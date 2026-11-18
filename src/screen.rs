@@ -380,39 +380,36 @@ impl Screen {
     /// They lie over the cells, outside the frame of text.
     fn flush_picture(&mut self) {
         let pictures = &mut self.pictures;
-        if pictures.wanted.is_empty() && !pictures.shown.is_empty() {
-            // Off the screen and out of the terminal's memory.
-            self.out.extend_from_slice(b"\x1b_Ga=d,d=A,q=2\x1b\\");
-        } else {
-            for old in &pictures.shown {
-                match pictures.wanted.iter().find(|at| at.id == old.id) {
-                    None => {
-                        let _ = write!(self.out, "\x1b_Ga=d,d=I,i={},q=2\x1b\\", old.id);
-                    }
-                    Some(at) if at != old && !pictures.erased => {
-                        // Take only the placement away; the data is still needed.
-                        let _ = write!(self.out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", old.id);
-                    }
-                    Some(_) => {}
+        if !pictures.erased && pictures.wanted == pictures.shown {
+            return;
+        }
+        for old in &pictures.shown {
+            match pictures.wanted.iter().find(|at| at.id == old.id) {
+                None => {
+                    let _ = write!(self.out, "\x1b_Ga=d,d=I,i={},q=2\x1b\\", old.id);
                 }
-            }
-            self.out.append(&mut pictures.data);
-            for at in &pictures.wanted {
-                if pictures.erased || !pictures.shown.contains(at) {
-                    let _ = write!(
-                        self.out,
-                        "\x1b[{};{}H\x1b_Ga=p,i={},c={},r={},C=1,q=2\x1b\\",
-                        at.y + 1,
-                        at.x + 1,
-                        at.id,
-                        at.cols,
-                        at.rows
-                    );
+                Some(at) if at != old || pictures.erased => {
+                    // Take only the placement away; the data is still needed.
+                    let _ = write!(self.out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", old.id);
                 }
+                Some(_) => {}
             }
         }
-        pictures.shown.clear();
-        pictures.shown.extend_from_slice(&pictures.wanted);
+        self.out.append(&mut pictures.data);
+        for at in &pictures.wanted {
+            if pictures.erased || !pictures.shown.contains(at) {
+                let _ = write!(
+                    self.out,
+                    "\x1b[{};{}H\x1b_Ga=p,i={},c={},r={},C=1,q=2\x1b\\",
+                    at.y + 1,
+                    at.x + 1,
+                    at.id,
+                    at.cols,
+                    at.rows
+                );
+            }
+        }
+        pictures.shown.clone_from(&pictures.wanted);
         pictures.erased = false;
     }
 
@@ -567,7 +564,7 @@ mod tests {
 
         // A frame without it takes it off the terminal altogether.
         screen.clear();
-        assert!(frame(&mut screen).contains("a=d,d=A"));
+        assert!(frame(&mut screen).contains("a=d,d=I,i=1"));
         assert_eq!(frame(&mut screen), "");
     }
 
@@ -594,8 +591,15 @@ mod tests {
         assert!(moved.contains(&format!("a=d,d=i,i={},", a.id)));
         assert!(moved.contains(&format!("\x1b[2;4H\x1b_Ga=p,i={},", a.id)));
 
+        screen.resize(24, 6);
+        let resized = frame(&mut screen);
+        assert!(!resized.contains("a=t"));
+        assert_eq!(resized.matches("a=p,").count(), 2);
+
         screen.clear();
-        assert!(frame(&mut screen).contains("a=d,d=A"));
+        let empty = frame(&mut screen);
+        assert!(empty.contains(&format!("a=d,d=I,i={},", a.id)));
+        assert!(empty.contains(&format!("a=d,d=I,i={},", b.id)));
         assert_eq!(frame(&mut screen), "");
     }
 

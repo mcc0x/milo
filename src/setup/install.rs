@@ -456,6 +456,7 @@ mod tests {
                     let panes = std::array::from_fn(|i| mask & (1 << i) != 0);
                     let layout = Layout { width: width.into(), panes, new_tabs, ..Layout::default() };
                     let lua = rex_lua(&layout);
+                    assert!(lua.contains("local usage_rows = 5\n"));
                     let (_, choices) = lua.split_once("local chosen = {\n").unwrap();
                     let (choices, _) = choices.split_once("}\n").unwrap();
                     for (name, chosen) in NAMES.into_iter().zip(panes) {

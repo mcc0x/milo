@@ -15,8 +15,8 @@ use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
 use crate::ui::{self, ADD, DEL, FAINT, Pane};
 use crate::watch::Scope;
-use crate::{rex, when};
 use crate::width::{byte_at_col, str_width};
+use crate::{rex, when};
 
 /// How many bytes to read when there is no diff text to show.
 const LIMIT: u64 = 2 << 20;
@@ -31,8 +31,7 @@ pub struct Reader {
     source: Source,
     /// The name git uses, relative to the repository root.
     path: String,
-CUT_SENTINEL
-    /// The file's status, if it has pending work.
+    /// What happened to the working file.
     kind: Kind,
     body: Body,
     lang: Option<&'static Lang>,
@@ -55,6 +54,25 @@ struct WorkingFile {
     repo: Repo,
     absolute: PathBuf,
     stamp: Option<Stamp>,
+}
+
+struct Location {
+    repo: Repo,
+    absolute: PathBuf,
+    path: String,
+}
+
+impl Location {
+    fn find(file: &Path) -> Option<Self> {
+        let dir = file.ancestors().skip(1).find(|dir| dir.is_dir()).unwrap_or(Path::new("."));
+        let tail = file.strip_prefix(dir).unwrap_or(file);
+        // Resolve the directory, but keep the final component even if it is a link.
+        let dir = dir.canonicalize().ok()?;
+        let absolute = dir.join(tail);
+        let repo = Repo::open(&dir)?;
+        let path = absolute.strip_prefix(&repo.root).ok()?.to_string_lossy().into_owned();
+        Some(Self { repo, absolute, path })
+    }
 }
 
 /// A file selected in a pane that can open the reader.
@@ -289,20 +307,39 @@ impl LinePainter<'_> {
 impl Reader {
     /// Opens `file`, which git may remember even if its directory is gone.
     pub fn open(file: &Path) -> Option<Self> {
-        let dir = file.ancestors().skip(1).find(|dir| dir.is_dir()).unwrap_or(Path::new("."));
-        let tail = file.strip_prefix(dir).unwrap_or(file);
-        // Resolve the directory, but keep the final component even if it is a link.
-        let dir = dir.canonicalize().ok()?;
-        let absolute = dir.join(tail);
-        let mut repo = Repo::open(&dir)?;
-        let path = absolute.strip_prefix(&repo.root).ok()?.to_string_lossy().into_owned();
-        let lang = syntax::for_file(&path);
+        let Location { mut repo, absolute, path } = Location::find(file)?;
         repo.only(&path);
-        let mut reader = Self {
-            repo,
+        let mut reader = Self::new(path, Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None })));
+        reader.load();
+        reader.reveal_first_change();
+        Some(reader)
+    }
+
+    /// The current repository takes precedence over whatever is at the old path today.
+    pub fn at_commit(file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
+        let cwd = std::env::current_dir().map_err(|_| "Cannot find the current directory.")?;
+        let absolute = cwd.join(file);
+        let (repo, path) = if let Some(repo) = Repo::open(&cwd).filter(|r| r.git)
+            && let Ok(tail) = absolute.strip_prefix(&repo.root)
+            && tail.components().all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            (repo, tail.to_string_lossy().into_owned())
+        } else {
+            let location =
+                Location::find(file).filter(|l| l.repo.git).ok_or("This file is not in a git repository.")?;
+            (location.repo, location.path)
+        };
+        let commit = repo.resolve_commit(id).ok_or("No commit with that ID.")?;
+        let files = repo.files_at(&commit.hash).ok_or("Git did not answer for this commit.")?;
+        let changed = files.iter().find(|file| file.path == path);
+        Ok(Self::committed(&repo, &path, &commit.hash, commit.time, changed))
+    }
+
+    fn new(path: String, source: Source) -> Self {
+        let lang = syntax::for_file(&path);
+        Self {
+            source,
             path,
-            absolute,
-            stamp: None,
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
             lang,
@@ -310,79 +347,68 @@ impl Reader {
             top: 0,
             pan: 0,
             rows: 0,
-        };
-        reader.load();
-        let first = reader.body.lines().iter().position(|line| line.kind != LineKind::Same);
-        reader.top = first.map_or(0, |i| i.saturating_sub(LEAD));
-        Some(reader)
+        }
     }
 
-    /// What to show of a file without diff lines to show: the picture it
-    /// is, the text it holds, or why neither.
-    fn file_body(&mut self, kind: Kind) -> Body {
-        // A link is shown as where it points, never as what is there.
-        if picture::is_picture(&self.path) && !self.absolute.is_symlink() {
-            return Picture::open(&self.absolute).map_or_else(Body::Note, Body::Picture);
-        }
-        match file_lines(&self.absolute, kind) {
+    fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {
+        let short_id = hash[..hash.len().min(7)].to_string();
+        let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time });
+        reader.body = reader.text_or_note(committed_lines(repo, path, hash, file));
+        reader.reveal_first_change();
+        reader
+    }
+
+    fn reveal_first_change(&mut self) {
+        let first = self.body.lines().iter().position(|line| line.kind != LineKind::Same);
+        self.top = first.map_or(0, |i| i.saturating_sub(LEAD));
+    }
+
+    fn text_or_note(&mut self, lines: Result<Vec<Line>, &'static str>) -> Body {
+        match lines {
             Ok(lines) => Body::Text(Text::new(lines, self.lang, &mut self.spans)),
             Err(note) => Body::Note(note),
         }
     }
 
-    /// Rebuilds the file and diff on screen, keeping the last good result if git fails.
+    /// Rebuilds the working file on screen, keeping the last good result if git fails.
     fn load(&mut self) {
-        self.repo.read();
-        let stamp = Stamp::at(&self.absolute);
-        if !self.repo.ok() {
+        let Source::Working(work) = &mut self.source else { return };
+        work.repo.read();
+        let stamp = Stamp::at(&work.absolute);
+        if !work.repo.ok() {
             return;
         }
-        match self.file_diff() {
-            Some(FileDiff { lines, kind }) => {
-                self.kind = kind;
-                let picture = picture::is_picture(&self.path);
-                // A picture that has not changed is not made ready again.
-                let kept = picture && stamp == self.stamp && matches!(self.body, Body::Picture(_));
-                if !kept {
-                    self.body = if lines.is_empty() || picture {
-                        self.file_body(kind)
-                    } else {
-                        Body::Text(Text::new(lines, self.lang, &mut self.spans))
-                    };
-                }
-            }
-            None if self.repo.ok() => {
-                self.kind = Kind::None;
-                self.body = Body::Note(if matches!(read::file(&self.absolute, LIMIT), Content::Unreadable) {
+        let (kind, lines) = match work.file_diff(&self.path) {
+            Some(FileDiff { lines, kind, .. }) => (kind, Ok(lines)),
+            None if work.repo.ok() => {
+                let note = if matches!(read::file(&work.absolute, LIMIT), Content::Unreadable) {
                     "This file cannot be read."
                 } else {
                     "Too large to show."
-                });
+                };
+                (Kind::None, Err(note))
             }
             None => return,
+        };
+        let picture = picture::is_picture(&self.path);
+        let kept = lines.is_ok() && picture && stamp == work.stamp && matches!(self.body, Body::Picture(_));
+        self.kind = kind;
+        work.stamp = stamp;
+        if kept {
+            return;
         }
-        self.stamp = stamp;
-    }
-
-    fn file_diff(&mut self) -> Option<FileDiff> {
-        if self.repo.is_untracked(&self.path) {
-            return Some(FileDiff { lines: Vec::new(), kind: Kind::Untracked });
-        }
-        if !self.repo.git {
-            return Some(FileDiff { lines: Vec::new(), kind: Kind::None });
-        }
-        let mut diff = diff::parse(&self.repo.file_diff(&self.path, None)?);
-        // A file that looks new may have been moved here; compare it with its old path.
-        if diff.kind == Kind::Added
-            && let Some(from) = self.repo.moved_from(&self.path)
-            && let Some(raw) = self.repo.file_diff(&self.path, Some(&from))
-        {
-            diff = diff::parse(&raw);
-        }
-        if self.repo.is_unmerged(&self.path) {
-            diff.kind = Kind::Conflict;
-        }
-        self.repo.ok().then_some(diff)
+        self.body = match lines {
+            Ok(lines) if lines.is_empty() || picture => {
+                // A link is shown as where it points, never as what is there.
+                if picture && !work.absolute.is_symlink() {
+                    Picture::open(&work.absolute).map_or_else(Body::Note, Body::Picture)
+                } else {
+                    let lines = file_lines(&work.absolute, kind);
+                    self.text_or_note(lines)
+                }
+            }
+            lines => self.text_or_note(lines),
+        };
     }
 
     fn last_top(&self) -> usize {
@@ -401,20 +427,76 @@ impl Reader {
     }
 }
 
+impl WorkingFile {
+    fn file_diff(&mut self, path: &str) -> Option<FileDiff> {
+        let kind = if self.repo.is_untracked(path) { Kind::Untracked } else { Kind::None };
+        if kind == Kind::Untracked || !self.repo.git {
+            return Some(FileDiff { lines: Vec::new(), kind, binary: false });
+        }
+        let mut diff = diff::parse(&self.repo.file_diff(path, None)?);
+        // A file that looks new may have been moved here; compare it with its old path.
+        if diff.kind == Kind::Added
+            && let Some(from) = self.repo.moved_from(path)
+            && let Some(raw) = self.repo.file_diff(path, Some(&from))
+        {
+            diff = diff::parse(&raw);
+        }
+        if self.repo.is_unmerged(path) {
+            diff.kind = Kind::Conflict;
+        }
+        self.repo.ok().then_some(diff)
+    }
+}
+
+/// A patch covers all the lines when there are edits. Otherwise, read the stored file.
+fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFile>) -> Result<Vec<Line>, &'static str> {
+    if picture::is_picture(path) {
+        return Err(NOT_TEXT);
+    }
+    if let Some(file) = file {
+        let raw = repo.file_diff_at(hash, file).map_err(|err| match err {
+            OutputError::TooLarge => "Too large to show.",
+            OutputError::Failed => "Git did not answer for this file.",
+        })?;
+        if raw.contains(&0) {
+            return Err(NOT_TEXT);
+        }
+        let patch = diff::parse(&raw);
+        if !patch.lines.is_empty() {
+            return Ok(patch.lines);
+        }
+        if patch.binary {
+            return Err(NOT_TEXT);
+        }
+        if file.kind == Kind::Deleted {
+            return Err("Empty.");
+        }
+    }
+    let raw = repo.blob_at(hash, path).map_err(|err| match err {
+        OutputError::TooLarge => "Too large to show.",
+        OutputError::Failed => "There is no file here in this commit.",
+    })?;
+    byte_lines(&raw, LineKind::Same)
+}
+
 impl Pane for Reader {
     fn help(&self) -> Page {
-        Page::reader()
+        Page::reader(matches!(self.source, Source::Committed { .. }))
     }
 
-    fn watch_scope(&self) -> crate::watch::Scope {
-        self.repo.watch_scope()
+    fn watch_scope(&self) -> Scope {
+        match &self.source {
+            Source::Working(work) => work.repo.watch_scope(),
+            Source::Committed { .. } => Scope { roots: Vec::new(), ignored: Vec::new(), complete: true },
+        }
     }
 
     fn check(&mut self) -> bool {
-        if self.repo.busy() {
+        let Source::Working(work) = &mut self.source else { return true };
+        if work.repo.busy() {
             return false;
         }
-        if self.repo.poll(&[]) || (self.repo.ok() && Stamp::at(&self.absolute) != self.stamp) {
+        if work.repo.poll(&[]) || (work.repo.ok() && Stamp::at(&work.absolute) != work.stamp) {
             self.load();
             self.top = self.top.min(self.last_top());
         }
@@ -496,27 +578,34 @@ impl Pane for Reader {
 
 impl Reader {
     fn draw_hint(&self, s: &mut Screen) {
-        let changes = self.kind != Kind::None
-            && matches!(&self.body, Body::Text(text) if text.lines.len() > (text.added + text.removed) as usize);
-        // A picture has nowhere to scroll to.
-        let still = matches!(self.body, Body::Picture(_));
-        let hint = match (changes, s.w) {
-            (true, 44..) => "↑↓ scroll · n next change · q close · ? help",
-            (true, _) => "n next change · ? help",
-            (false, 36..) if !still => "↑↓ scroll · q close · ? help",
-            (false, _) => "q close · ? help",
+        let changes = matches!(&self.body, Body::Text(text)
+            if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize);
+        let committed = matches!(self.source, Source::Committed { .. });
+        let still = matches!(self.body, Body::Picture(_)) || (committed && !matches!(self.body, Body::Text(_)));
+        let action = match (changes, committed) {
+            (true, true) => "n N changes",
+            (true, false) => "n next change",
+            (false, _) => "",
         };
-        s.put_fit(1, s.h - 1, s.w - 2, hint, FAINT);
+        let middle: &[_] = if still { &["q close"] } else { &["↑↓ scroll", "q close"] };
+        crate::help::draw_hint(s, action, middle, "? help");
     }
 
     /// Keeps the file name ahead of its directory so the name gets the space first.
     fn draw_heading(&self, s: &mut Screen) {
         let mut right = s.w - 1;
-        if let Body::Picture(picture) = &self.body {
+        if let Source::Committed { short_id, time } = &self.source {
+            let age = when::short_age(when::now().saturating_sub(*time));
+            let ago = if age == "now" { "" } else { " ago" };
+            let summary = format!("commit {short_id} · {age}{ago}");
+            let summary =
+                if str_width(&summary) <= right.saturating_sub(6) { &summary } else { &summary[..7 + short_id.len()] };
+            right -= s.put_right(right, 0, summary, FAINT);
+        } else if let Body::Picture(picture) = &self.body {
             let size = format!("{}×{}", picture.width, picture.height);
             right -= s.put_right(right, 0, &size, FAINT).min(right);
         }
-        if self.kind != Kind::None {
+        if matches!(self.source, Source::Working(_)) && self.kind != Kind::None {
             if let Body::Text(text) = &self.body {
                 right -= ui::size_right(s, right, 0, text.added, text.removed).min(right);
             }
@@ -544,6 +633,61 @@ mod tests {
         let mut screen = Screen::sized(w, h);
         reader.draw(&mut screen);
         screen.text()
+    }
+
+    #[test]
+    fn reader_hints_say_close_and_keep_help_last() {
+        let f = Fixture::folder();
+        f.write("page.txt", "a file\n");
+        let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+        assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · q close · ? help");
+        assert_eq!(drawn(&mut reader, 20, 5)[4], " q close · ? help");
+    }
+
+    #[test]
+    fn committed_pictures_and_other_binary_files_have_a_plain_note() {
+        let f = Fixture::new();
+        fs::write(f.root.join("logo.png"), Picture::sample_png(64, 32)).unwrap();
+        fs::write(f.root.join("data.bin"), b"\0one\0two").unwrap();
+        f.commit("binary files");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let commits = repo.history(1).unwrap();
+        let id = CommitId::parse(&commits[0].hash).unwrap();
+        f.write("logo.png", "not the saved picture");
+        f.write("data.bin", "not the saved data");
+        for file in ["logo.png", "data.bin"] {
+            let mut reader = Reader::at_commit(&f.root.join(file), id).unwrap();
+            let mut screen = Screen::sized(45, 8);
+            screen.set_pictures(true);
+            reader.draw(&mut screen);
+            assert!(screen.picture_at().is_none());
+            assert_eq!(screen.text()[2], format!("  {NOT_TEXT}"));
+        }
+    }
+
+    #[test]
+    fn both_jump_keys_work_in_a_committed_file() {
+        let f = Fixture::new();
+        let file = |changed| {
+            (1..=60)
+                .map(|n| format!("row {n}{}\n", if changed && matches!(n, 8 | 45) { " edited" } else { "" }))
+                .collect::<String>()
+        };
+        f.write("page.txt", &file(false));
+        f.commit("original");
+        f.write("page.txt", &file(true));
+        f.commit("edit two lines");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let commits = repo.history(1).unwrap();
+        let id = CommitId::parse(&commits[0].hash).unwrap();
+        let mut reader = Reader::at_commit(&f.root.join("page.txt"), id).unwrap();
+        for (line, key) in [(8, 'n'), (45, 'N'), (8, 'n')] {
+            let rows = drawn(&mut reader, 45, 12);
+            assert!(rows.iter().any(|row| row.contains(&format!("+ row {line} edited"))), "{rows:?}");
+            reader.on_key(Key::Char(key));
+        }
     }
 
     #[test]
@@ -673,12 +817,14 @@ mod tests {
         f.write(".git/index", "corrupt index");
         f.write("page.txt", "edited while git is not answering\n");
         assert!(reader.check());
-        assert!(!reader.repo.ok());
+        let Source::Working(work) = &reader.source else { unreachable!() };
+        assert!(!work.repo.ok());
         assert_eq!(drawn(&mut reader, 60, 6), before);
 
         fs::write(index, saved).unwrap();
         assert!(reader.check());
-        assert!(reader.repo.ok());
+        let Source::Working(work) = &reader.source else { unreachable!() };
+        assert!(work.repo.ok());
         assert!(drawn(&mut reader, 60, 6).iter().any(|row| row.contains("edited while git is not answering")));
     }
 

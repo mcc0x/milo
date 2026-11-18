@@ -23,17 +23,30 @@ use self::json::Value;
 use self::time::{DAY, MINUTE, Stamp};
 
 const AGE_NOTE: i64 = 5 * MINUTE;
+const CLOCK_SKEW: i64 = 5 * MINUTE;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const CODEX_BYTES: u64 = files::CODEX_FILES as u64 * TAIL_BYTES;
 const CLAUDE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 4096;
 const SAVED_LIMITS: &str = "claude-limits.json";
 
-#[derive(Clone, Copy)]
+/// An ordinary figure has at most three digits. Keep them ready for each frame.
+static PERCENT_TEXT: [[u8; 4]; 101] = {
+    let mut text = [[0; 4]; 101];
+    let mut n = 0_u8;
+    while n <= 100 {
+        text[n as usize] = [b'0' + n / 100, b'0' + n / 10 % 10, b'0' + n % 10, b'%'];
+        n += 1;
+    }
+    text
+};
+
+#[derive(Clone, Copy, PartialEq)]
 struct Window {
     minutes: u64,
     percent: f64,
     resets: Option<i64>,
+    observed: i64,
 }
 
 impl Window {
@@ -41,60 +54,77 @@ impl Window {
         value.number().filter(|n| (0.0..=100.0).contains(n)).map(|n| n.abs())
     }
 
-    fn number(self) -> String {
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window percent is in 0..=100")]
+    fn number(self) -> &'static str {
         // Rounding 99.9% to 100% would suggest there is nothing left.
         if self.percent > 99.0 && self.percent < 100.0 {
-            "99+%".into()
-        } else if self.percent > 0.0 && self.percent < 1.0 {
-            "<1%".into()
-        } else {
-            format!("{:.0}%", self.percent)
+            return "99+%";
         }
+        if self.percent > 0.0 && self.percent < 1.0 {
+            return "<1%";
+        }
+        let rounded = self.percent.round_ties_even() as usize;
+        let skip = usize::from(rounded < 100) + usize::from(rounded < 10);
+        std::str::from_utf8(&PERCENT_TEXT[rounded][skip..]).expect("the figures are ASCII")
     }
 
     fn is_reset(self, now: i64) -> bool {
         self.resets.is_some_and(|reset| reset <= now)
     }
 
-    fn codex(value: Option<Value<'_>>) -> Option<Self> {
+    fn codex(value: Option<Value<'_>>, observed: i64) -> Option<Self> {
         let [percent, minutes, resets] = value?.fields(["used_percent", "window_minutes", "resets_at"]);
         Some(Self {
-            minutes: minutes?.unsigned().filter(|n| *n > 0)?,
-            percent: Self::percent(percent?)?,
-            resets: resets.and_then(time::reset),
+            minutes: Self::minutes(minutes?)?,
+            percent: percent?.number().filter(|n| *n >= 0.0)?.abs().min(100.0),
+            resets: resets.and_then(|value| time::reset(value, observed)),
+            observed,
+        })
+    }
+
+    /// Fractional minutes are not a window, but some reports use 300.0 for 300.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the float is positive, whole and in range"
+    )]
+    fn minutes(value: Value<'_>) -> Option<u64> {
+        value.unsigned().filter(|&n| n > 0).or_else(|| {
+            let n = value.number()?;
+            (n > 0.0 && n < u64::MAX as f64 && n.fract() == 0.0).then_some(n as u64)
         })
     }
 }
 
 #[derive(Clone, Copy)]
-struct Snapshot {
+struct CodexReading {
     at: Stamp,
-    windows: [Option<Window>; 2],
+    // A report with no readable windows still supersedes older reports.
+    windows: Limits,
 }
 
-impl Snapshot {
-    fn new(at: Stamp, windows: [Option<Window>; 2]) -> Option<Self> {
-        windows.iter().any(Option::is_some).then_some(Self { at, windows })
-    }
+type Limits = [Option<Window>; 2];
 
-    fn codex(line: &[u8], now: i64) -> Option<Self> {
+impl CodexReading {
+    fn parse(line: &[u8], now: i64) -> Option<Self> {
         if !files::has_marker(line, b"token_count") {
             return None;
         }
         let [kind, at, payload] = Value::parse(line)?.fields(["type", "timestamp", "payload"]);
         kind?.is("event_msg").then_some(())?;
         let at = Stamp::iso(at?)?;
-        (at.seconds <= now).then_some(())?;
+        (at.seconds <= now.saturating_add(CLOCK_SKEW)).then_some(())?;
         let [kind, limits] = payload?.fields(["type", "rate_limits"]);
         kind?.is("token_count").then_some(())?;
         let [primary, secondary] = limits?.fields(["primary", "secondary"]);
-        Self::new(at, [Window::codex(primary), Window::codex(secondary)])
+        let windows = [primary, secondary].map(|window| Window::codex(window, at.seconds));
+        Some(Self { at, windows })
     }
 }
 
 struct CodexFile {
     mark: Mark,
-    snapshot: Option<Snapshot>,
+    reading: Option<CodexReading>,
 }
 
 #[derive(Default)]
@@ -105,15 +135,23 @@ struct Codex {
 
 impl Codex {
     fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) {
-        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Codex)) else {
+        let Some(root) = root else {
             *self = Self { no_sessions: true, ..Self::default() };
             return;
         };
+        let sessions = match Sessions::scan(root, Tree::Codex) {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                *self = Self { no_sessions: error.kind() == io::ErrorKind::NotFound, ..Self::default() };
+                return;
+            }
+        };
         self.no_sessions = sessions.files.is_empty() && !sessions.limited;
         if sessions.files.len() == self.files.len()
-            && sessions.files.iter().all(|candidate| {
-                self.files.get(&candidate.path).is_some_and(|file| file.mark == candidate.mark)
-            })
+            && sessions
+                .files
+                .iter()
+                .all(|candidate| self.files.get(&candidate.path).is_some_and(|file| file.mark == candidate.mark))
         {
             return;
         }
@@ -137,16 +175,16 @@ impl Codex {
             return cached;
         }
         let (file, mark) = sessions.open(&candidate.path)?;
-        let (mut snapshot, limited) =
-            files::tail(&file, mark.len, TAIL_BYTES, budget, |line| Snapshot::codex(line, now)).ok()?;
+        let (mut reading, limited) =
+            files::tail(&file, mark.len, TAIL_BYTES, budget, |line| CodexReading::parse(line, now)).ok()?;
         if limited && let Some(old) = cached.filter(|file| mark.same_file(file.mark) && mark.len > file.mark.len) {
-            snapshot = snapshot.or(old.snapshot);
+            reading = reading.or(old.reading);
         }
-        Some(CodexFile { mark, snapshot })
+        Some(CodexFile { mark, reading })
     }
 
-    fn snapshot(&self) -> Option<Snapshot> {
-        self.files.values().filter_map(|file| file.snapshot).max_by_key(|snapshot| snapshot.at)
+    fn latest(&self) -> Option<CodexReading> {
+        self.files.values().filter_map(|file| file.reading).max_by_key(|reading| reading.at)
     }
 }
 
@@ -257,7 +295,7 @@ struct Claude {
     files: HashMap<PathBuf, ClaudeFile>,
     limited: bool,
     saved_mark: Option<Mark>,
-    saved: Option<Snapshot>,
+    saved: Option<Limits>,
 }
 
 #[derive(Default)]
@@ -268,13 +306,22 @@ struct Activity {
 
 impl Claude {
     fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
-        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff })) else {
+        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
             self.files.clear();
             self.limited = false;
             return true;
         };
-        let mut previous = std::mem::take(&mut self.files);
         self.limited = sessions.limited;
+        if sessions.files.len() == self.files.len()
+            && sessions.files.iter().all(|candidate| {
+                self.files
+                    .get(&candidate.path)
+                    .is_some_and(|file| file.mark == candidate.mark && file.stream.offset == file.mark.len)
+            })
+        {
+            return true;
+        }
+        let mut previous = std::mem::take(&mut self.files);
         let mut settled = true;
         for candidate in &sessions.files {
             let mut file = previous.remove(&candidate.path).unwrap_or_else(|| ClaudeFile::new(candidate.mark));
@@ -423,10 +470,11 @@ impl Pane for Usage {
         let now = self.now();
         let earliest = self
             .codex
-            .snapshot()
+            .latest()
+            .map(|reading| reading.windows)
             .into_iter()
             .chain(self.claude.saved)
-            .flat_map(|s| s.windows.into_iter().flatten().filter_map(|w| w.resets))
+            .flat_map(|windows| windows.into_iter().flatten().filter_map(|w| w.resets))
             .filter(|&reset| reset > now)
             .min();
         let wait = earliest.map_or(MINUTE, |ts| ts.saturating_sub(now).min(MINUTE));
@@ -434,25 +482,30 @@ impl Pane for Usage {
     }
 
     fn help(&self) -> Page {
-        use help::{Row, heading, key, note};
-        Page::new(vec![
-            heading("Usage limits"),
-            note("Figures show the percent"),
-            note("used in each window,"),
-            note("from this machine's sessions"),
-            note("and as fresh as the last"),
-            note("message. After a window"),
-            note("resets it shows 0%."),
-            Row::new(),
-            heading("Claude Code"),
-            note("Turn on its limits in"),
-            note("milo setup. Tokens today"),
-            note("show local activity,"),
-            note("not a limit."),
-            key("r", "reload"),
-            key("q", "quit"),
-        ])
+        Page::new(help_rows())
     }
+}
+
+fn help_rows() -> Vec<help::Row> {
+    use help::{Row, heading, key, note};
+    vec![
+        heading("Usage limits"),
+        note("Figures show the percent"),
+        note("used in each window."),
+        note("From this machine's"),
+        note("sessions, as fresh as"),
+        note("the last message. Past"),
+        note("its reset, a window"),
+        note("starts again at 0%."),
+        Row::new(),
+        heading("Claude Code"),
+        note("Turn on its limits in"),
+        note("milo setup. Tokens today"),
+        note("show local activity,"),
+        note("not a limit."),
+        key("r", "reload"),
+        key("q", "quit"),
+    ]
 }
 
 /// Claude Code must get a line and a successful exit even if it sent bad data.

@@ -1,9 +1,9 @@
 //! Lays out and draws the project heading and file tree or strip.
 
-use std::borrow::Cow;
 use std::time::Instant;
 
 use crate::git::{Kind, PendingFile};
+use crate::help;
 use crate::icons;
 use crate::screen::{self, Screen, Style, Wash};
 use crate::tree::Node;
@@ -156,22 +156,13 @@ impl Outline {
     /// panes. On screen a pending file is simply one that changed.
     fn draw_hint(&self, s: &mut Screen) {
         let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
-        let pending = !self.pending.is_empty();
-        let text = match (self.repo.git, s.w) {
-            (true, 60..) => {
-                let filter = if self.pending_only { "c all files" } else { "c changed only" };
-                let open = if pending { "n next change" } else { "enter open" };
-                Cow::Owned(format!("{open} · {folders} · {filter} · ? help"))
-            }
-            (true, 30..) if pending => {
-                let filter = if self.pending_only { "c all files" } else { "c changed" };
-                Cow::Owned(format!("n next · {filter} · ? help"))
-            }
-            (false, 44..) => Cow::Owned(format!("enter open · {folders} · ? help")),
-            (_, 30..) => Cow::Borrowed("enter open · e all · ? help"),
-            _ => Cow::Borrowed("? help · q quit"),
-        };
-        s.put_fit(1, s.h - 1, s.w - 2, &text, FAINT);
+        if self.repo.git {
+            let filter = if self.pending_only { "c all files" } else { "c changed only" };
+            let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
+            help::draw_hint(s, first, &[folders, filter, "q quit"], "? help");
+        } else {
+            help::draw_hint(s, "Enter open", &[folders, "q quit"], "? help");
+        }
     }
 
     fn draw_tree(&mut self, s: &mut Screen, layout: &Layout, now: Instant) {

@@ -73,9 +73,9 @@ pub fn inside() -> bool {
     std::env::var_os("REX_SESSION").is_some()
 }
 
-/// Opens a floating reader in the outline's tab and returns its layer ID.
+/// Opens a floating reader in the caller's tab and returns its layer ID.
 /// If a previous layer is known, try to close it first.
-pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &'static str> {
+pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str>) -> Result<String, &'static str> {
     let session = std::env::var("REX_SESSION").map_err(|_| "Reading a file needs Rex.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
     if let Some(layer) = previous {
@@ -83,7 +83,7 @@ pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &
         let request = format!(r#"{{"session_id":{},"layer_id":{}}}"#, json(&session), json(layer));
         rex(&["api", "call", "-s", &session, "session.close_layer", &request]);
     }
-    // Over the tab the outline is in, even if the user's focus is elsewhere;
+    // Over the tab the caller is in, even if the user's focus is elsewhere;
     // failing that, over the active one.
     let window = std::env::var("REX_BLOCK")
         .ok()
@@ -92,17 +92,18 @@ pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &
         .map(|id| format!(r#""window_id":{},"#, json(&id)))
         .unwrap_or_default();
     let (_, name) = file.rsplit_once('/').unwrap_or(("", file));
+    let path = if commit.is_some() { file.into() } else { root.join(file) };
+    let command = reader_command(&exe, &path, commit);
     let request = format!(
         concat!(
             r#"{{"session_id":{},{}"bounds":[0.12,0.08,0.76,0.84],"focus":true,"layout":{{"block":{{"#,
             r#""flavor":"com.superlogical.terminal.shell","label":{},"#,
-            r#""options":{{"command":[{},"view",{}],"shell":"none","cwd":{}}}}}}}}}"#,
+            r#""options":{{"command":{},"shell":"none","cwd":{}}}}}}}}}"#,
         ),
         json(&session),
         window,
         json(name),
-        json(&exe.to_string_lossy()),
-        json(&root.join(file).to_string_lossy()),
+        command,
         json(&root.to_string_lossy()),
     );
     rex(&["api", "call", "-s", &session, "session.new_layer", &request])
@@ -110,9 +111,15 @@ pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &
         .ok_or("Rex did not open the file.")
 }
 
+fn reader_command(exe: &Path, file: &Path, commit: Option<&str>) -> String {
+    let args = commit.map_or_else(String::new, |hash| format!(r#","--commit",{}"#, json(hash)));
+    format!("[{},\"view\",{}{args}]", json(&exe.to_string_lossy()), json(&file.to_string_lossy()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{field, json};
+    use super::{field, json, reader_command};
+    use std::path::Path;
 
     #[test]
     fn strings_are_escaped_for_json() {
@@ -125,5 +132,11 @@ mod tests {
         assert_eq!(field(r#"{"layer_id":"layer:1","n":2}"#, "layer_id").as_deref(), Some("layer:1"));
         assert_eq!(field("{\n  \"window_id\": \"window:9\"\n}", "window_id").as_deref(), Some("window:9"));
         assert_eq!(field(r#"{"other":"x"}"#, "layer_id"), None);
+    }
+
+    #[test]
+    fn a_floating_reader_passes_the_path_and_commit_as_separate_words() {
+        let command = reader_command(Path::new("/bin/milo"), Path::new("-odd \"name"), Some("a123456"));
+        assert_eq!(command, r#"["/bin/milo","view","-odd \"name","--commit","a123456"]"#);
     }
 }

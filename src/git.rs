@@ -250,6 +250,11 @@ impl Repo {
         self.status.upstream.as_deref().or_else(|| self.stand_in.as_ref().map(|r| r.name.trim_end_matches("/HEAD")))
     }
 
+    /// A remote can be configured even when there is no branch to compare with.
+    pub fn has_remote(&self) -> Option<bool> {
+        self.git(&["remote"]).map(|names| !names.is_empty())
+    }
+
     /// False when git could not be asked: what is shown may be out of date.
     pub fn ok(&self) -> bool {
         self.ok.get()
@@ -577,24 +582,15 @@ impl Repo {
         self.status.tracked_uncommitted.len() - self.status.sources.len() + self.status.untracked.len()
     }
 
+    /// The full number ahead of the upstream, if this branch has one.
     pub fn upstream_ahead(&self) -> Option<u32> {
         self.status.upstream.as_ref().map(|_| self.status.ahead)
-    }
-
-    /// Counts the whole range, not just the commits the pane has loaded.
-    pub fn commits_to_push(&self) -> Option<u32> {
-        if let Some(ahead) = self.upstream_ahead() {
-            return Some(ahead);
-        }
-        let Some(base) = &self.ends().base else { return Some(0) };
-        let raw = self.git(&["rev-list", "--count", &format!("{base}..HEAD")])?;
-        self.require(std::str::from_utf8(&raw).ok().and_then(|n| n.trim_end().parse().ok()))
     }
 
     /// Finds the full object name and date without reading the work tree.
     pub fn resolve_commit(&self, id: CommitId<'_>) -> Option<CommitVersion> {
         let raw = self.git(&[
-            "log", "-1", "--no-walk", "--no-show-signature", "--no-notes", "--no-decorate",
+            "log", "-1", "--no-walk", "--no-show-signature", "--no-notes", "--no-decorate", "--no-patch",
             "--format=%H%x00%ct", "--end-of-options", id.0, "--",
         ])?;
         parse::commit_version(&raw, id)
@@ -614,9 +610,13 @@ impl Repo {
 
     /// An unchanged file (including a move with no edits) has no patch body.
     pub fn blob_at(&self, hash: &str, path: &str) -> Result<Vec<u8>, OutputError> {
+        let hash = CommitId::parse(hash).ok_or(OutputError::Failed)?.0;
         let guard = self.guard.as_deref().ok_or(OutputError::Failed)?;
         run::limited_output(
-            &self.root, guard, &["cat-file", "blob", "--end-of-options", &format!("{hash}:{path}")], DIFF_LIMIT,
+            &self.root,
+            guard,
+            &["cat-file", "blob", "--end-of-options", &format!("{hash}:{path}")],
+            DIFF_LIMIT,
         )
     }
 

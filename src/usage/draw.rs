@@ -1,17 +1,21 @@
-//! Fits each tool's most useful figure into the available rows and columns.
+//! Gives both tools the same frame, with less detail when the pane is small.
+
+mod digits;
 
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
+use crate::picture::Picture;
 use crate::screen::{GREEN, RED, Screen, Style, YELLOW};
 use crate::ui::FAINT;
+use crate::width::str_width;
 
-use super::{AGE_NOTE, Activity, FIVE_HOURS, Snapshot, Usage, Window, time};
+use super::{AGE_NOTE, Activity, CodexReading, Limits, Usage, Window, time};
 
-const GAP: &str = "  ·  ";
-const GAP_CELLS: usize = 5;
-const BAR: usize = 6;
-const MIN_BAR: usize = 3;
-const STACK_WIDTH: usize = 56;
+const SIDE_BY_SIDE: usize = 64;
+// Two short names, two four-character figures and the rule.
+const ONE_LINE_SPLIT: usize = 15;
+const TILE: &str = "██";
 
 #[derive(Clone, Copy)]
 enum Tool {
@@ -21,242 +25,359 @@ enum Tool {
 
 impl Tool {
     fn name(self) -> &'static str {
+        self.names()[0]
+    }
+
+    fn names(self) -> [&'static str; 3] {
         match self {
-            Self::Codex => "Codex",
-            Self::Claude => "Claude Code",
+            Self::Codex => ["Codex", "Cx", "X"],
+            Self::Claude => ["Claude", "Cl", "C"],
         }
     }
 
-    fn short(self) -> &'static str {
-        match self {
-            Self::Codex => "Cdx",
-            Self::Claude => "Cl",
-        }
+    fn colour(self) -> Style {
+        // Closest fixed ANSI colours to #10a37f and #d97757.
+        Style::fg(match self {
+            Self::Codex => 36,
+            Self::Claude => 173,
+        })
     }
 
-    fn missing(self) -> &'static str {
+    fn picture(self) -> &'static Picture {
+        static CODEX: LazyLock<Picture> =
+            LazyLock::new(|| Picture::embedded(include_bytes!("marks/codex.png")).expect("Codex mark is a PNG"));
+        static CLAUDE: LazyLock<Picture> =
+            LazyLock::new(|| Picture::embedded(include_bytes!("marks/claude.png")).expect("Claude mark is a PNG"));
         match self {
-            Self::Codex => "no Codex use found",
-            Self::Claude => "no Claude Code use found",
+            Self::Codex => &CODEX,
+            Self::Claude => &CLAUDE,
+        }
+    }
+}
+
+/// What the small line under a figure says about its window.
+#[derive(Clone, Copy)]
+enum When {
+    /// The window has started over since the figure was reported.
+    Reset,
+    /// Seconds until the window starts over.
+    Running(i64),
+    Unknown,
+}
+
+impl When {
+    fn draw(self, screen: &mut Screen, area: Area, row: usize) {
+        match self {
+            Self::Reset => area.note(screen, row, "reset"),
+            Self::Running(left) => {
+                let left = time::relative(left);
+                let prefix = if left.len() + 10 <= area.w { "resets in " } else { "in " };
+                area.note(screen, row, &format!("{prefix}{left}"));
+            }
+            Self::Unknown => {}
         }
     }
 }
 
 struct Metric {
     label: Cow<'static, str>,
-    number: String,
-    details: Option<Cow<'static, str>>,
-    bar: Option<f64>,
+    number: Option<&'static str>,
+    colour: Style,
+    when: When,
+    /// Seconds since the figure was reported, once that is worth saying:
+    /// one a few minutes old is as good as current.
+    age: Option<i64>,
 }
 
 impl Metric {
-    fn limit(window: Window, now: i64) -> Self {
+    fn limit(mut window: Window, now: i64) -> Self {
+        let age = now.saturating_sub(window.observed);
         let label = match window.minutes {
             10_080 => "week".into(),
+            300 => "5h".into(),
             1440 => "day".into(),
-            n if n.is_multiple_of(1440) => format!("{} d", n / 1440).into(),
-            n if n.is_multiple_of(60) => format!("{} h", n / 60).into(),
-            n => format!("{n} m").into(),
+            n if n.is_multiple_of(1440) => format!("{}d", n / 1440).into(),
+            n if n.is_multiple_of(60) => format!("{}h", n / 60).into(),
+            n => format!("{n}m").into(),
         };
-        if window.is_reset(now) {
-            return Self { label, number: "reset".into(), details: None, bar: None };
-        }
-        let details = window.resets.map_or_else(
-            || "reset time unknown".into(),
-            |when| format!("resets in {}", time::relative(when.saturating_sub(now))).into(),
-        );
-        Self { label, number: window.number(), details: Some(details), bar: Some(window.percent) }
+        let (when, age) = if window.is_reset(now) {
+            window.percent = 0.0;
+            (When::Reset, None)
+        } else {
+            let when = window.resets.map_or(When::Unknown, |at| When::Running(at.saturating_sub(now)));
+            (when, (age >= AGE_NOTE).then_some(age))
+        };
+        let colour = match window.percent {
+            90.0.. => RED,
+            70.0..90.0 => YELLOW,
+            _ => GREEN,
+        };
+        Self { label, number: Some(window.number()), colour: Style::fg(colour), when, age }
     }
 
-    fn activity(label: &'static str, count: u64, partial: bool) -> Self {
-        let mut number = tokens(count);
-        if partial {
-            number.push('+');
-        }
-        Self { label: label.into(), number, details: Some("tokens".into()), bar: None }
+    fn missing(label: &'static str) -> Self {
+        Self { label: label.into(), number: None, colour: FAINT, when: When::Unknown, age: None }
     }
 
-    fn bare_width(&self) -> usize {
-        self.label.len() + 1 + self.number.len()
+    fn number(&self) -> &str {
+        self.number.unwrap_or("—")
     }
 
-    fn full_width(&self, bar: usize) -> usize {
-        self.bare_width() + self.details.as_ref().map_or(0, |s| s.len() + 1) + self.bar.map_or(0, |_| bar + 1)
+    fn number_width(&self) -> usize {
+        self.number.map_or(1, str::len)
     }
 
-    fn draw(&self, row: &mut Row<'_>, bar_max: usize, details: bool) {
-        let width = row.left();
-        if self.number.len() > width {
-            return;
-        }
-        let label = self.bare_width() <= width;
-        let base = if label { self.bare_width() } else { self.number.len() };
-        let detail_width = self.details.as_ref().map_or(0, |s| s.len() + 1);
-        let details = details && base + detail_width <= width;
-        let bar = width.saturating_sub(base + if details { detail_width } else { 0 } + 1).min(bar_max);
+    fn inline_width(&self) -> usize {
+        self.label.len() + 1 + self.number_width()
+    }
+
+    fn inline(&self, row: &mut Row<'_>, label: bool) {
         if label {
             row.add(&self.label, FAINT);
             row.add(" ", FAINT);
         }
-        if bar >= MIN_BAR
-            && let Some(percent) = self.bar
+        row.add(self.number(), self.colour.bold());
+    }
+
+    fn panel(&self, screen: &mut Screen, area: Area, rows: Chart) {
+        area.note(screen, rows.label, &self.label);
+        if rows.large
+            && let Some(number) = self.number
+            && digits::width(number) <= area.w
         {
-            row.bar(bar, percent);
-            row.add(" ", FAINT);
+            digits::draw(screen, area.x, area.y + rows.label + 1, number, self.colour);
+        } else if self.number_width() <= area.w {
+            screen.put(
+                area.x,
+                area.y + rows.label + 1 + usize::from(rows.large),
+                area.w,
+                self.number(),
+                self.colour.bold(),
+            );
         }
-        row.add(&self.number, Style::PLAIN);
-        if details && let Some(text) = &self.details {
-            row.add(" ", FAINT);
-            row.add(text, FAINT);
+        self.when.draw(screen, area, rows.note);
+    }
+}
+
+struct Hint {
+    full: &'static str,
+    short: &'static str,
+}
+
+impl Hint {
+    /// Draws the hint, with `also` after it on the same row when both fit.
+    fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<String>) {
+        match also {
+            Some(also) if self.full.len() + 3 + str_width(&also) <= area.w => {
+                area.note(screen, row, &format!("{} · {also}", self.full));
+            }
+            _ => area.note(screen, row, if self.full.len() <= area.w { self.full } else { self.short }),
         }
     }
 }
 
 struct Report {
     tool: Tool,
-    detail: Option<&'static str>,
-    metrics: [Option<Metric>; 2],
-    age: Option<String>,
+    first: Metric,
+    second: Option<Metric>,
+    hint: Option<Hint>,
 }
 
 impl Report {
-    fn limits(tool: Tool, snapshot: Option<Snapshot>, partial: bool, now: i64) -> Self {
-        let Some(snapshot) = snapshot else { return Self::empty(tool, partial) };
-        let age = now.saturating_sub(snapshot.at.seconds);
-        let age = (age >= AGE_NOTE).then(|| format!("as of {} ago", time::relative(age)));
-        let metrics = snapshot.windows.map(|window| window.map(|w| Metric::limit(w, now)));
-        let [first, second] = metrics;
-        let metrics = if first.is_some() { [first, second] } else { [second, None] };
-        let detail = partial.then_some("scan limited");
-        Self { tool, detail, metrics, age }
+    fn codex(reading: Option<CodexReading>, no_sessions: bool, now: i64) -> Self {
+        let [first, second] = figures(reading.map(|reading| reading.windows), now);
+        let (first, second, hint) = match (first, second) {
+            (Some(first), second) => (first, second, None),
+            (None, Some(second)) => (second, None, None),
+            (None, None) => (
+                Metric::missing("limits"),
+                None,
+                Some(if reading.is_some() {
+                    Hint { full: "could not read Codex's figures", short: "could not read" }
+                } else if no_sessions {
+                    Hint { full: "no Codex sessions here", short: "no Codex sessions" }
+                } else {
+                    Hint { full: "no limits reported", short: "no limits" }
+                }),
+            ),
+        };
+        Self { tool: Tool::Codex, first, second, hint }
     }
 
-    fn activity(activity: Activity) -> Self {
-        if !activity.present {
-            return Self::empty(Tool::Claude, activity.partial);
-        }
-        let first = Metric::activity("5 h", activity.five, activity.partial);
-        let second = Metric::activity("today", activity.today, activity.partial);
-        Self { tool: Tool::Claude, detail: Some("activity"), metrics: [Some(first), Some(second)], age: None }
-    }
-
-    fn empty(tool: Tool, partial: bool) -> Self {
-        Self { tool, detail: partial.then_some("scan limited"), metrics: [None, None], age: None }
-    }
-
-    fn heading_width(&self) -> usize {
-        self.tool.name().len() + self.detail.map_or(0, |s| s.len() + 1)
-    }
-
-    fn minimum(&self) -> usize {
-        self.metrics[0].as_ref().map_or(self.tool.short().len(), |m| self.tool.short().len() + 1 + m.number.len())
-    }
-
-    fn ideal(&self) -> usize {
-        if self.metrics[0].is_none() && self.detail.is_none() {
-            return self.tool.missing().len();
-        }
-        let metrics = self.metrics.iter().flatten().map(|m| m.full_width(BAR) + GAP_CELLS).sum::<usize>();
-        self.heading_width() + metrics + self.age.as_ref().map_or(0, |age| age.len() + GAP_CELLS)
-    }
-
-    fn label(&self, row: &mut Row<'_>, needed: usize) -> bool {
-        if self.heading_width() + needed <= row.left() {
-            row.add(self.tool.name(), FAINT);
-            if let Some(detail) = self.detail {
-                row.add(" ", FAINT);
-                row.add(detail, FAINT);
-            }
-        } else if self.tool.name().len() + needed <= row.left() {
-            row.add(self.tool.name(), FAINT);
-        } else if self.tool.short().len() + needed <= row.left() {
-            row.add(self.tool.short(), FAINT);
-        } else {
-            return false;
-        }
-        true
-    }
-
-    fn missing(&self, row: &mut Row<'_>) {
-        if self.detail.is_none() && self.tool.missing().len() <= row.left() {
-            row.add(self.tool.missing(), FAINT);
-        } else if self.label(row, 0) && row.left() >= 2 && self.detail.is_none() {
-            row.add(" —", FAINT);
+    fn claude(limits: Option<Limits>, now: i64) -> Self {
+        let [five, week] = figures(limits, now);
+        Self {
+            tool: Tool::Claude,
+            first: five.unwrap_or_else(|| Metric::missing("5h")),
+            second: Some(week.unwrap_or_else(|| Metric::missing("week"))),
+            hint: limits.is_none().then_some(Hint { full: "turn on in milo setup", short: "milo setup" }),
         }
     }
 
-    fn inline(&self, row: &mut Row<'_>) {
-        let [Some(first), second] = &self.metrics else { return self.missing(row) };
-        let ideal = self.ideal();
-        let age = self.age.as_ref().filter(|_| ideal <= row.left());
-        let all = ideal - self.age.as_ref().map_or(0, |s| GAP_CELLS + s.len());
-        let second = second.as_ref().filter(|_| all <= row.left());
-        let values = first.bare_width() + 1;
-        let reserve = if self.tool.short().len() + values <= row.left() { values } else { first.number.len() + 1 };
-        if self.label(row, reserve) {
-            row.add(if self.heading_width() + GAP_CELLS + first.bare_width() <= row.width { GAP } else { " " }, FAINT);
-        }
-        if let Some(second) = second {
-            let split = row.x + first.full_width(BAR);
-            let width = row.end;
-            row.end = split;
-            first.draw(row, BAR, true);
-            row.end = width;
-            row.add(GAP, FAINT);
-            second.draw(row, BAR, true);
-        } else {
-            first.draw(row, BAR, true);
-        }
-        if let Some(age) = age {
-            row.add(GAP, FAINT);
-            row.add(age, FAINT);
-        }
+    fn has_number(&self) -> bool {
+        self.first.number.is_some() || self.second.as_ref().is_some_and(|second| second.number.is_some())
     }
 
-    fn stack_height(&self, width: usize) -> usize {
-        if self.metrics[0].is_none() {
-            return 1;
-        }
-        1 + self
-            .metrics
-            .iter()
-            .flatten()
-            .map(|m| {
-                1 + usize::from(m.details.as_ref().is_some_and(|d| d.len() <= width && m.full_width(MIN_BAR) > width))
-            })
-            .sum::<usize>()
-    }
-
-    fn stack(&self, screen: &mut Screen, y: usize, height: usize) {
-        if height < 2 || self.metrics[0].is_none() {
-            self.inline(&mut Row::new(screen, 0, y, screen.w));
+    fn inline(&self, screen: &mut Screen, area: Area) {
+        let (first, second) = self.inline_metrics(area.w);
+        let name = self
+            .tool
+            .names()
+            .into_iter()
+            .find(|name| name.len() + 1 + first.number_width() <= area.w)
+            .unwrap_or_default();
+        let identity = if name.is_empty() { 0 } else { name.len() + 1 };
+        let label = identity + first.inline_width() <= area.w;
+        let used = identity + if label { first.inline_width() } else { first.number_width() };
+        let second = second.filter(|second| label && used + 2 + second.inline_width() <= area.w);
+        let tile =
+            label && !name.is_empty() && used + second.map_or(0, |second| second.inline_width() + 2) + 3 <= area.w;
+        let mut row = Row { screen, x: area.x, y: area.y, left: area.w };
+        if used > area.w {
             return;
         }
-        let width = screen.w;
-        let mut heading = Row::new(screen, 0, y, width);
-        self.label(&mut heading, 0);
-        if height >= self.stack_height(width)
-            && let Some(age) = &self.age
-            && heading.left() >= GAP_CELLS + age.len()
-        {
-            heading.add(GAP, FAINT);
-            heading.add(age, FAINT);
+        if tile {
+            row.add(TILE, self.tool.colour());
+            row.add(" ", FAINT);
         }
-        let mut line = y + 1;
-        for metric in self.metrics.iter().flatten() {
-            if line >= y + height {
-                break;
+        if !name.is_empty() {
+            row.add(name, if tile { Style::PLAIN } else { self.tool.colour() });
+            row.add(" ", FAINT);
+        }
+        first.inline(&mut row, label);
+        if let Some(second) = second {
+            row.add("  ", FAINT);
+            second.inline(&mut row, true);
+        }
+    }
+
+    /// When one figure fits, prefer a limit somebody has actually reported.
+    fn inline_metrics(&self, width: usize) -> (&Metric, Option<&Metric>) {
+        let second = self.second.as_ref();
+        if self.first.number.is_none()
+            && let Some(available) = second
+            && available.number.is_some()
+            && width < self.tool.name().len() + 3 + self.first.inline_width() + available.inline_width()
+        {
+            return (available, None);
+        }
+        (&self.first, second)
+    }
+
+    /// The age of the oldest figure shown, when it is old enough to say.
+    fn age(&self) -> Option<i64> {
+        self.first.age.max(self.second.as_ref().and_then(|second| second.age))
+    }
+
+    /// Draws one tool in `area`. `marks` is the height both tools' marks are
+    /// sized for, so that they come out the same.
+    fn panel(&self, screen: &mut Screen, area: Area, marks: usize, activity: impl FnOnce() -> Activity) {
+        if area.w < 24 || area.h < 3 {
+            return self.inline(screen, area);
+        }
+        let chart = Chart::new(area.h);
+        let lane = if area.w >= 56 { 16 } else { 10 };
+        let text_row = chart.label + 1 + usize::from(chart.large);
+        let column = Area { w: lane - 1, ..area };
+        let beneath = self.mark(screen, Area { h: marks.min(area.h), ..column }, text_row);
+        // How old the reading is, said once for the tool rather than under
+        // each of its windows.
+        if let Some(age) = self.age()
+            && beneath <= chart.note
+        {
+            let exact = format!("{} ago", time::relative(age));
+            let text = if exact.len() <= column.w { exact } else { format!("{} ago", time::rough(age)) };
+            column.note(screen, chart.note, &text);
+        }
+        let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
+        let gap = match figures.w {
+            36.. => 3,
+            24..36 => 2,
+            _ => 1,
+        };
+        let (first, second) = figures.split(gap);
+        self.first.panel(screen, first, chart);
+        if let Some(metric) = &self.second {
+            metric.panel(screen, second, chart);
+        }
+        // Activity is not a limit, so it never sits under a window as if it
+        // were that window's caption: it has a row of its own, or follows
+        // the hint on the hint's row, or is left out.
+        let spare = chart.note + 1 < area.h;
+        match &self.hint {
+            Some(hint) if spare => {
+                hint.draw(screen, figures, chart.note, None);
+                figures.note(screen, chart.note + 1, &activity_text(activity()).unwrap_or_default());
             }
-            let separate = metric.full_width(MIN_BAR) > width && line + 1 < y + height;
-            metric.draw(&mut Row::new(screen, 0, line, width), width, !separate);
-            line += 1;
-            if separate
-                && let Some(detail) = &metric.details
-                && detail.len() <= width
-            {
-                Row::new(screen, 0, line, width).add(detail, FAINT);
-                line += 1;
-            }
+            Some(hint) => hint.draw(screen, figures, chart.note, activity_text(activity())),
+            None if spare => figures.note(screen, chart.note + 1, &activity_text(activity()).unwrap_or_default()),
+            None => {}
+        }
+    }
+
+    /// Draws the tool's mark four fifths as tall as `area`, in its middle,
+    /// and returns the first row beneath it.
+    fn mark(&self, screen: &mut Screen, area: Area, text_row: usize) -> usize {
+        if screen.pictures() == Some(true) {
+            let mark = self.tool.picture();
+            let (cols, rows) = mark.fit(screen.cell_size(), area.w, (4 * area.h + 2) / 5);
+            let top = (area.h - rows) / 2;
+            screen.show_picture(mark, area.x, area.y + top, cols, rows);
+            top + rows
+        } else {
+            let mut row = Row { screen, x: area.x, y: area.y + text_row, left: area.w };
+            row.add(TILE, self.tool.colour());
+            row.add(" ", FAINT);
+            row.add(self.tool.name(), Style::PLAIN);
+            text_row + 1
+        }
+    }
+}
+
+fn figures(limits: Option<Limits>, now: i64) -> [Option<Metric>; 2] {
+    limits.unwrap_or_default().map(|window| window.map(|window| Metric::limit(window, now)))
+}
+
+/// Leaves a row for a caption, and one more for activity when it fits.
+#[derive(Clone, Copy)]
+struct Chart {
+    label: usize,
+    note: usize,
+    large: bool,
+}
+
+impl Chart {
+    fn new(height: usize) -> Self {
+        let large = height >= 5;
+        let body = if large { 5 } else { 3 };
+        let label = height.saturating_sub(body + 1) / 2;
+        Self { label, note: label + body - 1, large }
+    }
+}
+
+/// A part of the frame measured in cells.
+#[derive(Clone, Copy)]
+struct Area {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+impl Area {
+    fn split(self, gap: usize) -> (Self, Self) {
+        let left = (self.w - gap) / 2;
+        (Self { w: left, ..self }, Self { x: self.x + left + gap, w: self.w - left - gap, ..self })
+    }
+
+    fn inset(self) -> Self {
+        let pad = if self.w >= 56 { 2 } else { usize::from(self.w >= 16) };
+        Self { x: self.x + pad, w: self.w - 2 * pad, ..self }
+    }
+
+    fn note(self, screen: &mut Screen, row: usize, text: &str) {
+        if str_width(text) <= self.w {
+            screen.put(self.x, self.y + row, self.w, text, FAINT);
         }
     }
 }
@@ -265,41 +386,21 @@ struct Row<'a> {
     screen: &'a mut Screen,
     x: usize,
     y: usize,
-    width: usize,
-    end: usize,
+    left: usize,
 }
 
-impl<'a> Row<'a> {
-    fn new(screen: &'a mut Screen, x: usize, y: usize, width: usize) -> Self {
-        Self { screen, x, y, width, end: x + width }
-    }
-
-    fn left(&self) -> usize {
-        self.end.saturating_sub(self.x)
-    }
-
+impl Row<'_> {
     fn add(&mut self, text: &str, style: Style) {
-        self.x += self.screen.put(self.x, self.y, self.left(), text, style);
+        let used = self.screen.put(self.x, self.y, self.left, text, style);
+        self.x += used;
+        self.left -= used;
     }
+}
 
-    fn bar(&mut self, width: usize, percent: f64) {
-        let palette = if percent >= 90.0 {
-            RED
-        } else if percent >= 70.0 {
-            YELLOW
-        } else {
-            GREEN
-        };
-        let count = f64::from(u32::try_from(width).unwrap_or(u32::MAX));
-        for i in 0..width {
-            let at = f64::from(u32::try_from(i).unwrap_or(u32::MAX)) + 0.5;
-            if at < count * percent / 100.0 {
-                self.add("━", Style::fg(palette));
-            } else {
-                self.add("┄", FAINT);
-            }
-        }
-    }
+/// What was used today, in words, or nothing when nothing was.
+fn activity_text(activity: Activity) -> Option<String> {
+    let more = if activity.partial { "+" } else { "" };
+    (activity.today > 0).then(|| format!("{}{more} tokens today", tokens(activity.today)))
 }
 
 fn tokens(tokens: u64) -> String {
@@ -319,27 +420,29 @@ fn tokens(tokens: u64) -> String {
     if fraction == 0 || whole >= 100 { format!("{whole}{suffix}") } else { format!("{whole}.{fraction}{suffix}") }
 }
 
-fn split(width: usize, a: &Report, b: &Report) -> (usize, usize) {
-    let spare = width - a.minimum() - b.minimum();
-    let extra = a
-        .ideal()
-        .saturating_sub(a.minimum())
-        .min(spare.saturating_sub(b.ideal().saturating_sub(b.minimum())).max(spare / 2));
-    let left = a.minimum() + extra;
-    (left, width - left)
+fn side_by_side(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
+    let (left, right) = area.split(1);
+    for row in area.y..area.y + area.h {
+        screen.put(left.w, row, 1, "│", FAINT);
+    }
+    reports[0].panel(screen, left.inset(), area.h, Activity::default);
+    reports[1].panel(screen, right.inset(), area.h, activity);
 }
 
-fn single_row(screen: &mut Screen, reports: &[Report; 2]) {
-    let [a, b] = reports;
-    if screen.w < a.minimum() + b.minimum() + 3 {
-        let best = if a.metrics[0].is_none() && b.metrics[0].is_some() { b } else { a };
-        best.inline(&mut Row::new(screen, 0, 0, screen.w));
-        return;
+fn stacked(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
+    let rule = usize::from(area.h > 2);
+    let top = (area.h - rule) / 2;
+    if rule > 0 {
+        for x in 0..area.w {
+            screen.put(x, top, 1, "─", FAINT);
+        }
     }
-    let (left, right) = split(screen.w - 3, a, b);
-    a.inline(&mut Row::new(screen, 0, 0, left));
-    Row::new(screen, left, 0, 3).add(" │ ", FAINT);
-    b.inline(&mut Row::new(screen, left + 3, 0, right));
+    let upper = Area { h: top, ..area }.inset();
+    let lower = Area { y: top + rule, h: area.h - top - rule, ..area }.inset();
+    // The lower half may be a row taller; both marks are sized for the shorter.
+    let marks = upper.h.min(lower.h);
+    reports[0].panel(screen, upper, marks, Activity::default);
+    reports[1].panel(screen, lower, marks, activity);
 }
 
 pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
@@ -348,29 +451,16 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     if w == 0 || h == 0 {
         return;
     }
-    let reports = [
-        Report::limits(Tool::Codex, usage.codex.snapshot(), usage.codex.limited, now),
-        if let Some(saved) = usage.claude.saved.filter(|s| s.fresh(now)) {
-            Report::limits(Tool::Claude, Some(saved), false, now)
-        } else {
-            Report::activity(usage.claude.activity(today, now.saturating_sub(FIVE_HOURS), now))
-        },
-    ];
-    if h == 1 {
-        return single_row(screen, &reports);
+    let reports =
+        [Report::codex(usage.codex.latest(), usage.codex.no_sessions, now), Report::claude(usage.claude.saved, now)];
+    let area = Area { x: 0, y: 0, w, h };
+    let activity = || usage.claude.activity(today, now);
+    if h == 1 && w < ONE_LINE_SPLIT {
+        let tool = usize::from(!reports[0].has_number() && reports[1].has_number());
+        reports[tool].inline(screen, area);
+    } else if h == 1 || h >= 3 && w >= SIDE_BY_SIDE {
+        side_by_side(screen, area, &reports, activity);
+    } else {
+        stacked(screen, area, &reports, activity);
     }
-    let [a, b] = &reports;
-    if h < 4 || w >= STACK_WIDTH {
-        a.inline(&mut Row::new(screen, 0, 0, w));
-        b.inline(&mut Row::new(screen, 0, 1, w));
-        return;
-    }
-    let max = [a.stack_height(w), b.stack_height(w)];
-    let mut height = max.map(|n| n.min(2));
-    for _ in 0..h.min(max[0] + max[1]).saturating_sub(height[0] + height[1]) {
-        let i = usize::from(height[1] < height[0] && height[1] < max[1] || height[0] == max[0]);
-        height[i] += 1;
-    }
-    a.stack(screen, 0, height[0]);
-    b.stack(screen, height[0], height[1]);
 }

@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 use crate::git::{Kind, PendingFile, Repo};
 use crate::help::Page;
 use crate::keys::Key;
-use crate::reader::Reader;
+use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::Screen;
 use crate::tree::{Folds, Tree};
 use crate::ui::Pane;
+use crate::walk;
 use crate::watch::Scope;
-use crate::{rex, walk};
 
 use self::attention::Attention;
 use self::draw::Layout;
@@ -26,6 +26,8 @@ const LIVE: Duration = Duration::from_secs(3);
 const PULSE: Duration = Duration::from_millis(500);
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
+/// A second click on the same item within this long opens it.
+pub(crate) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 pub struct Outline {
     repo: Repo,
@@ -50,9 +52,7 @@ pub struct Outline {
     strip_col: usize,
     /// The layout last drawn, which clicks and paging refer to.
     painted: Layout,
-    inside_rex: bool,
-    /// The floating window the last file was opened in, to replace it.
-    popup: Option<String>,
+    opener: OpenReader,
     /// The path last clicked and when, to tell a double click.
     clicked: Option<(String, Instant)>,
     /// Something to say in place of the key hint, and when it was said.
@@ -78,8 +78,7 @@ impl Outline {
             by_click: false,
             strip_col: 0,
             painted: Layout::default(),
-            inside_rex,
-            popup: None,
+            opener: OpenReader::new(inside_rex),
             clicked: None,
             note: None,
             reading: None,
@@ -240,16 +239,9 @@ impl Outline {
 
     /// Opens the reader in this pane, or replaces the floating reader in Rex.
     fn open_file(&mut self, path: &str) {
-        if !self.inside_rex {
-            self.reading = Reader::open(&self.repo.root.join(path));
-            return;
-        }
-        match rex::open(&self.repo.root, path, self.popup.as_deref()) {
-            Ok(layer) => self.popup = Some(layer),
-            Err(why) => {
-                self.popup = None;
-                self.say(why);
-            }
+        match self.opener.open(&self.repo, ReadFile::Working(path)) {
+            Ok(reader) => self.reading = reader,
+            Err(why) => self.say(why),
         }
     }
 }
@@ -504,6 +496,15 @@ mod tests {
         assert!(!draw(&mut o, 65, 11).text().iter().any(|row| row.contains("? help")));
         let tall = draw(&mut o, 65, 12).text();
         assert!(tall[11].contains("? help"), "{tall:?}");
+    }
+
+    #[test]
+    fn the_outline_hint_uses_key_names_and_keeps_help_last_when_narrow() {
+        let f = Fixture::folder();
+        f.write("page.txt", "a file\n");
+        let mut o = open(&f);
+        assert_eq!(draw(&mut o, 60, 12).text()[11], " Enter open · e open all · q quit · ? help");
+        assert_eq!(draw(&mut o, 24, 12).text()[11], " Enter open · ? help");
     }
 
     #[test]

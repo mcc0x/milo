@@ -65,6 +65,10 @@ pub(super) fn open_file(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).custom_flags(OPEN_FLAGS).open(path)
 }
 
+pub(super) fn open_directory(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).custom_flags(OPEN_FLAGS | libc::O_DIRECTORY).open(path)
+}
+
 pub(super) enum Tree {
     Codex,
     Claude { since: i64 },
@@ -159,7 +163,7 @@ pub(super) struct Candidate {
 }
 
 struct Scan {
-    entries: usize,
+    remaining: usize,
     files: Vec<Candidate>,
     limited: bool,
 }
@@ -167,12 +171,15 @@ struct Scan {
 impl Scan {
     fn directory(&mut self, mut dir: Dir, tree: &Tree, path: &mut PathBuf, depth: usize) {
         let fd = dir.fd();
-        while let Some(name) = dir.next() {
-            if self.entries == MAX_ENTRIES {
-                self.limited = true;
-                break;
+        if depth < tree.depth() && matches!(tree, Tree::Codex) {
+            for name in codex_folders(&mut dir, tree, depth) {
+                if !self.descend(fd, &name, tree, path, depth) {
+                    break;
+                }
             }
-            self.entries += 1;
+            return;
+        }
+        while let Some(name) = dir.next() {
             let bytes = name.to_bytes();
             if bytes == b"." || bytes == b".." {
                 continue;
@@ -182,16 +189,36 @@ impl Scan {
                     && let Some(mark) = mark_at(fd, name)
                     && tree.includes(mark)
                 {
+                    if !self.admit() {
+                        break;
+                    }
                     self.keep(tree.limit(), path, bytes, mark);
                 }
-            } else if tree.directory(bytes, depth)
-                && let Some(child) = open_at(fd, name, libc::O_DIRECTORY).and_then(Dir::new)
-            {
-                path.push(OsStr::from_bytes(bytes));
-                self.directory(child, tree, path, depth + 1);
-                path.pop();
+            } else if tree.directory(bytes, depth) && !self.descend(fd, name, tree, path, depth) {
+                break;
             }
         }
+    }
+
+    fn descend(&mut self, fd: RawFd, name: &CStr, tree: &Tree, path: &mut PathBuf, depth: usize) -> bool {
+        if let Some(child) = open_at(fd, name, libc::O_DIRECTORY).and_then(Dir::new) {
+            if !self.admit() {
+                return false;
+            }
+            path.push(OsStr::from_bytes(name.to_bytes()));
+            self.directory(child, tree, path, depth + 1);
+            path.pop();
+        }
+        true
+    }
+
+    fn admit(&mut self) -> bool {
+        if self.remaining == 0 {
+            self.limited = true;
+            return false;
+        }
+        self.remaining -= 1;
+        true
     }
 
     /// Keeps just the newest few files as the directory is walked.
@@ -215,6 +242,18 @@ impl Scan {
     }
 }
 
+/// Visits newer days first, so a full walk's budget runs out in older folders.
+fn codex_folders(dir: &mut Dir, tree: &Tree, depth: usize) -> Vec<CString> {
+    let mut names = Vec::new();
+    while let Some(name) = dir.next() {
+        if tree.directory(name.to_bytes(), depth) {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    names
+}
+
 pub(super) struct Sessions {
     root: File,
     pub files: Vec<Candidate>,
@@ -222,13 +261,19 @@ pub(super) struct Sessions {
 }
 
 impl Sessions {
-    pub(super) fn scan(root: &Path, tree: Tree) -> Option<Self> {
-        let root = OpenOptions::new().read(true).custom_flags(OPEN_FLAGS | libc::O_DIRECTORY).open(root).ok()?;
+    pub(super) fn scan(root: &Path, tree: Tree) -> io::Result<Self> {
+        Self::scan_with_limit(root, tree, MAX_ENTRIES)
+    }
+
+    fn scan_with_limit(root: &Path, tree: Tree, remaining: usize) -> io::Result<Self> {
+        let root = open_directory(root)?;
         // Open a separate stream: a duplicate descriptor would share the directory cursor.
-        let dir = Dir::new(open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY)?)?;
-        let mut scan = Scan { entries: 0, files: Vec::new(), limited: false };
+        let dir = open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY)
+            .and_then(Dir::new)
+            .ok_or_else(|| io::Error::other("cannot open session directory stream"))?;
+        let mut scan = Scan { remaining, files: Vec::new(), limited: false };
         scan.directory(dir, &tree, &mut PathBuf::new(), 0);
-        Some(Self { root, files: scan.files, limited: scan.limited })
+        Ok(Self { root, files: scan.files, limited: scan.limited })
     }
 
     pub(super) fn open(&self, path: &Path) -> Option<(File, Mark)> {
@@ -414,4 +459,43 @@ impl Stream {
 
 pub(super) fn has_marker(line: &[u8], marker: &[u8]) -> bool {
     line.split(|b| *b == b'"').skip(1).any(|part| part == marker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn the_walk_budget_is_spent_in_the_newest_year_month_and_day_first() {
+        let f = Fixture::folder();
+        let newest = "2026/11/19/rollout-new.jsonl";
+        for path in [
+            "2024/12/26/rollout-old-year.jsonl",
+            "2026/10/26/rollout-old-month.jsonl",
+            "2026/11/18/rollout-old-day.jsonl",
+            newest,
+        ] {
+            f.write(path, "{}\n");
+        }
+        let sessions = Sessions::scan_with_limit(&f.root, Tree::Codex, 4).unwrap();
+        assert!(sessions.limited);
+        assert_eq!(sessions.files.len(), 1);
+        assert_eq!(sessions.files[0].path, Path::new(newest));
+    }
+
+    #[test]
+    fn compressed_and_irrelevant_paths_do_not_spend_the_walk_budget() {
+        let f = Fixture::folder();
+        let plain = "2026/11/19/rollout-plain.jsonl";
+        for i in 0..12 {
+            f.write(&format!("2026/11/19/rollout-{i}.jsonl.zst"), "not read");
+            f.write(&format!("unrelated-{i}"), "not read");
+        }
+        f.write(plain, "{}\n");
+        let sessions = Sessions::scan_with_limit(&f.root, Tree::Codex, 4).unwrap();
+        assert!(!sessions.limited);
+        assert_eq!(sessions.files.len(), 1);
+        assert_eq!(sessions.files[0].path, Path::new(plain));
+    }
 }

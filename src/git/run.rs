@@ -45,35 +45,61 @@ pub(super) enum CommitDiff<'a> {
     File(&'a PendingFile),
 }
 
+// Full context within the output limit, with the prefixes the patch parser expects.
+const WHOLE_FILE: [&str; 4] =
+    ["--unified=8388608", "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "];
+
 /// Reads one commit against its first parent, or the empty tree for a root commit.
 pub(super) fn commit_diff(
-    root: &Path, guard: &[String], hash: &str, diff: CommitDiff<'_>,
+    root: &Path,
+    guard: &[String],
+    hash: &str,
+    diff: CommitDiff<'_>,
 ) -> Result<Vec<u8>, OutputError> {
-    let mut cmd = command(root, guard, &[
-        "diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id", "--no-color",
-        "--no-ext-diff", "--no-textconv", "--submodule=short", "-r", "-M",
-    ]);
+    let hash = super::CommitId::parse(hash).ok_or(OutputError::Failed)?.0;
+    if let CommitDiff::File(file) = diff
+        && let Some(from) = &file.from
+    {
+        // Compare these two paths exactly. A literal pathspec can also match
+        // children if a path was a file on one side and a folder on the other.
+        let mut cmd = command(root, guard, &["diff", "--no-color", "--no-ext-diff", "--no-textconv"]);
+        cmd.args(WHOLE_FILE).args([
+            "--end-of-options",
+            &format!("{hash}^:{from}"),
+            &format!("{hash}:{}", file.path),
+            "--",
+        ]);
+        return checked_output(cmd, DIFF_LIMIT);
+    }
+    let mut cmd = command(
+        root,
+        guard,
+        &[
+            "diff-tree",
+            "--root",
+            "--diff-merges=first-parent",
+            "--no-commit-id",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--submodule=short",
+            "-r",
+        ],
+    );
     let limit = match diff {
         CommitDiff::Files => {
-            cmd.args(["--raw", "--numstat", "-z", "--end-of-options", hash, "--"]);
+            cmd.args(["-M", "--raw", "--numstat", "-z", "--end-of-options", hash, "--"]);
             OUTPUT_LIMIT
         }
         CommitDiff::File(file) => {
             // A path also matches children. When a file becomes a folder or vice
             // versa, keep its addition or removal, not the changes below it.
             let filter = match file.kind {
-                Kind::Added => "--diff-filter=AC",
+                Kind::Added => "--diff-filter=A",
                 Kind::Deleted => "--diff-filter=D",
-                Kind::Renamed => "--diff-filter=R",
                 _ => "--diff-filter=MT",
             };
-            cmd.args([
-                "--unified=1000000", "--output-indicator-new=+", "--output-indicator-old=-",
-                "--output-indicator-context= ", filter, "--end-of-options", hash, "--", &file.path,
-            ]);
-            if let Some(from) = &file.from {
-                cmd.arg(from);
-            }
+            cmd.args(WHOLE_FILE).args(["--no-renames", filter, "--end-of-options", hash, "--", &file.path]);
             DIFF_LIMIT
         }
     };

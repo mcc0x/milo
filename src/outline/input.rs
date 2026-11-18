@@ -1,16 +1,13 @@
 //! Handles keys and clicks in the outline, or passes them to its reader.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::keys::Direction::{Next, Previous};
 use crate::keys::Key;
 use crate::ui::Pane;
 
-use super::Outline;
 use super::draw::margin;
-
-/// Two clicks on the same row within this long are a double click.
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+use super::{DOUBLE_CLICK, Outline};
 
 enum Pointed<'a> {
     File(&'a str),

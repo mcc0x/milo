@@ -13,10 +13,6 @@ pub(super) struct Stamp {
 }
 
 impl Stamp {
-    pub(super) fn at(seconds: i64) -> Self {
-        Self { seconds, nanos: 0 }
-    }
-
     pub(super) fn iso(value: Value<'_>) -> Option<Self> {
         let string = value.string(96)?;
         let b = string.as_bytes();
@@ -43,14 +39,20 @@ impl Stamp {
     }
 }
 
-pub(super) fn reset(value: Value<'_>) -> Option<i64> {
-    value.integer().filter(|ts| *ts >= 0).or_else(|| {
-        if let Some(stamp) = Stamp::iso(value) {
-            return stamp.seconds.checked_add(i64::from(stamp.nanos > 0));
-        }
-        // Some callers pass the numeric timestamp through as a string.
-        value.string(24)?.parse::<i64>().ok().filter(|ts| *ts >= 0)
-    })
+pub(super) fn reset(value: Value<'_>, observed: i64) -> Option<i64> {
+    const YEAR: i64 = 366 * DAY;
+    let latest = observed.saturating_add(YEAR);
+    if let Some(stamp) = Stamp::iso(value) {
+        let seconds = stamp.seconds.checked_add(i64::from(stamp.nanos > 0))?;
+        return (0..=latest).contains(&seconds).then_some(seconds);
+    }
+    let stamp = value.integer().or_else(|| value.string(24)?.parse().ok())?;
+    if stamp <= latest {
+        return (stamp >= 0).then_some(stamp);
+    }
+    // A near-future reset sent in milliseconds is about a thousand times too large.
+    let seconds = stamp / 1000 + i64::from(stamp % 1000 > 0);
+    (observed.saturating_sub(YEAR).max(0)..=latest).contains(&seconds).then_some(seconds)
 }
 
 fn digits(bytes: &[u8]) -> Option<u32> {
@@ -91,5 +93,16 @@ pub(super) fn relative(seconds: i64) -> String {
             if minutes == 0 { format!("{} h", seconds / HOUR) } else { format!("{} h {minutes} m", seconds / HOUR) }
         }
         _ => format!("{} d", seconds / DAY),
+    }
+}
+
+/// The same span to its largest unit only, for where there is little room
+/// and a rough answer serves: "6 h" for five hours and fifty minutes.
+pub(super) fn rough(seconds: i64) -> String {
+    match seconds {
+        ..MINUTE => "<1 m".into(),
+        MINUTE..HOUR => format!("{} m", seconds / MINUTE),
+        HOUR..DAY => format!("{} h", (seconds + HOUR / 2) / HOUR),
+        _ => format!("{} d", (seconds + DAY / 2) / DAY),
     }
 }

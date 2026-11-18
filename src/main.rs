@@ -26,13 +26,13 @@ mod watch;
 mod when;
 mod width;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use git::Repo;
+use git::{CommitId, Repo};
 use help::Page;
 use history::History;
 use keys::{Key, receive};
@@ -50,7 +50,7 @@ Usage: milo outline [PATH]
        milo history [PATH]
        milo usage
        milo setup
-       milo view FILE
+       milo view FILE [--commit ID]
        milo [PATH]
        milo listen [--stop]
        milo claude-status
@@ -67,7 +67,7 @@ is a plain file tree. Short git outlines show a strip of changed files;
 wider trees show line counts and what happened to each file.
 
 Outline (tree):
-  ↑ ↓ or k j    move
+  ↑↓ or k j     move
   Enter         toggle a folder or open a file
   Space         toggle a folder
   ← or h        close an open folder or go to the parent
@@ -86,14 +86,18 @@ folder to toggle it, click a file to select it, or double-click to open it.
 Files open in a floating reader inside Rex and in the same pane elsewhere.
 
 History:
-  ↑ ↓ or k j    move
-  Enter         show or hide the files a commit touched
+  ↑↓ or k j     move
+  Enter         show or hide files, show all, or read a file
+  ← or h        go to the commit from its files, or close an open commit
   r             reload
   q             quit
 
-Reader (also opened by milo view FILE):
-  ↑ ↓ or k j    scroll by a line
-  ← → or h l    scroll sideways
+Click a commit to show or hide its files, or click a file to select it.
+Double-click a file to read it.
+
+Reader (also opened by milo view):
+  ↑↓ or k j     scroll by a line
+  ←→ or h l     scroll sideways
   Space / b     page down/up
   g G           top/bottom
   n N           next/previous block of changed lines
@@ -108,6 +112,8 @@ names are bold; unpushed names are regular. In history, bold dots still
 need pushing, faint dots are pushed, and a hollow dot is uncommitted work.
 The reader colours supported code and marks added and removed lines. It
 shows a picture as a picture where the terminal can draw one.
+Use milo view FILE --commit ID to see the file as of that commit, not as
+it is now. ID is a full or abbreviated Git commit ID in hex.
 
 Icons use a Nerd Font by default. Set MILO_ICONS=plain for ordinary
 symbols or MILO_ICONS=off to hide icons.
@@ -179,7 +185,9 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
                     *help = None;
                 }
             } else if key == Key::Char('?') {
-                *help = Some(pane.help());
+                if Page::fits(screen) {
+                    *help = Some(pane.help());
+                }
             } else {
                 return pane.on_key(key);
             }
@@ -211,7 +219,7 @@ fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
 enum Command<'a> {
     Outline(Option<&'a OsStr>),
     History(Option<&'a OsStr>),
-    View(&'a OsStr),
+    View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Path(&'a OsStr),
     Usage,
     Setup,
@@ -225,13 +233,26 @@ enum Command<'a> {
 fn command<'a>(
     first: Option<&'a OsStr>,
     second: Option<&'a OsStr>,
+    rest: &'a [OsString],
     offer_setup: impl FnOnce() -> bool,
 ) -> Result<Command<'a>, String> {
+    if !rest.is_empty() && first != Some(OsStr::new("view")) {
+        return Err("too many arguments; see milo --help".to_string());
+    }
     Ok(match (first.and_then(OsStr::to_str), second) {
         (Some("outline"), path) => Command::Outline(path),
         (Some("history"), path) => Command::History(path),
-        (Some("view"), Some(file)) => Command::View(file),
-        (Some("view"), None) => return Err("which file? milo view FILE".to_string()),
+        (Some("view"), Some(file)) => {
+            let commit = match rest {
+                [] => None,
+                [flag, id] if flag == "--commit" => {
+                    Some(id.to_str().and_then(CommitId::parse).ok_or("commit ID must be 4 to 64 hex digits")?)
+                }
+                _ => return Err("expected milo view FILE [--commit ID]".to_string()),
+            };
+            Command::View { file, commit }
+        }
+        (Some("view"), None) => return Err("which file? milo view FILE [--commit ID]".to_string()),
         (Some("setup"), None) => Command::Setup,
         (Some("usage"), None) => Command::Usage,
         (Some("listen"), None) => Command::Listen(false),
@@ -261,8 +282,9 @@ fn open_pane(command: Command<'_>) -> Result<Box<dyn Pane>, String> {
                 .map_err(|why| format!("{why}; commands: outline, history, view, usage, setup"))?;
             Ok(Box::new(Outline::new(repo, rex::inside())))
         }
-        Command::History(path) => Ok(Box::new(History::new(open_repo(path)?))),
-        Command::View(file) => Ok(Box::new(
+        Command::History(path) => Ok(Box::new(History::new(open_repo(path)?, rex::inside()))),
+        Command::View { file, commit: Some(id) } => Ok(Box::new(Reader::at_commit(Path::new(file), id)?)),
+        Command::View { file, commit: None } => Ok(Box::new(
             Reader::open(Path::new(file))
                 .ok_or_else(|| format!("{} is not in a directory", Path::new(file).display()))?,
         )),
@@ -276,10 +298,9 @@ fn main() {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
     let second = args.next();
-    if args.next().is_some() {
-        fail("too many arguments; see milo --help");
-    }
-    let command = command(first.as_deref(), second.as_deref(), setup::offer_once).unwrap_or_else(|why| fail(&why));
+    let rest: Vec<_> = args.collect();
+    let command =
+        command(first.as_deref(), second.as_deref(), &rest, setup::offer_once).unwrap_or_else(|why| fail(&why));
     match command {
         Command::Help => return print!("{USAGE}"),
         Command::Version => return println!("milo {}", env!("CARGO_PKG_VERSION")),
@@ -317,6 +338,9 @@ fn main() {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
             let (w, h) = term::size();
             screen.resize(w, h);
+            if !Page::fits(&screen) {
+                help = None;
+            }
         }
         draw_pane(pane.as_mut(), &mut screen, help.as_mut());
         screen.flush();
@@ -360,7 +384,7 @@ mod tests {
     use super::*;
 
     fn command_frame(first: Option<&OsStr>, second: Option<&OsStr>) -> Vec<String> {
-        let command = command(first, second, || false).unwrap();
+        let command = command(first, second, &[], || false).unwrap();
         let mut pane = open_pane(command).unwrap();
         let mut screen = Screen::sized(65, 12);
         pane.draw(&mut screen);
@@ -388,8 +412,41 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_open_the_outline_in_the_current_directory() {
-        assert_eq!(command_frame(None, None), command_frame(Some(OsStr::new("outline")), None));
+    fn the_view_command_reads_a_dash_named_file_at_an_abbreviated_commit_id() {
+        let f = fixture::Fixture::new();
+        f.write("-notes.txt", "stored content\n");
+        f.commit("first");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let commits = repo.history(1).unwrap();
+        let id = &commits[0].hash[..12];
+        f.write("-notes.txt", "working content\n");
+
+        let file = f.root.join("-notes.txt");
+        let args = ["--commit".into(), id.into()];
+        let command = command(Some(OsStr::new("view")), Some(file.as_os_str()), &args, || false).unwrap();
+        let mut pane = open_pane(command).unwrap();
+        assert!(pane.watch_scope().roots.is_empty());
+        let mut screen = Screen::sized(65, 12);
+        pane.draw(&mut screen);
+        let rows = screen.text();
+        assert!(rows[0].contains("-notes.txt") && rows[0].contains(&format!("commit {}", &id[..7])));
+        assert_eq!(rows[1], " 1 + stored content");
+        assert!(!rows.iter().any(|row| row.contains("working content")));
+    }
+
+    #[test]
+    fn the_view_command_rejects_non_hex_ids_in_argument_parsing() {
+        for id in ["--all", "HEAD", "123", "b...e", "abc\n", &"f".repeat(65)] {
+            let args = ["--commit".into(), id.into()];
+            let command = command(Some(OsStr::new("view")), Some(OsStr::new("-notes")), &args, || false);
+            assert_eq!(command, Err("commit ID must be 4 to 64 hex digits".to_string()));
+        }
+    }
+
+    #[test]
+    fn no_arguments_choose_the_outline_in_the_current_directory() {
+        assert_eq!(command(None, None, &[], || false), Ok(Command::Outline(None)));
     }
 
     #[test]
@@ -402,7 +459,9 @@ mod tests {
             ("listen", Some("--stop"), Command::Listen(true)),
         ] {
             assert_eq!(
-                command(Some(OsStr::new(name)), arg.map(OsStr::new), || panic!("explicit commands never offer setup")),
+                command(Some(OsStr::new(name)), arg.map(OsStr::new), &[], || panic!(
+                    "explicit commands never offer setup"
+                )),
                 Ok(expected)
             );
         }
@@ -410,9 +469,9 @@ mod tests {
 
     #[test]
     fn only_bare_milo_can_offer_setup() {
-        assert_eq!(command(None, None, || true), Ok(Command::Setup));
+        assert_eq!(command(None, None, &[], || true), Ok(Command::Setup));
         let directory = OsStr::new("./work");
-        assert_eq!(command(Some(directory), None, || panic!("path was explicit")), Ok(Command::Path(directory)));
+        assert_eq!(command(Some(directory), None, &[], || panic!("path was explicit")), Ok(Command::Path(directory)));
     }
 
     #[test]
@@ -427,7 +486,9 @@ mod tests {
 
     #[test]
     fn an_unknown_word_names_the_commands() {
-        let command = command(Some(OsStr::new("not-a-milo-command")), None, || false).unwrap();
+        let f = fixture::Fixture::folder();
+        let missing = f.root.join("not-a-milo-command");
+        let command = command(Some(missing.as_os_str()), None, &[], || false).unwrap();
         let Err(why) = open_pane(command) else {
             panic!("unknown word opened a pane");
         };
@@ -493,7 +554,7 @@ mod tests {
         draw_pane(&mut pane, &mut screen, help.as_mut());
         let first = screen.text();
         assert!(first[0].trim_start().starts_with("Files"));
-        assert!(first[11].contains("Esc closes"));
+        assert!(first[11].contains("Esc close") && first[11].ends_with("q close"));
         assert!(!route_key(&mut pane, &mut screen, &mut help, Key::PgDn));
         draw_pane(&mut pane, &mut screen, help.as_mut());
         assert_eq!(screen.text()[0], first[10]);
@@ -503,6 +564,22 @@ mod tests {
         assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Esc));
         draw_pane(&mut pane, &mut screen, help.as_mut());
         assert_eq!(screen.text(), before);
+    }
+
+    #[test]
+    fn help_cannot_blank_a_one_row_pane() {
+        let f = fixture::Fixture::folder();
+        f.write("page.txt", "a file\n");
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let mut screen = Screen::sized(40, 1);
+        let mut help = None;
+        draw_pane(&mut pane, &mut screen, help.as_mut());
+        let before = screen.text();
+        assert!(before[0].contains("page.txt"));
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Char('?')));
+        draw_pane(&mut pane, &mut screen, help.as_mut());
+        assert_eq!(screen.text(), before);
+        assert!(help.is_none());
     }
 
     #[test]
