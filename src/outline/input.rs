@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::keys::Direction::{Next, Previous};
 use crate::keys::Key;
-use crate::ui::Pane;
+use crate::pane::{After, Pane};
 
 use super::draw::margin;
 use super::{DOUBLE_CLICK, Outline};
@@ -16,18 +16,21 @@ enum Pointed<'a> {
 }
 
 impl Outline {
-    pub(super) fn outline_key(&mut self, key: Key) {
+    pub(super) fn outline_key(&mut self, key: Key) -> After {
         let now = Instant::now();
         if let Key::Focus(here) = key {
             self.attention.focus(here, now);
-            return;
+            return After::Stay;
         }
         self.attention.used(now);
         if let Some(reader) = &mut self.reading {
-            if reader.on_key(key) {
+            if reader.key(key) == After::Leave {
                 self.reading = None;
             }
-            return;
+            return After::Stay;
+        }
+        if key == Key::Char('q') {
+            return After::Leave;
         }
         self.by_click &= matches!(key, Key::Click(..));
         match key {
@@ -35,6 +38,7 @@ impl Outline {
             _ if self.painted.strip => self.strip_key(key),
             _ => self.tree_key(key, now),
         }
+        After::Stay
     }
 
     /// The strip has no cursor: its keys move it a column at a time.

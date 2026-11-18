@@ -96,10 +96,10 @@ impl Outline {
     /// Names the project and branch beside the work that is waiting, if it fits.
     fn draw_heading(&self, s: &mut Screen, width: usize, uncommitted: usize) {
         let branch = self.repo.branch();
-        let name_width = str_width(&self.repo.name) + str_width(branch) + 5;
+        let name_width = ui::project_heading_width(&self.repo.name, branch);
         let summary_width = if self.repo.git { self.draw_summary(s, width, name_width, uncommitted) } else { 0 };
         let room = width.saturating_sub(summary_width + 3);
-        let x = 1 + s.put_fit(1, 0, room, &self.repo.name, Style::PLAIN.bold());
+        let x = 1 + ui::section_heading(s, 0, room, &self.repo.name);
         s.put_fit(x + 2, 0, room.saturating_sub(x + 1), branch, Style::fg(screen::MAGENTA));
     }
 

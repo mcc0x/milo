@@ -1,53 +1,74 @@
 //! Validates JSON and borrows values from the input. Skipped values allocate nothing.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
-const MAX_DEPTH: usize = 32;
+const REPORT_DEPTH: usize = 32;
+const SETTINGS_DEPTH: usize = 128;
+
+/// Settings edits preserve unknown values and whitespace byte for byte.
+pub struct Member<'a> {
+    pub key: Value<'a>,
+    pub value: Value<'a>,
+    pub key_range: Range<usize>,
+    pub value_range: Range<usize>,
+}
+
+/// Visit only the top-level members, returning the offset just after the opening brace.
+pub fn settings_object<'a>(text: &'a str, mut visit: impl FnMut(Member<'a>)) -> Option<usize> {
+    let mut input = Input::<true>(text);
+    input.space();
+    let open = text.len() - input.0.len() + 1;
+    input.0.starts_with('{').then_some(())?;
+    input.collection(1, |key, value, key_tail, value_tail| {
+        let key_start = text.len() - key_tail;
+        let value_start = text.len() - value_tail;
+        visit(Member {
+            key,
+            value,
+            key_range: key_start..key_start + key.0.len(),
+            value_range: value_start..value_start + value.0.len(),
+        });
+    })?;
+    input.space();
+    input.0.is_empty().then_some(open)
+}
 
 #[derive(Clone, Copy)]
-pub(super) struct Value<'a>(&'a str);
+pub struct Value<'a>(&'a str);
 
 impl<'a> Value<'a> {
-    pub(super) fn parse(bytes: &'a [u8]) -> Option<Self> {
-        let mut input = Input(std::str::from_utf8(bytes).ok()?);
+    pub fn parse(bytes: &'a [u8]) -> Option<Self> {
+        let mut input = Input::<false>(std::str::from_utf8(bytes).ok()?);
         let value = input.value(0)?;
         input.space();
         input.0.is_empty().then_some(value)
     }
 
-    pub(super) fn fields<const N: usize>(self, names: [&str; N]) -> [Option<Self>; N] {
+    pub fn fields<const N: usize>(self, names: [&str; N]) -> [Option<Self>; N] {
         let mut values = [None; N];
-        let Some(object) = self.0.strip_prefix('{') else { return values };
-        let mut input = Input(object);
-        loop {
-            input.space();
-            let Some(key) = input.string() else { break };
-            input.space();
-            input.eat(':');
-            let Some(value) = input.value(0) else { break };
-            if let Some(key) = key.string(64)
-                && let Some(i) = names.iter().position(|name| *name == key)
-            {
-                values[i] = Some(value);
-            }
-            input.space();
-            if !input.eat(',') {
-                break;
-            }
+        if self.object() {
+            let _ = Input::<false>(self.0).collection(0, |key, value, _, _| {
+                if let Some(key) = key.string(64)
+                    && let Some(i) = names.iter().position(|name| *name == key)
+                {
+                    values[i] = Some(value);
+                }
+            });
         }
         values
     }
 
-    pub(super) fn object(self) -> bool {
+    pub fn object(self) -> bool {
         self.0.starts_with('{')
     }
 
-    pub(super) fn null(self) -> bool {
+    pub fn null(self) -> bool {
         self.0 == "null"
     }
 
-    pub(super) fn elements(self) -> Option<impl Iterator<Item = Self>> {
-        let mut input = Input(self.0.strip_prefix('[')?);
+    pub fn elements(self) -> Option<impl Iterator<Item = Self>> {
+        let mut input = Input::<false>(self.0.strip_prefix('[')?);
         Some(std::iter::from_fn(move || {
             let value = input.value(0)?;
             input.space();
@@ -56,11 +77,24 @@ impl<'a> Value<'a> {
         }))
     }
 
-    pub(super) fn is(self, text: &str) -> bool {
-        self.string(text.len()).is_some_and(|s| s == text)
+    /// Compare short fixed names without allocating even when they are escaped.
+    pub fn is(self, mut expected: &str) -> bool {
+        let Some(text) = self.0.strip_prefix('"').and_then(|text| text.strip_suffix('"')) else { return false };
+        if text.len() > expected.len().saturating_mul(6) {
+            return false;
+        }
+        let mut input = Input::<false>(text);
+        while let Some((plain, escaped)) = input.0.split_once('\\') {
+            input.0 = escaped;
+            let Some(tail) = expected.strip_prefix(plain).and_then(|tail| tail.strip_prefix(input.escape()?)) else {
+                return false;
+            };
+            expected = tail;
+        }
+        input.0 == expected
     }
 
-    pub(super) fn string(self, max_bytes: usize) -> Option<Cow<'a, str>> {
+    pub fn string(self, max_bytes: usize) -> Option<Cow<'a, str>> {
         let text = self.0.strip_prefix('"')?.strip_suffix('"')?;
         if !text.contains('\\') {
             return (text.len() <= max_bytes).then_some(Cow::Borrowed(text));
@@ -69,7 +103,7 @@ impl<'a> Value<'a> {
             return None;
         }
         let mut decoded = String::with_capacity(text.len().min(max_bytes));
-        let mut input = Input(text);
+        let mut input = Input::<false>(text);
         while let Some((plain, escaped)) = input.0.split_once('\\') {
             decoded.push_str(plain);
             input.0 = escaped;
@@ -79,23 +113,24 @@ impl<'a> Value<'a> {
         (decoded.len() <= max_bytes).then_some(Cow::Owned(decoded))
     }
 
-    pub(super) fn unsigned(self) -> Option<u64> {
+    pub fn unsigned(self) -> Option<u64> {
         self.0.parse().ok()
     }
 
-    pub(super) fn integer(self) -> Option<i64> {
+    pub fn integer(self) -> Option<i64> {
         self.0.parse().ok()
     }
 
-    pub(super) fn number(self) -> Option<f64> {
+    pub fn number(self) -> Option<f64> {
         let number = self.0.parse::<f64>().ok()?;
         number.is_finite().then_some(number)
     }
 }
 
-struct Input<'a>(&'a str);
+/// A settings edit only needs valid syntax, but reports need decodable strings.
+struct Input<'a, const SETTINGS: bool>(&'a str);
 
-impl<'a> Input<'a> {
+impl<'a, const SETTINGS: bool> Input<'a, SETTINGS> {
     fn space(&mut self) {
         self.0 = self.0.trim_start_matches([' ', '\t', '\r', '\n']);
     }
@@ -111,13 +146,15 @@ impl<'a> Input<'a> {
 
     fn value(&mut self, depth: usize) -> Option<Value<'a>> {
         self.space();
+        if SETTINGS && depth > SETTINGS_DEPTH {
+            return None;
+        }
         let start = self.0;
         match start.as_bytes().first()? {
             b'"' => {
                 self.string()?;
             }
-            // Count containers, not the scalar at their innermost level.
-            b'{' | b'[' if depth < MAX_DEPTH => self.collection(depth + 1)?,
+            b'{' | b'[' if SETTINGS || depth < REPORT_DEPTH => self.collection(depth + 1, |_, _, _, _| {})?,
             b'-' | b'0'..=b'9' => self.number()?,
             b't' => self.0 = start.strip_prefix("true")?,
             b'f' => self.0 = start.strip_prefix("false")?,
@@ -127,7 +164,7 @@ impl<'a> Input<'a> {
         Some(Value(&start[..start.len() - self.0.len()]))
     }
 
-    fn collection(&mut self, depth: usize) -> Option<()> {
+    fn collection(&mut self, depth: usize, mut visit: impl FnMut(Value<'a>, Value<'a>, usize, usize)) -> Option<()> {
         let object = self.eat('{');
         if !object {
             self.eat('[');
@@ -140,11 +177,17 @@ impl<'a> Input<'a> {
         loop {
             self.space();
             if object {
-                self.string()?;
+                let key_tail = self.0.len();
+                let key = self.string()?;
                 self.space();
                 self.eat(':').then_some(())?;
+                self.space();
+                let value_tail = self.0.len();
+                let value = self.value(depth)?;
+                visit(key, value, key_tail, value_tail);
+            } else {
+                self.value(depth)?;
             }
-            self.value(depth)?;
             self.space();
             if self.eat(end) {
                 return Some(());
@@ -164,7 +207,11 @@ impl<'a> Input<'a> {
                 return Some(Value(&start[..start.len() - self.0.len()]));
             }
             self.eat('\\').then_some(())?;
-            self.escape()?;
+            if SETTINGS && self.eat('u') {
+                self.hex()?;
+            } else {
+                self.escape()?;
+            }
         }
     }
 
@@ -230,5 +277,21 @@ impl<'a> Input<'a> {
             self.digits().then_some(())?;
         }
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_and_reports_keep_their_own_nesting_bounds() {
+        let array = |depth: usize, value: &str| format!("{}{value}{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(Value::parse(array(32, "0").as_bytes()).is_some());
+        assert!(Value::parse(array(33, "0").as_bytes()).is_none());
+
+        let settings = |depth, value| format!("{{\"other\":{}}}", array(depth, value));
+        assert!(settings_object(&settings(128, ""), |_| {}).is_some());
+        assert!(settings_object(&settings(128, "0"), |_| {}).is_none());
     }
 }

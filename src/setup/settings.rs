@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use crate::json;
+
 const NAME: &str = "statusLine";
 const VALUE: &str = r#"{ "type": "command", "command": "milo claude-status" }"#;
 
@@ -22,6 +24,7 @@ pub(super) enum Status {
     Foreign,
 }
 
+/// Keep spans instead of parsed values so unrelated settings can remain exactly as written.
 pub(super) struct Settings<'a> {
     text: &'a str,
     open: usize,
@@ -31,18 +34,17 @@ pub(super) struct Settings<'a> {
 }
 
 impl<'a> Settings<'a> {
+    /// Reject ambiguous duplicate entries before setup might edit either one.
     pub(super) fn parse(text: &'a str) -> Option<Self> {
-        let mut json = Json { text, at: 0 };
-        json.space();
-        let mut result = Self { text, open: json.at + 1, first: None, status: Status::Absent, removal: None };
+        let mut result = Self { text, open: 0, first: None, status: Status::Absent, removal: None };
         let (mut previous, mut found, mut duplicate): (Option<Range<usize>>, _, _) = (None, false, false);
-        json.object(0, &mut |member| {
-            let start = member.key.start;
-            let end = member.value.end;
-            result.first.get_or_insert((start, &text[member.key.end..member.value.start]));
-            if quoted_eq(&text[member.key], NAME) {
+        result.open = json::settings_object(text, |member| {
+            let start = member.key_range.start;
+            let end = member.value_range.end;
+            result.first.get_or_insert((start, &text[member.key_range.end..member.value_range.start]));
+            if member.key.is(NAME) {
                 duplicate |= result.status != Status::Absent;
-                result.status = if is_milo(&text[member.value]) { Status::Milo } else { Status::Foreign };
+                result.status = if is_milo(&text[member.value_range]) { Status::Milo } else { Status::Foreign };
                 result.removal = Some(previous.as_ref().map_or(start, |member| member.end)..end);
                 found = true;
             } else if found {
@@ -52,14 +54,14 @@ impl<'a> Settings<'a> {
             // Keep the key start for removal with a next member, and the value end for a last member.
             previous = Some(start..end);
         })?;
-        json.space();
-        (!duplicate && json.at == text.len()).then_some(result)
+        (!duplicate).then_some(result)
     }
 
     pub(super) fn status(&self) -> Status {
         self.status
     }
 
+    /// Match the existing first member's spacing, if one is available.
     pub(super) fn add(&self) -> Option<String> {
         if self.status != Status::Absent {
             return None;
@@ -72,6 +74,7 @@ impl<'a> Settings<'a> {
         }
     }
 
+    /// Remove the appropriate comma with milo's own entry, and no other bytes.
     pub(super) fn remove(&self) -> Option<String> {
         let range = self.removal.as_ref()?;
         (self.status == Status::Milo).then(|| format!("{}{}", &self.text[..range.start], &self.text[range.end..]))
@@ -82,184 +85,18 @@ impl<'a> Settings<'a> {
     }
 }
 
+/// Anything beyond the two fields we install belongs to the user.
 fn is_milo(text: &str) -> bool {
-    let mut json = Json { text, at: 0 };
     let (mut count, mut command, mut kind) = (0, false, false);
-    json.object(0, &mut |member| {
+    json::settings_object(text, |member| {
         count += 1;
-        let (key, value) = (&text[member.key], &text[member.value]);
-        command |= quoted_eq(key, "command") && quoted_eq(value, "milo claude-status");
-        kind |= quoted_eq(key, "type") && quoted_eq(value, "command");
+        command |= member.key.is("command") && member.value.is("milo claude-status");
+        kind |= member.key.is("type") && member.value.is("command");
     })
     .is_some()
         && count == 2
         && command
         && kind
-}
-
-/// Compare a validated JSON string to an ASCII name without decoding or copying it.
-fn quoted_eq(text: &str, expected: &str) -> bool {
-    let Some(contents) = text.strip_prefix('"').and_then(|text| text.strip_suffix('"')) else { return false };
-    let mut bytes = contents.as_bytes();
-    for want in expected.bytes() {
-        if let Some(hex) = bytes.strip_prefix(b"\\u") {
-            let Some(digits) = hex.first_chunk::<4>() else { return false };
-            if std::str::from_utf8(digits).ok().and_then(|s| u16::from_str_radix(s, 16).ok()) != Some(u16::from(want)) {
-                return false;
-            }
-            bytes = &hex[4..];
-        } else if let Some(rest) = bytes.strip_prefix(&[want]) {
-            bytes = rest;
-        } else {
-            return false;
-        }
-    }
-    bytes.is_empty()
-}
-
-struct Member {
-    key: Range<usize>,
-    value: Range<usize>,
-}
-
-/// Validates JSON syntax and identifies byte ranges. Unknown values are never materialized.
-struct Json<'a> {
-    text: &'a str,
-    at: usize,
-}
-
-impl Json<'_> {
-    fn byte(&self) -> Option<u8> {
-        self.text.as_bytes().get(self.at).copied()
-    }
-
-    fn take(&mut self, byte: u8) -> bool {
-        let found = self.byte() == Some(byte);
-        self.at += usize::from(found);
-        found
-    }
-
-    fn space(&mut self) {
-        while matches!(self.byte(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.at += 1;
-        }
-    }
-
-    fn string(&mut self) -> Option<Range<usize>> {
-        let start = self.at;
-        self.take(b'"').then_some(())?;
-        loop {
-            let byte = self.byte()?;
-            self.at += 1;
-            match byte {
-                b'"' => return Some(start..self.at),
-                b'\\' => {
-                    let escape = self.byte()?;
-                    self.at += 1;
-                    match escape {
-                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {}
-                        b'u' => {
-                            let hex = self.text.as_bytes().get(self.at..self.at + 4)?;
-                            hex.iter().all(u8::is_ascii_hexdigit).then_some(())?;
-                            self.at += 4;
-                        }
-                        _ => return None,
-                    }
-                }
-                0..=31 => return None,
-                _ => {}
-            }
-        }
-    }
-
-    fn digits(&mut self) -> Option<()> {
-        let start = self.at;
-        while matches!(self.byte(), Some(b'0'..=b'9')) {
-            self.at += 1;
-        }
-        (self.at > start).then_some(())
-    }
-
-    fn number(&mut self) -> Option<()> {
-        self.take(b'-');
-        if !self.take(b'0') {
-            self.digits()?;
-        }
-        if self.take(b'.') {
-            self.digits()?;
-        }
-        if self.take(b'e') || self.take(b'E') {
-            if !self.take(b'+') {
-                self.take(b'-');
-            }
-            self.digits()?;
-        }
-        Some(())
-    }
-
-    fn literal(&mut self, value: &str) -> Option<()> {
-        self.text.as_bytes().get(self.at..self.at + value.len()).filter(|bytes| *bytes == value.as_bytes())?;
-        self.at += value.len();
-        Some(())
-    }
-
-    fn value(&mut self, depth: usize) -> Option<Range<usize>> {
-        self.space();
-        let start = self.at;
-        if depth > 128 {
-            return None;
-        }
-        match self.byte()? {
-            b'{' => self.object(depth, &mut |_| {})?,
-            b'[' => self.array(depth)?,
-            b'"' => {
-                self.string()?;
-            }
-            b't' => self.literal("true")?,
-            b'f' => self.literal("false")?,
-            b'n' => self.literal("null")?,
-            b'-' | b'0'..=b'9' => self.number()?,
-            _ => return None,
-        }
-        Some(start..self.at)
-    }
-
-    fn object(&mut self, depth: usize, visit: &mut dyn FnMut(Member)) -> Option<()> {
-        self.take(b'{').then_some(())?;
-        self.space();
-        if self.take(b'}') {
-            return Some(());
-        }
-        loop {
-            self.space();
-            let key = self.string()?;
-            self.space();
-            self.take(b':').then_some(())?;
-            let value = self.value(depth + 1)?;
-            visit(Member { key, value });
-            self.space();
-            if self.take(b'}') {
-                return Some(());
-            }
-            self.take(b',').then_some(())?;
-        }
-    }
-
-    fn array(&mut self, depth: usize) -> Option<()> {
-        self.take(b'[').then_some(())?;
-        self.space();
-        if self.take(b']') {
-            return Some(());
-        }
-        loop {
-            self.value(depth + 1)?;
-            self.space();
-            if self.take(b']') {
-                return Some(());
-            }
-            self.take(b',').then_some(())?;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -304,6 +141,14 @@ mod tests {
             assert_eq!(settings.status(), Status::Foreign);
             assert!(settings.add().is_none() && settings.remove().is_none());
         }
+    }
+
+    #[test]
+    fn editing_preserves_escapes_that_a_report_cannot_decode() {
+        let original = r#"{"other":"\uD800"}"#;
+        assert!(json::Value::parse(original.as_bytes()).is_none());
+        let added = Settings::parse(original).unwrap().add().unwrap();
+        assert_eq!(Settings::parse(&added).unwrap().remove().as_deref(), Some(original));
     }
 
     #[test]

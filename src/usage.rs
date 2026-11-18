@@ -2,7 +2,6 @@
 
 mod draw;
 mod files;
-mod json;
 mod omp;
 mod status;
 mod time;
@@ -14,15 +13,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::help::{self, Page};
+use crate::json::Value;
 use crate::keys::Key;
+use crate::pane::{After, Pane};
 use crate::screen::Screen;
-use crate::ui::Pane;
 use crate::watch::Scope;
+use crate::when::{DAY, MINUTE};
 use crate::{paths, when};
 
-use self::files::{Budget, Mark, Reverse, Sessions, Stream, Tree};
-use self::json::Value;
-use self::time::{DAY, MINUTE, Stamp};
+use self::files::{Budget, FileVersion, Reverse, Sessions, Stream, Tree};
+use self::time::Timestamp;
 
 const AGE_NOTE: i64 = 5 * MINUTE;
 const CLOCK_SKEW: i64 = 5 * MINUTE;
@@ -43,6 +43,7 @@ static PERCENT_TEXT: [[u8; 4]; 101] = {
     text
 };
 
+/// Keep a window's own observation time even if another window is newer.
 #[derive(Clone, Copy, PartialEq)]
 struct Window {
     minutes: u64,
@@ -52,6 +53,7 @@ struct Window {
 }
 
 impl Window {
+    /// Reject malformed or out-of-range percentages instead of showing a misleading figure.
     fn percent(value: Value<'_>) -> Option<f64> {
         value.number().filter(|n| (0.0..=100.0).contains(n)).map(|n| n.abs())
     }
@@ -74,6 +76,7 @@ impl Window {
         self.resets.is_some_and(|reset| reset <= now)
     }
 
+    /// Codex reports percentages and durations under different names from Claude.
     fn codex(value: Option<Value<'_>>, observed: i64) -> Option<Self> {
         let [percent, minutes, resets] = value?.fields(["used_percent", "window_minutes", "resets_at"]);
         Some(Self {
@@ -98,8 +101,10 @@ impl Window {
     }
 }
 
+/// The first two slots are the provider's all-models windows.
 type BaseWindows = [Option<Window>; 2];
 
+/// Keep the optional model week separate so it never replaces an all-models limit.
 #[derive(Clone, Copy, Default)]
 struct Limits {
     base: BaseWindows,
@@ -116,11 +121,13 @@ impl Limits {
         self.base.map(figure)
     }
 
+    /// Include the model-specific week when scheduling the next reset.
     fn windows(self) -> impl Iterator<Item = Window> {
         self.base.into_iter().flatten().chain(self.model_week.map(|model| model.window))
     }
 }
 
+/// Store the short provider label inline so a reading can stay cheap to copy.
 #[derive(Clone, Copy)]
 struct ModelWeek {
     window: Window,
@@ -129,6 +136,7 @@ struct ModelWeek {
 }
 
 impl ModelWeek {
+    /// Only accept labels safe to print in the strip.
     fn new(tier: &str, window: Window) -> Option<Self> {
         let len = tier.len();
         if len == 0 || !tier.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
@@ -145,23 +153,22 @@ impl ModelWeek {
     }
 }
 
+/// The newest reading wins even if a provider did not report a usable window.
 #[derive(Clone, Copy)]
 struct Reading {
-    at: Stamp,
-    // A report with no readable windows still supersedes older reports.
+    at: Timestamp,
     windows: Limits,
 }
 
-type CodexReading = Reading;
-
-impl CodexReading {
-    fn parse(line: &[u8], now: i64) -> Option<Self> {
+impl Reading {
+    /// Skip non-limit transcript lines and ignore separate Codex model buckets.
+    fn codex(line: &[u8], now: i64) -> Option<Self> {
         if !files::has_marker(line, b"token_count") {
             return None;
         }
         let [kind, at, payload] = Value::parse(line)?.fields(["type", "timestamp", "payload"]);
         kind?.is("event_msg").then_some(())?;
-        let at = Stamp::iso(at?)?;
+        let at = Timestamp::iso(at?)?;
         (at.seconds <= now.saturating_add(CLOCK_SKEW)).then_some(())?;
         let [kind, limits] = payload?.fields(["type", "rate_limits"]);
         kind?.is("token_count").then_some(())?;
@@ -174,11 +181,13 @@ impl CodexReading {
     }
 }
 
+/// Remember the file version so an unchanged transcript does not need another read.
 struct CodexFile {
-    mark: Mark,
-    reading: Option<CodexReading>,
+    version: FileVersion,
+    reading: Option<Reading>,
 }
 
+/// Keep one snapshot per session alongside the account snapshot from OMP.
 #[derive(Default)]
 struct Codex {
     files: HashMap<PathBuf, CodexFile>,
@@ -187,6 +196,7 @@ struct Codex {
 }
 
 impl Codex {
+    /// Drop sessions that vanished and reuse reports from files that did not change.
     fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) {
         let Some(root) = root else {
             self.files.clear();
@@ -201,12 +211,12 @@ impl Codex {
                 return;
             }
         };
-        self.no_sessions = sessions.files.is_empty() && !sessions.limited;
+        self.no_sessions = sessions.files.is_empty() && !sessions.partial;
         if sessions.files.len() == self.files.len()
             && sessions
                 .files
                 .iter()
-                .all(|candidate| self.files.get(&candidate.path).is_some_and(|file| file.mark == candidate.mark))
+                .all(|candidate| self.files.get(&candidate.path).is_some_and(|file| file.version == candidate.version))
         {
             return;
         }
@@ -219,6 +229,7 @@ impl Codex {
         }
     }
 
+    /// A bounded tail can miss an older report in a growing file; keep it if so.
     fn check_file(
         sessions: &Sessions,
         candidate: &files::Candidate,
@@ -226,23 +237,27 @@ impl Codex {
         now: i64,
         budget: &mut Budget,
     ) -> Option<CodexFile> {
-        if cached.as_ref().is_some_and(|file| file.mark == candidate.mark) {
+        if cached.as_ref().is_some_and(|file| file.version == candidate.version) {
             return cached;
         }
-        let (file, mark) = sessions.open(&candidate.path)?;
-        let (mut reading, limited) =
-            files::tail(&file, mark.len, TAIL_BYTES, budget, |line| CodexReading::parse(line, now)).ok()?;
-        if limited && let Some(old) = cached.filter(|file| mark.same_file(file.mark) && mark.len > file.mark.len) {
+        let (file, version) = sessions.open(&candidate.path)?;
+        let (mut reading, partial) =
+            files::tail(&file, version.len, TAIL_BYTES, budget, |line| Reading::codex(line, now)).ok()?;
+        if partial
+            && let Some(old) = cached.filter(|file| version.same_file(file.version) && version.len > file.version.len)
+        {
             reading = reading.or(old.reading);
         }
-        Some(CodexFile { mark, reading })
+        Some(CodexFile { version, reading })
     }
 
-    fn latest(&self) -> Option<CodexReading> {
+    /// Different sources can describe the same account, not separate limits to add.
+    fn latest(&self) -> Option<Reading> {
         self.files.values().filter_map(|file| file.reading).chain(self.omp).max_by_key(|reading| reading.at)
     }
 }
 
+/// One assistant message contributes tokens, not a percentage of the account limit.
 #[derive(Clone, Copy)]
 struct Sample {
     at: i64,
@@ -250,6 +265,7 @@ struct Sample {
 }
 
 impl Sample {
+    /// Filter obvious non-usage lines before invoking the JSON reader.
     fn parse(line: &[u8]) -> Option<(Self, Option<std::borrow::Cow<'_, str>>)> {
         if !files::has_marker(line, b"usage") {
             return None;
@@ -258,11 +274,13 @@ impl Sample {
         Self::from_record(at, kind, message)
     }
 
+    /// Backward reads also need timestamps from records that carry no usage.
     fn record(line: &[u8]) -> Option<(i64, Option<Value<'_>>, Option<Value<'_>>)> {
         let [kind, at, message] = Value::parse(line)?.fields(["type", "timestamp", "message"]);
-        Some((Stamp::iso(at?)?.seconds, kind, message))
+        Some((Timestamp::iso(at?)?.seconds, kind, message))
     }
 
+    /// Count generated and newly cached tokens, not tokens read from the cache.
     fn from_record<'a>(
         at: i64,
         kind: Option<Value<'_>>,
@@ -278,6 +296,7 @@ impl Sample {
     }
 }
 
+/// Identified messages can recur; anonymous ones cannot be safely merged.
 #[derive(Default)]
 struct Samples {
     identified: HashMap<Box<str>, Sample>,
@@ -286,6 +305,7 @@ struct Samples {
 }
 
 impl Samples {
+    /// Keep the earliest timestamp while preferring totals seen later in the transcript.
     fn add(&mut self, sample: Sample, id: Option<&str>, cutoff: i64, revisiting: bool) {
         if let Some(previous) = id.and_then(|id| self.identified.get_mut(id)) {
             previous.at = previous.at.min(sample.at);
@@ -310,8 +330,9 @@ impl Samples {
     }
 }
 
+/// Retains both the backward catch-up and the forward tail across read budgets.
 struct ClaudeFile {
-    mark: Mark,
+    version: FileVersion,
     stream: Stream,
     reverse: Option<Reverse>,
     samples: Samples,
@@ -319,25 +340,27 @@ struct ClaudeFile {
 }
 
 impl ClaudeFile {
+    /// A file is settled only after the old and newly appended work is done.
     fn settled(&self) -> bool {
-        self.reverse.is_none() && self.stream.offset == self.mark.len
+        self.reverse.is_none() && self.stream.offset == self.version.len
     }
 
+    /// A replacement or truncation starts over; appends use the existing cursor.
     fn check(&mut self, sessions: &Sessions, candidate: &files::Candidate, cutoff: i64, budget: &mut Budget) -> bool {
-        if self.mark == candidate.mark && self.settled() {
+        if self.version == candidate.version && self.settled() {
             return true;
         }
         if budget.remaining == 0 {
             return false;
         }
-        let Some((file, mark)) = sessions.open(&candidate.path) else {
-            *self = Self::new(candidate.mark);
+        let Some((file, version)) = sessions.open(&candidate.path) else {
+            *self = Self::new(candidate.version);
             return true;
         };
-        if !mark.same_file(self.mark) || mark.len < self.mark.len {
-            *self = Self::new(mark);
+        if !version.same_file(self.version) || version.len < self.version.len {
+            *self = Self::new(version);
         }
-        self.mark = mark;
+        self.version = version;
         self.samples.expire(cutoff);
         let loaded = self.read(&file, cutoff, budget);
         self.pending = if self.settled() {
@@ -351,6 +374,7 @@ impl ClaudeFile {
         loaded.is_err() || self.settled()
     }
 
+    /// Find today's records from the end, then switch to consuming appends.
     fn read(&mut self, file: &std::fs::File, cutoff: i64, budget: &mut Budget) -> io::Result<()> {
         if let Some(reverse) = &mut self.reverse {
             let mut reached_history = false;
@@ -380,23 +404,25 @@ impl ClaudeFile {
             }
             self.reverse = None;
         }
-        self.stream.read(file, self.mark.len, budget, |line| {
+        self.stream.read(file, self.version.len, budget, |line| {
             if let Some((sample, id)) = Sample::parse(line) {
                 self.samples.add(sample, id.as_deref(), cutoff, false);
             }
         })
     }
 
-    fn new(mark: Mark) -> Self {
+    /// Save the original end so subsequent appends are read exactly once.
+    fn new(version: FileVersion) -> Self {
         Self {
-            mark,
-            stream: Stream::resume(mark.len),
-            reverse: (mark.len != 0).then(|| Reverse::new(mark.len)),
+            version,
+            stream: Stream::resume(version.len),
+            reverse: (version.len != 0).then(|| Reverse::new(version.len)),
             samples: Samples::default(),
             pending: None,
         }
     }
 
+    /// Include a valid unterminated record provisionally until a newline commits it.
     fn identified(&self) -> impl Iterator<Item = (&str, Sample)> {
         self.samples
             .identified
@@ -413,19 +439,21 @@ impl ClaudeFile {
     }
 }
 
+/// Local token activity and account limits have separate sources and meanings.
 #[derive(Default)]
 struct Claude {
     files: HashMap<PathBuf, ClaudeFile>,
     identified: Vec<Sample>,
-    limited: bool,
-    saved_mark: Option<Mark>,
+    partial: bool,
+    saved_version: Option<FileVersion>,
     status: Option<Reading>,
-    native_mark: Option<Mark>,
+    native_version: Option<FileVersion>,
     native: Option<Reading>,
     omp: Option<Reading>,
     saved: Option<Limits>,
 }
 
+/// A partial total is a lower bound, not an exact amount of today's activity.
 #[derive(Default)]
 struct Activity {
     today: u64,
@@ -433,17 +461,18 @@ struct Activity {
 }
 
 impl Claude {
+    /// Merge duplicate IDs once per changed scan instead of on every redraw.
     fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
         let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
             self.files.clear();
             self.identified.clear();
-            self.limited = false;
+            self.partial = false;
             return true;
         };
-        self.limited = sessions.limited;
+        self.partial = sessions.partial;
         if sessions.files.len() == self.files.len()
             && sessions.files.iter().all(|candidate| {
-                self.files.get(&candidate.path).is_some_and(|file| file.mark == candidate.mark && file.settled())
+                self.files.get(&candidate.path).is_some_and(|file| file.version == candidate.version && file.settled())
             })
         {
             return true;
@@ -451,12 +480,12 @@ impl Claude {
         let mut previous = std::mem::take(&mut self.files);
         let mut settled = true;
         for candidate in &sessions.files {
-            let mut file = previous.remove(&candidate.path).unwrap_or_else(|| ClaudeFile::new(candidate.mark));
+            let mut file = previous.remove(&candidate.path).unwrap_or_else(|| ClaudeFile::new(candidate.version));
             settled &= file.check(&sessions, candidate, cutoff, budget);
-            self.limited |= !file.settled();
+            self.partial |= !file.settled();
             self.files.insert(candidate.path.clone(), file);
         }
-        self.limited |= !settled;
+        self.partial |= !settled;
         // Merge once per changed scan, not on each redraw. The number of
         // contributors is capped by the session and per-file sample limits.
         let mut unique = HashMap::<&str, Sample>::new();
@@ -474,8 +503,9 @@ impl Claude {
         settled
     }
 
+    /// Use the current local day even when the underlying transcripts have not changed.
     fn activity(&self, today: i64, now: i64) -> Activity {
-        let mut activity = Activity { partial: self.limited, ..Activity::default() };
+        let mut activity = Activity { partial: self.partial, ..Activity::default() };
         activity.partial |= self.files.values().any(|file| file.samples.incomplete_since.is_some_and(|at| at >= today));
         for sample in self
             .identified
@@ -489,12 +519,14 @@ impl Claude {
     }
 }
 
+/// Cache the first instant of the local day to avoid searching on every frame.
 struct Today {
     day: i64,
     since: i64,
 }
 
 impl Today {
+    /// Find local midnight without assuming a day has exactly 24 hours.
     fn at(now: i64, day: i64) -> Self {
         let (mut low, mut high) = (now.saturating_sub(2 * DAY), now);
         while low < high {
@@ -545,6 +577,7 @@ impl Usage {
         usage
     }
 
+    /// Tests use the same reader without depending on a real home or clock.
     fn from_dirs(codex_dir: Option<PathBuf>, claude_dir: Option<PathBuf>, state: Option<PathBuf>, now: i64) -> Self {
         Self {
             codex_dir,
@@ -570,6 +603,7 @@ impl Usage {
         when::now()
     }
 
+    /// Give each provider its own I/O allowance so one busy log cannot starve the other.
     fn refresh(&mut self, now: i64) -> bool {
         if let Some(reports) = self.omp.check(now, Instant::now()) {
             self.codex.omp = reports.codex;
@@ -581,7 +615,7 @@ impl Usage {
         if let Some(path) = &self.limits_file {
             files::read_cached(
                 path,
-                &mut self.claude.saved_mark,
+                &mut self.claude.saved_version,
                 &mut self.claude.status,
                 &mut claude_budget,
                 status::saved,
@@ -590,10 +624,10 @@ impl Usage {
         if let Some(path) = &self.claude_config {
             files::read_cached(
                 path,
-                &mut self.claude.native_mark,
+                &mut self.claude.native_version,
                 &mut self.claude.native,
                 &mut claude_budget,
-                |file, mark, budget| status::native(file, mark, budget, now),
+                |file, version, budget| status::native(file, version, budget, now),
             );
         }
         self.claude.saved = [self.claude.status, self.claude.native, self.claude.omp]
@@ -637,13 +671,18 @@ impl Pane for Usage {
         Scope { roots, ignored: Vec::new(), complete }
     }
 
-    fn key(&mut self, key: Key) -> bool {
-        if key == Key::Char('r') {
-            self.check();
+    fn key(&mut self, key: Key) -> After {
+        match key {
+            Key::Char('q') => return After::Leave,
+            Key::Char('r') => {
+                self.check();
+            }
+            _ => {}
         }
-        false
+        After::Stay
     }
 
+    /// Redraw at a reset even if none of the provider files has changed.
     fn next_frame(&self) -> Option<Duration> {
         let now = self.now();
         let earliest = self
@@ -664,8 +703,8 @@ impl Pane for Usage {
     }
 }
 
-fn help_rows() -> Vec<help::Row> {
-    use help::{Row, heading, key, note};
+fn help_rows() -> Vec<help::HelpRow> {
+    use help::{HelpRow, heading, key, note};
     vec![
         heading("Usage limits"),
         note("Figures show the percent"),
@@ -675,7 +714,7 @@ fn help_rows() -> Vec<help::Row> {
         note("the last message. Past"),
         note("its reset, a window"),
         note("starts again at 0%."),
-        Row::new(),
+        HelpRow::new(),
         heading("Claude Code"),
         note("Turn on its limits in"),
         note("milo setup. Tokens today"),

@@ -136,7 +136,7 @@ impl Folds {
 
 /// A visible node and how many folders it is drawn beneath.
 #[derive(Clone, Copy)]
-pub struct Row {
+pub struct TreeRow {
     pub node: u32,
     pub depth: u16,
 }
@@ -145,7 +145,7 @@ pub struct Row {
 pub struct Tree {
     nodes: Vec<Node>,
     index: HashMap<String, u32>,
-    pub rows: Vec<Row>,
+    pub rows: Vec<TreeRow>,
 }
 
 impl Tree {
@@ -221,14 +221,14 @@ impl Tree {
     /// expanded; `pending_only` drops everything that is not pending.
     pub fn layout(&mut self, open: impl Fn(&str) -> bool, pending_only: bool) {
         self.rows.clear();
-        let mut stack: Vec<_> = self.node(0).children.iter().rev().map(|&node| Row { node, depth: 0 }).collect();
+        let mut stack: Vec<_> = self.node(0).children.iter().rev().map(|&node| TreeRow { node, depth: 0 }).collect();
         while let Some(row) = stack.pop() {
             let n = self.node(row.node);
             if pending_only && n.kind == Kind::None {
                 continue;
             }
             if n.dir && open(&n.path) {
-                stack.extend(n.children.iter().rev().map(|&node| Row { node, depth: row.depth + 1 }));
+                stack.extend(n.children.iter().rev().map(|&node| TreeRow { node, depth: row.depth + 1 }));
             }
             self.rows.push(row);
         }
@@ -259,7 +259,7 @@ impl Tree {
 
     /// The next or previous folder among the visible rows.
     pub fn folder_row(&self, from: usize, direction: Direction) -> Option<usize> {
-        let is_dir = |r: &Row| self.node(r.node).dir;
+        let is_dir = |r: &TreeRow| self.node(r.node).dir;
         if direction == Direction::Next {
             self.rows.iter().skip(from + 1).position(is_dir).map(|i| from + 1 + i)
         } else {

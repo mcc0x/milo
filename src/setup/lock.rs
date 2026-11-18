@@ -20,6 +20,7 @@ const LOCK: &str = "listener.lock";
 const WIND_DOWN: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(10);
 
+/// Never resolve a link while opening a lock that may name a process.
 fn open(path: &Path, create: bool) -> io::Result<File> {
     OpenOptions::new().read(true).write(true).create(create).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
 }
@@ -71,6 +72,7 @@ fn existing(dir: &Path) -> io::Result<Option<File>> {
     }
 }
 
+/// The marker can outlive its listener; only a kernel lock proves it is running.
 pub(super) fn running(dir: &Path) -> io::Result<bool> {
     match existing(dir)? {
         Some(lock) => holder(&lock).map(|pid| pid.is_some()),

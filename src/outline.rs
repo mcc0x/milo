@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use crate::git::{Kind, PendingFile, Repo};
 use crate::help::Page;
 use crate::keys::Key;
+use crate::pane::{After, Pane};
 use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::Screen;
 use crate::tree::{Folds, Tree};
-use crate::ui::Pane;
 use crate::walk;
 use crate::watch::Scope;
 
@@ -255,14 +255,8 @@ impl Pane for Outline {
         }
     }
 
-    fn key(&mut self, key: Key) -> bool {
-        self.outline_key(key);
-        false
-    }
-
-    fn close(&mut self) -> bool {
-        self.attention.used(Instant::now());
-        self.reading.take().is_none()
+    fn key(&mut self, key: Key) -> After {
+        self.outline_key(key)
     }
 
     fn watch_scope(&self) -> Scope {
@@ -413,8 +407,8 @@ mod tests {
         assert!(rows.iter().any(|row| row == " ▾ src"));
         assert!(rows.iter().any(|row| row.contains("main.rs")));
 
-        o.on_key(Key::Char('p'));
-        o.on_key(Key::Enter);
+        o.key(Key::Char('p'));
+        o.key(Key::Enter);
         assert!(draw(&mut o, 40, 12).text().iter().any(|row| row.trim_start() == "▸ src 1"));
         f.write("src/deep/util.rs", "fn util() { more(); }\n");
         assert!(o.check());
@@ -429,11 +423,11 @@ mod tests {
         let mut o = open(&f);
         let before = draw(&mut o, 40, 12).text();
         assert!(before.iter().any(|row| row.contains("▸ deep")));
-        o.on_key(Key::Char('e'));
+        o.key(Key::Char('e'));
         let all = draw(&mut o, 40, 12).text();
         assert!(all.iter().any(|row| row.contains("▾ deep")));
         assert!(all.iter().any(|row| row.contains("util.rs")));
-        o.on_key(Key::Char('e'));
+        o.key(Key::Char('e'));
         assert_eq!(draw(&mut o, 40, 12).text(), before);
     }
 
@@ -445,13 +439,13 @@ mod tests {
         assert!(all.iter().any(|row| row.contains("README.md")));
         assert!(all[11].contains("c changed only"));
 
-        o.on_key(Key::Char('c'));
+        o.key(Key::Char('c'));
         let pending = draw(&mut o, 65, 12).text();
         assert!(!pending.iter().any(|row| row.contains("README.md")));
         assert!(pending.iter().any(|row| row.contains("main.rs")));
         assert!(pending.iter().any(|row| row.contains("notes.txt")));
         assert!(pending[11].contains("c all files"));
-        o.on_key(Key::Char('c'));
+        o.key(Key::Char('c'));
         assert_eq!(draw(&mut o, 65, 12).text(), all);
     }
 
@@ -459,7 +453,7 @@ mod tests {
     fn the_outline_follows_writes_only_when_the_keyboard_is_elsewhere() {
         let f = project();
         let mut o = open(&f);
-        o.on_key(Key::Focus(true));
+        o.key(Key::Focus(true));
         let before = o.selected_path().unwrap();
         assert_ne!(before, "src/deep/util.rs");
         f.write("src/deep/util.rs", "fn util() { more(); }\n");
@@ -469,7 +463,7 @@ mod tests {
         assert!(focused.iter().any(|row| row.contains("util.rs")));
         assert!(!focused[11].contains("following"));
 
-        o.on_key(Key::Focus(false));
+        o.key(Key::Focus(false));
         f.write("src/deep/util.rs", "fn util() { even_more(); }\n");
         assert!(o.check());
         assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
@@ -526,11 +520,11 @@ mod tests {
         let y = screen.text().iter().position(|row| row.contains("README.md")).unwrap();
         let before = o.selected_path();
         screen.resize(90, 11);
-        o.on_key(Key::Click(65, y));
+        o.key(Key::Click(65, y));
         assert_eq!(o.selected_path(), before);
 
         o.draw(&mut screen);
-        o.on_key(Key::Click(65, y));
+        o.key(Key::Click(65, y));
         assert_eq!(o.selected_path().as_deref(), Some("README.md"));
     }
 
@@ -542,9 +536,9 @@ mod tests {
         }
         let mut o = open(&f);
         draw(&mut o, 20, 1);
-        o.on_key(Key::End);
+        o.key(Key::End);
         assert_eq!(o.strip_col, 2);
-        o.on_key(Key::Left);
+        o.key(Key::Left);
         assert_eq!(o.strip_col, 1);
     }
 
@@ -554,10 +548,10 @@ mod tests {
         f.write("src/deep/util.rs", "fn util() { more(); }\n");
         let mut o = open(&f);
         assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
-        o.on_key(Key::Char('p'));
-        o.on_key(Key::Enter);
+        o.key(Key::Char('p'));
+        o.key(Key::Enter);
         assert!(!draw(&mut o, 40, 12).text().iter().any(|row| row.contains("util.rs")));
-        o.on_key(Key::Char('n'));
+        o.key(Key::Char('n'));
         assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
         assert!(draw(&mut o, 40, 12).text().iter().any(|row| row.contains("util.rs")));
         for (key, paths) in [
@@ -565,7 +559,7 @@ mod tests {
             ('N', ["notes.txt", "src/main.rs", "src/deep/util.rs"]),
         ] {
             for path in paths {
-                o.on_key(Key::Char(key));
+                o.key(Key::Char(key));
                 assert_eq!(o.selected_path().as_deref(), Some(path));
             }
         }
@@ -575,16 +569,16 @@ mod tests {
     fn reading_in_the_outline_pane_returns_to_the_same_cursor_on_quit() {
         let f = project();
         let mut o = open(&f);
-        o.on_key(Key::Char('n'));
+        o.key(Key::Char('n'));
         let before = draw(&mut o, 65, 12);
         let rows = before.text();
         let cursor = rows.iter().position(|row| row.contains("notes.txt")).unwrap();
         assert!(before.bar_at(cursor));
-        assert!(!o.on_key(Key::Enter));
+        assert_eq!(o.key(Key::Enter), After::Stay);
         let reader = draw(&mut o, 65, 12).text();
         assert!(reader[0].contains("notes.txt"));
         assert_eq!(reader[1], " 1 + one");
-        assert!(!o.on_key(Key::Char('q')));
+        assert_eq!(o.key(Key::Char('q')), After::Stay);
         let back = draw(&mut o, 65, 12);
         assert_eq!(back.text(), rows);
         assert!(back.bar_at(cursor));
@@ -597,7 +591,7 @@ mod tests {
         f.write("b.txt", "b\n");
         let mut o = open(&f);
         assert_eq!(draw(&mut o, 40, 8).text(), [" project", " ▸ sub", " • b.txt", "", "", "", "", ""]);
-        o.on_key(Key::Enter);
+        o.key(Key::Enter);
         assert!(draw(&mut o, 40, 8).text().iter().any(|row| row.contains("a.txt")));
         f.write("sub/new.txt", "new\n");
         assert!(o.check());

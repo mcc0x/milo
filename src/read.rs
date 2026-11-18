@@ -1,9 +1,10 @@
 //! Reads regular files and symbolic link targets without following the final link.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read as _};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+
+use crate::fs_ops;
 
 pub enum Content {
     Bytes(Vec<u8>),
@@ -28,7 +29,7 @@ fn unavailable(error: io::Error) -> Content {
 /// Opens the last path component without following links and without waiting
 /// on a pipe, then checks that it is a regular file before reading bytes.
 pub fn file(path: &Path, limit: u64) -> Content {
-    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path) {
+    let file = match fs_ops::open_read(path) {
         Ok(file) => file,
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) && fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) => {
             return fs::read_link(path).map_or_else(unavailable, Content::Link);

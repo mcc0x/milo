@@ -3,12 +3,12 @@
 use crate::git::Kind;
 use crate::keys::Key;
 use crate::screen::{Screen, Style};
-use crate::ui::{self, ADD, DEL, FAINT};
+use crate::ui::{self, ADD, DEL, FAINT, HEADING};
 use crate::width::str_width;
 
 /// One row of a page: pieces of text, each in its own style. A row must
 /// fit a pane 28 columns wide: 26 characters at most.
-pub type Row = Vec<(&'static str, Style)>;
+pub type HelpRow = Vec<(&'static str, Style)>;
 
 const SEPARATOR: &str = " · ";
 
@@ -39,13 +39,13 @@ pub fn draw_hint(s: &mut Screen, first: &str, middle: &[&str], last: &str) {
     s.put(x, y, last_width, last, FAINT);
 }
 
-pub fn heading(text: &'static str) -> Row {
-    vec![(text, Style::PLAIN.bold())]
+pub fn heading(text: &'static str) -> HelpRow {
+    vec![(text, HEADING)]
 }
 
 /// A sample drawn as it appears on screen, and what it means. The
 /// sample's padding stays plain so a strike stops at the last letter.
-pub fn sample(text: &'static str, st: Style, meaning: &'static str) -> Row {
+pub fn sample(text: &'static str, st: Style, meaning: &'static str) -> HelpRow {
     let shown = text.trim_end();
     vec![
         ("  ", Style::PLAIN),
@@ -57,17 +57,17 @@ pub fn sample(text: &'static str, st: Style, meaning: &'static str) -> Row {
 }
 
 /// A key, or a few, and what it does.
-pub fn key(keys: &'static str, does: &'static str) -> Row {
+pub fn key(keys: &'static str, does: &'static str) -> HelpRow {
     vec![("  ", Style::PLAIN), (keys, Style::PLAIN), ("  ", Style::PLAIN), (does, FAINT)]
 }
 
 /// A line of plain explanation.
-pub fn note(text: &'static str) -> Row {
+pub fn note(text: &'static str) -> HelpRow {
     vec![("  ", Style::PLAIN), (text, FAINT)]
 }
 
 /// The page for the outline. Without git there are no colours to explain.
-fn outline(git: bool) -> Vec<Row> {
+fn outline(git: bool) -> Vec<HelpRow> {
     let mut rows = Vec::new();
     if git {
         let name = |kind| ui::kind_style(kind).bold();
@@ -85,7 +85,7 @@ fn outline(git: bool) -> Vec<Row> {
             sample("−1      ", DEL, "lines removed"),
             sample("● ○     ", Style::PLAIN.bold(), "being written"),
             sample("•       ", Style::PLAIN, "just changed"),
-            Row::new(),
+            HelpRow::new(),
         ]);
     }
     rows.extend([
@@ -106,12 +106,12 @@ fn outline(git: bool) -> Vec<Row> {
     }
     rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
     if git {
-        rows.extend([Row::new(), heading("Strip keys"), key("←→   ", "scroll (h l)"), key("g G  ", "first/last")]);
+        rows.extend([HelpRow::new(), heading("Strip keys"), key("←→   ", "scroll (h l)"), key("g G  ", "first/last")]);
     }
     rows
 }
 
-fn history() -> Vec<Row> {
+fn history() -> Vec<HelpRow> {
     vec![
         heading("Commits"),
         sample("○", Style::PLAIN.bold(), "files to commit"),
@@ -121,7 +121,7 @@ fn history() -> Vec<Row> {
         sample("•", Style::PLAIN.bold(), "just arrived"),
         sample("+2", ADD, "lines added"),
         sample("−1", DEL, "lines removed"),
-        Row::new(),
+        HelpRow::new(),
         heading("Keys"),
         key("↑↓   ", "move (k j)"),
         key("Page Up", "previous page"),
@@ -134,20 +134,20 @@ fn history() -> Vec<Row> {
         key("← h  ", "parent or close"),
         key("r    ", "reload"),
         key("q    ", "quit"),
-        Row::new(),
+        HelpRow::new(),
         note("Click to select a file."),
         note("Double-click to read."),
         note("Click to toggle files."),
     ]
 }
 
-fn reader(committed: bool) -> Vec<Row> {
+fn reader(committed: bool) -> Vec<HelpRow> {
     let mut rows = vec![
         heading("Lines"),
         sample("+", ADD.bold(), "added"),
         sample("-", DEL, "removed"),
         sample("word", Style::PLAIN.reverse(), "what changed"),
-        Row::new(),
+        HelpRow::new(),
         heading("Keys"),
         key("↑↓   ", "scroll (k j)"),
         key("Space", "page down"),
@@ -165,13 +165,13 @@ fn reader(committed: bool) -> Vec<Row> {
 
 /// A page over the pane, with its own scroll position.
 pub struct Page {
-    rows: Vec<Row>,
+    rows: Vec<HelpRow>,
     top: usize,
 }
 
 impl Page {
     /// A page of a pane's own making, from the row builders above.
-    pub fn new(rows: Vec<Row>) -> Self {
+    pub fn new(rows: Vec<HelpRow>) -> Self {
         Self { rows, top: 0 }
     }
 

@@ -9,10 +9,11 @@ use std::sync::LazyLock;
 use crate::picture::Picture;
 use crate::screen::{Screen, Style};
 use crate::ui::FAINT;
+use crate::when::{self, Detail};
 use crate::width::str_width;
 
 use self::figure::Figure;
-use super::{AGE_NOTE, Activity, CodexReading, Limits, Usage, Window, time};
+use super::{AGE_NOTE, Activity, Limits, Reading, Usage, Window};
 
 const SIDE_BY_SIDE: usize = 64;
 // Two short names, two four-character figures and the rule.
@@ -30,6 +31,7 @@ impl Tool {
         self.names()[0]
     }
 
+    /// Progressively shorter names keep room for a figure on the narrowest panes.
     fn names(self) -> [&'static str; 3] {
         match self {
             Self::Codex => ["Codex", "Cx", "X"],
@@ -45,6 +47,7 @@ impl Tool {
         })
     }
 
+    /// Share each logo across frames instead of building a fresh image.
     fn picture(self) -> &'static Picture {
         static CODEX: LazyLock<Picture> =
             LazyLock::new(|| Picture::embedded(include_bytes!("marks/codex.png")).expect("Codex mark is a PNG"));
@@ -77,7 +80,7 @@ impl When {
         match self {
             Self::Reset => area.note(screen, row, "reset"),
             Self::Running(left) => {
-                let left = time::relative(left);
+                let left = when::duration(left, Detail::Exact);
                 let prefix = if left.len() + 10 <= area.w { "resets in " } else { "in " };
                 area.note(screen, row, &format!("{prefix}{left}"));
             }
@@ -86,6 +89,7 @@ impl When {
     }
 }
 
+/// Prepared display data lets each layout use the same figure and reset wording.
 struct Metric {
     label: Cow<'static, str>,
     number: Option<Figure>,
@@ -96,6 +100,7 @@ struct Metric {
 }
 
 impl Metric {
+    /// A known, elapsed window is back at zero even before another report arrives.
     fn limit(mut window: Window, now: i64) -> Self {
         let age = now.saturating_sub(window.observed);
         let label = match window.minutes {
@@ -136,7 +141,7 @@ impl Metric {
         self.label.len() + 1 + self.number_width()
     }
 
-    fn inline(&self, row: &mut Row<'_>, label: bool) {
+    fn inline(&self, row: &mut RowWriter<'_>, label: bool) {
         if label {
             row.add(&self.label, FAINT);
             row.add(" ", FAINT);
@@ -144,6 +149,7 @@ impl Metric {
         row.add(self.number(), self.colour().bold());
     }
 
+    /// Stay legible when either images or large text glyphs do not fit.
     fn panel(&self, screen: &mut Screen, area: Area, rows: Chart, slot: usize) {
         area.note(screen, rows.label, &self.label);
         let y = area.y + rows.label + 1;
@@ -161,6 +167,7 @@ impl Metric {
     }
 }
 
+/// Long and short explanations let missing figures fit either layout.
 struct Hint {
     full: &'static str,
     short: &'static str,
@@ -178,6 +185,7 @@ impl Hint {
     }
 }
 
+/// Each provider can show at most two figures without crowding the strip.
 struct Report {
     tool: Tool,
     first: Metric,
@@ -186,7 +194,8 @@ struct Report {
 }
 
 impl Report {
-    fn codex(reading: Option<CodexReading>, no_sessions: bool, now: i64) -> Self {
+    /// Distinguish missing sessions from unreadable or unreported limits.
+    fn codex(reading: Option<Reading>, no_sessions: bool, now: i64) -> Self {
         let [first, second] = figures(reading.map(|reading| reading.windows), now);
         let (first, second, hint) = match (first, second) {
             (Some(first), second) => (first, second, None),
@@ -232,6 +241,7 @@ impl Report {
         self.first.number.is_some() || self.second.as_ref().is_some_and(|second| second.number.is_some())
     }
 
+    /// Shorten the name and labels before giving up a reported figure.
     fn inline(&self, screen: &mut Screen, area: Area) {
         let (first, second) = self.inline_metrics(area.w);
         let name = self
@@ -246,7 +256,7 @@ impl Report {
         let second = second.filter(|second| label && used + 2 + second.inline_width() <= area.w);
         let tile =
             label && !name.is_empty() && used + second.map_or(0, |second| second.inline_width() + 2) + 3 <= area.w;
-        let mut row = Row { screen, x: area.x, y: area.y, left: area.w };
+        let mut row = RowWriter { screen, x: area.x, y: area.y, left: area.w };
         if used > area.w {
             return;
         }
@@ -299,8 +309,9 @@ impl Report {
         if let Some(age) = self.age()
             && beneath <= chart.note
         {
-            let exact = format!("{} ago", time::relative(age));
-            let text = if exact.len() <= column.w { exact } else { format!("{} ago", time::rough(age)) };
+            let exact = format!("{} ago", when::duration(age, Detail::Exact));
+            let text =
+                if exact.len() <= column.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
             column.note(screen, chart.note, &text);
         }
         let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
@@ -341,7 +352,7 @@ impl Report {
             screen.show_picture(mark, area.x, area.y + top, cols, rows);
             top + rows
         } else {
-            let mut row = Row { screen, x: area.x, y: area.y + text_row, left: area.w };
+            let mut row = RowWriter { screen, x: area.x, y: area.y + text_row, left: area.w };
             row.add(TILE, self.tool.colour());
             row.add(" ", FAINT);
             row.add(self.tool.name(), Style::PLAIN);
@@ -386,11 +397,13 @@ impl Area {
         (Self { w: left, ..self }, Self { x: self.x + left + gap, w: self.w - left - gap, ..self })
     }
 
+    /// Keep a little breathing room without losing columns on a narrow pane.
     fn inset(self) -> Self {
         let pad = if self.w >= 56 { 2 } else { usize::from(self.w >= 16) };
         Self { x: self.x + pad, w: self.w - 2 * pad, ..self }
     }
 
+    /// Leave off an explanation rather than show a misleading fragment.
     fn note(self, screen: &mut Screen, row: usize, text: &str) {
         if str_width(text) <= self.w {
             screen.put(self.x, self.y + row, self.w, text, FAINT);
@@ -398,14 +411,15 @@ impl Area {
     }
 }
 
-struct Row<'a> {
+/// Writes styled fragments without measuring and clipping each one by hand.
+struct RowWriter<'a> {
     screen: &'a mut Screen,
     x: usize,
     y: usize,
     left: usize,
 }
 
-impl Row<'_> {
+impl RowWriter<'_> {
     fn add(&mut self, text: &str, style: Style) {
         let used = self.screen.put(self.x, self.y, self.left, text, style);
         self.x += used;
@@ -419,6 +433,7 @@ fn activity_text(activity: Activity) -> Option<String> {
     (activity.today > 0).then(|| format!("{}{more} tokens today", tokens(activity.today)))
 }
 
+/// Keep token counts short enough for the strip without rounding across units.
 fn tokens(tokens: u64) -> String {
     const UNITS: [(u64, char); 6] = [
         (1000, 'k'),
@@ -461,6 +476,7 @@ fn stacked(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: imp
     reports[1].panel(screen, lower, marks, activity);
 }
 
+/// Choose a grid that leaves room for a useful figure at each supported size.
 pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     screen.clear();
     let (w, h) = (screen.w, screen.h);

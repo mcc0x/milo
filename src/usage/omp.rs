@@ -7,9 +7,11 @@ use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::fs_ops;
+use crate::json::Value;
+
 use super::files;
-use super::json::Value;
-use super::time::{self, Stamp};
+use super::time::{self, Timestamp};
 use super::{CLOCK_SKEW, Limits, ModelWeek, Reading, Window};
 
 const INTERVAL: Duration = Duration::from_secs(20);
@@ -54,11 +56,13 @@ WHERE h.rank=1 AND (r.observed_ms IS NULL OR h.recorded_at>r.observed_ms)
 ORDER BY observed_ms,limit_id;
 ";
 
+/// Honour the harness's directory override without invoking the harness.
 pub(super) fn database(home: Option<&Path>) -> Option<PathBuf> {
     let dir = std::env::var_os("PI_CODING_AGENT_DIR").filter(|s| !s.is_empty()).map(PathBuf::from);
     database_in(home, dir.as_deref())
 }
 
+/// SQLite receives an absolute path, even for a relative directory override.
 pub(super) fn database_in(home: Option<&Path>, dir: Option<&Path>) -> Option<PathBuf> {
     let path = match dir {
         Some(dir) => dir.join("agent.db"),
@@ -67,11 +71,13 @@ pub(super) fn database_in(home: Option<&Path>, dir: Option<&Path>) -> Option<Pat
     std::path::absolute(path).ok()
 }
 
+/// OMP keeps separate account snapshots for the two providers.
 pub(super) struct Reports {
     pub claude: Option<Reading>,
     pub codex: Option<Reading>,
 }
 
+/// A slow database read runs off the pane's event loop.
 #[derive(Default)]
 pub(super) struct Poll {
     path: Option<PathBuf>,
@@ -84,6 +90,7 @@ impl Poll {
         Self { path, ..Self::default() }
     }
 
+    /// Keep checking quickly enough to collect a worker that has not finished.
     pub(super) fn pending(&self) -> bool {
         self.job.is_some()
     }
@@ -106,6 +113,7 @@ impl Poll {
     }
 }
 
+/// Prefer the system binary over an executable found in the user's path.
 pub(super) fn sqlite() -> &'static OsStr {
     let system = Path::new("/usr/bin/sqlite3");
     if system.is_file() { system.as_os_str() } else { OsStr::new("sqlite3") }
@@ -123,7 +131,7 @@ fn readable(path: &Path) -> bool {
     if !path.is_absolute() || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
         return false;
     }
-    if files::open_file(path).and_then(|mut file| file.read_exact(&mut header)).is_err()
+    if fs_ops::open_read(path).and_then(|mut file| file.read_exact(&mut header)).is_err()
         || &header[..16] != b"SQLite format 3\0"
     {
         return false;
@@ -139,6 +147,7 @@ fn readable(path: &Path) -> bool {
     }
 }
 
+/// Bound both child output and wall time so a busy database cannot keep a worker alive.
 pub(super) fn query(executable: &OsStr, path: &Path, wait: Duration) -> Option<Vec<u8>> {
     if !readable(path) {
         return None;
@@ -168,6 +177,7 @@ pub(super) fn query(executable: &OsStr, path: &Path, wait: Duration) -> Option<V
     None
 }
 
+/// Reconstruct each newest snapshot without bringing back obsolete windows.
 pub(super) fn parse(bytes: &[u8], now: i64) -> Option<Reports> {
     let mut reports = Reports { claude: None, codex: None };
     // sqlite3 prints nothing for a select that returns no rows.
@@ -179,7 +189,7 @@ pub(super) fn parse(bytes: &[u8], now: i64) -> Option<Reports> {
             "provider", "observed_ms", "limit_id", "used_fraction", "reset_ms", "duration_ms", "tier", "window_label",
             "history_row",
         ]);
-        let Some(at) = at.and_then(Stamp::millis).filter(|at| at.seconds <= now.saturating_add(CLOCK_SKEW)) else {
+        let Some(at) = at.and_then(Timestamp::millis).filter(|at| at.seconds <= now.saturating_add(CLOCK_SKEW)) else {
             continue;
         };
         let (report, claude) = match provider.and_then(|v| v.string(20)).as_deref() {
@@ -210,7 +220,7 @@ pub(super) fn parse(bytes: &[u8], now: i64) -> Option<Reports> {
         let window = fraction.and_then(Value::number).filter(|n| (0.0..=1.0).contains(n)).map(|fraction| Window {
             minutes,
             percent: fraction.abs() * 100.0,
-            resets: reset.and_then(Stamp::millis).and_then(|stamp| time::cache_reset(stamp, at.seconds)),
+            resets: reset.and_then(Timestamp::millis).and_then(|stamp| time::cache_reset(stamp, at.seconds)),
             observed: at.seconds,
         });
         match (scoped, model) {

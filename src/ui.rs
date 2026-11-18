@@ -1,45 +1,25 @@
-//! Shares status styles, line counts, icons and scroll thumbs across screens.
-
-use std::time::Duration;
+//! Shares headings, status styles, icons and scroll thumbs across screens.
 
 use crate::git::{Kind, PendingFile};
-use crate::help::Page;
 use crate::icons::{self, Icon};
-use crate::keys::Key;
 use crate::screen::{self, Screen, Style};
-use crate::watch::Scope;
-
-/// One screen in the terminal. The loop owns input, redraws and when to check.
-pub trait Pane {
-    fn draw(&mut self, screen: &mut Screen);
-    fn help(&self) -> Page;
-    fn watch_scope(&self) -> Scope;
-
-    /// Takes in changes from outside. False asks the loop to check again soon.
-    fn check(&mut self) -> bool;
-
-    /// How long the frame stays right when nothing happens.
-    fn next_frame(&self) -> Option<Duration> {
-        None
-    }
-
-    /// Handles a pane's own keys. True leaves the terminal.
-    fn key(&mut self, key: Key) -> bool;
-
-    /// Most panes quit on q; one with a screen over it can close that instead.
-    fn close(&mut self) -> bool {
-        true
-    }
-
-    fn on_key(&mut self, key: Key) -> bool {
-        if key == Key::Char('q') { self.close() } else { self.key(key) }
-    }
-}
+use crate::width::str_width;
 
 /// Faint text follows the theme's foreground, unlike a fixed grey.
 pub const FAINT: Style = Style::PLAIN.faint();
+pub const HEADING: Style = Style::PLAIN.bold();
 pub const ADD: Style = Style::fg(screen::GREEN);
 pub const DEL: Style = Style::fg(screen::RED);
+
+/// Titles are inset by one column and yield to whatever follows on the same line.
+pub fn section_heading(s: &mut Screen, y: usize, width: usize, text: &str) -> usize {
+    s.put_fit(1, y, width, text, HEADING)
+}
+
+/// The space a project name and branch would take before shortening either.
+pub fn project_heading_width(name: &str, branch: &str) -> usize {
+    str_width(name) + str_width(branch) + 5
+}
 
 /// The colour that says what happened to a file.
 pub fn kind_colour(kind: Kind) -> Style {

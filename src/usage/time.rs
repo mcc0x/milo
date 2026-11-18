@@ -1,28 +1,28 @@
 //! Reads provider timestamps without rounding the order of snapshots.
 
-use super::json::Value;
+use crate::json::Value;
+use crate::when::{DAY, HOUR, MINUTE};
 
-pub(super) const MINUTE: i64 = 60;
-pub(super) const HOUR: i64 = 60 * MINUTE;
-pub(super) const DAY: i64 = 24 * HOUR;
-
+/// Subseconds break ties between reports that arrived in the same second.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Stamp {
+pub(super) struct Timestamp {
     pub seconds: i64,
     nanos: u32,
 }
 
-impl Stamp {
+impl Timestamp {
     pub(super) const fn seconds(seconds: i64) -> Self {
         Self { seconds, nanos: 0 }
     }
 
+    /// Keep the millisecond order even when two provider updates share a second.
     pub(super) fn millis(value: Value<'_>) -> Option<Self> {
         let ms = value.integer()?;
         let nanos = u32::try_from(ms % 1000).ok()? * 1_000_000;
         (ms >= 0).then_some(Self { seconds: ms / 1000, nanos })
     }
 
+    /// Transcripts order readings by their full timestamp, including fractional seconds.
     pub(super) fn iso(value: Value<'_>) -> Option<Self> {
         let string = value.string(96)?;
         let b = string.as_bytes();
@@ -44,20 +44,23 @@ impl Stamp {
             (&b[19..19], &b[19..])
         };
         let nanos = digits(fraction)? * 10_u32.pow(9 - u32::try_from(fraction.len()).ok()?);
-        let seconds = calendar_days(year, month, day)? * DAY + i64::from(hour * 3600 + min * 60 + sec) - offset(zone)?;
+        let seconds =
+            calendar_days(year, month, day)? * DAY + i64::from(hour) * HOUR + i64::from(min) * MINUTE + i64::from(sec)
+                - offset(zone)?;
         Some(Self { seconds, nanos })
     }
 }
 
 /// Disk caches specify their reset units; keep the floor rather than guessing units or rounding up.
-pub(super) fn cache_reset(stamp: Stamp, observed: i64) -> Option<i64> {
+pub(super) fn cache_reset(stamp: Timestamp, observed: i64) -> Option<i64> {
     (0..=observed.saturating_add(366 * DAY)).contains(&stamp.seconds).then_some(stamp.seconds)
 }
 
+/// Reports use more than one wire format; reject implausibly distant resets.
 pub(super) fn reset(value: Value<'_>, observed: i64) -> Option<i64> {
     const YEAR: i64 = 366 * DAY;
     let latest = observed.saturating_add(YEAR);
-    if let Some(stamp) = Stamp::iso(value) {
+    if let Some(stamp) = Timestamp::iso(value) {
         let seconds = stamp.seconds.checked_add(i64::from(stamp.nanos > 0))?;
         return (0..=latest).contains(&seconds).then_some(seconds);
     }
@@ -86,6 +89,7 @@ fn offset(zone: &[u8]) -> Option<i64> {
     }
 }
 
+/// Validate the day before converting so impossible dates do not become later months.
 fn calendar_days(year: u32, month: u32, day: u32) -> Option<i64> {
     let leap = |y: u32| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
     let days = [31, u32::from(leap(year)) + 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -97,27 +101,4 @@ fn calendar_days(year: u32, month: u32, day: u32) -> Option<i64> {
     let before_year = 365 * previous + previous / 4 - previous / 100 + previous / 400;
     let before_month: u32 = days[..month].iter().sum();
     Some(i64::from(before_year + before_month + day - 1) - 719_162)
-}
-
-pub(super) fn relative(seconds: i64) -> String {
-    match seconds {
-        ..MINUTE => "<1 m".into(),
-        MINUTE..HOUR => format!("{} m", seconds / MINUTE),
-        HOUR..DAY => {
-            let minutes = seconds % HOUR / MINUTE;
-            if minutes == 0 { format!("{} h", seconds / HOUR) } else { format!("{} h {minutes} m", seconds / HOUR) }
-        }
-        _ => format!("{} d", seconds / DAY),
-    }
-}
-
-/// The same span to its largest unit only, for where there is little room
-/// and a rough answer serves: "6 h" for five hours and fifty minutes.
-pub(super) fn rough(seconds: i64) -> String {
-    match seconds {
-        ..MINUTE => "<1 m".into(),
-        MINUTE..HOUR => format!("{} m", seconds / MINUTE),
-        HOUR..DAY => format!("{} h", (seconds + HOUR / 2) / HOUR),
-        _ => format!("{} d", (seconds + DAY / 2) / DAY),
-    }
 }

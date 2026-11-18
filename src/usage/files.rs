@@ -1,33 +1,36 @@
 //! Walks the session trees without following links and reads within a refresh budget.
 
 use std::ffi::{CStr, CString, OsStr};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, MetadataExt as _, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::time::Instant;
+
+use crate::fs_ops::{self, READ_FLAGS};
 
 pub(super) const CODEX_FILES: usize = 4;
 const CLAUDE_FILES: usize = 128;
 const MAX_ENTRIES: usize = 32_768;
 const MAX_LINE: usize = 2 * 1024 * 1024;
 const BLOCK: usize = 32 * 1024;
-const OPEN_FLAGS: libc::c_int = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 
+/// A transcript may be replaced or appended; remember its identity as well as its size and time.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct Mark {
+pub(super) struct FileVersion {
     device: i128,
     inode: u128,
     modified: (i128, i128),
     pub len: u64,
 }
 
-impl Mark {
+impl FileVersion {
+    /// Other filesystem objects are not session data.
     fn new(stat: &libc::stat) -> Option<Self> {
         if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
             return None;
@@ -41,6 +44,7 @@ impl Mark {
         })
     }
 
+    /// Compare the directory entry to the prior open file without opening it again.
     pub(super) fn metadata(metadata: &std::fs::Metadata) -> Self {
         Self {
             device: i128::from(metadata.dev()),
@@ -50,6 +54,7 @@ impl Mark {
         }
     }
 
+    /// Check the actual descriptor in case the directory entry changed during open.
     pub(super) fn opened(file: &File) -> Option<Self> {
         let mut stat = MaybeUninit::uninit();
         // SAFETY: The descriptor is live and stat points to writable memory.
@@ -58,22 +63,15 @@ impl Mark {
         Self::new(&unsafe { stat.assume_init() })
     }
 
+    /// Appends keep their identity even when the timestamp and size change.
     pub(super) fn same_file(self, other: Self) -> bool {
         self.device == other.device && self.inode == other.inode
     }
 }
 
-pub(super) fn open_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new().read(true).custom_flags(OPEN_FLAGS).open(path)
-}
-
-pub(super) fn open_directory(path: &Path) -> io::Result<File> {
-    OpenOptions::new().read(true).custom_flags(OPEN_FLAGS | libc::O_DIRECTORY).open(path)
-}
-
 /// Reads a regular file only when its size fits, including one byte to detect concurrent growth.
-pub(super) fn read_small(file: File, mark: Mark, cap: u64, budget: &mut Budget) -> Option<Vec<u8>> {
-    if mark.len > cap || budget.remaining <= mark.len {
+pub(super) fn read_small(file: File, version: FileVersion, cap: u64, budget: &mut Budget) -> Option<Vec<u8>> {
+    if version.len > cap || budget.remaining <= version.len {
         return None;
     }
     let mut bytes = Vec::new();
@@ -81,29 +79,29 @@ pub(super) fn read_small(file: File, mark: Mark, cap: u64, budget: &mut Budget) 
     budget.debit(bytes.len());
     result.ok()?;
     let len = u64::try_from(bytes.len()).ok()?;
-    (len <= cap && len == mark.len).then_some(bytes)
+    (len <= cap && len == version.len).then_some(bytes)
 }
 
 /// Reads only changed regular files; a removed or bad file stops being a source.
 pub(super) fn read_cached<T>(
     path: &Path,
-    previous: &mut Option<Mark>,
+    previous: &mut Option<FileVersion>,
     snapshot: &mut Option<T>,
     budget: &mut Budget,
-    parse: impl FnOnce(File, Mark, &mut Budget) -> Option<T>,
+    parse: impl FnOnce(File, FileVersion, &mut Budget) -> Option<T>,
 ) {
-    let Some(mark) = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()) else {
+    let Some(metadata) = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()) else {
         *previous = None;
         *snapshot = None;
         return;
     };
-    if *previous == Some(Mark::metadata(&mark)) {
+    if *previous == Some(FileVersion::metadata(&metadata)) {
         return;
     }
-    *snapshot = open_file(path).ok().and_then(|file| {
-        let mark = Mark::opened(&file)?;
-        *previous = Some(mark);
-        parse(file, mark, budget)
+    *snapshot = fs_ops::open_read(path).ok().and_then(|file| {
+        let version = FileVersion::opened(&file)?;
+        *previous = Some(version);
+        parse(file, version, budget)
     });
 }
 
@@ -141,6 +139,7 @@ pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Opti
     None
 }
 
+/// Restrict each walk to the layout its provider actually uses.
 pub(super) enum Tree {
     Codex,
     Claude { since: i64 },
@@ -166,10 +165,11 @@ impl Tree {
             }
     }
 
-    fn includes(&self, mark: Mark) -> bool {
+    /// Do not spend Claude's budget on transcripts older than today's activity.
+    fn includes(&self, version: FileVersion) -> bool {
         match *self {
             Self::Codex => true,
-            Self::Claude { since } => mark.modified.0 >= i128::from(since),
+            Self::Claude { since } => version.modified.0 >= i128::from(since),
         }
     }
 
@@ -181,6 +181,7 @@ impl Tree {
     }
 }
 
+/// Own the stream so borrowed entries cannot outlive their directory buffer.
 struct Dir(NonNull<libc::DIR>);
 
 impl Dir {
@@ -215,30 +216,34 @@ impl Drop for Dir {
     }
 }
 
+/// Resolve components relative to an already open directory, never following links.
 fn open_at(dir: RawFd, path: &CStr, flags: libc::c_int) -> Option<File> {
     // SAFETY: dir is a live directory descriptor, path is nul-terminated and no mode is needed.
-    let fd = unsafe { libc::openat(dir, path.as_ptr(), OPEN_FLAGS | libc::O_RDONLY | flags) };
+    let fd = unsafe { libc::openat(dir, path.as_ptr(), READ_FLAGS | libc::O_RDONLY | flags) };
     // SAFETY: A nonnegative result is a newly owned descriptor.
     (fd >= 0).then(|| unsafe { File::from_raw_fd(fd) })
 }
 
-fn mark_at(dir: RawFd, path: &CStr) -> Option<Mark> {
+/// Compare entries before opening files, without trusting a link's target.
+fn version_at(dir: RawFd, path: &CStr) -> Option<FileVersion> {
     let mut stat = MaybeUninit::uninit();
     // SAFETY: dir is live, path is nul-terminated and stat points to writable memory.
     (unsafe { libc::fstatat(dir, path.as_ptr(), stat.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0).then_some(())?;
     // SAFETY: A successful fstatat initialized stat.
-    Mark::new(&unsafe { stat.assume_init() })
+    FileVersion::new(&unsafe { stat.assume_init() })
 }
 
+/// A candidate is not known to be the same file until it is opened again.
 pub(super) struct Candidate {
     pub path: PathBuf,
-    pub mark: Mark,
+    pub version: FileVersion,
 }
 
+/// Cap both the number examined and the number held, independently.
 struct Scan {
     remaining: usize,
     files: Vec<Candidate>,
-    limited: bool,
+    partial: bool,
 }
 
 impl Scan {
@@ -258,13 +263,13 @@ impl Scan {
                 continue;
             }
             if tree.file(bytes, depth)
-                && let Some(mark) = mark_at(fd, name)
-                && tree.includes(mark)
+                && let Some(version) = version_at(fd, name)
+                && tree.includes(version)
             {
                 if !self.admit() {
                     break;
                 }
-                self.keep(tree.limit(), path, bytes, mark);
+                self.keep(tree.limit(), path, bytes, version);
             }
             if tree.directory(bytes, depth) && !self.descend(fd, name, tree, path, depth) {
                 break;
@@ -284,9 +289,10 @@ impl Scan {
         true
     }
 
+    /// Report a partial result only when another qualifying entry would exceed the budget.
     fn admit(&mut self) -> bool {
         if self.remaining == 0 {
-            self.limited = true;
+            self.partial = true;
             return false;
         }
         self.remaining -= 1;
@@ -294,22 +300,22 @@ impl Scan {
     }
 
     /// Keeps just the newest few files as the directory is walked.
-    fn keep(&mut self, limit: usize, dir: &Path, name: &[u8], mark: Mark) {
+    fn keep(&mut self, limit: usize, dir: &Path, name: &[u8], version: FileVersion) {
         if self.files.len() == limit {
-            self.limited = true;
-            if self.files.last().is_some_and(|old| old.mark.modified > mark.modified) {
+            self.partial = true;
+            if self.files.last().is_some_and(|old| old.version.modified > version.modified) {
                 return;
             }
         }
         let path = dir.join(OsStr::from_bytes(name));
         let at = self.files.partition_point(|old| {
-            old.mark.modified > mark.modified || (old.mark.modified == mark.modified && old.path < path)
+            old.version.modified > version.modified || (old.version.modified == version.modified && old.path < path)
         });
         if at < limit {
             if self.files.len() == limit {
                 self.files.pop();
             }
-            self.files.insert(at, Candidate { path, mark });
+            self.files.insert(at, Candidate { path, version });
         }
     }
 }
@@ -326,10 +332,11 @@ fn codex_folders(dir: &mut Dir, tree: &Tree, depth: usize) -> Vec<CString> {
     names
 }
 
+/// Keep the root descriptor so later opens are anchored to the directory actually scanned.
 pub(super) struct Sessions {
     root: File,
     pub files: Vec<Candidate>,
-    pub limited: bool,
+    pub partial: bool,
 }
 
 impl Sessions {
@@ -338,17 +345,18 @@ impl Sessions {
     }
 
     fn scan_with_limit(root: &Path, tree: Tree, remaining: usize) -> io::Result<Self> {
-        let root = open_directory(root)?;
+        let root = fs_ops::open_dir(root)?;
         // Open a separate stream: a duplicate descriptor would share the directory cursor.
         let dir = open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY)
             .and_then(Dir::new)
             .ok_or_else(|| io::Error::other("cannot open session directory stream"))?;
-        let mut scan = Scan { remaining, files: Vec::new(), limited: false };
+        let mut scan = Scan { remaining, files: Vec::new(), partial: false };
         scan.directory(dir, &tree, &mut PathBuf::new(), 0);
-        Ok(Self { root, files: scan.files, limited: scan.limited })
+        Ok(Self { root, files: scan.files, partial: scan.partial })
     }
 
-    pub(super) fn open(&self, path: &Path) -> Option<(File, Mark)> {
+    /// Refuse links or non-files even if the candidate was replaced after scanning.
+    pub(super) fn open(&self, path: &Path) -> Option<(File, FileVersion)> {
         let mut parts = path.iter().peekable();
         let mut folder = None::<File>;
         while let Some(part) = parts.next() {
@@ -356,8 +364,8 @@ impl Sessions {
             let name = CString::new(part.as_bytes()).ok()?;
             if parts.peek().is_none() {
                 let file = open_at(fd, &name, 0)?;
-                let mark = Mark::opened(&file)?;
-                return Some((file, mark));
+                let version = FileVersion::opened(&file)?;
+                return Some((file, version));
             }
             folder = Some(open_at(fd, &name, libc::O_DIRECTORY)?);
         }
@@ -365,6 +373,7 @@ impl Sessions {
     }
 }
 
+/// A shared allowance bounds all reads a provider can do during one check.
 pub(super) struct Budget {
     pub remaining: u64,
     #[cfg(test)]
@@ -389,6 +398,7 @@ impl Budget {
         }
     }
 
+    /// Keep partial reads and interruptions inside the same byte allowance.
     fn read_at(&mut self, file: &File, data: &mut [u8], offset: u64) -> io::Result<usize> {
         let cap = data.len().min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
         loop {
@@ -428,6 +438,7 @@ pub(super) fn tail<T>(
 }
 
 #[derive(Default)]
+/// Carry a split record across blocks without accumulating an unbounded line.
 struct Line {
     bytes: Vec<u8>,
     skipping: bool,
@@ -463,6 +474,7 @@ impl Reverse {
         Self { offset: len, line: Line::default(), at_end: true }
     }
 
+    /// Keep scanning after an oversized record, but do not pass it to the parser.
     pub(super) fn block<T>(
         &mut self,
         file: &File,
@@ -505,6 +517,7 @@ impl Reverse {
     }
 }
 
+/// Keep the current append position and any incomplete trailing record.
 pub(super) struct Stream {
     pub offset: u64,
     line: Line,
@@ -515,6 +528,7 @@ impl Stream {
         Self { offset, line: Line::default() }
     }
 
+    /// The first forward read must finish, not re-read, the last reverse record.
     pub(super) fn remember_tail(&mut self, line: Option<&[u8]>) {
         if let Some(line) = line {
             self.line.push(line.iter().copied());
@@ -523,6 +537,7 @@ impl Stream {
         }
     }
 
+    /// Stop at the observed size; bytes appended during the read belong to the next check.
     pub(super) fn read(
         &mut self,
         file: &File,
@@ -565,11 +580,13 @@ impl Stream {
         }
     }
 
+    /// A complete JSON record may already be usable before its newline arrives.
     pub(super) fn tail(&self) -> &[u8] {
         &self.line.bytes
     }
 }
 
+/// A cheap prefilter keeps ordinary transcript records out of the JSON parser.
 pub(super) fn has_marker(line: &[u8], marker: &[u8]) -> bool {
     line.split(|b| *b == b'"').skip(1).any(|part| part == marker)
 }
@@ -592,7 +609,7 @@ mod tests {
             f.write(path, "{}\n");
         }
         let sessions = Sessions::scan_with_limit(&f.root, Tree::Codex, 4).unwrap();
-        assert!(sessions.limited);
+        assert!(sessions.partial);
         assert_eq!(sessions.files.len(), 1);
         assert_eq!(sessions.files[0].path, Path::new(newest));
     }
@@ -607,7 +624,7 @@ mod tests {
         }
         f.write(plain, "{}\n");
         let sessions = Sessions::scan_with_limit(&f.root, Tree::Codex, 4).unwrap();
-        assert!(!sessions.limited);
+        assert!(!sessions.partial);
         assert_eq!(sessions.files.len(), 1);
         assert_eq!(sessions.files[0].path, Path::new(plain));
     }

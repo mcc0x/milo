@@ -43,12 +43,12 @@ pub enum Kind {
 /// When a file was last written and how long it is: enough to notice an
 /// edit. A link is stamped as itself, never as what it points to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Stamp {
+pub struct FileStamp {
     pub written: SystemTime,
     len: u64,
 }
 
-impl Stamp {
+impl FileStamp {
     pub fn at(path: &Path) -> Option<Self> {
         let m = std::fs::symlink_metadata(path).ok()?;
         Some(Self { written: m.modified().ok()?, len: m.len() })
@@ -65,7 +65,7 @@ pub struct PendingFile {
     pub add: u32,
     pub del: u32,
     pub unpushed: bool,
-    pub stamp: Option<Stamp>,
+    pub stamp: Option<FileStamp>,
 }
 
 impl PendingFile {
@@ -164,12 +164,12 @@ struct Unpushed {
 
 #[derive(Default)]
 struct Tracked {
-    index: Option<Stamp>,
+    index: Option<FileStamp>,
     paths: String,
 }
 
 struct Counted {
-    stamp: Option<Stamp>,
+    stamp: Option<FileStamp>,
     lines: u32,
 }
 
@@ -177,7 +177,7 @@ struct Counted {
 struct RenameLookup {
     path: String,
     ends: Ends,
-    index: Option<Stamp>,
+    index: Option<FileStamp>,
     from: Option<String>,
 }
 
@@ -354,7 +354,7 @@ impl Repo {
         let Some(raw) = self.require(self.status_raw(self.file.as_deref())) else { return false };
         let changed = !self.ok()
             || raw != self.raw
-            || files.iter().any(|f| Stamp::at(&self.root.join(&f.path)) != f.stamp)
+            || files.iter().any(|f| FileStamp::at(&self.root.join(&f.path)) != f.stamp)
             || self.stand_in_moved();
         self.polled = changed.then_some(raw);
         changed
@@ -423,7 +423,7 @@ impl Repo {
             return Some(Vec::new());
         }
         // An edit during the diff must leave a different stamp for the next poll.
-        let stamps: HashMap<&str, _> = paths.iter().map(|p| (p.as_str(), Stamp::at(&self.root.join(p)))).collect();
+        let stamps: HashMap<&str, _> = paths.iter().map(|p| (p.as_str(), FileStamp::at(&self.root.join(p)))).collect();
         let named = paths.len() <= PATHS_LIMIT;
         // Naming the paths lets the outline use the Reader's base without
         // including files that are only unpushed.
@@ -462,7 +462,7 @@ impl Repo {
         }
     }
 
-    fn add_missing_files(&self, files: &mut Vec<PendingFile>, stamps: &HashMap<&str, Option<Stamp>>) {
+    fn add_missing_files(&self, files: &mut Vec<PendingFile>, stamps: &HashMap<&str, Option<FileStamp>>) {
         // A file put back to what the remote has can still differ from HEAD.
         for path in &self.status.tracked_uncommitted {
             if !self.status.sources.contains(path) && !files.iter().any(|f| f.path == *path) {
@@ -476,7 +476,7 @@ impl Repo {
         let mut counted = HashMap::with_capacity(self.status.untracked.len());
         for path in &self.status.untracked {
             let full = self.root.join(path);
-            let stamp = Stamp::at(&full);
+            let stamp = FileStamp::at(&full);
             let lines = match self.counted.get(path) {
                 Some(previous) if previous.stamp == stamp => previous.lines,
                 _ => new_file_lines(&full),
@@ -503,14 +503,14 @@ impl Repo {
         }
         files.extend(self.unpushed.files.iter().cloned().map(|mut file| {
             file.unpushed = true;
-            file.stamp = Stamp::at(&self.root.join(&file.path));
+            file.stamp = FileStamp::at(&self.root.join(&file.path));
             file
         }));
         Some(())
     }
 
-    fn index_stamp(&self) -> Option<Stamp> {
-        Stamp::at(&self.git_dir.as_ref()?.join("index"))
+    fn index_stamp(&self) -> Option<FileStamp> {
+        FileStamp::at(&self.git_dir.as_ref()?.join("index"))
     }
 
     /// Tracked paths relative to the root. A failed refresh leaves the cache intact.

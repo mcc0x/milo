@@ -1,15 +1,16 @@
 //! Captures the optional Claude Code limits supplied to its status line.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use super::files::{self, Budget, Mark};
-use super::json::Value;
+use crate::fs_ops::{self, Temp};
+use crate::json::Value;
+
+use super::files::{self, Budget, FileVersion};
 use super::time;
 use super::{BaseWindows, Limits, Reading, Window};
 
@@ -44,24 +45,25 @@ fn window(value: Option<Value<'_>>, minutes: u64, observed: Observed) -> Option<
     })
 }
 
-pub(super) fn saved(file: File, mark: Mark, budget: &mut Budget) -> Option<Reading> {
-    let bytes = files::read_small(file, mark, MAX_SAVED, budget)?;
+/// The status helper's own cache can preserve windows from different reports.
+pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
+    let bytes = files::read_small(file, version, MAX_SAVED, budget)?;
     let [saved_at, rate_limits] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits"]);
     let at = saved_at?.integer()?;
     let base = windows(rate_limits?, Observed::Saved(at));
-    base.iter().any(Option::is_some).then_some(Reading { at: time::Stamp::seconds(at), windows: Limits::new(base) })
+    base.iter().any(Option::is_some).then_some(Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) })
 }
 
 /// Only inspect normal configurations up to 4 MiB; the cache is a top-level field.
-pub(super) fn native(file: File, mark: Mark, budget: &mut Budget, now: i64) -> Option<Reading> {
-    let bytes = files::read_small(file, mark, MAX_CONFIG, budget)?;
+pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget, now: i64) -> Option<Reading> {
+    let bytes = files::read_small(file, version, MAX_CONFIG, budget)?;
     let [cache, current] = Value::parse(&bytes)?.fields(["cachedUsageUtilization", "oauthAccount"]);
     let [at, usage, account] = cache?.fields(["fetchedAtMs", "utilization", "accountUuid"]);
     if let Some(account) = account {
         let [current] = current?.fields(["accountUuid"]);
         (account.string(128)? == current?.string(128)?).then_some(())?;
     }
-    let at = time::Stamp::millis(at?)?;
+    let at = time::Timestamp::millis(at?)?;
     (at.seconds <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
     let [five, week] = usage.filter(|object| object.object())?.fields(["five_hour", "seven_day"]);
     let window = |value: Option<Value<'_>>, minutes| {
@@ -69,7 +71,7 @@ pub(super) fn native(file: File, mark: Mark, budget: &mut Budget, now: i64) -> O
         Some(Window {
             minutes,
             percent: Window::percent(percent?)?,
-            resets: reset.and_then(time::Stamp::iso).and_then(|stamp| time::cache_reset(stamp, at.seconds)),
+            resets: reset.and_then(time::Timestamp::iso).and_then(|stamp| time::cache_reset(stamp, at.seconds)),
             observed: at.seconds,
         })
     };
@@ -77,17 +79,20 @@ pub(super) fn native(file: File, mark: Mark, budget: &mut Budget, now: i64) -> O
     Some(Reading { at, windows: Limits::new(base) })
 }
 
+/// A stalled stdin must not leave Claude waiting for its status line.
 pub(super) fn run_fd(input: impl AsFd, output: impl Write, path: Option<&Path>, now: i64) -> i32 {
     let input = files::read_pipe(input, MAX_INPUT, Instant::now() + INPUT_WAIT);
     run(input.as_deref().unwrap_or_default(), output, path, now)
 }
 
+/// Even malformed input gets an empty, successful status line.
 pub(super) fn run(input: &[u8], mut output: impl Write, path: Option<&Path>, now: i64) -> i32 {
     let line = capture(input, path, now).unwrap_or_default();
     let _ = writeln!(output, "{line}");
     0
 }
 
+/// Prefer usage figures for the line and cache; otherwise show the model name.
 fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
     if input.len() > MAX_INPUT {
         return None;
@@ -112,6 +117,7 @@ fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
     model_name(model?)
 }
 
+/// The helper prints to Claude's terminal, so leave out controls and long names.
 fn model_name(model: Value<'_>) -> Option<String> {
     let [name, id] = model.fields(["display_name", "id"]);
     let value = name.or(id).unwrap_or(model).string(128)?;
@@ -124,18 +130,19 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     // The file is replaced on each save, so take the lock on its directory.
-    let lock = files::open_directory(dir)?;
+    let lock = fs_ops::open_dir(dir)?;
     lock.lock()?;
     let done = merge_save(path, dir, now, windows);
     done.and(lock.unlock())
 }
 
+/// Merge under the directory lock so two status invocations cannot lose a window.
 fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
-    let previous = files::open_file(path)
+    let previous = fs_ops::open_read(path)
         .ok()
         .and_then(|file| {
-            let mark = Mark::opened(&file)?;
-            saved(file, mark, &mut Budget::new(MAX_SAVED + 1))
+            let version = FileVersion::opened(&file)?;
+            saved(file, version, &mut Budget::new(MAX_SAVED + 1))
         })
         .map(|reading| reading.windows.base)
         .unwrap_or_default();
@@ -146,6 +153,7 @@ fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Re
     write_limits(path, dir, now, merged)
 }
 
+/// An older or smaller report must not roll back a known nondecreasing window.
 fn newer(previous: Option<Window>, incoming: Option<Window>) -> Option<Window> {
     if let (Some(old), Some(new)) = (previous, incoming)
         && (old.resets > new.resets || old.resets == new.resets && old.percent >= new.percent)
@@ -155,35 +163,30 @@ fn newer(previous: Option<Window>, incoming: Option<Window>) -> Option<Window> {
     incoming.or(previous)
 }
 
+/// A replacement makes the next read see both windows from the same save.
 fn write_limits(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     static SERIAL: AtomicU32 = AtomicU32::new(0);
     let temporary =
         dir.join(format!(".claude-limits-{}-{}", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
-    let done = (|| {
-        write!(file, "{{\"saved_at\":{now},\"rate_limits\":{{")?;
-        for (i, (key, window)) in ["five_hour", "seven_day"].into_iter().zip(windows).enumerate() {
-            if i > 0 {
-                write!(file, ",")?;
-            }
-            write!(file, "\"{key}\":")?;
-            if let Some(window) = window {
-                let percent = window.percent;
-                write!(file, "{{\"used_percentage\":{percent},\"observed_at\":{}", window.observed)?;
-                if let Some(resets) = window.resets {
-                    write!(file, ",\"resets_at\":{resets}")?;
-                }
-                write!(file, "}}")?;
-            } else {
-                write!(file, "null")?;
-            }
+    let (temp, mut file) = Temp::create(temporary)?;
+    write!(file, "{{\"saved_at\":{now},\"rate_limits\":{{")?;
+    for (i, (key, window)) in ["five_hour", "seven_day"].into_iter().zip(windows).enumerate() {
+        if i > 0 {
+            write!(file, ",")?;
         }
-        writeln!(file, "}}}}")?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if done.is_err() {
-        let _ = fs::remove_file(temporary);
+        write!(file, "\"{key}\":")?;
+        if let Some(window) = window {
+            let percent = window.percent;
+            write!(file, "{{\"used_percentage\":{percent},\"observed_at\":{}", window.observed)?;
+            if let Some(resets) = window.resets {
+                write!(file, ",\"resets_at\":{resets}")?;
+            }
+            write!(file, "}}")?;
+        } else {
+            write!(file, "null")?;
+        }
     }
-    done
+    writeln!(file, "}}}}")?;
+    drop(file);
+    temp.replace(path)
 }

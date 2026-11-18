@@ -48,6 +48,7 @@ fn chunk(png: &mut Vec<u8>, name: &[u8; 4], data: &[u8]) {
     png.extend_from_slice(&(!crc).to_be_bytes());
 }
 
+/// Text and images use different palettes but must keep the same warning level.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
     Green,
@@ -75,6 +76,7 @@ impl Level {
     }
 }
 
+/// Share the displayed text and warning level between the terminal's drawing modes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Figure {
     pub text: &'static str,
@@ -115,6 +117,7 @@ impl Figure {
         (self.text.len() - 1) * PITCH + PERCENT
     }
 
+    /// Reuse the compressed mask; only the PNG wrapper and palette vary.
     fn picture(self, light: bool) -> Picture {
         const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
         const ALPHA: [u8; 16] = [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255];

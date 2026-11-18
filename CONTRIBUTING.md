@@ -66,26 +66,32 @@ The README has a one-line description of every module. The short version:
 | the reader | `src/reader.rs`, and `src/diff.rs` for how a diff becomes lines |
 | which git commands run, and how safely | `src/git/run.rs` |
 | Rex setup and its sketch | `src/setup.rs` |
-| how setup saves or removes settings | `src/setup/install.rs`, `src/setup/files.rs` |
+| how setup saves both sets of settings or puts them back | `src/setup/install.rs`, `src/setup/files.rs` |
+| changes to Rex settings and the generated layout | `src/setup/rex_files.rs`, `src/setup/layout.rs` |
+| changes to Claude Code settings | `src/setup/claude.rs`, `src/setup/settings.rs` |
+| how usage reads provider reports | `src/usage.rs`, `src/usage/files.rs`, `src/usage/omp.rs`, `src/usage/status.rs` |
+| the usage strip and its figures | `src/usage/draw.rs` |
+| the JSON reader shared by usage and setup | `src/json.rs` |
+| guarded file opens and atomic replacements | `src/fs_ops.rs` |
 | the Lua actions and the new-tab listener | `src/setup/actions.lua`, `src/setup/listener.lua` |
 | what is read from git's output | `src/git/parse.rs` |
 | what milo remembers about a repository | `src/git.rs` |
 | how the screen is drawn and what a style is | `src/screen.rs` |
 | keys and mouse input | `src/keys.rs` |
-| how often milo looks for changes | `Pace` in `src/main.rs` |
-| the contract a pane implements | `Pane` in `src/ui.rs` |
+| how often milo looks for changes | `Pace` in `src/pane.rs` |
+| the contract a pane implements | `Pane` in `src/pane.rs` |
 
 ### Adding a pane
 
-Put the screen in a new module under `src/` and implement `ui::Pane`. The trait gives the shared loop a frame to draw, keys to pass on, a help page, and a place to watch and check for changes. A pane with timed redraws can also implement `next_frame`.
+Put the screen in a new module under `src/` and implement `pane::Pane`. The trait gives the shared loop a frame to draw, keys to pass on, a help page, and a place to watch and check for changes. Return `After::Leave` from a key that closes the pane, or `After::Stay` to keep it open. A pane with timed redraws can also implement `next_frame`.
 
-Declare the module in `src/main.rs`, add one arm to `open_pane`, and list the command in `--help`. Do not add a second event loop.
+Declare the module in `src/main.rs`, add the command to `Command`, its parser and `dispatch`, and list it in `--help`. Do not add a second event loop.
 
 ### Changing the Rex layout
 
-The two Lua templates are in `src/setup/`. `install.rs` adds the choices and
+The two Lua templates are in `src/setup/`. `layout.rs` adds the choices and
 proportions above the actions in `rex.lua`, and the path to that file above
-the handler in `listener.lua`. Both use the same layout code.
+the handler in `listener.lua`. `rex_files.rs` checks both before installation.
 
 Run `cargo test setup::` for generation, screen and installation tests. The
 tests use throwaway settings and a stand-in for Rex. To check a generated file

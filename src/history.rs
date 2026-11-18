@@ -7,9 +7,10 @@ use crate::git::{Commit, Ends, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::outline::DOUBLE_CLICK;
+use crate::pane::{After, Pane};
 use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::{self, Screen, Style, Wash};
-use crate::ui::{self, FAINT, Pane};
+use crate::ui::{self, FAINT};
 use crate::watch::Scope;
 use crate::when;
 use crate::width::str_width;
@@ -31,7 +32,7 @@ struct Entry {
 
 /// Rows the cursor can point at, with the guides between them.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Row {
+enum TimelineRow {
     Uncommitted,
     Divider,
     Commit(usize),
@@ -40,7 +41,7 @@ enum Row {
     Note(&'static str),
 }
 
-impl Row {
+impl TimelineRow {
     fn selectable(self) -> bool {
         matches!(self, Self::Commit(_) | Self::File(_) | Self::More)
     }
@@ -62,13 +63,13 @@ pub struct History {
     /// The one commit whose files are shown, as an index into `entries`.
     open: Option<usize>,
     all_files: bool,
-    rows: Vec<Row>,
+    rows: Vec<TimelineRow>,
     cursor: usize,
     top: usize,
     shown: usize,
     painted: Option<Painted>,
     /// The last row clicked and when, to tell a double click.
-    clicked: Option<(Row, Instant)>,
+    clicked: Option<(TimelineRow, Instant)>,
     compact: bool,
     opener: OpenReader,
     reading: Option<Reader>,
@@ -132,15 +133,15 @@ impl History {
     }
 
     /// Remembers the open commit and the cursor by hash when commits move.
-    fn replace_commits(&mut self, commits: Vec<Commit>, selected: Row, uncommitted: usize) {
+    fn replace_commits(&mut self, commits: Vec<Commit>, selected: TimelineRow, uncommitted: usize) {
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
         let open = self.open.and_then(remap);
         let selected = match selected {
             // At the newest commit, follow new arrivals unless its files are open.
-            Row::Commit(0) if self.open != Some(0) => Row::Commit(0),
-            Row::Commit(i) => Row::Commit(remap(i).unwrap_or(0)),
-            Row::File(_) | Row::More if open.is_some() => selected,
-            _ => Row::Commit(0),
+            TimelineRow::Commit(0) if self.open != Some(0) => TimelineRow::Commit(0),
+            TimelineRow::Commit(i) => TimelineRow::Commit(remap(i).unwrap_or(0)),
+            TimelineRow::File(_) | TimelineRow::More if open.is_some() => selected,
+            _ => TimelineRow::Commit(0),
         };
         let before: HashMap<_, _> = self.entries.iter().map(|e| (e.commit.hash.as_str(), e.fresh)).collect();
         let loaded = self.ends.is_some();
@@ -156,42 +157,42 @@ impl History {
         self.build_rows(selected);
     }
 
-    fn selected(&self) -> Row {
-        self.rows.get(self.cursor).copied().unwrap_or(Row::Note(""))
+    fn selected(&self) -> TimelineRow {
+        self.rows.get(self.cursor).copied().unwrap_or(TimelineRow::Note(""))
     }
 
     fn open_files(&self) -> Option<&[PendingFile]> {
         self.repo.commit_files(&self.entries.get(self.open?)?.commit)
     }
 
-    fn build_rows(&mut self, selected: Row) {
+    fn build_rows(&mut self, selected: TimelineRow) {
         self.painted = None;
         let files = self.open_files().map(<[_]>::len);
         self.rows.clear();
         if self.uncommitted > 0 && (!self.compact || self.entries.is_empty()) {
-            self.rows.push(Row::Uncommitted);
+            self.rows.push(TimelineRow::Uncommitted);
         }
         for (i, entry) in self.entries.iter().enumerate() {
             if !self.compact && i > 0 && crosses_remote(&self.entries[i - 1].commit, &entry.commit) {
-                self.rows.push(Row::Divider);
+                self.rows.push(TimelineRow::Divider);
             }
-            self.rows.push(Row::Commit(i));
+            self.rows.push(TimelineRow::Commit(i));
             if self.open == Some(i) {
                 match files {
-                    Some(0) => self.rows.push(Row::Note("No files changed.")),
+                    Some(0) => self.rows.push(TimelineRow::Note("No files changed.")),
                     Some(n) => {
                         let shown = if self.all_files { n } else { n.min(FILE_PREVIEW) };
-                        self.rows.extend((0..shown).map(Row::File));
+                        self.rows.extend((0..shown).map(TimelineRow::File));
                         if shown < n {
-                            self.rows.push(Row::More);
+                            self.rows.push(TimelineRow::More);
                         }
                     }
-                    None => self.rows.push(Row::Note("Git did not answer for this commit.")),
+                    None => self.rows.push(TimelineRow::Note("Git did not answer for this commit.")),
                 }
             }
         }
         if self.entries.is_empty() {
-            self.rows.push(Row::Note("No commits yet."));
+            self.rows.push(TimelineRow::Note("No commits yet."));
         }
         self.cursor = self.rows.iter().position(|&row| row == selected).unwrap_or(0);
     }
@@ -204,24 +205,24 @@ impl History {
             self.repo.load_commit_files(&self.entries[i].commit);
             Some(i)
         };
-        self.build_rows(Row::Commit(i));
+        self.build_rows(TimelineRow::Commit(i));
     }
 
     fn show_all_files(&mut self) {
         self.all_files = true;
-        self.build_rows(Row::File(FILE_PREVIEW));
+        self.build_rows(TimelineRow::File(FILE_PREVIEW));
     }
 
     fn enter(&mut self) {
         match self.selected() {
-            Row::Commit(i) => {
+            TimelineRow::Commit(i) => {
                 self.toggle_files(i);
                 if self.open == Some(i) {
                     self.keep_preview_in_view();
                 }
             }
-            Row::File(i) => self.read_file(i),
-            Row::More => self.show_all_files(),
+            TimelineRow::File(i) => self.read_file(i),
+            TimelineRow::More => self.show_all_files(),
             _ => {}
         }
     }
@@ -247,10 +248,10 @@ impl History {
 
     fn left(&mut self) {
         match (self.selected(), self.open) {
-            (Row::File(_) | Row::More, Some(open)) => {
-                self.cursor = self.rows.iter().position(|&row| row == Row::Commit(open)).unwrap_or(self.cursor);
+            (TimelineRow::File(_) | TimelineRow::More, Some(open)) => {
+                self.cursor = self.rows.iter().position(|&row| row == TimelineRow::Commit(open)).unwrap_or(self.cursor);
             }
-            (Row::Commit(i), Some(open)) if i == open => self.toggle_files(i),
+            (TimelineRow::Commit(i), Some(open)) if i == open => self.toggle_files(i),
             _ => {}
         }
     }
@@ -270,15 +271,15 @@ impl History {
         self.cursor = at;
         self.clicked = Some((row, now));
         match (row, again) {
-            (Row::Commit(i), false) => {
+            (TimelineRow::Commit(i), false) => {
                 self.toggle_files(i);
                 self.top = self.cursor.saturating_sub(offset);
             }
-            (Row::File(i), true) => {
+            (TimelineRow::File(i), true) => {
                 self.clicked = None;
                 self.read_file(i);
             }
-            (Row::More, _) => {
+            (TimelineRow::More, _) => {
                 self.clicked = None;
                 self.show_all_files();
             }
@@ -299,7 +300,7 @@ impl History {
 
     fn keep_cursor_in_view(&mut self) {
         // Do not bring the top back under the pointer after a click.
-        if self.clicked.is_none() && self.selected() == Row::Commit(0) && self.cursor < self.shown {
+        if self.clicked.is_none() && self.selected() == TimelineRow::Commit(0) && self.cursor < self.shown {
             self.top = 0;
         } else if self.cursor < self.top {
             self.top = self.cursor;
@@ -311,12 +312,12 @@ impl History {
 
     fn draw_heading(&self, s: &mut Screen) {
         let branch = self.repo.branch();
-        let name_width = str_width(&self.repo.name) + str_width(branch) + 5;
+        let name_width = ui::project_heading_width(&self.repo.name, branch);
         let summary = self.draw_summary(s, name_width);
         let room = s.w.saturating_sub(summary + 3);
         let branch_room = str_width(branch).min(room / 2);
         let skip = if branch_room > 0 { 2 } else { 0 };
-        let name = s.put_fit(1, 0, room.saturating_sub(branch_room + skip), &self.repo.name, Style::PLAIN.bold());
+        let name = ui::section_heading(s, 0, room.saturating_sub(branch_room + skip), &self.repo.name);
         s.put_fit(1 + name + skip, 0, branch_room, branch, Style::fg(screen::MAGENTA));
     }
 
@@ -406,9 +407,9 @@ impl History {
         for (i, row) in self.rows.iter().enumerate().skip(self.top).take(self.shown) {
             let y = body_top + i - self.top;
             match *row {
-                Row::Uncommitted => self.draw_uncommitted(s, y),
-                Row::Divider => self.draw_divider(s, y),
-                Row::Commit(index) => {
+                TimelineRow::Uncommitted => self.draw_uncommitted(s, y),
+                TimelineRow::Divider => self.draw_divider(s, y),
+                TimelineRow::Commit(index) => {
                     let end = if self.open == Some(index) {
                         open_files.map_or(right, |files| file_count(s, y, files.len()))
                     } else {
@@ -416,11 +417,11 @@ impl History {
                     };
                     self.draw_commit(s, y, end, index);
                 }
-                Row::File(index) => draw_file(s, y, &files[index]),
-                Row::More => {
+                TimelineRow::File(index) => draw_file(s, y, &files[index]),
+                TimelineRow::More => {
                     draw_more(s, y, files.len() - FILE_PREVIEW);
                 }
-                Row::Note(text) => {
+                TimelineRow::Note(text) => {
                     s.put_fit(3, y, right - 3, text, FAINT);
                 }
             }
@@ -468,10 +469,10 @@ impl History {
             return;
         }
         let action = match self.selected() {
-            Row::Commit(i) if self.open == Some(i) => "Enter hide files",
-            Row::Commit(_) => "Enter show files",
-            Row::File(_) => "Enter read",
-            Row::More => "Enter show all",
+            TimelineRow::Commit(i) if self.open == Some(i) => "Enter hide files",
+            TimelineRow::Commit(_) => "Enter show files",
+            TimelineRow::File(_) => "Enter read",
+            TimelineRow::More => "Enter show all",
             _ => "",
         };
         let middle: &[_] =
@@ -554,19 +555,17 @@ impl Pane for History {
         true
     }
 
-    fn key(&mut self, key: Key) -> bool {
+    fn key(&mut self, key: Key) -> After {
         if let Some(reader) = &mut self.reading {
-            if reader.on_key(key) {
+            if reader.key(key) == After::Leave {
                 self.reading = None;
             }
-            return false;
+        } else if key == Key::Char('q') {
+            return After::Leave;
+        } else {
+            self.input(key, Instant::now());
         }
-        self.input(key, Instant::now());
-        false
-    }
-
-    fn close(&mut self) -> bool {
-        self.reading.take().is_none()
+        After::Stay
     }
 
     fn draw(&mut self, s: &mut Screen) {
@@ -700,9 +699,9 @@ mod tests {
     }
 
     fn read_next(history: &mut History, name: &str) -> Vec<String> {
-        assert!(!history.on_key(Key::Down));
+        assert_eq!(history.key(Key::Down), After::Stay);
         assert!(active_row(&draw(history, 65, 12), name), "{name} is not selected");
-        assert!(!history.on_key(Key::Enter));
+        assert_eq!(history.key(Key::Enter), After::Stay);
         draw(history, 65, 12).text()
     }
 
@@ -807,7 +806,7 @@ mod tests {
         let mut history = open(&f);
         let screen = draw(&mut history, 30, 12);
         assert_eq!(screen.text()[2], " ── on origin/main ──────────");
-        history.on_key(Key::Down);
+        history.key(Key::Down);
         assert!(active_row(&draw(&mut history, 30, 12), "on main"));
     }
 
@@ -823,7 +822,7 @@ mod tests {
         f.commit("write three files");
         let mut history = open(&f);
         draw(&mut history, 40, 5);
-        history.on_key(Key::Click(5, 1));
+        history.key(Key::Click(5, 1));
         let screen = draw(&mut history, 40, 5);
         assert!(active_row(&screen, "write three files") && screen.text()[1].contains("▾"));
         assert!(screen.text()[4].contains("c.txt"));
@@ -839,19 +838,19 @@ mod tests {
         history.input(Key::Click(5, 4), now + 2 * step + DOUBLE_CLICK);
         assert_eq!(draw(&mut history, 40, 5).text()[1], " 1 + stored c");
 
-        history.on_key(Key::Esc);
+        history.key(Key::Esc);
         let before = draw(&mut history, 40, 5).text();
-        history.on_key(Key::WheelDown);
+        history.key(Key::WheelDown);
         let after = draw(&mut history, 40, 5);
         assert_ne!(after.text(), before);
         assert!(active_row(&after, "older 3"));
-        history.on_key(Key::Home);
+        history.key(Key::Home);
         draw(&mut history, 40, 5);
-        history.on_key(Key::Click(5, 1));
+        history.key(Key::Click(5, 1));
         let closed = draw(&mut history, 40, 5);
         assert!(active_row(&closed, "write three files"));
         assert!(!closed.text().iter().any(|row| row.contains("c.txt")));
-        history.on_key(Key::WheelDown);
+        history.key(Key::WheelDown);
         let scrolled = draw(&mut history, 40, 5);
         assert_ne!(scrolled.text()[1], closed.text()[1]);
         assert!(active_row(&scrolled, "older 3"));
@@ -871,10 +870,10 @@ mod tests {
         }
         let mut history = open(&f);
         draw(&mut history, 30, 12);
-        history.on_key(Key::PgDn);
+        history.key(Key::PgDn);
         assert!(active_row(&draw(&mut history, 30, 12), "older commit"));
-        history.on_key(Key::Up);
-        history.on_key(Key::Enter);
+        history.key(Key::Up);
+        history.key(Key::Enter);
         let preview = draw(&mut history, 30, 12);
         let rows = preview.text();
         assert!(
@@ -890,22 +889,22 @@ mod tests {
         assert!(rows[10].contains("… 32 more"), "{rows:?}");
         assert_eq!(rows[11], " Enter hide files · ? help");
 
-        history.on_key(Key::End);
-        history.on_key(Key::Up);
+        history.key(Key::End);
+        history.key(Key::Up);
         let more = draw(&mut history, 30, 12);
         assert!(active_row(&more, "… 32 more"));
         assert_eq!(more.text()[11], " Enter show all · ? help");
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         assert!(active_row(&draw(&mut history, 30, 12), "page08.txt"));
-        history.on_key(Key::End);
-        history.on_key(Key::Up);
+        history.key(Key::End);
+        history.key(Key::Up);
         assert!(active_row(&draw(&mut history, 30, 12), "page39.txt"));
         commit(&f, "a commit arrived");
         assert!(history.check());
         assert!(active_row(&draw(&mut history, 30, 12), "page39.txt"));
-        history.on_key(Key::Left);
-        history.on_key(Key::Enter);
-        history.on_key(Key::Enter);
+        history.key(Key::Left);
+        history.key(Key::Enter);
+        history.key(Key::Enter);
         assert!(draw(&mut history, 30, 12).text()[10].contains("… 32 more"));
     }
 
@@ -919,14 +918,14 @@ mod tests {
         assert!(history.check());
         let uncommitted = draw(&mut history, 65, 12).text();
         assert!(uncommitted[1].contains("1 file to commit") && !uncommitted[11].contains("Enter"));
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         assert_eq!(draw(&mut history, 65, 12).text(), uncommitted);
         f.commit("add notes");
         assert!(history.check());
         assert_eq!(draw(&mut history, 30, 12).text()[11], " Enter show files · ? help");
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         assert_eq!(draw(&mut history, 30, 12).text()[11], " Enter hide files · ? help");
-        history.on_key(Key::Down);
+        history.key(Key::Down);
         assert_eq!(draw(&mut history, 30, 12).text()[11], " Enter read · q quit · ? help");
     }
 
@@ -944,19 +943,19 @@ mod tests {
         f.commit("touch four files");
         let mut history = open(&f);
         let before = draw(&mut history, 65, 12).text();
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         let rows = draw(&mut history, 65, 12).text();
         assert!(row(&rows, "touch four files").contains("▾"));
         assert!(row(&rows, "add.txt").contains("new") && row(&rows, "add.txt").ends_with("+3"), "{rows:?}");
         assert!(row(&rows, "edit.txt").contains("edited") && row(&rows, "edit.txt").ends_with("+2 −1"), "{rows:?}");
         assert!(row(&rows, "moved.txt").ends_with("moved"), "{rows:?}");
         assert!(row(&rows, "remove.txt").contains("removed") && row(&rows, "remove.txt").ends_with("−2"), "{rows:?}");
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         assert_eq!(draw(&mut history, 65, 12).text(), before);
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         assert_eq!(draw(&mut history, 65, 12).text(), rows);
-        history.on_key(Key::End);
-        history.on_key(Key::Enter);
+        history.key(Key::End);
+        history.key(Key::Enter);
         let root = draw(&mut history, 65, 12).text();
         assert!(row(&root, "remove.txt").contains("new") && row(&root, "remove.txt").ends_with("+2"), "{root:?}");
     }
@@ -972,7 +971,7 @@ mod tests {
 
         let mut history = open(&f);
         let id = format!("commit {}", &history.entries[0].commit.hash[..7]);
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         let rows = read_next(&mut history, "page.rs");
         assert!(rows[0].contains("page.rs") && rows[0].contains(&id) && rows[0].ends_with("ago"), "{rows:?}");
         assert_eq!(&rows[1..5], [" 1   fn main() {", "   -     let n = 1;", " 2 +     let n = 2;", " 3   }"]);
@@ -985,25 +984,25 @@ mod tests {
         assert!(!help.iter().any(|row| row.contains("reload")));
 
         f.write("page.rs", "another edit\n");
-        history.on_key(Key::Char('r'));
+        history.key(Key::Char('r'));
         assert!(history.check());
         assert_eq!(draw(&mut history, 65, 12).text(), rows);
 
-        assert!(!history.on_key(Key::Char('q')));
+        assert_eq!(history.key(Key::Char('q')), After::Stay);
         let screen = draw(&mut history, 65, 12);
         assert!(active_row(&screen, "page.rs"));
         assert!(row(&screen.text(), "change the number").contains("▾"));
         assert!(screen.text()[11].contains("Enter read"));
-        history.on_key(Key::Enter);
-        assert!(!history.on_key(Key::Esc));
+        history.key(Key::Enter);
+        assert_eq!(history.key(Key::Esc), After::Stay);
         assert!(active_row(&draw(&mut history, 65, 12), "page.rs"));
 
-        history.on_key(Key::Left);
+        history.key(Key::Left);
         let screen = draw(&mut history, 65, 12);
         assert!(active_row(&screen, "change the number"));
         assert!(row(&screen.text(), "change the number").contains("▾"));
         assert!(screen.text()[11].contains("Enter hide files"));
-        history.on_key(Key::Left);
+        history.key(Key::Left);
         let rows = draw(&mut history, 65, 12).text();
         assert!(!row(&rows, "change the number").contains("▾"));
         assert!(!rows.iter().any(|row| row.contains("page.rs")));
@@ -1026,11 +1025,11 @@ mod tests {
         f.write("same.txt", "edited after the move\n");
 
         let mut history = open(&f);
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         let rows = read_next(&mut history, "gone.txt");
         assert_eq!(rows[1], "   - a lost line");
         assert!(!rows.iter().any(|row| row.contains("a new file")));
-        history.on_key(Key::Esc);
+        history.key(Key::Esc);
         let rows = read_next(&mut history, "moved.txt");
         assert_eq!(
             &rows[1..6],
@@ -1042,7 +1041,7 @@ mod tests {
                 " 4 + after"
             ]
         );
-        history.on_key(Key::Esc);
+        history.key(Key::Esc);
         let rows = read_next(&mut history, "same.txt");
         assert_eq!(rows[1], " 1   an unchanged line");
         assert!(!rows.iter().any(|row| row.contains("edited after the move")));
@@ -1054,7 +1053,7 @@ mod tests {
         f.write("first.txt", "first line\nsecond line\n");
         f.commit("start");
         let mut history = open(&f);
-        history.on_key(Key::Enter);
+        history.key(Key::Enter);
         let rows = read_next(&mut history, "first.txt");
         assert_eq!(&rows[1..3], [" 1 + first line", " 2 + second line"]);
     }
@@ -1074,8 +1073,8 @@ mod tests {
         commit(&f, "later");
         let mut history = open(&f);
         draw(&mut history, 40, 2);
-        history.on_key(Key::Down);
-        history.on_key(Key::Enter);
+        history.key(Key::Down);
+        history.key(Key::Enter);
         let rows = draw(&mut history, 40, 2).text();
         assert!(rows[0].contains("merge topic"), "{rows:?}");
         assert!(rows[1].contains("topic.txt") && rows[1].ends_with("+1"), "{rows:?}");
@@ -1101,7 +1100,7 @@ mod tests {
             (Key::Home, "commit 8"),
         ] {
             draw(&mut history, 40, 4);
-            history.on_key(key);
+            history.key(key);
             let screen = draw(&mut history, 40, 4);
             let rows = screen.text();
             let y = rows.iter().position(|row| row.contains(subject)).expect(subject);

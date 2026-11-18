@@ -5,15 +5,16 @@ use std::path::{Path, PathBuf};
 
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
-use crate::git::{Commit, CommitId, Kind, PendingFile, Repo, Stamp};
+use crate::git::{Commit, CommitId, FileStamp, Kind, PendingFile, Repo};
 use crate::help::Page;
 use crate::icons;
 use crate::keys::{Direction, Key};
+use crate::pane::{After, Pane};
 use crate::picture::{self, Picture};
 use crate::read::{self, Content};
 use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
-use crate::ui::{self, ADD, DEL, FAINT, Pane};
+use crate::ui::{self, ADD, DEL, FAINT};
 use crate::watch::Scope;
 use crate::width::{byte_at_col, str_width};
 use crate::{rex, when};
@@ -53,7 +54,7 @@ enum Source {
 struct WorkingFile {
     repo: Repo,
     absolute: PathBuf,
-    stamp: Option<Stamp>,
+    stamp: Option<FileStamp>,
 }
 
 struct Location {
@@ -374,7 +375,7 @@ impl Reader {
     fn load(&mut self) {
         let Source::Working(work) = &mut self.source else { return };
         work.repo.read();
-        let stamp = Stamp::at(&work.absolute);
+        let stamp = FileStamp::at(&work.absolute);
         if !work.repo.ok() {
             return;
         }
@@ -496,21 +497,21 @@ impl Pane for Reader {
         if work.repo.busy() {
             return false;
         }
-        if work.repo.poll(&[]) || (work.repo.ok() && Stamp::at(&work.absolute) != work.stamp) {
+        if work.repo.poll(&[]) || (work.repo.ok() && FileStamp::at(&work.absolute) != work.stamp) {
             self.load();
             self.top = self.top.min(self.last_top());
         }
         true
     }
 
-    fn key(&mut self, key: Key) -> bool {
+    fn key(&mut self, key: Key) -> After {
         let key = match key {
             Key::Char(' ') => Key::PgDn,
             Key::Char('b') => Key::PgUp,
             _ => key,
         };
         match key {
-            Key::Esc => return true,
+            Key::Char('q') | Key::Esc => return After::Leave,
             Key::Char('n') => self.jump(Direction::Next),
             Key::Char('N') => self.jump(Direction::Previous),
             Key::Char('l') | Key::Right => self.pan += 8,
@@ -521,7 +522,7 @@ impl Pane for Reader {
                 }
             }
         }
-        false
+        After::Stay
     }
 
     fn draw(&mut self, s: &mut Screen) {
@@ -686,7 +687,7 @@ mod tests {
         for (line, key) in [(8, 'n'), (45, 'N'), (8, 'n')] {
             let rows = drawn(&mut reader, 45, 12);
             assert!(rows.iter().any(|row| row.contains(&format!("+ row {line} edited"))), "{rows:?}");
-            reader.on_key(Key::Char(key));
+            reader.key(Key::Char(key));
         }
     }
 
@@ -754,7 +755,7 @@ mod tests {
             let rows = drawn(&mut reader, 45, 22);
             let change = format!("+ line {n} edited");
             assert!(rows.iter().any(|row| row.contains(&change)), "{rows:?}");
-            reader.on_key(Key::Char('n'));
+            reader.key(Key::Char('n'));
         }
     }
 
@@ -780,7 +781,7 @@ mod tests {
         let mut screen = Screen::new();
         screen.resize(20, 3);
         for _ in 0..4 {
-            reader.on_key(Key::Right);
+            reader.key(Key::Right);
             reader.draw(&mut screen);
         }
         assert_eq!(reader.pan, 22);

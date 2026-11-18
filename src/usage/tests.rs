@@ -1,3 +1,5 @@
+//! Checks usage frames and provider ingestion with fixtures instead of live data.
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, symlink};
@@ -5,9 +7,11 @@ use std::os::unix::net::UnixStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
+use crate::fs_ops;
+use crate::pane::{Pace, WATCHED};
+use crate::when::HOUR;
 use crate::width::str_width;
 
-use super::time::HOUR;
 use super::*;
 
 const NOW: i64 = 1_795_100_000;
@@ -361,18 +365,18 @@ fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
     fs::create_dir_all(f.root.join(STATE)).unwrap();
     write(&f, CLAUDE, &assistant(now, 2000, 0, 0), now);
     let mut usage = unopened(&f, now);
-    let mut pace = crate::Pace::for_pane(&mut usage, crate::WATCHED, true);
+    let mut pace = Pace::for_pane(&mut usage, WATCHED, true);
     assert_eq!(activity(&usage).today, 2000);
-    assert_eq!(pace.idle, crate::WATCHED);
+    assert_eq!(pace.idle(), WATCHED);
 
     fs::remove_dir(f.root.join("codex")).unwrap();
     pace.look(&mut usage, true);
-    assert_eq!(pace.idle, Duration::from_secs(2));
+    assert_eq!(pace.idle(), Duration::from_secs(2));
     write(&f, CODEX, &codex(now, 61, now + HOUR, "null"), now);
     pace.look(&mut usage, true);
     assert!(frame(&mut usage, 100, 2)[0].contains("61%"));
     // A new root is not guaranteed to be covered by the original watcher.
-    assert_eq!(pace.idle, Duration::from_secs(2));
+    assert_eq!(pace.idle(), Duration::from_secs(2));
 }
 
 #[test]
@@ -592,9 +596,9 @@ fn claude_status_saves_limits_and_prints_a_short_plain_line() {
     let mut usage = open(&f, NOW);
     assert!(frame(&mut usage, 100, 2)[1].contains("week"));
     let budget = &mut Budget::new(16384);
-    let file = files::open_file(&path).unwrap();
-    let mark = Mark::opened(&file).unwrap();
-    let saved = status::saved(file, mark, budget).unwrap();
+    let file = fs_ops::open_read(&path).unwrap();
+    let version = FileVersion::opened(&file).unwrap();
+    let saved = status::saved(file, version, budget).unwrap();
     assert_eq!(saved.windows.base[0].unwrap().observed, NOW);
     assert_eq!(saved.windows.base[1].unwrap().resets, Some(1_795_219_200));
 }
@@ -683,7 +687,7 @@ fn a_claude_save_replaces_the_whole_private_file_at_once() {
     let f = Fixture::folder();
     let path = f.root.join(STATE).join(SAVED_LIMITS);
     assert_eq!(status::run(STATUS, Vec::new(), Some(&path), NOW), 0);
-    let mut before = files::open_file(&path).unwrap();
+    let mut before = fs_ops::open_read(&path).unwrap();
     let old_bytes = fs::read(&path).unwrap();
     let previous = before.metadata().unwrap();
     assert_eq!(previous.mode() & 0o777, 0o600);
@@ -856,7 +860,7 @@ mod omp_limits {
         assert!(!String::from_utf8_lossy(&bytes).contains("key-only-secret"));
         let reading = omp::parse(&bytes, NOW).unwrap();
         let claude = reading.claude.unwrap();
-        assert!(claude.at == Stamp::millis(Value::parse((now - 900).to_string().as_bytes()).unwrap()).unwrap());
+        assert!(claude.at == Timestamp::millis(Value::parse((now - 900).to_string().as_bytes()).unwrap()).unwrap());
         assert!(claude.windows.base[0].is_none());
         let week = claude.windows.base[1].unwrap();
         assert!(week.percent == 27.0 && week.resets == Some(NOW + DAY) && week.observed == NOW - 1);
@@ -1076,7 +1080,7 @@ fn a_small_fuzz_loop_never_panics_on_malformed_input() {
         if let Some(v) = Value::parse(&bytes) {
             let _ = v.fields(["usage", "payload"]);
         }
-        let _ = CodexReading::parse(&bytes, NOW);
+        let _ = Reading::codex(&bytes, NOW);
         let _ = Sample::parse(&bytes);
         assert_eq!(status::run(bytes.as_slice(), Vec::new(), None, NOW), 0);
     }

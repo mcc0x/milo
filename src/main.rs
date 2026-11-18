@@ -1,14 +1,17 @@
-//! Opens the requested pane and runs the terminal event loop.
+//! Parses the command line and dispatches commands.
 
 mod diff;
 #[cfg(test)]
 mod fixture;
+mod fs_ops;
 mod git;
 mod help;
 mod history;
 mod icons;
+mod json;
 mod keys;
 mod outline;
+mod pane;
 mod paths;
 mod picture;
 mod read;
@@ -29,19 +32,12 @@ mod width;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::exit;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
 
 use git::{CommitId, Repo};
-use help::Page;
 use history::History;
-use keys::{Key, receive};
 use outline::Outline;
+use pane::{Open, Pane, Start};
 use reader::Reader;
-use screen::Screen;
-use term::Wait;
-use ui::Pane;
-use watch::Watcher;
 
 const USAGE: &str = "\
 milo — file, history, usage, and reader panes for your terminal
@@ -121,98 +117,6 @@ symbols or MILO_ICONS=off to hide icons.
 https://usemilo.net
 ";
 
-/// Minimum rest after a look if the watcher has reported a change.
-const MIN_LOOK_INTERVAL: Duration = Duration::from_millis(120);
-/// Rest at least this many times the cost of the last look, so repeated
-/// looks at the same cost take at most a fifth of the time.
-const REST: u32 = 4;
-/// Time between looks when the watcher is expected to cover the project.
-const WATCHED: Duration = Duration::from_secs(30);
-/// Time between looks when the watcher cannot cover the project.
-const UNWATCHED: Duration = Duration::from_secs(2);
-
-/// When to look for changes again, with or without a report from the watcher.
-struct Pace {
-    idle: Duration,
-    ended: Instant,
-    took: Duration,
-    reported: bool,
-}
-
-impl Pace {
-    fn new(idle: Duration, now: Instant) -> Self {
-        Self { idle, ended: now, took: Duration::ZERO, reported: false }
-    }
-
-    fn for_pane(pane: &mut dyn Pane, idle: Duration, is_usage: bool) -> Self {
-        let mut pace = Self::new(idle, Instant::now());
-        if is_usage {
-            pace.look(pane, true);
-        }
-        pace
-    }
-
-    fn report_change(&mut self) {
-        self.reported = true;
-    }
-
-    /// Time until the event loop next calls `Pane::check`.
-    fn until_look(&self, now: Instant) -> Duration {
-        let rest = if self.reported { MIN_LOOK_INTERVAL } else { self.idle }.max(self.took * REST);
-        rest.saturating_sub(now.saturating_duration_since(self.ended))
-    }
-
-    /// An unsettled look, say during a checkout, is retried as if a change was reported.
-    fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
-        (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
-    }
-
-    fn look(&mut self, pane: &mut dyn Pane, is_usage: bool) {
-        let started = Instant::now();
-        let settled = pane.check();
-        self.finish_look(started, Instant::now(), settled);
-        if is_usage && self.idle == WATCHED && !pane.watch_scope().complete {
-            self.idle = UNWATCHED;
-        }
-    }
-}
-
-fn draw_pane(pane: &mut dyn Pane, screen: &mut Screen, help: Option<&mut Page>) {
-    if let Some(page) = help {
-        page.draw(screen);
-    } else {
-        pane.draw(screen);
-    }
-}
-
-/// Routes terminal replies and help keys before the pane sees them.
-/// Returns true when the program should quit.
-fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> bool {
-    match key {
-        Key::Ctrl(b'c') | Key::Eof => return true,
-        Key::Background(rgb) => screen.set_background(rgb),
-        Key::Pictures(able) => screen.set_pictures(able),
-        Key::CellSize(width, height) => screen.set_cell_size(width, height),
-        Key::Answered => screen.answered(),
-        // The pane still sees focus changes while its help is up.
-        Key::Focus(_) => return pane.on_key(key),
-        _ => {
-            if let Some(page) = help {
-                if !page.scroll(key, screen.h) {
-                    *help = None;
-                }
-            } else if key == Key::Char('?') {
-                if Page::fits(screen) {
-                    *help = Some(pane.help());
-                }
-            } else {
-                return pane.on_key(key);
-            }
-        }
-    }
-    false
-}
-
 /// Ends the program with a message. A path in it may hold anything, so
 /// control characters are left out.
 fn fail(message: &str) -> ! {
@@ -291,24 +195,43 @@ fn command<'a>(
     })
 }
 
-fn open_pane(command: Command<'_>) -> Result<Box<dyn Pane>, String> {
+/// The runner opens panes after installing signal handlers; tests draw without a terminal.
+fn dispatch(command: Command<'_>, run: impl FnOnce(Start, &Open<'_>) -> Result<(), String>) -> Result<(), String> {
     match command {
-        Command::Outline(path) => Ok(Box::new(Outline::new(open_repo(path)?, rex::inside()))),
-        Command::Path(path) => {
-            let repo = open_repo(Some(path))
-                .map_err(|why| format!("{why}; commands: outline, history, view, usage, setup"))?;
-            Ok(Box::new(Outline::new(repo, rex::inside())))
+        Command::Outline(path) => run(Start::Loaded, &|| open_outline(path)),
+        Command::Path(path) => run(Start::Loaded, &|| {
+            open_outline(Some(path)).map_err(|why| format!("{why}; commands: outline, history, view, usage, setup"))
+        }),
+        Command::History(path) => run(Start::Loaded, &|| Ok(Box::new(History::new(open_repo(path)?, rex::inside())))),
+        Command::View { file, commit } => run(Start::Loaded, &|| {
+            let path = Path::new(file);
+            let reader = if let Some(id) = commit {
+                Reader::at_commit(path, id)?
+            } else {
+                Reader::open(path).ok_or_else(|| format!("{} is not in a directory", path.display()))?
+            };
+            Ok(Box::new(reader))
+        }),
+        Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
+        Command::Setup { offered } => {
+            let start = if offered { Start::Offer(|| open_outline(None)) } else { Start::Loaded };
+            run(start, &|| Ok(Box::new(setup::Setup::open(offered))))
         }
-        Command::History(path) => Ok(Box::new(History::new(open_repo(path)?, rex::inside()))),
-        Command::View { file, commit: Some(id) } => Ok(Box::new(Reader::at_commit(Path::new(file), id)?)),
-        Command::View { file, commit: None } => Ok(Box::new(
-            Reader::open(Path::new(file))
-                .ok_or_else(|| format!("{} is not in a directory", Path::new(file).display()))?,
-        )),
-        Command::Usage => Ok(Box::new(usage::Usage::open())),
-        Command::Setup { offered } => Ok(Box::new(setup::Setup::open(offered))),
-        _ => unreachable!("non-pane commands are handled first"),
+        Command::Listen(stop) => exit(setup::listen(stop)),
+        Command::ClaudeStatus => exit(usage::claude_status()),
+        Command::Help => {
+            print!("{USAGE}");
+            Ok(())
+        }
+        Command::Version => {
+            println!("milo {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
     }
+}
+
+fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
+    Ok(Box::new(Outline::new(open_repo(path)?, rex::inside())))
 }
 
 fn main() {
@@ -318,99 +241,22 @@ fn main() {
     let rest: Vec<_> = args.collect();
     let command =
         command(first.as_deref(), second.as_deref(), &rest, setup::offer_once).unwrap_or_else(|why| fail(&why));
-    match command {
-        Command::Help => return print!("{USAGE}"),
-        Command::Version => return println!("milo {}", env!("CARGO_PKG_VERSION")),
-        Command::Listen(stop) => exit(setup::listen(stop)),
-        Command::ClaudeStatus => exit(usage::claude_status()),
-        _ => {}
-    }
-    let signal = term::listen();
-    let is_usage = command == Command::Usage;
-    let mut offered = matches!(command, Command::Setup { offered: true });
-    let mut pane = open_pane(command).unwrap_or_else(|why| fail(&why));
-    let watch_pane = |pane: &dyn Pane| {
-        let scope = pane.watch_scope();
-        let watcher = Watcher::new(&scope);
-        let idle = if watcher.fd().is_some() && scope.complete { WATCHED } else { UNWATCHED };
-        (watcher, idle)
-    };
-    let (mut watcher, idle) = watch_pane(pane.as_ref());
-    // Asked to stop while still starting up: there is nothing to put back.
-    if term::TERMINATED.load(Ordering::Relaxed) {
-        exit(1);
-    }
-    let mut keyboard = match term::enter() {
-        Ok(keyboard) => keyboard,
-        Err(e) => fail(&format!("cannot use this terminal: {e}")),
-    };
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        term::leave();
-        hook(info);
-    }));
-
-    let mut screen = Screen::new();
-    let mut help = None;
-    let mut keys = Vec::new();
-    let mut pace = Pace::for_pane(pane.as_mut(), idle, is_usage);
-    'run: while !term::TERMINATED.load(Ordering::Relaxed) {
-        if term::RESIZED.swap(false, Ordering::Relaxed) {
-            let (w, h) = term::size();
-            screen.resize(w, h);
-            if !Page::fits(&screen) {
-                help = None;
-            }
-        }
-        draw_pane(pane.as_mut(), &mut screen, help.as_mut());
-        screen.flush();
-
-        let until_look = pace.until_look(Instant::now());
-        let wait = if help.is_some() {
-            until_look
-        } else {
-            pane.next_frame().map_or(until_look, |frame| frame.min(until_look))
-        };
-        let timeout_ms = i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX);
-        match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
-            Wait::Input => {
-                receive(&mut keyboard, &mut keys);
-                for key in keys.drain(..) {
-                    if route_key(pane.as_mut(), &mut screen, &mut help, key) {
-                        if offered && matches!(key, Key::Char('q') | Key::Esc) {
-                            pane = open_pane(Command::Outline(None)).unwrap_or_else(|why| {
-                                term::leave();
-                                fail(&why)
-                            });
-                            let (next_watcher, next_idle) = watch_pane(pane.as_ref());
-                            watcher = next_watcher;
-                            pace = Pace::new(next_idle, Instant::now());
-                            offered = false;
-                            continue;
-                        }
-                        break 'run;
-                    }
-                }
-            }
-            Wait::Woken => {
-                watcher.drain();
-                pace.report_change();
-            }
-            Wait::Timeout | Wait::Interrupted => {}
-        }
-        if pace.until_look(Instant::now()).is_zero() {
-            pace.look(pane.as_mut(), is_usage);
-        }
-    }
-    // A picture is not part of the text, so it is taken down by name.
-    screen.clear();
-    screen.flush();
-    term::leave();
+    dispatch(command, pane::run).unwrap_or_else(|why| fail(&why));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::Screen;
+
+    fn open_pane(command: Command<'_>) -> Result<Box<dyn Pane>, String> {
+        let mut pane = None;
+        dispatch(command, |_, open| {
+            pane = Some(open()?);
+            Ok(())
+        })?;
+        Ok(pane.expect("tests dispatch only pane commands"))
+    }
 
     fn command_frame(first: Option<&OsStr>, second: Option<&OsStr>) -> Vec<String> {
         let command = command(first, second, &[], || false).unwrap();
@@ -523,106 +369,5 @@ mod tests {
         };
         assert!(why.contains("not-a-milo-command") && why.contains("outline, history, view"), "{why}");
         assert_eq!(why.lines().count(), 1);
-    }
-
-    #[test]
-    fn quiet_projects_get_a_look_even_without_a_report() {
-        let start = Instant::now();
-        for (idle, seconds) in [(WATCHED, 30), (UNWATCHED, 2)] {
-            let pace = Pace::new(idle, start);
-            assert_eq!(pace.until_look(start + Duration::from_secs(1)), Duration::from_secs(seconds - 1));
-            assert_eq!(pace.until_look(start + Duration::from_secs(seconds)), Duration::ZERO);
-        }
-    }
-
-    #[test]
-    fn a_report_is_due_immediately_if_the_last_look_has_had_enough_rest() {
-        let start = Instant::now();
-        let mut pace = Pace::new(WATCHED, start);
-        pace.report_change();
-        assert_eq!(pace.until_look(start + Duration::from_millis(20)), Duration::from_millis(100));
-        assert_eq!(pace.until_look(start + Duration::from_secs(1)), Duration::ZERO);
-    }
-
-    #[test]
-    fn a_slow_look_rests_four_times_as_long_even_when_changes_are_reported() {
-        let start = Instant::now();
-        let ended = start + Duration::from_secs(1);
-        let mut pace = Pace::new(UNWATCHED, start);
-        pace.finish_look(start, ended, true);
-        assert_eq!(pace.until_look(ended), Duration::from_secs(4));
-        pace.report_change();
-        assert_eq!(pace.until_look(ended + Duration::from_secs(1)), Duration::from_secs(3));
-        assert_eq!(pace.until_look(ended + Duration::from_secs(4)), Duration::ZERO);
-    }
-
-    #[test]
-    fn an_unsettled_look_is_retried_soon_and_a_settled_look_goes_back_to_idle() {
-        let start = Instant::now();
-        let ended = start + Duration::from_millis(10);
-        let mut pace = Pace::new(WATCHED, start);
-        pace.finish_look(start, ended, false);
-        assert_eq!(pace.until_look(ended), Duration::from_millis(120));
-        let retry = ended + Duration::from_millis(120);
-        assert_eq!(pace.until_look(retry), Duration::ZERO);
-        pace.finish_look(retry, retry + Duration::from_millis(10), true);
-        assert_eq!(pace.until_look(retry + Duration::from_millis(10)), Duration::from_secs(30));
-    }
-
-    #[test]
-    fn help_scrolls_by_a_page_and_escape_restores_the_outline() {
-        let f = fixture::Fixture::new();
-        f.write("page.txt", "a file\n");
-        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
-        let mut screen = Screen::sized(65, 12);
-        let mut help = None;
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        let before = screen.text();
-
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Char('?')));
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        let first = screen.text();
-        assert!(first[0].trim_start().starts_with("Files"));
-        assert!(first[11].contains("Esc close") && first[11].ends_with("q close"));
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::PgDn));
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        assert_eq!(screen.text()[0], first[10]);
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::PgUp));
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        assert_eq!(screen.text(), first);
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Esc));
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        assert_eq!(screen.text(), before);
-    }
-
-    #[test]
-    fn help_cannot_blank_a_one_row_pane() {
-        let f = fixture::Fixture::folder();
-        f.write("page.txt", "a file\n");
-        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
-        let mut screen = Screen::sized(40, 1);
-        let mut help = None;
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        let before = screen.text();
-        assert!(before[0].contains("page.txt"));
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Char('?')));
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        assert_eq!(screen.text(), before);
-        assert!(help.is_none());
-    }
-
-    #[test]
-    fn help_uses_the_nested_reader_page_and_terminal_quit_bypasses_it() {
-        let f = fixture::Fixture::new();
-        f.write("page.txt", "a file\n");
-        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
-        let mut screen = Screen::sized(65, 12);
-        let mut help = None;
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Enter));
-        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Char('?')));
-        draw_pane(&mut pane, &mut screen, help.as_mut());
-        assert!(screen.text()[0].trim_start().starts_with("Lines"));
-        assert!(route_key(&mut pane, &mut screen, &mut help, Key::Ctrl(b'c')));
-        assert!(route_key(&mut pane, &mut screen, &mut help, Key::Eof));
     }
 }
