@@ -151,6 +151,9 @@ impl Outline {
                     sum.add += f.add;
                     sum.del += f.del;
                 }
+                // A folder with pending work opens, and then stays open: a
+                // commit must not fold the tree away under the reader.
+                self.expanded.insert(dir.to_string());
                 if !f.committed {
                     self.uncommitted.insert(dir.to_string());
                 }
@@ -185,14 +188,13 @@ impl Outline {
     }
 
     fn is_open(&self, path: &str) -> bool {
-        !self.collapsed.contains(path)
-            && (self.all_open || self.expanded.contains(path) || self.sums.contains_key(path))
+        !self.collapsed.contains(path) && (self.all_open || self.expanded.contains(path))
     }
 
     /// Recomputes the visible rows, keeping the cursor on `selected`.
     fn relayout(&mut self, selected: Option<String>) {
-        let (expanded, collapsed, sums, all) = (&self.expanded, &self.collapsed, &self.sums, self.all_open);
-        let open = |p: &str| !collapsed.contains(p) && (all || expanded.contains(p) || sums.contains_key(p));
+        let (expanded, collapsed, all) = (&self.expanded, &self.collapsed, self.all_open);
+        let open = |p: &str| !collapsed.contains(p) && (all || expanded.contains(p));
         self.tree.layout(open, self.changed_only);
         let at = selected.and_then(|p| self.tree.row_of(&p)).unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
