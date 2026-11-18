@@ -15,11 +15,34 @@
   <code>one dependency</code> ·
   <code>570 KB binary</code> ·
   <code>first frame in ~55 ms</code> ·
-  <code>read-only</code> ·
+  <code>does not write to projects</code> ·
   <code>MIT</code>
 </p>
 
 ---
+
+## Set it up in Rex
+
+1. In your Rex shell, run `milo setup`.
+2. Choose your panes and press `s` to save. Press `a` to try them in this tab.
+
+```text
+┌─────────┬────────────────────┐
+│         │ Usage (two rows)   │
+│ Outline ├────────────────────┤
+│         │                    │
+├─────────┤ Your work          │
+│ History │                    │
+└─────────┴────────────────────┘
+```
+
+Your shell keeps the keyboard. The Rex command palette gets **Milo: Arrange This Tab** (`milo_layout`), **Milo: Add the Outline** (`milo_outline`), **Milo: Add the History** (`milo_history`), **Milo: Add the Usage Strip** (`milo_usage`), and **Milo: Close Panes in This Tab** (`milo_close`). You can bind any of them in your own `init.lua`, for example `rex.bind("cmd+shift+m", "milo_layout")`.
+
+Turn on **Arrange every new tab** to lay out new shells automatically. Tabs opened to run a command and tabs with their own layout are left alone. Turn the same switch off and save to stop arranging new tabs. Switch all three panes and the new-tab switch off and save to remove the Rex setup.
+
+Setup adds two marked lines to Rex's `init.lua`, then asks Rex to reload. It keeps the layout and new-tab script in `~/.config/milo/rex.lua` and `~/.config/milo/listener.lua` (or under `$XDG_CONFIG_HOME/milo`), and remembers setup and listener state in `~/.local/state/milo` (or `$XDG_STATE_HOME/milo`). It does not change your existing actions or keys. **Show Claude Code limits** is optional: it adds a status line to `~/.claude/settings.json` only if there is none. Milo removes that line when you turn the option back off, but never replaces someone else's status line.
+
+Outside Rex, the panes can still be run by themselves and setup can still enable Claude Code limits.
 
 ## Why
 
@@ -104,10 +127,14 @@ cp target/release/milo ~/.local/bin/     # or anywhere on your PATH
 ## Use
 
 ```sh
-milo                     # shorthand for milo outline
-milo outline ~/code/app  # the file tree
+milo                     # the outline; offers setup once in an unconfigured Rex
+milo outline ~/code/app   # the file tree
 milo history [PATH]      # recent commits
+milo usage               # usage at a glance
+milo setup               # choose a Rex layout and optionally show Claude Code limits
 milo view FILE           # read one file
+milo listen [--stop]     # start or stop the Rex new-tab listener
+milo claude-status       # the status line command called by Claude Code
 ```
 
 Outline and history default to the current directory and use the project root inside a git repository. In a plain folder the outline shows the files and history says there is no history. To outline a directory named like a command, give its path explicitly: `milo ./history`.
@@ -245,6 +272,12 @@ The Rust modules and their tests live under `src/`:
 | `syntax.rs` | the scanner that finds what to colour |
 | `syntax/langs.rs` | each language's rules, as data |
 | `history.rs` | the live commit list and the files a commit touched |
+| `usage.rs`, `usage/` | the usage strip and the Claude Code status-line command |
+| `setup.rs` | setup choices, sketch, keys and help |
+| `setup/install.rs`, `setup/files.rs` | generated files and safe installation or removal |
+| `setup/actions.lua`, `setup/listener.lua` | Rex action and new-tab script templates |
+| `setup/settings.rs`, `setup/lock.rs` | editing Claude's status line and keeping one Rex listener |
+| `paths.rs` | where milo's configuration and state live |
 | `help.rs` | the help pages |
 | `git.rs` | what is known about a repository, and when to ask again |
 | `git/run.rs` | running git safely: read-only, hardened, with a deadline |
@@ -260,7 +293,7 @@ The Rust modules and their tests live under `src/`:
 | `icons.rs` | file and folder symbols |
 | `read.rs` | reading a file without being fooled by what it is |
 | `picture.rs` | turning a picture file into something the terminal can show |
-| `rex.rs` | opening the reader in a floating Rex window |
+| `rex.rs` | calling Rex to open the reader, install actions, and listen for new tabs |
 | `when.rs` | calendar days and short ages |
 | `fixture.rs` | throwaway repositories for tests |
 
@@ -270,7 +303,9 @@ The Rust modules and their tests live under `src/`:
 
 Looking at a project should never run anything from it. A repository's own configuration can name programs for git to start: hooks, content filters, an external diff tool, a file-system monitor, a transport for fetching missing objects. milo switches each of them off for every git command it runs, gives every command a deadline, and caps what it will read back.
 
-It also never follows a symbolic link to show you a file from outside the project, never opens a device or a pipe as if it were a file, and strips control characters from file names, branch names and commit messages before they reach your terminal. And it only ever reads: milo does not change a repository.
+It also never follows a symbolic link to show you a file from outside the project, never opens a device or a pipe as if it were a file, and strips control characters from file names, branch names and commit messages before they reach your terminal. Milo does not change a repository.
+
+Saving in setup changes only milo's configuration and state, the marked block in Rex's `init.lua`, and, if you opt in, the status line in Claude Code's settings. It does not rewrite your other settings or key bindings. The Claude Code status-line command saves the usage limits that Claude Code sends it, not prompts or replies.
 
 ## Requirements
 

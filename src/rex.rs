@@ -1,11 +1,48 @@
-//! Opens and replaces a floating reader through the Rex command line.
+//! Calls Rex for floating readers, setup, and the new-tab listener.
 
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn rex(args: &[&str]) -> Option<String> {
     let out = Command::new("rex").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The shell that opened setup, even if focus has moved somewhere else.
+pub struct Target {
+    pub session: OsString,
+    pub block: OsString,
+}
+
+impl Target {
+    pub fn current() -> Option<Self> {
+        Some(Self { session: std::env::var_os("REX_SESSION")?, block: std::env::var_os("REX_BLOCK")? })
+    }
+}
+
+/// Setup reports its own messages, not process output that can contain paths or settings.
+pub fn run(args: &[&OsStr]) -> bool {
+    let mut command = Command::new("rex");
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if args.starts_with(&[OsStr::new("config"), OsStr::new("check")]) {
+        command.env("MILO_CHECKING_REX", "1");
+    }
+    command.status().is_ok_and(|status| status.success())
+}
+
+/// Replaces milo without releasing the listener's inherited lock.
+pub fn exec_listener(script: &Path) -> io::Error {
+    Command::new("rex")
+        .arg("do")
+        .arg(script)
+        .arg("--all")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .exec()
 }
 
 /// A string as a JSON literal.

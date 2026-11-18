@@ -9,15 +9,18 @@ mod history;
 mod icons;
 mod keys;
 mod outline;
+mod paths;
 mod picture;
 mod read;
 mod reader;
 mod rex;
 mod screen;
+mod setup;
 mod syntax;
 mod term;
 mod tree;
 mod ui;
+mod usage;
 mod walk;
 mod watch;
 mod when;
@@ -41,15 +44,22 @@ use ui::Pane;
 use watch::Watcher;
 
 const USAGE: &str = "\
-milo — a file outline, commit history, and read-only file reader
+milo — file, history, usage, and reader panes for your terminal
 
 Usage: milo outline [PATH]
        milo history [PATH]
+       milo usage
+       milo setup
        milo view FILE
        milo [PATH]
+       milo listen [--stop]
+       milo claude-status
        milo --help | --version
 
 PATH defaults to the current directory. Bare milo [PATH] opens the outline.
+Inside Rex, a bare milo offers setup the first time if no layout is installed.
+milo setup saves a Rex layout and can enable Claude Code usage limits.
+milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
 its recent commits. Both stay up to date on their own. Elsewhere the outline
@@ -197,42 +207,88 @@ fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Command<'a> {
+    Outline(Option<&'a OsStr>),
+    History(Option<&'a OsStr>),
+    View(&'a OsStr),
+    Path(&'a OsStr),
+    Usage,
+    Setup,
+    Listen(bool),
+    ClaudeStatus,
+    Help,
+    Version,
+}
+
 /// Only known command words are text; a path can hold arbitrary bytes.
-fn open_pane(first: Option<&OsStr>, second: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
-    match (first.and_then(OsStr::to_str), second) {
-        (Some("outline"), path) => Ok(Box::new(Outline::new(open_repo(path)?, rex::inside()))),
-        (Some("history"), path) => Ok(Box::new(History::new(open_repo(path)?))),
-        (Some("view"), Some(file)) => Ok(Box::new(
+fn command<'a>(
+    first: Option<&'a OsStr>,
+    second: Option<&'a OsStr>,
+    offer_setup: impl FnOnce() -> bool,
+) -> Result<Command<'a>, String> {
+    Ok(match (first.and_then(OsStr::to_str), second) {
+        (Some("outline"), path) => Command::Outline(path),
+        (Some("history"), path) => Command::History(path),
+        (Some("view"), Some(file)) => Command::View(file),
+        (Some("view"), None) => return Err("which file? milo view FILE".to_string()),
+        (Some("setup"), None) => Command::Setup,
+        (Some("usage"), None) => Command::Usage,
+        (Some("listen"), None) => Command::Listen(false),
+        (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
+        (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
+        (Some("claude-status"), None) => Command::ClaudeStatus,
+        (Some("setup" | "usage" | "claude-status"), Some(_)) => {
+            return Err("unexpected argument; see milo --help".to_string());
+        }
+        (Some("-h" | "--help"), None) => Command::Help,
+        (Some("-V" | "--version"), None) => Command::Version,
+        (Some(option), _) if option.starts_with('-') => return Err(format!("no option {option}; see milo --help")),
+        (_, None) => match first {
+            Some(path) => Command::Path(path),
+            None if offer_setup() => Command::Setup,
+            None => Command::Outline(None),
+        },
+        _ => return Err("expected a command or path; see milo --help".to_string()),
+    })
+}
+
+fn open_pane(command: Command<'_>) -> Result<Box<dyn Pane>, String> {
+    match command {
+        Command::Outline(path) => Ok(Box::new(Outline::new(open_repo(path)?, rex::inside()))),
+        Command::Path(path) => {
+            let repo = open_repo(Some(path))
+                .map_err(|why| format!("{why}; commands: outline, history, view, usage, setup"))?;
+            Ok(Box::new(Outline::new(repo, rex::inside())))
+        }
+        Command::History(path) => Ok(Box::new(History::new(open_repo(path)?))),
+        Command::View(file) => Ok(Box::new(
             Reader::open(Path::new(file))
                 .ok_or_else(|| format!("{} is not in a directory", Path::new(file).display()))?,
         )),
-        (Some("view"), None) => Err("which file? milo view FILE".to_string()),
-        (Some(option), _) if option.starts_with('-') => Err(format!("no option {option}; see milo --help")),
-        (_, None) => open_default(first),
-        _ => Err("expected outline, history, or view; see milo --help".to_string()),
+        Command::Usage => Ok(Box::new(usage::Usage::open())),
+        Command::Setup => Ok(Box::new(setup::Setup::open())),
+        _ => unreachable!("non-pane commands are handled first"),
     }
 }
 
-fn open_default(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
-    open_pane(Some(OsStr::new("outline")), path).map_err(|why| format!("{why}; commands: outline, history, view"))
-}
-
 fn main() {
-    let signal = term::listen();
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
     let second = args.next();
     if args.next().is_some() {
         fail("too many arguments; see milo --help");
     }
-    if second.is_none() {
-        match first.as_deref().and_then(OsStr::to_str) {
-            Some("-h" | "--help") => return print!("{USAGE}"),
-            Some("-V" | "--version") => return println!("milo {}", env!("CARGO_PKG_VERSION")),
-            _ => {}
-        }
+    let command = command(first.as_deref(), second.as_deref(), setup::offer_once).unwrap_or_else(|why| fail(&why));
+    match command {
+        Command::Help => return print!("{USAGE}"),
+        Command::Version => return println!("milo {}", env!("CARGO_PKG_VERSION")),
+        Command::Listen(stop) => exit(setup::listen(stop)),
+        Command::ClaudeStatus => exit(usage::claude_status()),
+        _ => {}
     }
-    let mut pane = open_pane(first.as_deref(), second.as_deref()).unwrap_or_else(|why| fail(&why));
+    let signal = term::listen();
+    let mut pane = open_pane(command).unwrap_or_else(|why| fail(&why));
     let (watcher, idle) = {
         let scope = pane.watch_scope();
         let watcher = Watcher::new(&scope);
@@ -304,7 +360,8 @@ mod tests {
     use super::*;
 
     fn command_frame(first: Option<&OsStr>, second: Option<&OsStr>) -> Vec<String> {
-        let mut pane = open_pane(first, second).unwrap();
+        let command = command(first, second, || false).unwrap();
+        let mut pane = open_pane(command).unwrap();
         let mut screen = Screen::sized(65, 12);
         pane.draw(&mut screen);
         screen.text()
@@ -336,6 +393,29 @@ mod tests {
     }
 
     #[test]
+    fn setup_usage_and_helper_commands_reach_separate_destinations() {
+        for (name, arg, expected) in [
+            ("setup", None, Command::Setup),
+            ("usage", None, Command::Usage),
+            ("claude-status", None, Command::ClaudeStatus),
+            ("listen", None, Command::Listen(false)),
+            ("listen", Some("--stop"), Command::Listen(true)),
+        ] {
+            assert_eq!(
+                command(Some(OsStr::new(name)), arg.map(OsStr::new), || panic!("explicit commands never offer setup")),
+                Ok(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn only_bare_milo_can_offer_setup() {
+        assert_eq!(command(None, None, || true), Ok(Command::Setup));
+        let directory = OsStr::new("./work");
+        assert_eq!(command(Some(directory), None, || panic!("path was explicit")), Ok(Command::Path(directory)));
+    }
+
+    #[test]
     fn a_directory_named_like_a_command_is_reachable_by_path() {
         let f = fixture::Fixture::folder();
         f.write("history/page.txt", "a file\n");
@@ -347,7 +427,8 @@ mod tests {
 
     #[test]
     fn an_unknown_word_names_the_commands() {
-        let Err(why) = open_pane(Some(OsStr::new("not-a-milo-command")), None) else {
+        let command = command(Some(OsStr::new("not-a-milo-command")), None, || false).unwrap();
+        let Err(why) = open_pane(command) else {
             panic!("unknown word opened a pane");
         };
         assert!(why.contains("not-a-milo-command") && why.contains("outline, history, view"), "{why}");

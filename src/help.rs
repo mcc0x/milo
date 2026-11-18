@@ -5,17 +5,19 @@ use crate::keys::Key;
 use crate::screen::{Screen, Style};
 use crate::ui::{self, ADD, DEL, FAINT};
 
-/// One row of a page: pieces of text, each in its own style.
-type Row = Vec<(&'static str, Style)>;
+/// One row of a page: pieces of text, each in its own style. A row must
+/// fit a pane 28 columns wide: 26 characters at most.
+pub type Row = Vec<(&'static str, Style)>;
 
 const FOOTER: &str = "↑↓ scroll · Esc closes";
 
-fn heading(text: &'static str) -> Row {
+pub fn heading(text: &'static str) -> Row {
     vec![(text, Style::PLAIN.bold())]
 }
 
-/// Leave the sample's padding plain so a strike stops at the last letter.
-fn sample(text: &'static str, st: Style, meaning: &'static str) -> Row {
+/// A sample drawn as it appears on screen, and what it means. The
+/// sample's padding stays plain so a strike stops at the last letter.
+pub fn sample(text: &'static str, st: Style, meaning: &'static str) -> Row {
     let shown = text.trim_end();
     vec![
         ("  ", Style::PLAIN),
@@ -26,8 +28,14 @@ fn sample(text: &'static str, st: Style, meaning: &'static str) -> Row {
     ]
 }
 
-fn key(keys: &'static str, does: &'static str) -> Row {
+/// A key, or a few, and what it does.
+pub fn key(keys: &'static str, does: &'static str) -> Row {
     vec![("  ", Style::PLAIN), (keys, Style::PLAIN), ("  ", Style::PLAIN), (does, FAINT)]
+}
+
+/// A line of plain explanation.
+pub fn note(text: &'static str) -> Row {
+    vec![("  ", Style::PLAIN), (text, FAINT)]
 }
 
 /// The page for the outline. Without git there are no colours to explain.
@@ -121,6 +129,11 @@ pub struct Page {
 }
 
 impl Page {
+    /// A page of a pane's own making, from the row builders above.
+    pub fn new(rows: Vec<Row>) -> Self {
+        Self { rows, top: 0 }
+    }
+
     pub fn outline(git: bool) -> Self {
         Self { rows: outline(git), top: 0 }
     }

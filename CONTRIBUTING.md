@@ -12,6 +12,7 @@ cd milo
 cargo build --release
 ./target/release/milo outline    # the outline, in this repository
 ./target/release/milo history    # recent commits
+./target/release/milo usage      # usage at a glance
 ./target/release/milo view src/main.rs
 ```
 
@@ -64,6 +65,9 @@ The README has a one-line description of every module. The short version:
 | the history heading, commit list or opened files | `src/history.rs` |
 | the reader | `src/reader.rs`, and `src/diff.rs` for how a diff becomes lines |
 | which git commands run, and how safely | `src/git/run.rs` |
+| Rex setup and its sketch | `src/setup.rs` |
+| how setup saves or removes settings | `src/setup/install.rs`, `src/setup/files.rs` |
+| the Lua actions and the new-tab listener | `src/setup/actions.lua`, `src/setup/listener.lua` |
 | what is read from git's output | `src/git/parse.rs` |
 | what milo remembers about a repository | `src/git.rs` |
 | how the screen is drawn and what a style is | `src/screen.rs` |
@@ -76,6 +80,20 @@ The README has a one-line description of every module. The short version:
 Put the screen in a new module under `src/` and implement `ui::Pane`. The trait gives the shared loop a frame to draw, keys to pass on, a help page, and a place to watch and check for changes. A pane with timed redraws can also implement `next_frame`.
 
 Declare the module in `src/main.rs`, add one arm to `open_pane`, and list the command in `--help`. Do not add a second event loop.
+
+### Changing the Rex layout
+
+The two Lua templates are in `src/setup/`. `install.rs` adds the choices and
+proportions above the actions in `rex.lua`, and the path to that file above
+the handler in `listener.lua`. Both use the same layout code.
+
+Run `cargo test setup::` for generation, screen and installation tests. The
+tests use throwaway settings and a stand-in for Rex. To check a generated file
+with Rex itself, copy it to a scratch directory and run
+`MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`; the flag prevents the
+new-tab listener from starting during the check. Check both files and try the
+different pane choices. Only try a reload or the actions on a disposable Rex
+configuration and session, never as part of the automated tests.
 
 ### Adding a language to the reader
 
