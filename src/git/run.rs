@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use super::{DIFF_LIMIT, Kind, PendingFile};
 use crate::term;
 
 /// Maximum output kept from a git command without a smaller per-command limit.
@@ -26,7 +27,7 @@ pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     real.filter(|path| path.is_file()).unwrap_or_else(|| PathBuf::from("git"))
 });
 
-pub(super) enum OutputError {
+pub(crate) enum OutputError {
     TooLarge,
     Failed,
 }
@@ -39,24 +40,44 @@ pub(super) fn limited_output(root: &Path, guard: &[String], args: &[&str], limit
     checked_output(command(root, guard, args), limit)
 }
 
+pub(super) enum CommitDiff<'a> {
+    Files,
+    File(&'a PendingFile),
+}
+
 /// Reads one commit against its first parent, or the empty tree for a root commit.
-pub(super) fn commit_diff(root: &Path, guard: &[String], hash: &str) -> Option<Vec<u8>> {
-    let args = [
-        "diff-tree",
-        "--root",
-        "--diff-merges=first-parent",
-        "--no-commit-id",
-        "--no-ext-diff",
-        "--no-textconv",
-        "-r",
-        "-M",
-        "--raw",
-        "--numstat",
-        "-z",
-        hash,
-        "--",
-    ];
-    output(root, guard, &args)
+pub(super) fn commit_diff(
+    root: &Path, guard: &[String], hash: &str, diff: CommitDiff<'_>,
+) -> Result<Vec<u8>, OutputError> {
+    let mut cmd = command(root, guard, &[
+        "diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id", "--no-color",
+        "--no-ext-diff", "--no-textconv", "--submodule=short", "-r", "-M",
+    ]);
+    let limit = match diff {
+        CommitDiff::Files => {
+            cmd.args(["--raw", "--numstat", "-z", "--end-of-options", hash, "--"]);
+            OUTPUT_LIMIT
+        }
+        CommitDiff::File(file) => {
+            // A path also matches children. When a file becomes a folder or vice
+            // versa, keep its addition or removal, not the changes below it.
+            let filter = match file.kind {
+                Kind::Added => "--diff-filter=AC",
+                Kind::Deleted => "--diff-filter=D",
+                Kind::Renamed => "--diff-filter=R",
+                _ => "--diff-filter=MT",
+            };
+            cmd.args([
+                "--unified=1000000", "--output-indicator-new=+", "--output-indicator-old=-",
+                "--output-indicator-context= ", filter, "--end-of-options", hash, "--", &file.path,
+            ]);
+            if let Some(from) = &file.from {
+                cmd.arg(from);
+            }
+            DIFF_LIMIT
+        }
+    };
+    checked_output(cmd, limit)
 }
 
 /// A missing ref or unrelated histories can give no object and exit with code 1.

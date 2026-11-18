@@ -1,10 +1,11 @@
-//! Shows one file read-only, with code colours and a line diff of pending work.
+//! Shows one file read-only, with code colours and a line diff.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::diff::{self, FileDiff, Line, LineKind};
-use crate::git::{Kind, Repo, Stamp};
+use crate::git::run::OutputError;
+use crate::git::{Commit, CommitId, Kind, PendingFile, Repo, Stamp};
 use crate::help::Page;
 use crate::icons;
 use crate::keys::{Direction, Key};
@@ -13,6 +14,8 @@ use crate::read::{self, Content};
 use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
 use crate::ui::{self, ADD, DEL, FAINT, Pane};
+use crate::watch::Scope;
+use crate::{rex, when};
 use crate::width::{byte_at_col, str_width};
 
 /// How many bytes to read when there is no diff text to show.
@@ -21,14 +24,14 @@ const LIMIT: u64 = 2 << 20;
 const LEAD: usize = 3;
 /// Extra room in the scan limit for a token that crosses the right edge.
 const LEAD_OUT: usize = 32;
+const NOT_TEXT: &str = "Not text, so there is nothing to show.";
 
 /// The file open in a pane and the position from which it is shown.
 pub struct Reader {
-    repo: Repo,
+    source: Source,
     /// The name git uses, relative to the repository root.
     path: String,
-    absolute: PathBuf,
-    stamp: Option<Stamp>,
+CUT_SENTINEL
     /// The file's status, if it has pending work.
     kind: Kind,
     body: Body,
@@ -40,6 +43,55 @@ pub struct Reader {
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
+}
+
+/// A working file can change; a commit needs only its name and date.
+enum Source {
+    Working(Box<WorkingFile>),
+    Committed { short_id: String, time: i64 },
+}
+
+struct WorkingFile {
+    repo: Repo,
+    absolute: PathBuf,
+    stamp: Option<Stamp>,
+}
+
+/// A file selected in a pane that can open the reader.
+pub enum ReadFile<'a> {
+    Working(&'a str),
+    Committed { commit: &'a Commit, file: &'a PendingFile },
+}
+
+/// Opens a file here, or replaces the last floating reader in Rex.
+pub enum OpenReader {
+    Here,
+    Floating { layer: Option<String> },
+}
+
+impl OpenReader {
+    pub fn new(inside_rex: bool) -> Self {
+        if inside_rex { Self::Floating { layer: None } } else { Self::Here }
+    }
+
+    pub fn open(&mut self, repo: &Repo, target: ReadFile<'_>) -> Result<Option<Reader>, &'static str> {
+        match self {
+            Self::Here => Ok(match target {
+                ReadFile::Working(path) => Reader::open(&repo.root.join(path)),
+                ReadFile::Committed { commit, file } => {
+                    Some(Reader::committed(repo, &file.path, &commit.hash, commit.time, Some(file)))
+                }
+            }),
+            Self::Floating { layer } => {
+                let (path, hash) = match target {
+                    ReadFile::Working(path) => (path, None),
+                    ReadFile::Committed { commit, file } => (file.path.as_str(), Some(commit.hash.as_str())),
+                };
+                *layer = Some(rex::open(&repo.root, path, hash, layer.take().as_deref())?);
+                Ok(None)
+            }
+        }
+    }
 }
 
 enum Body {
@@ -99,13 +151,20 @@ fn file_lines(path: &Path, kind: Kind) -> Result<Vec<Line>, &'static str> {
         Content::NotFile => Err("Not a file, so there is nothing to show."),
         Content::TooLarge => Err("Too large to show."),
         Content::Link(target) => Ok(vec![Line::new(line_kind, 1, &target.to_string_lossy())]),
-        Content::Bytes(bytes) if bytes.is_empty() => Err("Empty."),
-        Content::Bytes(bytes) if bytes.contains(&0) => Err("Not text, so there is nothing to show."),
-        Content::Bytes(bytes) => {
-            let text = String::from_utf8_lossy(&bytes);
-            Ok((1..).zip(text.lines()).map(|(no, line)| Line::new(line_kind, no, line)).collect())
-        }
+        Content::Bytes(bytes) => byte_lines(&bytes, line_kind),
     }
+}
+
+/// Turns a stored file into text, or says why it cannot be shown.
+fn byte_lines(bytes: &[u8], kind: LineKind) -> Result<Vec<Line>, &'static str> {
+    if bytes.is_empty() {
+        return Err("Empty.");
+    }
+    if bytes.contains(&0) {
+        return Err(NOT_TEXT);
+    }
+    let text = String::from_utf8_lossy(bytes);
+    Ok((1..).zip(text.lines()).map(|(no, line)| Line::new(kind, no, line)).collect())
 }
 
 /// Finds the next or previous run of changes, wrapping at either end.

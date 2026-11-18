@@ -5,7 +5,6 @@ use super::json::Value;
 pub(super) const MINUTE: i64 = 60;
 pub(super) const HOUR: i64 = 60 * MINUTE;
 pub(super) const DAY: i64 = 24 * HOUR;
-pub(super) const WEEK: i64 = 7 * DAY;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Stamp {

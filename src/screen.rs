@@ -146,25 +146,25 @@ struct Placement {
     rows: usize,
 }
 
-/// What is known of the terminal's way with pictures, and of the one on it.
+/// What is known of the terminal's way with pictures, and the ones on it.
 struct Pictures {
     /// Whether the terminal shows pictures; `None` until it has said.
     able: Option<bool>,
     /// The size of one cell in pixels: width, height.
     cell: (u16, u16),
-    /// The placement asked for in the frame being drawn, and the one on the terminal.
-    wanted: Option<Placement>,
-    shown: Option<Placement>,
-    /// The picture whose data the terminal holds.
-    held: Option<u32>,
-    /// Picture data to send with the next frame.
+    /// Placements asked for in this frame, and those sent in the last one.
+    wanted: Vec<Placement>,
+    shown: Vec<Placement>,
+    /// A resize erases the placements, but the terminal still has the pictures.
+    erased: bool,
+    /// Data for pictures in `wanted` that are not already on the terminal.
     data: Vec<u8>,
 }
 
 impl Default for Pictures {
     fn default() -> Self {
         // Most terminals draw a cell about twice as tall as it is wide.
-        Self { able: None, cell: (8, 16), wanted: None, shown: None, held: None, data: Vec::new() }
+        Self { able: None, cell: (8, 16), wanted: Vec::new(), shown: Vec::new(), erased: false, data: Vec::new() }
     }
 }
 
@@ -215,13 +215,13 @@ impl Screen {
         self.prev.clear();
         self.prev.resize(w * h, STALE);
         self.out.extend_from_slice(b"\x1b[0m\x1b[2J");
-        // Erasing the screen takes a picture's placement with it.
-        self.pictures.shown = None;
+        self.pictures.erased = true;
     }
 
     pub fn clear(&mut self) {
         self.cur.fill(BLANK);
-        self.pictures.wanted = None;
+        self.pictures.wanted.clear();
+        self.pictures.data.clear();
     }
 
     /// Notes that the terminal can, or cannot, show pictures.
@@ -255,13 +255,15 @@ impl Screen {
     /// tall, in the frame being drawn. Its data goes to the terminal once.
     pub fn show_picture(&mut self, picture: &Picture, x: usize, y: usize, cols: usize, rows: usize) {
         let pictures = &mut self.pictures;
-        if pictures.held != Some(picture.id) {
-            if let Some(old) = pictures.held.replace(picture.id) {
-                let _ = write!(pictures.data, "\x1b_Ga=d,d=I,i={old},q=2\x1b\\");
-            }
+        let at = Placement { id: picture.id, x, y, cols, rows };
+        if let Some(wanted) = pictures.wanted.iter_mut().find(|wanted| wanted.id == at.id) {
+            *wanted = at;
+            return;
+        }
+        if !pictures.shown.iter().any(|shown| shown.id == at.id) {
             picture.transmit(&mut pictures.data);
         }
-        pictures.wanted = Some(Placement { id: picture.id, x, y, cols, rows });
+        pictures.wanted.push(at);
     }
 
     /// Blanks one row, including its colours.
@@ -374,40 +376,44 @@ impl Screen {
         });
     }
 
-    /// Brings the picture on the terminal in line with the one last asked
-    /// for: placed, moved, or taken away. A picture lies over the cells,
-    /// outside the frame of text, so it is kept track of by itself.
+    /// Places, moves or removes the pictures asked for in this frame.
+    /// They lie over the cells, outside the frame of text.
     fn flush_picture(&mut self) {
         let pictures = &mut self.pictures;
-        if pictures.wanted == pictures.shown && pictures.data.is_empty() {
-            return;
-        }
-        match pictures.wanted {
-            Some(at) => {
-                if pictures.shown.is_some() {
-                    // Off the screen, but kept by the terminal to place again.
-                    self.out.extend_from_slice(b"\x1b_Ga=d,d=a,q=2\x1b\\");
-                }
-                self.out.append(&mut pictures.data);
-                let _ = write!(
-                    self.out,
-                    "\x1b[{};{}H\x1b_Ga=p,i={},c={},r={},C=1,q=2\x1b\\",
-                    at.y + 1,
-                    at.x + 1,
-                    at.id,
-                    at.cols,
-                    at.rows
-                );
-            }
-            None => {
-                pictures.data.clear();
-                if pictures.held.take().is_some() {
-                    // Off the screen and out of the terminal's memory.
-                    self.out.extend_from_slice(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        if pictures.wanted.is_empty() && !pictures.shown.is_empty() {
+            // Off the screen and out of the terminal's memory.
+            self.out.extend_from_slice(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        } else {
+            for old in &pictures.shown {
+                match pictures.wanted.iter().find(|at| at.id == old.id) {
+                    None => {
+                        let _ = write!(self.out, "\x1b_Ga=d,d=I,i={},q=2\x1b\\", old.id);
+                    }
+                    Some(at) if at != old && !pictures.erased => {
+                        // Take only the placement away; the data is still needed.
+                        let _ = write!(self.out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", old.id);
+                    }
+                    Some(_) => {}
                 }
             }
+            self.out.append(&mut pictures.data);
+            for at in &pictures.wanted {
+                if pictures.erased || !pictures.shown.contains(at) {
+                    let _ = write!(
+                        self.out,
+                        "\x1b[{};{}H\x1b_Ga=p,i={},c={},r={},C=1,q=2\x1b\\",
+                        at.y + 1,
+                        at.x + 1,
+                        at.id,
+                        at.cols,
+                        at.rows
+                    );
+                }
+            }
         }
-        pictures.shown = pictures.wanted;
+        pictures.shown.clear();
+        pictures.shown.extend_from_slice(&pictures.wanted);
+        pictures.erased = false;
     }
 
     fn flush_to(&mut self, write_frame: impl FnOnce(&[u8])) {
@@ -488,7 +494,12 @@ impl Screen {
 
     /// Where the frame being drawn asks for a picture: x, y, columns, rows.
     pub fn picture_at(&self) -> Option<(usize, usize, usize, usize)> {
-        self.pictures.wanted.map(|at| (at.x, at.y, at.cols, at.rows))
+        self.picture_placements().next()
+    }
+
+    /// All the pictures asked for in this frame, in drawing order.
+    pub fn picture_placements(&self) -> impl Iterator<Item = (usize, usize, usize, usize)> + '_ {
+        self.pictures.wanted.iter().map(|at| (at.x, at.y, at.cols, at.rows))
     }
 }
 
@@ -526,13 +537,14 @@ mod tests {
         assert_eq!(screen.text(), ["very-lo….txt"]);
     }
 
+    fn frame(screen: &mut Screen) -> String {
+        let mut written = String::new();
+        screen.flush_to(|frame| written = String::from_utf8_lossy(frame).into_owned());
+        written
+    }
+
     #[test]
     fn a_picture_is_sent_once_then_only_moved_and_at_last_taken_away() {
-        let frame = |screen: &mut Screen| {
-            let mut written = String::new();
-            screen.flush_to(|frame| written = String::from_utf8_lossy(frame).into_owned());
-            written
-        };
         let picture = Picture::sample(40, 20);
         let mut screen = Screen::sized(20, 6);
         screen.show_picture(&picture, 2, 1, 5, 2);
@@ -551,9 +563,37 @@ mod tests {
         screen.clear();
         screen.show_picture(&picture, 4, 1, 5, 2);
         let moved = frame(&mut screen);
-        assert!(!moved.contains("a=t") && moved.contains("a=d,d=a") && moved.contains("\x1b[2;5H\x1b_Ga=p"));
+        assert!(!moved.contains("a=t") && moved.contains("a=d,d=i,i=1") && moved.contains("\x1b[2;5H\x1b_Ga=p"));
 
         // A frame without it takes it off the terminal altogether.
+        screen.clear();
+        assert!(frame(&mut screen).contains("a=d,d=A"));
+        assert_eq!(frame(&mut screen), "");
+    }
+
+    #[test]
+    fn two_pictures_move_and_leave_independently() {
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10";
+        let a = Picture::embedded(PNG).unwrap();
+        let b = Picture::embedded(PNG).unwrap();
+        let mut screen = Screen::sized(20, 6);
+        screen.show_picture(&a, 2, 1, 4, 2);
+        screen.show_picture(&b, 12, 1, 4, 2);
+        let first = frame(&mut screen);
+        for (picture, col) in [(&a, 3), (&b, 13)] {
+            assert_eq!(first.matches(&format!("a=t,f=100,i={},", picture.id)).count(), 1);
+            assert!(first.contains(&format!("\x1b[2;{col}H\x1b_Ga=p,i={},c=4,r=2,", picture.id)));
+        }
+
+        screen.clear();
+        screen.show_picture(&a, 3, 1, 4, 2);
+        screen.show_picture(&b, 12, 1, 4, 2);
+        let moved = frame(&mut screen);
+        assert!(!moved.contains("a=t"));
+        assert_eq!(moved.matches("a=p,").count(), 1);
+        assert!(moved.contains(&format!("a=d,d=i,i={},", a.id)));
+        assert!(moved.contains(&format!("\x1b[2;4H\x1b_Ga=p,i={},", a.id)));
+
         screen.clear();
         assert!(frame(&mut screen).contains("a=d,d=A"));
         assert_eq!(frame(&mut screen), "");

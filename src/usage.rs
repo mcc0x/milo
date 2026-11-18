@@ -1,4 +1,4 @@
-//! Shows the limits the tools report, or Claude Code's local activity.
+//! Shows the last reported usage limits and today's local Claude Code activity.
 
 mod draw;
 mod files;
@@ -20,13 +20,11 @@ use crate::{paths, when};
 
 use self::files::{Budget, Mark, Sessions, Stream, Tree};
 use self::json::Value;
-use self::time::{DAY, HOUR, MINUTE, Stamp, WEEK};
+use self::time::{DAY, MINUTE, Stamp};
 
-const FIVE_HOURS: i64 = 5 * HOUR;
-const CLAUDE_FRESH: i64 = DAY;
 const AGE_NOTE: i64 = 5 * MINUTE;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
-const CODEX_BYTES: u64 = 16 * 1024 * 1024;
+const CODEX_BYTES: u64 = files::CODEX_FILES as u64 * TAIL_BYTES;
 const CLAUDE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 4096;
 const SAVED_LIMITS: &str = "claude-limits.json";
@@ -92,44 +90,40 @@ impl Snapshot {
         let [primary, secondary] = limits?.fields(["primary", "secondary"]);
         Self::new(at, [Window::codex(primary), Window::codex(secondary)])
     }
-
-    fn fresh(self, now: i64) -> bool {
-        (0..CLAUDE_FRESH).contains(&now.saturating_sub(self.at.seconds))
-    }
 }
 
 struct CodexFile {
     mark: Mark,
     snapshot: Option<Snapshot>,
-    limited: bool,
 }
 
 #[derive(Default)]
 struct Codex {
     files: HashMap<PathBuf, CodexFile>,
-    limited: bool,
+    no_sessions: bool,
 }
 
 impl Codex {
-    fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) -> bool {
-        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Codex, now.saturating_sub(WEEK))) else {
-            *self = Self::default();
-            return true;
+    fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) {
+        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Codex)) else {
+            *self = Self { no_sessions: true, ..Self::default() };
+            return;
         };
+        self.no_sessions = sessions.files.is_empty() && !sessions.limited;
+        if sessions.files.len() == self.files.len()
+            && sessions.files.iter().all(|candidate| {
+                self.files.get(&candidate.path).is_some_and(|file| file.mark == candidate.mark)
+            })
+        {
+            return;
+        }
         let mut previous = std::mem::take(&mut self.files);
-        self.limited = sessions.limited;
-        let mut settled = true;
         for candidate in &sessions.files {
             let cached = previous.remove(&candidate.path);
-            let (file, done) = Self::check_file(&sessions, candidate, cached, now, budget);
-            settled &= done;
-            if let Some(file) = file {
-                self.limited |= file.limited;
+            if let Some(file) = Self::check_file(&sessions, candidate, cached, now, budget) {
                 self.files.insert(candidate.path.clone(), file);
             }
         }
-        self.limited |= !settled;
-        settled
     }
 
     fn check_file(
@@ -138,23 +132,17 @@ impl Codex {
         cached: Option<CodexFile>,
         now: i64,
         budget: &mut Budget,
-    ) -> (Option<CodexFile>, bool) {
+    ) -> Option<CodexFile> {
         if cached.as_ref().is_some_and(|file| file.mark == candidate.mark) {
-            return (cached, true);
+            return cached;
         }
-        if candidate.mark.len.min(TAIL_BYTES) > budget.remaining {
-            return (cached, false);
-        }
-        let Some((file, mark)) = sessions.open(&candidate.path) else { return (None, true) };
-        let Ok((mut snapshot, limited)) =
-            files::tail(&file, mark.len, TAIL_BYTES, budget, |line| Snapshot::codex(line, now))
-        else {
-            return (None, true);
-        };
+        let (file, mark) = sessions.open(&candidate.path)?;
+        let (mut snapshot, limited) =
+            files::tail(&file, mark.len, TAIL_BYTES, budget, |line| Snapshot::codex(line, now)).ok()?;
         if limited && let Some(old) = cached.filter(|file| mark.same_file(file.mark) && mark.len > file.mark.len) {
             snapshot = snapshot.or(old.snapshot);
         }
-        (Some(CodexFile { mark, snapshot, limited }), true)
+        Some(CodexFile { mark, snapshot })
     }
 
     fn snapshot(&self) -> Option<Snapshot> {
@@ -274,15 +262,13 @@ struct Claude {
 
 #[derive(Default)]
 struct Activity {
-    five: u64,
     today: u64,
-    present: bool,
     partial: bool,
 }
 
 impl Claude {
     fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
-        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude, cutoff)) else {
+        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff })) else {
             self.files.clear();
             self.limited = false;
             return true;
@@ -299,18 +285,12 @@ impl Claude {
         settled
     }
 
-    fn activity(&self, today: i64, five: i64, now: i64) -> Activity {
+    fn activity(&self, today: i64, now: i64) -> Activity {
         let mut activity = Activity { partial: self.limited, ..Activity::default() };
         for file in self.files.values() {
-            activity.partial |= file.samples.incomplete_since.is_some_and(|at| at >= today.min(five));
-            for sample in file.all().filter(|s| s.at >= today.min(five) && s.at <= now) {
-                activity.present = true;
-                if sample.at >= five {
-                    activity.five = activity.five.saturating_add(sample.tokens);
-                }
-                if sample.at >= today {
-                    activity.today = activity.today.saturating_add(sample.tokens);
-                }
+            activity.partial |= file.samples.incomplete_since.is_some_and(|at| at >= today);
+            for sample in file.all().filter(|s| (today..=now).contains(&s.at)) {
+                activity.today = activity.today.saturating_add(sample.tokens);
             }
         }
         activity
@@ -390,19 +370,19 @@ impl Usage {
     }
 
     fn refresh(&mut self, now: i64) -> bool {
-        let cutoff = self.today.since(now).min(now.saturating_sub(FIVE_HOURS));
+        let cutoff = self.today.since(now);
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         if let Some(path) = &self.limits_file {
             status::read(path, &mut self.claude.saved_mark, &mut self.claude.saved, &mut claude_budget);
         }
-        let codex = self.codex.check(self.codex_dir.as_deref(), now, &mut codex_budget);
+        self.codex.check(self.codex_dir.as_deref(), now, &mut codex_budget);
         let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, &mut claude_budget);
         #[cfg(test)]
         {
             self.bytes_read = codex_budget.read + claude_budget.read;
         }
-        codex && claude
+        claude
     }
 }
 
@@ -445,9 +425,8 @@ impl Pane for Usage {
             .codex
             .snapshot()
             .into_iter()
-            .chain(self.claude.saved.filter(|s| s.fresh(now)))
+            .chain(self.claude.saved)
             .flat_map(|s| s.windows.into_iter().flatten().filter_map(|w| w.resets))
-            .chain(self.claude.saved.map(|s| s.at.seconds.saturating_add(CLAUDE_FRESH)))
             .filter(|&reset| reset > now)
             .min();
         let wait = earliest.map_or(MINUTE, |ts| ts.saturating_sub(now).min(MINUTE));
@@ -458,26 +437,18 @@ impl Pane for Usage {
         use help::{Row, heading, key, note};
         Page::new(vec![
             heading("Usage limits"),
-            note("Codex reads its sessions."),
-            note("Claude Code gets limits"),
-            note("from its status line."),
-            note("Bars show the share of"),
-            note("each limit used. A reset"),
-            note("means its figure expired."),
-            note("As of: last limit report."),
+            note("Figures show the percent"),
+            note("used in each window,"),
+            note("from this machine's sessions"),
+            note("and as fresh as the last"),
+            note("message. After a window"),
+            note("resets it shows 0%."),
             Row::new(),
-            heading("Claude Code activity"),
-            note("After a day, shows local"),
-            note("transcript activity."),
-            note("Input and output tokens,"),
-            note("including cache writes,"),
-            note("not cache reads. Today"),
-            note("starts at local midnight."),
-            Row::new(),
-            note("From sessions on this"),
-            note("machine, as fresh as the"),
-            note("last message. Turn on"),
-            note("limits in milo setup."),
+            heading("Claude Code"),
+            note("Turn on its limits in"),
+            note("milo setup. Tokens today"),
+            note("show local activity,"),
+            note("not a limit."),
             key("r", "reload"),
             key("q", "quit"),
         ])

@@ -42,7 +42,7 @@ impl Default for Layout {
             new_tabs: false,
             width: WIDTHS[0].into(),
             outline_share: "0.70".into(),
-            usage_rows: "2".into(),
+            usage_rows: "5".into(),
         }
     }
 }

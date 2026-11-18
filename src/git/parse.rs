@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use super::{Commit, Ends, Kind, PendingFile};
+use super::{Commit, CommitId, CommitVersion, Ends, Kind, PendingFile};
 use crate::when;
 
 #[derive(Default)]
@@ -116,6 +116,13 @@ pub(super) fn parse_files(raw: &[u8]) -> Vec<PendingFile> {
         }
     }
     files
+}
+
+pub(super) fn commit_version(raw: &[u8], id: CommitId<'_>) -> Option<CommitVersion> {
+    let (hash, time) = std::str::from_utf8(raw).ok()?.trim_end().split_once('\0')?;
+    // Git also accepts refs made of hex digits. Match the object name, not the ref name.
+    hash.get(..id.0.len())?.eq_ignore_ascii_case(id.0).then_some(())?;
+    Some(CommitVersion { hash: hash.to_string(), time: time.parse().ok()? })
 }
 
 /// Parses history and marks the commits in the unpushed list.

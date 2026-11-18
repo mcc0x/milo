@@ -87,12 +87,14 @@ fn mark_edits(mut lines: &mut [Line]) {
 pub struct FileDiff {
     pub lines: Vec<Line>,
     pub kind: Kind,
+    pub binary: bool,
 }
 
 /// Parses the file's status and each line, leaving removals in place.
 pub fn parse(raw: &[u8]) -> FileDiff {
     let mut lines = Vec::new();
     let mut kind = Kind::None;
+    let mut binary = false;
     let (mut old, mut new, mut in_hunk, mut second) = (1, 1, false, false);
     for line in String::from_utf8_lossy(raw).lines() {
         if line.starts_with("diff --git ") {
@@ -112,6 +114,8 @@ pub fn parse(raw: &[u8]) -> FileDiff {
                 kind = Kind::Deleted;
             } else if line.starts_with("rename from ") {
                 kind = Kind::Renamed;
+            } else if line.starts_with("Binary files ") {
+                binary = true;
             }
         } else {
             let (kind, number) = match line.as_bytes().first() {
@@ -128,7 +132,7 @@ pub fn parse(raw: &[u8]) -> FileDiff {
         }
     }
     mark_edits(&mut lines);
-    FileDiff { lines, kind }
+    FileDiff { lines, kind, binary }
 }
 
 #[cfg(test)]
@@ -141,7 +145,7 @@ mod tests {
 
     #[test]
     fn a_diff_becomes_numbered_lines() {
-        let FileDiff { lines, kind } = parse(
+        let FileDiff { lines, kind, .. } = parse(
             b"diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n one\n-two\n+2\n+2.5\n three\n",
         );
         assert_eq!(kind, Kind::Modified);

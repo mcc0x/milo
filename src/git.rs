@@ -88,6 +88,22 @@ fn new_file_lines(path: &Path) -> u32 {
     }
 }
 
+/// An object name supplied by the caller, not a branch name or revision expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitId<'a>(&'a str);
+
+impl<'a> CommitId<'a> {
+    pub fn parse(text: &'a str) -> Option<Self> {
+        ((4..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit())).then_some(Self(text))
+    }
+}
+
+/// The resolved name and date of a commit opened by its ID.
+pub struct CommitVersion {
+    pub hash: String,
+    pub time: i64,
+}
+
 /// One commit on the current branch.
 pub struct Commit {
     pub hash: String,
@@ -575,13 +591,41 @@ impl Repo {
         self.require(std::str::from_utf8(&raw).ok().and_then(|n| n.trim_end().parse().ok()))
     }
 
+    /// Finds the full object name and date without reading the work tree.
+    pub fn resolve_commit(&self, id: CommitId<'_>) -> Option<CommitVersion> {
+        let raw = self.git(&[
+            "log", "-1", "--no-walk", "--no-show-signature", "--no-notes", "--no-decorate",
+            "--format=%H%x00%ct", "--end-of-options", id.0, "--",
+        ])?;
+        parse::commit_version(&raw, id)
+    }
+
+    /// Reads the files touched by this commit, compared with its first parent.
+    pub fn files_at(&self, hash: &str) -> Option<Vec<PendingFile>> {
+        let raw = run::commit_diff(&self.root, self.guard.as_deref()?, hash, run::CommitDiff::Files).ok()?;
+        Some(parse_files(&raw))
+    }
+
+    /// Reads a whole-file patch, using both paths when a file moved.
+    pub fn file_diff_at(&self, hash: &str, file: &PendingFile) -> Result<Vec<u8>, OutputError> {
+        let guard = self.guard.as_deref().ok_or(OutputError::Failed)?;
+        run::commit_diff(&self.root, guard, hash, run::CommitDiff::File(file))
+    }
+
+    /// An unchanged file (including a move with no edits) has no patch body.
+    pub fn blob_at(&self, hash: &str, path: &str) -> Result<Vec<u8>, OutputError> {
+        let guard = self.guard.as_deref().ok_or(OutputError::Failed)?;
+        run::limited_output(
+            &self.root, guard, &["cat-file", "blob", "--end-of-options", &format!("{hash}:{path}")], DIFF_LIMIT,
+        )
+    }
+
     /// Loads the files once per commit. A failed read can be tried again.
     pub fn load_commit_files(&mut self, commit: &Commit) {
         if !self.committed.contains_key(&commit.hash)
-            && let Some(guard) = &self.guard
-            && let Some(raw) = run::commit_diff(&self.root, guard, &commit.hash)
+            && let Some(files) = self.files_at(&commit.hash)
         {
-            self.committed.insert(commit.hash.clone(), parse_files(&raw));
+            self.committed.insert(commit.hash.clone(), files);
         }
     }
 

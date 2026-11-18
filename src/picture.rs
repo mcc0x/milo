@@ -4,6 +4,7 @@
 //! no larger than a pane could use. The converting is left to `sips`, the
 //! image tool that comes with macOS; elsewhere only PNG files can be shown.
 
+use std::borrow::Cow;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -36,7 +37,7 @@ pub fn is_picture(name: &str) -> bool {
 
 /// A picture ready for the terminal: PNG data and its size in pixels.
 pub struct Picture {
-    png: Vec<u8>,
+    png: Cow<'static, [u8]>,
     pub width: u32,
     pub height: u32,
     pub id: u32,
@@ -54,8 +55,17 @@ impl Picture {
             return Err("Too large to show.");
         }
         let png = to_png(path).ok_or("This picture cannot be shown.")?;
-        let (width, height) = png_size(&png).ok_or("This picture cannot be shown.")?;
-        Ok(Self { png, width, height, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) })
+        Self::png(png.into()).ok_or("This picture cannot be shown.")
+    }
+
+    /// Opens a PNG built into milo without copying its bytes.
+    pub fn embedded(png: &'static [u8]) -> Option<Self> {
+        Self::png(png.into())
+    }
+
+    fn png(png: Cow<'static, [u8]>) -> Option<Self> {
+        let (width, height) = png_size(&png)?;
+        Some(Self { png, width, height, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) })
     }
 
     /// The columns and rows the picture takes in a space of `cols` by `rows`
@@ -218,7 +228,7 @@ impl Picture {
     }
 
     pub fn sample(width: u32, height: u32) -> Self {
-        Self { png: Self::sample_png(width, height), width, height, id: 1 }
+        Self { png: Self::sample_png(width, height).into(), width, height, id: 1 }
     }
 }
 
@@ -268,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_picture_is_sent_in_pieces_and_only_the_last_says_so() {
-        let picture = Picture { png: vec![7; CHUNK], width: 1, height: 1, id: 9 };
+        let picture = Picture { png: vec![7; CHUNK].into(), width: 1, height: 1, id: 9 };
         let mut out = Vec::new();
         picture.transmit(&mut out);
         let text = String::from_utf8(out).unwrap();

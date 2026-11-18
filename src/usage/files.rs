@@ -10,7 +10,8 @@ use std::os::unix::fs::{FileExt, MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
-const MAX_FILES: usize = 128;
+pub(super) const CODEX_FILES: usize = 4;
+const CLAUDE_FILES: usize = 128;
 const MAX_ENTRIES: usize = 32_768;
 const MAX_LINE: usize = 2 * 1024 * 1024;
 const BLOCK: usize = 32 * 1024;
@@ -66,26 +67,40 @@ pub(super) fn open_file(path: &Path) -> io::Result<File> {
 
 pub(super) enum Tree {
     Codex,
-    Claude,
+    Claude { since: i64 },
 }
 
 impl Tree {
     fn depth(&self) -> usize {
         match self {
             Self::Codex => 3,
-            Self::Claude => 1,
+            Self::Claude { .. } => 1,
         }
     }
 
     fn directory(&self, name: &[u8], depth: usize) -> bool {
         match self {
             Self::Codex => name.len() == if depth == 0 { 4 } else { 2 } && name.iter().all(u8::is_ascii_digit),
-            Self::Claude => true,
+            Self::Claude { .. } => true,
         }
     }
 
     fn file(&self, name: &[u8]) -> bool {
         name.ends_with(b".jsonl") && (!matches!(self, Self::Codex) || name.starts_with(b"rollout-"))
+    }
+
+    fn includes(&self, mark: Mark) -> bool {
+        match *self {
+            Self::Codex => true,
+            Self::Claude { since } => mark.modified.0 >= i128::from(since),
+        }
+    }
+
+    fn limit(&self) -> usize {
+        match self {
+            Self::Codex => CODEX_FILES,
+            Self::Claude { .. } => CLAUDE_FILES,
+        }
     }
 }
 
@@ -150,7 +165,7 @@ struct Scan {
 }
 
 impl Scan {
-    fn directory(&mut self, mut dir: Dir, tree: &Tree, path: &mut PathBuf, depth: usize, cutoff: i64) {
+    fn directory(&mut self, mut dir: Dir, tree: &Tree, path: &mut PathBuf, depth: usize) {
         let fd = dir.fd();
         while let Some(name) = dir.next() {
             if self.entries == MAX_ENTRIES {
@@ -165,17 +180,37 @@ impl Scan {
             if depth == tree.depth() {
                 if tree.file(bytes)
                     && let Some(mark) = mark_at(fd, name)
-                    && mark.modified.0 >= i128::from(cutoff)
+                    && tree.includes(mark)
                 {
-                    self.files.push(Candidate { path: path.join(OsStr::from_bytes(bytes)), mark });
+                    self.keep(tree.limit(), path, bytes, mark);
                 }
             } else if tree.directory(bytes, depth)
                 && let Some(child) = open_at(fd, name, libc::O_DIRECTORY).and_then(Dir::new)
             {
                 path.push(OsStr::from_bytes(bytes));
-                self.directory(child, tree, path, depth + 1, cutoff);
+                self.directory(child, tree, path, depth + 1);
                 path.pop();
             }
+        }
+    }
+
+    /// Keeps just the newest few files as the directory is walked.
+    fn keep(&mut self, limit: usize, dir: &Path, name: &[u8], mark: Mark) {
+        if self.files.len() == limit {
+            self.limited = true;
+            if self.files.last().is_some_and(|old| old.mark.modified > mark.modified) {
+                return;
+            }
+        }
+        let path = dir.join(OsStr::from_bytes(name));
+        let at = self.files.partition_point(|old| {
+            old.mark.modified > mark.modified || (old.mark.modified == mark.modified && old.path < path)
+        });
+        if at < limit {
+            if self.files.len() == limit {
+                self.files.pop();
+            }
+            self.files.insert(at, Candidate { path, mark });
         }
     }
 }
@@ -187,17 +222,13 @@ pub(super) struct Sessions {
 }
 
 impl Sessions {
-    pub(super) fn scan(root: &Path, tree: Tree, cutoff: i64) -> Option<Self> {
+    pub(super) fn scan(root: &Path, tree: Tree) -> Option<Self> {
         let root = OpenOptions::new().read(true).custom_flags(OPEN_FLAGS | libc::O_DIRECTORY).open(root).ok()?;
         // Open a separate stream: a duplicate descriptor would share the directory cursor.
         let dir = Dir::new(open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY)?)?;
         let mut scan = Scan { entries: 0, files: Vec::new(), limited: false };
-        scan.directory(dir, &tree, &mut PathBuf::new(), 0, cutoff);
-        let mut files = scan.files;
-        files.sort_unstable_by(|a, b| b.mark.modified.cmp(&a.mark.modified).then_with(|| a.path.cmp(&b.path)));
-        let limited = scan.limited || files.len() > MAX_FILES;
-        files.truncate(MAX_FILES);
-        Some(Self { root, files, limited })
+        scan.directory(dir, &tree, &mut PathBuf::new(), 0);
+        Some(Self { root, files: scan.files, limited: scan.limited })
     }
 
     pub(super) fn open(&self, path: &Path) -> Option<(File, Mark)> {
