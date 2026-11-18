@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::git::{Commit, Ends, FileChange, Kind, Repo};
 use crate::help::Page;
+use crate::reader::Reader;
 use crate::tree::{Folds, Tree};
-use crate::view::View;
 use crate::watch::Scope;
 use crate::{rex, walk};
 
@@ -62,7 +62,7 @@ pub struct Outline {
     /// Something to say in place of the key hint, and when it was said.
     note: Option<(String, Instant)>,
     /// A file being read here, in place of the outline, outside Rex.
-    reading: Option<View>,
+    reading: Option<Reader>,
 }
 
 struct Replaced {
@@ -225,8 +225,8 @@ impl Outline {
     /// Returns false if it is too soon to tell, and worth looking again.
     pub fn check(&mut self) -> bool {
         // A file being read here is kept up to date, and so is what it covers.
-        if let Some(view) = &mut self.reading {
-            view.check();
+        if let Some(reader) = &mut self.reading {
+            reader.check();
         }
         if self.repo.busy() {
             // Git is part-way through changing many files at once.
@@ -322,7 +322,7 @@ impl Outline {
     /// the one opened before, and otherwise here in this pane.
     fn open_file(&mut self, path: &str) {
         if !self.inside_rex {
-            self.reading = View::open(&self.repo.root.join(path));
+            self.reading = Reader::open(&self.repo.root.join(path));
             return;
         }
         match rex::open(&self.repo.root, path, self.popup.as_deref()) {
@@ -334,7 +334,7 @@ impl Outline {
         }
     }
 
-    /// The help page for whichever view is showing.
+    /// The help page for the Outline or its open Reader.
     pub fn help(&self) -> Page {
         if self.reading.is_some() { Page::reader() } else { Page::outline(self.repo.git) }
     }
@@ -436,9 +436,9 @@ mod tests {
         }
         assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
 
-        let mut view = View::open(&f.root.join("edit.txt")).unwrap();
+        let mut reader = Reader::open(&f.root.join("edit.txt")).unwrap();
         let mut screen = Screen::sized(65, 12);
-        view.draw(&mut screen);
+        reader.draw(&mut screen);
         let counts = |row: &str| row.split_whitespace().rev().take(2).collect::<Vec<_>>().join(" ");
         assert_eq!(counts(file_row(&rows, "edit.txt")), counts(&screen.text()[0]));
     }

@@ -219,7 +219,7 @@ impl Repo {
         Some(Self { root, name, git, ok, git_dir: lines.next(), common_dir: lines.next(), guard, ..Self::default() })
     }
 
-    /// Limits status to one path for a reader of a single file.
+    /// Limits status to one file without narrowing the repository's root.
     pub fn only(&mut self, path: &str) {
         self.file = Some(path.to_string());
         self.polled = None;
@@ -279,7 +279,7 @@ impl Repo {
         let inside = || std::fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
         let complete = !self.git || self.common_dir.is_some() || inside();
 
-        // The reader's status covers one file. A full status is useful only
+        // The Reader's status covers one file. A full status is useful only
         // for exclusions: if it fails, watching extra directories is safe.
         let full = self.file.as_ref().and_then(|_| self.status_raw(None)).map(|raw| parse_status(&raw));
         let status = full.as_ref().unwrap_or(&self.status);
@@ -406,7 +406,7 @@ impl Repo {
         let stamps: HashMap<&str, _> = changed.iter().map(|p| (p.as_str(), Stamp::read(&self.root.join(p)))).collect();
         let named = changed.len() <= PATHS_LIMIT;
         // Naming the paths lets the outline compare with what is pushed, as
-        // the reader does, without listing files that are only committed.
+        // the Reader does, without listing files that are only committed.
         let against = if named { self.against() } else { self.ends().head() };
         let args = ["diff", against, "-M", "--no-color", "--raw", "--numstat", "-z"];
         let raw = if named {
@@ -552,7 +552,7 @@ impl Repo {
         let args = if from.is_some() { &args[..] } else { &args[..args.len() - 1] };
         match run::limited_output(&self.root, self.guard.as_deref()?, args, DIFF_LIMIT) {
             Ok(diff) => Some(diff),
-            // A diff over the reader's limit is deliberately not shown.
+            // An oversized diff is not a git failure.
             Err(OutputError::TooLarge) => None,
             Err(OutputError::Failed) => self.require(None),
         }

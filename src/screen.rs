@@ -228,6 +228,18 @@ impl Screen {
         self.put(end - width, y, width, text, st)
     }
 
+    /// Draws a decimal number ending just before column `end`.
+    pub fn put_number(&mut self, end: usize, y: usize, mut number: u32, st: Style) {
+        for cell in self.span(0, y, end).iter_mut().rev() {
+            let ch = char::from_digit(number % 10, 10).expect("remainder is a decimal digit");
+            *cell = Cell { ch, st };
+            number /= 10;
+            if number == 0 {
+                break;
+            }
+        }
+    }
+
     /// Like `put`, but ends a string that does not fit with an ellipsis.
     pub fn put_fit(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
         if max_w == 0 || str_width(s) <= max_w {

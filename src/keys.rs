@@ -35,6 +35,13 @@ pub enum Key {
     Eof,
 }
 
+/// Which way to move through a list of items.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Next,
+    Previous,
+}
+
 impl Key {
     /// How far this key scrolls a list with `shown` visible rows, if it scrolls.
     pub fn rows(self, shown: usize) -> Option<isize> {

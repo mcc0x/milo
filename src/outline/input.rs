@@ -1,9 +1,9 @@
-//! Interprets keys and clicks as actions on the outline or its open reader.
+//! Handles keys and clicks for the Outline and its open Reader.
 
 use std::time::{Duration, Instant};
 
+use crate::keys::Direction::{Next, Previous};
 use crate::keys::Key;
-use crate::tree::Direction::{Next, Previous};
 
 use super::Outline;
 use super::draw::margin;
@@ -18,7 +18,7 @@ enum Pointed<'a> {
 }
 
 impl Outline {
-    /// Returns true when the outline should quit, not when its reader closes.
+    /// Returns true when the Outline should quit, not when its Reader closes.
     pub fn on_key(&mut self, key: Key) -> bool {
         let now = Instant::now();
         if let Key::Focus(here) = key {
@@ -26,8 +26,8 @@ impl Outline {
             return false;
         }
         self.attention.used(now);
-        if let Some(view) = &mut self.reading {
-            if view.on_key(key) {
+        if let Some(reader) = &mut self.reading {
+            if reader.on_key(key) {
                 self.reading = None;
             }
             return false;

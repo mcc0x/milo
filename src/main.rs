@@ -1,5 +1,6 @@
 //! strata: a project's files, coloured by what is not yet committed or pushed.
 
+mod diff;
 #[cfg(test)]
 mod fixture;
 mod git;
@@ -9,13 +10,13 @@ mod icons;
 mod keys;
 mod outline;
 mod read;
+mod reader;
 mod rex;
 mod screen;
 mod syntax;
 mod term;
 mod tree;
 mod ui;
-mod view;
 mod walk;
 mod watch;
 mod when;
@@ -31,9 +32,9 @@ use git::Repo;
 use help::Page;
 use keys::{Key, read_keys};
 use outline::Outline;
+use reader::Reader;
 use screen::Screen;
 use term::Wait;
-use view::View;
 use watch::{Scope, Watcher};
 
 const USAGE: &str = "\
@@ -61,9 +62,8 @@ It updates on its own.
 
 Enter or a double click on a file opens it to read: in a floating window
 when running inside Rex, otherwise in the pane itself. `strata view FILE`
-is that reader by itself: the file, read-only, coloured as code, with the
-lines it gained and lost marked. n and N step through the changes, q
-closes it.
+opens the file on its own, read-only, coloured as code, with the lines it
+gained and lost marked. n and N step through the changes, q closes it.
 
 Colour is the change: yellow edited, green new, red removed, cyan moved,
 magenta in conflict. Bold is not committed yet; regular weight is
@@ -119,7 +119,7 @@ impl Pace {
 /// The two things strata can fill a pane with.
 enum Ui {
     Outline(Box<Outline>),
-    View(Box<View>),
+    Reader(Box<Reader>),
 }
 
 impl Ui {
@@ -130,7 +130,7 @@ impl Ui {
         }
         match self {
             Ui::Outline(o) => o.draw(s),
-            Ui::View(v) => v.draw(s),
+            Ui::Reader(reader) => reader.draw(s),
         }
     }
 
@@ -138,14 +138,14 @@ impl Ui {
     fn on_key(&mut self, key: Key) -> bool {
         match self {
             Ui::Outline(o) => o.on_key(key),
-            Ui::View(v) => v.on_key(key),
+            Ui::Reader(reader) => reader.on_key(key),
         }
     }
 
     fn help(&self) -> Page {
         match self {
             Ui::Outline(o) => o.help(),
-            Ui::View(_) => Page::reader(),
+            Ui::Reader(_) => Page::reader(),
         }
     }
 
@@ -154,7 +154,7 @@ impl Ui {
     fn check(&mut self) -> bool {
         match self {
             Ui::Outline(o) => o.check(),
-            Ui::View(v) => v.check(),
+            Ui::Reader(reader) => reader.check(),
         }
     }
 
@@ -162,7 +162,7 @@ impl Ui {
     fn next_frame(&self) -> Option<Duration> {
         match self {
             Ui::Outline(o) => o.next_frame(),
-            Ui::View(_) => None,
+            Ui::Reader(_) => None,
         }
     }
 
@@ -170,12 +170,12 @@ impl Ui {
     fn watch(&self) -> Scope {
         match self {
             Ui::Outline(o) => o.watch(),
-            Ui::View(v) => v.watch(),
+            Ui::Reader(reader) => reader.watch(),
         }
     }
 }
 
-/// Routes terminal replies and help keys before the view itself sees a key.
+/// Routes terminal replies and help keys before the Outline or Reader sees a key.
 /// Returns true when the program should quit.
 fn route_key(ui: &mut Ui, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> bool {
     match key {
@@ -221,8 +221,8 @@ fn main() {
         (Some("view"), None) => fail("which file? strata view FILE"),
         (Some("view"), Some(file)) => {
             let file = Path::new(file);
-            match View::open(file) {
-                Some(view) => Ui::View(Box::new(view)),
+            match Reader::open(file) {
+                Some(reader) => Ui::Reader(Box::new(reader)),
                 None => fail(&format!("{} is not in a directory", file.display())),
             }
         }

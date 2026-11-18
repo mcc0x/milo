@@ -85,8 +85,8 @@ pub(super) fn margin(rows: usize) -> usize {
 
 impl Outline {
     pub fn draw(&mut self, s: &mut Screen) {
-        if let Some(view) = &mut self.reading {
-            return view.draw(s);
+        if let Some(reader) = &mut self.reading {
+            return reader.draw(s);
         }
         s.clear();
         let now = Instant::now();

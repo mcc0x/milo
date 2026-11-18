@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::git::{FileChange, Kind};
+use crate::keys::Direction;
 
 pub struct Node {
     name_at: usize,
@@ -97,7 +98,7 @@ impl Folds {
         self.choice.insert(path.to_string(), open);
     }
 
-    /// Opens a folder unless the reader has already decided about it.
+    /// Opens a folder unless the user has already decided about it.
     pub fn suggest(&mut self, path: &str) {
         if !self.choice.contains_key(path) {
             self.choice.insert(path.to_string(), true);
@@ -139,13 +140,6 @@ impl Folds {
 pub struct Row {
     pub node: u32,
     pub depth: u16,
-}
-
-/// Which way to look through the tree.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Next,
-    Previous,
 }
 
 #[derive(Default)]

@@ -38,10 +38,10 @@ pub fn inside() -> bool {
     std::env::var_os("REX_SESSION").is_some()
 }
 
-/// Opens `file` in strata's own reader, in a floating window over the tab
+/// Opens `file` in a Reader, in a floating window over the tab
 /// this pane is in, closing the window `previous` first if there is one.
 /// Returns the new window's name for the next call, or what to tell the
-/// reader when it could not be done.
+/// user when it could not be done.
 pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &'static str> {
     let session = std::env::var("REX_SESSION").map_err(|_| "Reading a file needs Rex.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
@@ -50,7 +50,7 @@ pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &
         let request = format!(r#"{{"session_id":{},"layer_id":{}}}"#, json(&session), json(layer));
         rex(&["api", "call", "-s", &session, "session.close_layer", &request]);
     }
-    // Over the tab the outline is in, wherever the reader is looking;
+    // Over the tab the outline is in, even if the user's focus is elsewhere;
     // failing that, over the active one.
     let window = std::env::var("REX_BLOCK")
         .ok()

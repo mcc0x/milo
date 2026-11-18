@@ -58,7 +58,7 @@ fn outline(git: bool) -> Vec<Row> {
     rows
 }
 
-/// The page for the reader.
+/// The Reader's help page.
 fn reader() -> Vec<Row> {
     vec![
         heading("Lines"),
