@@ -1,5 +1,6 @@
 //! The whole project as a tree, coloured by what is pending.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::git::Kind;
@@ -11,6 +12,37 @@ pub struct Node {
     pub children: Vec<u32>,
     pub dir: bool,
     pub kind: Kind,
+}
+
+fn trim_zeros(digits: &[u8]) -> &[u8] {
+    let first = digits.iter().position(|&c| c != b'0').unwrap_or(digits.len());
+    &digits[first..]
+}
+
+/// Orders names the way a person would: without regard to case, and with
+/// runs of digits compared as numbers, so `file2` comes before `file10`.
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < x.len() && j < y.len() {
+        if x[i].is_ascii_digit() && y[j].is_ascii_digit() {
+            let run = |s: &[u8], from: usize| from + s[from..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let (ie, je) = (run(x, i), run(y, j));
+            // Without leading zeros, the longer run is the larger number.
+            let (n, m) = (trim_zeros(&x[i..ie]), trim_zeros(&y[j..je]));
+            match n.len().cmp(&m.len()).then_with(|| n.cmp(&m)) {
+                Ordering::Equal => (i, j) = (ie, je),
+                other => return other,
+            }
+        } else {
+            match x[i].to_ascii_lowercase().cmp(&y[j].to_ascii_lowercase()) {
+                Ordering::Equal => (i, j) = (i + 1, j + 1),
+                other => return other,
+            }
+        }
+    }
+    // Equal apart from case or leading zeros: fall back to a stable total order.
+    (x.len() - i).cmp(&(y.len() - j)).then_with(|| a.cmp(b))
 }
 
 #[derive(Default)]
@@ -39,7 +71,7 @@ impl Tree {
             let mut children = std::mem::take(&mut tree.nodes[i].children);
             children.sort_unstable_by(|&a, &b| {
                 let (a, b) = (&tree.nodes[a as usize], &tree.nodes[b as usize]);
-                b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name))
+                b.dir.cmp(&a.dir).then_with(|| natural_cmp(&a.name, &b.name))
             });
             tree.nodes[i].children = children;
         }

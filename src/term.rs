@@ -238,8 +238,9 @@ const BG_SHIFT: u32 = 9;
 const BOLD: u32 = 1 << 18;
 const ITALIC: u32 = 1 << 19;
 const STRIKE: u32 = 1 << 20;
+const FAINT: u32 = 1 << 21;
 /// The flags that are part of the text itself and survive a highlight.
-const FACE: u32 = BOLD | ITALIC | STRIKE;
+const FACE: u32 = BOLD | ITALIC | STRIKE | FAINT;
 
 impl Style {
     pub const PLAIN: Style = Style(0);
@@ -260,6 +261,11 @@ impl Style {
         Style(self.0 | STRIKE)
     }
 
+    /// Receded, relative to whatever the theme's text colour is.
+    pub const fn faint(self) -> Style {
+        Style(self.0 | FAINT)
+    }
+
     /// A grey background. Grey text would vanish on it, so that turns plain.
     const fn tinted(self) -> Style {
         let fg = if self.0 & FG == GRAY as u32 + 1 { 0 } else { self.0 & FG };
@@ -273,6 +279,9 @@ impl Style {
         }
         if self.0 & ITALIC != 0 {
             out.extend_from_slice(b";3");
+        }
+        if self.0 & FAINT != 0 {
+            out.extend_from_slice(b";2");
         }
         if self.0 & STRIKE != 0 {
             out.extend_from_slice(b";9");
@@ -365,6 +374,20 @@ impl Screen {
         }
         let used = self.put(x, y, max_w - 1, s, st);
         used + self.put(x + used, y, 1, "…", st)
+    }
+
+    /// Like `put`, but shortens a string that does not fit in the middle,
+    /// so a file name keeps both its start and its extension.
+    pub fn put_middle(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
+        if max_w < 8 || str_width(s) <= max_w {
+            return self.put_fit(x, y, max_w, s, st);
+        }
+        let tail_chars = (max_w / 3).min(8);
+        let tail_at = s.char_indices().rev().nth(tail_chars - 1).map_or(0, |(i, _)| i);
+        let tail_w = str_width(&s[tail_at..]);
+        let mut used = self.put(x, y, max_w.saturating_sub(tail_w + 1), s, st);
+        used += self.put(x + used, y, 1, "…", st);
+        used + self.put(x + used, y, tail_w, &s[tail_at..], st)
     }
 
     /// Gives a span a grey background that keeps each cell's own colour.

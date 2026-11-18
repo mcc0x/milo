@@ -34,9 +34,6 @@ Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
 STRATA_ICONS=off shows none.
 ";
 
-/// How often an idle outline checks the repository for changes.
-const IDLE_MS: i32 = 2000;
-
 fn main() {
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
@@ -69,7 +66,7 @@ fn main() {
         }
         outline.draw(&mut screen);
         screen.flush();
-        match term::wait(IDLE_MS) {
+        match term::wait(outline.idle_ms()) {
             Wait::Input => {
                 term::read_keys(&mut keys);
                 for key in keys.drain(..) {

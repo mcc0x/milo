@@ -33,15 +33,6 @@ pub fn kind_word(kind: Kind) -> &'static str {
     }
 }
 
-/// Keeps `sel` inside a window of `h` rows starting at `top`.
-pub fn follow(sel: usize, top: &mut usize, h: usize) {
-    if sel < *top {
-        *top = sel;
-    } else if sel >= *top + h {
-        *top = sel + 1 - h;
-    }
-}
-
 /// Draws "+12 −3" ending just before column `end`. Returns its width.
 pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> usize {
     let a = if add > 0 { format!("+{add}") } else { String::new() };
@@ -70,7 +61,7 @@ pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &FileChang
     let st = if f.committed { st } else { st.bold() };
     let (dir, name) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
     let mut used = icon(s, x, y, max_w, icons::file(name));
-    used += s.put_fit(x + used, y, max_w - used, name, st);
+    used += s.put_middle(x + used, y, max_w - used, name, st);
     if !dir.is_empty() && used + 2 < max_w {
         s.put_fit(x + used + 1, y, max_w - used - 1, dir, DIM);
     }

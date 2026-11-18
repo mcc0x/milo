@@ -210,6 +210,11 @@ impl Repo {
         files
     }
 
+    /// When the `i`th file of the last load was written, if it still exists.
+    pub fn modified(&self, i: usize) -> Option<SystemTime> {
+        self.stamp.get(i).copied().flatten().map(|(at, _)| at)
+    }
+
     /// Whether anything moved since the last load: git's own view of the
     /// repository, or the content of a file that was already pending.
     pub fn stale(&self, files: &[FileChange]) -> bool {
