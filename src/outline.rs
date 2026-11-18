@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::git::{Commit, FileChange, Kind, Repo};
+use crate::git::{Commit, Ends, FileChange, Kind, Repo};
 use crate::history::{self, Context};
 use crate::keys::Key;
 use crate::screen::{self, Screen, Style, Wash};
@@ -71,7 +71,7 @@ pub struct Outline {
     recent: Vec<usize>,
     /// Recent commits, newest first, and what they were read for.
     history: Vec<Commit>,
-    history_key: (String, Option<String>),
+    history_key: Ends,
     show_history: bool,
     /// Files that changed while the outline was open, by path, and when.
     fresh: HashMap<String, Instant>,
@@ -106,6 +106,11 @@ pub struct Outline {
     reading: Option<View>,
 }
 
+struct Replaced {
+    files: Vec<FileChange>,
+    history: Vec<Commit>,
+}
+
 impl Outline {
     pub fn new(repo: Repo, inside_rex: bool) -> Outline {
         let mut outline = Outline {
@@ -116,7 +121,7 @@ impl Outline {
             folds: Folds::default(),
             recent: Vec::new(),
             history: Vec::new(),
-            history_key: (String::new(), None),
+            history_key: Ends::default(),
             show_history: true,
             fresh: HashMap::new(),
             fresh_commits: HashMap::new(),
@@ -137,7 +142,7 @@ impl Outline {
             help: None,
             reading: None,
         };
-        let _ = outline.load(None, None, false);
+        outline.load();
         // Start where the work is, not at the top of the tree.
         let first = outline.tree.rows.iter().position(|r| {
             let n = outline.tree.node(r.node);
@@ -152,42 +157,53 @@ impl Outline {
         self.repo.watch()
     }
 
-    /// Without git, every file in the folders that are open.
-    fn walk(&self) -> Vec<String> {
-        walk::list(&self.repo.root, |p| self.folds.is_open(p))
+    /// Lists every file in the open folders, noting whether they differ.
+    fn relist(&mut self) -> bool {
+        let listing = walk::list(&self.repo.root, |p| self.folds.is_open(p));
+        if listing == self.listing {
+            return false;
+        }
+        self.listing = listing;
+        true
     }
 
-    /// Reads everything afresh. `raw` is a status the repository was just
-    /// asked for and `listing` a walk just made, if any; `mark` marks commits
-    /// that were not there before. Returns the replaced list so the caller
-    /// can compare it to what is pending, if git answered.
-    fn load(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>, mark: bool) -> Option<Vec<FileChange>> {
+    fn build_folder(&mut self) {
         let selected = self.selected_path();
-        self.repo.read(raw);
-        let old = self.repo.pending().map(|files| std::mem::replace(&mut self.files, files));
-        if self.repo.git {
-            self.tree.rebuild(self.repo.tracked(), &self.files);
-        } else {
-            self.listing = listing.unwrap_or_else(|| self.walk());
-            self.tree.rebuild(self.listing.iter().map(String::as_str), &self.files);
-        }
+        self.tree.rebuild(self.listing.iter().map(String::as_str), &self.files);
+        self.relayout(selected);
+    }
 
-        // History only changes when the branch or what is pushed does.
-        let key = self.repo.history_key();
-        if key != self.history_key
+    /// Reads the current project. Returns the lists replaced by a git refresh.
+    fn load(&mut self) -> Option<Replaced> {
+        if !self.repo.git {
+            self.relist();
+            self.build_folder();
+            return None;
+        }
+        let selected = self.selected_path();
+        self.repo.read();
+        let files = self.repo.pending()?;
+        let tracked = self.repo.tracked()?;
+        let files = std::mem::replace(&mut self.files, files);
+        self.tree.rebuild(tracked, &self.files);
+        self.update_recent();
+        self.relayout(selected);
+        let history = self.load_history();
+        Some(Replaced { files, history })
+    }
+
+    /// History only changes when the branch or what is pushed does.
+    fn load_history(&mut self) -> Vec<Commit> {
+        if self.repo.ends() != &self.history_key
             && let Some(history) = self.repo.history(HISTORY_LIMIT)
         {
-            // With nothing known before, every commit would count as new.
-            if mark && !self.history.is_empty() {
-                let known: HashSet<&str> = self.history.iter().map(|c| c.hash.as_str()).collect();
-                let now = Instant::now();
-                for c in history.iter().filter(|c| !known.contains(c.hash.as_str())) {
-                    self.fresh_commits.insert(c.hash.clone(), now);
-                }
-            }
-            (self.history, self.history_key) = (history, key);
+            self.history_key.clone_from(self.repo.ends());
+            return std::mem::replace(&mut self.history, history);
         }
+        Vec::new()
+    }
 
+    fn update_recent(&mut self) {
         self.recent.clear();
         let mut once = HashSet::new();
         for (i, f) in self.files.iter().enumerate() {
@@ -203,18 +219,23 @@ impl Outline {
             }
         }
         let files = &self.files;
-        self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|(at, _)| at)));
-        self.relayout(selected);
-        old
+        self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|s| s.written)));
     }
 
     /// Loads afresh, marks what differs from before and, left alone, brings
     /// the latest of it into view.
-    fn reload(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>) {
-        let Some(old) = self.load(raw, listing, true) else { return };
-        let before: HashMap<(&str, bool), &FileChange> =
-            old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
+    fn reload(&mut self) {
+        let Some(old) = self.load() else { return };
         let now = Instant::now();
+        // With nothing known before, every commit would count as new.
+        if !old.history.is_empty() {
+            let known: HashSet<&str> = old.history.iter().map(|c| c.hash.as_str()).collect();
+            for c in self.history.iter().filter(|c| !known.contains(c.hash.as_str())) {
+                self.fresh_commits.insert(c.hash.clone(), now);
+            }
+        }
+        let before: HashMap<(&str, bool), &FileChange> =
+            old.files.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
         // The file written most recently among those that changed.
         let mut newest: Option<&FileChange> = None;
         for f in &self.files {
@@ -222,7 +243,7 @@ impl Outline {
                 continue;
             }
             self.fresh.insert(f.path.clone(), now);
-            if newest.is_none_or(|n| n.stamp.map(|s| s.0) <= f.stamp.map(|s| s.0)) {
+            if newest.is_none_or(|n| n.stamp.map(|s| s.written) <= f.stamp.map(|s| s.written)) {
                 newest = Some(f);
             }
         }
@@ -243,14 +264,11 @@ impl Outline {
             return false;
         }
         if self.repo.git {
-            if let Some(raw) = self.repo.poll(&self.files) {
-                self.reload(Some(raw), None);
+            if self.repo.poll(&self.files) {
+                self.reload();
             }
-        } else {
-            let listing = self.walk();
-            if listing != self.listing {
-                self.reload(None, Some(listing));
-            }
+        } else if self.relist() {
+            self.build_folder();
         }
         true
     }
@@ -316,7 +334,7 @@ impl Outline {
         if self.repo.git {
             self.relayout(selected);
         } else {
-            let _ = self.load(None, None, false);
+            self.load();
         }
     }
 
@@ -383,7 +401,7 @@ impl Outline {
         let head = (h >= 4) as usize;
         let hint = (h >= HINT_ROWS) as usize;
         let ctx = Context {
-            remote: self.repo.remote.as_deref(),
+            remote: self.repo.remote(),
             dirty: self.files.iter().filter(|f| !f.committed).count(),
             fresh: &self.fresh_commits,
         };
@@ -428,23 +446,23 @@ impl Outline {
         let commit = self.files.iter().filter(|f| !f.committed).count();
         let push = self.files.len() - commit;
         // Spelled out where it fits beside the name; "○3 ↑2" where it does not.
-        let name_w = str_width(&self.repo.name) + str_width(&self.repo.branch) + 5;
+        let name_w = str_width(&self.repo.name) + str_width(self.repo.branch()) + 5;
         let summary = |long: bool| {
             let mut parts = Vec::new();
-            if !self.repo.ok {
+            if !self.repo.ok() {
                 // Nothing below can be trusted, so nothing is claimed.
                 let text = if long { "git did not answer" } else { "! git" };
                 return (vec![(text.to_string(), ui::DEL)], str_width(text));
             }
             if commit + push == 0 {
                 // Nothing can be called pushed where there is nowhere to push.
-                let text = match (long, self.repo.remote.is_some()) {
+                let text = match (long, self.repo.remote().is_some()) {
                     (true, true) => "✓ all committed and pushed",
                     (true, false) => "✓ all committed",
                     (false, _) => "✓ clean",
                 };
                 parts.push((text.to_string(), Style::fg(screen::GREEN)));
-                if long && self.repo.remote.is_none() {
+                if long && self.repo.remote().is_none() {
                     parts.push((" · no remote".to_string(), DIM));
                 }
             }
@@ -475,7 +493,7 @@ impl Outline {
         }
         let room = w.saturating_sub(sum_w + 3);
         let x = 1 + s.put_fit(1, 0, room, &self.repo.name, Style::PLAIN.bold());
-        s.put_fit(x + 2, 0, room.saturating_sub(x + 1), &self.repo.branch, Style::fg(screen::MAGENTA));
+        s.put_fit(x + 2, 0, room.saturating_sub(x + 1), self.repo.branch(), Style::fg(screen::MAGENTA));
     }
 
     /// The keys, worded for what each would do right now.
@@ -714,7 +732,7 @@ impl Outline {
         self.by_click &= matches!(key, Key::Click(..));
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
-            Key::Char('r') => self.reload(None, None),
+            Key::Char('r') => self.reload(),
             Key::Char('t') => self.show_history = !self.show_history,
             _ if self.horizontal => self.strip_key(key),
             _ => self.tree_key(key),
@@ -1097,5 +1115,25 @@ mod tests {
         let rows = draw(&mut o, 40, 8).text();
         assert_eq!(rows[0], " project");
         assert!(rows.iter().any(|row| row.contains("new.txt")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_failed_git_read_keeps_the_tree_until_the_repository_answers_again() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        let mut o = open(&f);
+        let before = draw(&mut o, 60, 10).text();
+        let index = f.root.join(".git/index");
+        let saved = fs::read(&index).unwrap();
+        f.write(".git/index", "corrupt index");
+        assert!(o.check());
+        let failed = draw(&mut o, 60, 10).text();
+        assert!(failed[0].ends_with("git did not answer"), "{failed:?}");
+        assert_eq!(failed[1..], before[1..]);
+
+        fs::write(index, saved).unwrap();
+        assert!(o.check());
+        assert_eq!(draw(&mut o, 60, 10).text(), before);
     }
 }

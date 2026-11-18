@@ -38,7 +38,7 @@ impl Fixture {
 
     /// Runs git in this project and returns its output.
     pub fn git(&self, args: &[&str]) -> String {
-        let mut command = Command::new(&*crate::git::GIT);
+        let mut command = Command::new(&*crate::git::run::GIT);
         isolate_git(&mut command);
         let out = command.arg("-C").arg(&self.root).args(["-c", "commit.gpgsign=false"]).args(args).output().unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));

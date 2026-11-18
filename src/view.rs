@@ -65,7 +65,7 @@ pub struct View {
     /// The file, relative to the repository root.
     path: String,
     abs: PathBuf,
-    stamp: Stamp,
+    stamp: Option<Stamp>,
     lines: Vec<Line>,
     /// Said in place of the content when there is none to show.
     note: Option<&'static str>,
@@ -232,13 +232,14 @@ impl View {
     /// Opens `file`. It need not exist any more, nor the directory it was
     /// in, if git remembers it. `None` if nothing above it exists either.
     pub fn open(file: &Path) -> Option<View> {
-        // The nearest directory that is still there says which repository
-        // this is; the rest of the path is taken on trust.
-        let here = file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        let dir = here.ancestors().find(|d| d.is_dir()).filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        let repo = Repo::open(dir)?;
-        let abs = dir.canonicalize().ok()?.join(file.strip_prefix(dir).unwrap_or(file));
+        // Locate the repository using the nearest directory that still exists.
+        let dir = file.ancestors().skip(1).find(|d| d.is_dir()).unwrap_or(Path::new("."));
+        let mut repo = Repo::open(dir)?;
+        let remainder = file.strip_prefix(dir).unwrap_or(file);
+        let abs = dir.canonicalize().ok()?.join(remainder);
         let path = abs.strip_prefix(&repo.root).ok()?.to_string_lossy().into_owned();
+        let lang = syntax::for_file(&path);
+        repo.only(&path);
         let mut view = View {
             repo,
             path,
@@ -247,16 +248,14 @@ impl View {
             lines: Vec::new(),
             note: None,
             kind: Kind::None,
-            lang: None,
+            lang,
             spans: Vec::new(),
             top: 0,
             pan: 0,
             rows: 0,
             help: None,
         };
-        view.lang = syntax::for_file(&view.path);
-        view.repo.only(&view.path);
-        view.load(None);
+        view.load();
         // Start at the first change, with a little of the file above it.
         let first = view.lines.iter().position(|l| l.kind != LineKind::Same);
         view.top = first.map_or(0, |i| i.saturating_sub(LEAD));
@@ -268,16 +267,17 @@ impl View {
         self.repo.watch()
     }
 
-    /// The last write time and length of the path itself, never of a link's target.
-    fn stamp(&self) -> Stamp {
-        let m = std::fs::symlink_metadata(&self.abs).ok()?;
-        Some((m.modified().ok()?, m.len()))
-    }
-
-    /// Reads the file and what is pending for it. `raw` is a status the
-    /// repository was just asked for, if any.
-    fn load(&mut self, raw: Option<Vec<u8>>) {
-        self.read(raw);
+    /// Reads the file and what is pending for it.
+    fn load(&mut self) {
+        self.repo.read();
+        let stamp = Stamp::read(&self.abs);
+        if !self.repo.ok() || !self.read() {
+            if self.lines.is_empty() && self.note.is_none() {
+                self.note = Some("Git did not answer.");
+            }
+            return;
+        }
+        self.stamp = stamp;
         let Some(lang) = self.lang else { return };
         // Only what is on screen is ever coloured, when it is drawn. For
         // that, each line remembers what was still open where it begins: a
@@ -290,37 +290,45 @@ impl View {
         }
     }
 
-    fn read(&mut self, raw: Option<Vec<u8>>) {
-        self.repo.read(raw);
-        self.stamp = self.stamp();
-        (self.lines, self.note, self.kind) = (Vec::new(), None, Kind::None);
-        if self.repo.is_untracked(&self.path) {
-            // Git has nothing to compare a file it does not track against.
-            self.kind = Kind::Untracked;
+    /// Replaces what is shown only after the required git reads succeed.
+    fn read(&mut self) -> bool {
+        let (lines, kind) = if self.repo.is_untracked(&self.path) {
+            (Vec::new(), Kind::Untracked)
         } else if self.repo.git {
-            let Some(mut diff) = self.repo.file_diff(&self.path, None) else {
+            let Some(diff) = self.repo.file_diff(&self.path, None) else {
+                if !self.repo.ok() {
+                    return false;
+                }
+                self.lines.clear();
+                self.kind = Kind::None;
                 self.note = Some(if matches!(read::file(&self.abs, LIMIT), Content::Unreadable) {
                     "This file cannot be read."
                 } else {
                     "Too large to show."
                 });
-                return;
+                return true;
             };
-            (self.lines, self.kind) = parse_diff(&diff);
-            // A file that looks new may have been moved here; shown beside
-            // where it was, only what changed in it counts as a change.
-            if self.kind == Kind::Added
+            let (mut lines, mut kind) = parse_diff(&diff);
+            // A file that looks new may have been moved here; compare it with where it was.
+            if kind == Kind::Added
                 && let Some(from) = self.repo.moved_from(&self.path)
+                && let Some(diff) = self.repo.file_diff(&self.path, Some(&from))
             {
-                diff = self.repo.file_diff(&self.path, Some(&from)).unwrap_or(diff);
-                (self.lines, self.kind) = parse_diff(&diff);
+                (lines, kind) = parse_diff(&diff);
+            }
+            if !self.repo.ok() {
+                return false;
             }
             if self.repo.is_unmerged(&self.path) {
-                self.kind = Kind::Conflict;
+                kind = Kind::Conflict;
             }
-        }
+            (lines, kind)
+        } else {
+            (Vec::new(), Kind::None)
+        };
+        (self.lines, self.kind, self.note) = (lines, kind, None);
         if !self.lines.is_empty() {
-            return;
+            return true;
         }
         // A file git has never seen is new from its first line to its last.
         let kind = if self.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
@@ -339,6 +347,7 @@ impl View {
                 }
             }
         }
+        true
     }
 
     /// Looks for changes to the file or to the repository around it.
@@ -347,9 +356,8 @@ impl View {
         if self.repo.busy() {
             return false;
         }
-        let raw = self.repo.poll(&[]);
-        if raw.is_some() || self.stamp() != self.stamp {
-            self.load(raw);
+        if self.repo.poll(&[]) || (self.repo.ok() && Stamp::read(&self.abs) != self.stamp) {
+            self.load();
             self.scroll(0);
         }
         true
@@ -693,6 +701,27 @@ mod tests {
         fs::remove_file(target).unwrap();
         let mut view = View::open(&link).unwrap();
         assert_eq!(drawn(&mut view, 60, 6), rows);
+    }
+
+    #[test]
+    fn a_failed_git_read_does_not_replace_the_file_in_view() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        let mut view = View::open(&f.root.join("page.txt")).unwrap();
+        let before = drawn(&mut view, 60, 6);
+        let index = f.root.join(".git/index");
+        let saved = fs::read(&index).unwrap();
+        f.write(".git/index", "corrupt index");
+        f.write("page.txt", "edited while git is not answering\n");
+        assert!(view.check());
+        assert!(!view.repo.ok());
+        assert_eq!(drawn(&mut view, 60, 6), before);
+
+        fs::write(index, saved).unwrap();
+        assert!(view.check());
+        assert!(view.repo.ok());
+        assert!(drawn(&mut view, 60, 6).iter().any(|row| row.contains("edited while git is not answering")));
     }
 
     #[test]
