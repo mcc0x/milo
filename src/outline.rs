@@ -29,6 +29,8 @@ const CHECK: Duration = Duration::from_secs(2);
 const FRESH: Duration = Duration::from_secs(4);
 /// From this height a quarter of the pane shows recent history.
 const HISTORY_ROWS: usize = 20;
+/// From this width history sits beside the outline instead.
+const SIDE_COLS: usize = 90;
 /// Commits loaded for it: more than any pane has columns for dots.
 const HISTORY_LIMIT: usize = 300;
 
@@ -92,6 +94,8 @@ pub struct Outline {
     horizontal: bool,
     /// The rows between heading and hint: (first row, height).
     body: (usize, usize),
+    /// Columns the outline itself has, with history beside it or not.
+    width: usize,
 }
 
 impl Outline {
@@ -118,6 +122,7 @@ impl Outline {
             strip_col: 0,
             horizontal: false,
             body: (0, 0),
+            width: 0,
         };
         outline.load();
         // Start where the work is, not at the top of the tree.
@@ -276,9 +281,14 @@ impl Outline {
         // A strip of two or three rows has none to spare for a heading.
         let head = (h >= 4) as usize;
         let hint = (h >= HINT_ROWS) as usize;
-        // Recent history sits beneath the tree in a tall pane, if there is any.
-        let history = !self.horizontal && self.show_history && h >= HISTORY_ROWS && !self.history.is_empty();
-        let panel = if history { self.history_rows(h - head - hint) } else { 0 };
+        // Recent history goes beside the outline where the pane is wide, and
+        // beneath the tree where it is only tall.
+        let history = self.show_history && !self.history.is_empty();
+        let beside = if history && w >= SIDE_COLS && h >= 3 { (w / 3).clamp(30, 52) } else { 0 };
+        let beneath = history && beside == 0 && !self.horizontal && h >= HISTORY_ROWS;
+        let panel = if beneath { self.history_rows(h - head - hint) } else { 0 };
+        // One column between the two is the rule that separates them.
+        self.width = if beside > 0 { w - beside - 1 } else { w };
         self.body = (head, h - head - hint - panel);
         if head == 1 {
             self.header(s);
@@ -288,8 +298,16 @@ impl Outline {
         } else {
             self.draw_tree(s);
         }
+        if beside > 0 {
+            for y in head..head + self.body.1 {
+                s.put(self.width, y, 1, "│", DIM);
+            }
+            self.draw_history(s, (self.width + 1, head), (beside, self.body.1));
+            // The panel's own rule meets the one between the two halves.
+            s.put(self.width, head, 1, "┬", DIM);
+        }
         if panel > 0 {
-            self.draw_history(s, self.body.0 + self.body.1, panel);
+            self.draw_history(s, (0, self.body.0 + self.body.1), (w, panel));
         }
         if hint == 1 && self.focused {
             self.hint(s);
@@ -365,7 +383,7 @@ impl Outline {
     }
 
     fn draw_tree(&mut self, s: &mut Screen) {
-        let (w, (y0, h)) = (s.w, self.body);
+        let (w, (y0, h)) = (self.width, self.body);
         let len = self.tree.rows.len();
         if len == 0 {
             let text = if self.changed_only { "Nothing to commit or push." } else { "No files." };
@@ -463,14 +481,16 @@ impl Outline {
         content.min((avail / 4).max(5).max(spare)).min(avail.saturating_sub(3))
     }
 
-    /// Recent commits beneath the tree. One row of dots gives the shape:
+    /// Recent commits, in the area whose corner is (x0, y0): beneath the
+    /// tree, or beside it in a wide pane. One row of dots gives the shape:
     /// newest first, a gap between days, a tick where the remote is. Below
     /// it the newest few are spelled out. Hollow is work not committed,
     /// yellow is committed but not pushed, green is on the remote, and the
     /// bold dot is where the branch is now. Without a remote, commits are
     /// simply uncoloured.
-    fn draw_history(&self, s: &mut Screen, y0: usize, rows: usize) {
-        let (w, end) = (s.w, y0 + rows);
+    fn draw_history(&self, s: &mut Screen, (x0, y0): (usize, usize), (w, rows): (usize, usize)) {
+        // Text keeps one column clear of both edges of the area.
+        let (left, right, end) = (x0 + 1, x0 + w - 1, y0 + rows);
         let remote = self.repo.remote.as_deref();
         let unpushed = self.history.iter().filter(|c| !c.pushed).count();
         let dirty = self.files.iter().filter(|f| !f.committed).count();
@@ -485,12 +505,15 @@ impl Outline {
         // Where history passes from local commits to ones the remote has.
         let crosses = |before: &Commit, c: &Commit| remote.is_some() && !before.pushed && c.pushed;
 
-        s.put(0, y0, w, &"─".repeat(w), DIM);
-        s.put(1, y0, w.saturating_sub(2), " History ", Style::PLAIN);
+        s.put(x0, y0, w, &"─".repeat(w), DIM);
+        s.put(left, y0, w - 2, " History ", Style::PLAIN);
         // The heading counts files to push; this counts commits, and says so.
         if unpushed > 0 {
             let text = format!(" {unpushed} unpushed ");
-            s.put(w.saturating_sub(text.len() + 1), y0, text.len(), &text, Style::fg(term::YELLOW));
+            s.put(right.saturating_sub(text.len()), y0, text.len(), &text, Style::fg(term::YELLOW));
+        }
+        if rows < 2 {
+            return;
         }
 
         // Spaced out while every commit fits that way, packed once they do not.
@@ -498,32 +521,33 @@ impl Outline {
         let days = pairs().filter(|(a, b)| a.day != b.day).count();
         let ticks = pairs().filter(|(a, b)| crosses(a, b)).count();
         let cells = self.history.len() + ticks + (dirty > 0) as usize;
-        let step = if cells * 2 + days <= w.saturating_sub(2) { 2 } else { 1 };
-        let (mut x, y) = (1, y0 + 1);
+        let step = if cells * 2 + days <= w - 2 { 2 } else { 1 };
+        let (mut x, y) = (left, y0 + 1);
         if dirty > 0 {
             s.put(x, y, 1, "○", Style::PLAIN.bold());
             x += step;
         }
         for (i, c) in self.history.iter().enumerate() {
             if let Some(before) = i.checked_sub(1).map(|b| &self.history[b]) {
-                if crosses(before, c) && x + 1 < w {
+                if crosses(before, c) && x < right {
                     s.put(x, y, 1, "│", DIM);
                     x += step;
                 }
                 x += (before.day != c.day) as usize;
             }
-            if x + 1 >= w {
+            if x >= right {
                 break;
             }
             s.put(x, y, 1, "●", dot(i, c));
             x += step;
         }
 
+        let text_x = left + 2;
         let mut y = y0 + 2;
         if dirty > 0 && y < end {
             let text = format!("{dirty} file{} not committed", if dirty == 1 { "" } else { "s" });
-            s.put(1, y, 1, "○", Style::PLAIN.bold());
-            s.put_fit(3, y, w.saturating_sub(4), &text, Style::PLAIN.bold());
+            s.put(left, y, 1, "○", Style::PLAIN.bold());
+            s.put_fit(text_x, y, right.saturating_sub(text_x), &text, Style::PLAIN.bold());
             y += 1;
         }
         let now = when::now();
@@ -531,25 +555,25 @@ impl Outline {
         for (i, c) in self.history.iter().enumerate() {
             if i > 0 && crosses(&self.history[i - 1], c) && y < end {
                 // Everything below this line is already on the remote.
-                s.put(1, y, w.saturating_sub(2), &"╌".repeat(w.saturating_sub(2)), DIM);
-                s.put(3, y, w.saturating_sub(5), &format!(" {} ", remote.unwrap_or_default()), DIM);
+                s.put(left, y, w - 2, &"╌".repeat(w - 2), DIM);
+                s.put(text_x, y, right.saturating_sub(text_x), &format!(" {} ", remote.unwrap_or_default()), DIM);
                 y += 1;
             }
             if y >= end {
                 break;
             }
-            s.put(1, y, 1, "●", dot(i, c));
+            s.put(left, y, 1, "●", dot(i, c));
             // An age is only worth its column where it differs from the row above.
             let age = when::short_age(now - c.time);
-            let mut right = w - 1;
+            let mut text_end = right;
             if age != last_age {
-                right -= age.len();
-                s.put(right, y, age.len(), &age, DIM);
-                right -= 1;
+                text_end -= age.len();
+                s.put(text_end, y, age.len(), &age, DIM);
+                text_end -= 1;
             }
             last_age = age;
 
-            let room = right.saturating_sub(3);
+            let room = text_end.saturating_sub(text_x);
             let fresh = self.fresh.contains_key(&commit_key(&c.hash));
             // Merges and what is already pushed recede; a commit that just
             // landed stands out for a moment.
@@ -561,15 +585,15 @@ impl Outline {
             };
             // A "scope: " prefix steps back so the eye lands on what follows.
             let split = if fresh || quiet { 0 } else { prefix_len(&c.subject) };
-            let used = s.put(3, y, room, &c.subject[..split], Style::PLAIN.faint());
-            s.put_fit(3 + used, y, room.saturating_sub(used), &c.subject[split..], st);
+            let used = s.put(text_x, y, room, &c.subject[..split], Style::PLAIN.faint());
+            s.put_fit(text_x + used, y, room.saturating_sub(used), &c.subject[split..], st);
             y += 1;
         }
     }
 
     /// Pending files only, most recent first, filling columns top to bottom.
     fn draw_strip(&mut self, s: &mut Screen) {
-        let (w, (y0, h)) = (s.w, self.body);
+        let (w, (y0, h)) = (self.width, self.body);
         if self.recent.is_empty() {
             // With a heading, that already says so.
             if y0 == 0 {
@@ -714,7 +738,9 @@ impl Outline {
                     self.sel = self.tree.row_of(&self.tree.nodes[parent].path).unwrap_or(self.sel);
                 }
             }
-            Key::Click(y) if !self.horizontal && (self.body.0..self.body.0 + self.body.1).contains(&y) => {
+            Key::Click(x, y)
+                if !self.horizontal && x < self.width && (self.body.0..self.body.0 + self.body.1).contains(&y) =>
+            {
                 let row = self.top + y - self.body.0;
                 if row < self.tree.rows.len() {
                     self.sel = row;

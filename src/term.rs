@@ -103,8 +103,8 @@ pub enum Key {
     PgDn,
     Home,
     End,
-    /// A left click, on this screen row.
-    Click(usize),
+    /// A left click, at this column and row.
+    Click(usize, usize),
     WheelUp,
     WheelDown,
     /// The pane gained or lost keyboard focus.
@@ -190,12 +190,12 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
 fn csi(params: &[u8], fin: u8) -> Option<Key> {
     if let Some(mouse) = params.strip_prefix(b"<") {
         let mut it = std::str::from_utf8(mouse).ok()?.split(';').map(|p| p.parse::<usize>().ok());
-        let (btn, _x, y) = (it.next()??, it.next()??, it.next()??.checked_sub(1)?);
+        let (btn, x, y) = (it.next()??, it.next()??.checked_sub(1)?, it.next()??.checked_sub(1)?);
         // Bit 6 marks the wheel; the low bits are the button. 'M' is a press.
         return match (fin, btn & 64 != 0, btn & 3) {
             (b'M', true, 0) => Some(Key::WheelUp),
             (b'M', true, 1) => Some(Key::WheelDown),
-            (b'M', false, 0) => Some(Key::Click(y)),
+            (b'M', false, 0) => Some(Key::Click(x, y)),
             _ => None,
         };
     }

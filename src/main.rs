@@ -25,8 +25,9 @@ Usage: strata [PATH]
 PATH is any directory (default: the current one). Inside a git repository
 it shows the whole project; anywhere else it is a plain file tree, with
 nothing coloured. It fits its pane: a file tree when tall, a strip of the
-changed files when short, with what happened to each when wide. It updates
-on its own.
+changed files when short, with what happened to each when wide. Recent
+history sits beneath the tree in a tall pane and beside it in a wide one.
+It updates on its own.
 
   ↑ ↓ or j k    move                enter    open or close a folder
   n N           next, previous changed file
