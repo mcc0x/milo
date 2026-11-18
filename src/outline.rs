@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 
 use crate::git::{Commit, FileChange, Kind, Repo};
 use crate::history::{self, Context};
-use crate::term::{self, Key, Screen, Style, Wash};
+use crate::keys::Key;
+use crate::screen::{self, Screen, Style, Wash};
 use crate::tree::{Folds, Tree};
 use crate::ui::{self, DIM};
 use crate::view::View;
 use crate::watch::Scope;
+use crate::width::str_width;
 use crate::{help, icons, rex, walk};
 
 /// At or below this height the pane is a horizontal strip.
@@ -137,8 +139,8 @@ impl Outline {
         };
         let _ = outline.load(None, None, false);
         // Start where the work is, not at the top of the tree.
-        let first = outline.tree.rows.iter().position(|&(n, _)| {
-            let n = &outline.tree.nodes[n as usize];
+        let first = outline.tree.rows.iter().position(|r| {
+            let n = outline.tree.node(r.node);
             !n.dir && n.kind != Kind::None
         });
         outline.sel = first.unwrap_or(0);
@@ -172,18 +174,18 @@ impl Outline {
 
         // History only changes when the branch or what is pushed does.
         let key = self.repo.history_key();
-        if key != self.history_key {
-            if let Some(history) = self.repo.history(HISTORY_LIMIT) {
-                // With nothing known before, every commit would count as new.
-                if mark && !self.history.is_empty() {
-                    let known: HashSet<&str> = self.history.iter().map(|c| c.hash.as_str()).collect();
-                    let now = Instant::now();
-                    for c in history.iter().filter(|c| !known.contains(c.hash.as_str())) {
-                        self.fresh_commits.insert(c.hash.clone(), now);
-                    }
+        if key != self.history_key
+            && let Some(history) = self.repo.history(HISTORY_LIMIT)
+        {
+            // With nothing known before, every commit would count as new.
+            if mark && !self.history.is_empty() {
+                let known: HashSet<&str> = self.history.iter().map(|c| c.hash.as_str()).collect();
+                let now = Instant::now();
+                for c in history.iter().filter(|c| !known.contains(c.hash.as_str())) {
+                    self.fresh_commits.insert(c.hash.clone(), now);
                 }
-                (self.history, self.history_key) = (history, key);
             }
+            (self.history, self.history_key) = (history, key);
         }
 
         self.recent.clear();
@@ -210,7 +212,8 @@ impl Outline {
     /// the latest of it into view.
     fn reload(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>) {
         let Some(old) = self.load(raw, listing, true) else { return };
-        let before: HashMap<(&str, bool), &FileChange> = old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
+        let before: HashMap<(&str, bool), &FileChange> =
+            old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
         let now = Instant::now();
         // The file written most recently among those that changed.
         let mut newest: Option<&FileChange> = None;
@@ -268,11 +271,7 @@ impl Outline {
     /// keyboard, otherwise from the next time the reader uses it. Unseen, it
     /// gives up after `UNSEEN`.
     fn mark_left(at: Instant, looked: Instant, focus: Option<bool>) -> Duration {
-        let seen = if focus == Some(true) {
-            Some(at.max(looked))
-        } else {
-            Some(looked).filter(|&looked| looked > at)
-        };
+        let seen = if focus == Some(true) { Some(at.max(looked)) } else { Some(looked).filter(|&looked| looked > at) };
         let fade = seen.map_or(UNSEEN, |from| FRESH.saturating_sub(from.elapsed()));
         fade.min(UNSEEN.saturating_sub(at.elapsed()))
     }
@@ -416,7 +415,7 @@ impl Outline {
         // A note is said wherever there is a last row, hint or not.
         if let Some((note, _)) = &self.note {
             s.put(0, h - 1, w, &" ".repeat(w), Style::PLAIN);
-            s.put_fit(1, h - 1, w - 2, note, Style::fg(term::YELLOW));
+            s.put_fit(1, h - 1, w - 2, note, Style::fg(screen::YELLOW));
         } else if hint == 1 && self.focus != Some(false) {
             self.hint(s);
         }
@@ -429,13 +428,13 @@ impl Outline {
         let commit = self.files.iter().filter(|f| !f.committed).count();
         let push = self.files.len() - commit;
         // Spelled out where it fits beside the name; "○3 ↑2" where it does not.
-        let name_w = term::str_width(&self.repo.name) + term::str_width(&self.repo.branch) + 5;
+        let name_w = str_width(&self.repo.name) + str_width(&self.repo.branch) + 5;
         let summary = |long: bool| {
             let mut parts = Vec::new();
             if !self.repo.ok {
                 // Nothing below can be trusted, so nothing is claimed.
                 let text = if long { "git did not answer" } else { "! git" };
-                return (vec![(text.to_string(), ui::DEL)], term::str_width(text));
+                return (vec![(text.to_string(), ui::DEL)], str_width(text));
             }
             if commit + push == 0 {
                 // Nothing can be called pushed where there is nowhere to push.
@@ -444,7 +443,7 @@ impl Outline {
                     (true, false) => "✓ all committed",
                     (false, _) => "✓ clean",
                 };
-                parts.push((text.to_string(), Style::fg(term::GREEN)));
+                parts.push((text.to_string(), Style::fg(screen::GREEN)));
                 if long && self.repo.remote.is_none() {
                     parts.push((" · no remote".to_string(), DIM));
                 }
@@ -460,7 +459,7 @@ impl Outline {
                 let text = if long { format!("{push} to push") } else { format!("↑{push}") };
                 parts.push((text, Style::PLAIN));
             }
-            let width: usize = parts.iter().map(|(t, _)| term::str_width(t)).sum();
+            let width: usize = parts.iter().map(|(t, _)| str_width(t)).sum();
             (parts, width)
         };
         let (mut parts, mut sum_w) = if self.repo.git { summary(true) } else { (Vec::new(), 0) };
@@ -476,7 +475,7 @@ impl Outline {
         }
         let room = w.saturating_sub(sum_w + 3);
         let x = 1 + s.put_fit(1, 0, room, &self.repo.name, Style::PLAIN.bold());
-        s.put_fit(x + 2, 0, room.saturating_sub(x + 1), &self.repo.branch, Style::fg(term::MAGENTA));
+        s.put_fit(x + 2, 0, room.saturating_sub(x + 1), &self.repo.branch, Style::fg(screen::MAGENTA));
     }
 
     /// The keys, worded for what each would do right now.
@@ -526,8 +525,8 @@ impl Outline {
         // wider than what there is to say.
         let wide = w >= WIDE_COLS;
         let (mut word_w, mut size_w) = (0, 0);
-        for &(node, _) in self.tree.rows.iter().filter(|_| wide) {
-            let n = &self.tree.nodes[node as usize];
+        for row in self.tree.rows.iter().filter(|_| wide) {
+            let n = self.tree.node(row.node);
             if !n.dir {
                 word_w = word_w.max(ui::kind_word(n.kind).len());
             }
@@ -537,8 +536,8 @@ impl Outline {
         size_w += (size_w > 0) as usize;
         let quiet = self.files.is_empty();
         let rows = self.tree.rows.iter().enumerate().skip(self.top).take(h);
-        for (y, (i, &(node, depth))) in (y0..).zip(rows) {
-            let n = &self.tree.nodes[node as usize];
+        for (y, (i, row)) in (y0..).zip(rows) {
+            let n = self.tree.node(row.node);
             let pending = n.kind != Kind::None;
             let open = n.dir && self.folds.is_open(&n.path);
             let colour = ui::kind_style(n.kind);
@@ -554,7 +553,7 @@ impl Outline {
                 right -= 1;
             }
 
-            let indent = (depth as usize * 2).min(w / 3);
+            let indent = (usize::from(row.depth) * 2).min(w / 3);
             for guide in (0..indent).step_by(2) {
                 s.put(1 + guide, y, 1, "│", DIM);
             }
@@ -628,7 +627,7 @@ impl Outline {
             let files = &self.recent[col * h..((col + 1) * h).min(self.recent.len())];
             let name_w = |&f: &usize| {
                 let path = &self.files[f].path;
-                term::str_width(path.rsplit_once('/').map_or(path, |(_, n)| n))
+                str_width(path.rsplit_once('/').map_or(path, |(_, n)| n))
             };
             let col_w = (files.iter().map(name_w).max().unwrap_or(0) + 12).clamp(16, 34).min(w);
             // A column is drawn whole or not at all, bar the first.
@@ -646,7 +645,7 @@ impl Outline {
         let after = self.recent.len().saturating_sub(col * h);
         if after > 0 {
             let more = format!("  +{after} more ›");
-            s.put(w.saturating_sub(term::str_width(&more) + 1), y0 + h - 1, w, &more, DIM);
+            s.put(w.saturating_sub(str_width(&more) + 1), y0 + h - 1, w, &more, DIM);
         }
         self.strip_col = first;
     }
@@ -738,7 +737,7 @@ impl Outline {
     }
 
     fn tree_key(&mut self, key: Key) {
-        let page = self.body.1.max(2) as isize - 1;
+        let page = isize::try_from(self.body.1.max(2) - 1).unwrap_or(isize::MAX);
         let sel = self.sel;
         match key {
             Key::Char('e') => {

@@ -7,10 +7,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::{Kind, Repo, Stamp};
+use crate::keys::Key;
 use crate::read::{self, Content};
+use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
-use crate::term::{self, Key, Screen, Style, Wash};
 use crate::ui::{self, ADD, DEL, DIM};
+use crate::width::{byte_at_col, str_width};
 use crate::{help, icons};
 
 /// Files larger than this are not shown.
@@ -45,13 +47,13 @@ struct Line {
 impl Line {
     fn new(kind: LineKind, no: u32, text: &str) -> Self {
         let text = clean(text);
-        let width = term::str_width(&text);
+        let width = str_width(&text);
         Self { kind, no, text, width, changed: (0, 0), state: State::default() }
     }
 
     /// The byte offset to draw from and the prefix needed to colour what is shown.
     fn text_for_draw(&self, pan: usize, width: usize) -> (usize, &str) {
-        let skip = term::byte_at_col(&self.text, pan);
+        let skip = byte_at_col(&self.text, pan);
         // A character occupies at most four bytes. Keep the prefix for its syntax.
         let end = self.text.floor_char_boundary(skip + (width + LEAD_OUT) * 4);
         (skip, &self.text[..end])
@@ -87,11 +89,11 @@ pub struct View {
 fn class_style(class: Class) -> Style {
     match class {
         Class::Comment => DIM.italic(),
-        Class::Str => Style::fg(term::GREEN),
-        Class::Number => Style::fg(term::YELLOW),
-        Class::Keyword => Style::fg(term::MAGENTA),
-        Class::Type => Style::fg(term::CYAN),
-        Class::Function | Class::Key => Style::fg(term::BLUE),
+        Class::Str => Style::fg(screen::GREEN),
+        Class::Number => Style::fg(screen::YELLOW),
+        Class::Keyword => Style::fg(screen::MAGENTA),
+        Class::Type => Style::fg(screen::CYAN),
+        Class::Function | Class::Key => Style::fg(screen::BLUE),
     }
 }
 
@@ -307,11 +309,11 @@ impl View {
             (self.lines, self.kind) = parse_diff(&diff);
             // A file that looks new may have been moved here; shown beside
             // where it was, only what changed in it counts as a change.
-            if self.kind == Kind::Added {
-                if let Some(from) = self.repo.moved_from(&self.path) {
-                    diff = self.repo.file_diff(&self.path, Some(&from)).unwrap_or(diff);
-                    (self.lines, self.kind) = parse_diff(&diff);
-                }
+            if self.kind == Kind::Added
+                && let Some(from) = self.repo.moved_from(&self.path)
+            {
+                diff = self.repo.file_diff(&self.path, Some(&from)).unwrap_or(diff);
+                (self.lines, self.kind) = parse_diff(&diff);
             }
             if self.repo.is_unmerged(&self.path) {
                 self.kind = Kind::Conflict;
@@ -331,7 +333,7 @@ impl View {
             Content::Bytes(bytes) if bytes.contains(&0) => self.note = Some("Not text, so there is nothing to show."),
             Content::Bytes(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
-                self.lines = text.lines().enumerate().map(|(i, l)| Line::new(kind, i as u32 + 1, l)).collect();
+                self.lines = (1..).zip(text.lines()).map(|(no, line)| Line::new(kind, no, line)).collect();
                 if self.lines.is_empty() {
                     self.note = Some("Empty.");
                 }
@@ -432,15 +434,15 @@ impl View {
                 if start >= end {
                     continue;
                 }
-                col += term::str_width(&text[at..start]);
-                let width = term::str_width(&text[start..end]);
+                col += str_width(&text[at..start]);
+                let width = str_width(&text[start..end]);
                 s.paint(text_x + col, y, width.min(text_w.saturating_sub(col)), class_style(class));
                 (at, col) = (end, col + width);
             }
             let (a, b) = (line.changed.0.clamp(skip, text.len()), line.changed.1.clamp(skip, text.len()));
             if a < b {
-                let from = term::str_width(&text[skip..a]);
-                let width = term::str_width(&text[a..b]);
+                let from = str_width(&text[skip..a]);
+                let width = str_width(&text[a..b]);
                 s.emphasise(text_x + from, y, width.min(text_w.saturating_sub(from)));
             }
             // A tint across the row, so a change is seen without reading
@@ -468,6 +470,10 @@ impl View {
         let w = s.w;
         let mut right = w - 1;
         if self.kind != Kind::None {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the file or diff is at most 8 MiB, with at least one byte per line"
+            )]
             let count = |kind| self.lines.iter().filter(|l| l.kind == kind).count() as u32;
             right -= ui::size_right(s, right, 0, count(LineKind::Add), count(LineKind::Del)).min(right);
             let word = ui::kind_word(self.kind);
@@ -483,7 +489,7 @@ impl View {
 
     /// Returns true when the viewer should close.
     pub fn on_key(&mut self, key: Key) -> bool {
-        let page = self.rows.max(2) as isize - 1;
+        let page = isize::try_from(self.rows.max(2) - 1).unwrap_or(isize::MAX);
         if let Some(top) = self.help {
             self.help = match key {
                 Key::Ctrl(b'c') | Key::Eof => return true,
@@ -626,7 +632,8 @@ mod tests {
 
     #[test]
     fn an_edited_word_is_picked_out() {
-        let (lines, _) = parse_diff(b"diff --git a/f b/f\n@@ -1 +1 @@\n-let total = count + 1;\n+let total = count + 2;\n");
+        let (lines, _) =
+            parse_diff(b"diff --git a/f b/f\n@@ -1 +1 @@\n-let total = count + 1;\n+let total = count + 2;\n");
         assert_eq!(&lines[0].text[lines[0].changed.0..lines[0].changed.1], "1");
         assert_eq!(&lines[1].text[lines[1].changed.0..lines[1].changed.1], "2");
     }
@@ -693,7 +700,7 @@ mod tests {
         let dir = Fixture::folder();
         let file = dir.root.join("text");
         fs::write(&file, "content").unwrap();
-        fs::set_permissions(&file, Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&file, Permissions::from_mode(0o0)).unwrap();
         // Users who can bypass file permissions can still read this file.
         if fs::File::open(&file).is_ok() {
             return;

@@ -2,7 +2,7 @@
 //! over the pane on `?`, so nobody has to leave to find out.
 
 use crate::git::Kind;
-use crate::term::{Screen, Style};
+use crate::screen::{Screen, Style};
 use crate::ui::{self, ADD, DEL, DIM};
 
 /// One row of a page: pieces of text, each in its own style.
@@ -49,18 +49,9 @@ pub fn outline(git: bool) -> Vec<Row> {
             Row::new(),
         ]);
     }
-    rows.extend([
-        heading("Keys"),
-        key("↑ ↓  ", "move"),
-        key("enter", "open"),
-        key("e    ", "open every folder"),
-    ]);
+    rows.extend([heading("Keys"), key("↑ ↓  ", "move"), key("enter", "open"), key("e    ", "open every folder")]);
     if git {
-        rows.extend([
-            key("n N  ", "next, previous"),
-            key("c    ", "changed only"),
-            key("t    ", "history on or off"),
-        ]);
+        rows.extend([key("n N  ", "next, previous"), key("c    ", "changed only"), key("t    ", "history on or off")]);
     }
     rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
     rows

@@ -8,8 +8,8 @@ use crate::git::{FileChange, Kind};
 pub struct Node {
     name_at: usize,
     pub path: String,
-    pub parent: u32,
-    pub children: Vec<u32>,
+    parent: u32,
+    children: Vec<u32>,
     pub dir: bool,
     /// What happened here; for a directory, the strongest kind beneath it.
     pub kind: Kind,
@@ -134,12 +134,18 @@ impl Folds {
     }
 }
 
+/// A visible node and how many folders it is drawn beneath.
+#[derive(Clone, Copy)]
+pub struct Row {
+    pub node: u32,
+    pub depth: u16,
+}
+
 #[derive(Default)]
 pub struct Tree {
-    pub nodes: Vec<Node>,
+    nodes: Vec<Node>,
     index: HashMap<String, u32>,
-    /// Visible rows as (node, depth).
-    pub rows: Vec<(u32, u16)>,
+    pub rows: Vec<Row>,
 }
 
 impl Tree {
@@ -164,7 +170,7 @@ impl Tree {
         for i in 0..self.nodes.len() {
             let mut children = std::mem::take(&mut self.nodes[i].children);
             children.sort_unstable_by(|&a, &b| {
-                let (a, b) = (&self.nodes[a as usize], &self.nodes[b as usize]);
+                let (a, b) = (self.node(a), self.node(b));
                 b.dir.cmp(&a.dir).then_with(|| natural_cmp(a.name(), b.name()))
             });
             self.nodes[i].children = children;
@@ -174,16 +180,16 @@ impl Tree {
     fn insert(&mut self, path: &str, dir: bool) -> u32 {
         if let Some(&i) = self.index.get(path) {
             // A directory that became a file is still where its old files hang.
-            self.nodes[i as usize].dir |= dir;
+            self.node_mut(i).dir |= dir;
             return i;
         }
         let (parent, name_at) = match path.rsplit_once('/') {
             Some((dir, _)) => (self.insert(dir, true), dir.len() + 1),
             None => (0, 0),
         };
-        let i = self.nodes.len() as u32;
+        let i = u32::try_from(self.nodes.len()).expect("too many nodes in the project tree");
         self.nodes.push(Node::new(path, name_at, parent, dir));
-        self.nodes[parent as usize].children.push(i);
+        self.node_mut(parent).children.push(i);
         self.index.insert(path.to_string(), i);
         i
     }
@@ -192,10 +198,10 @@ impl Tree {
     /// A file listed twice, not committed and then committed, counts once,
     /// as it first appears.
     fn mark(&mut self, file: &FileChange) {
-        let mut i = self.insert(&file.path, false) as usize;
-        let first = !std::mem::replace(&mut self.nodes[i].marked, true);
+        let mut i = self.insert(&file.path, false);
+        let first = !std::mem::replace(&mut self.node_mut(i).marked, true);
         loop {
-            let n = &mut self.nodes[i];
+            let n = self.node_mut(i);
             n.uncommitted |= !file.committed;
             if first {
                 if n.kind < file.kind {
@@ -208,7 +214,7 @@ impl Tree {
             if i == 0 {
                 break;
             }
-            i = n.parent as usize;
+            i = n.parent;
         }
     }
 
@@ -216,37 +222,45 @@ impl Tree {
     /// expanded; `changed_only` drops everything that is not pending.
     pub fn layout(&mut self, open: impl Fn(&str) -> bool, changed_only: bool) {
         self.rows.clear();
-        let mut stack: Vec<(u32, u16)> = self.nodes[0].children.iter().rev().map(|&c| (c, 0)).collect();
-        while let Some((i, depth)) = stack.pop() {
-            let n = &self.nodes[i as usize];
+        let mut stack: Vec<_> = self.node(0).children.iter().rev().map(|&node| Row { node, depth: 0 }).collect();
+        while let Some(row) = stack.pop() {
+            let n = self.node(row.node);
             if changed_only && n.kind == Kind::None {
                 continue;
             }
-            self.rows.push((i, depth));
             if n.dir && open(&n.path) {
-                stack.extend(n.children.iter().rev().map(|&c| (c, depth + 1)));
+                stack.extend(n.children.iter().rev().map(|&node| Row { node, depth: row.depth + 1 }));
             }
+            self.rows.push(row);
         }
     }
 
+    pub fn node(&self, id: u32) -> &Node {
+        &self.nodes[id as usize]
+    }
+
+    fn node_mut(&mut self, id: u32) -> &mut Node {
+        &mut self.nodes[id as usize]
+    }
+
     pub fn row(&self, i: usize) -> Option<&Node> {
-        self.rows.get(i).map(|&(n, _)| &self.nodes[n as usize])
+        self.rows.get(i).map(|r| self.node(r.node))
     }
 
     pub fn row_of(&self, path: &str) -> Option<usize> {
         let node = *self.index.get(path)?;
-        self.rows.iter().position(|&(n, _)| n == node)
+        self.rows.iter().position(|r| r.node == node)
     }
 
     /// The row of the folder that row `i` is in, if it is in one.
     pub fn parent_row(&self, i: usize) -> Option<usize> {
         let parent = self.row(i)?.parent;
-        (parent != 0).then(|| self.rows.iter().position(|&(n, _)| n == parent)).flatten()
+        (parent != 0).then(|| self.rows.iter().position(|r| r.node == parent)).flatten()
     }
 
     /// The next or previous folder among the visible rows.
     pub fn folder_row(&self, from: usize, forward: bool) -> Option<usize> {
-        let is_dir = |&(n, _): &(u32, u16)| self.nodes[n as usize].dir;
+        let is_dir = |r: &Row| self.node(r.node).dir;
         if forward {
             self.rows.iter().skip(from + 1).position(is_dir).map(|i| from + 1 + i)
         } else {
@@ -256,14 +270,14 @@ impl Tree {
 
     /// The next or previous row at the same depth in the same folder.
     pub fn sibling_row(&self, from: usize, forward: bool) -> Option<usize> {
-        let &(_, depth) = self.rows.get(from)?;
+        let depth = self.rows.get(from)?.depth;
         // The folder's rows end at the first one shallower than this.
         if forward {
-            let ahead = self.rows[from + 1..].iter().take_while(|r| r.1 >= depth);
-            ahead.enumerate().find(|(_, r)| r.1 == depth).map(|(i, _)| from + 1 + i)
+            let ahead = self.rows[from + 1..].iter().take_while(|r| r.depth >= depth);
+            ahead.enumerate().find(|(_, r)| r.depth == depth).map(|(i, _)| from + 1 + i)
         } else {
-            let behind = self.rows[..from].iter().rev().take_while(|r| r.1 >= depth);
-            behind.enumerate().find(|(_, r)| r.1 == depth).map(|(i, _)| from - 1 - i)
+            let behind = self.rows[..from].iter().rev().take_while(|r| r.depth >= depth);
+            behind.enumerate().find(|(_, r)| r.depth == depth).map(|(i, _)| from - 1 - i)
         }
     }
 
@@ -271,13 +285,16 @@ impl Tree {
     /// wrapping around, whether or not its folders are open.
     pub fn next_pending(&self, from: usize, forward: bool) -> Option<&str> {
         let mut order = Vec::with_capacity(self.nodes.len());
-        let mut stack: Vec<u32> = self.nodes[0].children.iter().rev().copied().collect();
+        let mut stack: Vec<_> = self.node(0).children.iter().rev().copied().collect();
         while let Some(i) = stack.pop() {
             order.push(i);
-            stack.extend(self.nodes[i as usize].children.iter().rev());
+            stack.extend(self.node(i).children.iter().rev());
         }
-        let pending = |&&n: &&u32| !self.nodes[n as usize].dir && self.nodes[n as usize].kind != Kind::None;
-        let at = self.rows.get(from).and_then(|&(n, _)| order.iter().position(|&x| x == n));
+        let pending = |&&id: &&u32| {
+            let node = self.node(id);
+            !node.dir && node.kind != Kind::None
+        };
+        let at = self.rows.get(from).and_then(|r| order.iter().position(|&id| id == r.node));
         let (before, after) = match at {
             Some(at) => (&order[..at], &order[at + 1..]),
             None => (&order[..0], &order[..]),
@@ -287,7 +304,7 @@ impl Tree {
         } else {
             before.iter().rev().chain(after.iter().rev()).find(pending)
         };
-        hit.map(|&n| self.nodes[n as usize].path.as_str())
+        hit.map(|&id| self.node(id).path.as_str())
     }
 }
 
@@ -300,7 +317,7 @@ mod tests {
     }
 
     fn names(tree: &Tree) -> Vec<&str> {
-        tree.rows.iter().map(|&(n, _)| tree.nodes[n as usize].path.as_str()).collect()
+        tree.rows.iter().map(|r| tree.node(r.node).path.as_str()).collect()
     }
 
     impl Tree {
@@ -359,9 +376,9 @@ mod tests {
     fn a_file_listed_twice_counts_once_as_first_seen() {
         let files = [file("a.rs", Kind::Modified, 1, false), file("a.rs", Kind::Added, 9, true)];
         let tree = Tree::build(["a.rs"].into_iter(), &files);
-        let a = &tree.nodes[1];
+        let a = tree.node(1);
         assert_eq!((a.kind, a.add, a.uncommitted), (Kind::Modified, 1, true));
-        assert_eq!(tree.nodes[0].pending, 1);
+        assert_eq!(tree.node(0).pending, 1);
     }
 
     #[test]
@@ -369,7 +386,7 @@ mod tests {
         // The order git reports them in: what was deleted, then what is new.
         let files = [file("dir/a.txt", Kind::Deleted, 0, false), file("dir", Kind::Untracked, 1, false)];
         let mut tree = Tree::build(["dir"].into_iter(), &files);
-        assert_eq!((tree.nodes[0].pending, tree.nodes[0].add), (2, 1));
+        assert_eq!((tree.node(0).pending, tree.node(0).add), (2, 1));
         tree.layout(|_| true, false);
         assert_eq!(names(&tree), ["dir", "dir/a.txt"]);
     }

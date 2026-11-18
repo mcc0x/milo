@@ -2,23 +2,24 @@
 
 use crate::git::{FileChange, Kind};
 use crate::icons::{self, Icon};
-use crate::term::{self, Screen, Style};
+use crate::screen::{self, Screen, Style};
+use crate::width::str_width;
 
 /// Text that steps back. Faint, not grey: it stays a shade of the theme's
 /// own text colour, where a theme's grey can match its background.
 pub const DIM: Style = Style::PLAIN.faint();
-pub const ADD: Style = Style::fg(term::GREEN);
-pub const DEL: Style = Style::fg(term::RED);
+pub const ADD: Style = Style::fg(screen::GREEN);
+pub const DEL: Style = Style::fg(screen::RED);
 
 /// The colour that says what happened to a file.
 pub fn kind_colour(kind: Kind) -> Style {
     match kind {
         Kind::None => Style::PLAIN,
-        Kind::Modified => Style::fg(term::YELLOW),
+        Kind::Modified => Style::fg(screen::YELLOW),
         Kind::Added | Kind::Untracked => ADD,
         Kind::Deleted => DEL,
-        Kind::Renamed => Style::fg(term::CYAN),
-        Kind::Conflict => Style::fg(term::MAGENTA),
+        Kind::Renamed => Style::fg(screen::CYAN),
+        Kind::Conflict => Style::fg(screen::MAGENTA),
     }
 }
 
@@ -58,7 +59,7 @@ pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> u
     let a = if add > 0 { format!("+{add}") } else { String::new() };
     let d = if del > 0 { format!("−{del}") } else { String::new() };
     let gap = (!a.is_empty() && !d.is_empty()) as usize;
-    let w = a.len() + gap + term::str_width(&d);
+    let w = a.len() + gap + str_width(&d);
     let x = end.saturating_sub(w);
     s.put(x, y, a.len(), &a, ADD);
     s.put(x + a.len() + gap, y, w, &d, DEL);

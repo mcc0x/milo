@@ -1,12 +1,22 @@
 [package]
 name = "strata"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A project's files in a terminal pane, coloured by what is not yet committed or pushed."
 license = "MIT"
 
 [dependencies]
 libc = "0.2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
 
 [profile.release]
 opt-level = 3

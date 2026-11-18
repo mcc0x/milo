@@ -5,8 +5,8 @@ use std::io::Read as _;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::read::{self, Content};
@@ -273,7 +273,11 @@ fn new_file_lines(path: &Path) -> u32 {
         return 1;
     }
     match read::file(path, NEW_FILE_LIMIT) {
-        Content::Bytes(bytes) if !bytes.contains(&0) => bytes.split_inclusive(|&b| b == b'\n').count() as u32,
+        Content::Bytes(bytes) if !bytes.contains(&0) => {
+            #[expect(clippy::cast_possible_truncation, reason = "a 256 KiB file has at most 262,144 lines")]
+            let count = bytes.split_inclusive(|&b| b == b'\n').count() as u32;
+            count
+        }
         _ => 0,
     }
 }
@@ -311,6 +315,15 @@ pub struct Commit {
     pub pushed: bool,
     /// Joins two lines of history rather than changing anything itself.
     pub merge: bool,
+}
+
+/// Where a file was moved from, and the tree and index used to find it.
+struct RenameLookup {
+    path: String,
+    against: String,
+    tip: String,
+    index: Stamp,
+    from: Option<String>,
 }
 
 pub struct Repo {
@@ -353,8 +366,7 @@ pub struct Repo {
     committed: ((Option<String>, String), Vec<FileChange>),
     /// Every tracked file, kept while the index stays as it was.
     tracked: (Stamp, String),
-    /// Where one file was moved from, and what that answer rests on.
-    moved: Option<((String, String, String, Stamp), Option<String>)>,
+    moved: Option<RenameLookup>,
 }
 
 impl Repo {
@@ -364,8 +376,9 @@ impl Repo {
     pub fn open(dir: &Path) -> Option<Repo> {
         let ask = |args: &[&str]| output(command(dir, &[], args), OUTPUT_LIMIT).and_then(|o| String::from_utf8(o).ok());
         // Older gits do not know --path-format; they still say where the top is.
-        let found = ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])
-            .or_else(|| ask(&["rev-parse", "--show-toplevel"]));
+        let found =
+            ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])
+                .or_else(|| ask(&["rev-parse", "--show-toplevel"]));
         let mut lines = found.as_deref().unwrap_or("").lines().filter(|l| !l.is_empty()).map(PathBuf::from);
         let (root, git) = match lines.next() {
             Some(top) => (top, true),
@@ -462,7 +475,8 @@ impl Repo {
     }
 
     fn status_raw(&self, scope: Option<&str>) -> Option<Vec<u8>> {
-        let mut args = vec!["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all", "--ignored=matching"];
+        let mut args =
+            vec!["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all", "--ignored=matching"];
         if let Some(path) = scope {
             args.extend(["--", path]);
         }
@@ -541,9 +555,8 @@ impl Repo {
             self.basis = basis;
         }
         self.ok = true;
-        self.remote = target.map(|t| {
-            if st.upstream.is_some() { t.clone() } else { t.trim_end_matches("/HEAD").to_string() }
-        });
+        self.remote =
+            target.map(|t| if st.upstream.is_some() { t.clone() } else { t.trim_end_matches("/HEAD").to_string() });
         self.stand_in = stand_in;
         self.against = self.base.clone().unwrap_or_else(|| head.to_string());
         self.branch.clone_from(&st.branch);
@@ -676,19 +689,27 @@ impl Repo {
     /// until something that could change it does.
     pub fn moved_from(&mut self, path: &str) -> Option<String> {
         let index = self.index_stamp();
-        let key = (path.to_string(), self.against.clone(), self.tip.clone(), index);
-        if index.is_none() || self.moved.as_ref().is_none_or(|(kept, _)| *kept != key) {
+        let fresh = index.is_some()
+            && self.moved.as_ref().is_some_and(|known| {
+                known.path == path && known.against == self.against && known.tip == self.tip && known.index == index
+            });
+        if !fresh {
             if let Some(raw) = self.git(&["diff", &self.against, "-M", "--no-color", "--raw", "-z"]) {
                 let mut files = Vec::new();
                 parse_changes(&raw, false, &mut files);
                 let from = files.into_iter().find(|f| f.path == path).and_then(|f| f.from);
-                self.moved = Some((key, from));
+                self.moved = Some(RenameLookup {
+                    path: path.to_string(),
+                    against: self.against.clone(),
+                    tip: self.tip.clone(),
+                    index,
+                    from,
+                });
             } else {
                 self.ok = false;
             }
         }
-        let ((known, _, _, _), from) = self.moved.as_ref()?;
-        if known == path { from.clone() } else { None }
+        self.moved.as_ref().filter(|known| known.path == path)?.from.clone()
     }
 
     /// The whole of one file as a diff against what is already pushed, or

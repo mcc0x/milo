@@ -1,0 +1,4 @@
+max_width = 120
+use_small_heuristics = "Max"
+# Lists of short words, such as a language's keywords, stay packed in rows.
+short_array_element_width_threshold = 24

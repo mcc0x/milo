@@ -1,9 +1,14 @@
-//! Colouring source text with small language tables, not a grammar.
+//! Finds colour spans in source text using delimiters and word lists.
 //!
-//! Comments and multiline strings carry state between lines. Ambiguous
-//! syntax can be misclassified, including an apparent opener that keeps
-//! later lines in a string or comment until its closing delimiter appears.
+//! Open comments and multiline strings carry on to the next line. This
+//! scanner does not parse a grammar, so it can mistake text for an opener
+//! and colour later lines as a string or comment until a closer appears.
 
+mod langs;
+
+pub use langs::for_file;
+
+/// What a coloured piece of source text resembles.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Class {
     Comment,
@@ -20,6 +25,7 @@ pub enum Class {
 /// Bytes `start..end` of a line are of one class.
 pub type Span = (usize, usize, Class);
 
+/// A pair of string delimiters and the rules for text between them.
 struct Quote {
     open: &'static str,
     close: &'static str,
@@ -29,28 +35,35 @@ struct Quote {
     raw: bool,
 }
 
+/// The delimiters, words and conventions the scanner uses for one language.
 pub struct Lang {
+    /// Markers that turn the rest of a line into a comment.
     line_comments: &'static [&'static str],
+    /// Pairs of delimiters for comments that can cross line breaks.
     block_comments: &'static [(&'static str, &'static str)],
     /// Tried in order, so a longer opener must come before its prefix.
     quotes: &'static [Quote],
+    /// Words reserved by the language.
     keywords: &'static [&'static str],
     /// Words that stand for a value: `true`, `nil`, `None`.
     constants: &'static [&'static str],
-    /// A lone apostrophe is not a character literal.
+    /// Treat an apostrophe as an opener only if it looks like a character literal.
     chars: bool,
+    /// Colour a leading `#` and its directive name as a keyword.
     directives: bool,
     /// Distinguish names that resemble types, calls and constants.
     names: bool,
+    /// The separator after a field name in a data file, if any.
     key_end: Option<u8>,
-    /// Shell and YAML require whitespace before a comment marker.
+    /// Start line comments only at the start of a line or after whitespace.
     spaced_comments: bool,
-    /// YAML quotes and constants only begin at a scalar boundary.
+    /// Match quotes and named values only where a YAML value can begin.
     scalars: bool,
-    /// Avoid treating apostrophes and URLs in JSX prose as code.
+    /// Ignore likely apostrophes and URLs in JSX prose.
     jsx: bool,
-    /// PHP's `#[` starts an attribute, not a comment.
+    /// Read PHP's `#[` as an attribute opener rather than a comment.
     attributes: bool,
+    /// Colour bracketed TOML headers at the start of a line as keys.
     table_headers: bool,
 }
 
@@ -66,6 +79,16 @@ pub enum State {
 
 fn is_word(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
+}
+
+fn word_end(b: &[u8], start: usize) -> usize {
+    start + b[start..].iter().take_while(|&&c| is_word(c)).count()
+}
+
+fn number_end(b: &[u8], start: usize) -> usize {
+    let end = word_end(b, start);
+    // A decimal point must have a digit after it, unlike a range or member access.
+    if b.get(end) == Some(&b'.') && b.get(end + 1).is_some_and(u8::is_ascii_digit) { word_end(b, end + 1) } else { end }
 }
 
 /// Most delimiters can be ruled out by looking at just the first byte.
@@ -85,28 +108,26 @@ fn find_end(b: &[u8], from: usize, needle: &str) -> Option<usize> {
     (from..=last).find(|&i| begins(&b[i..], needle)).map(|i| i + needle.len())
 }
 
-/// Where a string that is open at `from` ends, and whether it closed.
-fn string_end(b: &[u8], from: usize, q: &Quote) -> (usize, bool) {
+/// Where the closing quote ends, skipping escaped bytes in non-raw strings.
+fn string_end(b: &[u8], from: usize, q: &Quote) -> Option<usize> {
     let mut i = from;
     while i < b.len() {
         if !q.raw && b[i] == b'\\' {
             i += 2;
         } else if begins(&b[i..], q.close) {
-            return (i + q.close.len(), true);
+            return Some(i + q.close.len());
         } else {
             i += 1;
         }
     }
-    (b.len(), false)
+    None
 }
 
 /// Recognise a character, including Rust's `'\u{1F600}'`, not a lifetime.
 fn is_char(b: &[u8], i: usize) -> bool {
     match b.get(i + 1) {
         Some(b'\\') => b[i + 2..].iter().take(12).any(|&c| c == b'\''),
-        Some(_) => b[i + 2..].iter().take(4).position(|&c| c == b'\'').is_some_and(|p| {
-            p == 0 || b[i + 1] >= 0x80
-        }),
+        Some(_) => b[i + 2..].iter().take(4).position(|&c| c == b'\'').is_some_and(|p| p == 0 || b[i + 1] >= 0x80),
         None => false,
     }
 }
@@ -116,150 +137,153 @@ fn previous(b: &[u8], i: usize) -> Option<usize> {
 }
 
 fn scalar_start(b: &[u8], i: usize) -> bool {
-    previous(b, i).is_none_or(|p| {
-        matches!(b[p], b':' | b'[' | b'{' | b',') || (b[p] == b'-' && p + 1 < i)
-    })
+    previous(b, i).is_none_or(|p| matches!(b[p], b':' | b'[' | b'{' | b',') || (b[p] == b'-' && p + 1 < i))
 }
 
 impl Lang {
     /// Replace `out` with ordered, non-empty byte spans for this line.
-    /// The caller can reuse its allocation; `state` carries open delimiters.
+    /// Use the same `state` on consecutive lines to keep open comments and strings.
     pub fn scan(&self, text: &str, state: &mut State, out: &mut Vec<Span>) {
         out.clear();
         let b = text.as_bytes();
-        let mut i = 0;
-        match *state {
-            State::Code => {}
-            State::Comment(k) => {
-                if let Some((_, close)) = self.block_comments.get(k as usize) {
-                    match find_end(b, 0, close) {
-                        Some(end) => {
-                            out.push((0, end, Class::Comment));
-                            i = end;
-                        }
-                        None => {
-                            if !b.is_empty() {
-                                out.push((0, b.len(), Class::Comment));
-                            }
-                            return;
-                        }
-                    }
-                }
-                *state = State::Code;
-            }
-            State::Quote(k) => {
-                if let Some(q) = self.quotes.get(k as usize) {
-                    let (end, closed) = string_end(b, 0, q);
-                    if end > 0 {
-                        out.push((0, end, Class::Str));
-                    }
-                    if !closed {
-                        return;
-                    }
-                    i = end;
-                }
-                *state = State::Code;
-            }
-        }
-
+        let Some(mut i) = self.resume(b, state, out) else { return };
         let indent = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
         if i <= indent {
             i = self.line_start(b, indent, out);
         }
         while i < b.len() {
-            let rest = &b[i..];
-            let spaced = !self.spaced_comments || i == 0 || b[i - 1].is_ascii_whitespace();
-            let attribute = self.attributes && begins(rest, "#[");
-            // Immediate whitespace still permits ordinary `code // comment`.
-            let jsx_text = self.jsx && i > 0 && (is_word(b[i - 1]) || matches!(b[i - 1], b'>' | b':'));
-            if spaced && !attribute && !jsx_text && self.line_comments.iter().any(|c| begins(rest, c)) {
-                out.push((i, b.len(), Class::Comment));
-                break;
-            }
-            if let Some(k) = self.block_comments.iter().position(|(open, _)| begins(rest, open)) {
-                let (open, close) = self.block_comments[k];
-                match find_end(b, i + open.len(), close) {
-                    Some(end) => {
-                        out.push((i, end, Class::Comment));
-                        i = end;
-                        continue;
-                    }
-                    None => {
-                        out.push((i, b.len(), Class::Comment));
-                        *state = State::Comment(k as u8);
-                        break;
-                    }
-                }
-            }
-            let opens = |q: &Quote| {
-                begins(rest, q.open)
-                    && (!self.scalars || scalar_start(b, i))
-                    && (q.open != "'" || ((!self.jsx || previous(b, i).is_none_or(|p| !is_word(b[p]) && b[p] != b'>'))
-                        && (!self.chars || is_char(b, i))))
-            };
-            if let Some(k) = self.quotes.iter().position(opens) {
-                let q = &self.quotes[k];
-                let (end, closed) = string_end(b, i + q.open.len(), q);
-                let names_field = closed
-                    && self.key_end == Some(b':')
-                    && b[end..].iter().find(|c| !c.is_ascii_whitespace()) == Some(&b':');
-                out.push((i, end, if names_field { Class::Key } else { Class::Str }));
-                if !closed && q.multiline {
-                    *state = State::Quote(k as u8);
-                }
+            if let Some(end) = self.comment(b, i, state, out) {
                 i = end;
-                continue;
-            }
-            let c = b[i];
-            if c == b'\\' && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
-                // Escaped punctuation in code cannot open a quote or comment.
-                // Do not skip a UTF-8 byte or a PHP namespace such as `\Http`.
-                i += 2;
-            } else if c.is_ascii_digit() {
-                let mut end = i + rest.iter().take_while(|&&c| is_word(c)).count();
-                // A fraction, but not a range or a tuple field's method.
-                if b.get(end) == Some(&b'.') && b.get(end + 1).is_some_and(u8::is_ascii_digit) {
-                    end += 1 + b[end + 1..].iter().take_while(|&&c| is_word(c)).count();
-                }
-                out.push((i, end, Class::Number));
-                i = end;
-            } else if is_word(c) {
-                let end = i + rest.iter().take_while(|&&c| is_word(c)).count();
-                let member = previous(b, i).is_some_and(|p| {
-                    b[p] == b'$' || (b[p] == b'.' && (p == 0 || b[p - 1] != b'.'))
-                });
-                let scalar = !self.scalars || scalar_start(b, i);
-                if let Some(class) = self.word(&text[i..end], &b[end..], member, scalar) {
-                    out.push((i, end, class));
-                }
+            } else if let Some(end) = self.quote(b, i, state, out) {
                 i = end;
             } else {
-                i += 1;
+                i = self.code(text, i, out);
             }
         }
+    }
+
+    /// Finish any open comment or string, or return `None` if it stays open.
+    fn resume(&self, b: &[u8], state: &mut State, out: &mut Vec<Span>) -> Option<usize> {
+        let open = match *state {
+            State::Code => return Some(0),
+            State::Comment(k) => {
+                self.block_comments.get(usize::from(k)).map(|(_, close)| (find_end(b, 0, close), Class::Comment))
+            }
+            State::Quote(k) => self.quotes.get(usize::from(k)).map(|q| (string_end(b, 0, q), Class::Str)),
+        };
+        let Some((close, class)) = open else {
+            *state = State::Code;
+            return Some(0);
+        };
+        let end = close.unwrap_or(b.len());
+        if end > 0 {
+            out.push((0, end, class));
+        }
+        if close.is_some() {
+            *state = State::Code;
+        }
+        close
+    }
+
+    #[inline]
+    fn comment(&self, b: &[u8], i: usize, state: &mut State, out: &mut Vec<Span>) -> Option<usize> {
+        let rest = &b[i..];
+        let spaced = !self.spaced_comments || i == 0 || b[i - 1].is_ascii_whitespace();
+        let attribute = self.attributes && begins(rest, "#[");
+        // Immediate whitespace still permits ordinary `code // comment`.
+        let jsx_text = self.jsx && i > 0 && (is_word(b[i - 1]) || matches!(b[i - 1], b'>' | b':'));
+        if spaced && !attribute && !jsx_text && self.line_comments.iter().any(|c| begins(rest, c)) {
+            out.push((i, b.len(), Class::Comment));
+            return Some(b.len());
+        }
+        let k = self.block_comments.iter().position(|(open, _)| begins(rest, open))?;
+        let (open, close) = self.block_comments[k];
+        let end = find_end(b, i + open.len(), close).unwrap_or_else(|| {
+            *state = State::Comment(u8::try_from(k).expect("block comment index fits in a byte"));
+            b.len()
+        });
+        out.push((i, end, Class::Comment));
+        Some(end)
+    }
+
+    #[inline]
+    fn quote(&self, b: &[u8], i: usize, state: &mut State, out: &mut Vec<Span>) -> Option<usize> {
+        let k = self.quotes.iter().position(|q| self.opens_quote(b, i, q))?;
+        let q = &self.quotes[k];
+        let close = string_end(b, i + q.open.len(), q);
+        let end = close.unwrap_or(b.len());
+        let field = close.is_some() && self.key_end == Some(b':') && b[end..].trim_ascii_start().first() == Some(&b':');
+        out.push((i, end, if field { Class::Key } else { Class::Str }));
+        if close.is_none() && q.multiline {
+            *state = State::Quote(u8::try_from(k).expect("quote index fits in a byte"));
+        }
+        Some(end)
+    }
+
+    fn opens_quote(&self, b: &[u8], i: usize, q: &Quote) -> bool {
+        if !begins(&b[i..], q.open) || (self.scalars && !scalar_start(b, i)) {
+            return false;
+        }
+        if q.open != "'" {
+            return true;
+        }
+        let jsx_text = self.jsx && previous(b, i).is_some_and(|p| is_word(b[p]) || b[p] == b'>');
+        !jsx_text && (!self.chars || is_char(b, i))
+    }
+
+    #[inline]
+    fn code(&self, text: &str, i: usize, out: &mut Vec<Span>) -> usize {
+        let b = text.as_bytes();
+        let c = b[i];
+        if c == b'\\' && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
+            // Escaped punctuation cannot open a quote or comment.
+            // Keep UTF-8 and PHP namespaces such as `\Http` intact.
+            i + 2
+        } else if c.is_ascii_digit() {
+            let end = number_end(b, i);
+            out.push((i, end, Class::Number));
+            end
+        } else if is_word(c) {
+            self.scan_word(text, i, out)
+        } else {
+            i + 1
+        }
+    }
+
+    fn scan_word(&self, text: &str, i: usize, out: &mut Vec<Span>) -> usize {
+        let b = text.as_bytes();
+        let end = word_end(b, i);
+        let member = previous(b, i).is_some_and(|p| b[p] == b'$' || (b[p] == b'.' && (p == 0 || b[p - 1] != b'.')));
+        let scalar = !self.scalars || scalar_start(b, i);
+        if let Some(class) = self.classify_word(&text[i..end], &b[end..], member, scalar) {
+            out.push((i, end, class));
+        }
+        end
     }
 
     /// Handle a directive, data field or TOML header at the line's start.
     fn line_start(&self, b: &[u8], indent: usize, out: &mut Vec<Span>) -> usize {
         if self.directives && b.get(indent) == Some(&b'#') {
             let name = indent + 1 + b[indent + 1..].iter().take_while(|c| c.is_ascii_whitespace()).count();
-            let end = name + b[name..].iter().take_while(|&&c| is_word(c)).count();
+            let end = word_end(b, name);
             out.push((indent, end, Class::Keyword));
             return end;
         }
         if self.table_headers && b.get(indent) == Some(&b'[') {
-            let double = b.get(indent + 1) == Some(&b'[');
-            if let Some(end) = find_end(b, indent + if double { 2 } else { 1 }, if double { "]]" } else { "]" }) {
+            let close = if b.get(indent + 1) == Some(&b'[') { "]]" } else { "]" };
+            if let Some(end) = find_end(b, indent + close.len(), close) {
                 out.push((indent, end, Class::Key));
                 return end;
             }
         }
-        let Some(sep) = self.key_end else { return 0 };
+        self.key_end.map_or(0, |sep| Self::leading_field(b, indent, sep, out))
+    }
+
+    fn leading_field(b: &[u8], indent: usize, sep: u8, out: &mut Vec<Span>) -> usize {
         // "- name: value" in a list is still a field.
         let start = indent + b[indent..].iter().take_while(|&&c| c == b'-' || c == b' ').count();
-        let name = b[start..].iter().take_while(|&&c| {
-            is_word(c) || matches!(c, b'.' | b'-' | b' ' | b'/' | b'$')
-        }).count();
+        let name =
+            b[start..].iter().take_while(|&&c| is_word(c) || matches!(c, b'.' | b'-' | b' ' | b'/' | b'$')).count();
         let end = start + b[start..start + name].trim_ascii_end().len();
         let after = b[start + name..].first() == Some(&sep);
         let spaced = sep != b':' || b.get(start + name + 1).is_none_or(u8::is_ascii_whitespace);
@@ -270,7 +294,7 @@ impl Lang {
         0
     }
 
-    fn word(&self, word: &str, after: &[u8], member: bool, scalar: bool) -> Option<Class> {
+    fn classify_word(&self, word: &str, after: &[u8], member: bool, scalar: bool) -> Option<Class> {
         if (!member || word == "await") && listed(self.keywords, word) {
             return Some(Class::Keyword);
         }
@@ -281,633 +305,142 @@ impl Lang {
             return None;
         }
         let call = matches!(after, [b'(', ..] | [b'!', b'(' | b'[' | b'{', ..]);
-        let mut letters = word.bytes().filter(u8::is_ascii_alphabetic);
         let upper = word.as_bytes()[0].is_ascii_uppercase();
         match (call, upper) {
             (true, _) => Some(Class::Function),
-            (false, true) if letters.any(|c| c.is_ascii_lowercase()) => Some(Class::Type),
+            (false, true) if word.as_bytes().iter().any(u8::is_ascii_lowercase) => Some(Class::Type),
             (false, true) if word.len() > 1 => Some(Class::Number),
             _ => None,
         }
     }
 }
 
-const PLAIN: Lang = Lang {
-    line_comments: &[],
-    block_comments: &[],
-    quotes: &[],
-    keywords: &[],
-    constants: &[],
-    chars: false,
-    directives: false,
-    names: true,
-    key_end: None,
-    spaced_comments: false,
-    scalars: false,
-    jsx: false,
-    attributes: false,
-    table_headers: false,
-};
-
-const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, raw: false };
-const SINGLE: Quote = Quote { open: "'", close: "'", ..DOUBLE };
-const C_COMMENTS: &[(&str, &str)] = &[("/*", "*/")];
-const C_QUOTES: &[Quote] = &[DOUBLE, SINGLE];
-
-static RUST: Lang = Lang {
-    chars: true,
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: &[
-        Quote { open: "r###\"", close: "\"###", multiline: true, raw: true },
-        Quote { open: "r##\"", close: "\"##", multiline: true, raw: true },
-        Quote { open: "r#\"", close: "\"#", multiline: true, raw: true },
-        Quote { open: "r\"", multiline: true, raw: true, ..DOUBLE },
-        Quote { open: "br###\"", close: "\"###", multiline: true, raw: true },
-        Quote { open: "br##\"", close: "\"##", multiline: true, raw: true },
-        Quote { open: "br#\"", close: "\"#", multiline: true, raw: true },
-        Quote { open: "br\"", multiline: true, raw: true, ..DOUBLE },
-        Quote { open: "b\"", multiline: true, ..DOUBLE },
-        Quote { multiline: true, ..DOUBLE },
-        SINGLE,
-    ],
-    keywords: &[
-        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn",
-        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
-        "Self", "static", "struct", "super", "trait", "type", "unsafe", "use", "where", "while",
-    ],
-    constants: &["true", "false"],
-    ..PLAIN
-};
-
-static PYTHON: Lang = Lang {
-    line_comments: &["#"],
-    quotes: &[
-        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE },
-        Quote { open: "'''", close: "'''", multiline: true, ..SINGLE },
-        DOUBLE,
-        SINGLE,
-    ],
-    keywords: &[
-        "and", "as", "assert", "async", "await", "break", "case", "class", "continue", "def", "del", "elif", "else",
-        "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "match", "nonlocal",
-        "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
-    ],
-    constants: &["True", "False", "None", "self", "cls"],
-    ..PLAIN
-};
-
-const JS_QUOTES: &[Quote] = &[Quote { open: "`", close: "`", multiline: true, ..DOUBLE }, DOUBLE, SINGLE];
-const JS_WORDS: &[&str] = &[
-    "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
-    "do", "else", "export", "extends", "finally", "for", "from", "function", "if", "import", "in", "instanceof",
-    "let", "new", "of", "return", "static", "super", "switch", "this", "throw", "try", "typeof", "var", "void",
-    "while", "with", "yield",
-];
-const TS_WORDS: &[&str] = &[
-    "abstract", "any", "as", "async", "await", "boolean", "break", "case", "catch", "class", "const", "continue",
-    "debugger", "declare", "default", "delete", "do", "else", "enum", "export", "extends", "finally", "for", "from",
-    "function", "get", "if", "implements", "import", "in", "instanceof", "interface", "is", "keyof", "let",
-    "namespace", "never", "new", "number", "of", "private", "protected", "public", "readonly", "return", "satisfies",
-    "set", "static", "string", "super", "switch", "this", "throw", "try", "type", "typeof", "unknown", "var", "void",
-    "while", "with", "yield",
-];
-static JAVASCRIPT: Lang = Lang {
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: JS_QUOTES,
-    keywords: JS_WORDS,
-    constants: &["true", "false", "null", "undefined", "NaN", "Infinity"],
-    ..PLAIN
-};
-static TYPESCRIPT: Lang = Lang { keywords: TS_WORDS, ..JAVASCRIPT };
-static JSX: Lang = Lang { jsx: true, ..JAVASCRIPT };
-static TSX: Lang = Lang { jsx: true, ..TYPESCRIPT };
-
-static GO: Lang = Lang {
-    chars: true,
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: &[Quote { open: "`", close: "`", multiline: true, raw: true }, DOUBLE, SINGLE],
-    keywords: &[
-        "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func",
-        "go", "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct",
-        "switch", "type", "var",
-    ],
-    constants: &["true", "false", "nil", "iota"],
-    ..PLAIN
-};
-
-static JAVA: Lang = Lang {
-    chars: true,
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: &[Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE }, DOUBLE, SINGLE],
-    keywords: &[
-        "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const", "continue",
-        "default", "do", "double", "else", "enum", "extends", "final", "finally", "float", "for", "if",
-        "implements", "import", "instanceof", "int", "interface", "long", "native", "new", "package", "permits", "private",
-        "protected", "public", "record", "return", "sealed", "short", "static", "super", "switch", "synchronized", "this",
-        "throw", "throws", "transient", "try", "var", "void", "volatile", "while", "yield",
-    ],
-    constants: &["true", "false", "null"],
-    ..PLAIN
-};
-
-const C_WORDS: &[&str] = &[
-    "alignas", "alignof", "auto", "bool", "break", "case", "char", "const", "constexpr", "continue", "default",
-    "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
-    "restrict", "return", "short", "signed", "sizeof", "static", "static_assert", "struct", "switch", "thread_local",
-    "typedef", "typeof", "typeof_unqual", "union", "unsigned", "void", "volatile", "while",
-    "_Alignas", "_Alignof", "_Atomic", "_BitInt", "_Bool", "_Complex", "_Decimal32", "_Decimal64",
-    "_Decimal128", "_Generic", "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
-];
-const CPP_WORDS: &[&str] = &[
-    "alignas", "alignof", "auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr",
-    "continue", "decltype", "default", "delete", "do", "double", "else", "enum", "explicit", "extern", "final",
-    "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept",
-    "operator", "override", "private", "protected", "public", "register", "restrict", "return", "short", "signed",
-    "sizeof", "static", "struct", "switch", "template", "this", "throw", "try", "typedef", "typename", "union",
-    "unsigned", "using", "virtual", "void", "volatile", "while",
-];
-static C: Lang = Lang {
-    chars: true,
-    directives: true,
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: C_QUOTES,
-    keywords: C_WORDS,
-    constants: &["true", "false", "NULL", "nullptr"],
-    ..PLAIN
-};
-static CPP: Lang = Lang {
-    keywords: CPP_WORDS,
-    quotes: &[Quote { open: "R\"(", close: ")\"", multiline: true, raw: true }, DOUBLE, SINGLE],
-    ..C
-};
-
-static CSHARP: Lang = Lang {
-    chars: true,
-    directives: true,
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: &[
-        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, raw: true },
-        Quote { open: "@\"", multiline: true, raw: true, ..DOUBLE },
-        DOUBLE,
-        SINGLE,
-    ],
-    keywords: &[
-        "abstract", "as", "async", "await", "base", "bool", "break", "byte", "case", "catch", "char", "class",
-        "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event",
-        "explicit", "extern", "finally", "fixed", "float", "for", "foreach", "get", "goto", "if", "implicit", "in", "init", "int",
-        "interface", "internal", "is", "lock", "long", "namespace", "new", "object", "operator", "out",
-        "override", "params", "partial", "private", "protected", "public", "readonly", "record", "ref", "return", "sbyte", "sealed",
-        "set", "short", "sizeof", "static", "string", "struct", "switch", "this", "throw", "try", "typeof",
-        "uint", "ulong", "unsafe", "ushort", "using", "var", "virtual", "void", "volatile", "when", "where", "while", "yield",
-    ],
-    constants: &["true", "false", "null"],
-    ..PLAIN
-};
-
-static PHP: Lang = Lang {
-    line_comments: &["//", "#"],
-    block_comments: C_COMMENTS,
-    attributes: true,
-    quotes: &[
-        // Heredoc labels are not parsed: protect its body through the first
-        // semicolon, normally the one following the closing label.
-        Quote { open: "<<<", close: ";", multiline: true, raw: true },
-        Quote { multiline: true, ..DOUBLE },
-        Quote { multiline: true, ..SINGLE },
-    ],
-    keywords: &[
-        "abstract", "and", "array", "as", "break", "callable", "case", "catch", "class", "clone", "const", "continue",
-        "declare", "default", "do", "echo", "else", "elseif", "empty", "enum", "extends", "final", "finally", "fn",
-        "for", "foreach", "function", "global", "if", "implements", "include", "include_once", "instanceof", "interface", "isset",
-        "match", "namespace", "new", "or", "print", "private", "protected", "public", "readonly", "require", "require_once",
-        "return", "static", "switch", "throw", "trait", "try", "use", "var", "while", "yield",
-    ],
-    constants: &["true", "false", "null", "TRUE", "FALSE", "NULL"],
-    ..PLAIN
-};
-
-static SHELL: Lang = Lang {
-    names: false,
-    spaced_comments: true,
-    line_comments: &["#"],
-    quotes: &[Quote { multiline: true, ..DOUBLE }, Quote { multiline: true, raw: true, ..SINGLE }],
-    keywords: &[
-        "case", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function", "if", "in", "local",
-        "return", "then", "until", "while",
-    ],
-    constants: &["true", "false"],
-    ..PLAIN
-};
-
-static JSON: Lang = Lang {
-    line_comments: &["//"],
-    block_comments: C_COMMENTS,
-    quotes: &[DOUBLE],
-    constants: &["true", "false", "null"],
-    names: false,
-    key_end: Some(b':'),
-    ..PLAIN
-};
-static YAML: Lang = Lang {
-    line_comments: &["#"],
-    quotes: C_QUOTES,
-    constants: &["true", "false", "null", "yes", "no", "on", "off"],
-    names: false,
-    key_end: Some(b':'),
-    spaced_comments: true,
-    scalars: true,
-    ..PLAIN
-};
-static TOML: Lang = Lang {
-    line_comments: &["#"],
-    quotes: &[
-        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE },
-        Quote { open: "'''", close: "'''", multiline: true, raw: true },
-        DOUBLE,
-        Quote { raw: true, ..SINGLE },
-    ],
-    constants: &["true", "false"],
-    names: false,
-    key_end: Some(b'='),
-    table_headers: true,
-    ..PLAIN
-};
-
-/// The language a file is written in, going by its name.
-/// Return `None` for a language this scanner does not colour.
-pub fn for_file(name: &str) -> Option<&'static Lang> {
-    let (_, ext) = name.rsplit_once('.')?;
-    const FILE_LANGS: &[(&[&str], &Lang)] = &[
-        (&["rs"], &RUST),
-        (&["py", "pyi"], &PYTHON),
-        (&["js", "mjs", "cjs"], &JAVASCRIPT),
-        (&["ts", "mts", "cts"], &TYPESCRIPT),
-        (&["jsx"], &JSX),
-        (&["tsx"], &TSX),
-        (&["go"], &GO),
-        (&["java"], &JAVA),
-        (&["c", "h"], &C),
-        (&["cc", "cpp", "cxx", "hpp", "hh"], &CPP),
-        (&["cs"], &CSHARP),
-        (&["php"], &PHP),
-        (&["sh", "bash", "zsh"], &SHELL),
-        (&["json", "jsonc"], &JSON),
-        (&["yaml", "yml"], &YAML),
-        (&["toml"], &TOML),
-    ];
-    FILE_LANGS.iter().find_map(|(extensions, lang)| {
-        extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)).then_some(*lang)
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use super::langs::FILE_LANGS;
     use super::*;
 
-    const LANGUAGES: &[&Lang] = &[
-        &RUST, &PYTHON, &JAVASCRIPT, &TYPESCRIPT, &JSX, &TSX, &GO, &JAVA,
-        &C, &CPP, &CSHARP, &PHP, &SHELL, &JSON, &YAML, &TOML,
-    ];
+    fn lang(name: &str) -> &'static Lang {
+        for_file(name).unwrap()
+    }
 
-    /// The classed pieces of one line, as text.
-    fn pieces<'a>(lang: &Lang, text: &'a str, state: &mut State) -> Vec<(&'a str, Class)> {
+    /// Turn byte spans into the text they colour so assertions can name the pieces.
+    pub(super) fn pieces<'a>(lang: &Lang, text: &'a str, state: &mut State) -> Vec<(&'a str, Class)> {
         let mut out = Vec::new();
         lang.scan(text, state, &mut out);
         out.into_iter().map(|(a, b, class)| (&text[a..b], class)).collect()
     }
 
-    fn one<'a>(lang: &Lang, text: &'a str) -> Vec<(&'a str, Class)> {
+    pub(super) fn one<'a>(lang: &Lang, text: &'a str) -> Vec<(&'a str, Class)> {
         pieces(lang, text, &mut State::Code)
     }
 
     #[test]
-    fn rust_tells_words_apart() {
+    fn a_lifetime_is_not_a_string_but_a_char_is() {
+        let rust = lang("test.rs");
+        assert_eq!(one(rust, "fn f<'a>(x: &'a str) {}"), [("fn", Class::Keyword)]);
+        assert_eq!(one(rust, "let c = 'x'; let n = '\\n';").iter().filter(|p| p.1 == Class::Str).count(), 2);
         assert_eq!(
-            one(&RUST, "let n: Option<u8> = parse(MAX, 42); // done"),
-            [
-                ("let", Class::Keyword),
-                ("Option", Class::Type),
-                ("parse", Class::Function),
-                ("MAX", Class::Number),
-                ("42", Class::Number),
-                ("// done", Class::Comment),
-            ]
+            one(rust, "'\\u{1F600}' '\\u{10FFFF}'"),
+            [("'\\u{1F600}'", Class::Str), ("'\\u{10FFFF}'", Class::Str),]
         );
     }
 
     #[test]
-    fn a_lifetime_is_not_a_string_but_a_char_is() {
-        assert_eq!(one(&RUST, "fn f<'a>(x: &'a str) {}"), [("fn", Class::Keyword)]);
-        assert_eq!(one(&RUST, "let c = 'x'; let n = '\\n';").iter().filter(|p| p.1 == Class::Str).count(), 2);
-    }
-
-    #[test]
     fn a_macro_is_a_call() {
-        assert_eq!(one(&RUST, "println!(\"hi\")"), [("println", Class::Function), ("\"hi\"", Class::Str)]);
+        assert_eq!(one(lang("test.rs"), "println!(\"hi\")"), [("println", Class::Function), ("\"hi\"", Class::Str)]);
     }
 
     #[test]
     fn a_block_comment_runs_over_lines() {
+        let c = lang("test.c");
         let mut state = State::Code;
-        assert_eq!(pieces(&C, "int a; /* one", &mut state), [("int", Class::Keyword), ("/* one", Class::Comment)]);
-        assert_eq!(pieces(&C, "two", &mut state), [("two", Class::Comment)]);
-        assert_eq!(pieces(&C, "three */ return 0;", &mut state)[..2], [("three */", Class::Comment), ("return", Class::Keyword)]);
+        assert_eq!(pieces(c, "int a; /* one", &mut state), [("int", Class::Keyword), ("/* one", Class::Comment)]);
+        assert_eq!(pieces(c, "two", &mut state), [("two", Class::Comment)]);
+        assert_eq!(
+            pieces(c, "three */ return 0;", &mut state)[..2],
+            [("three */", Class::Comment), ("return", Class::Keyword)]
+        );
         assert_eq!(state, State::Code);
     }
 
     #[test]
     fn a_python_docstring_runs_over_lines_but_a_plain_string_does_not() {
+        let python = lang("test.py");
         let mut state = State::Code;
-        assert_eq!(pieces(&PYTHON, "def f(): \"\"\"start", &mut state).last(), Some(&("\"\"\"start", Class::Str)));
-        assert_eq!(pieces(&PYTHON, "end\"\"\" + x", &mut state), [("end\"\"\"", Class::Str)]);
-        assert_eq!(pieces(&PYTHON, "s = 'unclosed", &mut state), [("'unclosed", Class::Str)]);
-        assert_eq!(pieces(&PYTHON, "return None", &mut state), [("return", Class::Keyword), ("None", Class::Number)]);
+        assert_eq!(pieces(python, "def f(): \"\"\"start", &mut state).last(), Some(&("\"\"\"start", Class::Str)));
+        assert_eq!(pieces(python, "end\"\"\" + x", &mut state), [("end\"\"\"", Class::Str)]);
+        assert_eq!(pieces(python, "s = 'unclosed", &mut state), [("'unclosed", Class::Str)]);
+        assert_eq!(pieces(python, "return None", &mut state), [("return", Class::Keyword), ("None", Class::Number)]);
     }
 
     #[test]
     fn an_escaped_quote_does_not_end_a_string() {
-        assert_eq!(one(&JAVASCRIPT, r#"const s = "a \" b"; // c"#)[1..], [(r#""a \" b""#, Class::Str), ("// c", Class::Comment)]);
+        assert_eq!(
+            one(lang("test.js"), r#"const s = "a \" b"; // c"#)[1..],
+            [(r#""a \" b""#, Class::Str), ("// c", Class::Comment)]
+        );
     }
 
     #[test]
     fn a_comment_marker_inside_a_string_is_text() {
-        assert_eq!(one(&JAVASCRIPT, "x = \"http://a\""), [("\"http://a\"", Class::Str)]);
+        assert_eq!(one(lang("test.js"), "x = \"http://a\""), [("\"http://a\"", Class::Str)]);
     }
 
     #[test]
-    fn c_directives_are_keywords() {
-        assert_eq!(one(&C, "#include <stdio.h>")[0], ("#include", Class::Keyword));
-    }
-
-    #[test]
-    fn data_files_colour_their_field_names() {
-        assert_eq!(one(&JSON, r#"  "name": "strata", "n": 3, "ok": true"#).iter().map(|p| p.1).collect::<Vec<_>>(), [
-            Class::Key,
-            Class::Str,
-            Class::Key,
-            Class::Number,
-            Class::Key,
-            Class::Number
-        ]);
-        assert_eq!(one(&TOML, "opt-level = 3  # fast"), [("opt-level", Class::Key), ("3", Class::Number), ("# fast", Class::Comment)]);
-        assert_eq!(one(&YAML, "  - name: build"), [("name", Class::Key)]);
-        assert_eq!(one(&YAML, "url: http://x"), [("url", Class::Key)]);
-    }
-
-    #[test]
-    fn text_that_is_not_ascii_is_left_whole() {
+    fn spans_leave_utf8_characters_whole() {
         let line = "let café = \"naïve ☕\"; // ünïcode";
         let mut out = Vec::new();
-        RUST.scan(line, &mut State::Code, &mut out);
+        let mut state = State::Code;
+        lang("test.rs").scan(line, &mut state, &mut out);
         for (a, b, _) in out {
             assert!(line.is_char_boundary(a) && line.is_char_boundary(b));
         }
     }
 
     #[test]
-    fn languages_are_found_by_file_name() {
-        assert!(for_file("main.rs").is_some() && for_file("App.TSX").is_some() && for_file("Cargo.toml").is_some());
-        assert!(for_file("README.md").is_none() && for_file("Makefile").is_none());
-    }
-
-    #[test]
-    fn shell_and_yaml_hashes_need_whitespace() {
-        let line = "if [ $# -lt 2 ]; then echo \"usage\" >&2; exit 1; fi";
-        let spans = one(&SHELL, line);
-        assert!(spans.contains(&("if", Class::Keyword)));
-        assert!(spans.contains(&("fi", Class::Keyword)));
-        assert!(!spans.iter().any(|p| p.1 == Class::Comment));
-        for line in ["${#array[@]}", "${path##*/}", "$((16#ff))", "foo#bar"] {
-            assert!(!one(&SHELL, line).iter().any(|p| p.1 == Class::Comment), "{line}");
-        }
-        assert_eq!(one(&YAML, "url: http://example.com/#anchor"), [("url", Class::Key)]);
-        for lang in [&SHELL, &YAML] {
-            assert_eq!(one(lang, "# comment"), [("# comment", Class::Comment)]);
-            assert_eq!(one(lang, "foo\t# comment").last(), Some(&("# comment", Class::Comment)));
-        }
-    }
-
-    #[test]
     fn numbers_leave_ranges_and_members_alone() {
+        let rust = lang("test.rs");
         for line in ["for i in 0..n", "self.0.len()", "(0..self.h)"] {
-            let spans = one(&RUST, line);
+            let spans = one(rust, line);
             assert!(spans.contains(&("0", Class::Number)), "{line}: {spans:?}");
             assert!(!spans.iter().any(|p| p.1 == Class::Number && p.0.contains('.')));
         }
-        assert_eq!(one(&RUST, "1.25f32 0xff 3.0.1"), [
-            ("1.25f32", Class::Number), ("0xff", Class::Number),
-            ("3.0", Class::Number), ("1", Class::Number),
-        ]);
+        assert_eq!(
+            one(rust, "1.25f32 0xff 3.0.1"),
+            [("1.25f32", Class::Number), ("0xff", Class::Number), ("3.0", Class::Number), ("1", Class::Number),]
+        );
     }
 
     #[test]
     fn escaped_code_punctuation_cannot_open_comments_or_strings() {
+        let javascript = lang("test.js");
         let mut state = State::Code;
         for line in [r#"url.replace(/\/*$/, "")"#, r"/^https?:\/\//.test(url)"] {
-            assert!(!pieces(&JAVASCRIPT, line, &mut state).iter().any(|p| p.1 == Class::Comment));
+            assert!(!pieces(javascript, line, &mut state).iter().any(|p| p.1 == Class::Comment));
             assert_eq!(state, State::Code);
         }
-        assert_eq!(one(&SHELL, r"'don'\''t stop'; echo next"), [
-            ("'don'", Class::Str), ("'t stop'", Class::Str),
-        ]);
-        assert!(one(&PHP, r"App\Http").contains(&("Http", Class::Type)));
-        assert_eq!(one(&RUST, "\\é foo()"), [("foo", Class::Function)]);
-    }
-
-    #[test]
-    fn rust_raw_and_byte_strings_keep_their_delimiters() {
-        let text = "r##\"Use \"#\" ... and \" for inches.\"##;";
-        assert_eq!(one(&RUST, text), [(&text[..text.len() - 1], Class::Str)]);
-        assert_eq!(one(&RUST, "br#\"x\"y\"#"), [("br#\"x\"y\"#", Class::Str)]);
-        for (open, close) in [
-            ("r###\"", "\"###"), ("r##\"", "\"##"), ("r#\"", "\"#"), ("r\"", "\""),
-            ("br###\"", "\"###"), ("br##\"", "\"##"), ("br#\"", "\"#"), ("br\"", "\""),
-        ] {
-            let mut state = State::Code;
-            assert_eq!(pieces(&RUST, open, &mut state), [(open, Class::Str)]);
-            assert_ne!(state, State::Code);
-            assert_eq!(pieces(&RUST, "/* raw \\ text", &mut state), [("/* raw \\ text", Class::Str)]);
-            assert_eq!(pieces(&RUST, close, &mut state), [(close, Class::Str)]);
-            assert_eq!(state, State::Code);
-            assert_eq!(pieces(&RUST, "let next = 1;", &mut state)[0], ("let", Class::Keyword));
-        }
+        assert_eq!(
+            one(lang("test.sh"), r"'don'\''t stop'; echo next"),
+            [("'don'", Class::Str), ("'t stop'", Class::Str),]
+        );
+        assert!(one(lang("test.php"), r"App\Http").contains(&("Http", Class::Type)));
+        assert_eq!(one(lang("test.rs"), "\\é foo()"), [("foo", Class::Function)]);
     }
 
     #[test]
     fn member_and_variable_names_are_not_keywords() {
-        for lang in [&JAVASCRIPT, &TYPESCRIPT] {
+        for lang in [lang("test.js"), lang("test.ts")] {
             for line in ["cache.get(key)", "cache.set(k, v)", "action.type", "Array.from(x)", "z.string()"] {
                 assert!(!one(lang, line).iter().any(|p| p.1 == Class::Keyword), "{line}");
             }
         }
-        assert_eq!(one(&PYTHON, "re.match("), [("match", Class::Function)]);
-        assert_eq!(one(&PHP, "$array $class $default $function"), []);
-        assert_eq!(one(&RUST, "future.await"), [("await", Class::Keyword)]);
-        assert!(one(&RUST, "0..self.h").contains(&("self", Class::Keyword)));
-        assert_eq!(one(&TYPESCRIPT, "action. type"), []);
-    }
-
-    #[test]
-    fn javascript_and_c_have_their_own_keywords() {
-        let ts = "type number string any declare interface namespace readonly keyof satisfies unknown never abstract implements private protected public enum is as boolean get set";
-        for ext in ["js", "jsx", "mjs", "cjs"] {
-            assert_eq!(one(for_file(&format!("file.{ext}")).unwrap(), ts), []);
-        }
-        for ext in ["ts", "tsx", "mts", "cts"] {
-            let spans = one(for_file(&format!("file.{ext}")).unwrap(), ts);
-            assert!(spans.iter().all(|p| p.1 == Class::Keyword));
-            assert_eq!(spans.len(), ts.split_whitespace().count());
-        }
-        let cpp = "new private class this template namespace delete friend virtual";
-        for ext in ["c", "h"] {
-            assert_eq!(one(for_file(&format!("file.{ext}")).unwrap(), cpp), []);
-        }
-        assert_eq!(one(&CPP, cpp).len(), cpp.split_whitespace().count());
-        assert_eq!(one(&C, "_Atomic int n = 0;")[..2], [("_Atomic", Class::Keyword), ("int", Class::Keyword)]);
-    }
-
-    #[test]
-    fn yaml_plain_scalars_are_not_code() {
-        assert_eq!(one(&YAML, "- name: Don't cache on push"), [("name", Class::Key)]);
-        assert_eq!(one(&YAML, "run: npm ci --no-cache"), [("run", Class::Key)]);
-        assert_eq!(one(&YAML, "$ref: value"), [("$ref", Class::Key)]);
-        assert_eq!(one(&YAML, "foo/bar: value"), [("foo/bar", Class::Key)]);
-        assert_eq!(one(&YAML, "text: words \"not a string\" on"), [("text", Class::Key)]);
-        assert_eq!(one(&YAML, "enabled: [yes, no, on, off]"), [
-            ("enabled", Class::Key), ("yes", Class::Number), ("no", Class::Number),
-            ("on", Class::Number), ("off", Class::Number),
-        ]);
-        assert_eq!(one(&YAML, "- 'quoted'"), [("'quoted'", Class::Str)]);
-        assert_eq!(one(&YAML, "name: \"quoted\""), [("name", Class::Key), ("\"quoted\"", Class::Str)]);
-        for lang in [&JSON, &TOML] {
-            assert_eq!(one(lang, "yes no on off"), []);
-        }
-    }
-
-    #[test]
-    fn php_multiline_strings_and_heredocs_protect_comment_markers() {
-        for quote in ["\"", "'"] {
-            let mut state = State::Code;
-            pieces(&PHP, quote, &mut state);
-            assert_eq!(pieces(&PHP, "/* not a comment", &mut state), [("/* not a comment", Class::Str)]);
-            pieces(&PHP, quote, &mut state);
-            assert_eq!(state, State::Code);
-        }
-        for opener in ["<<<TEXT", "<<<'TEXT'"] {
-            let mut state = State::Code;
-            assert_eq!(pieces(&PHP, opener, &mut state), [(opener, Class::Str)]);
-            assert_eq!(pieces(&PHP, "/* plain text", &mut state), [("/* plain text", Class::Str)]);
-            assert_eq!(pieces(&PHP, "TEXT; echo 1;", &mut state), [
-                ("TEXT;", Class::Str), ("echo", Class::Keyword), ("1", Class::Number),
-            ]);
-            assert_eq!(state, State::Code);
-        }
-    }
-
-    #[test]
-    fn cpp_raw_strings_can_contain_quotes_and_comments() {
-        let mut state = State::Code;
-        assert_eq!(pieces(&CPP, "auto s = R\"(a \"quote\"", &mut state), [
-            ("auto", Class::Keyword), ("R\"(a \"quote\"", Class::Str),
-        ]);
-        assert_eq!(pieces(&CPP, "/* raw */", &mut state), [("/* raw */", Class::Str)]);
-        assert_eq!(pieces(&CPP, ")\"; return;", &mut state), [(")\"", Class::Str), ("return", Class::Keyword)]);
-        assert_eq!(state, State::Code);
-    }
-
-    #[test]
-    fn jsx_text_keeps_apostrophes_and_urls() {
-        for lang in [&JSX, &TSX] {
-            for line in ["<p>Don't do that, it's bad</p>", "<a>See http://example.com</a>", "<p>'Hello'</p>"] {
-                assert!(!one(lang, line).iter().any(|p| matches!(p.1, Class::Str | Class::Comment)), "{line}");
-            }
-            assert_eq!(one(lang, "const x = 'value'; // comment").last(), Some(&("// comment", Class::Comment)));
-            assert!(one(lang, "const x = 'value';").contains(&("'value'", Class::Str)));
-            assert_eq!(one(lang, "return x // comment").last(), Some(&("// comment", Class::Comment)));
-            assert!(one(lang, "<p title='hello'>").contains(&("'hello'", Class::Str)));
-        }
-    }
-
-    #[test]
-    fn json_comments_and_toml_raw_strings_and_headers_are_coloured() {
-        assert_eq!(one(&JSON, "/* tsconfig */ {\"ok\": true}"), [
-            ("/* tsconfig */", Class::Comment), ("\"ok\"", Class::Key), ("true", Class::Number),
-        ]);
-        let mut state = State::Code;
-        assert_eq!(pieces(&TOML, "text = '''literal", &mut state), [("text", Class::Key), ("'''literal", Class::Str)]);
-        assert_eq!(pieces(&TOML, "\\raw # text'''", &mut state), [("\\raw # text'''", Class::Str)]);
-        assert_eq!(state, State::Code);
-        assert_eq!(one(&TOML, " [table] # name"), [("[table]", Class::Key), ("# name", Class::Comment)]);
-        assert_eq!(one(&TOML, "[[array.table]]"), [("[[array.table]]", Class::Key)]);
-    }
-
-    #[test]
-    fn language_specific_keywords_and_literals_are_coloured() {
-        let mut state = State::Code;
-        assert_eq!(pieces(&CSHARP, "var s = \"\"\"a \" quote", &mut state), [
-            ("var", Class::Keyword), ("\"\"\"a \" quote", Class::Str),
-        ]);
-        assert_eq!(pieces(&CSHARP, "/* raw */\"\"\";", &mut state), [("/* raw */\"\"\"", Class::Str)]);
-        assert_eq!(state, State::Code);
-        let words = "partial where when goto unsafe init ushort sbyte";
-        assert_eq!(one(&CSHARP, words).len(), words.split_whitespace().count());
-        assert!(one(&CSHARP, words).iter().all(|p| p.1 == Class::Keyword));
-        assert_eq!(one(&JAVA, "sealed permits"), [("sealed", Class::Keyword), ("permits", Class::Keyword)]);
-        assert_eq!(one(&PHP, "#[Route('/')]"), [("Route", Class::Function), ("'/'", Class::Str)]);
-        assert_eq!(one(&PHP, "require_once include_once"), [
-            ("require_once", Class::Keyword), ("include_once", Class::Keyword),
-        ]);
-        assert_eq!(one(&RUST, "'\\u{1F600}' '\\u{10FFFF}'"), [
-            ("'\\u{1F600}'", Class::Str), ("'\\u{10FFFF}'", Class::Str),
-        ]);
-    }
-
-    #[test]
-    fn declarations_and_control_flow_keep_their_language_colours() {
-        assert_eq!(one(&GO, "func main() { fmt.Println(`hi`); return }"), [
-            ("func", Class::Keyword), ("main", Class::Function), ("Println", Class::Function),
-            ("`hi`", Class::Str), ("return", Class::Keyword),
-        ]);
-        assert_eq!(one(&JAVA, "public static void main(String[] args) { return; }"), [
-            ("public", Class::Keyword), ("static", Class::Keyword), ("void", Class::Keyword),
-            ("main", Class::Function), ("String", Class::Type), ("return", Class::Keyword),
-        ]);
-        assert_eq!(one(&CSHARP, "public string Name { get; init; }"), [
-            ("public", Class::Keyword), ("string", Class::Keyword), ("Name", Class::Type),
-            ("get", Class::Keyword), ("init", Class::Keyword),
-        ]);
-        assert_eq!(one(&PHP, "foreach ($items as $item) { echo \"hi\"; }"), [
-            ("foreach", Class::Keyword), ("as", Class::Keyword), ("echo", Class::Keyword), ("\"hi\"", Class::Str),
-        ]);
-        assert_eq!(one(&SHELL, "for file in *.rs; do echo \"$file\"; done # done"), [
-            ("for", Class::Keyword), ("in", Class::Keyword), ("do", Class::Keyword),
-            ("\"$file\"", Class::Str), ("done", Class::Keyword), ("# done", Class::Comment),
-        ]);
-    }
-
-    #[test]
-    fn longer_openers_precede_their_prefixes_in_every_table() {
-        fn ordered(openers: &[&str]) {
-            for (i, open) in openers.iter().enumerate() {
-                assert!(!open.is_empty());
-                for later in &openers[i + 1..] {
-                    assert!(!later.starts_with(open), "{later:?} must precede {open:?}");
-                }
-            }
-        }
-        for lang in LANGUAGES {
-            ordered(&lang.quotes.iter().map(|q| q.open).collect::<Vec<_>>());
-            ordered(lang.line_comments);
-            ordered(&lang.block_comments.iter().map(|c| c.0).collect::<Vec<_>>());
-            assert!(lang.quotes.len() <= u8::MAX as usize);
-            assert!(lang.block_comments.len() <= u8::MAX as usize);
-        }
+        let rust = lang("test.rs");
+        assert_eq!(one(lang("test.py"), "re.match("), [("match", Class::Function)]);
+        assert_eq!(one(lang("test.php"), "$array $class $default $function"), []);
+        assert_eq!(one(rust, "future.await"), [("await", Class::Keyword)]);
+        assert!(one(rust, "0..self.h").contains(&("self", Class::Keyword)));
+        assert_eq!(one(lang("test.ts"), "action. type"), []);
     }
 
     fn valid_spans(text: &str, spans: &[Span]) {
@@ -922,12 +455,12 @@ mod tests {
     #[test]
     fn adversarial_lines_preserve_span_invariants_with_carried_state() {
         let lines = [
-            "", " ", "////", "/*", "", "*/", "'''", "\"\"\"", "'", "\"", "`",
-            "\\", "\\é", "é☕中文", "'unterminated", "\"unterminated", "/* unterminated",
-            "", "r##\"raw", "\"##", "<<<TEXT", "TEXT;", "#[", "[[", "0..é", "0.1.foo", "*/",
+            "", " ", "////", "/*", "", "*/", "'''", "\"\"\"", "'", "\"", "`", "\\", "\\é", "é☕中文", "'unterminated",
+            "\"unterminated", "/* unterminated", "", "r##\"raw", "\"##", "<<<TEXT", "TEXT;", "#[", "[[", "0..é",
+            "0.1.foo", "*/",
         ];
         let mut out = Vec::new();
-        for lang in LANGUAGES {
+        for (_, lang) in FILE_LANGS {
             let mut state = State::Code;
             for text in lines {
                 lang.scan(text, &mut state, &mut out);
@@ -943,23 +476,27 @@ mod tests {
 
     #[test]
     fn scan_replaces_spans_from_the_previous_line() {
+        let rust = lang("test.rs");
         let mut out = Vec::new();
         let mut state = State::Code;
-        RUST.scan("let x = 1;", &mut state, &mut out);
-        RUST.scan("// done", &mut state, &mut out);
+        rust.scan("let x = 1;", &mut state, &mut out);
+        rust.scan("// done", &mut state, &mut out);
         assert_eq!(out, [(0, 7, Class::Comment)]);
-        RUST.scan("", &mut state, &mut out);
+        rust.scan("", &mut state, &mut out);
         assert!(out.is_empty());
     }
 
     #[test]
-    fn this_source_file_finishes_in_code_state() {
-        let mut state = State::Code;
+    fn scanner_sources_finish_in_code_state() {
+        let rust = lang("test.rs");
         let mut out = Vec::new();
-        for text in include_str!("syntax.rs").lines() {
-            RUST.scan(text, &mut state, &mut out);
-            valid_spans(text, &out);
+        for source in [include_str!("syntax.rs"), include_str!("syntax/langs.rs")] {
+            let mut state = State::Code;
+            for text in source.lines() {
+                rust.scan(text, &mut state, &mut out);
+                valid_spans(text, &out);
+            }
+            assert_eq!(state, State::default());
         }
-        assert_eq!(state, State::default());
     }
 }

@@ -74,7 +74,8 @@ mod imp {
     type Callback = extern "C" fn(*const c_void, *mut c_void, usize, *mut c_void, *const u32, *const u64);
 
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    // SAFETY: Declarations match CFArray.h, CFString.h and CFBase.h in the macOS SDK.
+    unsafe extern "C" {
         // CFArray.h
         static kCFTypeArrayCallBacks: Opaque;
         // CFString.h
@@ -97,8 +98,8 @@ mod imp {
     }
 
     #[link(name = "CoreServices", kind = "framework")]
-    // FSEvents.h
-    extern "C" {
+    // SAFETY: Declarations and callback ABI match FSEvents.h in the macOS SDK.
+    unsafe extern "C" {
         fn FSEventStreamCreate(
             alloc: *const c_void,
             callback: Callback,
@@ -115,7 +116,8 @@ mod imp {
         fn FSEventStreamRelease(stream: *mut c_void);
     }
 
-    extern "C" {
+    // SAFETY: Declarations match dispatch/queue.h and dispatch/object.h in the macOS SDK.
+    unsafe extern "C" {
         // dispatch/queue.h
         fn dispatch_queue_create(label: *const libc::c_char, attr: *const c_void) -> *mut c_void;
         // dispatch/object.h
@@ -149,21 +151,22 @@ mod imp {
 
     /// Makes a Core Foundation array of paths that the caller must release.
     fn path_array(paths: &[PathBuf]) -> *const c_void {
+        let Ok(count) = isize::try_from(paths.len()) else { return null() };
         let mut strings = Vec::with_capacity(paths.len());
         for path in paths {
             let bytes = path.as_os_str().as_bytes();
+            let Ok(len) = isize::try_from(bytes.len()) else { break };
             // SAFETY: the bytes are readable for their stated length and copied by this call.
-            let string = unsafe { CFStringCreateWithBytes(null(), bytes.as_ptr(), bytes.len() as isize, UTF8, 0) };
+            let string = unsafe { CFStringCreateWithBytes(null(), bytes.as_ptr(), len, UTF8, 0) };
             if string.is_null() {
                 break;
             }
             strings.push(string);
         }
         let array = if strings.len() == paths.len() {
-            // SAFETY: the slice holds live CFStrings, which the array retains using the system callbacks.
-            unsafe {
-                CFArrayCreate(null(), strings.as_mut_ptr(), strings.len() as isize, &raw const kCFTypeArrayCallBacks)
-            }
+            let callbacks = &raw const kCFTypeArrayCallBacks;
+            // SAFETY: The slice holds `count` live CFStrings, which the array retains through the callbacks.
+            unsafe { CFArrayCreate(null(), strings.as_mut_ptr(), count, callbacks) }
         } else {
             null()
         };
@@ -211,19 +214,18 @@ mod imp {
             unsafe { FSEventStreamRelease(stream) };
             return false;
         }
-        // SAFETY: stream and queue are live; setting the queue schedules the stream before it starts.
-        unsafe {
-            FSEventStreamSetDispatchQueue(stream, queue);
-            if FSEventStreamStart(stream) != 0 {
-                return true;
-            }
+        // SAFETY: The stream and queue are both live; setting the queue schedules the stream.
+        unsafe { FSEventStreamSetDispatchQueue(stream, queue) };
+        // SAFETY: The live stream has been scheduled on its queue.
+        if unsafe { FSEventStreamStart(stream) } != 0 {
+            return true;
         }
-        // SAFETY: the live stream was scheduled above, so it can be invalidated before releasing both objects.
-        unsafe {
-            FSEventStreamInvalidate(stream);
-            FSEventStreamRelease(stream);
-            dispatch_release(queue);
-        }
+        // SAFETY: The live stream was scheduled above, so it can be invalidated.
+        unsafe { FSEventStreamInvalidate(stream) };
+        // SAFETY: This releases our reference to the stream after invalidating it.
+        unsafe { FSEventStreamRelease(stream) };
+        // SAFETY: This releases our reference to the queue after detaching the stream.
+        unsafe { dispatch_release(queue) };
         false
     }
 }

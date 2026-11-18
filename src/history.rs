@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::git::Commit;
-use crate::term::{Screen, Style};
+use crate::screen::{Screen, Style};
 use crate::ui::DIM;
 use crate::when;
 

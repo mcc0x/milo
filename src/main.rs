@@ -6,9 +6,11 @@ mod git;
 mod help;
 mod history;
 mod icons;
+mod keys;
 mod outline;
 mod read;
 mod rex;
+mod screen;
 mod syntax;
 mod term;
 mod tree;
@@ -17,6 +19,7 @@ mod view;
 mod walk;
 mod watch;
 mod when;
+mod width;
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -25,8 +28,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use git::Repo;
+use keys::{Key, read_keys};
 use outline::Outline;
-use term::{Key, Screen, Wait};
+use screen::Screen;
+use term::Wait;
 use view::View;
 use watch::{Scope, Watcher};
 
@@ -112,8 +117,8 @@ impl Pace {
 
 /// The two things strata can fill a pane with.
 enum Ui {
-    Outline(Outline),
-    View(View),
+    Outline(Box<Outline>),
+    View(Box<View>),
 }
 
 impl Ui {
@@ -182,7 +187,7 @@ fn main() {
         (Some("view"), Some(file)) => {
             let file = Path::new(file);
             match View::open(file) {
-                Some(view) => Ui::View(view),
+                Some(view) => Ui::View(Box::new(view)),
                 None => fail(format!("{} is not in a directory", file.display())),
             }
         }
@@ -192,10 +197,8 @@ fn main() {
         (_, None) => {
             let dir = first.as_deref().map_or(Path::new("."), Path::new);
             match Repo::open(dir) {
-                Some(repo) => Ui::Outline(Outline::new(repo, rex::inside())),
-                None if dir.is_file() => {
-                    fail(format!("{0} is a file; to read it: strata view {0}", dir.display()))
-                }
+                Some(repo) => Ui::Outline(Box::new(Outline::new(repo, rex::inside()))),
+                None if dir.is_file() => fail(format!("{0} is a file; to read it: strata view {0}", dir.display())),
                 None => fail(format!("{} is not a directory", dir.display())),
             }
         }
@@ -234,9 +237,10 @@ fn main() {
 
         let until_look = pace.wait(Instant::now());
         let wait = ui.next_frame().map_or(until_look, |frame| frame.min(until_look));
-        match term::wait(&keyboard, signal.as_ref(), wait.as_millis() as i32 + 1, watcher.fd()) {
+        let timeout_ms = i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX);
+        match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
             Wait::Input => {
-                term::read_keys(&mut keyboard, &mut keys);
+                read_keys(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
                     if let Key::Background(rgb) = key {
                         screen.set_background(rgb);
