@@ -1,0 +1,91 @@
+# Contributing to strata
+
+Thanks for wanting to help. strata is small on purpose, and the bar for a change is that it leaves the program simpler, faster or more correct without making it larger than it needs to be.
+
+## Getting set up
+
+You need Rust 1.91 or later, git, and a terminal.
+
+```sh
+git clone <your fork>
+cd strata
+cargo build --release
+./target/release/strata            # the outline, in this repository
+./target/release/strata view src/main.rs
+```
+
+## Before you open a pull request
+
+All four of these must be clean. They are quick: the whole test suite runs in under a second.
+
+```sh
+cargo build --release              # no warnings
+cargo clippy --all-targets         # no warnings; the lint set is in Cargo.toml
+cargo fmt -- --check               # no diff; the settings are in rustfmt.toml
+cargo test                         # everything passes
+```
+
+Then run the program and look at the thing you changed. Tests read the screen as text, so they cannot tell you that something looks wrong.
+
+## What a good change looks like
+
+**It solves one thing.** A bug fix does not also rename a module. A refactoring does not also change behaviour.
+
+**It adds no dependency.** strata depends on `libc` and nothing else. If you believe a crate would earn its place, open an issue first and say what it replaces.
+
+**It is tested by what the user sees.** Most tests build a throwaway git repository (`src/fixture.rs`), open strata on it, and assert on the frame of text it draws. Write tests that would fail if the behaviour broke, not tests that repeat the code. A bug fix comes with the test that would have caught it.
+
+**It keeps untrusted repositories safe.** strata is often pointed at code its user has not read. It must never run a program a repository names (hooks, filters, external diff tools, file-system monitors), never follow a link out of the project to show a file, and never write an escape sequence from a file name or a commit message to the terminal. `git/run.rs` is where git is called; nothing else should start a process except `rex.rs`.
+
+**It stays read-only.** strata never changes a repository. Every git command it runs only reads.
+
+## Style
+
+The code is written to be read. A few habits keep it that way:
+
+- **Comments say what and why, in plain words.** Write for someone who knows Rust but has never seen this file. Do not describe how the code used to be, and do not restate the line below.
+- **One word per idea.** *Pending* is anything not yet pushed; *uncommitted* is the part of that not yet committed; *unpushed* is the part committed but still local. `check` takes in changes made outside; `poll` asks git whether anything moved; `load` rebuilds what a screen shows. If you need a new word, define it in a doc comment where the idea is introduced.
+- **Small functions with one job.** If a function runs past about forty lines and is not a plain table, it is probably doing two things.
+- **Names over positions.** Prefer a small struct or enum to a tuple or a bare `bool` argument when a reader would otherwise have to remember an order or a meaning.
+- **No leftovers.** No commented-out code, no `TODO`, no parameter that is always the same value, no helper kept for a caller that is gone.
+- **`unsafe` explains itself.** Every block has a `// SAFETY:` comment directly above it giving the actual argument. The lints enforce that the comment exists; reviewers check that it is true.
+- **On screen, plain words.** Text the user reads says "changed", "to commit", "to push". Words such as *pending* are for the code.
+
+## Finding your way around
+
+The README has a one-line description of every module. The short version:
+
+| If you want to change… | Look in… |
+| --- | --- |
+| what a row, the header or the hint line looks like | `src/outline/draw.rs` |
+| what a key or click does in the outline | `src/outline/input.rs` |
+| when the outline follows work, or how long a mark stays | `src/outline/attention.rs` |
+| the reader | `src/reader.rs`, and `src/diff.rs` for how a diff becomes lines |
+| which git commands run, and how safely | `src/git/run.rs` |
+| what is read from git's output | `src/git/parse.rs` |
+| what strata remembers about a repository | `src/git.rs` |
+| how the screen is drawn and what a style is | `src/screen.rs` |
+| keys and mouse input | `src/keys.rs` |
+| how often strata looks for changes | `Pace` in `src/main.rs` |
+
+### Adding a language to the reader
+
+Code colouring is a small scanner (`src/syntax.rs`) driven by tables (`src/syntax/langs.rs`). To add a language you should only need to touch the tables:
+
+1. Add a `Lang` constant: its line and block comments, its quotes (list a longer opener before any opener it starts with), its keywords and constants.
+2. Map its file extensions in `for_file`.
+3. Add a test with a few idiomatic lines and the classes you expect.
+
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for strata to colour it imperfectly.
+
+## Commit messages
+
+One line in the imperative that says what the commit does for someone using or reading strata ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.
+
+## Reporting a bug
+
+Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. For anything that looks like a security problem (strata running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+
+## Licence
+
+By contributing you agree that your work is released under the MIT licence that covers the project (see `LICENSE`).
