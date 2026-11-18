@@ -33,6 +33,7 @@ on its own.
   J K           next, previous beside this one, over anything nested
   p             up to the parent folder
   e             open every folder   c        changed files only
+  t             show or hide recent history
   r             reload              q        quit
 
 Colour is the change: yellow edited, green new, red removed, cyan moved.

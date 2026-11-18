@@ -1,5 +1,6 @@
 //! Read-only git plumbing: which files are not yet committed or pushed.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
@@ -155,9 +156,34 @@ fn pushed_base(root: &Path, status: &Status) -> Option<String> {
     (!base.is_empty() && base != status.oid).then(|| base.to_string())
 }
 
+/// One commit on the current branch.
+pub struct Commit {
+    pub subject: String,
+    /// How long ago, in a few characters: "now", "5m", "2h", "3d", "6w".
+    pub age: String,
+    /// Already on the remote. Always true when there is no remote.
+    pub pushed: bool,
+}
+
+/// Shortens git's "2 hours ago" to "2h".
+fn short_age(relative: &str) -> String {
+    let mut words = relative.split(' ');
+    let (n, unit) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+    let suffix = match unit.as_bytes().first() {
+        Some(b's') | None => return "now".into(),
+        Some(b'm') if unit.starts_with("mo") => "mo",
+        Some(b'm') => "m",
+        Some(b'h') => "h",
+        Some(b'd') => "d",
+        Some(b'w') => "w",
+        _ => "y",
+    };
+    format!("{n}{suffix}")
+}
+
 /// Everything not yet pushed: first what is not committed, then what is
 /// committed but still local.
-fn pending(root: &Path, status: &Status) -> Vec<FileChange> {
+fn pending(root: &Path, status: &Status, base: Option<&str>) -> Vec<FileChange> {
     let mut files = Vec::new();
     let head = if status.oid == "(initial)" { EMPTY_TREE } else { "HEAD" };
     parse_changes(&run(root, &["diff", head, "-M", "--raw", "--numstat", "-z"]), false, &mut files);
@@ -165,8 +191,8 @@ fn pending(root: &Path, status: &Status) -> Vec<FileChange> {
         let add = new_file_lines(&root.join(path));
         files.push(FileChange { path: path.clone(), kind: Kind::Untracked, add, del: 0, committed: false });
     }
-    if let Some(base) = pushed_base(root, status) {
-        parse_changes(&run(root, &["diff", &base, "HEAD", "-M", "--raw", "--numstat", "-z"]), true, &mut files);
+    if let Some(base) = base {
+        parse_changes(&run(root, &["diff", base, "HEAD", "-M", "--raw", "--numstat", "-z"]), true, &mut files);
     }
     files
 }
@@ -181,6 +207,10 @@ pub struct Repo {
     /// False for a folder outside any repository: files are listed, and
     /// nothing is ever pending.
     pub git: bool,
+    /// Whether there is anywhere to push to; without it nothing is "unpushed".
+    pub remote: bool,
+    /// The newest commit the remote already has, when this branch is ahead.
+    base: Option<String>,
     raw: Vec<u8>,
     stamp: Stamp,
 }
@@ -194,7 +224,8 @@ impl Repo {
             None => (dir.canonicalize().ok().filter(|d| d.is_dir())?, false),
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Some(Repo { root, name, branch: String::new(), git, raw: Vec::new(), stamp: Vec::new() })
+        let (branch, base, raw, stamp) = (String::new(), None, Vec::new(), Vec::new());
+        Some(Repo { root, name, branch, git, remote: false, base, raw, stamp })
     }
 
     fn status_raw(&self) -> Vec<u8> {
@@ -216,10 +247,38 @@ impl Repo {
         }
         self.raw = self.status_raw();
         let status = parse_status(&self.raw);
-        let files = pending(&self.root, &status);
+        self.base = pushed_base(&self.root, &status);
+        let files = pending(&self.root, &status, self.base.as_deref());
+        // Without an upstream, the remote's default branch still counts as one.
+        self.remote = status.upstream.is_some()
+            || !run(&self.root, &["rev-parse", "--verify", "--quiet", "origin/HEAD"]).is_empty();
         self.branch = status.branch;
         self.stamp = self.stamp(&files);
         files
+    }
+
+    /// The newest `limit` commits on the current branch, newest first.
+    pub fn history(&self, limit: usize) -> Vec<Commit> {
+        if !self.git {
+            return Vec::new();
+        }
+        let unpushed: HashSet<String> = match &self.base {
+            Some(base) => {
+                let raw = run(&self.root, &["rev-list", "-n", "1000", &format!("{base}..HEAD")]);
+                String::from_utf8_lossy(&raw).lines().map(str::to_string).collect()
+            }
+            None => HashSet::new(),
+        };
+        let n = limit.to_string();
+        let raw = run(&self.root, &["log", "-n", &n, "--no-show-signature", "--format=%H%x00%ar%x00%s"]);
+        String::from_utf8_lossy(&raw)
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.splitn(3, '\0');
+                let (hash, age, subject) = (f.next()?, f.next()?, f.next()?);
+                Some(Commit { subject: subject.to_string(), age: short_age(age), pushed: !unpushed.contains(hash) })
+            })
+            .collect()
     }
 
     /// When the `i`th file of the last load was written, if it still exists.

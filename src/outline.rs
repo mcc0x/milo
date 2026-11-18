@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::git::{FileChange, Kind, Repo};
+use crate::git::{Commit, FileChange, Kind, Repo};
 use crate::icons;
 use crate::term::{self, Key, Screen, Style};
 use crate::tree::Tree;
@@ -26,6 +26,10 @@ const SIZE_W: usize = 11;
 const CHECK: Duration = Duration::from_secs(2);
 /// How long a row that just changed stays marked.
 const FRESH: Duration = Duration::from_secs(4);
+/// From this height a quarter of the pane shows recent history.
+const HISTORY_ROWS: usize = 20;
+/// Commits loaded for it: more than any pane has columns for dots.
+const HISTORY_LIMIT: usize = 300;
 
 /// What is pending beneath one directory.
 #[derive(Default, Clone, Copy)]
@@ -55,6 +59,9 @@ pub struct Outline {
     uncommitted: HashSet<String>,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
+    /// Recent commits, newest first; empty outside git.
+    history: Vec<Commit>,
+    show_history: bool,
     /// Files that changed while the outline was open, and when.
     fresh: HashMap<String, Instant>,
     checked: Instant,
@@ -84,6 +91,8 @@ impl Outline {
             sums: HashMap::new(),
             uncommitted: HashSet::new(),
             recent: Vec::new(),
+            history: Vec::new(),
+            show_history: true,
             fresh: HashMap::new(),
             checked: Instant::now(),
             changed_only: false,
@@ -141,6 +150,7 @@ impl Outline {
         let pending = self.files.iter().map(|f| f.path.as_str());
         self.tree = Tree::build(all.iter().map(String::as_str).chain(pending));
         self.listing = if self.repo.git { Vec::new() } else { all };
+        self.history = self.repo.history(HISTORY_LIMIT);
         // Reversed, so a file both committed and edited again shows its newest state.
         self.tree.colour(self.files.iter().rev().map(|f| (f.path.as_str(), f.kind)));
 
@@ -246,7 +256,10 @@ impl Outline {
         // A strip of two or three rows has none to spare for a heading.
         let head = (h >= 4) as usize;
         let hint = (h >= HINT_ROWS) as usize;
-        self.body = (head, h - head - hint);
+        // A quarter of a tall pane goes to recent history, if there is any.
+        let history = !self.horizontal && self.show_history && h >= HISTORY_ROWS && !self.history.is_empty();
+        let panel = if history { (h / 4).max(5) } else { 0 };
+        self.body = (head, h - head - hint - panel);
         if head == 1 {
             self.header(s);
         }
@@ -254,6 +267,9 @@ impl Outline {
             self.draw_strip(s);
         } else {
             self.draw_tree(s);
+        }
+        if panel > 0 {
+            self.draw_history(s, self.body.0 + self.body.1, panel);
         }
         if hint == 1 && self.focused {
             self.hint(s);
@@ -416,6 +432,56 @@ impl Outline {
         }
     }
 
+    /// Recent commits beneath the tree: a row of dots for the shape of it,
+    /// then the newest few spelled out. A hollow dot is work not committed,
+    /// yellow is committed but not pushed, green is safe on the remote, and
+    /// the ringed dot is where the branch is now. With no remote to push
+    /// to, commits are simply uncoloured.
+    fn draw_history(&self, s: &mut Screen, y0: usize, rows: usize) {
+        let w = s.w;
+        s.put(0, y0, w, &"─".repeat(w), DIM);
+        s.put(2, y0, w.saturating_sub(3), " History ", Style::PLAIN.bold());
+        let dot = |i: usize, c: &Commit| {
+            let st = match (self.repo.remote, c.pushed) {
+                (false, _) => Style::PLAIN,
+                (true, true) => Style::fg(term::GREEN),
+                (true, false) => Style::fg(term::YELLOW),
+            };
+            (if i == 0 { "◉" } else { "●" }, st)
+        };
+        let dirty = !self.uncommitted.is_empty();
+        // Spaced out while every commit fits that way, packed once they do not.
+        let room = w.saturating_sub(2);
+        let step = if (self.history.len() + dirty as usize) * 2 <= room { 2 } else { 1 };
+        let (mut x, y) = (1, y0 + 1);
+        if dirty {
+            s.put(x, y, 1, "○", Style::PLAIN.bold());
+            x += step;
+        }
+        for (i, c) in self.history.iter().enumerate().take((w - 1).saturating_sub(x) / step) {
+            let (glyph, st) = dot(i, c);
+            s.put(x, y, 1, glyph, st);
+            x += step;
+        }
+
+        let mut y = y0 + 2;
+        if dirty && y < y0 + rows {
+            s.put(1, y, 1, "○", Style::PLAIN.bold());
+            s.put_fit(3, y, w.saturating_sub(4), "not committed yet", Style::PLAIN.bold());
+            y += 1;
+        }
+        for (i, c) in self.history.iter().enumerate().take((y0 + rows).saturating_sub(y)) {
+            let (glyph, st) = dot(i, c);
+            s.put(1, y, 1, glyph, st);
+            let age_x = (w - 1).saturating_sub(c.age.len());
+            s.put(age_x, y, c.age.len(), &c.age, DIM);
+            // What is already pushed recedes, like untouched files above.
+            let text = if c.pushed && self.repo.remote { Style::PLAIN.faint() } else { Style::PLAIN };
+            s.put_fit(3, y, age_x.saturating_sub(4), &c.subject, text);
+            y += 1;
+        }
+    }
+
     /// Pending files only, most recent first, filling columns top to bottom.
     fn draw_strip(&mut self, s: &mut Screen) {
         let (w, (y0, h)) = (s.w, self.body);
@@ -531,6 +597,7 @@ impl Outline {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
             Key::Focus(focused) => self.focused = focused,
             Key::Char('r') => self.reload(),
+            Key::Char('t') => self.show_history = !self.show_history,
             Key::Char('e') => {
                 // Opening everything also forgets what was closed by hand.
                 self.all_open = !self.all_open;
