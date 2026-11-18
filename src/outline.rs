@@ -25,8 +25,18 @@ const WORD_W: usize = 8;
 const SIZE_W: usize = 11;
 /// How often the repository is checked for changes.
 const CHECK: Duration = Duration::from_secs(2);
-/// How long a row that just changed stays marked.
+/// How soon after the operating system reports a change it is looked at;
+/// also the least time between two such looks while changes keep coming.
+const SETTLE: Duration = Duration::from_millis(120);
+/// How long a mark stays once it has been seen.
 const FRESH: Duration = Duration::from_secs(4);
+/// How long a row counts as being written right now, and pulses.
+const LIVE: Duration = Duration::from_secs(3);
+const PULSE: Duration = Duration::from_millis(500);
+/// How long a mark nobody has seen is kept.
+const UNSEEN: Duration = Duration::from_secs(300);
+/// Without input for this long, the outline follows the work by itself.
+const FOLLOW_AFTER: Duration = Duration::from_secs(15);
 /// From this height a quarter of the pane shows recent history.
 const HISTORY_ROWS: usize = 20;
 /// From this width history sits beside the outline instead.
@@ -84,6 +94,12 @@ pub struct Outline {
     /// Files that changed while the outline was open, and when.
     fresh: HashMap<String, Instant>,
     checked: Instant,
+    /// The operating system reported a change that has not been looked at yet.
+    poked: bool,
+    /// When the reader last used the pane or returned to it.
+    looked: Instant,
+    /// The terminal has reported focus at least once, so `focused` is real.
+    focus_known: bool,
     changed_only: bool,
     /// Every directory is open, until toggled off again.
     all_open: bool,
@@ -119,6 +135,9 @@ impl Outline {
             changed_only: false,
             all_open: false,
             focused: true,
+            focus_known: false,
+            looked: Instant::now(),
+            poked: false,
             sel: 0,
             top: 0,
             strip_col: 0,
@@ -149,14 +168,23 @@ impl Outline {
         let known: HashSet<String> = self.history.iter().map(|c| c.hash.clone()).collect();
         self.load();
         let now = Instant::now();
+        // The file written most recently among those that changed.
+        let mut newest: Option<(Option<SystemTime>, String)> = None;
         for (key, seen) in self.seen() {
             if before.get(&key) != Some(&seen) {
+                if newest.as_ref().is_none_or(|(at, _)| *at <= seen.3) {
+                    newest = Some((seen.3, key.0.clone()));
+                }
                 self.fresh.insert(key.0, now);
             }
         }
         // With nothing known before, every commit would count as new.
         for c in self.history.iter().filter(|c| !known.is_empty() && !known.contains(&c.hash)) {
             self.fresh.insert(commit_key(&c.hash), now);
+        }
+        // Left alone, the outline keeps the latest work in view.
+        if let Some((_, path)) = newest.filter(|_| self.following()) {
+            self.reveal(path);
         }
     }
 
@@ -217,21 +245,69 @@ impl Outline {
 
     /// Called when nothing has happened for `idle_ms`.
     pub fn tick(&mut self) {
-        self.fresh.retain(|_, at| at.elapsed() < FRESH);
-        if self.checked.elapsed() >= CHECK {
-            self.checked = Instant::now();
-            let stale = if self.repo.git { self.repo.stale(&self.files) } else { self.list() != self.listing };
-            if stale {
-                self.reload();
-            }
+        let marks = std::mem::take(&mut self.fresh);
+        self.fresh = marks.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
+        self.check_if_due();
+    }
+
+    /// Called when the operating system reports a change under the root.
+    pub fn changed(&mut self) {
+        self.poked = true;
+        self.check_if_due();
+    }
+
+    /// Looks for changes, at most once per `SETTLE` after being told of one
+    /// and once per `CHECK` regardless.
+    fn check_if_due(&mut self) {
+        let due = if self.poked { SETTLE } else { CHECK };
+        if self.checked.elapsed() < due {
+            return;
         }
+        (self.checked, self.poked) = (Instant::now(), false);
+        let stale = if self.repo.git { self.repo.stale(&self.files) } else { self.list() != self.listing };
+        if stale {
+            self.reload();
+        }
+    }
+
+    /// Whether the reader is, as far as can be told, looking at the pane
+    /// right now: it has the keyboard, and the terminal is known to say so.
+    fn watched(&self) -> bool {
+        self.focus_known && self.focused
+    }
+
+    /// Whether the outline should move by itself to where work is
+    /// happening: the keyboard is elsewhere, or has not been used here lately.
+    fn following(&self) -> bool {
+        (self.focus_known && !self.focused) || self.looked.elapsed() >= FOLLOW_AFTER
+    }
+
+    /// How much longer a mark made at `at` stays. It fades `FRESH` after it
+    /// has been seen: at once if the pane is being watched, otherwise from
+    /// the next time the reader looks. Unseen, it gives up after `UNSEEN`.
+    fn mark_left(&self, at: Instant) -> Duration {
+        // Watching, a mark is seen as it appears, or on returning to the pane.
+        let seen = if self.watched() {
+            Some(at.max(self.looked))
+        } else {
+            Some(self.looked).filter(|&looked| looked > at)
+        };
+        let fade = seen.map_or(UNSEEN, |from| FRESH.saturating_sub(from.elapsed()));
+        fade.min(UNSEEN.saturating_sub(at.elapsed()))
     }
 
     /// How long to wait for input before the next `tick`.
     pub fn idle_ms(&self) -> i32 {
-        let check = CHECK.saturating_sub(self.checked.elapsed());
-        let fade = self.fresh.values().map(|at| FRESH.saturating_sub(at.elapsed())).min();
-        fade.map_or(check, |f| f.min(check)).as_millis() as i32 + 1
+        let due = if self.poked { SETTLE } else { CHECK };
+        let mut wait = due.saturating_sub(self.checked.elapsed());
+        for &at in self.fresh.values() {
+            wait = wait.min(self.mark_left(at));
+            // A mark still pulsing needs a redraw at each beat.
+            if at.elapsed() < LIVE {
+                wait = wait.min(PULSE);
+            }
+        }
+        wait.as_millis() as i32 + 1
     }
 
     fn selected_path(&self) -> Option<String> {
@@ -451,8 +527,22 @@ impl Outline {
             } else {
                 s.put_middle(x, y, room, &n.name, st);
             }
-            if self.fresh.contains_key(&n.path) {
-                s.put(0, y, 1, "●", colour);
+            // A row that changed: pulsing while it is being written, then a
+            // quieter mark until it has been seen. A closed folder carries
+            // the mark of whatever changed inside it.
+            let changed = if n.dir && !open {
+                self.fresh.iter().filter(|(p, _)| under(p, &n.path)).map(|(_, at)| *at).max()
+            } else {
+                self.fresh.get(&n.path).copied()
+            };
+            if let Some(age) = changed.map(|at| at.elapsed()) {
+                let live = age < LIVE;
+                let glyph = match (live, age.as_millis() / PULSE.as_millis() % 2) {
+                    (true, 0) => "●",
+                    (true, _) => "○",
+                    (false, _) => "•",
+                };
+                s.put(0, y, 1, glyph, if live { colour.bold() } else { colour });
             }
             // Grey rather than a solid bar, so the row keeps its own colour;
             // and no bar at all while the keyboard is in another pane.
@@ -665,6 +755,11 @@ impl Outline {
         let from = self.tree.rows.get(self.sel).map(|&(n, _)| n);
         let Some(target) = self.tree.next_pending(from, forward) else { return };
         let path = self.tree.nodes[target as usize].path.clone();
+        self.reveal(path);
+    }
+
+    /// Opens whatever folders hide `path` and puts the cursor on it.
+    fn reveal(&mut self, path: String) {
         let mut p = path.as_str();
         while let Some((dir, _)) = p.rsplit_once('/') {
             self.collapsed.remove(dir);
@@ -711,9 +806,16 @@ impl Outline {
     /// Returns true when the program should quit.
     pub fn on_key(&mut self, key: Key) -> bool {
         let page = self.body.1.max(2) as isize - 1;
+        // Any key, click or return to the pane is the reader looking at it.
+        self.looked = Instant::now();
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
-            Key::Focus(focused) => self.focused = focused,
+            Key::Focus(focused) => {
+                (self.focused, self.focus_known) = (focused, true);
+                if !focused {
+                    return false;
+                }
+            }
             Key::Char('r') => self.reload(),
             Key::Char('t') => self.show_history = !self.show_history,
             Key::Char('e') => {
@@ -773,4 +875,9 @@ impl Outline {
         }
         false
     }
+}
+
+/// Whether `path` lies inside the directory `dir`.
+fn under(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }

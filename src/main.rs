@@ -7,6 +7,7 @@ mod term;
 mod tree;
 mod ui;
 mod walk;
+mod watch;
 mod when;
 
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use std::sync::atomic::Ordering;
 use git::Repo;
 use outline::Outline;
 use term::{Screen, Wait};
+use watch::Watcher;
 
 const USAGE: &str = "\
 strata — a project's files, coloured by what is not yet committed or pushed
@@ -57,6 +59,7 @@ fn main() {
         eprintln!("strata: {} is not a directory", dir.display());
         exit(1);
     };
+    let watcher = Watcher::new(&repo.root);
     let mut outline = Outline::new(repo);
     if let Err(e) = term::enter() {
         eprintln!("strata: cannot use this terminal: {e}");
@@ -77,7 +80,7 @@ fn main() {
         }
         outline.draw(&mut screen);
         screen.flush();
-        match term::wait(outline.idle_ms()) {
+        match term::wait(outline.idle_ms(), watcher.fd()) {
             Wait::Input => {
                 term::read_keys(&mut keys);
                 for key in keys.drain(..) {
@@ -85,6 +88,10 @@ fn main() {
                         break 'run;
                     }
                 }
+            }
+            Wait::Woken => {
+                watcher.drain();
+                outline.changed();
             }
             Wait::Timeout => outline.tick(),
             Wait::Interrupted => {}

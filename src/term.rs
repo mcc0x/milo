@@ -1,6 +1,7 @@
 //! Raw terminal access: mode switching, input decoding and a diffed cell buffer.
 
 use std::io::{self, Write};
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
@@ -77,16 +78,25 @@ pub fn size() -> (usize, usize) {
 
 pub enum Wait {
     Input,
+    /// The extra descriptor became readable.
+    Woken,
     Timeout,
     Interrupted,
 }
 
-pub fn wait(timeout_ms: i32) -> Wait {
-    let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-    match unsafe { libc::poll(&mut fd, 1, timeout_ms) } {
+/// Waits for the keyboard, or for `extra` to become readable, or for
+/// `timeout_ms` to pass. The keyboard is reported first when both are ready.
+pub fn wait(timeout_ms: i32, extra: Option<RawFd>) -> Wait {
+    let mut fds = [
+        libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
+        // poll() ignores a negative descriptor.
+        libc::pollfd { fd: extra.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+    ];
+    match unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) } {
         0 => Wait::Timeout,
-        n if n > 0 => Wait::Input,
-        _ => Wait::Interrupted,
+        n if n < 0 => Wait::Interrupted,
+        _ if fds[0].revents != 0 => Wait::Input,
+        _ => Wait::Woken,
     }
 }
 
