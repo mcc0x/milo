@@ -8,10 +8,9 @@ pub static RESIZED: AtomicBool = AtomicBool::new(true);
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
 static ORIG: OnceLock<libc::termios> = OnceLock::new();
 
-// Alternate screen, hidden cursor, button + drag mouse reporting in SGR form,
-// and focus reporting.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?1004h";
-const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1002l\x1b[?25h\x1b[?1049l";
+// Alternate screen, hidden cursor, mouse buttons in SGR form, focus reporting.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?1004h";
+const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
 
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
@@ -96,10 +95,6 @@ pub enum Key {
     Char(char),
     Ctrl(u8),
     Enter,
-    Esc,
-    Tab,
-    BackTab,
-    Backspace,
     Up,
     Down,
     Left,
@@ -108,13 +103,12 @@ pub enum Key {
     PgDn,
     Home,
     End,
-    Click(usize, usize),
-    Drag(usize, usize),
-    Release,
+    /// A left click, on this screen row.
+    Click(usize),
+    WheelUp,
+    WheelDown,
     /// The pane gained or lost keyboard focus.
     Focus(bool),
-    WheelUp(usize, usize),
-    WheelDown(usize, usize),
     /// stdin reached end of file: the terminal is gone.
     Eof,
 }
@@ -149,7 +143,7 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
         i += 1;
         match c {
             0x1b => match b.get(i) {
-                None => keys.push(Key::Esc),
+                None => {}
                 Some(b'[') => {
                     let start = i + 1;
                     let mut end = start;
@@ -174,10 +168,8 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
                 Some(_) => i += 1,
             },
             b'\r' | b'\n' => keys.push(Key::Enter),
-            b'\t' => keys.push(Key::Tab),
-            8 | 127 => keys.push(Key::Backspace),
             1..=26 => keys.push(Key::Ctrl(c + b'a' - 1)),
-            0..=31 => {}
+            0..=31 | 127 => {}
             _ => {
                 let len = match c {
                     0xc0..=0xdf => 2,
@@ -198,16 +190,12 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
 fn csi(params: &[u8], fin: u8) -> Option<Key> {
     if let Some(mouse) = params.strip_prefix(b"<") {
         let mut it = std::str::from_utf8(mouse).ok()?.split(';').map(|p| p.parse::<usize>().ok());
-        let (btn, x, y) = (it.next()??, it.next()??.checked_sub(1)?, it.next()??.checked_sub(1)?);
-        if fin == b'm' {
-            return Some(Key::Release);
-        }
-        // Bit 6 marks the wheel, bit 5 motion; the low bits are the button.
-        return match (btn & 64 != 0, btn & 32 != 0, btn & 3) {
-            (true, _, 0) => Some(Key::WheelUp(x, y)),
-            (true, _, 1) => Some(Key::WheelDown(x, y)),
-            (false, true, 0) => Some(Key::Drag(x, y)),
-            (false, false, 0) => Some(Key::Click(x, y)),
+        let (btn, _x, y) = (it.next()??, it.next()??, it.next()??.checked_sub(1)?);
+        // Bit 6 marks the wheel; the low bits are the button. 'M' is a press.
+        return match (fin, btn & 64 != 0, btn & 3) {
+            (b'M', true, 0) => Some(Key::WheelUp),
+            (b'M', true, 1) => Some(Key::WheelDown),
+            (b'M', false, 0) => Some(Key::Click(y)),
             _ => None,
         };
     }
@@ -218,7 +206,6 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
         b'D' => Key::Left,
         b'H' => Key::Home,
         b'F' => Key::End,
-        b'Z' => Key::BackTab,
         b'I' => Key::Focus(true),
         b'O' => Key::Focus(false),
         b'~' => match params.split(|&c| c == b';').next()? {
@@ -249,9 +236,8 @@ pub struct Style(u32);
 const FG: u32 = 0x1ff;
 const BG_SHIFT: u32 = 9;
 const BOLD: u32 = 1 << 18;
-const REVERSE: u32 = 1 << 19;
-const ITALIC: u32 = 1 << 20;
-const STRIKE: u32 = 1 << 21;
+const ITALIC: u32 = 1 << 19;
+const STRIKE: u32 = 1 << 20;
 /// The flags that are part of the text itself and survive a highlight.
 const FACE: u32 = BOLD | ITALIC | STRIKE;
 
@@ -290,9 +276,6 @@ impl Style {
         }
         if self.0 & STRIKE != 0 {
             out.extend_from_slice(b";9");
-        }
-        if self.0 & REVERSE != 0 {
-            out.extend_from_slice(b";7");
         }
         for (color, base) in [(self.0 & FG, 30), (self.0 >> BG_SHIFT & FG, 40)] {
             let _ = match color.checked_sub(1) {
@@ -354,31 +337,13 @@ impl Screen {
         &mut self.cur[start..start + w.min(self.w - x)]
     }
 
+    /// Draws `s` at (x, y) in at most `max_w` columns. Returns the columns used.
     pub fn put(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
-        self.put_skip(x, y, max_w, s, st, 0)
-    }
-
-    /// Like `put`, but ends a string that does not fit with an ellipsis.
-    pub fn put_fit(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
-        if max_w == 0 || str_width(s) <= max_w {
-            return self.put(x, y, max_w, s, st);
-        }
-        let used = self.put(x, y, max_w - 1, s, st);
-        used + self.put(x + used, y, 1, "…", st)
-    }
-
-    /// Draws `s` at (x, y) in at most `max_w` columns, after skipping the
-    /// first `skip` columns of the text. Returns the columns used.
-    pub fn put_skip(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style, skip: usize) -> usize {
         let row = self.span(x, y, max_w);
-        let (mut col, mut used) = (0, 0);
+        let mut used = 0;
         for ch in s.chars() {
             let cw = char_width(ch);
             if cw == 0 {
-                continue;
-            }
-            if col < skip {
-                col += cw;
                 continue;
             }
             if used + cw > row.len() {
@@ -393,27 +358,19 @@ impl Screen {
         used
     }
 
-    pub fn fill(&mut self, x: usize, y: usize, w: usize, ch: char, st: Style) {
-        self.span(x, y, w).fill(Cell { ch, st });
-    }
-
-    /// Marks a row span as selected: a solid bar when its pane has focus, a
-    /// grey background otherwise.
-    pub fn select(&mut self, x: usize, y: usize, w: usize, focused: bool) {
-        for cell in self.span(x, y, w) {
-            cell.st = if focused { Style(cell.st.0 & FACE | REVERSE) } else { cell.st.tinted() };
+    /// Like `put`, but ends a string that does not fit with an ellipsis.
+    pub fn put_fit(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
+        if max_w == 0 || str_width(s) <= max_w {
+            return self.put(x, y, max_w, s, st);
         }
+        let used = self.put(x, y, max_w - 1, s, st);
+        used + self.put(x + used, y, 1, "…", st)
     }
 
-    /// Gives a span a grey background, as a heading bar.
+    /// Gives a span a grey background that keeps each cell's own colour.
     pub fn tint(&mut self, x: usize, y: usize, w: usize) {
-        self.select(x, y, w, false);
-    }
-
-    /// Inverts a span, to pick out the changed part of a line.
-    pub fn emphasise(&mut self, x: usize, y: usize, w: usize) {
         for cell in self.span(x, y, w) {
-            cell.st = Style(cell.st.0 | REVERSE);
+            cell.st = cell.st.tinted();
         }
     }
 
