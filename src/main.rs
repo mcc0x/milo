@@ -6,6 +6,7 @@ mod icons;
 mod outline;
 mod read;
 mod rex;
+mod syntax;
 mod term;
 mod tree;
 mod ui;

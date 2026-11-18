@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::git::{Kind, Repo, Stamp};
 use crate::icons;
 use crate::read::{self, Content};
+use crate::syntax::{self, Class, Lang, Span, State};
 use crate::term::{self, Key, Screen, Style};
 use crate::ui::{self, ADD, DEL, DIM};
 
@@ -33,6 +34,8 @@ struct Line {
     text: String,
     /// Byte range of `text` that differs from its paired line; empty if none.
     changed: (usize, usize),
+    /// The pieces of `text` to colour as code, in order.
+    spans: Vec<Span>,
 }
 
 pub struct View {
@@ -46,10 +49,24 @@ pub struct View {
     note: Option<&'static str>,
     /// What is pending for this file; `Kind::None` if nothing is.
     kind: Kind,
+    /// The language the file is written in, if it is one this colours.
+    lang: Option<&'static Lang>,
     top: usize,
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
+}
+
+/// The colour of each class of code. These follow the terminal's theme.
+fn class_style(class: Class) -> Style {
+    match class {
+        Class::Comment => DIM.italic(),
+        Class::Str => Style::fg(term::GREEN),
+        Class::Number => Style::fg(term::YELLOW),
+        Class::Keyword => Style::fg(term::MAGENTA),
+        Class::Type => Style::fg(term::CYAN),
+        Class::Function | Class::Key => Style::fg(term::BLUE),
+    }
 }
 
 /// Expands tabs and drops control characters so a line is safe to draw.
@@ -147,7 +164,8 @@ fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
                 (LineKind::Same, &mut new)
             }
         };
-        lines.push(Line { kind: line_kind, no: *no, text: clean(l.get(1..).unwrap_or("")), changed: (0, 0) });
+        let text = clean(l.get(1..).unwrap_or(""));
+        lines.push(Line { kind: line_kind, no: *no, text, changed: (0, 0), spans: Vec::new() });
         *no += 1;
     }
     mark_changed(&mut lines);
@@ -173,10 +191,12 @@ impl View {
             lines: Vec::new(),
             note: None,
             kind: Kind::None,
+            lang: None,
             top: 0,
             pan: 0,
             rows: 0,
         };
+        view.lang = syntax::for_file(&view.path);
         view.load(None);
         // Start at the first change, with a little of the file above it.
         let first = view.lines.iter().position(|l| l.kind != LineKind::Same);
@@ -198,9 +218,20 @@ impl View {
         Some((m.modified().ok()?, m.len()))
     }
 
-    /// Reads the file and what is pending for it. `raw` is a status the
-    /// repository was just asked for, if any.
+    /// Reads the file and what is pending for it, and colours it. `raw` is
+    /// a status the repository was just asked for, if any.
     fn load(&mut self, raw: Option<Vec<u8>>) {
+        self.read(raw);
+        let Some(lang) = self.lang else { return };
+        // What a removed line was is not part of the file as it now reads,
+        // so the lines before and after it are scanned as neighbours.
+        let mut state = State::default();
+        for line in self.lines.iter_mut().filter(|l| l.kind != LineKind::Del) {
+            line.spans = lang.line(&line.text, &mut state);
+        }
+    }
+
+    fn read(&mut self, raw: Option<Vec<u8>>) {
         self.repo.read(raw);
         self.stamp = self.stamp();
         (self.lines, self.note, self.kind) = (Vec::new(), None, Kind::None);
@@ -240,6 +271,7 @@ impl View {
                     no: i as u32 + 1,
                     text: clean(l),
                     changed: (0, 0),
+                    spans: Vec::new(),
                 };
                 self.lines = text.lines().enumerate().map(line).collect();
                 if self.lines.is_empty() {
@@ -299,17 +331,34 @@ impl View {
         let text_x = digits + 4;
         let text_w = (w - 1).saturating_sub(text_x);
         for (y, line) in (1..).zip(self.lines.iter().skip(self.top).take(self.rows)) {
-            let (sign, st, no_st) = match line.kind {
+            // In a language this knows, an added line keeps the colours of
+            // its code and is marked in the margin; otherwise it is green
+            // throughout. A removed line is red either way.
+            let coloured = self.lang.is_some();
+            let (sign, st, margin) = match line.kind {
                 LineKind::Same => (" ", Style::PLAIN, DIM),
+                LineKind::Add if coloured => ("+", Style::PLAIN, ADD.bold()),
                 LineKind::Add => ("+", ADD, ADD),
                 LineKind::Del => ("-", DEL, DEL),
             };
             let no = line.no.to_string();
-            s.put(1 + digits - no.len(), y, digits, &no, no_st);
-            s.put(digits + 2, y, 1, sign, st);
+            s.put(1 + digits - no.len(), y, digits, &no, margin);
+            s.put(digits + 2, y, 1, sign, margin);
             // Panning skips whole characters off the left of the text.
             let skip = line.text.char_indices().nth(self.pan).map_or(line.text.len(), |(i, _)| i);
             s.put(text_x, y, text_w, &line.text[skip..], st);
+            // Columns run on from one span to the next, so each is measured once.
+            let (mut at, mut col) = (skip, 0);
+            for &(start, end, class) in &line.spans {
+                let (start, end) = (start.max(skip), end.max(skip));
+                if start >= end || col >= text_w {
+                    continue;
+                }
+                col += term::str_width(&line.text[at..start]);
+                let width = term::str_width(&line.text[start..end]);
+                s.paint(text_x + col, y, width.min(text_w.saturating_sub(col)), class_style(class));
+                (at, col) = (end, col + width);
+            }
             let (a, b) = (line.changed.0.max(skip), line.changed.1.max(skip));
             if a < b {
                 let from = term::str_width(&line.text[skip..a]);

@@ -266,6 +266,7 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
 pub const RED: u8 = 1;
 pub const GREEN: u8 = 2;
 pub const YELLOW: u8 = 3;
+pub const BLUE: u8 = 4;
 pub const MAGENTA: u8 = 5;
 pub const CYAN: u8 = 6;
 pub const GRAY: u8 = 8;
@@ -435,6 +436,13 @@ impl Screen {
         let mut used = self.put(x, y, max_w.saturating_sub(tail_w + 1), s, st);
         used += self.put(x + used, y, 1, "…", st);
         used + self.put(x + used, y, tail_w, &s[tail_at..], st)
+    }
+
+    /// Gives a span a style, keeping what is written there.
+    pub fn paint(&mut self, x: usize, y: usize, w: usize, st: Style) {
+        for cell in self.span(x, y, w) {
+            cell.st = st;
+        }
     }
 
     /// Inverts a span, to pick out the changed part of a line.
