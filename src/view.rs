@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::git::{Kind, Repo, Stamp};
 use crate::read::{self, Content};
 use crate::syntax::{self, Class, Lang, Span, State};
-use crate::term::{self, Key, Screen, Style};
+use crate::term::{self, Key, Screen, Style, Wash};
 use crate::ui::{self, ADD, DEL, DIM};
 use crate::{help, icons};
 
@@ -403,6 +403,13 @@ impl View {
                 let from = term::str_width(&line.text[skip..a]);
                 let width = term::str_width(&line.text[a..b]);
                 s.emphasise(text_x + from, y, width.min(text_w.saturating_sub(from)));
+            }
+            // A tint across the row, so a change is seen without reading
+            // the margin.
+            match line.kind {
+                LineKind::Same => {}
+                LineKind::Add => s.wash(0, y, w - 1, Wash::Added),
+                LineKind::Del => s.wash(0, y, w - 1, Wash::Removed),
             }
         }
         ui::thumb(s, w - 1, 1, self.rows, self.lines.len(), self.top);

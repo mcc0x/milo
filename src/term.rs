@@ -2,7 +2,7 @@
 
 use std::io::{self, ErrorKind, Write};
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
@@ -13,8 +13,9 @@ static SIGNAL: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
 
 // Alternate screen, hidden cursor, mouse buttons in SGR form, focus
 // reporting, and no wrapping: a row that turns out wider than reckoned is
-// cut at the edge instead of spilling onto the next.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h";
+// cut at the edge instead of spilling onto the next. Last, the terminal is
+// asked what its background colour is; its answer comes in with the keys.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b]11;?\x1b\\";
 const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// How long the rest of a split escape sequence is waited for.
 const SEQUENCE_MS: i32 = 25;
@@ -211,6 +212,8 @@ fn unfinished(b: &[u8]) -> bool {
     match &b[esc + 1..] {
         [] | [b'O'] => true,
         [b'[', rest @ ..] => !rest.iter().any(|c| (0x40..=0x7e).contains(c)),
+        // An answer from the terminal runs to a BEL, or to an ESC of its own.
+        [b']', rest @ ..] => !rest.contains(&7),
         _ => false,
     }
 }
@@ -242,6 +245,15 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
                         keys.push(k);
                     }
                     i += 2;
+                }
+                // An answer from the terminal, ended by BEL or by ESC \.
+                Some(b']') => {
+                    let start = i + 1;
+                    let Some(len) = b[start..].iter().position(|&c| c == 7 || c == 0x1b) else { return };
+                    if let Some(bg) = background_reply(&b[start..start + len]) {
+                        set_background(bg);
+                    }
+                    i = start + len + if b[start + len] == 7 { 1 } else { 2 };
                 }
                 // Alt-modified key: drop it rather than act on the bare key.
                 Some(_) => i += 1,
@@ -305,23 +317,62 @@ pub const YELLOW: u8 = 3;
 pub const BLUE: u8 = 4;
 pub const MAGENTA: u8 = 5;
 pub const CYAN: u8 = 6;
-pub const GRAY: u8 = 8;
 
-/// Packed cell style: fg in bits 0-8, bg in bits 9-17 (0 = default, n+1 =
-/// colour n of the 256-colour palette), then the face flags. Colours 0-15
-/// follow the terminal theme; 16-255 are fixed.
+/// A background laid behind text without changing the text.
+#[derive(Clone, Copy)]
+pub enum Wash {
+    /// The bar under the cursor.
+    Bar = 1,
+    /// A line the file gained.
+    Added = 2,
+    /// A line the file lost.
+    Removed = 3,
+}
+
+/// The colour of each wash once the terminal has said what its background
+/// is: 0 until then, otherwise 0x01RRGGBB.
+static WASHES: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+
+/// Works the washes out from the terminal's background, so each is a shade
+/// of whatever theme is in use: the bar a step towards the text, a gained
+/// line a little green, a lost one a little red.
+fn set_background(bg: [u32; 3]) {
+    let dark = bg[0] * 299 + bg[1] * 587 + bg[2] * 114 < 128_000;
+    let towards: [[u32; 3]; 3] = [if dark { [255; 3] } else { [0; 3] }, [0, 190, 70], [230, 50, 50]];
+    for (wash, (to, part)) in WASHES.iter().zip(towards.into_iter().zip([14, 16, 16])) {
+        let mix = |i: usize| (bg[i] * (100 - part) + to[i] * part) / 100;
+        wash.store(1 << 24 | mix(0) << 16 | mix(1) << 8 | mix(2), Ordering::Relaxed);
+    }
+    // Every cell that carries a wash has to be drawn again.
+    RESIZED.store(true, Ordering::Relaxed);
+}
+
+/// Reads the terminal's answer to being asked its background colour:
+/// "11;rgb:RRRR/GGGG/BBBB", each part one to four hex digits.
+fn background_reply(reply: &[u8]) -> Option<[u32; 3]> {
+    let text = std::str::from_utf8(reply).ok()?.strip_prefix("11;rgb:")?;
+    let mut parts = text.split('/').map(|part| {
+        let value = u32::from_str_radix(part, 16).ok()?;
+        // Scaled from however many digits were given to eight bits.
+        Some(value * 255 / ((1u32 << (4 * part.len().clamp(1, 4))) - 1))
+    });
+    Some([parts.next()??, parts.next()??, parts.next()??])
+}
+
+/// Packed cell style: the text colour in bits 0-8 (0 = default, n+1 =
+/// colour n of the 256-colour palette), then the face flags and the wash.
+/// Colours 0-15 follow the terminal theme; 16-255 are fixed.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style(u32);
 
 const FG: u32 = 0x1ff;
-const BG_SHIFT: u32 = 9;
 const BOLD: u32 = 1 << 18;
 const ITALIC: u32 = 1 << 19;
 const STRIKE: u32 = 1 << 20;
 const FAINT: u32 = 1 << 21;
 const REVERSE: u32 = 1 << 22;
-/// The flags that are part of the text itself and survive a highlight.
-const FACE: u32 = BOLD | ITALIC | STRIKE | FAINT;
+const WASH_SHIFT: u32 = 23;
+const WASH: u32 = 3 << WASH_SHIFT;
 
 impl Style {
     pub const PLAIN: Style = Style(0);
@@ -352,12 +403,6 @@ impl Style {
         Style(self.0 | REVERSE)
     }
 
-    /// A grey background. Grey text would vanish on it, so that turns plain.
-    const fn tinted(self) -> Style {
-        let fg = if self.0 & FG == GRAY as u32 + 1 { 0 } else { self.0 & FG };
-        Style(self.0 & FACE | fg | (GRAY as u32 + 1) << BG_SHIFT)
-    }
-
     fn sgr(self, out: &mut Vec<u8>) {
         out.extend_from_slice(b"\x1b[0");
         if self.0 & BOLD != 0 {
@@ -375,12 +420,22 @@ impl Style {
         if self.0 & STRIKE != 0 {
             out.extend_from_slice(b";9");
         }
-        for (color, base) in [(self.0 & FG, 30), (self.0 >> BG_SHIFT & FG, 40)] {
-            let _ = match color.checked_sub(1) {
-                None => Ok(()),
-                Some(c @ 0..8) => write!(out, ";{}", base + c),
-                Some(c @ 8..16) => write!(out, ";{}", base + 52 + c),
-                Some(c) => write!(out, ";{};5;{c}", base + 8),
+        let _ = match (self.0 & FG).checked_sub(1) {
+            None => Ok(()),
+            Some(c @ 0..8) => write!(out, ";{}", 30 + c),
+            Some(c @ 8..16) => write!(out, ";{}", 82 + c),
+            Some(c) => write!(out, ";38;5;{c}"),
+        };
+        // A wash is mixed from the terminal's own background. Where that is
+        // not known the bar falls back on the theme's grey, and the other
+        // washes on nothing: the lines they mark are marked in the margin too.
+        let wash = self.0 >> WASH_SHIFT & 3;
+        if wash != 0 {
+            let rgb = WASHES[wash as usize - 1].load(Ordering::Relaxed);
+            let _ = match (rgb, wash) {
+                (0, 1) => write!(out, ";100"),
+                (0, _) => Ok(()),
+                _ => write!(out, ";48;2;{};{};{}", rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255),
             };
         }
         out.push(b'm');
@@ -493,10 +548,10 @@ impl Screen {
         }
     }
 
-    /// Gives a span a grey background that keeps each cell's own colour.
-    pub fn tint(&mut self, x: usize, y: usize, w: usize) {
+    /// Lays a wash behind a span, keeping each cell's own text and colour.
+    pub fn wash(&mut self, x: usize, y: usize, w: usize, wash: Wash) {
         for cell in self.span(x, y, w) {
-            cell.st = cell.st.tinted();
+            cell.st = Style(cell.st.0 & !WASH | (wash as u32) << WASH_SHIFT);
         }
     }
 
@@ -626,6 +681,16 @@ mod tests {
         let mut keys = Vec::new();
         decode(bytes, &mut keys);
         keys
+    }
+
+    #[test]
+    fn the_terminals_background_is_read_and_is_not_a_key() {
+        assert_eq!(background_reply(b"11;rgb:0d0d/1111/1717"), Some([13, 17, 23]));
+        assert_eq!(background_reply(b"11;rgb:ff/80/0"), Some([255, 128, 0]));
+        assert_eq!(background_reply(b"11;rgb:zz/00/00"), None);
+        // Ended either way, the answer is swallowed and the keys around it kept.
+        assert_eq!(keys(b"j\x1b]10;rgb:1/2/3\x1b\\k\x1b]10;?\x07l"), [Key::Char('j'), Key::Char('k'), Key::Char('l')]);
+        assert!(unfinished(b"\x1b]11;rgb:0d0d/11") && !unfinished(b"\x1b]11;rgb:0/0/0\x1b\\"));
     }
 
     #[test]

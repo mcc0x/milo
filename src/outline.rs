@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::git::{Commit, FileChange, Kind, Repo};
 use crate::history::{self, Context};
-use crate::term::{self, Key, Screen, Style};
+use crate::term::{self, Key, Screen, Style, Wash};
 use crate::tree::{Folds, Tree};
 use crate::ui::{self, DIM};
 use crate::view::View;
@@ -592,10 +592,11 @@ impl Outline {
                 };
                 s.put(0, y, 1, glyph, if live { colour.bold() } else { colour });
             }
-            // Grey rather than a solid bar, so the row keeps its own colour;
-            // and no bar at all while the keyboard is in another pane.
+            // A shade of the background rather than a solid bar, so the row
+            // keeps its own colour; and no bar at all while the keyboard is
+            // in another pane.
             if i == self.sel && self.focus != Some(false) {
-                s.tint(0, y, w - 1);
+                s.wash(0, y, w - 1, Wash::Bar);
             }
         }
         ui::thumb(s, w - 1, y0, h, len, self.top);

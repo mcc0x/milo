@@ -4,7 +4,9 @@ use crate::git::{FileChange, Kind};
 use crate::icons::{self, Icon};
 use crate::term::{self, Screen, Style};
 
-pub const DIM: Style = Style::fg(term::GRAY);
+/// Text that steps back. Faint, not grey: it stays a shade of the theme's
+/// own text colour, where a theme's grey can match its background.
+pub const DIM: Style = Style::PLAIN.faint();
 pub const ADD: Style = Style::fg(term::GREEN);
 pub const DEL: Style = Style::fg(term::RED);
 
