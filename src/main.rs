@@ -7,6 +7,7 @@ mod term;
 mod tree;
 mod ui;
 mod walk;
+mod when;
 
 use std::path::PathBuf;
 use std::process::exit;

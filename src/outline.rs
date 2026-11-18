@@ -12,6 +12,7 @@ use crate::term::{self, Key, Screen, Style};
 use crate::tree::Tree;
 use crate::ui::{self, DIM};
 use crate::walk;
+use crate::when;
 
 /// At or below this height the pane is a horizontal strip.
 const STRIP_ROWS: usize = 7;
@@ -41,6 +42,20 @@ struct Sum {
 
 /// What a pending file looked like at one load, to tell when it changes.
 type Seen = (Kind, u32, u32, Option<SystemTime>);
+
+/// The key a commit is marked fresh under; the NUL keeps it apart from paths.
+fn commit_key(hash: &str) -> String {
+    format!("\0{hash}")
+}
+
+/// Length of a leading "scope: " in a commit subject: a short single word
+/// and the colon and space after it. Zero if there is none.
+fn prefix_len(subject: &str) -> usize {
+    match subject.split_once(": ") {
+        Some((scope, _)) if scope.len() <= 24 && !scope.contains(' ') => scope.len() + 2,
+        _ => 0,
+    }
+}
 
 pub struct Outline {
     repo: Repo,
@@ -124,12 +139,17 @@ impl Outline {
     /// Loads afresh, and marks what differs from the previous load.
     fn reload(&mut self) {
         let before = self.seen();
+        let known: HashSet<String> = self.history.iter().map(|c| c.hash.clone()).collect();
         self.load();
         let now = Instant::now();
         for (key, seen) in self.seen() {
             if before.get(&key) != Some(&seen) {
                 self.fresh.insert(key.0, now);
             }
+        }
+        // With nothing known before, every commit would count as new.
+        for c in self.history.iter().filter(|c| !known.is_empty() && !known.contains(&c.hash)) {
+            self.fresh.insert(commit_key(&c.hash), now);
         }
     }
 
@@ -256,9 +276,9 @@ impl Outline {
         // A strip of two or three rows has none to spare for a heading.
         let head = (h >= 4) as usize;
         let hint = (h >= HINT_ROWS) as usize;
-        // A quarter of a tall pane goes to recent history, if there is any.
+        // Recent history sits beneath the tree in a tall pane, if there is any.
         let history = !self.horizontal && self.show_history && h >= HISTORY_ROWS && !self.history.is_empty();
-        let panel = if history { (h / 4).max(5) } else { 0 };
+        let panel = if history { self.history_rows(h - head - hint) } else { 0 };
         self.body = (head, h - head - hint - panel);
         if head == 1 {
             self.header(s);
@@ -432,52 +452,117 @@ impl Outline {
         }
     }
 
-    /// Recent commits beneath the tree: a row of dots for the shape of it,
-    /// then the newest few spelled out. A hollow dot is work not committed,
-    /// yellow is committed but not pushed, green is safe on the remote, and
-    /// the ringed dot is where the branch is now. With no remote to push
-    /// to, commits are simply uncoloured.
+    /// Rows the history panel wants out of `avail`: no more than it has to
+    /// say, about a quarter of the pane, more where the tree leaves room.
+    fn history_rows(&self, avail: usize) -> usize {
+        let unpushed = self.history.iter().filter(|c| !c.pushed).count();
+        let divider = (unpushed > 0 && unpushed < self.history.len()) as usize;
+        let dirty = self.files.iter().any(|f| !f.committed) as usize;
+        let content = 2 + dirty + divider + self.history.len();
+        let spare = avail.saturating_sub(self.tree.rows.len()).min(avail / 2);
+        content.min((avail / 4).max(5).max(spare)).min(avail.saturating_sub(3))
+    }
+
+    /// Recent commits beneath the tree. One row of dots gives the shape:
+    /// newest first, a gap between days, a tick where the remote is. Below
+    /// it the newest few are spelled out. Hollow is work not committed,
+    /// yellow is committed but not pushed, green is on the remote, and the
+    /// bold dot is where the branch is now. Without a remote, commits are
+    /// simply uncoloured.
     fn draw_history(&self, s: &mut Screen, y0: usize, rows: usize) {
-        let w = s.w;
-        s.put(0, y0, w, &"─".repeat(w), DIM);
-        s.put(2, y0, w.saturating_sub(3), " History ", Style::PLAIN.bold());
+        let (w, end) = (s.w, y0 + rows);
+        let remote = self.repo.remote.as_deref();
+        let unpushed = self.history.iter().filter(|c| !c.pushed).count();
+        let dirty = self.files.iter().filter(|f| !f.committed).count();
         let dot = |i: usize, c: &Commit| {
-            let st = match (self.repo.remote, c.pushed) {
-                (false, _) => Style::PLAIN,
-                (true, true) => Style::fg(term::GREEN),
-                (true, false) => Style::fg(term::YELLOW),
+            let st = match (remote, c.pushed) {
+                (None, _) => Style::PLAIN,
+                (Some(_), true) => Style::fg(term::GREEN),
+                (Some(_), false) => Style::fg(term::YELLOW),
             };
-            (if i == 0 { "◉" } else { "●" }, st)
+            if i == 0 { st.bold() } else { st }
         };
-        let dirty = !self.uncommitted.is_empty();
+        // Where history passes from local commits to ones the remote has.
+        let crosses = |before: &Commit, c: &Commit| remote.is_some() && !before.pushed && c.pushed;
+
+        s.put(0, y0, w, &"─".repeat(w), DIM);
+        s.put(1, y0, w.saturating_sub(2), " History ", Style::PLAIN);
+        // The heading counts files to push; this counts commits, and says so.
+        if unpushed > 0 {
+            let text = format!(" {unpushed} unpushed ");
+            s.put(w.saturating_sub(text.len() + 1), y0, text.len(), &text, Style::fg(term::YELLOW));
+        }
+
         // Spaced out while every commit fits that way, packed once they do not.
-        let room = w.saturating_sub(2);
-        let step = if (self.history.len() + dirty as usize) * 2 <= room { 2 } else { 1 };
+        let pairs = || self.history.iter().zip(self.history.iter().skip(1));
+        let days = pairs().filter(|(a, b)| a.day != b.day).count();
+        let ticks = pairs().filter(|(a, b)| crosses(a, b)).count();
+        let cells = self.history.len() + ticks + (dirty > 0) as usize;
+        let step = if cells * 2 + days <= w.saturating_sub(2) { 2 } else { 1 };
         let (mut x, y) = (1, y0 + 1);
-        if dirty {
+        if dirty > 0 {
             s.put(x, y, 1, "○", Style::PLAIN.bold());
             x += step;
         }
-        for (i, c) in self.history.iter().enumerate().take((w - 1).saturating_sub(x) / step) {
-            let (glyph, st) = dot(i, c);
-            s.put(x, y, 1, glyph, st);
+        for (i, c) in self.history.iter().enumerate() {
+            if let Some(before) = i.checked_sub(1).map(|b| &self.history[b]) {
+                if crosses(before, c) && x + 1 < w {
+                    s.put(x, y, 1, "│", DIM);
+                    x += step;
+                }
+                x += (before.day != c.day) as usize;
+            }
+            if x + 1 >= w {
+                break;
+            }
+            s.put(x, y, 1, "●", dot(i, c));
             x += step;
         }
 
         let mut y = y0 + 2;
-        if dirty && y < y0 + rows {
+        if dirty > 0 && y < end {
+            let text = format!("{dirty} file{} not committed", if dirty == 1 { "" } else { "s" });
             s.put(1, y, 1, "○", Style::PLAIN.bold());
-            s.put_fit(3, y, w.saturating_sub(4), "not committed yet", Style::PLAIN.bold());
+            s.put_fit(3, y, w.saturating_sub(4), &text, Style::PLAIN.bold());
             y += 1;
         }
-        for (i, c) in self.history.iter().enumerate().take((y0 + rows).saturating_sub(y)) {
-            let (glyph, st) = dot(i, c);
-            s.put(1, y, 1, glyph, st);
-            let age_x = (w - 1).saturating_sub(c.age.len());
-            s.put(age_x, y, c.age.len(), &c.age, DIM);
-            // What is already pushed recedes, like untouched files above.
-            let text = if c.pushed && self.repo.remote { Style::PLAIN.faint() } else { Style::PLAIN };
-            s.put_fit(3, y, age_x.saturating_sub(4), &c.subject, text);
+        let now = when::now();
+        let mut last_age = String::new();
+        for (i, c) in self.history.iter().enumerate() {
+            if i > 0 && crosses(&self.history[i - 1], c) && y < end {
+                // Everything below this line is already on the remote.
+                s.put(1, y, w.saturating_sub(2), &"╌".repeat(w.saturating_sub(2)), DIM);
+                s.put(3, y, w.saturating_sub(5), &format!(" {} ", remote.unwrap_or_default()), DIM);
+                y += 1;
+            }
+            if y >= end {
+                break;
+            }
+            s.put(1, y, 1, "●", dot(i, c));
+            // An age is only worth its column where it differs from the row above.
+            let age = when::short_age(now - c.time);
+            let mut right = w - 1;
+            if age != last_age {
+                right -= age.len();
+                s.put(right, y, age.len(), &age, DIM);
+                right -= 1;
+            }
+            last_age = age;
+
+            let room = right.saturating_sub(3);
+            let fresh = self.fresh.contains_key(&commit_key(&c.hash));
+            // Merges and what is already pushed recede; a commit that just
+            // landed stands out for a moment.
+            let quiet = c.merge || (c.pushed && remote.is_some());
+            let st = match (fresh, quiet) {
+                (true, _) => Style::PLAIN.bold(),
+                (false, true) => Style::PLAIN.faint(),
+                (false, false) => Style::PLAIN,
+            };
+            // A "scope: " prefix steps back so the eye lands on what follows.
+            let split = if fresh || quiet { 0 } else { prefix_len(&c.subject) };
+            let used = s.put(3, y, room, &c.subject[..split], Style::PLAIN.faint());
+            s.put_fit(3 + used, y, room.saturating_sub(used), &c.subject[split..], st);
             y += 1;
         }
     }

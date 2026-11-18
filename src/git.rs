@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
+use crate::when;
+
 /// New files larger than this are listed without counting their lines.
 const NEW_FILE_LIMIT: u64 = 256 << 10;
 /// What an empty repository is compared against before its first commit.
@@ -158,27 +160,16 @@ fn pushed_base(root: &Path, status: &Status) -> Option<String> {
 
 /// One commit on the current branch.
 pub struct Commit {
+    pub hash: String,
     pub subject: String,
-    /// How long ago, in a few characters: "now", "5m", "2h", "3d", "6w".
-    pub age: String,
+    /// When it was committed, in seconds since the epoch.
+    pub time: i64,
+    /// The local calendar day of `time`, to tell one day's work from the next.
+    pub day: i64,
     /// Already on the remote. Always true when there is no remote.
     pub pushed: bool,
-}
-
-/// Shortens git's "2 hours ago" to "2h".
-fn short_age(relative: &str) -> String {
-    let mut words = relative.split(' ');
-    let (n, unit) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
-    let suffix = match unit.as_bytes().first() {
-        Some(b's') | None => return "now".into(),
-        Some(b'm') if unit.starts_with("mo") => "mo",
-        Some(b'm') => "m",
-        Some(b'h') => "h",
-        Some(b'd') => "d",
-        Some(b'w') => "w",
-        _ => "y",
-    };
-    format!("{n}{suffix}")
+    /// Joins two lines of history rather than changing anything itself.
+    pub merge: bool,
 }
 
 /// Everything not yet pushed: first what is not committed, then what is
@@ -207,8 +198,9 @@ pub struct Repo {
     /// False for a folder outside any repository: files are listed, and
     /// nothing is ever pending.
     pub git: bool,
-    /// Whether there is anywhere to push to; without it nothing is "unpushed".
-    pub remote: bool,
+    /// What this branch is pushed to, by name: its upstream, else the
+    /// remote's default branch. Without one nothing is "unpushed".
+    pub remote: Option<String>,
     /// The newest commit the remote already has, when this branch is ahead.
     base: Option<String>,
     raw: Vec<u8>,
@@ -225,7 +217,7 @@ impl Repo {
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let (branch, base, raw, stamp) = (String::new(), None, Vec::new(), Vec::new());
-        Some(Repo { root, name, branch, git, remote: false, base, raw, stamp })
+        Some(Repo { root, name, branch, git, remote: None, base, raw, stamp })
     }
 
     fn status_raw(&self) -> Vec<u8> {
@@ -250,8 +242,8 @@ impl Repo {
         self.base = pushed_base(&self.root, &status);
         let files = pending(&self.root, &status, self.base.as_deref());
         // Without an upstream, the remote's default branch still counts as one.
-        self.remote = status.upstream.is_some()
-            || !run(&self.root, &["rev-parse", "--verify", "--quiet", "origin/HEAD"]).is_empty();
+        let origin = || !run(&self.root, &["rev-parse", "--verify", "--quiet", "origin/HEAD"]).is_empty();
+        self.remote = status.upstream.clone().or_else(|| origin().then(|| "origin".to_string()));
         self.branch = status.branch;
         self.stamp = self.stamp(&files);
         files
@@ -270,13 +262,21 @@ impl Repo {
             None => HashSet::new(),
         };
         let n = limit.to_string();
-        let raw = run(&self.root, &["log", "-n", &n, "--no-show-signature", "--format=%H%x00%ar%x00%s"]);
+        let raw = run(&self.root, &["log", "-n", &n, "--no-show-signature", "--format=%H%x00%ct%x00%P%x00%s"]);
         String::from_utf8_lossy(&raw)
             .lines()
             .filter_map(|line| {
-                let mut f = line.splitn(3, '\0');
-                let (hash, age, subject) = (f.next()?, f.next()?, f.next()?);
-                Some(Commit { subject: subject.to_string(), age: short_age(age), pushed: !unpushed.contains(hash) })
+                let mut f = line.splitn(4, '\0');
+                let (hash, time, parents, subject) = (f.next()?, f.next()?, f.next()?, f.next()?);
+                let time = time.parse().unwrap_or(0);
+                Some(Commit {
+                    pushed: !unpushed.contains(hash),
+                    hash: hash.to_string(),
+                    subject: subject.to_string(),
+                    time,
+                    day: when::local_day(time),
+                    merge: parents.contains(' '),
+                })
             })
             .collect()
     }
