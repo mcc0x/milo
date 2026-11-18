@@ -3,7 +3,6 @@
 use crate::git::{FileChange, Kind};
 use crate::icons::{self, Icon};
 use crate::screen::{self, Screen, Style};
-use crate::width::str_width;
 
 /// Text that steps back. Faint, not grey: it stays a shade of the theme's
 /// own text colour, where a theme's grey can match its background.
@@ -56,14 +55,15 @@ pub fn size_width(add: u32, del: u32) -> usize {
 
 /// Draws "+12 −3" ending just before column `end`. Returns its width.
 pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> usize {
-    let a = if add > 0 { format!("+{add}") } else { String::new() };
-    let d = if del > 0 { format!("−{del}") } else { String::new() };
-    let gap = (!a.is_empty() && !d.is_empty()) as usize;
-    let w = a.len() + gap + str_width(&d);
-    let x = end.saturating_sub(w);
-    s.put(x, y, a.len(), &a, ADD);
-    s.put(x + a.len() + gap, y, w, &d, DEL);
-    w
+    let mut used = 0;
+    if del > 0 {
+        used += s.put_right(end, y, &format!("−{del}"), DEL);
+    }
+    if add > 0 {
+        let gap = usize::from(del > 0);
+        used += gap + s.put_right(end.saturating_sub(used + gap), y, &format!("+{add}"), ADD);
+    }
+    used
 }
 
 /// Draws an icon in its own colour, and the gap after it. Returns the

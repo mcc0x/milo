@@ -186,6 +186,11 @@ impl Screen {
         self.cur.fill(BLANK);
     }
 
+    /// Blanks one row, including its colours.
+    pub fn clear_row(&mut self, y: usize) {
+        self.span(0, y, self.w).fill(BLANK);
+    }
+
     /// The cells of row `y` from `x`, at most `w` wide, clipped to the screen.
     fn span(&mut self, x: usize, y: usize, w: usize) -> &mut [Cell] {
         if y >= self.h || x >= self.w {
@@ -214,6 +219,13 @@ impl Screen {
             used += cw;
         }
         used
+    }
+
+    /// Draws text ending just before `end`. Returns the columns used.
+    pub fn put_right(&mut self, end: usize, y: usize, text: &str, st: Style) -> usize {
+        let end = end.min(self.w);
+        let width = str_width(text).min(end);
+        self.put(end - width, y, width, text, st)
     }
 
     /// Like `put`, but ends a string that does not fit with an ellipsis.
@@ -363,6 +375,13 @@ mod tests {
         screen.put(3, 0, 4, "界 should not spill", Style::PLAIN);
         screen.put(3, 1, 4, "界", Style::PLAIN);
         assert_eq!(screen.text(), ["  界", ""]);
+    }
+
+    #[test]
+    fn right_alignment_counts_columns_not_bytes() {
+        let mut screen = Screen::sized(8, 1);
+        assert_eq!(screen.put_right(7, 0, "−界", Style::PLAIN), 3);
+        assert_eq!(screen.text(), ["    −界"]);
     }
 
     #[test]

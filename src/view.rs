@@ -7,13 +7,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::{Kind, Repo, Stamp};
+use crate::icons;
 use crate::keys::Key;
 use crate::read::{self, Content};
 use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
 use crate::ui::{self, ADD, DEL, DIM};
 use crate::width::{byte_at_col, str_width};
-use crate::{help, icons};
 
 /// Files larger than this are not shown.
 const LIMIT: u64 = 2 << 20;
@@ -81,8 +81,6 @@ pub struct View {
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
-    /// The page of explanations, when it is up, and how far it is scrolled.
-    help: Option<usize>,
 }
 
 /// The colour of each class of code. These follow the terminal's theme.
@@ -149,9 +147,9 @@ fn common_ends(a: &str, b: &str) -> (usize, usize) {
     (prefix, suffix)
 }
 
-/// Where a run of removals is followed by as many additions, marks the part
-/// of each line that actually changed, so a one-word edit reads as one word.
-fn mark_changed(lines: &mut [Line]) {
+/// Where removals are followed by as many additions, picks out the part of
+/// each line that changed, so a one-word edit reads as one word.
+fn emphasise_edits(lines: &mut [Line]) {
     let mut i = 0;
     while i < lines.len() {
         if lines[i].kind != LineKind::Del {
@@ -224,7 +222,7 @@ fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
         lines.push(Line::new(line_kind, *no, l.get(1..).unwrap_or("")));
         *no += 1;
     }
-    mark_changed(&mut lines);
+    emphasise_edits(&mut lines);
     (lines, kind)
 }
 
@@ -253,7 +251,6 @@ impl View {
             top: 0,
             pan: 0,
             rows: 0,
-            help: None,
         };
         view.load();
         // Start at the first change, with a little of the file above it.
@@ -380,9 +377,6 @@ impl View {
     }
 
     pub fn draw(&mut self, s: &mut Screen) {
-        if let Some(top) = &mut self.help {
-            return help::draw(s, &help::reader(), top);
-        }
         s.clear();
         let (w, h) = (s.w, s.h);
         if w < 20 || h < 3 {
@@ -417,7 +411,7 @@ impl View {
             // A removed line has no place in the file as it now reads, so
             // it has no number either.
             let no = if line.kind == LineKind::Del { String::new() } else { line.no.to_string() };
-            s.put(1 + digits - no.len(), y, digits, &no, margin);
+            s.put_right(1 + digits, y, &no, margin);
             s.put(digits + 2, y, 1, sign, margin);
             // Panning skips whole characters off the left of the text, and
             // says that it has.
@@ -485,8 +479,9 @@ impl View {
             let count = |kind| self.lines.iter().filter(|l| l.kind == kind).count() as u32;
             right -= ui::size_right(s, right, 0, count(LineKind::Add), count(LineKind::Del)).min(right);
             let word = ui::kind_word(self.kind);
-            right = right.saturating_sub(word.len() + 2);
-            s.put(right, 0, word.len(), word, ui::kind_colour(self.kind));
+            let end = right.saturating_sub(2);
+            s.put_right(end.max(word.len()), 0, word, ui::kind_colour(self.kind));
+            right = end.saturating_sub(word.len());
         }
         let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
         let room = right.saturating_sub(2);
@@ -495,37 +490,24 @@ impl View {
         s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, DIM);
     }
 
-    /// Returns true when the viewer should close.
+    /// Returns true when the reader should close.
     pub fn on_key(&mut self, key: Key) -> bool {
-        let page = isize::try_from(self.rows.max(2) - 1).unwrap_or(isize::MAX);
-        if let Some(top) = self.help {
-            self.help = match key {
-                Key::Ctrl(b'c') | Key::Eof => return true,
-                Key::Focus(_) => Some(top),
-                Key::Char('j') | Key::Down | Key::WheelDown => Some(top + 1),
-                Key::Char('k') | Key::Up | Key::WheelUp => Some(top.saturating_sub(1)),
-                _ => None,
-            };
-            return false;
-        }
+        let key = match key {
+            Key::Char(' ') => Key::PgDn,
+            Key::Char('b') => Key::PgUp,
+            _ => key,
+        };
         match key {
-            Key::Char('q') | Key::Esc | Key::Ctrl(b'c') | Key::Eof => return true,
-            Key::Char('?') => self.help = Some(0),
-            Key::Char('j') | Key::Down => self.scroll(1),
-            Key::Char('k') | Key::Up => self.scroll(-1),
-            Key::WheelDown => self.scroll(3),
-            Key::WheelUp => self.scroll(-3),
-            Key::Char(' ') | Key::PgDn | Key::Ctrl(b'f') => self.scroll(page),
-            Key::Char('b') | Key::PgUp | Key::Ctrl(b'b') => self.scroll(-page),
-            Key::Ctrl(b'd') => self.scroll(page / 2),
-            Key::Ctrl(b'u') => self.scroll(-page / 2),
-            Key::Char('g') | Key::Home => self.scroll(isize::MIN),
-            Key::Char('G') | Key::End => self.scroll(isize::MAX),
+            Key::Char('q') | Key::Esc => return true,
             Key::Char('n') => self.jump(true),
             Key::Char('N') => self.jump(false),
             Key::Char('l') | Key::Right => self.pan += 8,
             Key::Char('h') | Key::Left => self.pan = self.pan.saturating_sub(8),
-            _ => {}
+            _ => {
+                if let Some(rows) = key.rows(self.rows) {
+                    self.scroll(rows);
+                }
+            }
         }
         false
     }

@@ -35,6 +35,26 @@ pub enum Key {
     Eof,
 }
 
+impl Key {
+    /// How far this key scrolls a list with `shown` visible rows, if it scrolls.
+    pub fn rows(self, shown: usize) -> Option<isize> {
+        let page = isize::try_from(shown.max(2) - 1).unwrap_or(isize::MAX);
+        Some(match self {
+            Key::Char('j') | Key::Down => 1,
+            Key::Char('k') | Key::Up => -1,
+            Key::WheelDown => 3,
+            Key::WheelUp => -3,
+            Key::PgDn | Key::Ctrl(b'f') => page,
+            Key::PgUp | Key::Ctrl(b'b') => -page,
+            Key::Ctrl(b'd') => page / 2,
+            Key::Ctrl(b'u') => -page / 2,
+            Key::Char('g') | Key::Home => isize::MIN,
+            Key::Char('G') | Key::End => isize::MAX,
+            _ => return None,
+        })
+    }
+}
+
 /// Drains everything currently readable on stdin into `keys`.
 pub fn read_keys(keyboard: &mut File, keys: &mut Vec<Key>) {
     let mut buf = [0u8; 4096];

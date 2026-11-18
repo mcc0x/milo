@@ -21,7 +21,7 @@ pub struct Node {
     /// Holds work that is not committed yet.
     pub uncommitted: bool,
     /// A pending file by this very path has been counted here.
-    marked: bool,
+    counted: bool,
 }
 
 impl Node {
@@ -37,7 +37,7 @@ impl Node {
             del: 0,
             pending: 0,
             uncommitted: false,
-            marked: false,
+            counted: false,
         }
     }
 
@@ -141,6 +141,13 @@ pub struct Row {
     pub depth: u16,
 }
 
+/// Which way to look through the tree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Next,
+    Previous,
+}
+
 #[derive(Default)]
 pub struct Tree {
     nodes: Vec<Node>,
@@ -150,7 +157,7 @@ pub struct Tree {
 
 impl Tree {
     /// Makes this the tree of `paths`, where one ending in `/` is a
-    /// directory in its own right, and marks what is pending from `files`.
+    /// directory in its own right, and counts what is pending from `files`.
     /// The tree is rebuilt in the storage it already has: a large project
     /// is rebuilt often, and memory given back each time is not reused well.
     pub fn rebuild<'a>(&mut self, paths: impl Iterator<Item = &'a str>, files: &[FileChange]) {
@@ -165,7 +172,7 @@ impl Tree {
             };
         }
         for file in files {
-            self.mark(file);
+            self.count(file);
         }
         for i in 0..self.nodes.len() {
             let mut children = std::mem::take(&mut self.nodes[i].children);
@@ -197,9 +204,9 @@ impl Tree {
     /// Records one pending file on its node and on every directory above it.
     /// A file listed twice, not committed and then committed, counts once,
     /// as it first appears.
-    fn mark(&mut self, file: &FileChange) {
+    fn count(&mut self, file: &FileChange) {
         let mut i = self.insert(&file.path, false);
-        let first = !std::mem::replace(&mut self.node_mut(i).marked, true);
+        let first = !std::mem::replace(&mut self.node_mut(i).counted, true);
         loop {
             let n = self.node_mut(i);
             n.uncommitted |= !file.committed;
@@ -259,9 +266,9 @@ impl Tree {
     }
 
     /// The next or previous folder among the visible rows.
-    pub fn folder_row(&self, from: usize, forward: bool) -> Option<usize> {
+    pub fn folder_row(&self, from: usize, direction: Direction) -> Option<usize> {
         let is_dir = |r: &Row| self.node(r.node).dir;
-        if forward {
+        if direction == Direction::Next {
             self.rows.iter().skip(from + 1).position(is_dir).map(|i| from + 1 + i)
         } else {
             self.rows.iter().take(from).rposition(is_dir)
@@ -269,10 +276,10 @@ impl Tree {
     }
 
     /// The next or previous row at the same depth in the same folder.
-    pub fn sibling_row(&self, from: usize, forward: bool) -> Option<usize> {
+    pub fn sibling_row(&self, from: usize, direction: Direction) -> Option<usize> {
         let depth = self.rows.get(from)?.depth;
         // The folder's rows end at the first one shallower than this.
-        if forward {
+        if direction == Direction::Next {
             let ahead = self.rows[from + 1..].iter().take_while(|r| r.depth >= depth);
             ahead.enumerate().find(|(_, r)| r.depth == depth).map(|(i, _)| from + 1 + i)
         } else {
@@ -283,7 +290,7 @@ impl Tree {
 
     /// The nearest pending file after (or before) row `from` in tree order,
     /// wrapping around, whether or not its folders are open.
-    pub fn next_pending(&self, from: usize, forward: bool) -> Option<&str> {
+    pub fn next_pending(&self, from: usize, direction: Direction) -> Option<&str> {
         let mut order = Vec::with_capacity(self.nodes.len());
         let mut stack: Vec<_> = self.node(0).children.iter().rev().copied().collect();
         while let Some(i) = stack.pop() {
@@ -299,7 +306,7 @@ impl Tree {
             Some(at) => (&order[..at], &order[at + 1..]),
             None => (&order[..0], &order[..]),
         };
-        let hit = if forward {
+        let hit = if direction == Direction::Next {
             after.iter().chain(before).find(pending)
         } else {
             before.iter().rev().chain(after.iter().rev()).find(pending)
@@ -405,13 +412,13 @@ mod tests {
         let mut tree = Tree::build(["a/x.rs", "b/y.rs", "c.txt"].into_iter(), &files);
         tree.layout(|p| p == "a", false);
         assert_eq!(names(&tree), ["a", "a/x.rs", "b", "c.txt"]);
-        assert_eq!(tree.sibling_row(0, true), Some(2));
-        assert_eq!(tree.sibling_row(2, false), Some(0));
-        assert_eq!(tree.folder_row(0, true), Some(2));
+        assert_eq!(tree.sibling_row(0, Direction::Next), Some(2));
+        assert_eq!(tree.sibling_row(2, Direction::Previous), Some(0));
+        assert_eq!(tree.folder_row(0, Direction::Next), Some(2));
         assert_eq!(tree.parent_row(1), Some(0));
         assert_eq!(tree.parent_row(0), None);
         // The pending file sits in a closed folder, and is still found.
-        assert_eq!(tree.next_pending(0, true), Some("b/y.rs"));
+        assert_eq!(tree.next_pending(0, Direction::Next), Some("b/y.rs"));
     }
 
     #[test]

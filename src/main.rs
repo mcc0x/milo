@@ -28,6 +28,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use git::Repo;
+use help::Page;
 use keys::{Key, read_keys};
 use outline::Outline;
 use screen::Screen;
@@ -56,7 +57,7 @@ It updates on its own.
   e             open every folder   c        changed files only
   t             show or hide recent history
   r             reload              q        quit
-  ?             what the colours and marks mean, and these keys
+  ?             what the colours and marks mean, and common keys
 
 Enter or a double click on a file opens it to read: in a floating window
 when running inside Rex, otherwise in the pane itself. `strata view FILE`
@@ -122,7 +123,11 @@ enum Ui {
 }
 
 impl Ui {
-    fn draw(&mut self, s: &mut Screen) {
+    fn draw(&mut self, s: &mut Screen, help: Option<&mut Page>) {
+        if let Some(page) = help {
+            page.draw(s);
+            return;
+        }
         match self {
             Ui::Outline(o) => o.draw(s),
             Ui::View(v) => v.draw(s),
@@ -134,6 +139,13 @@ impl Ui {
         match self {
             Ui::Outline(o) => o.on_key(key),
             Ui::View(v) => v.on_key(key),
+        }
+    }
+
+    fn help(&self) -> Page {
+        match self {
+            Ui::Outline(o) => o.help(),
+            Ui::View(_) => Page::reader(),
         }
     }
 
@@ -163,9 +175,32 @@ impl Ui {
     }
 }
 
+/// Routes terminal replies and help keys before the view itself sees a key.
+/// Returns true when the program should quit.
+fn route_key(ui: &mut Ui, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> bool {
+    match key {
+        Key::Ctrl(b'c') | Key::Eof => return true,
+        Key::Background(rgb) => screen.set_background(rgb),
+        // Focus still matters to the outline underneath the page.
+        Key::Focus(_) => return ui.on_key(key),
+        _ => {
+            if let Some(page) = help {
+                if !page.scroll(key, screen.h) {
+                    *help = None;
+                }
+            } else if key == Key::Char('?') {
+                *help = Some(ui.help());
+            } else {
+                return ui.on_key(key);
+            }
+        }
+    }
+    false
+}
+
 /// Ends the program with a message. A path in it may hold anything, so
 /// control characters are left out.
-fn fail(message: String) -> ! {
+fn fail(message: &str) -> ! {
     let safe: String = message.chars().filter(|c| !c.is_control() || *c == '\n').collect();
     eprintln!("strata: {safe}");
     exit(1);
@@ -177,32 +212,32 @@ fn main() {
     let first = args.next();
     let second = args.next();
     if args.next().is_some() {
-        fail("too many arguments; see strata --help".to_string());
+        fail("too many arguments; see strata --help");
     }
     // Paths may contain arbitrary bytes; only the words strata knows are text.
     let mut ui = match (first.as_deref().and_then(OsStr::to_str), second.as_deref()) {
         (Some("-h" | "--help"), None) => return print!("{USAGE}"),
         (Some("-V" | "--version"), None) => return println!("strata {}", env!("CARGO_PKG_VERSION")),
-        (Some("view"), None) => fail("which file? strata view FILE".to_string()),
+        (Some("view"), None) => fail("which file? strata view FILE"),
         (Some("view"), Some(file)) => {
             let file = Path::new(file);
             match View::open(file) {
                 Some(view) => Ui::View(Box::new(view)),
-                None => fail(format!("{} is not in a directory", file.display())),
+                None => fail(&format!("{} is not in a directory", file.display())),
             }
         }
         (Some(option), None) if option.starts_with('-') => {
-            fail(format!("no option {option}; see strata --help"));
+            fail(&format!("no option {option}; see strata --help"));
         }
         (_, None) => {
             let dir = first.as_deref().map_or(Path::new("."), Path::new);
             match Repo::open(dir) {
                 Some(repo) => Ui::Outline(Box::new(Outline::new(repo, rex::inside()))),
-                None if dir.is_file() => fail(format!("{0} is a file; to read it: strata view {0}", dir.display())),
-                None => fail(format!("{} is not a directory", dir.display())),
+                None if dir.is_file() => fail(&format!("{0} is a file; to read it: strata view {0}", dir.display())),
+                None => fail(&format!("{} is not a directory", dir.display())),
             }
         }
-        _ => fail("too many arguments; see strata --help".to_string()),
+        _ => fail("too many arguments; see strata --help"),
     };
     let (watcher, idle) = {
         let scope = ui.watch();
@@ -216,7 +251,7 @@ fn main() {
     }
     let mut keyboard = match term::enter() {
         Ok(keyboard) => keyboard,
-        Err(e) => fail(format!("cannot use this terminal: {e}")),
+        Err(e) => fail(&format!("cannot use this terminal: {e}")),
     };
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -225,6 +260,7 @@ fn main() {
     }));
 
     let mut screen = Screen::new();
+    let mut help = None;
     let mut keys = Vec::new();
     let mut pace = Pace::new(idle, Instant::now());
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
@@ -232,19 +268,18 @@ fn main() {
             let (w, h) = term::size();
             screen.resize(w, h);
         }
-        ui.draw(&mut screen);
+        ui.draw(&mut screen, help.as_mut());
         screen.flush();
 
         let until_look = pace.wait(Instant::now());
-        let wait = ui.next_frame().map_or(until_look, |frame| frame.min(until_look));
+        let wait =
+            if help.is_some() { until_look } else { ui.next_frame().map_or(until_look, |frame| frame.min(until_look)) };
         let timeout_ms = i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX);
         match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
             Wait::Input => {
                 read_keys(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
-                    if let Key::Background(rgb) = key {
-                        screen.set_background(rgb);
-                    } else if ui.on_key(key) {
+                    if route_key(&mut ui, &mut screen, &mut help, key) {
                         break 'run;
                     }
                 }
@@ -310,5 +345,46 @@ mod tests {
         assert_eq!(pace.wait(retry), Duration::ZERO);
         pace.finished(retry, retry + Duration::from_millis(10), true);
         assert_eq!(pace.wait(retry + Duration::from_millis(10)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn help_scrolls_by_a_page_and_escape_restores_the_outline() {
+        let f = fixture::Fixture::new();
+        f.write("page.txt", "a file\n");
+        let mut ui = Ui::Outline(Box::new(Outline::new(Repo::open(&f.root).unwrap(), false)));
+        let mut screen = Screen::sized(65, 12);
+        let mut help = None;
+        ui.draw(&mut screen, help.as_mut());
+        let before = screen.text();
+
+        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Char('?')));
+        ui.draw(&mut screen, help.as_mut());
+        let first = screen.text();
+        assert!(first[0].trim_start().starts_with("Files"));
+        assert!(first[11].contains("other keys close this"));
+        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::PgDn));
+        ui.draw(&mut screen, help.as_mut());
+        assert_eq!(screen.text()[0], first[10]);
+        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::PgUp));
+        ui.draw(&mut screen, help.as_mut());
+        assert_eq!(screen.text(), first);
+        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Esc));
+        ui.draw(&mut screen, help.as_mut());
+        assert_eq!(screen.text(), before);
+    }
+
+    #[test]
+    fn help_uses_the_nested_reader_page_and_terminal_quit_bypasses_it() {
+        let f = fixture::Fixture::new();
+        f.write("page.txt", "a file\n");
+        let mut ui = Ui::Outline(Box::new(Outline::new(Repo::open(&f.root).unwrap(), false)));
+        let mut screen = Screen::sized(65, 12);
+        let mut help = None;
+        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Enter));
+        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Char('?')));
+        ui.draw(&mut screen, help.as_mut());
+        assert!(screen.text()[0].trim_start().starts_with("Lines"));
+        assert!(route_key(&mut ui, &mut screen, &mut help, Key::Ctrl(b'c')));
+        assert!(route_key(&mut ui, &mut screen, &mut help, Key::Eof));
     }
 }
