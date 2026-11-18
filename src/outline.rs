@@ -5,6 +5,7 @@ mod draw;
 mod input;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::git::{Kind, PendingFile, Repo};
@@ -18,12 +19,8 @@ use crate::walk;
 use crate::watch::Scope;
 
 use self::attention::Attention;
-use self::draw::Layout;
+use self::draw::{ChangeColumns, Layout};
 
-/// How long a file mark pulses after a recent change.
-const LIVE: Duration = Duration::from_secs(3);
-/// Time between the two states of a pulsing mark.
-const PULSE: Duration = Duration::from_millis(500);
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
 /// A second click on the same item within this long opens it.
@@ -35,13 +32,13 @@ pub struct Outline {
     /// A path can occur once in each group.
     pending: Vec<PendingFile>,
     /// Without git, the listing the tree was built from, to notice changes.
-    listing: Vec<String>,
+    listing: walk::Listing,
     tree: Tree,
+    /// Measured once per row layout, and only when there is room for details.
+    change_columns: Option<ChangeColumns>,
     folds: Folds,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
-    /// Files that changed while the outline was open, by path, and when.
-    file_marks: HashMap<String, Instant>,
     attention: Attention,
     pending_only: bool,
     sel: usize,
@@ -54,7 +51,7 @@ pub struct Outline {
     painted: Layout,
     opener: OpenReader,
     /// The path last clicked and when, to tell a double click.
-    clicked: Option<(String, Instant)>,
+    clicked: Option<(Rc<str>, Instant)>,
     /// Something to say in place of the key hint, and when it was said.
     note: Option<(String, Instant)>,
     /// A file being read here, in place of the outline, outside Rex.
@@ -66,11 +63,11 @@ impl Outline {
         let mut outline = Outline {
             repo,
             pending: Vec::new(),
-            listing: Vec::new(),
+            listing: walk::Listing::default(),
             tree: Tree::default(),
+            change_columns: None,
             folds: Folds::default(),
             recent: Vec::new(),
-            file_marks: HashMap::new(),
             attention: Attention::new(Instant::now()),
             pending_only: false,
             sel: 0,
@@ -83,7 +80,11 @@ impl Outline {
             note: None,
             reading: None,
         };
-        outline.load();
+        if outline.repo.git {
+            outline.load();
+        } else {
+            outline.refresh_folder(None);
+        }
         // Start where the work is, not at the top of the tree.
         let first = outline.tree.rows.iter().position(|r| {
             let n = outline.tree.node(r.node);
@@ -93,29 +94,17 @@ impl Outline {
         outline
     }
 
-    /// Refreshes the plain-folder listing, reporting whether its paths changed.
-    fn relist(&mut self) -> bool {
+    fn refresh_folder(&mut self, selected: Option<Rc<str>>) {
         let listing = walk::list(&self.repo.root, |p| self.folds.is_open(p));
-        if listing == self.listing {
-            return false;
+        if listing.paths != self.listing.paths {
+            self.tree.rebuild(listing.paths.iter().map(String::as_str), &[]);
+            self.relayout(selected);
         }
         self.listing = listing;
-        true
-    }
-
-    fn build_folder(&mut self) {
-        let selected = self.selected_path();
-        self.tree.rebuild(self.listing.iter().map(String::as_str), &self.pending);
-        self.relayout(selected);
     }
 
     /// Rebuilds what the outline shows, returning the old files so new work can be marked.
     fn load(&mut self) -> Option<Vec<PendingFile>> {
-        if !self.repo.git {
-            self.relist();
-            self.build_folder();
-            return None;
-        }
         let selected = self.selected_path();
         self.repo.read();
         let files = self.repo.pending()?;
@@ -166,11 +155,7 @@ impl Outline {
             if before.get(&(f.path.as_str(), f.unpushed)).is_some_and(|old| *old == f) {
                 continue;
             }
-            if let Some(at) = self.file_marks.get_mut(&f.path) {
-                *at = now;
-            } else {
-                self.file_marks.insert(f.path.clone(), now);
-            }
+            self.attention.mark(&f.path, now);
             if newest.is_none_or(|n| n.stamp.map(|s| s.written) <= f.stamp.map(|s| s.written)) {
                 newest = Some(f);
             }
@@ -180,38 +165,41 @@ impl Outline {
 
     /// Forgets marks and notes that have had their time.
     fn expire(&mut self, now: Instant) {
-        let keep = |at| !self.attention.mark_left(at, now).is_zero();
-        self.file_marks.retain(|_, at| keep(*at));
+        self.attention.expire_marks(now);
         if self.note.as_ref().is_some_and(|(_, at)| now.saturating_duration_since(*at) >= NOTE) {
             self.note = None;
         }
     }
 
-    fn selected_path(&self) -> Option<String> {
+    fn selected_path(&self) -> Option<Rc<str>> {
         self.tree.row(self.sel).map(|n| n.path.clone())
     }
 
     /// Recomputes the visible rows, keeping the cursor on `selected`.
-    fn relayout(&mut self, selected: Option<String>) {
+    fn relayout(&mut self, selected: Option<Rc<str>>) {
         self.tree.layout(|p| self.folds.is_open(p), self.pending_only);
-        let at = selected.and_then(|p| self.tree.row_of(&p)).unwrap_or(self.sel);
+        self.change_columns = None;
+        let at = selected.as_deref().and_then(|path| self.tree.row_of(path)).unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
     }
 
     /// Applies the folder choices. A plain tree must list its open folders again
     /// because it does not keep the contents of closed folders.
-    fn refold(&mut self, selected: Option<String>) {
+    fn refold(&mut self, selected: Option<Rc<str>>) {
         if self.repo.git {
             self.relayout(selected);
         } else {
-            self.load();
+            self.refresh_folder(selected);
         }
     }
 
     /// Opens whatever folders hide `path` and puts the cursor on it.
-    fn reveal(&mut self, path: String) {
-        self.folds.open_above(&path);
-        self.relayout(Some(path));
+    fn reveal(&mut self, path: Rc<str>) {
+        if self.folds.open_above(&path) {
+            self.relayout(Some(path));
+        } else if let Some(row) = self.tree.row_of(&path) {
+            self.sel = row;
+        }
     }
 
     /// Brings the latest marked file into view and says why the cursor moved.
@@ -273,8 +261,8 @@ impl Pane for Outline {
             if self.repo.poll(&self.pending) {
                 self.reload();
             }
-        } else if self.relist() {
-            self.build_folder();
+        } else {
+            self.refresh_folder(self.selected_path());
         }
         reader_settled
     }
@@ -284,11 +272,7 @@ impl Pane for Outline {
             return None;
         }
         let now = Instant::now();
-        let mark = self
-            .file_marks
-            .values()
-            .map(|&at| if now.saturating_duration_since(at) < LIVE { PULSE } else { self.attention.mark_left(at, now) })
-            .min();
+        let mark = self.attention.next_mark_frame(now);
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
         [mark, note].into_iter().flatten().min()
     }
@@ -455,10 +439,10 @@ mod tests {
         let mut o = open(&f);
         o.key(Key::Focus(true));
         let before = o.selected_path().unwrap();
-        assert_ne!(before, "src/deep/util.rs");
+        assert_ne!(before.as_ref(), "src/deep/util.rs");
         f.write("src/deep/util.rs", "fn util() { more(); }\n");
         assert!(o.check());
-        assert_eq!(o.selected_path().as_deref(), Some(before.as_str()));
+        assert_eq!(o.selected_path().as_deref(), Some(before.as_ref()));
         let focused = draw(&mut o, 65, 12).text();
         assert!(focused.iter().any(|row| row.contains("util.rs")));
         assert!(!focused[11].contains("following"));
@@ -618,5 +602,89 @@ mod tests {
         fs::write(index, saved).unwrap();
         assert!(o.check());
         assert_eq!(draw(&mut o, 60, 10).text(), before);
+    }
+
+    #[test]
+    fn a_git_error_is_not_reported_as_clean_in_a_one_row_strip() {
+        let f = project();
+        let mut o = open(&f);
+        f.write(".git/index", "corrupt index");
+        assert!(o.check());
+        assert_eq!(draw(&mut o, 80, 1).text(), [" git did not answer"]);
+    }
+
+    #[test]
+    fn the_strip_overflow_arrow_leaves_the_last_filename_readable() {
+        let f = Fixture::new();
+        for path in ["a-long.txt", "b-long.txt", "c-long.txt"] {
+            f.write(path, "pending\n");
+        }
+        let mut o = open(&f);
+        let rows = draw(&mut o, 22, 1).text();
+        assert!(rows[0].contains("-long.txt") && rows[0].ends_with('›'), "{rows:?}");
+    }
+
+    #[test]
+    fn a_ten_column_pane_can_still_show_a_short_filename() {
+        let f = Fixture::folder();
+        f.write("猫.txt", "a file\n");
+        let mut o = open(&f);
+        let rows = draw(&mut o, 10, 20).text();
+        assert!(rows.iter().any(|row| row.contains("猫.txt")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_read_is_not_reported_as_empty() {
+        let f = Fixture::folder();
+        f.write("page.txt", "a file\n");
+        let mut o = open(&f);
+        let away = f.root.with_file_name("moved");
+        fs::rename(&f.root, &away).unwrap();
+        assert!(o.check());
+        let rows = draw(&mut o, 40, 8).text();
+        assert_eq!(rows[1], " Cannot read this folder.");
+
+        fs::rename(away, &f.root).unwrap();
+        assert!(o.check());
+        assert!(draw(&mut o, 40, 8).text()[1].contains("page.txt"));
+    }
+
+    #[test]
+    fn a_mark_seen_in_the_outline_fades_after_focus_leaves() {
+        let f = project();
+        let mut o = open(&f);
+        let now = Instant::now();
+        o.attention.focus(true, now - Duration::from_secs(1));
+        o.mark_files(&[], now);
+        let rows = draw(&mut o, 65, 12).text();
+        assert!(!file_row(&rows, "main.rs").starts_with(' '), "{rows:?}");
+
+        o.attention.focus(false, now + Duration::from_secs(1));
+        o.expire(now + Duration::from_secs(4));
+        let rows = draw(&mut o, 65, 12).text();
+        assert!(file_row(&rows, "main.rs").starts_with(' '), "{rows:?}");
+    }
+
+    #[test]
+    fn an_initial_git_error_does_not_claim_that_the_tree_is_empty() {
+        let f = project();
+        f.write(".git/index", "corrupt index");
+        let mut o = open(&f);
+        let rows = draw(&mut o, 80, 24).text();
+        assert!(rows[0].ends_with("git did not answer"), "{rows:?}");
+        assert!(rows[1].is_empty(), "{rows:?}");
+        assert!(draw(&mut o, 10, 20).text()[0].contains("! git"));
+    }
+
+    #[test]
+    fn clicks_on_a_note_cannot_open_a_hidden_file() {
+        let f = Fixture::folder();
+        f.write("page.txt", "a file\n");
+        let mut o = open(&f);
+        o.say("Cannot open this file");
+        draw(&mut o, 40, 1);
+        o.key(Key::Click(3, 0));
+        o.key(Key::Click(3, 0));
+        assert_eq!(draw(&mut o, 40, 1).text(), [" Cannot open this file"]);
     }
 }

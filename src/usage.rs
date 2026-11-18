@@ -187,12 +187,20 @@ struct CodexFile {
     reading: Option<Reading>,
 }
 
+#[derive(Default)]
+enum CodexSessions {
+    #[default]
+    Missing,
+    Present,
+    Unreadable,
+}
+
 /// Keep one snapshot per session alongside the account snapshot from OMP.
 #[derive(Default)]
 struct Codex {
     files: HashMap<PathBuf, CodexFile>,
     omp: Option<Reading>,
-    no_sessions: bool,
+    sessions: CodexSessions,
 }
 
 impl Codex {
@@ -200,18 +208,28 @@ impl Codex {
     fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) {
         let Some(root) = root else {
             self.files.clear();
-            self.no_sessions = true;
+            self.sessions = CodexSessions::Missing;
             return;
         };
-        let sessions = match Sessions::scan(root, Tree::Codex) {
+        let mut sessions = match Sessions::scan(root, Tree::Codex) {
             Ok(sessions) => sessions,
             Err(error) => {
                 self.files.clear();
-                self.no_sessions = error.kind() == io::ErrorKind::NotFound;
+                self.sessions = if error.kind() == io::ErrorKind::NotFound {
+                    CodexSessions::Missing
+                } else {
+                    CodexSessions::Unreadable
+                };
                 return;
             }
         };
-        self.no_sessions = sessions.files.is_empty() && !sessions.partial;
+        self.sessions = if sessions.inaccessible {
+            CodexSessions::Unreadable
+        } else if sessions.files.is_empty() && !sessions.partial {
+            CodexSessions::Missing
+        } else {
+            CodexSessions::Present
+        };
         if sessions.files.len() == self.files.len()
             && sessions
                 .files
@@ -221,10 +239,12 @@ impl Codex {
             return;
         }
         let mut previous = std::mem::take(&mut self.files);
-        for candidate in &sessions.files {
+        for candidate in std::mem::take(&mut sessions.files) {
             let cached = previous.remove(&candidate.path);
-            if let Some(file) = Self::check_file(&sessions, candidate, cached, now, budget) {
-                self.files.insert(candidate.path.clone(), file);
+            if let Some(file) = Self::check_file(&sessions, &candidate, cached, now, budget) {
+                self.files.insert(candidate.path, file);
+            } else {
+                self.sessions = CodexSessions::Unreadable;
             }
         }
     }
@@ -345,7 +365,7 @@ impl ClaudeFile {
         self.reverse.is_none() && self.stream.offset == self.version.len
     }
 
-    /// A replacement or truncation starts over; appends use the existing cursor.
+    /// Rewritten files start over; appends use the existing cursor.
     fn check(&mut self, sessions: &Sessions, candidate: &files::Candidate, cutoff: i64, budget: &mut Budget) -> bool {
         if self.version == candidate.version && self.settled() {
             return true;
@@ -357,7 +377,7 @@ impl ClaudeFile {
             *self = Self::new(candidate.version);
             return true;
         };
-        if !version.same_file(self.version) || version.len < self.version.len {
+        if !version.same_file(self.version) || version != self.version && version.len <= self.version.len {
             *self = Self::new(version);
         }
         self.version = version;
@@ -463,7 +483,7 @@ struct Activity {
 impl Claude {
     /// Merge duplicate IDs once per changed scan instead of on every redraw.
     fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
-        let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
+        let Some(mut sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
             self.files.clear();
             self.identified.clear();
             self.partial = false;
@@ -479,11 +499,11 @@ impl Claude {
         }
         let mut previous = std::mem::take(&mut self.files);
         let mut settled = true;
-        for candidate in &sessions.files {
+        for candidate in std::mem::take(&mut sessions.files) {
             let mut file = previous.remove(&candidate.path).unwrap_or_else(|| ClaudeFile::new(candidate.version));
-            settled &= file.check(&sessions, candidate, cutoff, budget);
+            settled &= file.check(&sessions, &candidate, cutoff, budget);
             self.partial |= !file.settled();
-            self.files.insert(candidate.path.clone(), file);
+            self.files.insert(candidate.path, file);
         }
         self.partial |= !settled;
         // Merge once per changed scan, not on each redraw. The number of
@@ -709,10 +729,9 @@ fn help_rows() -> Vec<help::HelpRow> {
         heading("Usage limits"),
         note("Figures show the percent"),
         note("used in each window."),
-        note("From this machine's"),
-        note("sessions, as fresh as"),
-        note("the last message. Past"),
-        note("its reset, a window"),
+        note("From the newest local"),
+        note("report for each tool."),
+        note("Past its reset, a window"),
         note("starts again at 0%."),
         HelpRow::new(),
         heading("Claude Code"),

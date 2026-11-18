@@ -2,14 +2,17 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::git::{Kind, PendingFile};
 use crate::keys::Direction;
 
 pub struct Node {
     name_at: usize,
-    pub path: String,
+    pub path: Rc<str>,
     parent: u32,
+    /// Number of pending files before this node in tree order.
+    pending_before: u32,
     children: Vec<u32>,
     pub dir: bool,
     /// What happened here; for a directory, the strongest kind beneath it.
@@ -26,11 +29,12 @@ pub struct Node {
 }
 
 impl Node {
-    fn new(path: &str, name_at: usize, parent: u32, dir: bool) -> Node {
+    fn new(path: Rc<str>, name_at: usize, parent: u32, dir: bool) -> Node {
         Node {
             name_at,
-            path: path.to_string(),
+            path,
             parent,
+            pending_before: 0,
             children: Vec::new(),
             dir,
             kind: Kind::None,
@@ -45,6 +49,10 @@ impl Node {
     /// The last part of the path, as it appears in the tree.
     pub fn name(&self) -> &str {
         &self.path[self.name_at..]
+    }
+
+    fn is_pending_file(&self) -> bool {
+        !self.dir && self.kind != Kind::None
     }
 }
 
@@ -94,7 +102,11 @@ impl Folds {
     }
 
     pub fn set(&mut self, path: &str, open: bool) {
-        self.choice.insert(path.to_string(), open);
+        if let Some(choice) = self.choice.get_mut(path) {
+            *choice = open;
+        } else {
+            self.choice.insert(path.to_owned(), open);
+        }
     }
 
     /// Opens a folder unless the user has already decided about it.
@@ -104,13 +116,16 @@ impl Folds {
         }
     }
 
-    /// Opens every folder above `path`, whatever was decided before.
-    pub fn open_above(&mut self, path: &str) {
+    /// Opens every folder above `path`, returning whether any were closed.
+    pub fn open_above(&mut self, path: &str) -> bool {
+        let mut opened = false;
         let mut p = path;
         while let Some((dir, _)) = p.rsplit_once('/') {
+            opened |= !self.is_open(dir);
             self.set(dir, true);
             p = dir;
         }
+        opened
     }
 
     pub fn all(&self) -> bool {
@@ -144,7 +159,8 @@ pub struct TreeRow {
 #[derive(Default)]
 pub struct Tree {
     nodes: Vec<Node>,
-    index: HashMap<String, u32>,
+    index: HashMap<Rc<str>, u32>,
+    pending_order: Vec<u32>,
     pub rows: Vec<TreeRow>,
 }
 
@@ -157,7 +173,8 @@ impl Tree {
         self.nodes.clear();
         self.index.clear();
         self.rows.clear();
-        self.nodes.push(Node::new("", 0, 0, true));
+        self.pending_order.clear();
+        self.nodes.push(Node::new(Rc::from(""), 0, 0, true));
         for path in paths {
             match path.strip_suffix('/') {
                 Some(dir) => self.insert(dir, true),
@@ -175,6 +192,22 @@ impl Tree {
             });
             self.nodes[i].children = children;
         }
+        if !files.is_empty() {
+            self.index_pending(0);
+        }
+    }
+
+    fn index_pending(&mut self, id: u32) {
+        let before = u32::try_from(self.pending_order.len()).expect("at most one pending file per node");
+        let node = self.node_mut(id);
+        node.pending_before = before;
+        let children = node.children.len();
+        if node.is_pending_file() {
+            self.pending_order.push(id);
+        }
+        for i in 0..children {
+            self.index_pending(self.node(id).children[i]);
+        }
     }
 
     fn insert(&mut self, path: &str, dir: bool) -> u32 {
@@ -188,9 +221,10 @@ impl Tree {
             None => (0, 0),
         };
         let i = u32::try_from(self.nodes.len()).expect("too many nodes in the project tree");
-        self.nodes.push(Node::new(path, name_at, parent, dir));
+        let path: Rc<str> = Rc::from(path);
+        self.nodes.push(Node::new(Rc::clone(&path), name_at, parent, dir));
         self.node_mut(parent).children.push(i);
-        self.index.insert(path.to_string(), i);
+        self.index.insert(path, i);
         i
     }
 
@@ -282,28 +316,20 @@ impl Tree {
 
     /// The nearest pending file after (or before) row `from` in tree order,
     /// wrapping around, whether or not its folders are open.
-    pub fn next_pending(&self, from: usize, direction: Direction) -> Option<&str> {
-        let mut order = Vec::with_capacity(self.nodes.len());
-        let mut stack: Vec<_> = self.node(0).children.iter().rev().copied().collect();
-        while let Some(i) = stack.pop() {
-            order.push(i);
-            stack.extend(self.node(i).children.iter().rev());
+    pub fn next_pending(&self, from: usize, direction: Direction) -> Option<&Rc<str>> {
+        let len = self.pending_order.len();
+        let current = self.row(from);
+        let at = current.map_or(0, |node| node.pending_before as usize);
+        let here = current.is_some_and(Node::is_pending_file);
+        if len <= usize::from(here) {
+            return None;
         }
-        let pending = |&&id: &&u32| {
-            let node = self.node(id);
-            !node.dir && node.kind != Kind::None
+        let next = match direction {
+            Direction::Next => (at + usize::from(here)) % len,
+            Direction::Previous if at == 0 => len - 1,
+            Direction::Previous => at - 1,
         };
-        let at = self.rows.get(from).and_then(|r| order.iter().position(|&id| id == r.node));
-        let (before, after) = match at {
-            Some(at) => (&order[..at], &order[at + 1..]),
-            None => (&order[..0], &order[..]),
-        };
-        let hit = if direction == Direction::Next {
-            after.iter().chain(before).find(pending)
-        } else {
-            before.iter().rev().chain(after.iter().rev()).find(pending)
-        };
-        hit.map(|&id| self.node(id).path.as_str())
+        Some(&self.node(self.pending_order[next]).path)
     }
 }
 
@@ -318,7 +344,7 @@ mod tests {
     }
 
     fn names(tree: &Tree) -> Vec<&str> {
-        tree.rows.iter().map(|r| tree.node(r.node).path.as_str()).collect()
+        tree.rows.iter().map(|r| tree.node(r.node).path.as_ref()).collect()
     }
 
     impl Tree {
@@ -412,7 +438,7 @@ mod tests {
         assert_eq!(tree.parent_row(1), Some(0));
         assert_eq!(tree.parent_row(0), None);
         // The pending file sits in a closed folder, and is still found.
-        assert_eq!(tree.next_pending(0, Direction::Next), Some("b/y.rs"));
+        assert_eq!(tree.next_pending(0, Direction::Next).map(Rc::as_ref), Some("b/y.rs"));
     }
 
     #[test]

@@ -181,16 +181,28 @@ impl Tree {
     }
 }
 
+struct Entry<'a> {
+    name: &'a CStr,
+    kind: u8,
+}
+
+impl Entry<'_> {
+    /// A directory's hint can spare a syscall but cannot replace a guarded open.
+    fn may_be(&self, kind: u8) -> bool {
+        self.kind == kind || self.kind == libc::DT_UNKNOWN
+    }
+}
+
 /// Own the stream so borrowed entries cannot outlive their directory buffer.
 struct Dir(NonNull<libc::DIR>);
 
 impl Dir {
-    fn new(file: File) -> Option<Self> {
+    fn new(file: File) -> io::Result<Self> {
         let fd = file.as_raw_fd();
         // SAFETY: fd is a live directory descriptor; fdopendir owns it only on success.
-        let dir = Self(NonNull::new(unsafe { libc::fdopendir(fd) })?);
+        let dir = NonNull::new(unsafe { libc::fdopendir(fd) }).ok_or_else(io::Error::last_os_error)?;
         let _ = file.into_raw_fd();
-        Some(dir)
+        Ok(Self(dir))
     }
 
     fn fd(&self) -> RawFd {
@@ -198,14 +210,15 @@ impl Dir {
         unsafe { libc::dirfd(self.0.as_ptr()) }
     }
 
-    fn next(&mut self) -> Option<&CStr> {
+    fn next(&mut self) -> Option<Entry<'_>> {
         // SAFETY: The stream is live and uniquely borrowed. The result lasts until the next read.
         let entry = NonNull::new(unsafe { libc::readdir(self.0.as_ptr()) })?;
-        // SAFETY: entry points to a live directory entry. Do not form a reference to the
-        // whole struct: the space actually used for the name varies by entry.
+        // SAFETY: readdir supplies the type as part of the live entry.
+        let kind = unsafe { (*entry.as_ptr()).d_type };
+        // SAFETY: The entry contains the name, but not necessarily the space for the whole struct.
         let name = unsafe { &raw const (*entry.as_ptr()).d_name };
         // SAFETY: readdir supplies a nul-terminated name in the entry.
-        Some(unsafe { CStr::from_ptr(name.cast()) })
+        Some(Entry { name: unsafe { CStr::from_ptr(name.cast()) }, kind })
     }
 }
 
@@ -217,11 +230,14 @@ impl Drop for Dir {
 }
 
 /// Resolve components relative to an already open directory, never following links.
-fn open_at(dir: RawFd, path: &CStr, flags: libc::c_int) -> Option<File> {
+fn open_at(dir: RawFd, path: &CStr, flags: libc::c_int) -> io::Result<File> {
     // SAFETY: dir is a live directory descriptor, path is nul-terminated and no mode is needed.
     let fd = unsafe { libc::openat(dir, path.as_ptr(), READ_FLAGS | libc::O_RDONLY | flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
     // SAFETY: A nonnegative result is a newly owned descriptor.
-    (fd >= 0).then(|| unsafe { File::from_raw_fd(fd) })
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Compare entries before opening files, without trusting a link's target.
@@ -244,6 +260,7 @@ struct Scan {
     remaining: usize,
     files: Vec<Candidate>,
     partial: bool,
+    inaccessible: bool,
 }
 
 impl Scan {
@@ -257,13 +274,14 @@ impl Scan {
             }
             return;
         }
-        while let Some(name) = dir.next() {
-            let bytes = name.to_bytes();
+        while let Some(entry) = dir.next() {
+            let bytes = entry.name.to_bytes();
             if bytes == b"." || bytes == b".." {
                 continue;
             }
-            if tree.file(bytes, depth)
-                && let Some(version) = version_at(fd, name)
+            if entry.may_be(libc::DT_REG)
+                && tree.file(bytes, depth)
+                && let Some(version) = version_at(fd, entry.name)
                 && tree.includes(version)
             {
                 if !self.admit() {
@@ -271,20 +289,30 @@ impl Scan {
                 }
                 self.keep(tree.limit(), path, bytes, version);
             }
-            if tree.directory(bytes, depth) && !self.descend(fd, name, tree, path, depth) {
+            if entry.may_be(libc::DT_DIR)
+                && tree.directory(bytes, depth)
+                && !self.descend(fd, entry.name, tree, path, depth)
+            {
                 break;
             }
         }
     }
 
     fn descend(&mut self, fd: RawFd, name: &CStr, tree: &Tree, path: &mut PathBuf, depth: usize) -> bool {
-        if let Some(child) = open_at(fd, name, libc::O_DIRECTORY).and_then(Dir::new) {
-            if !self.admit() {
-                return false;
+        match open_at(fd, name, libc::O_DIRECTORY).and_then(Dir::new) {
+            Ok(child) => {
+                if !self.admit() {
+                    return false;
+                }
+                path.push(OsStr::from_bytes(name.to_bytes()));
+                self.directory(child, tree, path, depth + 1);
+                path.pop();
             }
-            path.push(OsStr::from_bytes(name.to_bytes()));
-            self.directory(child, tree, path, depth + 1);
-            path.pop();
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                self.inaccessible = true;
+                self.partial = true;
+            }
+            Err(_) => {}
         }
         true
     }
@@ -323,9 +351,9 @@ impl Scan {
 /// Visits newer days first, so a full walk's budget runs out in older folders.
 fn codex_folders(dir: &mut Dir, tree: &Tree, depth: usize) -> Vec<CString> {
     let mut names = Vec::new();
-    while let Some(name) = dir.next() {
-        if tree.directory(name.to_bytes(), depth) {
-            names.push(name.to_owned());
+    while let Some(entry) = dir.next() {
+        if entry.may_be(libc::DT_DIR) && tree.directory(entry.name.to_bytes(), depth) {
+            names.push(entry.name.to_owned());
         }
     }
     names.sort_unstable_by(|a, b| b.cmp(a));
@@ -337,6 +365,7 @@ pub(super) struct Sessions {
     root: File,
     pub files: Vec<Candidate>,
     pub partial: bool,
+    pub inaccessible: bool,
 }
 
 impl Sessions {
@@ -347,12 +376,10 @@ impl Sessions {
     fn scan_with_limit(root: &Path, tree: Tree, remaining: usize) -> io::Result<Self> {
         let root = fs_ops::open_dir(root)?;
         // Open a separate stream: a duplicate descriptor would share the directory cursor.
-        let dir = open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY)
-            .and_then(Dir::new)
-            .ok_or_else(|| io::Error::other("cannot open session directory stream"))?;
-        let mut scan = Scan { remaining, files: Vec::new(), partial: false };
+        let dir = open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY).and_then(Dir::new)?;
+        let mut scan = Scan { remaining, files: Vec::new(), partial: false, inaccessible: false };
         scan.directory(dir, &tree, &mut PathBuf::new(), 0);
-        Ok(Self { root, files: scan.files, partial: scan.partial })
+        Ok(Self { root, files: scan.files, partial: scan.partial, inaccessible: scan.inaccessible })
     }
 
     /// Refuse links or non-files even if the candidate was replaced after scanning.
@@ -363,11 +390,11 @@ impl Sessions {
             let fd = folder.as_ref().unwrap_or(&self.root).as_raw_fd();
             let name = CString::new(part.as_bytes()).ok()?;
             if parts.peek().is_none() {
-                let file = open_at(fd, &name, 0)?;
+                let file = open_at(fd, &name, 0).ok()?;
                 let version = FileVersion::opened(&file)?;
                 return Some((file, version));
             }
-            folder = Some(open_at(fd, &name, libc::O_DIRECTORY)?);
+            folder = Some(open_at(fd, &name, libc::O_DIRECTORY).ok()?);
         }
         None
     }

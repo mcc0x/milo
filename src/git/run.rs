@@ -118,13 +118,26 @@ pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Opti
     }
 }
 
-/// A filter can run a program on file contents. Disable each configured filter.
-pub(super) fn filter_guard(root: &Path) -> Option<Vec<String>> {
-    // Listing all keys succeeds even when there are no filters, unlike a pattern query.
-    let names = String::from_utf8(output(root, &[], &["config", "--null", "--name-only", "--list"])?).ok()?;
-    // "filter.<name>.<setting>": the name may itself hold dots.
-    let mut filters: Vec<&str> =
-        names.split_terminator('\0').filter_map(|key| Some(key.strip_prefix("filter.")?.rsplit_once('.')?.0)).collect();
+pub(super) struct Config {
+    pub(super) guard: Vec<String>,
+    pub(super) has_remote: bool,
+}
+
+/// Read remote names while listing the filters that must be disabled.
+pub(super) fn config(root: &Path) -> Option<Config> {
+    let names = output(root, &[], &["config", "--null", "--name-only", "--list"])?;
+    let names = std::str::from_utf8(&names).ok()?;
+    let mut has_remote = false;
+    let mut filters = Vec::new();
+    for key in names.split_terminator('\0') {
+        // Git config subsections (remote or filter names) can contain dots.
+        if let Some((_, setting)) = key.strip_prefix("remote.").and_then(|key| key.rsplit_once('.')) {
+            has_remote |= !setting.is_empty();
+        }
+        if let Some((name, _)) = key.strip_prefix("filter.").and_then(|key| key.rsplit_once('.')) {
+            filters.push(name);
+        }
+    }
     filters.sort_unstable();
     filters.dedup();
     let mut guard = Vec::new();
@@ -133,7 +146,7 @@ pub(super) fn filter_guard(root: &Path) -> Option<Vec<String>> {
             guard.extend(["-c".to_string(), format!("filter.{name}.{setting}")]);
         }
     }
-    Some(guard)
+    Some(Config { guard, has_remote })
 }
 
 /// Disable the repository's own programs and avoid writing to its index.

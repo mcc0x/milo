@@ -15,16 +15,14 @@ static ORIG: OnceLock<libc::termios> = OnceLock::new();
 /// The write end of the wake pipe, kept open for handlers until the program exits.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
 
-// Alternate screen, hidden cursor, mouse buttons in SGR form, focus
-// reporting, and no wrapping: a row that turns out wider than reckoned is
-// cut at the edge instead of spilling onto the next. Then the terminal is
-// asked four things, whose answers come in with the keys: its background
-// colour, whether it shows pictures (by offering it a one-pixel one), the
-// size of a cell in pixels, and last what kind of terminal it is, which
-// every terminal answers and so marks the end of the answers.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\
+// Use the alternate screen, hide the cursor, ask for mouse and focus reports,
+// and ask the terminal to mark pasted text so it cannot act as key presses.
+// Turn off wrapping so a row never spills onto the next. Then ask for the
+// background colour, picture support, cell size, and terminal type. The
+// terminal type reply tells us the terminal has finished answering.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\
     \x1b]11;?\x1b\\\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
-const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+const LEAVE: &[u8] = b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 /// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
 pub fn wake(fd: RawFd) {

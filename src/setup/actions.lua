@@ -21,7 +21,7 @@ local function tab_panes(ctx)
         end
       end
     end
-    if found then return panes, window, main end
+    if found then return panes, main, window end
   end
 end
 
@@ -42,16 +42,22 @@ local function split(ctx, anchor, direction, side, ratio, layout)
   if err then error(err, 0) end
 end
 
-local function arrange(ctx, wanted)
-  local present, _, main = tab_panes(ctx)
+local function arrange(ctx, wanted, shell)
+  local present, main
+  if shell then
+    -- The listener already checked that this tab has only its main shell.
+    present, main = {}, ctx.block_id
+  else
+    present, main = tab_panes(ctx)
+  end
   if not main then return end
   local outline = wanted.outline and not present[labels.outline]
   local history = wanted.history and not present[labels.history]
   local usage = wanted.usage and not present[labels.usage]
   if not (outline or history or usage) then return end
 
-  local process = rex.block.call(terminal, "process", { block_id = main })
-  local cwd = process and ((process.foreground or {}).cwd or (process.child or {}).cwd)
+  local process = shell or rex.call(terminal .. ".process", { session_id = ctx.session_id, block_id = main })
+  local cwd = process and (process.foreground and process.foreground.cwd or process.child and process.child.cwd)
   if outline and history then
     local column = rex.layout.vertical(outline_share, pane("outline", cwd), pane("history", cwd))
     split(ctx, main, "horizontal", "before", column_width, column)
@@ -66,7 +72,7 @@ local function arrange(ctx, wanted)
 
   -- Read the main pane's height after placing the sidebar.
   if usage then
-    local size = rex.block.call(terminal, "size", { block_id = main })
+    local size = rex.call(terminal .. ".size", { session_id = ctx.session_id, block_id = main })
     if size and size.rows and size.rows > usage_rows + 1 then
       split(ctx, main, "vertical", "before", usage_rows / size.rows, pane("usage", cwd))
     end
@@ -75,7 +81,7 @@ end
 
 -- The listener uses the same layout, reading the latest choices for each tab.
 if ... == "listener" then
-  if arrange_new_tabs then return function(ctx) arrange(ctx, chosen) end end
+  if arrange_new_tabs then return function(ctx, shell) arrange(ctx, chosen, shell) end end
   return nil
 end
 
@@ -98,7 +104,7 @@ rex.action{
 rex.action{
   name = "milo_close", title = "Milo: Close Panes in This Tab",
   run = function(ctx)
-    local _, window = tab_panes(ctx)
+    local _, _, window = tab_panes(ctx)
     if not window then return end
     for _, layer in ipairs(window.layers) do
       for _, block in ipairs(layer.blocks) do

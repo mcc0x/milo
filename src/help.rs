@@ -11,6 +11,7 @@ use crate::width::str_width;
 pub type HelpRow = Vec<(&'static str, Style)>;
 
 const SEPARATOR: &str = " · ";
+const CLOSE: &str = "q close";
 
 /// Keeps the last hint whole, dropping middle items before the first.
 pub fn draw_hint(s: &mut Screen, first: &str, middle: &[&str], last: &str) {
@@ -176,28 +177,28 @@ impl Page {
     }
 
     pub fn outline(git: bool) -> Self {
-        Self { rows: outline(git), top: 0 }
+        Self::new(outline(git))
     }
 
     pub fn history() -> Self {
-        Self { rows: history(), top: 0 }
+        Self::new(history())
     }
 
     pub fn reader(committed: bool) -> Self {
-        Self { rows: reader(committed), top: 0 }
+        Self::new(reader(committed))
     }
 
-    /// Help needs a row for its words and a row for its keys.
+    /// Don't cover the pane unless help can show how to close it.
     pub fn fits(s: &Screen) -> bool {
-        s.w >= 4 && s.h >= 2
+        s.w >= 2 + CLOSE.len() && s.h >= 2
     }
 
     pub fn draw(&mut self, s: &mut Screen) {
-        s.clear();
-        let (w, h) = (s.w, s.h);
         if !Self::fits(s) {
             return;
         }
+        s.clear();
+        let (w, h) = (s.w, s.h);
         let shown = h - 1;
         self.top = self.top.min(self.rows.len().saturating_sub(shown));
         for (y, row) in self.rows.iter().skip(self.top).take(shown).enumerate() {
@@ -207,7 +208,7 @@ impl Page {
             }
         }
         ui::thumb(s, w - 1, 0, shown, self.rows.len(), self.top);
-        draw_hint(s, "↑↓ scroll", &["Esc close"], "q close");
+        draw_hint(s, "↑↓ scroll", &["Esc close"], CLOSE);
     }
 
     /// Scrolls the page. Returns false when the key closes it instead.

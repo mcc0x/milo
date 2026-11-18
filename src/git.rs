@@ -8,6 +8,8 @@ pub(crate) mod run;
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -135,10 +137,17 @@ impl Ends {
     }
 }
 
-/// The default branch used in place of an upstream, and where it points.
+/// The default branch to try in place of an upstream, even before it exists.
 struct StandIn {
     name: String,
-    oid: String,
+    oid: Option<String>,
+}
+
+impl StandIn {
+    fn remote(&self) -> Option<&str> {
+        self.oid.as_ref()?;
+        self.name.strip_prefix("refs/remotes/")?.strip_suffix("/HEAD")
+    }
 }
 
 /// What could make the merge base change between two status reads.
@@ -151,7 +160,7 @@ struct Basis<'a> {
 
 impl<'a> Basis<'a> {
     fn new(status: &'a Status, stand_in: Option<&'a StandIn>) -> Self {
-        let target = stand_in.map(|r| r.oid.as_str()).or(status.upstream.as_deref());
+        let target = stand_in.and_then(|r| r.oid.as_deref()).or(status.upstream.as_deref());
         Self { tip: &status.ends.tip, target, ahead: status.ahead }
     }
 }
@@ -192,8 +201,7 @@ pub struct Repo {
     /// its branches. They differ in a linked worktree.
     git_dir: Option<PathBuf>,
     common_dir: Option<PathBuf>,
-    /// Settings that switch off the repository's own filters.
-    guard: Option<Vec<String>>,
+    config: Option<run::Config>,
     /// When set, status is limited to this path.
     file: Option<String>,
     stand_in: Option<StandIn>,
@@ -207,32 +215,47 @@ pub struct Repo {
     unpushed: Unpushed,
     tracked: Tracked,
     moved: Option<RenameLookup>,
-    /// Files a commit touched stay the same even when the worktree or branch moves.
-    committed: HashMap<String, Vec<PendingFile>>,
 }
 
-/// Git versions without `--path-format` can still give the project root.
-fn git_dirs(dir: &Path) -> Option<String> {
-    let ask = |args: &[&str]| String::from_utf8(run::output(dir, &[], args)?).ok();
-    ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])
-        .or_else(|| ask(&["rev-parse", "--show-toplevel"]))
+struct GitDirs {
+    root: PathBuf,
+    git: Option<PathBuf>,
+    common: Option<PathBuf>,
+}
+
+fn git_dirs(dir: &Path) -> Option<GitDirs> {
+    let ask = |args: &[&str]| run::output(dir, &[], args);
+    let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+    let one = |args: &[&str]| Some(path(ask(args)?.strip_suffix(b"\n")?));
+    let raw =
+        ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"]);
+    let Some(raw) = raw else {
+        // Older Git can still give the project root.
+        return Some(GitDirs { root: one(&["rev-parse", "--show-toplevel"])?, git: None, common: None });
+    };
+    let mut paths = raw.strip_suffix(b"\n")?.split(|&b| b == b'\n');
+    if let (Some(root), Some(git), Some(common), None) = (paths.next(), paths.next(), paths.next(), paths.next()) {
+        return Some(GitDirs { root: path(root), git: Some(path(git)), common: Some(path(common)) });
+    }
+    // A newline can be part of a path. Separate answers have no ambiguous delimiters.
+    Some(GitDirs {
+        root: one(&["rev-parse", "--show-toplevel"])?,
+        git: one(&["rev-parse", "--absolute-git-dir"]),
+        common: one(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    })
 }
 
 impl Repo {
     /// Opens the repository containing `dir`, or the directory as a plain folder.
     pub fn open(dir: &Path) -> Option<Self> {
-        let found = git_dirs(dir);
-        let mut lines = found.as_deref().unwrap_or("").lines().filter(|l| !l.is_empty()).map(PathBuf::from);
-        let top = lines.next();
-        let git = top.is_some();
-        let root = match top {
-            Some(top) => top,
-            None => dir.canonicalize().ok().filter(|d| d.is_dir())?,
+        let (root, git, git_dir, common_dir) = match git_dirs(dir) {
+            Some(found) => (found.root, true, found.git, found.common),
+            None => (dir.canonicalize().ok().filter(|d| d.is_dir())?, false, None, None),
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let guard = git.then(|| run::filter_guard(&root)).flatten();
-        let ok = Cell::new(!git || guard.is_some());
-        Some(Self { root, name, git, ok, git_dir: lines.next(), common_dir: lines.next(), guard, ..Self::default() })
+        let config = git.then(|| run::config(&root)).flatten();
+        let ok = Cell::new(!git || config.is_some());
+        Some(Self { root, name, git, ok, git_dir, common_dir, config, ..Self::default() })
     }
 
     /// Limits status to one file without narrowing the repository's root.
@@ -247,12 +270,23 @@ impl Repo {
 
     /// The upstream, or the name of the remote whose default branch stands in for it.
     pub fn remote(&self) -> Option<&str> {
-        self.status.upstream.as_deref().or_else(|| self.stand_in.as_ref().map(|r| r.name.trim_end_matches("/HEAD")))
+        self.status.upstream.as_deref().or_else(|| self.stand_in.as_ref().and_then(StandIn::remote))
     }
 
     /// A remote can be configured even when there is no branch to compare with.
-    pub fn has_remote(&self) -> Option<bool> {
-        self.git(&["remote"]).map(|names| !names.is_empty())
+    pub fn has_remote(&self) -> bool {
+        self.config.as_ref().is_some_and(|config| config.has_remote)
+    }
+
+    /// History shows changes to remote configuration even when status stays the same.
+    pub fn refresh_config(&mut self) -> bool {
+        let Some(config) = self.require(run::config(&self.root)) else { return false };
+        self.config = Some(config);
+        true
+    }
+
+    fn guard(&self) -> Option<&[String]> {
+        self.config.as_ref().map(|config| config.guard.as_slice())
     }
 
     /// False when git could not be asked: what is shown may be out of date.
@@ -278,11 +312,11 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> Option<Vec<u8>> {
-        self.require(run::output(&self.root, self.guard.as_deref()?, args))
+        self.require(run::output(&self.root, self.guard()?, args))
     }
 
     fn optional_oid(&self, args: &[&str]) -> Option<Option<String>> {
-        self.require(run::optional_oid(&self.root, self.guard.as_deref()?, args))
+        self.require(run::optional_oid(&self.root, self.guard()?, args))
     }
 
     fn resolve(&self, name: &str) -> Option<Option<String>> {
@@ -341,7 +375,7 @@ impl Repo {
             path.unwrap_or(""),
         ];
         let args = if path.is_some() { &args[..] } else { &args[..args.len() - 2] };
-        run::output(&self.root, self.guard.as_deref()?, args)
+        run::output(&self.root, self.guard()?, args)
     }
 
     /// Asks git whether the repository state has moved and checks pending file stamps.
@@ -362,9 +396,9 @@ impl Repo {
 
     fn stand_in_moved(&self) -> bool {
         // A push or fetch moves the remote's branch without touching this one.
-        self.stand_in
-            .as_ref()
-            .is_some_and(|r| self.resolve(&r.name).is_some_and(|oid| oid.as_deref() != Some(r.oid.as_str())))
+        self.stand_in.as_ref().is_some_and(|r| {
+            (r.oid.is_some() || self.has_remote()) && self.resolve(&r.name).is_some_and(|oid| oid != r.oid)
+        })
     }
 
     /// Takes in the repository's status and comparison base, keeping both on failure.
@@ -392,16 +426,17 @@ impl Repo {
             return Some(None);
         }
         let remote = status.gone.as_deref().and_then(|u| u.split_once('/')).map_or("origin", |(remote, _)| remote);
-        let name = format!("{remote}/HEAD");
-        Some(self.resolve(&name)?.map(|oid| StandIn { name, oid }))
+        let name = format!("refs/remotes/{remote}/HEAD");
+        let oid = self.resolve(&name)?;
+        Some(Some(StandIn { name, oid }))
     }
 
     fn merge_base(&self, status: &Status, stand_in: Option<&StandIn>) -> Option<Option<String>> {
         // An upstream this branch is level with has nothing to compare.
         let target =
-            status.upstream.as_deref().filter(|_| status.ahead > 0).or_else(|| stand_in.map(|r| r.name.as_str()));
+            status.upstream.as_deref().filter(|_| status.ahead > 0).or_else(|| stand_in.and_then(|r| r.oid.as_deref()));
         let Some(target) = target.filter(|_| status.ends.has_commit()) else { return Some(None) };
-        let base = self.optional_oid(&["merge-base", "--end-of-options", "HEAD", target])?;
+        let base = self.optional_oid(&["merge-base", "--end-of-options", &status.ends.tip, target])?;
         Some(base.filter(|base| *base != status.ends.tip))
     }
 
@@ -569,7 +604,7 @@ impl Repo {
             path,
         ];
         let args = if from.is_some() { &args[..] } else { &args[..args.len() - 1] };
-        match run::limited_output(&self.root, self.guard.as_deref()?, args, DIFF_LIMIT) {
+        match run::limited_output(&self.root, self.guard()?, args, DIFF_LIMIT) {
             Ok(diff) => Some(diff),
             // An oversized diff is not a git failure.
             Err(OutputError::TooLarge) => None,
@@ -598,39 +633,26 @@ impl Repo {
 
     /// Reads the files touched by this commit, compared with its first parent.
     pub fn files_at(&self, hash: &str) -> Option<Vec<PendingFile>> {
-        let raw = run::commit_diff(&self.root, self.guard.as_deref()?, hash, run::CommitDiff::Files).ok()?;
+        let raw = run::commit_diff(&self.root, self.guard()?, hash, run::CommitDiff::Files).ok()?;
         Some(parse_files(&raw))
     }
 
     /// Reads a whole-file patch, using both paths when a file moved.
     pub fn file_diff_at(&self, hash: &str, file: &PendingFile) -> Result<Vec<u8>, OutputError> {
-        let guard = self.guard.as_deref().ok_or(OutputError::Failed)?;
+        let guard = self.guard().ok_or(OutputError::Failed)?;
         run::commit_diff(&self.root, guard, hash, run::CommitDiff::File(file))
     }
 
     /// An unchanged file (including a move with no edits) has no patch body.
     pub fn blob_at(&self, hash: &str, path: &str) -> Result<Vec<u8>, OutputError> {
         let hash = CommitId::parse(hash).ok_or(OutputError::Failed)?.0;
-        let guard = self.guard.as_deref().ok_or(OutputError::Failed)?;
+        let guard = self.guard().ok_or(OutputError::Failed)?;
         run::limited_output(
             &self.root,
             guard,
             &["cat-file", "blob", "--end-of-options", &format!("{hash}:{path}")],
             DIFF_LIMIT,
         )
-    }
-
-    /// Loads the files once per commit. A failed read can be tried again.
-    pub fn load_commit_files(&mut self, commit: &Commit) {
-        if !self.committed.contains_key(&commit.hash)
-            && let Some(files) = self.files_at(&commit.hash)
-        {
-            self.committed.insert(commit.hash.clone(), files);
-        }
-    }
-
-    pub fn commit_files(&self, commit: &Commit) -> Option<&[PendingFile]> {
-        self.committed.get(&commit.hash).map(Vec::as_slice)
     }
 
     /// The newest `limit` commits, newest first, or `None` on failure.
@@ -646,12 +668,25 @@ impl Repo {
             Some(_) => self.status.upstream.as_deref(),
             None => self.ends().base.as_deref(),
         };
+        let limit = limit.to_string();
+        let tip = &self.ends().tip;
         let unpushed = match target {
-            Some(target) => self.git(&["rev-list", "-n", "1000", "--end-of-options", &format!("{target}..HEAD")])?,
+            Some(target) => self.git(&["rev-list", "-n", &limit, "--end-of-options", &format!("{target}..{tip}")])?,
             None => Vec::new(),
         };
-        let raw =
-            self.git(&["log", "-n", &limit.to_string(), "--no-show-signature", "--format=%H%x00%ct%x00%P%x00%s"])?;
+        let raw = self.git(&[
+            "log",
+            "-n",
+            &limit,
+            "--no-show-signature",
+            "--no-notes",
+            "--no-decorate",
+            "--no-patch",
+            "--format=%H%x00%ct%x00%P%x00%s",
+            "--end-of-options",
+            tip,
+            "--",
+        ])?;
         Some(parse_history(&raw, &unpushed))
     }
 }
@@ -697,6 +732,25 @@ mod tests {
         assert_eq!(repo.remote(), Some("origin/main"));
         assert!(repo.pending().unwrap().is_empty());
         assert!(!repo.history(1).unwrap()[0].unpushed);
+    }
+
+    #[test]
+    fn history_uses_the_same_tip_as_the_status_it_displays() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.push();
+        let mut repo = read_repo(&f);
+        f.write("page.txt", "second\n");
+        f.commit("second");
+
+        let commits = repo.history(1).unwrap();
+        assert_eq!(commits[0].subject, "first");
+        assert!(!commits[0].unpushed);
+        repo.read();
+        let commits = repo.history(1).unwrap();
+        assert_eq!(commits[0].subject, "second");
+        assert!(commits[0].unpushed);
     }
 
     #[test]

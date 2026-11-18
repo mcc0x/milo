@@ -28,6 +28,8 @@ struct Entry {
     commit: Commit,
     /// Arrived since this pane first read the history.
     fresh: bool,
+    /// File lists stay cached while their commit is in the timeline.
+    files: Option<Vec<PendingFile>>,
 }
 
 /// Rows the cursor can point at, with the guides between them.
@@ -53,16 +55,18 @@ struct Painted {
     body_top: usize,
 }
 
+struct OpenCommit {
+    index: usize,
+    all_files: bool,
+}
+
 pub struct History {
     repo: Repo,
     ends: Option<Ends>,
     entries: Vec<Entry>,
     ahead: Option<u32>,
-    has_remote: bool,
     uncommitted: usize,
-    /// The one commit whose files are shown, as an index into `entries`.
-    open: Option<usize>,
-    all_files: bool,
+    open: Option<OpenCommit>,
     rows: Vec<TimelineRow>,
     cursor: usize,
     top: usize,
@@ -83,10 +87,8 @@ impl History {
             ends: None,
             entries: Vec::new(),
             ahead: None,
-            has_remote: false,
             uncommitted: 0,
             open: None,
-            all_files: false,
             rows: Vec::new(),
             cursor: 0,
             top: 0,
@@ -110,9 +112,6 @@ impl History {
         if !self.repo.ok() {
             return;
         }
-        if !self.refresh_remote() {
-            return;
-        }
         let selected = self.selected();
         let uncommitted = self.repo.uncommitted_count();
         let ahead = self.repo.upstream_ahead();
@@ -126,48 +125,53 @@ impl History {
         }
     }
 
-    fn refresh_remote(&mut self) -> bool {
-        let Some(has_remote) = self.repo.has_remote() else { return false };
-        self.has_remote = has_remote;
-        true
+    fn reload(&mut self) {
+        if self.repo.git && self.repo.refresh_config() {
+            self.load();
+        }
     }
 
     /// Remembers the open commit and the cursor by hash when commits move.
-    fn replace_commits(&mut self, commits: Vec<Commit>, selected: TimelineRow, uncommitted: usize) {
+    fn replace_commits(&mut self, commits: Vec<Commit>, selected: Option<TimelineRow>, uncommitted: usize) {
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
-        let open = self.open.and_then(remap);
+        let open = self
+            .open
+            .as_ref()
+            .and_then(|open| Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files }));
         let selected = match selected {
             // At the newest commit, follow new arrivals unless its files are open.
-            TimelineRow::Commit(0) if self.open != Some(0) => TimelineRow::Commit(0),
-            TimelineRow::Commit(i) => TimelineRow::Commit(remap(i).unwrap_or(0)),
-            TimelineRow::File(_) | TimelineRow::More if open.is_some() => selected,
+            Some(TimelineRow::Commit(0)) if self.open_index() != Some(0) => TimelineRow::Commit(0),
+            Some(TimelineRow::Commit(i)) => TimelineRow::Commit(remap(i).unwrap_or(0)),
+            Some(row @ (TimelineRow::File(_) | TimelineRow::More)) if open.is_some() => row,
             _ => TimelineRow::Commit(0),
         };
-        let before: HashMap<_, _> = self.entries.iter().map(|e| (e.commit.hash.as_str(), e.fresh)).collect();
+        let mut before: HashMap<_, _> = self.entries.drain(..).map(|e| (e.commit.hash, (e.fresh, e.files))).collect();
         let loaded = self.ends.is_some();
-        self.entries = commits
-            .into_iter()
-            .map(|commit| Entry { fresh: before.get(commit.hash.as_str()).copied().unwrap_or(loaded), commit })
-            .collect();
+        self.entries.extend(commits.into_iter().map(|commit| {
+            let (fresh, files) = before.remove(&commit.hash).unwrap_or((loaded, None));
+            Entry { commit, fresh, files }
+        }));
         self.ends = Some(self.repo.ends().clone());
-        self.all_files &= open.is_some();
         self.clicked = None;
         self.open = open;
         self.uncommitted = uncommitted;
-        self.build_rows(selected);
+        self.build_rows(Some(selected));
     }
 
-    fn selected(&self) -> TimelineRow {
-        self.rows.get(self.cursor).copied().unwrap_or(TimelineRow::Note(""))
+    fn selected(&self) -> Option<TimelineRow> {
+        self.rows.get(self.cursor).copied()
+    }
+
+    fn open_index(&self) -> Option<usize> {
+        self.open.as_ref().map(|open| open.index)
     }
 
     fn open_files(&self) -> Option<&[PendingFile]> {
-        self.repo.commit_files(&self.entries.get(self.open?)?.commit)
+        self.entries[self.open_index()?].files.as_deref()
     }
 
-    fn build_rows(&mut self, selected: TimelineRow) {
+    fn build_rows(&mut self, selected: Option<TimelineRow>) {
         self.painted = None;
-        let files = self.open_files().map(<[_]>::len);
         self.rows.clear();
         if self.uncommitted > 0 && (!self.compact || self.entries.is_empty()) {
             self.rows.push(TimelineRow::Uncommitted);
@@ -177,11 +181,12 @@ impl History {
                 self.rows.push(TimelineRow::Divider);
             }
             self.rows.push(TimelineRow::Commit(i));
-            if self.open == Some(i) {
-                match files {
-                    Some(0) => self.rows.push(TimelineRow::Note("No files changed.")),
-                    Some(n) => {
-                        let shown = if self.all_files { n } else { n.min(FILE_PREVIEW) };
+            if let Some(open) = self.open.as_ref().filter(|open| open.index == i) {
+                match entry.files.as_deref() {
+                    Some([]) => self.rows.push(TimelineRow::Note("No files changed.")),
+                    Some(files) => {
+                        let n = files.len();
+                        let shown = if open.all_files { n } else { n.min(FILE_PREVIEW) };
                         self.rows.extend((0..shown).map(TimelineRow::File));
                         if shown < n {
                             self.rows.push(TimelineRow::More);
@@ -194,43 +199,75 @@ impl History {
         if self.entries.is_empty() {
             self.rows.push(TimelineRow::Note("No commits yet."));
         }
-        self.cursor = self.rows.iter().position(|&row| row == selected).unwrap_or(0);
+        self.cursor = selected.and_then(|selected| self.rows.iter().position(|&row| row == selected)).unwrap_or(0);
     }
 
     fn toggle_files(&mut self, i: usize) {
-        self.all_files = false;
-        self.open = if self.open == Some(i) {
+        self.open = if self.open_index() == Some(i) {
             None
         } else {
-            self.repo.load_commit_files(&self.entries[i].commit);
-            Some(i)
+            let entry = &mut self.entries[i];
+            if entry.files.is_none() {
+                entry.files = self.repo.files_at(&entry.commit.hash);
+            }
+            Some(OpenCommit { index: i, all_files: false })
         };
-        self.build_rows(TimelineRow::Commit(i));
+        self.build_rows(Some(TimelineRow::Commit(i)));
     }
 
     fn show_all_files(&mut self) {
-        self.all_files = true;
-        self.build_rows(TimelineRow::File(FILE_PREVIEW));
+        if let Some(open) = &mut self.open {
+            open.all_files = true;
+            self.build_rows(Some(TimelineRow::File(FILE_PREVIEW)));
+        }
+    }
+}
+
+impl History {
+    fn input(&mut self, key: Key, now: Instant) {
+        if matches!(key, Key::Focus(_)) {
+            return;
+        }
+        if !matches!(key, Key::Click(..)) {
+            self.clicked = None;
+        }
+        self.read_error = None;
+        match key {
+            Key::Click(x, y) => self.click(x, y, now),
+            Key::Enter => self.enter(),
+            Key::Left | Key::Char('h') => self.left(),
+            Key::Char('r') => self.reload(),
+            _ => {
+                if let Some(delta) = key.rows(self.shown) {
+                    self.scroll(delta);
+                    if matches!(key, Key::WheelUp | Key::WheelDown) {
+                        self.top = self.top.saturating_add_signed(delta);
+                        self.painted = None;
+                    }
+                }
+            }
+        }
     }
 
     fn enter(&mut self) {
         match self.selected() {
-            TimelineRow::Commit(i) => {
+            Some(TimelineRow::Commit(i)) => {
                 self.toggle_files(i);
-                if self.open == Some(i) {
+                if self.open_index() == Some(i) {
                     self.keep_preview_in_view();
                 }
             }
-            TimelineRow::File(i) => self.read_file(i),
-            TimelineRow::More => self.show_all_files(),
+            Some(TimelineRow::File(i)) => self.read_file(i),
+            Some(TimelineRow::More) => self.show_all_files(),
             _ => {}
         }
     }
 
     fn read_file(&mut self, i: usize) {
-        let Some(open) = self.open else { return };
-        let commit = &self.entries[open].commit;
-        let Some(file) = self.repo.commit_files(commit).and_then(|files| files.get(i)) else { return };
+        let Some(open) = self.open_index() else { return };
+        let entry = &self.entries[open];
+        let Some(file) = entry.files.as_ref().and_then(|files| files.get(i)) else { return };
+        let commit = &entry.commit;
         match self.opener.open(&self.repo, ReadFile::Committed { commit, file }) {
             Ok(reader) => self.reading = reader,
             Err(why) => self.read_error = Some(why),
@@ -242,16 +279,16 @@ impl History {
         let files = self.open_files().map_or(0, <[_]>::len);
         let preview = files.min(FILE_PREVIEW) + usize::from(files > FILE_PREVIEW);
         let shown = self.shown.max(1);
-        let room = preview.min(shown - 1);
+        let room = preview.max(1).min(shown - 1);
         self.top = self.top.max((self.cursor + room + 1).saturating_sub(shown));
     }
 
     fn left(&mut self) {
-        match (self.selected(), self.open) {
-            (TimelineRow::File(_) | TimelineRow::More, Some(open)) => {
+        match (self.selected(), self.open_index()) {
+            (Some(TimelineRow::File(_) | TimelineRow::More), Some(open)) => {
                 self.cursor = self.rows.iter().position(|&row| row == TimelineRow::Commit(open)).unwrap_or(self.cursor);
             }
-            (TimelineRow::Commit(i), Some(open)) if i == open => self.toggle_files(i),
+            (Some(TimelineRow::Commit(i)), Some(open)) if i == open => self.toggle_files(i),
             _ => {}
         }
     }
@@ -300,7 +337,11 @@ impl History {
 
     fn keep_cursor_in_view(&mut self) {
         // Do not bring the top back under the pointer after a click.
-        if self.clicked.is_none() && self.selected() == TimelineRow::Commit(0) && self.cursor < self.shown {
+        if self.clicked.is_none()
+            && self.open_index() != Some(0)
+            && self.selected() == Some(TimelineRow::Commit(0))
+            && self.cursor < self.shown
+        {
             self.top = 0;
         } else if self.cursor < self.top {
             self.top = self.cursor;
@@ -309,7 +350,9 @@ impl History {
         }
         self.top = self.top.min(self.rows.len().saturating_sub(self.shown));
     }
+}
 
+impl History {
     fn draw_heading(&self, s: &mut Screen) {
         let branch = self.repo.branch();
         let name_width = ui::project_heading_width(&self.repo.name, branch);
@@ -327,7 +370,7 @@ impl History {
             let text = if name_width + 18 <= s.w { "git did not answer" } else { "! git" };
             return s.put_right(right, 0, text, ui::DEL);
         }
-        if !self.has_remote {
+        if !self.repo.has_remote() {
             return s.put_right(right, 0, "no remote", FAINT);
         }
         let Some(ahead) = self.ahead else {
@@ -351,12 +394,15 @@ impl History {
 
     /// Shows the shape of recent history: a gap between days, a tick at the remote.
     fn draw_dots(&self, s: &mut Screen) {
-        let pairs = || self.entries.windows(2).map(|pair| (&pair[0].commit, &pair[1].commit));
-        let days = pairs().filter(|(a, b)| a.day != b.day).count();
-        let ticks = pairs().filter(|(a, b)| crosses_remote(a, b)).count();
-        let cells = self.entries.len() + ticks + usize::from(self.uncommitted > 0);
         let right = s.w - 1;
-        let step = if cells * 2 + days < right { 2 } else { 1 };
+        let cells = self.entries.len() + usize::from(self.uncommitted > 0);
+        // If even the dots alone would not fit with spaces, don't count the gaps.
+        let gap_width = |pair: &[Entry]| {
+            let (before, after) = (&pair[0].commit, &pair[1].commit);
+            2 * usize::from(crosses_remote(before, after)) + usize::from(before.day != after.day)
+        };
+        let spaced = cells * 2 < right && cells * 2 + self.entries.windows(2).map(gap_width).sum::<usize>() < right;
+        let step = if spaced { 2 } else { 1 };
         let mut x = 1;
         if self.uncommitted > 0 {
             s.put(x, 1, 1, "○", Style::PLAIN.bold());
@@ -410,7 +456,7 @@ impl History {
                 TimelineRow::Uncommitted => self.draw_uncommitted(s, y),
                 TimelineRow::Divider => self.draw_divider(s, y),
                 TimelineRow::Commit(index) => {
-                    let end = if self.open == Some(index) {
+                    let end = if self.open_index() == Some(index) {
                         open_files.map_or(right, |files| file_count(s, y, files.len()))
                     } else {
                         ages.draw(s, y, self.entries[index].commit.time)
@@ -440,13 +486,13 @@ impl History {
     }
 
     fn draw_commit(&self, s: &mut Screen, y: usize, end: usize, i: usize) {
-        let Entry { commit, fresh } = &self.entries[i];
+        let Entry { commit, fresh, .. } = &self.entries[i];
         let bold = Style::PLAIN.bold();
         if *fresh {
             s.put(0, y, 1, "•", bold);
         }
         s.put(1, y, 1, "●", self.dot_style(commit));
-        if self.open == Some(i) {
+        if self.open_index() == Some(i) {
             s.put(2, y, 1, "▾", FAINT);
         }
         let quiet = commit.merge || (!commit.unpushed && self.repo.remote().is_some());
@@ -469,40 +515,15 @@ impl History {
             return;
         }
         let action = match self.selected() {
-            TimelineRow::Commit(i) if self.open == Some(i) => "Enter hide files",
-            TimelineRow::Commit(_) => "Enter show files",
-            TimelineRow::File(_) => "Enter read",
-            TimelineRow::More => "Enter show all",
+            Some(TimelineRow::Commit(i)) if self.open_index() == Some(i) => "Enter hide files",
+            Some(TimelineRow::Commit(_)) => "Enter show files",
+            Some(TimelineRow::File(_)) => "Enter read",
+            Some(TimelineRow::More) => "Enter show all",
             _ => "",
         };
         let middle: &[_] =
             if self.entries.is_empty() { &["r reload", "q quit"] } else { &["↑↓ move", "r reload", "q quit"] };
         help::draw_hint(s, action, middle, "? help");
-    }
-
-    fn input(&mut self, key: Key, now: Instant) {
-        if matches!(key, Key::Focus(_)) {
-            return;
-        }
-        if !matches!(key, Key::Click(..)) {
-            self.clicked = None;
-        }
-        self.read_error = None;
-        match key {
-            Key::Click(x, y) => self.click(x, y, now),
-            Key::Enter => self.enter(),
-            Key::Left | Key::Char('h') => self.left(),
-            Key::Char('r') => self.load(),
-            _ => {
-                if let Some(delta) = key.rows(self.shown) {
-                    self.scroll(delta);
-                    if matches!(key, Key::WheelUp | Key::WheelDown) {
-                        self.top = self.top.saturating_add_signed(delta);
-                        self.painted = None;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -547,10 +568,8 @@ impl Pane for History {
         if self.repo.busy() {
             return false;
         }
-        if self.repo.poll(&[]) {
+        if self.repo.refresh_config() && self.repo.poll(&[]) {
             self.load();
-        } else if self.repo.ok() {
-            self.refresh_remote();
         }
         true
     }
@@ -575,14 +594,18 @@ impl Pane for History {
             return;
         }
         s.clear();
-        if s.w < 12 || s.h == 0 {
+        if s.w < 8 || s.h == 0 {
             return;
         }
         if !self.repo.git {
-            s.put_fit(1, 0, s.w - 2, "This folder is not a git project.", FAINT);
+            s.put_fit(1, 0, s.w - 2, "Not a Git project.", FAINT);
             return;
         }
-        let compact = s.h < HEADING_ROWS;
+        let compact = s.h < HEADING_ROWS || s.w < 12;
+        if compact && self.entries.is_empty() && !self.repo.ok() {
+            s.put_fit(1, 0, s.w - 2, "Git did not answer.", ui::DEL);
+            return;
+        }
         if self.compact != compact {
             self.compact = compact;
             self.build_rows(self.selected());
@@ -1085,6 +1108,35 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_commit_opened_at_the_edge_shows_why_it_has_no_files() {
+        let f = Fixture::new();
+        commit(&f, "first");
+        commit(&f, "second");
+        let mut history = open(&f);
+        draw(&mut history, 40, 2);
+        history.key(Key::Down);
+        history.key(Key::Enter);
+        let rows = draw(&mut history, 40, 2).text();
+        assert!(rows[0].contains("first") && rows[1].contains("No files changed."), "{rows:?}");
+    }
+
+    #[test]
+    fn the_newest_commit_preview_can_scroll_past_the_uncommitted_row() {
+        let f = Fixture::new();
+        commit(&f, "first");
+        f.write("a.txt", "a\n");
+        f.write("b.txt", "b\n");
+        f.commit("both files");
+        f.write("pending.txt", "still editing\n");
+        let mut history = open(&f);
+        let rows = draw(&mut history, 40, 4).text();
+        assert!(rows[1].contains("to commit"), "{rows:?}");
+        history.key(Key::Enter);
+        let rows = draw(&mut history, 40, 4).text();
+        assert!(rows[1].contains("both files") && rows[3].contains("b.txt"), "{rows:?}");
+    }
+
+    #[test]
     fn scrolling_keeps_the_cursor_on_screen() {
         let f = Fixture::new();
         for i in 1..=8 {
@@ -1139,11 +1191,60 @@ mod tests {
     }
 
     #[test]
+    fn ten_columns_still_show_the_commit_and_its_file() {
+        let f = Fixture::new();
+        f.write("a", "notes\n");
+        f.commit("notes");
+        let mut history = open(&f);
+        assert!(active_row(&draw(&mut history, 10, 4), "notes"));
+        history.key(Key::Enter);
+        assert!(draw(&mut history, 10, 4).text()[1].starts_with("   │ • a"));
+    }
+
+    #[test]
+    fn an_unreadable_history_does_not_look_empty_at_one_row() {
+        let f = Fixture::new();
+        commit(&f, "first");
+        f.write(".git/index", "corrupt index");
+        let mut history = open(&f);
+        assert!(draw(&mut history, 40, 1).text()[0].contains("Git did not answer."));
+    }
+
+    #[test]
+    fn setting_the_remote_default_branch_updates_a_clean_timeline() {
+        let f = Fixture::new();
+        commit(&f, "already pushed");
+        f.push();
+        f.git(&["remote", "set-head", "origin", "-d"]);
+        f.git(&["switch", "-q", "-c", "topic", "--no-track"]);
+        commit(&f, "not pushed");
+        let mut history = open(&f);
+        let rows = draw(&mut history, 40, 8).text();
+        assert!(!rows.iter().any(|row| row.contains("── on origin")), "{rows:?}");
+        f.git(&["remote", "set-head", "origin", "main"]);
+        assert!(history.check());
+        let rows = draw(&mut history, 40, 8).text();
+        assert!(rows[2].contains("── on origin") && rows[3].contains("already pushed"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_project_name_can_contain_a_newline() {
+        let mut f = Fixture::new();
+        let root = f.root.with_file_name("line\nbreak");
+        std::fs::rename(&f.root, &root).unwrap();
+        f.root = root;
+        commit(&f, "first in this project");
+        let mut history = open(&f);
+        let rows = draw(&mut history, 50, 8).text();
+        assert!(rows[0].contains("linebreak") && rows[1].contains("first in this project"), "{rows:?}");
+    }
+
+    #[test]
     fn a_plain_folder_says_it_is_not_a_git_project() {
         let f = Fixture::folder();
         f.write("page.txt", "a file\n");
         let mut history = open(&f);
         assert!(history.check());
-        assert_eq!(draw(&mut history, 40, 3).text(), [" This folder is not a git project.", "", ""]);
+        assert_eq!(draw(&mut history, 40, 3).text(), [" Not a Git project.", "", ""]);
     }
 }

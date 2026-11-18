@@ -1,9 +1,13 @@
 //! Uses keyboard focus to decide whether to follow work and when to fade marks.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// How long an outline without focus reports waits before following work.
 const FOLLOW_UNTOLD: Duration = Duration::from_secs(120);
+/// Marks pulse for three seconds after a change.
+pub(super) const LIVE: Duration = Duration::from_secs(3);
+pub(super) const PULSE: Duration = Duration::from_millis(500);
 /// How long a mark stays after it has been seen.
 const FADE: Duration = Duration::from_secs(4);
 /// How long a mark can stay visible even if the user never sees it.
@@ -16,18 +20,30 @@ enum Focus {
     Elsewhere,
 }
 
+struct Mark {
+    at: Instant,
+    until: Instant,
+}
+
 pub(super) struct Attention {
     focus: Focus,
     used: Instant,
+    marks: HashMap<String, Mark>,
+    unseen_marks: bool,
 }
 
 impl Attention {
     pub(super) fn new(now: Instant) -> Self {
-        Self { focus: Focus::Unknown, used: now }
+        Self { focus: Focus::Unknown, used: now, marks: HashMap::new(), unseen_marks: false }
     }
 
     pub(super) fn used(&mut self, now: Instant) {
         self.used = now;
+        if std::mem::take(&mut self.unseen_marks) {
+            for mark in self.marks.values_mut() {
+                mark.until = mark.until.min(now + FADE);
+            }
+        }
     }
 
     pub(super) fn focus(&mut self, here: bool, now: Instant) {
@@ -51,14 +67,42 @@ impl Attention {
     }
 
     /// A mark is seen on arrival when focused, or on the next use of the pane.
-    pub(super) fn mark_left(&self, at: Instant, now: Instant) -> Duration {
-        let seen = match self.focus {
-            Focus::Here => Some(at.max(self.used)),
-            _ if self.used > at => Some(self.used),
-            _ => None,
-        };
-        let left = |from, limit: Duration| limit.saturating_sub(now.saturating_duration_since(from));
-        seen.map_or(UNSEEN, |from| left(from, FADE)).min(left(at, UNSEEN))
+    pub(super) fn mark(&mut self, path: &str, now: Instant) {
+        let here = self.focus == Focus::Here;
+        self.unseen_marks |= !here;
+        let mark = Mark { at: now, until: now + if here { FADE } else { UNSEEN } };
+        if let Some(old) = self.marks.get_mut(path) {
+            *old = mark;
+        } else {
+            self.marks.insert(path.to_owned(), mark);
+        }
+    }
+
+    pub(super) fn expire_marks(&mut self, now: Instant) {
+        self.marks.retain(|_, mark| mark.until > now);
+    }
+
+    pub(super) fn next_mark_frame(&self, now: Instant) -> Option<Duration> {
+        self.marks
+            .values()
+            .map(|mark| {
+                let left = mark.until.saturating_duration_since(now);
+                if now.saturating_duration_since(mark.at) < LIVE { left.min(PULSE) } else { left }
+            })
+            .min()
+    }
+
+    /// A closed folder carries the latest mark among the files it hides.
+    pub(super) fn marked_at(&self, path: &str, closed_folder: bool) -> Option<Instant> {
+        if closed_folder {
+            self.marks
+                .iter()
+                .filter(|(file, _)| file.strip_prefix(path).is_some_and(|rest| rest.starts_with('/')))
+                .map(|(_, mark)| mark.at)
+                .max()
+        } else {
+            self.marks.get(path).map(|mark| mark.at)
+        }
     }
 }
 
@@ -91,29 +135,39 @@ mod tests {
     }
 
     #[test]
-    fn a_mark_fades_four_seconds_after_it_is_seen() {
+    fn a_seen_mark_fades_even_if_focus_moves_or_the_user_keeps_typing() {
         let now = Instant::now();
         let at = now + Duration::from_secs(1);
         let mut attention = Attention::new(now);
         attention.focus(true, now);
-        assert_eq!(attention.mark_left(at, at), Duration::from_secs(4));
-        assert_eq!(attention.mark_left(at, at + Duration::from_secs(4)), Duration::ZERO);
+        attention.mark("focused", at);
+        attention.focus(false, at + Duration::from_secs(1));
+        attention.expire_marks(at + Duration::from_secs(3));
+        assert_eq!(attention.marked_at("focused", false), Some(at));
+        attention.expire_marks(at + Duration::from_secs(4));
+        assert_eq!(attention.marked_at("focused", false), None);
 
-        attention.focus(false, now);
+        let at = at + Duration::from_secs(5);
+        attention.mark("unfocused", at);
         let seen = at + Duration::from_secs(30);
         attention.focus(true, seen);
-        assert_eq!(attention.mark_left(at, seen), Duration::from_secs(4));
-        assert_eq!(attention.mark_left(at, seen + Duration::from_secs(4)), Duration::ZERO);
+        attention.used(seen + Duration::from_secs(2));
+        attention.expire_marks(seen + Duration::from_secs(3));
+        assert_eq!(attention.marked_at("unfocused", false), Some(at));
+        attention.expire_marks(seen + Duration::from_secs(4));
+        assert_eq!(attention.marked_at("unfocused", false), None);
     }
 
     #[test]
     fn an_unseen_mark_is_dropped_after_five_minutes() {
-        let now = Instant::now();
-        let at = now + Duration::from_secs(1);
-        let mut attention = Attention::new(now);
-        assert_eq!(attention.mark_left(at, at + Duration::from_secs(299)), Duration::from_secs(1));
-        assert_eq!(attention.mark_left(at, at + Duration::from_secs(300)), Duration::ZERO);
+        let at = Instant::now();
+        let mut attention = Attention::new(at);
+        attention.mark("a", at);
+        let almost = at + Duration::from_secs(299);
+        assert_eq!(attention.next_mark_frame(almost), Some(Duration::from_secs(1)));
         attention.used(at + Duration::from_secs(298));
-        assert_eq!(attention.mark_left(at, at + Duration::from_secs(299)), Duration::from_secs(1));
+        assert_eq!(attention.next_mark_frame(almost), Some(Duration::from_secs(1)));
+        attention.expire_marks(at + Duration::from_secs(300));
+        assert_eq!(attention.marked_at("a", false), None);
     }
 }

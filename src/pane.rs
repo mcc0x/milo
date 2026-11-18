@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::help::Page;
-use crate::keys::{Key, receive};
+use crate::keys::{Input, Key};
 use crate::screen::Screen;
 use crate::term::{self, Wait};
 use crate::watch::{Scope, Watcher};
@@ -21,10 +21,15 @@ pub enum After {
 pub trait Pane {
     fn draw(&mut self, screen: &mut Screen);
     fn help(&self) -> Page;
-    fn watch_scope(&self) -> Scope;
+    /// An empty, complete scope means nothing outside the pane can change it.
+    fn watch_scope(&self) -> Scope {
+        Scope { roots: Vec::new(), ignored: Vec::new(), complete: true }
+    }
 
     /// Takes in changes from outside. False asks the loop to check again soon.
-    fn check(&mut self) -> bool;
+    fn check(&mut self) -> bool {
+        true
+    }
 
     /// How long the frame stays right when nothing happens.
     fn next_frame(&self) -> Option<Duration> {
@@ -140,18 +145,25 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
     After::Stay
 }
 
+fn watch_pane(pane: &dyn Pane, needs_polling: bool) -> (Watcher, Option<Duration>) {
+    let scope = pane.watch_scope();
+    let watcher = Watcher::new(&scope);
+    let idle = if !needs_polling && scope.complete && scope.roots.is_empty() {
+        None
+    } else if watcher.fd().is_some() && scope.complete {
+        Some(WATCHED)
+    } else {
+        Some(UNWATCHED)
+    };
+    (watcher, idle)
+}
+
 pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
     let signal = term::listen();
     let check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Offer(open) = start { Some(open) } else { None };
     let mut pane = open()?;
-    let watch_pane = |pane: &dyn Pane| {
-        let scope = pane.watch_scope();
-        let watcher = Watcher::new(&scope);
-        let idle = if watcher.fd().is_some() && scope.complete { WATCHED } else { UNWATCHED };
-        (watcher, idle)
-    };
-    let (mut watcher, idle) = watch_pane(pane.as_ref());
+    let (mut watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
     // Asked to stop while still starting up: there is nothing to put back.
     if term::TERMINATED.load(Ordering::Relaxed) {
         exit(1);
@@ -166,7 +178,8 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
     let mut screen = Screen::new();
     let mut help = None;
     let mut keys = Vec::new();
-    let mut pace = Pace::for_pane(pane.as_mut(), idle, check_on_open);
+    let mut input = Input::default();
+    let mut pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
             let (w, h) = term::size();
@@ -178,16 +191,35 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
         draw_pane(pane.as_mut(), &mut screen, help.as_mut());
         screen.flush();
 
-        let until_look = pace.until_look(Instant::now());
-        let wait = if help.is_some() {
-            until_look
-        } else {
-            pane.next_frame().map_or(until_look, |frame| frame.min(until_look))
+        let drawn = Instant::now();
+        let until_look = pace.as_ref().map(|pace| pace.until_look(drawn));
+        let until_frame = if help.is_some() { None } else { pane.next_frame() };
+        let wait = until_look
+            .into_iter()
+            .chain(until_frame)
+            // If the signal pipe couldn't be opened, don't sleep through a signal.
+            .chain(signal.is_none().then_some(UNWATCHED))
+            .min();
+        let event = loop {
+            let timeout_ms = wait.map_or(-1, |wait| {
+                i32::try_from(wait.saturating_sub(drawn.elapsed()).as_millis() + 1).unwrap_or(i32::MAX)
+            });
+            match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
+                Wait::Input => {
+                    input.receive(&mut keyboard, &mut keys);
+                    if !keys.is_empty() {
+                        break Wait::Input;
+                    }
+                    // Ignored input doesn't need a new frame, but timers still run.
+                    if wait.is_some_and(|wait| drawn.elapsed() >= wait) {
+                        break Wait::Timeout;
+                    }
+                }
+                event => break event,
+            }
         };
-        let timeout_ms = i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX);
-        match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
+        match event {
             Wait::Input => {
-                receive(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
                     if route_key(pane.as_mut(), &mut screen, &mut help, key) == After::Leave {
                         if matches!(key, Key::Char('q') | Key::Esc)
@@ -200,9 +232,9 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
                                     return Err(why);
                                 }
                             };
-                            let (next_watcher, next_idle) = watch_pane(pane.as_ref());
+                            let (next_watcher, next_idle) = watch_pane(pane.as_ref(), false);
                             watcher = next_watcher;
-                            pace = Pace::new(next_idle, Instant::now());
+                            pace = next_idle.map(|idle| Pace::new(idle, Instant::now()));
                             continue;
                         }
                         break 'run;
@@ -211,11 +243,15 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
             }
             Wait::Woken => {
                 watcher.drain();
-                pace.report_change();
+                if let Some(pace) = &mut pace {
+                    pace.report_change();
+                }
             }
             Wait::Timeout | Wait::Interrupted => {}
         }
-        if pace.until_look(Instant::now()).is_zero() {
+        if let Some(pace) = &mut pace
+            && pace.until_look(Instant::now()).is_zero()
+        {
             pace.look(pane.as_mut(), check_on_open);
         }
     }
@@ -315,6 +351,25 @@ mod tests {
         draw_pane(&mut pane, &mut screen, help.as_mut());
         assert_eq!(screen.text(), before);
         assert!(help.is_none());
+    }
+
+    #[test]
+    fn help_does_not_cover_a_pane_too_narrow_to_show_how_to_close_it() {
+        let f = fixture::Fixture::folder();
+        f.write("a.txt", "a file\n");
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let mut screen = Screen::sized(8, 5);
+        let mut help = None;
+        draw_pane(&mut pane, &mut screen, None);
+        let before = screen.text();
+        assert_eq!(route_key(&mut pane, &mut screen, &mut help, Key::Char('?')), After::Stay);
+        draw_pane(&mut pane, &mut screen, help.as_mut());
+        assert_eq!(screen.text(), before);
+
+        screen.resize(9, 5);
+        assert_eq!(route_key(&mut pane, &mut screen, &mut help, Key::Char('?')), After::Stay);
+        draw_pane(&mut pane, &mut screen, help.as_mut());
+        assert_eq!(screen.text()[4], " q close");
     }
 
     #[test]

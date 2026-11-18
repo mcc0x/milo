@@ -13,7 +13,7 @@ use crate::paths;
 const RELOAD: [&str; 2] = ["config", "reload"];
 
 /// Lets setup use the real Rex command while tests use an isolated stand-in.
-pub(super) type RunRex = dyn Fn(&[&OsStr]) -> bool;
+pub(super) type RunRex<'a> = dyn Fn(&[&OsStr]) -> bool + 'a;
 
 /// The files may be saved even if the separate listener could not start or stop.
 #[derive(Debug, PartialEq, Eq)]
@@ -44,22 +44,31 @@ impl Store {
     }
 
     /// Plan both sets of changes before writing so one failed plan cannot leave a partial save.
-    pub fn save(&self, layout: Option<&Layout>, claude: Option<bool>, run: &RunRex) -> Result<Saved, &'static str> {
+    pub fn save(&self, layout: Option<&Layout>, claude: Option<bool>, run: &RunRex<'_>) -> Result<Saved, &'static str> {
         let mut changes = Vec::new();
         let new_tabs = layout.is_some_and(|layout| layout.new_tabs);
-        let reload = if let Some(layout) = layout {
-            self.plan_rex(layout, &mut changes, run)? || (new_tabs && !lock::running(&self.state).unwrap_or(false))
-        } else {
-            false
-        };
+        let rex = layout.map(|layout| self.plan_rex(layout, &mut changes, run)).transpose()?;
+        let listener_running = new_tabs && lock::running(&self.state).unwrap_or(false);
+        let reload = rex.as_ref().is_some_and(|plan| plan.reload) || (new_tabs && !listener_running);
+        let restart = listener_running && rex.is_some_and(|plan| plan.listener_changed);
         if let Some(enabled) = claude {
             self.claude_files()?.plan(enabled, &mut changes)?;
         }
-        files::install(&changes, || !reload || call(run, RELOAD))?;
-        Ok(if new_tabs && !lock::wait_running(&self.state).unwrap_or(false) {
-            Saved::ListenerDidNotStart
-        } else if layout.is_some() && !new_tabs && lock::stop(&self.state).is_err() {
+        let mut stopped = false;
+        let installed = files::install(&changes, || {
+            // A running listener has already loaded its script; a reload alone won't update it.
+            stopped = restart && lock::stop(&self.state).is_ok();
+            !reload || call(run, RELOAD)
+        });
+        if installed.is_err() && stopped {
+            // The previous files are back, so give Rex a chance to start the old listener again.
+            call(run, RELOAD);
+        }
+        installed?;
+        Ok(if (restart && !stopped) || (layout.is_some() && !new_tabs && lock::stop(&self.state).is_err()) {
             Saved::ListenerDidNotStop
+        } else if new_tabs && !lock::wait_running(&self.state).unwrap_or(false) {
+            Saved::ListenerDidNotStart
         } else {
             Saved::Ready
         })
@@ -76,7 +85,7 @@ pub(super) fn settings_path(path: &Path) -> Result<Cow<'_, Path>, &'static str> 
     files::resolve(path).map_err(|_| "Could not read a settings file. No files were changed.")
 }
 
-fn call<const N: usize>(run: &RunRex, args: [&str; N]) -> bool {
+fn call<const N: usize>(run: &RunRex<'_>, args: [&str; N]) -> bool {
     run(&args.map(OsStr::new))
 }
 
@@ -334,7 +343,76 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), hand_edited);
         layout.toggle(TabPane::History);
         store.save(Some(&layout), None, &run).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), hand_edited.replace("history = false", "history = true"));
         assert!(store.layout().unwrap().0 == layout);
+    }
+
+    #[test]
+    fn default_setup_neither_checks_nor_installs_the_unused_listener() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let calls = Rc::new(RefCell::new(0));
+        let recorded = Rc::clone(&calls);
+        store
+            .save(Some(&Layout::default()), None, &move |_| {
+                *recorded.borrow_mut() += 1;
+                true
+            })
+            .unwrap();
+        assert_eq!(*calls.borrow(), 2);
+        assert!(!store.listener_file().exists());
+    }
+
+    #[test]
+    fn a_quoted_example_in_rex_settings_is_not_replaced_or_removed() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let original = b"local notes = [=[\n-- Managed by milo setup.\npcall(dofile, \"other.lua\")\n]=]\n";
+        fs::write(&store.init, original).unwrap();
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        assert!(fs::read(&store.init).unwrap().ends_with(original));
+        store.save(Some(&off()), None, &|_| true).unwrap();
+        assert_eq!(fs::read(&store.init).unwrap(), original);
+    }
+
+    #[test]
+    fn unrelated_rex_files_are_not_overwritten_on_install() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        fs::create_dir(&store.config).unwrap();
+        let original = b"rex.action{ name = 'my_action' }\n";
+        fs::write(store.rex_file(), original).unwrap();
+        let result = store.save(Some(&Layout::default()), None, &|_| true);
+        assert!(result.unwrap_err().contains("Your file was left alone."));
+        assert_eq!(fs::read(store.rex_file()).unwrap(), original);
+        assert!(!store.init.exists());
+    }
+
+    #[test]
+    fn enabling_new_tabs_does_not_overwrite_a_custom_listener() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let saved = fs::read(store.rex_file()).unwrap();
+        let listener = b"-- My own listener.\n";
+        fs::write(store.listener_file(), listener).unwrap();
+        let layout = Layout { new_tabs: true, ..Layout::default() };
+        assert!(store.save(Some(&layout), None, &|_| true).unwrap_err().contains("listener file"));
+        assert_eq!(fs::read(store.listener_file()).unwrap(), listener);
+        assert_eq!(fs::read(store.rex_file()).unwrap(), saved);
+    }
+
+    #[test]
+    fn removal_leaves_user_changes_to_generated_rex_files() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let file = store.rex_file();
+        let original = fs::read_to_string(&file).unwrap() + "\n-- Keep my notes here.\n";
+        fs::write(&file, &original).unwrap();
+        store.save(Some(&off()), None, &|_| true).unwrap();
+        assert_eq!(fs::read_to_string(file).unwrap(), original);
+        assert!(!store.init.exists());
     }
 
     #[test]
@@ -346,5 +424,17 @@ mod tests {
             fs::read_to_string(&store.claude).unwrap(),
             "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"milo claude-status\"\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn removing_claude_status_leaves_a_reformatted_settings_file() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let not_rex = |_: &[&OsStr]| panic!("Claude Code settings do not need Rex");
+        store.save(None, Some(true), &not_rex).unwrap();
+        let text = fs::read_to_string(&store.claude).unwrap().replace('\n', "\r\n");
+        fs::write(&store.claude, text).unwrap();
+        store.save(None, Some(false), &not_rex).unwrap();
+        assert_eq!(fs::read_to_string(&store.claude).unwrap(), "{\r\n  \r\n}\r\n");
     }
 }

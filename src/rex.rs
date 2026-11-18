@@ -35,14 +35,7 @@ pub fn run(args: &[&OsStr]) -> bool {
 
 /// Replaces milo without releasing the listener's inherited lock.
 pub fn exec_listener(script: &Path) -> io::Error {
-    Command::new("rex")
-        .arg("do")
-        .arg(script)
-        .arg("--all")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .exec()
+    Command::new("rex").arg("do").arg(script).arg("--all").stdin(Stdio::null()).stdout(Stdio::null()).exec()
 }
 
 /// A string as a JSON literal.

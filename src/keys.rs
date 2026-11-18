@@ -3,11 +3,14 @@
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
 
 use crate::term::wait_ready;
 
-/// Milliseconds to wait for the rest of a split escape sequence.
-const SEQUENCE_MS: i32 = 25;
+/// Allow split terminal sequences and multibyte keys one short wait to finish.
+const SEQUENCE_WAIT: Duration = Duration::from_millis(25);
+const READ_SIZE: usize = 4096;
+const PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
@@ -68,126 +71,174 @@ impl Key {
     }
 }
 
-/// Drains everything currently readable on stdin into `keys`.
-pub fn receive(keyboard: &mut File, keys: &mut Vec<Key>) {
-    let mut buf = [0u8; 4096];
-    let mut used = 0;
-    let mut overflow = Vec::new();
-    let mut retried = false;
-    loop {
-        match keyboard.read(&mut buf[used..]) {
-            // Input was ready, so an empty first read is EOF.
-            Ok(0) if !retried && used == 0 && overflow.is_empty() => keys.push(Key::Eof),
-            Ok(n) => {
-                used += n;
-                if used == buf.len() {
-                    overflow.extend_from_slice(&buf);
-                    used = 0;
-                    continue;
+#[derive(Default)]
+pub struct Input {
+    pending: Vec<u8>,
+    /// While pasting, how many bytes of the end marker have been seen.
+    paste_end: Option<usize>,
+}
+
+impl Input {
+    pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
+        let mut buf = [0u8; READ_SIZE];
+        let mut read_input = false;
+        let mut deadline = None;
+        // Give resize signals and file checks a turn even during a long paste.
+        for _ in 0..32 {
+            let n = match keyboard.read(&mut buf) {
+                Ok(0) if read_input => break,
+                Ok(0) => {
+                    self.finish(keys);
+                    keys.push(Key::Eof);
+                    return;
+                }
+                Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    self.finish(keys);
+                    keys.push(Key::Eof);
+                    return;
+                }
+            };
+            read_input = true;
+            self.feed(&buf[..n], keys);
+            if self.pending.is_empty() {
+                if n < buf.len() && self.paste_end.is_none() {
+                    return;
+                }
+                deadline = None;
+            } else {
+                let now = Instant::now();
+                let until = *deadline.get_or_insert(now + SEQUENCE_WAIT);
+                let timeout = i32::try_from(until.saturating_duration_since(now).as_millis() + 1).unwrap_or(i32::MAX);
+                let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+                if now >= until || wait_ready(&mut fds, timeout) <= 0 {
+                    break;
                 }
             }
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
-            // Any other failure will not mend: the terminal is gone.
-            Err(_) => keys.push(Key::Eof),
         }
-        let bytes = if overflow.is_empty() {
-            &buf[..used]
+        self.finish(keys);
+    }
+
+    fn feed(&mut self, bytes: &[u8], keys: &mut Vec<Key>) {
+        if self.pending.is_empty() {
+            self.pending.extend_from_slice(decode(bytes, &mut self.paste_end, keys));
         } else {
-            overflow.extend_from_slice(&buf[..used]);
-            used = 0;
-            &overflow[..]
-        };
-        // Give a split escape sequence one short wait for its ending.
-        let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-        if retried || !unfinished(bytes) || wait_ready(&mut fds, SEQUENCE_MS) <= 0 {
-            decode(bytes, keys);
-            return;
+            self.pending.extend_from_slice(bytes);
+            let left = decode(&self.pending, &mut self.paste_end, keys).len();
+            let used = self.pending.len() - left;
+            self.pending.drain(..used);
         }
-        retried = true;
+        // The replies we use are short. Don't keep a growing, unterminated reply.
+        if self.pending.len() >= READ_SIZE {
+            self.pending.clear();
+        }
+    }
+
+    fn finish(&mut self, keys: &mut Vec<Key>) {
+        if self.pending == [0x1b] {
+            keys.push(Key::Esc);
+        }
+        self.pending.clear();
     }
 }
 
-/// Whether `b` ends partway through an escape sequence.
-fn unfinished(b: &[u8]) -> bool {
-    let Some(esc) = b.iter().rposition(|&c| c == 0x1b) else { return false };
-    match &b[esc + 1..] {
-        [] | [b'O'] => true,
-        [b'[', rest @ ..] => !rest.iter().any(|c| (0x40..=0x7e).contains(c)),
-        // An answer from the terminal runs to a BEL, or to an ESC of its own.
-        [b']', rest @ ..] => !rest.contains(&7),
-        // An answer about pictures always ends with an ESC of its own.
-        [b'_', ..] => true,
-        _ => false,
+/// Skips clipboard text without copying it or turning it into keys.
+fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
+    let Some(mut matched) = *end else { return 0 };
+    let mut used = 0;
+    while used < bytes.len() {
+        if matched == 0 {
+            let Some(i) = bytes[used..].iter().position(|&c| c == PASTE_END[0]) else { return bytes.len() };
+            used += i + 1;
+            matched = 1;
+        } else {
+            let byte = bytes[used];
+            used += 1;
+            if byte == PASTE_END[matched] {
+                matched += 1;
+                if matched == PASTE_END.len() {
+                    *end = None;
+                    return used;
+                }
+            } else {
+                matched = usize::from(byte == PASTE_END[0]);
+            }
+        }
     }
+    *end = Some(matched);
+    used
 }
 
-fn decode(b: &[u8], keys: &mut Vec<Key>) {
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i];
-        i += 1;
-        match c {
-            0x1b => match b.get(i) {
-                None => keys.push(Key::Esc),
-                Some(b'[') => {
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < b.len() && !(0x40..=0x7e).contains(&b[end]) {
-                        end += 1;
+/// Decodes complete keys and returns any partial sequence at the end.
+fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec<Key>) -> &'a [u8] {
+    loop {
+        bytes = &bytes[skip_paste(bytes, paste_end)..];
+        let Some((&c, rest)) = bytes.split_first() else { return bytes };
+        let (key, tail) = match c {
+            0x1b => match rest {
+                [] | [b'O'] => return bytes,
+                [b'[', body @ ..] => {
+                    let Some(end) = body.iter().position(|c| (0x40..=0x7e).contains(c)) else { return bytes };
+                    let tail = &body[end + 1..];
+                    if &body[..=end] == b"200~" {
+                        *paste_end = Some(0);
+                        (None, tail)
+                    } else {
+                        (csi(&body[..end], body[end]), tail)
                     }
-                    if end == b.len() {
-                        return;
-                    }
-                    if let Some(k) = csi(&b[start..end], b[end]) {
-                        keys.push(k);
-                    }
-                    i = end + 1;
                 }
-                Some(b'O') => {
-                    if let Some(k) = b.get(i + 1).and_then(|&f| csi(&[], f)) {
-                        keys.push(k);
-                    }
-                    i += 2;
-                }
-                // An answer from the terminal, ended by BEL or by ESC \.
-                Some(b']') => {
-                    let start = i + 1;
-                    let Some(len) = b[start..].iter().position(|&c| c == 7 || c == 0x1b) else { return };
-                    if let Some(bg) = background_reply(&b[start..start + len]) {
-                        keys.push(Key::Background(bg));
-                    }
-                    i = start + len + if b[start + len] == 7 { 1 } else { 2 };
-                }
-                // An answer about pictures: "Gi=31;OK", ended by ESC \.
-                Some(b'_') => {
-                    let start = i + 1;
-                    let Some(len) = b[start..].iter().position(|&c| c == 0x1b) else { return };
-                    let answer = &b[start..start + len];
-                    if answer.starts_with(b"G") {
-                        keys.push(Key::Pictures(answer.ends_with(b";OK")));
-                    }
-                    i = start + len + 2;
+                [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
+                // OSC ends in BEL or ESC \. APC (including pictures) ends only in ESC \.
+                [kind @ (b']' | b'_'), body @ ..] => {
+                    let osc = *kind == b']';
+                    let Some(end) = body.iter().position(|&c| c == 0x1b || osc && c == 7) else {
+                        return bytes;
+                    };
+                    let tail = match &body[end..] {
+                        [7, tail @ ..] | [0x1b, b'\\', tail @ ..] => tail,
+                        [0x1b] => return bytes,
+                        other => {
+                            bytes = other;
+                            continue;
+                        }
+                    };
+                    let answer = &body[..end];
+                    let key = if osc {
+                        background_reply(answer).map(Key::Background)
+                    } else {
+                        answer.starts_with(b"G").then(|| Key::Pictures(answer.ends_with(b";OK")))
+                    };
+                    (key, tail)
                 }
                 // Alt-modified key: drop it rather than act on the bare key.
-                Some(_) => i += 1,
+                [_, tail @ ..] => (None, tail),
             },
-            b'\r' | b'\n' => keys.push(Key::Enter),
-            1..=26 => keys.push(Key::Ctrl(c + b'a' - 1)),
-            0..=31 | 127 => {}
+            b'\r' | b'\n' => (Some(Key::Enter), rest),
+            1..=26 => (Some(Key::Ctrl(c + b'a' - 1)), rest),
+            b' '..=b'~' => (Some(Key::Char(char::from(c))), rest),
             _ => {
                 let len = match c {
-                    0xc0..=0xdf => 2,
+                    0xc2..=0xdf => 2,
                     0xe0..=0xef => 3,
-                    0xf0..=0xf7 => 4,
-                    _ => 1,
+                    0xf0..=0xf4 => 4,
+                    _ => 0,
                 };
-                let end = (i - 1 + len).min(b.len());
-                if let Some(ch) = std::str::from_utf8(&b[i - 1..end]).ok().and_then(|s| s.chars().next()) {
-                    keys.push(Key::Char(ch));
+                if len > bytes.len() && rest.iter().all(|&byte| byte & 0xc0 == 0x80) {
+                    return bytes;
                 }
-                i = end;
+                if len > 0
+                    && let Some(ch) = bytes.get(..len).and_then(|b| std::str::from_utf8(b).ok()?.chars().next())
+                {
+                    (Some(Key::Char(ch)), &bytes[len..])
+                } else {
+                    (None, rest)
+                }
             }
-        }
+        };
+        keys.extend(key);
+        bytes = tail;
     }
 }
 
@@ -255,7 +306,9 @@ mod tests {
 
     fn keys(bytes: &[u8]) -> Vec<Key> {
         let mut keys = Vec::new();
-        decode(bytes, &mut keys);
+        let mut input = Input::default();
+        input.feed(bytes, &mut keys);
+        input.finish(&mut keys);
         keys
     }
 
@@ -285,7 +338,6 @@ mod tests {
             ]
         );
         assert_eq!(keys(b"j\x1b]10;rgb:1/2/3\x07k"), [Key::Char('j'), Key::Char('k')]);
-        assert!(unfinished(b"\x1b]11;rgb:0d0d/11") && !unfinished(b"\x1b]11;rgb:0/0/0\x1b\\"));
     }
 
     #[test]
@@ -303,8 +355,6 @@ mod tests {
             [Key::Char('j'), Key::Pictures(true), Key::Char('k'), Key::CellSize(8, 16), Key::Answered, Key::Char('l')]
         );
         assert_eq!(keys(b"\x1b_Gi=31;ENOTSUPPORTED\x1b\\"), [Key::Pictures(false)]);
-        // An answer still arriving is waited for, not read as an Esc and some letters.
-        assert!(unfinished(b"\x1b_Gi=31;O") && !unfinished(b"\x1b_Gi=31;OK\x1b\\"));
     }
 
     #[test]
@@ -315,13 +365,37 @@ mod tests {
     }
 
     #[test]
-    fn an_unfinished_sequence_is_recognised() {
-        assert!(unfinished(b"\x1b"));
-        assert!(unfinished(b"j\x1b["));
-        assert!(unfinished(b"\x1b[<0;8"));
-        assert!(unfinished(b"\x1bO"));
-        assert!(!unfinished(b"\x1b[A"));
-        assert!(!unfinished(b"\x1b[<0;8;3M"));
-        assert!(!unfinished(b"abc"));
+    fn terminal_replies_and_multibyte_keys_can_span_reads() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        for byte in "j\x1b[<0;8;3M界\x1b]11;rgb:0/0/f\x1b\\\x1b_Gi=31;OK\x1b\\k".bytes() {
+            input.feed(&[byte], &mut keys);
+        }
+        assert_eq!(
+            keys,
+            [
+                Key::Char('j'),
+                Key::Click(7, 2),
+                Key::Char('界'),
+                Key::Background([0, 0, 255]),
+                Key::Pictures(true),
+                Key::Char('k'),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_cannot_quit_the_pane_or_act_on_it() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        for part in [b"j\x1b[".as_slice(), b"200~s q\r\x03\x1b[201", b"x\x1b", b"[201", b"~k"] {
+            input.feed(part, &mut keys);
+        }
+        assert_eq!(keys, [Key::Char('j'), Key::Char('k')]);
+    }
+
+    #[test]
+    fn a_malformed_utf8_key_does_not_swallow_the_next_key() {
+        assert_eq!(keys(b"\xf0\x80q"), [Key::Char('q')]);
     }
 }

@@ -31,8 +31,14 @@ struct Quote {
     close: &'static str,
     /// May run on over several lines.
     multiline: bool,
-    /// A backslash does not escape anything inside.
-    raw: bool,
+    escape: Escape,
+}
+
+#[derive(Clone, Copy)]
+enum Escape {
+    Backslash,
+    Doubled,
+    None,
 }
 
 /// The delimiters, words and conventions the scanner uses for one language.
@@ -108,14 +114,18 @@ fn find_end(b: &[u8], from: usize, needle: &str) -> Option<usize> {
     (from..=last).find(|&i| begins(&b[i..], needle)).map(|i| i + needle.len())
 }
 
-/// Where the closing quote ends, skipping escaped bytes in non-raw strings.
+/// Where the closing quote ends, skipping escaped delimiters.
 fn string_end(b: &[u8], from: usize, q: &Quote) -> Option<usize> {
     let mut i = from;
     while i < b.len() {
-        if !q.raw && b[i] == b'\\' {
+        if matches!(q.escape, Escape::Backslash) && b[i] == b'\\' {
             i += 2;
         } else if begins(&b[i..], q.close) {
-            return Some(i + q.close.len());
+            let end = i + q.close.len();
+            if !matches!(q.escape, Escape::Doubled) || !begins(&b[end..], q.close) {
+                return Some(end);
+            }
+            i = end + q.close.len();
         } else {
             i += 1;
         }
@@ -145,25 +155,36 @@ impl Lang {
     /// Use the same `state` on consecutive lines to keep open comments and strings.
     pub fn scan(&self, text: &str, state: &mut State, out: &mut Vec<Span>) {
         out.clear();
+        self.walk::<true>(text, state, &mut |span| out.push(span));
+    }
+
+    /// Carry open delimiters forward without classifying tokens or keeping spans.
+    pub fn advance(&self, text: &str, state: &mut State) {
+        self.walk::<false>(text, state, &mut |_| {});
+    }
+
+    fn walk<const DRAW: bool>(&self, text: &str, state: &mut State, emit: &mut impl FnMut(Span)) {
         let b = text.as_bytes();
-        let Some(mut i) = self.resume(b, state, out) else { return };
+        let Some(mut i) = self.resume(b, state, emit) else { return };
         let indent = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
         if i <= indent {
-            i = self.line_start(b, indent, out);
+            i = self.line_start(b, indent, emit);
         }
         while i < b.len() {
-            if let Some(end) = self.comment(b, i, state, out) {
+            if b[i].is_ascii_whitespace() {
+                i += 1;
+            } else if let Some(end) = self.comment(b, i, state, emit) {
                 i = end;
-            } else if let Some(end) = self.quote(b, i, state, out) {
+            } else if let Some(end) = self.quote::<DRAW>(b, i, state, emit) {
                 i = end;
             } else {
-                i = self.code(text, i, out);
+                i = self.code::<DRAW>(text, i, emit);
             }
         }
     }
 
     /// Finish any open comment or string, or return `None` if it stays open.
-    fn resume(&self, b: &[u8], state: &mut State, out: &mut Vec<Span>) -> Option<usize> {
+    fn resume(&self, b: &[u8], state: &mut State, emit: &mut impl FnMut(Span)) -> Option<usize> {
         let open = match *state {
             State::Code => return Some(0),
             State::Comment(k) => {
@@ -177,7 +198,7 @@ impl Lang {
         };
         let end = close.unwrap_or(b.len());
         if end > 0 {
-            out.push((0, end, class));
+            emit((0, end, class));
         }
         if close.is_some() {
             *state = State::Code;
@@ -186,14 +207,14 @@ impl Lang {
     }
 
     #[inline]
-    fn comment(&self, b: &[u8], i: usize, state: &mut State, out: &mut Vec<Span>) -> Option<usize> {
+    fn comment(&self, b: &[u8], i: usize, state: &mut State, emit: &mut impl FnMut(Span)) -> Option<usize> {
         let rest = &b[i..];
         let spaced = !self.spaced_comments || i == 0 || b[i - 1].is_ascii_whitespace();
         let attribute = self.attributes && begins(rest, "#[");
         // Suppress likely prose or URL markers without suppressing `code // comment`.
         let jsx_text = self.jsx && i > 0 && (is_word(b[i - 1]) || matches!(b[i - 1], b'>' | b':'));
         if spaced && !attribute && !jsx_text && self.line_comments.iter().any(|c| begins(rest, c)) {
-            out.push((i, b.len(), Class::Comment));
+            emit((i, b.len(), Class::Comment));
             return Some(b.len());
         }
         let k = self.block_comments.iter().position(|(open, _)| begins(rest, open))?;
@@ -202,18 +223,27 @@ impl Lang {
             *state = State::Comment(u8::try_from(k).expect("block comment index fits in a byte"));
             b.len()
         });
-        out.push((i, end, Class::Comment));
+        emit((i, end, Class::Comment));
         Some(end)
     }
 
     #[inline]
-    fn quote(&self, b: &[u8], i: usize, state: &mut State, out: &mut Vec<Span>) -> Option<usize> {
+    fn quote<const DRAW: bool>(
+        &self,
+        b: &[u8],
+        i: usize,
+        state: &mut State,
+        emit: &mut impl FnMut(Span),
+    ) -> Option<usize> {
         let k = self.quotes.iter().position(|q| self.opens_quote(b, i, q))?;
         let q = &self.quotes[k];
         let close = string_end(b, i + q.open.len(), q);
         let end = close.unwrap_or(b.len());
-        let field = close.is_some() && self.key_end == Some(b':') && b[end..].trim_ascii_start().first() == Some(&b':');
-        out.push((i, end, if field { Class::Key } else { Class::Str }));
+        if DRAW {
+            let field =
+                close.is_some() && self.key_end == Some(b':') && b[end..].trim_ascii_start().first() == Some(&b':');
+            emit((i, end, if field { Class::Key } else { Class::Str }));
+        }
         if close.is_none() && q.multiline {
             *state = State::Quote(u8::try_from(k).expect("quote index fits in a byte"));
         }
@@ -232,7 +262,7 @@ impl Lang {
     }
 
     #[inline]
-    fn code(&self, text: &str, i: usize, out: &mut Vec<Span>) -> usize {
+    fn code<const DRAW: bool>(&self, text: &str, i: usize, emit: &mut impl FnMut(Span)) -> usize {
         let b = text.as_bytes();
         let c = b[i];
         if c == b'\\' && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
@@ -241,45 +271,47 @@ impl Lang {
             i + 2
         } else if c.is_ascii_digit() {
             let end = number_end(b, i);
-            out.push((i, end, Class::Number));
+            emit((i, end, Class::Number));
             end
         } else if is_word(c) {
-            self.scan_word(text, i, out)
+            let end = word_end(b, i);
+            if DRAW {
+                self.colour_word(text, i, end, emit);
+            }
+            end
         } else {
             i + 1
         }
     }
 
-    fn scan_word(&self, text: &str, i: usize, out: &mut Vec<Span>) -> usize {
+    fn colour_word(&self, text: &str, i: usize, end: usize, emit: &mut impl FnMut(Span)) {
         let b = text.as_bytes();
-        let end = word_end(b, i);
         let member = previous(b, i).is_some_and(|p| b[p] == b'$' || (b[p] == b'.' && (p == 0 || b[p - 1] != b'.')));
         let scalar = !self.scalars || scalar_start(b, i);
         if let Some(class) = self.classify_word(&text[i..end], &b[end..], member, scalar) {
-            out.push((i, end, class));
+            emit((i, end, class));
         }
-        end
     }
 
     /// Handle a directive, data field or TOML header at the line's start.
-    fn line_start(&self, b: &[u8], indent: usize, out: &mut Vec<Span>) -> usize {
+    fn line_start(&self, b: &[u8], indent: usize, emit: &mut impl FnMut(Span)) -> usize {
         if self.directives && b.get(indent) == Some(&b'#') {
             let name = indent + 1 + b[indent + 1..].iter().take_while(|c| c.is_ascii_whitespace()).count();
             let end = word_end(b, name);
-            out.push((indent, end, Class::Keyword));
+            emit((indent, end, Class::Keyword));
             return end;
         }
         if self.table_headers && b.get(indent) == Some(&b'[') {
             let close = if b.get(indent + 1) == Some(&b'[') { "]]" } else { "]" };
             if let Some(end) = find_end(b, indent + close.len(), close) {
-                out.push((indent, end, Class::Key));
+                emit((indent, end, Class::Key));
                 return end;
             }
         }
-        self.key_end.map_or(0, |sep| Self::leading_field(b, indent, sep, out))
+        self.key_end.map_or(0, |sep| Self::leading_field(b, indent, sep, emit))
     }
 
-    fn leading_field(b: &[u8], indent: usize, sep: u8, out: &mut Vec<Span>) -> usize {
+    fn leading_field(b: &[u8], indent: usize, sep: u8, emit: &mut impl FnMut(Span)) -> usize {
         // "- name: value" in a list is still a field.
         let start = indent + b[indent..].iter().take_while(|&&c| c == b'-' || c == b' ').count();
         let name =
@@ -288,7 +320,7 @@ impl Lang {
         let after = b[start + name..].first() == Some(&sep);
         let spaced = sep != b':' || b.get(start + name + 1).is_none_or(u8::is_ascii_whitespace);
         if end > start && after && spaced {
-            out.push((start, end, Class::Key));
+            emit((start, end, Class::Key));
             return start + name;
         }
         0

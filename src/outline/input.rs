@@ -1,5 +1,6 @@
 //! Handles keys and clicks in the outline, or passes them to its reader.
 
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::keys::Direction::{Next, Previous};
@@ -9,10 +10,10 @@ use crate::pane::{After, Pane};
 use super::draw::margin;
 use super::{DOUBLE_CLICK, Outline};
 
-enum Pointed<'a> {
-    File(&'a str),
-    OpenFolder(&'a str),
-    ClosedFolder(&'a str),
+enum Pointed {
+    File(Rc<str>),
+    OpenFolder(Rc<str>),
+    ClosedFolder(Rc<str>),
 }
 
 impl Outline {
@@ -34,7 +35,8 @@ impl Outline {
         }
         self.by_click &= matches!(key, Key::Click(..));
         match key {
-            Key::Char('r') => self.reload(),
+            Key::Char('r') if self.repo.git => self.reload(),
+            Key::Char('r') => self.refresh_folder(self.selected_path()),
             _ if self.painted.strip => self.strip_key(key),
             _ => self.tree_key(key, now),
         }
@@ -71,7 +73,7 @@ impl Outline {
             }
             Key::Char('n' | 'N') => {
                 let direction = if key == Key::Char('n') { Next } else { Previous };
-                if let Some(path) = self.tree.next_pending(sel, direction).map(str::to_owned) {
+                if let Some(path) = self.tree.next_pending(sel, direction).cloned() {
                     self.reveal(path);
                 }
             }
@@ -90,12 +92,12 @@ impl Outline {
         }
     }
 
-    fn pointed(&self) -> Option<Pointed<'_>> {
+    fn pointed(&self) -> Option<Pointed> {
         let node = self.tree.row(self.sel)?;
-        let path = node.path.as_str();
+        let path = Rc::clone(&node.path);
         Some(if !node.dir {
             Pointed::File(path)
-        } else if self.folds.is_open(path) {
+        } else if self.folds.is_open(&path) {
             Pointed::OpenFolder(path)
         } else {
             Pointed::ClosedFolder(path)
@@ -105,13 +107,12 @@ impl Outline {
     fn open_or_close(&mut self, key: Key) {
         match (key, self.pointed()) {
             (Key::Enter | Key::Char(' ' | 'l') | Key::Right, Some(Pointed::ClosedFolder(path))) => {
-                self.set_open(path.to_owned(), true);
+                self.set_open(path, true);
             }
             (Key::Enter | Key::Char(' ' | 'h') | Key::Left, Some(Pointed::OpenFolder(path))) => {
-                self.set_open(path.to_owned(), false);
+                self.set_open(path, false);
             }
             (Key::Enter, Some(Pointed::File(path))) => {
-                let path = path.to_owned();
                 self.open_file(&path);
             }
             (Key::Char('h') | Key::Left, _) => self.sel = self.tree.parent_row(self.sel).unwrap_or(self.sel),
@@ -119,7 +120,7 @@ impl Outline {
         }
     }
 
-    fn set_open(&mut self, path: String, open: bool) {
+    fn set_open(&mut self, path: Rc<str>, open: bool) {
         self.folds.set(&path, open);
         self.refold(Some(path));
     }

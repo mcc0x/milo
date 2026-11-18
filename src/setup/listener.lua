@@ -17,29 +17,28 @@ local function single_pane(session_id, window_id)
   end
 end
 
--- A tab opened as a plain shell runs a login shell, whose own name for
--- itself starts with a dash ("-zsh"). One opened to run a command does not.
-local function is_login_shell(process)
+local function arrange_shell(session_id, window_id, retries)
+  local block = single_pane(session_id, window_id)
+  if not block then return end
+  local process = rex.call(terminal .. ".process", { session_id = session_id, block_id = block })
+  if not process or not process.foreground then
+    -- Starting a shell should not hold up events for other tabs.
+    if retries > 0 then
+      rex.after(0.05, function() arrange_shell(session_id, window_id, retries - 1) end)
+    end
+    return
+  end
+  -- A login shell gives itself a name such as "-zsh"; a command does not.
   local name = process.foreground.argv0 or ""
-  return name:sub(1, 1) == "-"
+  if name:sub(1, 1) ~= "-" then return end
+  local load_layout = loadfile(rex_config)
+  if not load_layout then return end
+  local ok, arrange = pcall(load_layout, "listener")
+  if ok and arrange then
+    pcall(arrange, { session_id = session_id, block_id = block }, process)
+  end
 end
 
 rex.on("window_created", function(ctx, event)
-  -- For a moment a new pane has nothing running in it yet: look again shortly.
-  for attempt = 1, 10 do
-    local block = single_pane(ctx.session_id, event.window_id)
-    if not block then return end
-    local process = rex.block.call(terminal, "process", { block_id = block })
-    if process and process.foreground then
-      if not is_login_shell(process) then return end
-      local load_layout = loadfile(rex_config)
-      if not load_layout then return end
-      local ok, arrange = pcall(load_layout, "listener")
-      if ok and arrange then
-        pcall(arrange, { session_id = ctx.session_id, block_id = block })
-      end
-      return
-    end
-    if attempt < 10 then rex.sleep(0.05) end
-  end
+  arrange_shell(ctx.session_id, event.window_id, 9)
 end)

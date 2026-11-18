@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::fs_ops::{self, Temp};
 use crate::json::Value;
+use crate::width::char_width;
 
 use super::files::{self, Budget, FileVersion};
 use super::time;
@@ -121,9 +122,17 @@ fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
 fn model_name(model: Value<'_>) -> Option<String> {
     let [name, id] = model.fields(["display_name", "id"]);
     let value = name.or(id).unwrap_or(model).string(128)?;
-    let safe: String =
-        value.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_')).take(40).collect();
-    Some(safe.trim().to_owned())
+    let mut safe: String = value
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_' | '\u{0300}'..='\u{036f}'))
+        .skip_while(|&c| c == ' ' || char_width(c) == 0)
+        .scan(0, |columns, c| {
+            *columns += char_width(c);
+            (*columns <= 40).then_some(c)
+        })
+        .collect();
+    safe.truncate(safe.trim_end().len());
+    Some(safe)
 }
 
 fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {

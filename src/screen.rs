@@ -132,8 +132,6 @@ struct Cell {
 const BLANK: Cell = Cell { ch: ' ', st: Style::PLAIN };
 /// Trailing half of a double-width character.
 const CONT: char = '\0';
-/// Never drawn, so a row of these differs from any real frame.
-const STALE: Cell = Cell { ch: '\u{1}', st: Style::PLAIN };
 const SYNC_ON: &[u8] = b"\x1b[?2026h";
 
 /// Where a picture sits on the screen, in cells.
@@ -220,7 +218,8 @@ impl Screen {
         self.cur.clear();
         self.cur.resize(w * h, BLANK);
         self.prev.clear();
-        self.prev.resize(w * h, STALE);
+        // The erase below already puts plain blanks in every cell.
+        self.prev.resize(w * h, BLANK);
         self.out.extend_from_slice(b"\x1b[0m\x1b[2J");
         self.pictures.erased = true;
     }
@@ -619,6 +618,17 @@ mod tests {
         let empty = frame(&mut screen);
         assert!(empty.contains(&format!("a=d,d=I,i={},", a.id)));
         assert!(empty.contains(&format!("a=d,d=I,i={},", b.id)));
+        assert_eq!(frame(&mut screen), "");
+    }
+
+    #[test]
+    fn resizing_erases_old_text_without_rewriting_blank_cells() {
+        let mut screen = Screen::sized(4, 1);
+        screen.put(0, 0, 4, "old!", Style::PLAIN);
+        assert!(frame(&mut screen).contains("old!"));
+
+        screen.resize(80, 24);
+        assert_eq!(frame(&mut screen), "\x1b[?2026h\x1b[0m\x1b[2J\x1b[0m\x1b[?2026l");
         assert_eq!(frame(&mut screen), "");
     }
 

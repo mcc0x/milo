@@ -36,13 +36,17 @@ pub fn file(path: &Path, limit: u64) -> Content {
         }
         Err(e) => return unavailable(e),
     };
-    match file.metadata() {
-        Ok(m) if m.is_file() => {}
+    let size = match file.metadata() {
+        Ok(m) if m.is_file() => m.len(),
         Ok(_) => return Content::NotFile,
         Err(e) => return unavailable(e),
+    };
+    if size > limit {
+        return Content::TooLarge;
     }
-    let mut bytes = Vec::new();
-    match file.take(limit + 1).read_to_end(&mut bytes) {
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    // A file can grow after the metadata read.
+    match file.take(limit.saturating_add(1)).read_to_end(&mut bytes) {
         Ok(_) if bytes.len() as u64 > limit => Content::TooLarge,
         Ok(_) => Content::Bytes(bytes),
         Err(e) => unavailable(e),

@@ -22,7 +22,17 @@ const POLL: Duration = Duration::from_millis(10);
 
 /// Never resolve a link while opening a lock that may name a process.
 fn open(path: &Path, create: bool) -> io::Result<File> {
-    OpenOptions::new().read(true).write(true).create(create).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(create)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
 }
 
 /// A lock over a whole file, of the kind asked for.
@@ -101,6 +111,9 @@ pub(super) fn listen(dir: &Path, script: &Path) -> io::Result<()> {
     let lock = open(&dir.join(LOCK), true)?;
     if !take(&lock)? {
         return Ok(());
+    }
+    if !fs::symlink_metadata(script)?.is_file() {
+        return Err(ErrorKind::InvalidInput.into());
     }
     // SAFETY: The descriptor is open. Left open in `rex`, it keeps the lock:
     // a process gives its lock up when it closes the file.

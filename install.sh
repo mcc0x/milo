@@ -31,7 +31,7 @@ if [ "${1-}" = --uninstall ]; then
     fi
     printf '%s\n' 'Rex and Claude Code settings were not changed.' \
         'To remove the Rex setup while milo is installed, run milo setup inside Rex.' \
-        'Turn off all three panes and Arrange every new tab, then press s to save.'
+        'Turn off all three panes and Arrange new shell tabs, then press s to save.'
     exit 0
 fi
 

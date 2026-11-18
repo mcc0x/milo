@@ -79,10 +79,6 @@ impl<'a> Settings<'a> {
         let range = self.removal.as_ref()?;
         (self.status == Status::Milo).then(|| format!("{}{}", &self.text[..range.start], &self.text[range.end..]))
     }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.first.is_none()
-    }
 }
 
 /// Anything beyond the two fields we install belongs to the user.

@@ -6,11 +6,12 @@ use crate::git::{Kind, PendingFile};
 use crate::help;
 use crate::icons;
 use crate::screen::{self, Screen, Style, Wash};
-use crate::tree::Node;
+use crate::tree::{Node, Tree};
 use crate::ui::{self, FAINT};
 use crate::width::str_width;
 
-use super::{LIVE, Outline, PULSE};
+use super::Outline;
+use super::attention::{LIVE, PULSE};
 
 /// The shortest pane with room for the project heading.
 const HEADING_ROWS: usize = 4;
@@ -20,6 +21,7 @@ const STRIP_ROWS: usize = 7;
 const HINT_ROWS: usize = 12;
 /// From this outline width each file also says what happened to it.
 const WIDE_COLS: usize = 52;
+const GIT_ERROR: &str = "git did not answer";
 
 #[derive(Default)]
 pub(super) struct Layout {
@@ -48,7 +50,7 @@ impl Layout {
 }
 
 fn arrange(w: usize, h: usize, git: bool) -> Layout {
-    if w < 12 || h == 0 {
+    if w < 3 || h == 0 {
         return Layout::default();
     }
     let strip = git && h <= STRIP_ROWS;
@@ -69,14 +71,13 @@ impl Outline {
         s.clear();
         let now = Instant::now();
         self.expire(now);
-        let uncommitted = self.pending.partition_point(|file| !file.unpushed);
-        let layout = arrange(s.w, s.h, self.repo.git);
+        let mut layout = arrange(s.w, s.h, self.repo.git);
         if layout.width == 0 {
             self.painted = layout;
             return;
         }
         if layout.heading {
-            self.draw_heading(s, layout.width, uncommitted);
+            self.draw_heading(s, layout.width);
         }
         if layout.strip {
             self.draw_strip(s, &layout);
@@ -87,6 +88,9 @@ impl Outline {
             let y = s.h - 1;
             s.clear_row(y);
             s.put_fit(1, y, s.w - 2, note, Style::fg(screen::YELLOW));
+            if !layout.hint && !layout.strip {
+                layout.body_rows -= 1;
+            }
         } else if layout.hint && self.attention.show_controls() {
             self.draw_hint(s);
         }
@@ -94,11 +98,19 @@ impl Outline {
     }
 
     /// Names the project and branch beside the work that is waiting, if it fits.
-    fn draw_heading(&self, s: &mut Screen, width: usize, uncommitted: usize) {
+    fn draw_heading(&self, s: &mut Screen, width: usize) {
         let branch = self.repo.branch();
         let name_width = ui::project_heading_width(&self.repo.name, branch);
-        let summary_width = if self.repo.git { self.draw_summary(s, width, name_width, uncommitted) } else { 0 };
-        let room = width.saturating_sub(summary_width + 3);
+        let summary_width = if self.repo.git {
+            let uncommitted = self.pending.partition_point(|file| !file.unpushed);
+            self.draw_summary(s, width, name_width, uncommitted)
+        } else if self.listing.unreadable && !self.listing.paths.is_empty() && width >= 24 {
+            let problem = if width >= 45 { "Some files could not be listed" } else { "Cannot list all files" };
+            s.put_right(width - 1, 0, problem, ui::DEL)
+        } else {
+            0
+        };
+        let room = width.saturating_sub(summary_width + if branch.is_empty() { 2 } else { 3 });
         let x = 1 + ui::section_heading(s, 0, room, &self.repo.name);
         s.put_fit(x + 2, 0, room.saturating_sub(x + 1), branch, Style::fg(screen::MAGENTA));
     }
@@ -115,7 +127,7 @@ impl Outline {
             let compact_width = text_width(&compact);
             (compact, compact_width)
         };
-        if used + 12 > width {
+        if used + 12 > width && self.repo.ok() {
             return 0;
         }
         let mut end = width - 1;
@@ -131,7 +143,7 @@ impl Outline {
         let mut parts = [("", Style::PLAIN); 5];
         if !self.repo.ok() {
             let text = match form {
-                Form::Long => "git did not answer",
+                Form::Long => GIT_ERROR,
                 Form::Compact => "! git",
             };
             parts[0] = (text, ui::DEL);
@@ -169,12 +181,27 @@ impl Outline {
         let (y0, rows) = (layout.body_top, layout.body_rows);
         let len = self.tree.rows.len();
         if len == 0 {
-            let text = if self.pending_only { "Nothing to commit or push." } else { "No files." };
-            s.put_fit(1, y0, layout.width - 2, text, FAINT);
+            // The heading already says why no tree could be loaded.
+            if !self.repo.ok() {
+                if !layout.heading {
+                    s.put_fit(1, y0, layout.width - 2, GIT_ERROR, ui::DEL);
+                }
+                return;
+            }
+            let (text, style) = if self.listing.unreadable {
+                ("Cannot read this folder.", ui::DEL)
+            } else if self.pending_only {
+                ("Nothing to commit or push.", FAINT)
+            } else {
+                ("No files.", FAINT)
+            };
+            s.put_fit(1, y0, layout.width - 2, text, style);
             return;
         }
         self.keep_in_view(rows);
-        let columns = self.columns(layout);
+        let details =
+            layout.wide.then(|| *self.change_columns.get_or_insert_with(|| ChangeColumns::measure(&self.tree)));
+        let columns = Columns { width: layout.width, details };
         for (y, i) in (y0..).zip(self.top..len.min(self.top + rows)) {
             self.draw_row(s, y, i, &columns, now);
         }
@@ -190,21 +217,6 @@ impl Outline {
             self.top = self.sel + margin + 1 - rows;
         }
         self.top = self.top.min(self.tree.rows.len().saturating_sub(rows));
-    }
-
-    fn columns(&self, layout: &Layout) -> Columns {
-        let details = layout.wide.then(|| {
-            let (mut word, mut size) = (0, 0);
-            for row in &self.tree.rows {
-                let node = self.tree.node(row.node);
-                if !node.dir {
-                    word = word.max(ui::kind_word(node.kind).len());
-                }
-                size = size.max(ui::size_width(node.add, node.del));
-            }
-            ChangeColumns { word, size }
-        });
-        Columns { width: layout.width, details }
     }
 
     fn draw_row(&self, s: &mut Screen, y: usize, i: usize, columns: &Columns, now: Instant) {
@@ -247,14 +259,8 @@ impl Outline {
         }
     }
 
-    /// A closed folder carries the most recent mark among the files it hides.
     fn draw_mark(&self, s: &mut Screen, y: usize, node: &Node, open: bool, now: Instant) {
-        let at = if node.dir && !open {
-            self.file_marks.iter().filter(|(p, _)| under(p, &node.path)).map(|(_, at)| *at).max()
-        } else {
-            self.file_marks.get(&node.path).copied()
-        };
-        let Some(at) = at else { return };
+        let Some(at) = self.attention.marked_at(&node.path, node.dir && !open) else { return };
         let age = now.saturating_duration_since(at);
         let live = age < LIVE;
         let glyph = match (live, age.as_millis() / PULSE.as_millis() % 2) {
@@ -269,6 +275,10 @@ impl Outline {
     /// Shows pending files, most recent first, filling columns top to bottom.
     fn draw_strip(&mut self, s: &mut Screen, layout: &Layout) {
         let (w, y0, rows) = (layout.width, layout.body_top, layout.body_rows);
+        if !layout.heading && !self.repo.ok() {
+            s.put_fit(1, 0, w - 2, GIT_ERROR, ui::DEL);
+            return;
+        }
         if self.recent.is_empty() {
             if !layout.heading {
                 s.put_fit(1, 0, w - 2, "Nothing to commit or push.", FAINT);
@@ -295,7 +305,13 @@ impl Outline {
         }
         let after = self.recent.len() - shown;
         if after > 0 {
-            s.put_right(w - 1, y0 + rows - 1, &format!("  +{after} more ›"), FAINT);
+            let label = format!("+{after} more ›");
+            let y = y0 + rows - 1;
+            if str_width(&label) < w - x {
+                s.put_right(w - 1, y, &label, FAINT);
+            } else {
+                s.put(w - 1, y, 1, "›", FAINT);
+            }
         }
         self.strip_col = first;
     }
@@ -341,9 +357,24 @@ struct Columns {
     details: Option<ChangeColumns>,
 }
 
-struct ChangeColumns {
+#[derive(Clone, Copy, Default)]
+pub(super) struct ChangeColumns {
     word: usize,
     size: usize,
+}
+
+impl ChangeColumns {
+    fn measure(tree: &Tree) -> Self {
+        let mut widths = Self::default();
+        for row in &tree.rows {
+            let node = tree.node(row.node);
+            if !node.dir {
+                widths.word = widths.word.max(ui::kind_word(node.kind).len());
+            }
+            widths.size = widths.size.max(ui::size_width(node.add, node.del));
+        }
+        widths
+    }
 }
 
 impl Columns {
@@ -361,10 +392,6 @@ impl Columns {
         }
         word_at - 1
     }
-}
-
-fn under(path: &str, dir: &str) -> bool {
-    path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Each strip column is only as wide as its own names need.

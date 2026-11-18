@@ -1,6 +1,6 @@
 //! Defines the code-colouring rules and selects them by file extension.
 
-use super::{Lang, Quote};
+use super::{Escape, Lang, Quote};
 
 const PLAIN: Lang = Lang {
     line_comments: &[],
@@ -19,7 +19,7 @@ const PLAIN: Lang = Lang {
     table_headers: false,
 };
 
-const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, raw: false };
+const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, escape: Escape::Backslash };
 const SINGLE: Quote = Quote { open: "'", close: "'", ..DOUBLE };
 const C_COMMENTS: &[(&str, &str)] = &[("/*", "*/")];
 const C_QUOTES: &[Quote] = &[DOUBLE, SINGLE];
@@ -29,14 +29,14 @@ static RUST: Lang = Lang {
     line_comments: &["//"],
     block_comments: C_COMMENTS,
     quotes: &[
-        Quote { open: "r###\"", close: "\"###", multiline: true, raw: true },
-        Quote { open: "r##\"", close: "\"##", multiline: true, raw: true },
-        Quote { open: "r#\"", close: "\"#", multiline: true, raw: true },
-        Quote { open: "r\"", multiline: true, raw: true, ..DOUBLE },
-        Quote { open: "br###\"", close: "\"###", multiline: true, raw: true },
-        Quote { open: "br##\"", close: "\"##", multiline: true, raw: true },
-        Quote { open: "br#\"", close: "\"#", multiline: true, raw: true },
-        Quote { open: "br\"", multiline: true, raw: true, ..DOUBLE },
+        Quote { open: "r###\"", close: "\"###", multiline: true, escape: Escape::None },
+        Quote { open: "r##\"", close: "\"##", multiline: true, escape: Escape::None },
+        Quote { open: "r#\"", close: "\"#", multiline: true, escape: Escape::None },
+        Quote { open: "r\"", multiline: true, escape: Escape::None, ..DOUBLE },
+        Quote { open: "br###\"", close: "\"###", multiline: true, escape: Escape::None },
+        Quote { open: "br##\"", close: "\"##", multiline: true, escape: Escape::None },
+        Quote { open: "br#\"", close: "\"#", multiline: true, escape: Escape::None },
+        Quote { open: "br\"", multiline: true, escape: Escape::None, ..DOUBLE },
         Quote { open: "b\"", multiline: true, ..DOUBLE },
         Quote { multiline: true, ..DOUBLE },
         SINGLE,
@@ -98,7 +98,7 @@ static GO: Lang = Lang {
     chars: true,
     line_comments: &["//"],
     block_comments: C_COMMENTS,
-    quotes: &[Quote { open: "`", close: "`", multiline: true, raw: true }, DOUBLE, SINGLE],
+    quotes: &[Quote { open: "`", close: "`", multiline: true, escape: Escape::None }, DOUBLE, SINGLE],
     keywords: &[
         "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go",
         "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type",
@@ -152,7 +152,7 @@ static C: Lang = Lang {
 };
 static CPP: Lang = Lang {
     keywords: CPP_WORDS,
-    quotes: &[Quote { open: "R\"(", close: ")\"", multiline: true, raw: true }, DOUBLE, SINGLE],
+    quotes: &[Quote { open: "R\"(", close: ")\"", multiline: true, escape: Escape::None }, DOUBLE, SINGLE],
     ..C
 };
 
@@ -162,8 +162,8 @@ static CSHARP: Lang = Lang {
     line_comments: &["//"],
     block_comments: C_COMMENTS,
     quotes: &[
-        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, raw: true },
-        Quote { open: "@\"", multiline: true, raw: true, ..DOUBLE },
+        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, escape: Escape::None },
+        Quote { open: "@\"", multiline: true, escape: Escape::Doubled, ..DOUBLE },
         DOUBLE,
         SINGLE,
     ],
@@ -187,7 +187,7 @@ static PHP: Lang = Lang {
     attributes: true,
     quotes: &[
         // Use the first semicolon as the end, normally the one after the closing label.
-        Quote { open: "<<<", close: ";", multiline: true, raw: true },
+        Quote { open: "<<<", close: ";", multiline: true, escape: Escape::None },
         Quote { multiline: true, ..DOUBLE },
         Quote { multiline: true, ..SINGLE },
     ],
@@ -207,7 +207,7 @@ static SHELL: Lang = Lang {
     names: false,
     spaced_comments: true,
     line_comments: &["#"],
-    quotes: &[Quote { multiline: true, ..DOUBLE }, Quote { multiline: true, raw: true, ..SINGLE }],
+    quotes: &[Quote { multiline: true, ..DOUBLE }, Quote { multiline: true, escape: Escape::None, ..SINGLE }],
     keywords: &[
         "case", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function", "if", "in", "local", "return",
         "then", "until", "while",
@@ -227,7 +227,7 @@ static JSON: Lang = Lang {
 };
 static YAML: Lang = Lang {
     line_comments: &["#"],
-    quotes: C_QUOTES,
+    quotes: &[DOUBLE, Quote { escape: Escape::Doubled, ..SINGLE }],
     constants: &["true", "false", "null", "yes", "no", "on", "off"],
     names: false,
     key_end: Some(b':'),
@@ -239,9 +239,9 @@ static TOML: Lang = Lang {
     line_comments: &["#"],
     quotes: &[
         Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE },
-        Quote { open: "'''", close: "'''", multiline: true, raw: true },
+        Quote { open: "'''", close: "'''", multiline: true, escape: Escape::None },
         DOUBLE,
-        Quote { raw: true, ..SINGLE },
+        Quote { escape: Escape::None, ..SINGLE },
     ],
     constants: &["true", "false"],
     names: false,
@@ -417,6 +417,14 @@ mod tests {
     }
 
     #[test]
+    fn yaml_doubled_apostrophes_do_not_end_single_quoted_strings() {
+        assert_eq!(
+            one(&YAML, "text: 'don''t' # comment"),
+            [("text", Class::Key), ("'don''t'", Class::Str), ("# comment", Class::Comment)]
+        );
+    }
+
+    #[test]
     fn php_multiline_strings_and_heredocs_protect_comment_markers() {
         for quote in ["\"", "'"] {
             let mut state = State::Code;
@@ -492,6 +500,17 @@ mod tests {
         let words = "partial where when goto unsafe init ushort sbyte";
         assert_eq!(one(&CSHARP, words).len(), words.split_whitespace().count());
         assert!(one(&CSHARP, words).iter().all(|p| p.1 == Class::Keyword));
+    }
+
+    #[test]
+    fn csharp_doubled_quotes_do_not_end_multiline_verbatim_strings() {
+        let mut state = State::Code;
+        let first = r#"@"This has ""quoted"" text"#;
+        assert_eq!(pieces(&CSHARP, first, &mut state), [(first, Class::Str)]);
+        assert_eq!(
+            pieces(&CSHARP, "on the next line\"; return;", &mut state)[..2],
+            [("on the next line\"", Class::Str), ("return", Class::Keyword)]
+        );
     }
 
     #[test]

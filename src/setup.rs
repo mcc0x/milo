@@ -49,16 +49,22 @@ impl Choice {
             (Self::Pane(TabPane::History), false) => ("History", "Commits on the left"),
             (Self::Pane(TabPane::Usage), false) => ("Usage", "A strip across the top"),
             (Self::Width, false) => ("Column width", "Room for files and commits"),
-            (Self::NewTabs, false) => ("Arrange every new tab", "Only tabs opened as a shell"),
+            (Self::NewTabs, false) => ("Arrange new shell tabs", "Skip tabs that run a command"),
             (Self::ClaudeLimits, false) => ("Show Claude Code limits", "For the usage strip"),
             (Self::Pane(TabPane::Outline), true) => ("Outline", "Files"),
             (Self::Pane(TabPane::History), true) => ("History", "Git"),
             (Self::Pane(TabPane::Usage), true) => ("Usage", "Top"),
             (Self::Width, true) => ("Column width", "Left"),
-            (Self::NewTabs, true) => ("New tabs", "Shell"),
+            (Self::NewTabs, true) => ("Shell tabs", "Auto"),
             (Self::ClaudeLimits, true) => ("Claude limits", "Usage"),
         }
     }
+}
+
+enum Installed {
+    Unreadable,
+    Absent,
+    Active(Layout),
 }
 
 /// Holds unsaved choices separately from what is already installed.
@@ -69,7 +75,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     target: Option<rex::Target>,
     run: R,
     layout: Layout,
-    installed: Option<bool>,
+    installed: Installed,
     claude: Claude,
     show_limits: bool,
     selected: Choice,
@@ -84,17 +90,17 @@ impl Setup {
     }
 }
 
-impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
+impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     /// Start from installed choices without reading Rex's files outside Rex.
     fn new(store: Option<Store>, inside: bool, target: Option<rex::Target>, run: R) -> Self {
         let mut message = None;
         let mut layout = Layout::default();
-        let mut installed = None;
+        let mut installed = Installed::Unreadable;
         if inside && let Some(store) = &store {
             match store.layout() {
                 Ok((saved, active)) => {
+                    installed = if active { Installed::Active(saved.clone()) } else { Installed::Absent };
                     layout = saved;
-                    installed = Some(active);
                 }
                 Err(why) => message = Some((why, Style::PLAIN.bold())),
             }
@@ -119,24 +125,25 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
     fn save(&mut self) -> Result<&'static str, &'static str> {
         let Some(store) = &self.store else { return Err("Could not find your settings folders.") };
         let limits = self.limit_change();
-        let remove = self.inside && !self.layout.enabled() && self.installed == Some(true);
+        let remove = !self.layout.enabled() && matches!(self.installed, Installed::Active(_));
         let saved = store.save(self.inside.then_some(&self.layout), limits, &self.run)?;
         if self.inside {
-            self.installed = Some(self.layout.enabled());
+            self.installed =
+                if self.layout.enabled() { Installed::Active(self.layout.clone()) } else { Installed::Absent };
         }
         self.claude = store.claude();
         self.show_limits = self.claude == Claude::On;
         Ok(match saved {
-            Saved::ListenerDidNotStart => "Saved. The Rex listener is not running.",
-            Saved::ListenerDidNotStop if remove => "Removed milo from Rex. The listener is still running.",
-            Saved::ListenerDidNotStop => "Saved. The Rex listener is still running.",
+            Saved::ListenerDidNotStart => "Saved, but new tabs won't be arranged. Save again to retry.",
+            Saved::ListenerDidNotStop if remove => "Removed milo from Rex, but could not stop arranging new tabs.",
+            Saved::ListenerDidNotStop => "Saved, but could not stop arranging new tabs.",
             Saved::Ready if remove && limits.is_some() => "Removed milo from Rex. Saved Claude Code choices.",
             Saved::Ready if remove => "Removed milo from Rex.",
             Saved::Ready if self.inside && self.layout.enabled() && limits.is_some() => {
-                "Saved. Rex and Claude Code choices."
+                "Saved Rex and Claude Code choices."
             }
-            Saved::Ready if self.inside && self.layout.enabled() => "Saved. Rex layout choices.",
-            Saved::Ready if limits.is_some() => "Saved. Claude Code choices.",
+            Saved::Ready if self.inside && self.layout.enabled() => "Saved Rex layout choices.",
+            Saved::Ready if limits.is_some() => "Saved Claude Code choices.",
             Saved::Ready => "No changes to save.",
         })
     }
@@ -193,7 +200,8 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
         let selected = choice == self.selected;
         let style = if selected { Style::PLAIN.bold() } else { Style::PLAIN };
         let compact = width < 49;
-        let (value, explanation) = if compact { (16, 23) } else { (28, 36) };
+        let (value, explanation) =
+            if compact { (16.min(width.saturating_sub(status.len().min(6))), 23) } else { (28, 36) };
         let (name, detail) = choice.labels(compact);
         if selected {
             s.put(0, y, 1, "›", style);
@@ -204,12 +212,16 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
     }
 
     fn footer(&self, s: &mut Screen) {
-        let last = match self.offered {
-            true if s.w < 30 => "q next · ? help",
-            true => "q outline · ? help",
-            false => "q quit · ? help",
-        };
-        let (first, keys): (&str, &[&str]) = if s.w < 40 {
+        if s.w < 17 {
+            if s.w >= 8 {
+                s.put(1, s.h - 1, s.w - 1, if self.offered { "q next" } else { "q quit" }, FAINT);
+            }
+            return;
+        }
+        let last = if self.offered { "q next · ? help" } else { "q quit · ? help" };
+        let (first, keys): (&str, &[&str]) = if !self.can_save() {
+            ("", &[])
+        } else if s.w < 40 {
             ("s save", if self.inside { &["a try"] } else { &["Space"] })
         } else if self.inside {
             ("↑↓ move", &["Space change", "a try", "s save"])
@@ -229,9 +241,9 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
             }
             let status = if self.inside {
                 match self.installed {
-                    Some(true) => "Rex layout installed",
-                    Some(false) => "Rex: not set up yet",
-                    None => "Rex setup could not be read",
+                    Installed::Active(_) => "Rex layout installed",
+                    Installed::Absent => "Rex: not set up yet",
+                    Installed::Unreadable => "Could not read Rex settings",
                 }
             } else if self.claude == Claude::Off {
                 "Not set up yet"
@@ -260,8 +272,8 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
         }
         let issue = match self.claude {
             Claude::Foreign => "Claude Code already has a status line; milo will not replace it.",
-            Claude::NotOwned => "This Claude Code status line was not added by setup.",
-            Claude::Invalid => "Claude Code settings must be a readable JSON object.",
+            Claude::NotOwned => "Milo did not add this status line, so it will leave it alone.",
+            Claude::Invalid => "Milo could not read Claude Code settings. They won't be changed.",
             Claude::On | Claude::Off => "",
         };
         for text in wrap(issue, s.w - 1) {
@@ -278,50 +290,37 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
 
     /// Explain actual file changes before saving, not just which toggles are on.
     fn draw_save_plan(&self, s: &mut Screen, mut y: usize, end: usize) -> usize {
-        let compact = s.w <= 28;
-        let (init, files, reload) = if !self.inside {
-            ("", "", "")
+        let saved = if let Installed::Active(layout) = &self.installed { Some(layout) } else { None };
+        let rex = if !self.inside {
+            ""
         } else if self.layout.enabled() {
-            let init = match (self.installed, compact) {
-                (Some(true), true) => "On save: keep milo's line in Rex's init.lua.",
-                (Some(true), false) => "Keep milo's line in Rex's init.lua.",
-                (_, true) => "On save: add one line to Rex's init.lua.",
-                (_, false) => "Add one line to Rex's init.lua.",
-            };
-            let reload =
-                if self.installed == Some(true) { "Ask Rex to reload if needed." } else { "Ask Rex to reload." };
-            (init, "Write milo's two files.", reload)
-        } else if self.installed == Some(true) {
-            let init = if compact {
-                "On save: remove milo's line from Rex's init.lua."
-            } else {
-                "Remove milo's line from Rex's init.lua."
-            };
-            (init, "Delete milo's two files.", "Ask Rex to reload.")
-        } else {
-            ("", "", "")
-        };
-        let listener = if self.inside && self.layout.new_tabs {
-            "Start arranging new tabs."
-        } else if self.inside && self.installed == Some(true) {
-            "Stop arranging new tabs."
+            match saved {
+                None => "Add two lines to Rex settings.",
+                Some(layout) if layout != &self.layout => "Update the layout in Rex.",
+                Some(_) => "",
+            }
+        } else if saved.is_some() {
+            "Remove Milo's two lines from Rex settings."
         } else {
             ""
+        };
+        let listener = match (saved.is_some_and(|layout| layout.new_tabs), self.layout.new_tabs) {
+            (false, true) => "Arrange new shell tabs.",
+            (true, false) => "Stop arranging new shell tabs.",
+            _ => "",
         };
         let claude = match self.limit_change() {
             Some(true) => "Add milo to Claude Code's status line.",
             Some(false) => "Take milo off Claude Code's status line.",
             None => "",
         };
-        if init.is_empty() && claude.is_empty() {
+        if [rex, listener, claude].iter().all(|text| text.is_empty()) {
             return y;
         }
-        if !compact || init.is_empty() {
-            s.put(1, y, s.w - 1, "On save:", HEADING);
-            y += 1;
-        }
+        s.put(1, y, s.w - 1, "On save:", HEADING);
+        y += 1;
         let width = s.w - 1;
-        for text in [init, files, reload, listener, claude].into_iter().flat_map(|text| wrap(text, width)) {
+        for text in [rex, listener, claude].into_iter().flat_map(|text| wrap(text, width)) {
             if y == end {
                 break;
             }
@@ -402,7 +401,7 @@ fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout) {
     draw(joint + 2, if usage { 4 } else { 3 }, "Your work");
 }
 
-impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
+impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
     fn draw(&mut self, s: &mut Screen) {
         s.clear();
         if s.w < 4 || s.h == 0 {
@@ -414,7 +413,7 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
         }
         let mut end = s.h - 1;
         if let Some((text, style)) = self.message {
-            let rows = wrap(text, s.w - 1).take(end.saturating_sub(1));
+            let rows = wrap(text, s.w - 1).take(end.saturating_sub(2));
             end -= rows.clone().count();
             for (row, text) in rows.enumerate() {
                 s.put(1, end + row, s.w - 1, text, style);
@@ -426,11 +425,17 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
 
     fn help(&self) -> Page {
         use help::{heading, key};
-        let mut rows = vec![heading("Setup keys"), key("Space", "change (Enter)")];
+        let mut rows = vec![heading("Setup keys")];
+        if self.can_save() {
+            rows.push(key("Space", "change (Enter)"));
+        }
         if self.inside {
             rows.extend([key("↑↓   ", "move (k j)"), key("a    ", "try in this tab")]);
         }
-        rows.extend([key("s    ", "save choices"), key("q    ", if self.offered { "open outline" } else { "quit" })]);
+        if self.can_save() {
+            rows.push(key("s    ", "save choices"));
+        }
+        rows.push(key("q    ", if self.offered { "open outline" } else { "quit" }));
         Page::new(rows)
     }
 
@@ -451,7 +456,7 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
                 let tried = self.arrange().map(|()| "Tried in this tab. Not saved yet: press s to keep it.");
                 self.report(tried);
             }
-            Key::Char('s') if self.inside || self.claude.editable() => {
+            Key::Char('s') if self.can_save() => {
                 let saved = self.save();
                 self.report(saved);
             }
@@ -463,6 +468,10 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
 }
 
 impl<R> Setup<R> {
+    fn can_save(&self) -> bool {
+        self.inside || self.claude.editable()
+    }
+
     fn report(&mut self, result: Result<&'static str, &'static str>) {
         self.message = Some(match result {
             Ok(message) => (message, FAINT),
@@ -487,10 +496,16 @@ pub fn listen(stop: bool) -> i32 {
             lock::listen(&state, &config.join("listener.lua"))
         }
     }
-    if run(stop).is_ok() {
-        return 0;
+    let Err(error) = run(stop) else { return 0 };
+    if stop {
+        eprintln!("milo: could not stop the Rex listener: {error}");
+    } else if error.kind() == io::ErrorKind::NotFound {
+        eprintln!(
+            "milo: could not start the Rex listener. Check that Rex is installed and new shell tabs are on in milo setup."
+        );
+    } else {
+        eprintln!("milo: could not start the Rex listener: {error}");
     }
-    eprintln!("milo: could not {} the Rex listener.", if stop { "stop" } else { "start" });
     1
 }
 
@@ -547,7 +562,7 @@ mod tests {
             pane.key(Key::Char('j'));
         }
         let rows = frame(&mut pane, 28, 5);
-        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("New tabs")));
+        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("Shell tabs")));
         assert!(!rows.iter().any(|row| row.contains('┌')));
         assert_eq!(rows[4].trim(), "s save · q quit · ? help");
     }
@@ -562,12 +577,12 @@ mod tests {
         assert!(rows[2].contains("Tab layouts need Rex"));
         assert!(rows[3].contains("milo outline, milo history, milo usage"));
         assert!(rows[4].contains("Show Claude Code limits"));
-        assert!(!rows.iter().any(|row| row.contains("Arrange every new tab")));
+        assert!(!rows.iter().any(|row| row.contains("Arrange new shell tabs")));
         pane.key(Key::Enter);
         pane.key(Key::Char('s'));
         assert!(fs::read_to_string(f.root.join("settings.json")).unwrap().contains("milo claude-status"));
         assert!(!f.root.join("init.lua").exists());
-        assert_eq!(frame(&mut pane, 75, 10)[8].trim(), "Saved. Claude Code choices.");
+        assert_eq!(frame(&mut pane, 75, 10)[8].trim(), "Saved Claude Code choices.");
     }
 
     #[test]
@@ -579,6 +594,7 @@ mod tests {
         let mut pane = Setup::new(Some(store), false, None, |_| panic!("outside Rex"));
         let rows = frame(&mut pane, 78, 10);
         assert!(rows.iter().any(|row| row.contains("Claude Code already has a status line; milo will not replace it")));
+        assert!(!rows[9].contains("save"));
         pane.key(Key::Enter);
         pane.key(Key::Char('s'));
         assert_eq!(fs::read_to_string(f.root.join("settings.json")).unwrap(), original);
@@ -602,10 +618,8 @@ mod tests {
         for text in [
             "Set up panes for Rex tabs.",
             "not set up yet",
-            "add one line to Rex's init.lua.",
-            "Write milo's two files.",
-            "Ask Rex to reload.",
-            "Start arranging new tabs.",
+            "Add two lines to Rex settings.",
+            "Arrange new shell tabs.",
             "Add milo to Claude Code's status line.",
             "Tried in this tab. Not saved yet: press s to keep it.",
         ] {
@@ -621,7 +635,7 @@ mod tests {
         let mut pane = Setup::new(Some(store(&f)), true, None, |_| true);
         assert_eq!(pane.key(Key::Char('s')), After::Stay);
         let rows = frame(&mut pane, 80, 24);
-        assert_eq!(rows[22].trim(), "Saved. Rex layout choices.");
+        assert_eq!(rows[22].trim(), "Saved Rex layout choices.");
         assert!(rows[23].ends_with("q quit · ? help"));
         assert_eq!(rows[2].chars().nth(28), Some('O'));
         assert_eq!(rows[5].chars().nth(28), Some('T'));
@@ -630,10 +644,20 @@ mod tests {
             pane.key(Key::Down);
         }
         let rows = frame(&mut pane, 80, 24);
-        assert!(rows.iter().any(|row| row.contains("Remove milo's line from Rex's init.lua.")));
+        assert!(rows.iter().any(|row| row.contains("Remove Milo's two lines from Rex settings.")));
         assert_eq!(pane.key(Key::Char('s')), After::Stay);
         let rows = frame(&mut pane, 80, 24);
         assert_eq!(rows[22].trim(), "Removed milo from Rex.");
         assert!(rows[23].ends_with("q quit · ? help"));
+    }
+
+    #[test]
+    fn ten_columns_show_the_toggle_and_a_way_out_even_after_an_error() {
+        let f = Fixture::folder();
+        let mut pane = Setup::new(Some(store(&f)), true, None, |_| false);
+        pane.key(Key::Char('a'));
+        let rows = frame(&mut pane, 10, 5);
+        assert!(rows.iter().any(|row| row.starts_with('›') && row.ends_with("On")));
+        assert_eq!(rows[4].trim(), "q quit");
     }
 }

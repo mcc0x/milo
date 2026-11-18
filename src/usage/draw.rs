@@ -6,6 +6,7 @@ mod figure;
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
+use crate::help;
 use crate::picture::Picture;
 use crate::screen::{Screen, Style};
 use crate::ui::FAINT;
@@ -13,7 +14,7 @@ use crate::when::{self, Detail};
 use crate::width::str_width;
 
 use self::figure::Figure;
-use super::{AGE_NOTE, Activity, Limits, Reading, Usage, Window};
+use super::{AGE_NOTE, Activity, CodexSessions, Limits, Reading, Usage, Window};
 
 const SIDE_BY_SIDE: usize = 64;
 // Two short names, two four-character figures and the rule.
@@ -195,7 +196,7 @@ struct Report {
 
 impl Report {
     /// Distinguish missing sessions from unreadable or unreported limits.
-    fn codex(reading: Option<Reading>, no_sessions: bool, now: i64) -> Self {
+    fn codex(reading: Option<Reading>, sessions: &CodexSessions, now: i64) -> Self {
         let [first, second] = figures(reading.map(|reading| reading.windows), now);
         let (first, second, hint) = match (first, second) {
             (Some(first), second) => (first, second, None),
@@ -203,12 +204,13 @@ impl Report {
             (None, None) => (
                 Metric::missing("limits"),
                 None,
-                Some(if reading.is_some() {
-                    Hint { full: "could not read Codex's figures", short: "could not read" }
-                } else if no_sessions {
-                    Hint { full: "no Codex sessions here", short: "no Codex sessions" }
-                } else {
-                    Hint { full: "no limits reported", short: "no limits" }
+                Some(match sessions {
+                    _ if reading.is_some() => Hint { full: "could not read Codex's figures", short: "could not read" },
+                    CodexSessions::Unreadable => {
+                        Hint { full: "could not read Codex sessions", short: "could not read" }
+                    }
+                    CodexSessions::Missing => Hint { full: "no Codex sessions here", short: "no sessions" },
+                    CodexSessions::Present => Hint { full: "no limits reported", short: "no limits" },
                 }),
             ),
         };
@@ -219,31 +221,34 @@ impl Report {
     /// model's week. A window nobody reported gets no empty place, and the
     /// two slots go to the first two there are.
     fn claude(limits: Option<Limits>, now: i64) -> Self {
-        let model = limits.and_then(|limits| limits.model_week).map(|model| {
+        let model = limits.into_iter().filter_map(|limits| limits.model_week).map(|model| {
             let mut metric = Metric::limit(model.window, now);
             metric.label = format!("{} week", model.label()).into();
             metric
         });
         let mut known = figures(limits, now).into_iter().flatten().chain(model);
-        let (first, second) = match known.next() {
-            Some(first) => (first, known.next()),
-            None => (Metric::missing("5h"), Some(Metric::missing("week"))),
+        let (first, second, hint) = match known.next() {
+            Some(first) => (first, known.next(), None),
+            None => (
+                Metric::missing("5h"),
+                Some(Metric::missing("week")),
+                Some(if limits.is_some() {
+                    Hint { full: "no limits reported", short: "no limits" }
+                } else {
+                    Hint { full: "turn on in milo setup", short: "milo setup" }
+                }),
+            ),
         };
-        Self {
-            tool: Tool::Claude,
-            first,
-            second,
-            hint: limits.is_none().then_some(Hint { full: "turn on in milo setup", short: "milo setup" }),
-        }
+        Self { tool: Tool::Claude, first, second, hint }
     }
 
     fn has_number(&self) -> bool {
-        self.first.number.is_some() || self.second.as_ref().is_some_and(|second| second.number.is_some())
+        self.first.number.is_some()
     }
 
     /// Shorten the name and labels before giving up a reported figure.
     fn inline(&self, screen: &mut Screen, area: Area) {
-        let (first, second) = self.inline_metrics(area.w);
+        let first = &self.first;
         let name = self
             .tool
             .names()
@@ -253,7 +258,7 @@ impl Report {
         let identity = if name.is_empty() { 0 } else { name.len() + 1 };
         let label = identity + first.inline_width() <= area.w;
         let used = identity + if label { first.inline_width() } else { first.number_width() };
-        let second = second.filter(|second| label && used + 2 + second.inline_width() <= area.w);
+        let second = self.second.as_ref().filter(|second| label && used + 2 + second.inline_width() <= area.w);
         let tile =
             label && !name.is_empty() && used + second.map_or(0, |second| second.inline_width() + 2) + 3 <= area.w;
         let mut row = RowWriter { screen, x: area.x, y: area.y, left: area.w };
@@ -273,19 +278,6 @@ impl Report {
             row.add("  ", FAINT);
             second.inline(&mut row, true);
         }
-    }
-
-    /// When one figure fits, prefer a limit somebody has actually reported.
-    fn inline_metrics(&self, width: usize) -> (&Metric, Option<&Metric>) {
-        let second = self.second.as_ref();
-        if self.first.number.is_none()
-            && let Some(available) = second
-            && available.number.is_some()
-            && width < self.tool.name().len() + 3 + self.first.inline_width() + available.inline_width()
-        {
-            return (available, None);
-        }
-        (&self.first, second)
     }
 
     /// The age of the oldest figure shown, when it is old enough to say.
@@ -315,17 +307,19 @@ impl Report {
             column.note(screen, chart.note, &text);
         }
         let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
-        let gap = match figures.w {
-            36.. => 3,
-            24..36 => 2,
-            _ => 1,
-        };
-        // A lone figure has the whole width, so that its caption fits.
-        let (first, second) = if self.second.is_some() { figures.split(gap) } else { (figures, figures) };
         let slot = self.tool as usize * 2;
-        self.first.panel(screen, first, chart, slot);
         if let Some(metric) = &self.second {
+            let gap = match figures.w {
+                36.. => 3,
+                24..36 => 2,
+                _ => 1,
+            };
+            let (first, second) = figures.split(gap);
+            self.first.panel(screen, first, chart, slot);
             metric.panel(screen, second, chart, slot + 1);
+        } else {
+            // A lone figure has the whole width, so that its caption fits.
+            self.first.panel(screen, figures, chart, slot);
         }
         // Activity is not a limit, so it never sits under a window as if it
         // were that window's caption: it has a row of its own, or follows
@@ -484,16 +478,22 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         return;
     }
     let reports =
-        [Report::codex(usage.codex.latest(), usage.codex.no_sessions, now), Report::claude(usage.claude.saved, now)];
-    let area = Area { x: 0, y: 0, w, h };
+        [Report::codex(usage.codex.latest(), &usage.codex.sessions, now), Report::claude(usage.claude.saved, now)];
+    let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
+    // Leave the captions and activity their rows in a compact pane.
+    let footer = w >= 8 && h >= if split { 7 } else { 14 };
+    let area = Area { x: 0, y: 0, w, h: h - usize::from(footer) };
     let activity = || usage.claude.activity(today, now);
     if h == 1 && w < ONE_LINE_SPLIT {
         let tool = usize::from(!reports[0].has_number() && reports[1].has_number());
         reports[tool].inline(screen, area);
-    } else if h == 1 || h >= 3 && w >= SIDE_BY_SIDE {
+    } else if split {
         side_by_side(screen, area, &reports, activity);
     } else {
         stacked(screen, area, &reports, activity);
+    }
+    if footer {
+        help::draw_hint(screen, "r reload", &["q quit"], "? help");
     }
 }
 

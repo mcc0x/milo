@@ -5,28 +5,47 @@ use std::path::Path;
 /// Stop adding folders to the walk after this many entries have been listed.
 const CAP: usize = 50_000;
 
+#[derive(Default)]
+pub struct Listing {
+    pub paths: Vec<String>,
+    pub unreadable: bool,
+}
+
 /// Sorted paths relative to `root`. Folders end in `/` and their contents are
 /// listed only if `open` says to descend. Symbolic links are not followed.
-pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Vec<String> {
-    let mut out = Vec::new();
+pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
+    let mut listing = Listing::default();
     let mut dirs = vec![String::new()];
     while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(root.join(&dir)) else { continue };
-        for entry in entries.flatten() {
+        let Ok(entries) = std::fs::read_dir(root.join(&dir)) else {
+            listing.unreadable = true;
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                listing.unreadable = true;
+                continue;
+            };
+            let name = entry.file_name();
             // Hide Finder's folder metadata in the plain tree.
-            if entry.file_name() == ".DS_Store" {
+            if name == ".DS_Store" {
                 continue;
             }
-            let mut path = format!("{dir}{}", entry.file_name().to_string_lossy());
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                if out.len() < CAP && open(&path) {
-                    dirs.push(format!("{path}/"));
-                }
+            let Ok(kind) = entry.file_type() else {
+                listing.unreadable = true;
+                continue;
+            };
+            let mut path = format!("{dir}{}", name.to_string_lossy());
+            if kind.is_dir() {
+                let descend = listing.paths.len() < CAP && open(&path);
                 path.push('/');
+                if descend {
+                    dirs.push(path.clone());
+                }
             }
-            out.push(path);
+            listing.paths.push(path);
         }
     }
-    out.sort_unstable();
-    out
+    listing.paths.sort_unstable();
+    listing
 }

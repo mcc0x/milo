@@ -15,26 +15,30 @@ pub struct Scope {
     pub complete: bool,
 }
 
-/// One watcher per process: the callback finds its pipe through a static.
-/// A running stream, its queue and its write end last until the process exits.
 pub struct Watcher {
-    /// Readable whenever something changed since the last `drain`.
-    heard: Option<PipeReader>,
+    listener: Option<Listener>,
+}
+
+struct Listener {
+    // Stop callbacks before closing the read end.
+    _stream: imp::Stream,
+    heard: PipeReader,
 }
 
 impl Watcher {
     pub fn new(scope: &Scope) -> Watcher {
-        Watcher { heard: imp::start(&scope.roots, &scope.ignored) }
+        Watcher { listener: imp::start(&scope.roots, &scope.ignored) }
     }
 
     /// A descriptor to wait on alongside the keyboard, if watching works here.
     pub fn fd(&self) -> Option<RawFd> {
-        self.heard.as_ref().map(AsRawFd::as_raw_fd)
+        self.listener.as_ref().map(|listener| listener.heard.as_raw_fd())
     }
 
     /// Clears the waiting notification bytes; they carry no path details.
     pub fn drain(&self) {
-        let Some(mut pipe) = self.heard.as_ref() else { return };
+        let Some(listener) = &self.listener else { return };
+        let mut pipe = &listener.heard;
         let mut buf = [0u8; 256];
         loop {
             match pipe.read(&mut buf) {
@@ -49,12 +53,13 @@ impl Watcher {
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::c_void;
-    use std::io::{self, PipeReader};
-    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::io::{self, PipeWriter};
+    use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
-    use std::ptr::{null, null_mut};
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::ptr::{null, null_mut, without_provenance_mut};
+
+    use super::Listener;
 
     /// Seconds FSEvents can wait to combine follow-up notifications.
     const LATENCY: f64 = 0.05;
@@ -63,8 +68,28 @@ mod imp {
     const NO_DEFER: u32 = 0x2;
     const UTF8: u32 = 0x0800_0100;
 
-    /// The write end of the pipe the callback signals through.
-    static SIGNAL: AtomicI32 = AtomicI32::new(-1);
+    pub(super) struct Stream {
+        stream: *mut c_void,
+        queue: *mut c_void,
+        _signal: PipeWriter,
+    }
+
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            extern "C" fn drained(_: *mut c_void) {}
+            // SAFETY: This stream was started on our serial queue. Stop and detach it,
+            // then wait for any callback already on the queue before closing its pipe.
+            unsafe { FSEventStreamStop(self.stream) };
+            // SAFETY: The stopped stream is still scheduled on the queue.
+            unsafe { FSEventStreamInvalidate(self.stream) };
+            // SAFETY: The queue remains live and this drop runs outside it.
+            unsafe { dispatch_sync_f(self.queue, null_mut(), drained) };
+            // SAFETY: Release our retained references after detaching the stream.
+            unsafe { FSEventStreamRelease(self.stream) };
+            // SAFETY: We own the queue and have drained it.
+            unsafe { dispatch_release(self.queue) };
+        }
+    }
 
     #[repr(C)]
     struct Opaque {
@@ -72,6 +97,15 @@ mod imp {
     }
 
     type Callback = extern "C" fn(*const c_void, *mut c_void, usize, *mut c_void, *const u32, *const u64);
+
+    #[repr(C)]
+    struct Context {
+        version: isize,
+        info: *mut c_void,
+        retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+        release: Option<extern "C" fn(*const c_void)>,
+        describe: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     // SAFETY: Declarations match CFArray.h, CFString.h and CFBase.h in the macOS SDK.
@@ -103,7 +137,7 @@ mod imp {
         fn FSEventStreamCreate(
             alloc: *const c_void,
             callback: Callback,
-            context: *mut c_void,
+            context: *mut Context,
             paths: *const c_void,
             since: u64,
             latency: f64,
@@ -112,6 +146,7 @@ mod imp {
         fn FSEventStreamSetExclusionPaths(stream: *mut c_void, paths: *const c_void) -> u8;
         fn FSEventStreamSetDispatchQueue(stream: *mut c_void, queue: *mut c_void);
         fn FSEventStreamStart(stream: *mut c_void) -> u8;
+        fn FSEventStreamStop(stream: *mut c_void);
         fn FSEventStreamInvalidate(stream: *mut c_void);
         fn FSEventStreamRelease(stream: *mut c_void);
     }
@@ -120,16 +155,26 @@ mod imp {
     unsafe extern "C" {
         // dispatch/queue.h
         fn dispatch_queue_create(label: *const libc::c_char, attr: *const c_void) -> *mut c_void;
+        fn dispatch_sync_f(queue: *mut c_void, context: *mut c_void, task: extern "C" fn(*mut c_void));
         // dispatch/object.h
         fn dispatch_release(object: *mut c_void);
     }
 
     /// Runs on the stream's queue. The event loop checks what actually changed.
-    extern "C" fn on_event(_: *const c_void, _: *mut c_void, _: usize, _: *mut c_void, _: *const u32, _: *const u64) {
-        crate::term::wake(SIGNAL.load(Ordering::Relaxed));
+    extern "C" fn on_event(
+        _: *const c_void,
+        info: *mut c_void,
+        _: usize,
+        _: *mut c_void,
+        _: *const u32,
+        _: *const u64,
+    ) {
+        if let Ok(fd) = RawFd::try_from(info.addr().wrapping_sub(1)) {
+            crate::term::wake(fd);
+        }
     }
 
-    pub(super) fn start(roots: &[PathBuf], ignored: &[PathBuf]) -> Option<PipeReader> {
+    pub(super) fn start(roots: &[PathBuf], ignored: &[PathBuf]) -> Option<Listener> {
         let (reader, writer) = io::pipe().ok()?;
         for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
             // SAFETY: each fd is an open pipe end; F_SETFL accepts an integer flag.
@@ -137,15 +182,8 @@ mod imp {
                 return None;
             }
         }
-        SIGNAL.compare_exchange(-1, writer.as_raw_fd(), Ordering::Relaxed, Ordering::Relaxed).ok()?;
-        if stream(roots, ignored) {
-            // The callback can write for the rest of the process.
-            let _ = writer.into_raw_fd();
-            Some(reader)
-        } else {
-            SIGNAL.store(-1, Ordering::Relaxed);
-            None
-        }
+        let (stream, queue) = start_stream(roots, ignored, writer.as_raw_fd())?;
+        Some(Listener { _stream: Stream { stream, queue, _signal: writer }, heard: reader })
     }
 
     /// Makes a Core Foundation array of paths that the caller must release.
@@ -177,24 +215,28 @@ mod imp {
     }
 
     /// Starts a stream on its own queue. The stream keeps the paths it needs.
-    fn stream(roots: &[PathBuf], ignored: &[PathBuf]) -> bool {
+    fn start_stream(roots: &[PathBuf], ignored: &[PathBuf], signal: RawFd) -> Option<(*mut c_void, *mut c_void)> {
         let paths = path_array(roots);
         if paths.is_null() {
-            return false;
+            return None;
         }
-        // SAFETY: paths is a live CFArray and the callback takes no context.
-        let stream = unsafe { FSEventStreamCreate(null(), on_event, null_mut(), paths, SINCE_NOW, LATENCY, NO_DEFER) };
+        // Pass the descriptor as an integer cookie, never as an address to dereference.
+        let info = without_provenance_mut(usize::try_from(signal).expect("an open pipe descriptor") + 1);
+        let mut context = Context { version: 0, info, retain: None, release: None, describe: None };
+        // SAFETY: paths is a live CFArray. The stream copies the fields of context.
+        let stream =
+            unsafe { FSEventStreamCreate(null(), on_event, &mut context, paths, SINCE_NOW, LATENCY, NO_DEFER) };
         // SAFETY: paths was created above and the stream keeps its own paths.
         unsafe { CFRelease(paths) };
         if stream.is_null() {
-            return false;
+            return None;
         }
         if !ignored.is_empty() {
             let ignored = path_array(ignored);
             if ignored.is_null() {
                 // SAFETY: stream is live and has not been scheduled.
                 unsafe { FSEventStreamRelease(stream) };
-                return false;
+                return None;
             }
             // SAFETY: stream is live and ignored is a live CFArray of directory strings.
             let excluded = unsafe { FSEventStreamSetExclusionPaths(stream, ignored) };
@@ -203,7 +245,7 @@ mod imp {
             if excluded == 0 {
                 // SAFETY: stream is live and has not been scheduled.
                 unsafe { FSEventStreamRelease(stream) };
-                return false;
+                return None;
             }
         }
         // SAFETY: the label is a NUL-terminated string; null asks for a serial queue.
@@ -211,13 +253,13 @@ mod imp {
         if queue.is_null() {
             // SAFETY: stream is live and has not been scheduled.
             unsafe { FSEventStreamRelease(stream) };
-            return false;
+            return None;
         }
         // SAFETY: The stream and queue are both live; setting the queue schedules the stream.
         unsafe { FSEventStreamSetDispatchQueue(stream, queue) };
         // SAFETY: The live stream has been scheduled on its queue.
         if unsafe { FSEventStreamStart(stream) } != 0 {
-            return true;
+            return Some((stream, queue));
         }
         // SAFETY: The live stream was scheduled above, so it can be invalidated.
         unsafe { FSEventStreamInvalidate(stream) };
@@ -225,16 +267,43 @@ mod imp {
         unsafe { FSEventStreamRelease(stream) };
         // SAFETY: This releases our reference to the queue after detaching the stream.
         unsafe { dispatch_release(queue) };
-        false
+        None
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use std::io::PipeReader;
     use std::path::PathBuf;
 
-    pub(super) fn start(_: &[PathBuf], _: &[PathBuf]) -> Option<PipeReader> {
+    use super::Listener;
+
+    pub(super) struct Stream;
+    pub(super) fn start(_: &[PathBuf], _: &[PathBuf]) -> Option<Listener> {
         None
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn the_next_pane_gets_live_changes_when_it_replaces_a_watched_pane() {
+        let watch = |folder: &Fixture| {
+            Watcher::new(&Scope { roots: vec![folder.root.clone()], ignored: Vec::new(), complete: true })
+        };
+        let first = Fixture::folder();
+        let original = watch(&first);
+        assert!(original.fd().is_some());
+
+        let second = Fixture::folder();
+        let replacement = watch(&second);
+        drop(original);
+        second.write("new.txt", "recent change\n");
+        let fd = replacement.fd().expect("the next pane should also get a watcher");
+        let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+        assert_eq!(crate::term::wait_ready(&mut fds, 2_000), 1);
+        assert_eq!(fds[0].revents, libc::POLLIN);
     }
 }

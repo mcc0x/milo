@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::env;
-use std::fs::{self, Permissions};
+use std::fs::{self, File, Metadata, Permissions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -28,17 +28,22 @@ pub(super) struct Image {
     pub mode: u32,
 }
 
+pub(super) fn open(path: &Path) -> io::Result<Option<(File, Metadata)>> {
+    let file = match fs_ops::open_read(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let info = file.metadata()?;
+    if !info.is_file() {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    Ok(Some((file, info)))
+}
+
 impl Image {
     pub(super) fn read(path: &Path) -> io::Result<Option<Self>> {
-        let mut file = match fs_ops::open_read(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let info = file.metadata()?;
-        if !info.is_file() {
-            return Err(ErrorKind::InvalidInput.into());
-        }
+        let Some((mut file, info)) = open(path)? else { return Ok(None) };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(Some(Self { bytes, mode: info.permissions().mode() & 0o7777 }))
@@ -46,13 +51,14 @@ impl Image {
 }
 
 /// Use the same naming for staged Lua and for a settings replacement.
-fn temp(dir: &Path, bytes: &[u8]) -> io::Result<Temp> {
+fn temp(dir: &Path, bytes: &[u8], mode: u32) -> io::Result<Temp> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     for _ in 0..32 {
         let path = dir.join(format!(".milo-{}-{}.lua", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         match Temp::create(path) {
             Ok((temp, mut file)) => {
                 file.write_all(bytes)?;
+                file.set_permissions(Permissions::from_mode(mode))?;
                 return Ok(temp);
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
@@ -64,7 +70,8 @@ fn temp(dir: &Path, bytes: &[u8]) -> io::Result<Temp> {
 
 /// Checking and trying a layout do not create the directory it would be installed in.
 pub(super) fn staged(near: &Path, bytes: &[u8]) -> io::Result<Temp> {
-    if let Some(dir) = near.ancestors().find(|p| p.is_dir()) { temp(dir, bytes) } else { temp(&env::temp_dir(), bytes) }
+    let dir = near.ancestors().find(|p| p.is_dir());
+    dir.map_or_else(|| temp(&env::temp_dir(), bytes, 0o600), |dir| temp(dir, bytes, 0o600))
 }
 
 /// A planned edit carries the old state, so a concurrent edit is not overwritten.
@@ -80,20 +87,25 @@ impl Change {
         (after != before).then_some(Self { path, before, after })
     }
 
-    /// Apply or undo only while the file still has the bytes and mode we expect.
+    /// Stage before rechecking the old file so the check is close to publication.
     fn replace(&self, expected: &Option<Image>, image: Option<&Image>) -> io::Result<()> {
+        let staged = if let Some(image) = image {
+            let dir = self.path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            fs::create_dir_all(dir)?;
+            Some(temp(dir, &image.bytes, image.mode)?)
+        } else {
+            None
+        };
+        if expected.is_none()
+            && let Some(staged) = &staged
+        {
+            // Publishing a new file must not overwrite a file that just appeared.
+            return fs::hard_link(staged.path(), &self.path);
+        }
         if &Image::read(&self.path)? != expected {
             return Err(ErrorKind::Interrupted.into());
         }
-        if let Some(image) = image {
-            let dir = self.path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-            fs::create_dir_all(dir)?;
-            let file = temp(dir, &image.bytes)?;
-            fs::set_permissions(file.path(), Permissions::from_mode(image.mode))?;
-            file.replace(&self.path)
-        } else {
-            fs::remove_file(&self.path)
-        }
+        if let Some(staged) = staged { staged.replace(&self.path) } else { fs::remove_file(&self.path) }
     }
 }
 

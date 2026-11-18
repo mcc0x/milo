@@ -5,12 +5,20 @@
 //! image tool that comes with macOS; elsewhere only PNG files can be shown.
 
 use std::borrow::Cow;
+#[cfg(target_os = "macos")]
+use std::io::Read as _;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use crate::fs_ops::{self, Temp};
+use crate::read::{self, Content};
+#[cfg(target_os = "macos")]
 use crate::term;
 
 /// Picture files larger than this are not opened.
@@ -18,6 +26,7 @@ const FILE_LIMIT: u64 = 64 << 20;
 /// The longest side kept, in pixels: more than any pane has to show it with.
 const LONGEST_SIDE: u32 = 1600;
 /// How long a conversion may take before it is given up on.
+#[cfg(target_os = "macos")]
 const DEADLINE: Duration = Duration::from_secs(5);
 /// Bytes of encoded picture sent to the terminal at a time, as it asks.
 const CHUNK: usize = 4096;
@@ -47,15 +56,18 @@ impl Picture {
     /// Reads the picture at `path`, or says in plain words why it cannot be
     /// shown. A link is not followed: what it points to may be anywhere.
     pub fn open(path: &Path) -> Result<Self, &'static str> {
-        let meta = std::fs::symlink_metadata(path).map_err(|_| "This file is gone.")?;
-        if !meta.is_file() {
-            return Err("Not a file, so there is nothing to show.");
-        }
-        if meta.len() > FILE_LIMIT {
-            return Err("Too large to show.");
-        }
-        let png = to_png(path).ok_or("This picture cannot be shown.")?;
-        Self::png(png.into()).ok_or("This picture cannot be shown.")
+        let bytes = match read::file(path, FILE_LIMIT) {
+            Content::Bytes(bytes) => bytes,
+            Content::Gone => return Err("This file is gone."),
+            Content::TooLarge => return Err("Too large to show."),
+            Content::Unreadable => return Err("This file cannot be read."),
+            Content::NotFile | Content::Link(_) => return Err("Not a file, so there is nothing to show."),
+        };
+        let png = match png_size(&bytes) {
+            Some((w, h)) if w.max(h) <= LONGEST_SIDE => Some(bytes),
+            size => convert(bytes, path, size.is_some()),
+        };
+        png.and_then(|png| Self::png(png.into())).ok_or("This picture cannot be shown.")
     }
 
     /// Opens a PNG built into milo without copying its bytes.
@@ -93,8 +105,9 @@ impl Picture {
     /// Writes what hands the picture's data to a terminal that speaks the
     /// kitty graphics protocol: the PNG in base64, in pieces, under its number.
     pub fn transmit(&self, out: &mut Vec<u8>) {
-        let encoded = base64(&self.png);
-        let mut pieces = encoded.chunks(CHUNK).peekable();
+        let encoded_len = self.png.len().div_ceil(3) * 4;
+        out.reserve(encoded_len + encoded_len.div_ceil(CHUNK) * 12 + 32);
+        let mut pieces = self.png.chunks(CHUNK / 4 * 3).peekable();
         let mut first = true;
         while let Some(piece) = pieces.next() {
             let more = u8::from(pieces.peek().is_some());
@@ -105,7 +118,7 @@ impl Picture {
             } else {
                 write!(out, "\x1b_Gm={more};")
             };
-            out.extend_from_slice(piece);
+            append_base64(piece, out);
             out.extend_from_slice(b"\x1b\\");
             first = false;
         }
@@ -121,67 +134,54 @@ fn png_size(png: &[u8]) -> Option<(u32, u32)> {
     (header.get(4..8)? == b"IHDR" && width > 0 && height > 0).then_some((width, height))
 }
 
-/// The picture as PNG data no longer than `LONGEST_SIDE` on a side. A PNG
-/// that is already small enough is used as it is.
-fn to_png(path: &Path) -> Option<Vec<u8>> {
-    let is_png = path.extension().is_some_and(|ending| ending.eq_ignore_ascii_case("png"));
-    if is_png {
-        let png = std::fs::read(path).ok()?;
-        if png_size(&png).is_some_and(|(w, h)| w.max(h) <= LONGEST_SIDE) {
-            return Some(png);
-        }
-    }
-    convert(path)
-}
-
-/// A file of this process's own in the temporary directory, removed when
-/// it goes out of use.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(id: u32) -> Self {
-        Self(std::env::temp_dir().join(format!("milo-{}-{id}.png", std::process::id())))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Converts with `sips`, then shrinks the result if it is larger than a pane
-/// could use. Shrinking is a second step because `sips` would enlarge a
-/// small picture to the size asked for.
+/// Convert a private copy: the original path may no longer name the file we opened.
 #[cfg(target_os = "macos")]
-fn convert(path: &Path) -> Option<Vec<u8>> {
-    let scratch = Scratch::new(NEXT_ID.fetch_add(1, Ordering::Relaxed));
-    let sips = |args: &[&std::ffi::OsStr]| {
+fn convert(bytes: Vec<u8>, path: &Path, known_large: bool) -> Option<Vec<u8>> {
+    let dir = std::env::temp_dir();
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let prefix = format!("milo-{}-{id}", std::process::id());
+    let source = dir.join(format!("{prefix}-in")).with_extension(path.extension().unwrap_or_default());
+    let (input, mut file) = Temp::create(source).ok()?;
+    file.write_all(&bytes).ok()?;
+    drop(file);
+    drop(bytes);
+    let (output, _) = Temp::create(dir.join(format!("{prefix}-out.png"))).ok()?;
+
+    let side = LONGEST_SIDE.to_string();
+    let sips = |source: &Path, resize: bool| {
         let mut command = Command::new("/usr/bin/sips");
-        command.args(args).arg("--out").arg(&scratch.0);
+        if resize {
+            command.args(["-Z", &side]);
+        }
+        command.args(["-s", "format", "png"]).arg(source).arg("--out").arg(output.path());
         finishes(command)
     };
-    if !sips(&["-s".as_ref(), "format".as_ref(), "png".as_ref(), path.as_os_str()]) {
+    if !sips(input.path(), known_large) {
         return None;
     }
-    let png = std::fs::read(&scratch.0).ok()?;
-    if png_size(&png)?.0.max(png_size(&png)?.1) <= LONGEST_SIDE {
-        return Some(png);
+    // The unscaled conversion may be large; only read its dimensions before shrinking.
+    let mut header = [0; 24];
+    fs_ops::open_read(output.path()).ok()?.read_exact(&mut header).ok()?;
+    let (w, h) = png_size(&header)?;
+    if w.max(h) > LONGEST_SIDE && !sips(output.path(), true) {
+        return None;
     }
-    let side = LONGEST_SIDE.to_string();
-    sips(&["-Z".as_ref(), side.as_ref(), scratch.0.as_os_str()]).then(|| std::fs::read(&scratch.0).ok())?
+    match read::file(output.path(), FILE_LIMIT) {
+        Content::Bytes(png) => Some(png),
+        _ => None,
+    }
 }
 
 /// Without a converter at hand, only what is already a PNG can be shown.
 #[cfg(not(target_os = "macos"))]
-fn convert(_: &Path) -> Option<Vec<u8>> {
+fn convert(_: Vec<u8>, _: &Path, _: bool) -> Option<Vec<u8>> {
     None
 }
 
 /// Runs a command to its end and says whether it succeeded. One that takes
 /// too long, or outlives a request to quit, is stopped: a file made to
 /// stall a converter must not stall milo.
-#[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "only macOS has a converter to run"))]
+#[cfg(target_os = "macos")]
 fn finishes(mut command: Command) -> bool {
     let started = Instant::now();
     let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
@@ -203,9 +203,8 @@ fn finishes(mut command: Command) -> bool {
 }
 
 /// Standard base64, with padding.
-fn base64(data: &[u8]) -> Vec<u8> {
+fn append_base64(data: &[u8], out: &mut Vec<u8>) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
     for group in data.chunks(3) {
         let bits = group.iter().fold(0u32, |bits, &byte| bits << 8 | u32::from(byte)) << (8 * (3 - group.len()));
         for place in 0..4 {
@@ -214,7 +213,6 @@ fn base64(data: &[u8]) -> Vec<u8> {
             out.push(letter);
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -249,7 +247,11 @@ mod tests {
 
     #[test]
     fn base64_pads_what_does_not_fill_a_group() {
-        let text = |data: &[u8]| String::from_utf8(base64(data)).unwrap();
+        let text = |data: &[u8]| {
+            let mut out = Vec::new();
+            append_base64(data, &mut out);
+            String::from_utf8(out).unwrap()
+        };
         assert_eq!([text(b""), text(b"f"), text(b"fo"), text(b"foo")], ["", "Zg==", "Zm8=", "Zm9v"]);
         assert_eq!(text(b"\xff\xfe\xfd\xfc"), "//79/A==");
     }
@@ -287,5 +289,10 @@ mod tests {
         assert_eq!(pieces.len(), 2);
         assert!(pieces[0].starts_with("\x1b_Ga=t,f=100,i=9,q=2,m=1;"));
         assert!(pieces[1].starts_with("\x1b_Gm=0;"));
+        let (first, second) = (pieces[0].split_once(';').unwrap().1, pieces[1].split_once(';').unwrap().1);
+        assert_eq!(first.len(), CHUNK);
+        let mut encoded = Vec::new();
+        append_base64(&picture.png, &mut encoded);
+        assert_eq!([first, second].concat().as_bytes(), encoded);
     }
 }

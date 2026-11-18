@@ -35,6 +35,9 @@ impl Home {
         let name = format!("milo-listener-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let home = Self { root: std::env::temp_dir().join(name) };
         fs::create_dir_all(home.root.join("bin")).unwrap();
+        let config = home.root.join(".config/milo");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("listener.lua"), "").unwrap();
         home.set_rex(rex);
         home
     }
@@ -159,4 +162,14 @@ fn stopping_retries_when_the_listener_holds_the_lock_after_the_wait() {
     }
     assert!(soon(|| listener.try_wait().unwrap().is_some()));
     assert!(stopped);
+}
+
+#[test]
+fn starting_without_a_saved_listener_explains_how_to_enable_it() {
+    let home = Home::new("#!/bin/sh\necho started > \"$HOME/started\"\n");
+    fs::remove_file(home.root.join(".config/milo/listener.lua")).unwrap();
+    let output = home.milo(&["listen"]).stderr(Stdio::piped()).output().unwrap();
+    assert!(!output.status.success());
+    assert!(!home.started());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("new shell tabs are on in milo setup"));
 }

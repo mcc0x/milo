@@ -16,7 +16,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 - If the user wants to configure milo, open `milo setup` inside Rex. Let the
   user choose the panes and optionally enable **Show Claude Code limits**.
   `s` saves; `a` tries the layout in this tab. To remove the Rex setup, turn off
-  all three panes and **Arrange every new tab**, then press `s`.
+  all three panes and **Arrange new shell tabs**, then press `s`.
 
 ## Commands
 

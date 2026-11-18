@@ -25,7 +25,7 @@ const LIMIT: u64 = 2 << 20;
 const LEAD: usize = 3;
 /// Extra room in the scan limit for a token that crosses the right edge.
 const LEAD_OUT: usize = 32;
-const NOT_TEXT: &str = "Not text, so there is nothing to show.";
+const NOT_TEXT: &str = "This file is not text.";
 
 /// The file open in a pane and the position from which it is shown.
 pub struct Reader {
@@ -126,38 +126,64 @@ impl Body {
             Self::Note(_) | Self::Picture(_) => &[],
         }
     }
+
+    fn from_lines(lines: Result<Vec<Line>, &'static str>, lang: Option<&Lang>) -> Self {
+        match lines {
+            Ok(lines) => Self::Text(Text::new(lines, lang)),
+            Err(note) => Self::Note(note),
+        }
+    }
 }
 
 struct Text {
     lines: Vec<Line>,
     /// What was still open at the start of each line, for files coloured as code.
     starts: Vec<State>,
+    /// Start of each block of changed lines, before adding viewing context.
+    changes: Vec<usize>,
     digits: usize,
     added: u32,
     removed: u32,
 }
 
 impl Text {
-    fn new(lines: Vec<Line>, lang: Option<&Lang>, spans: &mut Vec<Span>) -> Self {
+    fn new(lines: Vec<Line>, lang: Option<&Lang>) -> Self {
         let mut starts = Vec::with_capacity(if lang.is_some() { lines.len() } else { 0 });
+        let mut changes = Vec::new();
         let mut state = State::default();
         let (mut last, mut added, mut removed) = (1, 0, 0);
-        for line in &lines {
+        let mut previous = LineKind::Same;
+        for (i, line) in lines.iter().enumerate() {
             last = last.max(line.number);
             match line.kind {
                 LineKind::Add => added += 1,
                 LineKind::Del => removed += 1,
                 LineKind::Same => {}
             }
+            if previous == LineKind::Same && line.kind != LineKind::Same {
+                changes.push(i);
+            }
+            previous = line.kind;
             if let Some(lang) = lang {
                 starts.push(state);
                 // Removed lines are not part of the file's syntax.
                 if line.kind != LineKind::Del {
-                    lang.scan(&line.text, &mut state, spans);
+                    lang.advance(&line.text, &mut state);
                 }
             }
         }
-        Self { lines, starts, digits: last.ilog10() as usize + 1, added, removed }
+        Self { lines, starts, changes, digits: last.ilog10() as usize + 1, added, removed }
+    }
+
+    /// Finds the next or previous block, wrapping and skipping duplicate viewport positions.
+    fn change_top(&self, top: usize, last: usize, direction: Direction) -> Option<usize> {
+        let at = |&line: &usize| line.saturating_sub(LEAD).min(last);
+        let changes = &self.changes;
+        match direction {
+            Direction::Next => changes.get(changes.partition_point(|line| at(line) <= top)).or(changes.first()),
+            Direction::Previous => changes[..changes.partition_point(|line| at(line) < top)].last().or(changes.last()),
+        }
+        .map(at)
     }
 }
 
@@ -186,44 +212,12 @@ fn byte_lines(bytes: &[u8], kind: LineKind) -> Result<Vec<Line>, &'static str> {
     Ok((1..).zip(text.lines()).map(|(no, line)| Line::new(kind, no, line)).collect())
 }
 
-/// Finds the next or previous run of changes, wrapping at either end.
-fn change_top(
-    kinds: impl IntoIterator<Item = LineKind>,
-    top: usize,
-    last: usize,
-    direction: Direction,
-) -> Option<usize> {
-    let (mut first, mut final_top, mut previous) = (None, None, None);
-    let mut same = true;
-    for (i, kind) in kinds.into_iter().enumerate() {
-        let starts = same && kind != LineKind::Same;
-        same = kind == LineKind::Same;
-        if !starts {
-            continue;
-        }
-        let at = i.saturating_sub(LEAD).min(last);
-        if direction == Direction::Next && at > top {
-            return Some(at);
-        }
-        if direction == Direction::Previous && at >= top && previous.is_some() {
-            return previous;
-        }
-        first.get_or_insert(at);
-        final_top = Some(at);
-        if at < top {
-            previous = Some(at);
-        }
-    }
-    match direction {
-        Direction::Next => first,
-        Direction::Previous => previous.or(final_top),
-    }
-}
-
 /// The byte to draw from and the prefix needed to colour what is shown.
 fn text_for_draw(text: &str, pan: usize, width: usize) -> (usize, &str) {
     let skip = byte_at_col(text, pan);
-    let end = text.floor_char_boundary(skip + (width + LEAD_OUT) * 4);
+    let rest = &text[skip..];
+    let columns = width + LEAD_OUT;
+    let end = if rest.len() <= columns { text.len() } else { skip + byte_at_col(rest, columns) };
     (skip, &text[..end])
 }
 
@@ -255,12 +249,14 @@ impl LinePainter<'_> {
             LineKind::Add => ("+", ADD, ADD),
             LineKind::Del => ("-", DEL, DEL),
         };
-        if line.kind != LineKind::Del {
-            s.put_number(self.x - 3, y, line.number, margin_style);
-        }
-        s.put(self.x - 2, y, 1, sign, margin_style);
-        if self.pan > 0 {
-            s.put(self.x - 1, y, 1, "‹", FAINT);
+        if self.x >= 3 {
+            if line.kind != LineKind::Del {
+                s.put_number(self.x - 3, y, line.number, margin_style);
+            }
+            s.put(self.x - 2, y, 1, sign, margin_style);
+            if self.pan > 0 {
+                s.put(self.x - 1, y, 1, "‹", FAINT);
+            }
         }
         let (skip, text) = text_for_draw(&line.text, self.pan, self.width);
         s.put(self.x, y, self.width, &text[skip..], text_style);
@@ -354,20 +350,16 @@ impl Reader {
     fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {
         let short_id = hash[..hash.len().min(7)].to_string();
         let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time });
-        reader.body = reader.text_or_note(committed_lines(repo, path, hash, file));
+        reader.body = Body::from_lines(committed_lines(repo, path, hash, file), reader.lang);
         reader.reveal_first_change();
         reader
     }
 
     fn reveal_first_change(&mut self) {
-        let first = self.body.lines().iter().position(|line| line.kind != LineKind::Same);
-        self.top = first.map_or(0, |i| i.saturating_sub(LEAD));
-    }
-
-    fn text_or_note(&mut self, lines: Result<Vec<Line>, &'static str>) -> Body {
-        match lines {
-            Ok(lines) => Body::Text(Text::new(lines, self.lang, &mut self.spans)),
-            Err(note) => Body::Note(note),
+        if let Body::Text(text) = &self.body
+            && let Some(first) = text.changes.first()
+        {
+            self.top = first.saturating_sub(LEAD);
         }
     }
 
@@ -379,6 +371,7 @@ impl Reader {
         if !work.repo.ok() {
             return;
         }
+        let picture = picture::is_picture(&self.path);
         let (kind, lines) = match work.file_diff(&self.path) {
             Some(FileDiff { lines, kind, .. }) => (kind, Ok(lines)),
             None if work.repo.ok() => {
@@ -391,7 +384,6 @@ impl Reader {
             }
             None => return,
         };
-        let picture = picture::is_picture(&self.path);
         let kept = lines.is_ok() && picture && stamp == work.stamp && matches!(self.body, Body::Picture(_));
         self.kind = kind;
         work.stamp = stamp;
@@ -399,16 +391,11 @@ impl Reader {
             return;
         }
         self.body = match lines {
-            Ok(lines) if lines.is_empty() || picture => {
-                // A link is shown as where it points, never as what is there.
-                if picture && !work.absolute.is_symlink() {
-                    Picture::open(&work.absolute).map_or_else(Body::Note, Body::Picture)
-                } else {
-                    let lines = file_lines(&work.absolute, kind);
-                    self.text_or_note(lines)
-                }
+            Ok(_) if picture && !work.absolute.is_symlink() => {
+                Picture::open(&work.absolute).map_or_else(Body::Note, Body::Picture)
             }
-            lines => self.text_or_note(lines),
+            Ok(lines) if lines.is_empty() || picture => Body::from_lines(file_lines(&work.absolute, kind), self.lang),
+            lines => Body::from_lines(lines, self.lang),
         };
     }
 
@@ -421,8 +408,9 @@ impl Reader {
     }
 
     fn jump(&mut self, direction: Direction) {
-        let kinds = self.body.lines().iter().map(|line| line.kind);
-        if let Some(top) = change_top(kinds, self.top, self.last_top(), direction) {
+        if let Body::Text(text) = &self.body
+            && let Some(top) = text.change_top(self.top, self.last_top(), direction)
+        {
             self.top = top;
         }
     }
@@ -459,9 +447,6 @@ fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFil
             OutputError::TooLarge => "Too large to show.",
             OutputError::Failed => "Git did not answer for this file.",
         })?;
-        if raw.contains(&0) {
-            return Err(NOT_TEXT);
-        }
         let patch = diff::parse(&raw);
         if !patch.lines.is_empty() {
             return Ok(patch.lines);
@@ -527,40 +512,41 @@ impl Pane for Reader {
 
     fn draw(&mut self, s: &mut Screen) {
         s.clear();
-        let (w, h) = (s.w, s.h);
-        if w < 20 || h < 3 {
+        self.rows = s.h.saturating_sub(2);
+        if s.w == 0 || s.h == 0 {
             return;
         }
-        self.rows = h - 2;
-        self.top = self.top.min(self.last_top());
         self.draw_heading(s);
-        match &self.body {
-            Body::Note(note) => {
-                s.put_fit(2, 2, w - 4, note, FAINT);
-                self.pan = 0;
-            }
-            Body::Picture(picture) => {
-                self.pan = 0;
-                // The picture sits in the middle of the space between
-                // heading and hint, with a column clear on either side.
-                let (room_w, room_h) = (w - 2, self.rows);
-                match s.pictures() {
-                    Some(true) => {
-                        let (cols, rows) = picture.fit(s.cell_size(), room_w, room_h);
-                        s.show_picture(picture, 1 + (room_w - cols) / 2, 1 + (room_h - rows) / 2, cols, rows);
-                    }
-                    Some(false) => {
-                        s.put_fit(2, 2, w - 4, "This terminal cannot show pictures.", FAINT);
-                    }
-                    // The terminal has not yet said; it will in a moment.
-                    None => {}
+        if self.rows > 0 {
+            self.draw_body(s);
+        }
+        if s.h > 1 {
+            self.draw_hint(s);
+        }
+    }
+}
+
+impl Reader {
+    fn draw_body(&mut self, s: &mut Screen) {
+        self.top = self.top.min(self.last_top());
+        let note = match &self.body {
+            Body::Note(note) => Some(*note),
+            Body::Picture(picture) => match s.pictures() {
+                Some(true) if s.w > 2 => {
+                    let room = s.w - 2;
+                    let (cols, rows) = picture.fit(s.cell_size(), room, self.rows);
+                    s.show_picture(picture, 1 + (room - cols) / 2, 1 + (self.rows - rows) / 2, cols, rows);
+                    None
                 }
-            }
+                Some(false) => Some("This terminal cannot show pictures."),
+                _ => None,
+            },
             Body::Text(text) => {
                 let lines = &text.lines[self.top..];
                 let shown = &lines[..lines.len().min(self.rows)];
-                let x = text.digits + 4;
-                let width = w - 1 - x;
+                let gutter = text.digits + 4;
+                let x = if s.w >= gutter + 3 { gutter } else { 0 };
+                let width = s.w - 1 - x;
                 if self.pan > 0 {
                     let longest = shown.iter().map(|line| line.width).max().unwrap_or(0);
                     self.pan = self.pan.min(longest.saturating_sub(width));
@@ -570,19 +556,21 @@ impl Pane for Reader {
                     let state = text.starts.get(self.top + i).copied().unwrap_or_default();
                     painter.draw_line(s, i + 1, line, state);
                 }
-                ui::thumb(s, w - 1, 1, self.rows, text.lines.len(), self.top);
+                ui::thumb(s, s.w - 1, 1, self.rows, text.lines.len(), self.top);
+                return;
             }
+        };
+        self.pan = 0;
+        if let Some(note) = note {
+            s.put_fit(2, self.rows.min(2), s.w.saturating_sub(3), note, FAINT);
         }
-        self.draw_hint(s);
     }
-}
 
-impl Reader {
     fn draw_hint(&self, s: &mut Screen) {
         let changes = matches!(&self.body, Body::Text(text)
             if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize);
         let committed = matches!(self.source, Source::Committed { .. });
-        let still = matches!(self.body, Body::Picture(_)) || (committed && !matches!(self.body, Body::Text(_)));
+        let still = !matches!(self.body, Body::Text(_));
         let action = match (changes, committed) {
             (true, true) => "n N changes",
             (true, false) => "n next change",
@@ -594,32 +582,51 @@ impl Reader {
 
     /// Keeps the file name ahead of its directory so the name gets the space first.
     fn draw_heading(&self, s: &mut Screen) {
+        let right = self.draw_details(s);
+        let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
+        let room = if right == s.w - 1 { right } else { right.saturating_sub(2) };
+        let mut x = 1;
+        if room > 10 {
+            x += ui::icon(s, x, 0, room - x, icons::file(name));
+        }
+        x += s.put_middle(x, 0, room.saturating_sub(x), name, Style::PLAIN.bold());
+        s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, FAINT);
+    }
+
+    fn draw_details(&self, s: &mut Screen) -> usize {
         let mut right = s.w - 1;
+        const NAME_ROOM: usize = 10;
         if let Source::Committed { short_id, time } = &self.source {
             let age = when::short_age(when::now().saturating_sub(*time));
             let ago = if age == "now" { "" } else { " ago" };
             let summary = format!("commit {short_id} · {age}{ago}");
-            let summary =
-                if str_width(&summary) <= right.saturating_sub(6) { &summary } else { &summary[..7 + short_id.len()] };
-            right -= s.put_right(right, 0, summary, FAINT);
+            let (bare, _) = summary.split_once(" · ").expect("commit and age are separated");
+            let room = right.saturating_sub(NAME_ROOM);
+            if str_width(&summary) <= room {
+                right -= s.put_right(right, 0, &summary, FAINT);
+            } else if bare.len() <= room {
+                right -= s.put_right(right, 0, bare, FAINT);
+            }
         } else if let Body::Picture(picture) = &self.body {
             let size = format!("{}×{}", picture.width, picture.height);
-            right -= s.put_right(right, 0, &size, FAINT).min(right);
+            if str_width(&size) <= right.saturating_sub(NAME_ROOM) {
+                right -= s.put_right(right, 0, &size, FAINT);
+            }
         }
         if matches!(self.source, Source::Working(_)) && self.kind != Kind::None {
-            if let Body::Text(text) = &self.body {
-                right -= ui::size_right(s, right, 0, text.added, text.removed).min(right);
-            }
             let word = ui::kind_word(self.kind);
-            let end = right.saturating_sub(2);
-            s.put_right(end.max(word.len()), 0, word, ui::kind_colour(self.kind));
-            right = end.saturating_sub(word.len());
+            let status = word.len() + 2;
+            if status <= right.saturating_sub(NAME_ROOM) {
+                if let Body::Text(text) = &self.body
+                    && ui::size_width(text.added, text.removed) + status <= right.saturating_sub(NAME_ROOM)
+                {
+                    right -= ui::size_right(s, right, 0, text.added, text.removed);
+                }
+                right -= 2;
+                right -= s.put_right(right, 0, word, ui::kind_colour(self.kind));
+            }
         }
-        let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
-        let room = right.saturating_sub(2);
-        let mut x = 1 + ui::icon(s, 1, 0, room, icons::file(name));
-        x += s.put_fit(x, 0, room.saturating_sub(x), name, Style::PLAIN.bold());
-        s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, FAINT);
+        right
     }
 }
 
@@ -646,6 +653,43 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_file_uses_the_body_row_not_the_hint_row() {
+        let f = Fixture::folder();
+        f.write("empty.txt", "");
+        let mut reader = Reader::open(&f.root.join("empty.txt")).unwrap();
+        let rows = drawn(&mut reader, 40, 3);
+        assert_eq!(&rows[1..], ["  Empty.", " q close · ? help"]);
+    }
+
+    #[test]
+    fn a_narrow_reader_keeps_a_file_name_and_shows_its_text_when_there_is_a_body_row() {
+        let f = Fixture::folder();
+        f.write("test.txt", "hi\n");
+        let mut reader = Reader::open(&f.root.join("test.txt")).unwrap();
+        assert!(drawn(&mut reader, 40, 1)[0].ends_with("test.txt"));
+        let narrow = drawn(&mut reader, 10, 20);
+        assert!(narrow[0].ends_with("test.txt") && narrow[1].ends_with("hi"), "{narrow:?}");
+    }
+
+    #[test]
+    fn a_long_name_keeps_its_extension_in_a_narrow_heading() {
+        let f = Fixture::folder();
+        let file = "a-very-long-file-name-with-界.txt";
+        f.write(file, "hi\n");
+        let mut reader = Reader::open(&f.root.join(file)).unwrap();
+        let rows = drawn(&mut reader, 28, 20);
+        assert!(rows[0].contains('…') && rows[0].ends_with(".txt"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_long_run_of_combining_marks_does_not_hide_later_text_on_the_same_line() {
+        let f = Fixture::folder();
+        f.write("page.rs", &format!("a{}after\n", "\u{301}".repeat(300)));
+        let mut reader = Reader::open(&f.root.join("page.rs")).unwrap();
+        assert!(drawn(&mut reader, 80, 24)[1].ends_with("aafter"));
+    }
+
+    #[test]
     fn committed_pictures_and_other_binary_files_have_a_plain_note() {
         let f = Fixture::new();
         fs::write(f.root.join("logo.png"), Picture::sample_png(64, 32)).unwrap();
@@ -665,6 +709,17 @@ mod tests {
             assert!(screen.picture_at().is_none());
             assert_eq!(screen.text()[2], format!("  {NOT_TEXT}"));
         }
+    }
+
+    #[test]
+    fn working_diffs_forced_to_text_do_not_show_binary_bytes() {
+        let f = Fixture::new();
+        f.write(".gitattributes", "data.bin diff\n");
+        f.write("data.bin", "before\0");
+        f.commit("binary files");
+        f.write("data.bin", "after\0");
+        let mut reader = Reader::open(&f.root.join("data.bin")).unwrap();
+        assert_eq!(drawn(&mut reader, 45, 8)[2].trim_start(), "This file is not text.");
     }
 
     #[test]
@@ -767,8 +822,9 @@ mod tests {
         kinds[94] = LineKind::Add;
         kinds[96] = LineKind::Del;
         use Direction::{Next, Previous};
+        let text = Text::new((1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(), None);
         for (top, direction, expected) in [(6, Next, 82), (82, Next, 6), (6, Previous, 82), (82, Previous, 6)] {
-            assert_eq!(change_top(kinds, top, 82, direction), Some(expected));
+            assert_eq!(text.change_top(top, 82, direction), Some(expected));
         }
     }
 
@@ -882,5 +938,18 @@ mod tests {
         fs::remove_file(&file).unwrap();
         let mut gone = Reader::open(&file).unwrap();
         assert_eq!(drawn(&mut gone, 60, 6)[2].trim_start(), "This file is gone.");
+    }
+
+    #[test]
+    fn an_unreadable_picture_explains_why_it_cannot_be_shown() {
+        let f = Fixture::folder();
+        let file = f.root.join("logo.png");
+        fs::write(&file, Picture::sample_png(32, 32)).unwrap();
+        fs::set_permissions(&file, Permissions::from_mode(0o0)).unwrap();
+        if fs::File::open(&file).is_ok() {
+            return;
+        }
+        let mut reader = Reader::open(&file).unwrap();
+        assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file cannot be read.");
     }
 }

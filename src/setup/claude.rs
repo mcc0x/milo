@@ -88,15 +88,11 @@ impl ClaudeFiles<'_> {
                 changes.extend(Change::new(self.path.into_owned(), self.settings, Some(text.into_bytes())));
             }
             (Claude::On, false) => {
-                let text = json.remove().expect("the status line is milo's");
                 let created = self.note.as_ref().is_some_and(|note| note.bytes == CLAUDE_CREATED);
-                let now_empty = Settings::parse(&text).is_some_and(|settings| settings.is_empty());
-                let delete = created && now_empty && matches!(self.path, Cow::Borrowed(_));
-                changes.extend(Change::new(
-                    self.path.into_owned(),
-                    self.settings,
-                    (!delete).then(|| text.into_bytes()),
-                ));
+                let untouched = self.settings.as_ref().is_some_and(|file| file.bytes == settings::NEW.as_bytes());
+                let delete = created && untouched && matches!(self.path, Cow::Borrowed(_));
+                let after = (!delete).then(|| json.remove().expect("the status line is milo's").into_bytes());
+                changes.extend(Change::new(self.path.into_owned(), self.settings, after));
                 changes.extend(Change::new(self.note_path, self.note, None));
             }
             (Claude::Off, false) => changes.extend(Change::new(self.note_path, self.note, None)),

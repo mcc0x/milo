@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use crate::git::Kind;
-use crate::width::str_width;
+use crate::width::char_width;
 
 const TAB: usize = 4;
 
@@ -30,14 +30,16 @@ pub struct Line {
 impl Line {
     /// Makes a line with tabs expanded and control characters left out.
     pub fn new(kind: LineKind, number: u32, text: &str) -> Self {
-        let text = clean(text);
-        let width = str_width(&text);
+        let (text, width) = clean(text);
         Self { kind, number, text, width, changed: 0..0 }
     }
 }
 
 /// Expands tabs and drops control characters before comparing or drawing text.
-fn clean(line: &str) -> String {
+fn clean(line: &str) -> (String, usize) {
+    if line.bytes().all(|b| matches!(b, b' '..=b'~')) {
+        return (line.to_owned(), line.len());
+    }
     let mut s = String::with_capacity(line.len());
     let mut col = 0;
     for c in line.chars() {
@@ -47,10 +49,10 @@ fn clean(line: &str) -> String {
             col += pad;
         } else if !c.is_control() {
             s.push(c);
-            col += 1;
+            col += char_width(c);
         }
     }
-    s
+    (s, col)
 }
 
 /// Bytes two strings share at the start and the end, without overlap.
@@ -94,7 +96,8 @@ pub struct FileDiff {
 pub fn parse(raw: &[u8]) -> FileDiff {
     let mut lines = Vec::new();
     let mut kind = Kind::None;
-    let mut binary = false;
+    let contains_nul = raw.contains(&0);
+    let mut binary = contains_nul;
     let (mut old, mut new, mut in_hunk, mut second) = (1, 1, false, false);
     for line in String::from_utf8_lossy(raw).lines() {
         if line.starts_with("diff --git ") {
@@ -117,7 +120,7 @@ pub fn parse(raw: &[u8]) -> FileDiff {
             } else if line.starts_with("Binary files ") {
                 binary = true;
             }
-        } else {
+        } else if !contains_nul {
             let (kind, number) = match line.as_bytes().first() {
                 Some(b'+') => (LineKind::Add, &mut new),
                 Some(b'-') => (LineKind::Del, &mut old),
@@ -206,6 +209,14 @@ mod tests {
 
     #[test]
     fn text_is_made_safe_to_draw() {
-        assert_eq!(clean("a\tb\x1b[31m"), "a   b[31m");
+        assert_eq!(clean("a\tb\x1b[31m").0, "a   b[31m");
+    }
+
+    #[test]
+    fn tabs_align_after_wide_characters_and_combining_marks() {
+        for (source, text) in [("界\tX", "界  X"), ("e\u{301}\tX", "e\u{301}   X")] {
+            let line = Line::new(LineKind::Same, 1, source);
+            assert_eq!((line.text.as_str(), line.width), (text, 5));
+        }
     }
 }
