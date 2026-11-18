@@ -16,7 +16,6 @@ use crate::keys::Key;
 use crate::pane::{After, Pane};
 use crate::screen::{Screen, Style};
 use crate::ui::{self, FAINT, HEADING};
-use crate::watch::Scope;
 use crate::width::char_width;
 use crate::{paths, rex};
 use claude::Claude;
@@ -439,14 +438,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
         Page::new(rows)
     }
 
-    fn watch_scope(&self) -> Scope {
-        Scope { roots: Vec::new(), ignored: Vec::new(), complete: true }
-    }
-
-    fn check(&mut self) -> bool {
-        true
-    }
-
     fn key(&mut self, key: Key) -> After {
         match key {
             Key::Up | Key::Char('k') if self.inside => self.move_selection(-1),
@@ -461,7 +452,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
                 self.report(saved);
             }
             Key::Char('q') | Key::Esc => return After::Leave,
-            _ => {}
+            _ => return After::Ignored,
         }
         After::Stay
     }

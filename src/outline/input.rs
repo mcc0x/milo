@@ -4,11 +4,11 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::keys::Direction::{Next, Previous};
-use crate::keys::Key;
+use crate::keys::{DOUBLE_CLICK, Key};
 use crate::pane::{After, Pane};
 
+use super::Outline;
 use super::draw::margin;
-use super::{DOUBLE_CLICK, Outline};
 
 enum Pointed {
     File(Rc<str>),
@@ -23,44 +23,55 @@ impl Outline {
             self.attention.focus(here, now);
             return After::Stay;
         }
-        self.attention.used(now);
+        let reschedule = self.attention.used(now);
         if let Some(reader) = &mut self.reading {
-            if reader.key(key) == After::Leave {
-                self.reading = None;
-            }
-            return After::Stay;
+            return match reader.key(key) {
+                After::Leave => {
+                    self.reading = None;
+                    After::Stay
+                }
+                after => after,
+            };
         }
         if key == Key::Char('q') {
             return After::Leave;
         }
+        let by_click = self.by_click;
         self.by_click &= matches!(key, Key::Click(..));
-        match key {
-            Key::Char('r') if self.repo.git => self.reload(),
-            Key::Char('r') => self.refresh_folder(self.selected_path()),
+        let changed = match key {
+            Key::Char('r') => {
+                if self.repo.git {
+                    self.reload();
+                } else {
+                    self.refresh_folder(self.selected_path());
+                }
+                true
+            }
             _ if self.painted.strip => self.strip_key(key),
             _ => self.tree_key(key, now),
-        }
-        After::Stay
+        };
+        if changed || reschedule || by_click != self.by_click { After::Stay } else { After::Ignored }
     }
 
     /// The strip has no cursor: its keys move it a column at a time.
-    fn strip_key(&mut self, key: Key) {
+    fn strip_key(&mut self, key: Key) -> bool {
         let delta = match key {
             Key::Char('l') | Key::Right => Some(1),
             Key::Char('h') | Key::Left => Some(-1),
             Key::Ctrl(_) => None,
             _ => key.rows(1),
         };
-        let Some(delta) = delta else { return };
+        let Some(delta) = delta else { return false };
         let last = self.painted.last_column(self.recent.len());
-        self.strip_col = match delta {
+        let column = match delta {
             isize::MIN => 0,
             isize::MAX => last,
             _ => self.strip_col.saturating_add_signed(delta.signum()).min(last),
         };
+        std::mem::replace(&mut self.strip_col, column) != column
     }
 
-    fn tree_key(&mut self, key: Key, now: Instant) {
+    fn tree_key(&mut self, key: Key, now: Instant) -> bool {
         let sel = self.sel;
         match key {
             Key::Char('e') => {
@@ -88,8 +99,9 @@ impl Outline {
                 }
             }
             Key::Enter | Key::Char(' ' | 'h' | 'l') | Key::Left | Key::Right => self.open_or_close(key),
-            _ => self.tree_scroll(key, self.painted.body_rows),
+            _ => return self.tree_scroll(key, self.painted.body_rows),
         }
+        true
     }
 
     fn pointed(&self) -> Option<Pointed> {
@@ -125,8 +137,9 @@ impl Outline {
         self.refold(Some(path));
     }
 
-    fn tree_scroll(&mut self, key: Key, shown: usize) {
-        let Some(rows) = key.rows(shown) else { return };
+    fn tree_scroll(&mut self, key: Key, shown: usize) -> bool {
+        let Some(rows) = key.rows(shown) else { return false };
+        let before = (self.sel, self.top);
         // The wheel moves the view; the other keys move the cursor.
         if matches!(key, Key::WheelUp | Key::WheelDown) {
             self.scroll_under_pointer(rows, shown.max(1));
@@ -134,6 +147,7 @@ impl Outline {
             let last = self.tree.rows.len().saturating_sub(1);
             self.sel = self.sel.saturating_add_signed(rows).min(last);
         }
+        (self.sel, self.top) != before
     }
 
     fn scroll_under_pointer(&mut self, delta: isize, rows: usize) {

@@ -1,9 +1,8 @@
 //! Draws and scrolls the in-pane guide to marks and keys.
 
-use crate::git::Kind;
 use crate::keys::Key;
 use crate::screen::{Screen, Style};
-use crate::ui::{self, ADD, DEL, FAINT, HEADING};
+use crate::ui::{self, FAINT, HEADING};
 use crate::width::str_width;
 
 /// One row of a page: pieces of text, each in its own style. A row must
@@ -67,103 +66,6 @@ pub fn note(text: &'static str) -> HelpRow {
     vec![("  ", Style::PLAIN), (text, FAINT)]
 }
 
-/// The page for the outline. Without git there are no colours to explain.
-fn outline(git: bool) -> Vec<HelpRow> {
-    let mut rows = Vec::new();
-    if git {
-        let name = |kind| ui::kind_style(kind).bold();
-        rows.extend([
-            heading("Files"),
-            sample("edited  ", name(Kind::Modified), "changed"),
-            sample("new     ", name(Kind::Untracked), "added"),
-            sample("removed ", name(Kind::Deleted), "deleted"),
-            sample("moved   ", name(Kind::Renamed), "renamed"),
-            sample("conflict", name(Kind::Conflict), "needs merging"),
-            sample("bold    ", Style::PLAIN.bold(), "to commit"),
-            sample("regular ", Style::PLAIN, "to push"),
-            sample("docs 3  ", Style::PLAIN, "3 changed"),
-            sample("+2      ", ADD, "lines added"),
-            sample("−1      ", DEL, "lines removed"),
-            sample("● ○     ", Style::PLAIN.bold(), "being written"),
-            sample("•       ", Style::PLAIN, "just changed"),
-            HelpRow::new(),
-        ]);
-    }
-    rows.extend([
-        heading("Tree keys"),
-        key("↑↓   ", "move (k j)"),
-        key("Enter", "toggle folder"),
-        key("Enter", "open file"),
-        key("Space", "toggle folder"),
-        key("←    ", "close or parent"),
-        key("→    ", "open folder"),
-        key("{ }  ", "prev/next folder"),
-        key("K J  ", "prev/next sibling"),
-        key("p    ", "parent folder"),
-        key("e    ", "open all/restore"),
-    ]);
-    if git {
-        rows.extend([key("n N  ", "next/prev change"), key("c    ", "changed only")]);
-    }
-    rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
-    if git {
-        rows.extend([HelpRow::new(), heading("Strip keys"), key("←→   ", "scroll (h l)"), key("g G  ", "first/last")]);
-    }
-    rows
-}
-
-fn history() -> Vec<HelpRow> {
-    vec![
-        heading("Commits"),
-        sample("○", Style::PLAIN.bold(), "files to commit"),
-        sample("●", Style::PLAIN.bold(), "a commit to push"),
-        sample("●", FAINT, "already pushed"),
-        sample("●", Style::PLAIN, "no comparison"),
-        sample("•", Style::PLAIN.bold(), "just arrived"),
-        sample("+2", ADD, "lines added"),
-        sample("−1", DEL, "lines removed"),
-        HelpRow::new(),
-        heading("Keys"),
-        key("↑↓   ", "move (k j)"),
-        key("Page Up", "previous page"),
-        key("Page Down", "next page"),
-        key("g G  ", "first/last"),
-        key("Enter", "show files"),
-        key("Enter", "hide files"),
-        key("Enter", "show all"),
-        key("Enter", "read"),
-        key("← h  ", "parent or close"),
-        key("r    ", "reload"),
-        key("q    ", "quit"),
-        HelpRow::new(),
-        note("Click to select a file."),
-        note("Double-click to read."),
-        note("Click to toggle files."),
-    ]
-}
-
-fn reader(committed: bool) -> Vec<HelpRow> {
-    let mut rows = vec![
-        heading("Lines"),
-        sample("+", ADD.bold(), "added"),
-        sample("-", DEL, "removed"),
-        sample("word", Style::PLAIN.reverse(), "what changed"),
-        HelpRow::new(),
-        heading("Keys"),
-        key("↑↓   ", "scroll (k j)"),
-        key("Space", "page down"),
-        key("b    ", "page up"),
-        key("n N  ", "next/prev change"),
-        key("←→   ", "scroll (h l)"),
-        key("g G  ", "top/bottom"),
-        key("q Esc", "close"),
-    ];
-    if committed {
-        rows.insert(1, note("As of a commit"));
-    }
-    rows
-}
-
 /// A page over the pane, with its own scroll position.
 pub struct Page {
     rows: Vec<HelpRow>,
@@ -176,16 +78,12 @@ impl Page {
         Self { rows, top: 0 }
     }
 
-    pub fn outline(git: bool) -> Self {
-        Self::new(outline(git))
-    }
-
-    pub fn history() -> Self {
-        Self::new(history())
-    }
-
-    pub fn reader(committed: bool) -> Self {
-        Self::new(reader(committed))
+    #[cfg(test)]
+    pub fn assert_rows_fit(&self, room: usize) {
+        for row in &self.rows {
+            let width: usize = row.iter().map(|(text, _)| str_width(text)).sum();
+            assert!(width <= room, "{width} columns: {:?}", row.iter().map(|(text, _)| text).collect::<Vec<_>>());
+        }
     }
 
     /// Don't cover the pane unless help can show how to close it.
@@ -227,22 +125,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_help_row_fits_a_28_column_pane() {
-        let room = 28 - 2; // The first and last columns are reserved.
-        let pages = [outline(true), outline(false), history(), reader(false), reader(true)];
-        for row in pages.into_iter().flatten() {
-            let width: usize = row.iter().map(|(text, _)| str_width(text)).sum();
-            assert!(width <= room, "{width} columns: {:?}", row.iter().map(|(text, _)| text).collect::<Vec<_>>());
-        }
-    }
-
-    #[test]
     fn a_narrow_hint_drops_middle_items_without_clipping_the_end() {
         let mut screen = Screen::sized(23, 1);
         draw_hint(&mut screen, "Enter read", &["r reload", "q quit"], "? help");
         assert_eq!(screen.text(), [" Enter read · ? help"]);
         let mut help = Screen::sized(28, 2);
-        Page::history().draw(&mut help);
+        Page::new(vec![heading("Keys")]).draw(&mut help);
         assert_eq!(help.text()[1], " ↑↓ scroll · q close");
     }
 }

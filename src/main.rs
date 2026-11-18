@@ -125,8 +125,16 @@ fn fail(message: &str) -> ! {
     exit(1);
 }
 
+fn project_path(path: Option<&OsStr>) -> &Path {
+    path.map_or(Path::new("."), Path::new)
+}
+
+fn file_dir(path: &Path) -> &Path {
+    path.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."))
+}
+
 fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
-    let dir = path.map_or(Path::new("."), Path::new);
+    let dir = project_path(path);
     Repo::open(dir).ok_or_else(|| {
         if dir.is_file() {
             format!("{0} is a file; to read it: milo view {0}", dir.display())
@@ -196,14 +204,16 @@ fn command<'a>(
 }
 
 /// The runner opens panes after installing signal handlers; tests draw without a terminal.
-fn dispatch(command: Command<'_>, run: impl FnOnce(Start, &Open<'_>) -> Result<(), String>) -> Result<(), String> {
+fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Result<(), String>) -> Result<(), String> {
     match command {
-        Command::Outline(path) => run(Start::Loaded, &|| open_outline(path)),
-        Command::Path(path) => run(Start::Loaded, &|| {
+        Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
+        Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
             open_outline(Some(path)).map_err(|why| format!("{why}; commands: outline, history, view, usage, setup"))
         }),
-        Command::History(path) => run(Start::Loaded, &|| Ok(Box::new(History::new(open_repo(path)?, rex::inside())))),
-        Command::View { file, commit } => run(Start::Loaded, &|| {
+        Command::History(path) => {
+            run(Start::Reading(project_path(path)), &|| Ok(Box::new(History::new(open_repo(path)?, rex::inside()))))
+        }
+        Command::View { file, commit } => run(Start::Reading(file_dir(Path::new(file))), &|| {
             let path = Path::new(file);
             let reader = if let Some(id) = commit {
                 Reader::at_commit(path, id)?
@@ -308,6 +318,28 @@ mod tests {
         assert!(rows[0].contains("-notes.txt") && rows[0].contains(&format!("commit {}", &id[..7])));
         assert_eq!(rows[1], " 1 + stored content");
         assert!(!rows.iter().any(|row| row.contains("working content")));
+    }
+
+    #[test]
+    fn every_project_help_row_fits_a_28_column_pane() {
+        let f = fixture::Fixture::new();
+        let plain = fixture::Fixture::folder();
+        f.write("page.txt", "a file\n");
+        f.commit("first");
+        let file = f.root.join("page.txt");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let commits = repo.history(1).unwrap();
+        let commands = [
+            Command::Outline(Some(f.root.as_os_str())),
+            Command::Outline(Some(plain.root.as_os_str())),
+            Command::History(Some(f.root.as_os_str())),
+            Command::View { file: file.as_os_str(), commit: None },
+            Command::View { file: file.as_os_str(), commit: CommitId::parse(&commits[0].hash) },
+        ];
+        for command in commands {
+            open_pane(command).unwrap().help().assert_rows_fit(26);
+        }
     }
 
     #[test]

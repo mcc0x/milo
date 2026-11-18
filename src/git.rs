@@ -334,14 +334,13 @@ impl Repo {
         let inside = || std::fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
         let complete = !self.git || self.common_dir.is_some() || inside();
 
-        // The Reader's status covers one file. A full status is useful only
-        // for exclusions: if it fails, watching extra directories is safe.
-        let full = self.file.as_ref().and_then(|_| self.status_raw(None)).map(|raw| parse_status(&raw));
-        let status = full.as_ref().unwrap_or(&self.status);
+        // A file-limited status cannot find all the ignored directories.
+        // Missing exclusions are fine: they widen the watch, not the checks.
         let internal = [self.git_dir.as_deref(), self.common_dir.as_deref()]
             .map(|dir| dir.and_then(|dir| dir.strip_prefix(&self.root).ok()));
         let file = self.file.as_deref().map(Path::new);
-        let mut ignored: Vec<_> = status
+        let mut ignored: Vec<_> = self
+            .status
             .ignored
             .iter()
             .map(Path::new)

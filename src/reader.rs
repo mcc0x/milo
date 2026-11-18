@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
 use crate::git::{Commit, CommitId, FileStamp, Kind, PendingFile, Repo};
-use crate::help::Page;
+use crate::help::{self, Page};
 use crate::icons;
 use crate::keys::{Direction, Key};
 use crate::pane::{After, Pane};
@@ -251,7 +251,7 @@ impl LinePainter<'_> {
         };
         if self.x >= 3 {
             if line.kind != LineKind::Del {
-                s.put_number(self.x - 3, y, line.number, margin_style);
+                s.put_number(self.x - 3, y, line.number.into(), margin_style);
             }
             s.put(self.x - 2, y, 1, sign, margin_style);
             if self.pan > 0 {
@@ -467,7 +467,27 @@ fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFil
 
 impl Pane for Reader {
     fn help(&self) -> Page {
-        Page::reader(matches!(self.source, Source::Committed { .. }))
+        use help::{HelpRow, heading, key, note, sample};
+
+        let mut rows = vec![
+            heading("Lines"),
+            sample("+", ADD.bold(), "added"),
+            sample("-", DEL, "removed"),
+            sample("word", Style::PLAIN.reverse(), "what changed"),
+            HelpRow::new(),
+            heading("Keys"),
+            key("↑↓   ", "scroll (k j)"),
+            key("Space", "page down"),
+            key("b    ", "page up"),
+            key("n N  ", "next/prev change"),
+            key("←→   ", "scroll (h l)"),
+            key("g G  ", "top/bottom"),
+            key("q Esc", "close"),
+        ];
+        if matches!(self.source, Source::Committed { .. }) {
+            rows.insert(1, note("As of a commit"));
+        }
+        Page::new(rows)
     }
 
     fn watch_scope(&self) -> Scope {
@@ -495,6 +515,7 @@ impl Pane for Reader {
             Key::Char('b') => Key::PgUp,
             _ => key,
         };
+        let before = (self.top, self.pan);
         match key {
             Key::Char('q') | Key::Esc => return After::Leave,
             Key::Char('n') => self.jump(Direction::Next),
@@ -507,7 +528,7 @@ impl Pane for Reader {
                 }
             }
         }
-        After::Stay
+        if (self.top, self.pan) == before { After::Ignored } else { After::Stay }
     }
 
     fn draw(&mut self, s: &mut Screen) {
@@ -598,13 +619,18 @@ impl Reader {
         const NAME_ROOM: usize = 10;
         if let Source::Committed { short_id, time } = &self.source {
             let age = when::short_age(when::now().saturating_sub(*time));
-            let ago = if age == "now" { "" } else { " ago" };
-            let summary = format!("commit {short_id} · {age}{ago}");
-            let (bare, _) = summary.split_once(" · ").expect("commit and age are separated");
+            let ago = if age.count.is_some() { " ago" } else { "" };
+            let bare = "commit ";
+            let space = " · ";
             let room = right.saturating_sub(NAME_ROOM);
-            if str_width(&summary) <= room {
-                right -= s.put_right(right, 0, &summary, FAINT);
-            } else if bare.len() <= room {
+            let width = bare.len() + short_id.len();
+            if width + str_width(space) + age.width() + ago.len() <= room {
+                right -= s.put_right(right, 0, ago, FAINT);
+                right -= ui::age_right(s, right, 0, age);
+                right -= s.put_right(right, 0, space, FAINT);
+            }
+            if width <= room {
+                right -= s.put_right(right, 0, short_id, FAINT);
                 right -= s.put_right(right, 0, bare, FAINT);
             }
         } else if let Body::Picture(picture) = &self.body {
@@ -684,9 +710,10 @@ mod tests {
     #[test]
     fn a_long_run_of_combining_marks_does_not_hide_later_text_on_the_same_line() {
         let f = Fixture::folder();
-        f.write("page.rs", &format!("a{}after\n", "\u{301}".repeat(300)));
+        let text = format!("a{}after", "\u{301}".repeat(300));
+        f.write("page.rs", &format!("{text}\n"));
         let mut reader = Reader::open(&f.root.join("page.rs")).unwrap();
-        assert!(drawn(&mut reader, 80, 24)[1].ends_with("aafter"));
+        assert!(drawn(&mut reader, 80, 24)[1].ends_with(&text));
     }
 
     #[test]

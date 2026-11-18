@@ -3,6 +3,7 @@
 use crate::git::{Kind, PendingFile};
 use crate::icons::{self, Icon};
 use crate::screen::{self, Screen, Style};
+use crate::when::Age;
 use crate::width::str_width;
 
 /// Faint text follows the theme's foreground, unlike a fixed grey.
@@ -66,13 +67,38 @@ pub fn size_width(add: u32, del: u32) -> usize {
 pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> usize {
     let mut used = 0;
     if del > 0 {
-        used += s.put_right(end, y, &format!("−{del}"), DEL);
+        used += signed_right(s, end, y, "−", del, DEL);
     }
     if add > 0 {
         let gap = usize::from(del > 0);
-        used += gap + s.put_right(end.saturating_sub(used + gap), y, &format!("+{add}"), ADD);
+        used += gap + signed_right(s, end.saturating_sub(used + gap), y, "+", add, ADD);
     }
     used
+}
+
+fn signed_right(s: &mut Screen, end: usize, y: usize, sign: &str, count: u32, st: Style) -> usize {
+    let end = end.min(s.w);
+    let digits = count.ilog10() + 1;
+    let used = (digits as usize + 1).min(end);
+    if used == 0 || y >= s.h {
+        return 0;
+    }
+    s.put(end - used, y, 1, sign, st);
+    if used > 1 {
+        // Like clipped text, keep the first digits, not the last ones.
+        let clipped = u32::try_from(digits as usize + 1 - used).expect("a u32 has at most ten digits");
+        s.put_number(end, y, u64::from(count / 10u32.pow(clipped)), st);
+    }
+    used
+}
+
+/// Draws a compact age that has room to fit.
+pub fn age_right(s: &mut Screen, end: usize, y: usize, age: Age) -> usize {
+    let used = s.put_right(end, y, age.suffix, FAINT);
+    if let Some(count) = age.count {
+        s.put_number(end - used, y, count, FAINT);
+    }
+    age.width()
 }
 
 /// Draws an icon in its own colour, and the gap after it. Returns the
@@ -107,5 +133,33 @@ pub fn thumb(s: &mut Screen, x: usize, y0: usize, h: usize, len: usize, top: usi
     let at = top.min(len - h) * (h - size) / (len - h);
     for y in y0 + at..y0 + at + size {
         s.put(x, y, 1, "▐", FAINT);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipped_change_counts_keep_the_sign_and_first_digits() {
+        for w in 0..25 {
+            for end in 0..25 {
+                for (add, del) in [(12, 345), (u32::MAX, 0), (0, u32::MAX), (1, 1), (0, 0)] {
+                    let mut screen = Screen::sized(w, 1);
+                    let actual = size_right(&mut screen, end, 0, add, del);
+                    let mut expected = Screen::sized(w, 1);
+                    let mut used = 0;
+                    if del > 0 {
+                        used += expected.put_right(end, 0, &format!("−{del}"), DEL);
+                    }
+                    if add > 0 {
+                        let gap = usize::from(del > 0);
+                        used += gap + expected.put_right(end.saturating_sub(used + gap), 0, &format!("+{add}"), ADD);
+                    }
+                    assert_eq!(actual, used);
+                    assert_eq!(screen.text(), expected.text());
+                }
+            }
+        }
     }
 }

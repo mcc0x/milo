@@ -4,8 +4,9 @@ Milo is read-only when looking at a project. It disables Git hooks, repository c
 
 ## Updates and drawing
 
-- One terminal loop handles terminal replies, input, help and when to check. Panes own what they show; Git supplies the repository state.
-- On macOS, file-system notifications wake the Git panes and ignored directories are left out of the watch. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
+- One terminal loop handles terminal replies, input, help and when to check. Panes own what they show; Git supplies the repository state. A project still opening after a short wait shows its name and “Reading…”.
+- On macOS, file-system notifications wake the Git panes. The outline and history leave out known ignored directories. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
+- A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened.
 - Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.
@@ -30,7 +31,7 @@ Paths below are relative to [`src/`](../src/). See [contributing](../CONTRIBUTIN
 | `setup/actions.lua`, `setup/listener.lua` | Rex action and new-tab templates |
 | `setup/settings.rs`, `setup/lock.rs` | Claude Code settings and the Rex listener lock |
 | `paths.rs`, `rex.rs` | Milo's settings and state paths, and calls to Rex |
-| `help.rs`, `ui.rs` | Help pages and common drawing tools |
+| `help.rs`, `ui.rs` | Help overlay and row builders, and common drawing tools |
 | `git.rs`, `git/run.rs`, `git/parse.rs` | Repository state, guarded Git commands and output parsing |
 | `tree.rs`, `walk.rs`, `watch.rs` | Folder rows, walking plain folders and file-system notifications |
 | `screen.rs`, `keys.rs`, `term.rs`, `width.rs` | Screen cells, input, terminal control and text width |

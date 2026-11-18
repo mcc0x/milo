@@ -37,13 +37,16 @@ impl Attention {
         Self { focus: Focus::Unknown, used: now, marks: HashMap::new(), unseen_marks: false }
     }
 
-    pub(super) fn used(&mut self, now: Instant) {
+    /// Returns whether mark expiry changed, so the next frame can be scheduled again.
+    pub(super) fn used(&mut self, now: Instant) -> bool {
         self.used = now;
-        if std::mem::take(&mut self.unseen_marks) {
+        let unseen = std::mem::take(&mut self.unseen_marks);
+        if unseen {
             for mark in self.marks.values_mut() {
                 mark.until = mark.until.min(now + FADE);
             }
         }
+        unseen
     }
 
     pub(super) fn focus(&mut self, here: bool, now: Instant) {

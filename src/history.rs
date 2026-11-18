@@ -5,8 +5,7 @@ use std::time::Instant;
 
 use crate::git::{Commit, Ends, PendingFile, Repo};
 use crate::help::{self, Page};
-use crate::keys::Key;
-use crate::outline::DOUBLE_CLICK;
+use crate::keys::{DOUBLE_CLICK, Key};
 use crate::pane::{After, Pane};
 use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::{self, Screen, Style, Wash};
@@ -224,14 +223,12 @@ impl History {
 }
 
 impl History {
-    fn input(&mut self, key: Key, now: Instant) {
+    fn input(&mut self, key: Key, now: Instant) -> After {
         if matches!(key, Key::Focus(_)) {
-            return;
+            return After::Ignored;
         }
-        if !matches!(key, Key::Click(..)) {
-            self.clicked = None;
-        }
-        self.read_error = None;
+        let unclicked = !matches!(key, Key::Click(..)) && self.clicked.take().is_some();
+        let cleared = self.read_error.take().is_some();
         match key {
             Key::Click(x, y) => self.click(x, y, now),
             Key::Enter => self.enter(),
@@ -239,14 +236,20 @@ impl History {
             Key::Char('r') => self.reload(),
             _ => {
                 if let Some(delta) = key.rows(self.shown) {
+                    let before = (self.cursor, self.top);
                     self.scroll(delta);
                     if matches!(key, Key::WheelUp | Key::WheelDown) {
                         self.top = self.top.saturating_add_signed(delta);
                         self.painted = None;
                     }
+                    if (self.cursor, self.top) != before || self.painted.is_none() {
+                        return After::Stay;
+                    }
                 }
+                return if unclicked || cleared { After::Stay } else { After::Ignored };
             }
         }
+        After::Stay
     }
 
     fn enter(&mut self) {
@@ -381,12 +384,13 @@ impl History {
             let text = if name_width + 12 <= s.w { "✓ all pushed" } else { "✓" };
             return s.put_right(right, 0, text, ui::ADD);
         }
-        let digits = digits(ahead);
+        let count = u64::from(ahead);
+        let digits = digits(count);
         let words = if ahead == 1 { [" commit to push", " commit ↑"] } else { [" commits to push", " commits ↑"] };
         if let Some(word) = words.into_iter().find(|word| name_width + digits + str_width(word) <= s.w) {
-            count_right(s, 0, ahead, word, Style::PLAIN)
+            count_right(s, 0, count, word, Style::PLAIN)
         } else {
-            s.put_number(right, 0, ahead, Style::PLAIN);
+            s.put_number(right, 0, count, Style::PLAIN);
             s.put(right.saturating_sub(digits + 1), 0, 1, "↑", Style::PLAIN);
             digits + 1
         }
@@ -532,7 +536,7 @@ impl History {
 struct Ages {
     now: Option<i64>,
     time: Option<i64>,
-    shown: String,
+    shown: Option<when::Age>,
 }
 
 impl Ages {
@@ -543,18 +547,49 @@ impl Ages {
         }
         self.time = Some(time);
         let age = when::short_age(self.now.get_or_insert_with(when::now).saturating_sub(time));
-        if age == self.shown {
+        if Some(age) == self.shown {
             return right;
         }
-        let used = s.put_right(right, y, &age, FAINT);
-        self.shown = age;
+        let used = ui::age_right(s, right, y, age);
+        self.shown = Some(age);
         right - used - 1
     }
 }
 
 impl Pane for History {
     fn help(&self) -> Page {
-        self.reading.as_ref().map_or_else(Page::history, Pane::help)
+        use help::{HelpRow, heading, key, note, sample};
+
+        if let Some(reader) = &self.reading {
+            return reader.help();
+        }
+        Page::new(vec![
+            heading("Commits"),
+            sample("○", Style::PLAIN.bold(), "files to commit"),
+            sample("●", Style::PLAIN.bold(), "a commit to push"),
+            sample("●", FAINT, "already pushed"),
+            sample("●", Style::PLAIN, "no comparison"),
+            sample("•", Style::PLAIN.bold(), "just arrived"),
+            sample("+2", ui::ADD, "lines added"),
+            sample("−1", ui::DEL, "lines removed"),
+            HelpRow::new(),
+            heading("Keys"),
+            key("↑↓   ", "move (k j)"),
+            key("Page Up", "previous page"),
+            key("Page Down", "next page"),
+            key("g G  ", "first/last"),
+            key("Enter", "show files"),
+            key("Enter", "hide files"),
+            key("Enter", "show all"),
+            key("Enter", "read"),
+            key("← h  ", "parent or close"),
+            key("r    ", "reload"),
+            key("q    ", "quit"),
+            HelpRow::new(),
+            note("Click to select a file."),
+            note("Double-click to read."),
+            note("Click to toggle files."),
+        ])
     }
 
     fn watch_scope(&self) -> Scope {
@@ -576,15 +611,18 @@ impl Pane for History {
 
     fn key(&mut self, key: Key) -> After {
         if let Some(reader) = &mut self.reading {
-            if reader.key(key) == After::Leave {
-                self.reading = None;
+            match reader.key(key) {
+                After::Leave => {
+                    self.reading = None;
+                    After::Stay
+                }
+                after => after,
             }
         } else if key == Key::Char('q') {
-            return After::Leave;
+            After::Leave
         } else {
-            self.input(key, Instant::now());
+            self.input(key, Instant::now())
         }
-        After::Stay
     }
 
     fn draw(&mut self, s: &mut Screen) {
@@ -629,14 +667,14 @@ impl Pane for History {
     }
 }
 
-fn count_right(s: &mut Screen, y: usize, count: u32, suffix: &str, style: Style) -> usize {
+fn count_right(s: &mut Screen, y: usize, count: u64, suffix: &str, style: Style) -> usize {
     let right = s.w - 1;
     let used = s.put_right(right, y, suffix, style);
     s.put_number(right - used, y, count, style);
     digits(count) + used
 }
 
-fn digits(count: u32) -> usize {
+fn digits(count: u64) -> usize {
     count.checked_ilog10().unwrap_or(0) as usize + 1
 }
 
@@ -644,9 +682,9 @@ fn draw_more(s: &mut Screen, y: usize, count: usize) {
     let Ok(count) = u32::try_from(count) else { return };
     let right = s.w - 1;
     let start = 5 + s.put(5, y, 2, "… ", FAINT);
-    let end = start + digits(count);
+    let end = start + digits(count.into());
     if end <= right {
-        s.put_number(end, y, count, FAINT);
+        s.put_number(end, y, count.into(), FAINT);
         s.put_fit(end, y, right - end, " more", FAINT);
     }
 }
@@ -655,11 +693,11 @@ fn file_count(s: &mut Screen, y: usize, files: usize) -> usize {
     let right = s.w - 1;
     let Ok(count) = u32::try_from(files) else { return right };
     let suffix = if count == 1 { " file" } else { " files" };
-    let width = digits(count) + suffix.len();
+    let width = digits(count.into()) + suffix.len();
     if width + 5 > right {
         return right;
     }
-    right - count_right(s, y, count, suffix, FAINT) - 1
+    right - count_right(s, y, count.into(), suffix, FAINT) - 1
 }
 
 fn draw_file(s: &mut Screen, y: usize, file: &PendingFile) {

@@ -83,7 +83,7 @@ The README has a one-line description of every module. The short version:
 
 ### Adding a pane
 
-Put the screen in a new module under `src/` and implement `pane::Pane`. The trait gives the shared loop a frame to draw, keys to pass on, a help page, and a place to watch and check for changes. Return `After::Leave` from a key that closes the pane, or `After::Stay` to keep it open. A pane with timed redraws can also implement `next_frame`.
+Put the screen in a new module under `src/` and implement `pane::Pane`. Give it a frame to draw, its own help page built with `Page::new`, and a handler for its keys. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to leave the frame alone. If outside changes can affect the pane, implement `watch_scope` and `check`. A pane with nothing to watch or update on a timer sleeps until input; a pane with timed redraws implements `next_frame`.
 
 Declare the module in `src/main.rs`, add the command to `Command`, its parser and `dispatch`, and list it in `--help`. Do not add a second event loop.
 

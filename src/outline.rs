@@ -9,12 +9,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::git::{Kind, PendingFile, Repo};
-use crate::help::Page;
+use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
 use crate::reader::{OpenReader, ReadFile, Reader};
-use crate::screen::Screen;
+use crate::screen::{Screen, Style};
 use crate::tree::{Folds, Tree};
+use crate::ui::{self, ADD, DEL};
 use crate::walk;
 use crate::watch::Scope;
 
@@ -23,8 +24,6 @@ use self::draw::{ChangeColumns, Layout};
 
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
-/// A second click on the same item within this long opens it.
-pub(crate) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 pub struct Outline {
     repo: Repo,
@@ -278,7 +277,57 @@ impl Pane for Outline {
     }
 
     fn help(&self) -> Page {
-        self.reading.as_ref().map_or_else(|| Page::outline(self.repo.git), Pane::help)
+        use help::{HelpRow, heading, key, sample};
+
+        if let Some(reader) = &self.reading {
+            return reader.help();
+        }
+        let mut rows = Vec::new();
+        if self.repo.git {
+            let name = |kind| ui::kind_style(kind).bold();
+            rows.extend([
+                heading("Files"),
+                sample("edited  ", name(Kind::Modified), "changed"),
+                sample("new     ", name(Kind::Untracked), "added"),
+                sample("removed ", name(Kind::Deleted), "deleted"),
+                sample("moved   ", name(Kind::Renamed), "renamed"),
+                sample("conflict", name(Kind::Conflict), "needs merging"),
+                sample("bold    ", Style::PLAIN.bold(), "to commit"),
+                sample("regular ", Style::PLAIN, "to push"),
+                sample("docs 3  ", Style::PLAIN, "3 changed"),
+                sample("+2      ", ADD, "lines added"),
+                sample("−1      ", DEL, "lines removed"),
+                sample("● ○     ", Style::PLAIN.bold(), "being written"),
+                sample("•       ", Style::PLAIN, "just changed"),
+                HelpRow::new(),
+            ]);
+        }
+        rows.extend([
+            heading("Tree keys"),
+            key("↑↓   ", "move (k j)"),
+            key("Enter", "toggle folder"),
+            key("Enter", "open file"),
+            key("Space", "toggle folder"),
+            key("←    ", "close or parent"),
+            key("→    ", "open folder"),
+            key("{ }  ", "prev/next folder"),
+            key("K J  ", "prev/next sibling"),
+            key("p    ", "parent folder"),
+            key("e    ", "open all/restore"),
+        ]);
+        if self.repo.git {
+            rows.extend([key("n N  ", "next/prev change"), key("c    ", "changed only")]);
+        }
+        rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
+        if self.repo.git {
+            rows.extend([
+                HelpRow::new(),
+                heading("Strip keys"),
+                key("←→   ", "scroll (h l)"),
+                key("g G  ", "first/last"),
+            ]);
+        }
+        Page::new(rows)
     }
 }
 

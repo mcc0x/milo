@@ -697,7 +697,7 @@ impl Pane for Usage {
             Key::Char('r') => {
                 self.check();
             }
-            _ => {}
+            _ => return After::Ignored,
         }
         After::Stay
     }

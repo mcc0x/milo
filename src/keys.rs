@@ -12,6 +12,9 @@ const SEQUENCE_WAIT: Duration = Duration::from_millis(25);
 const READ_SIZE: usize = 4096;
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// A second click on the same item within this long opens it.
+pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     Char(char),

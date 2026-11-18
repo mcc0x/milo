@@ -25,16 +25,29 @@ pub fn local_day(ts: i64) -> i64 {
 }
 
 /// Age to fit next to a commit subject. Uses the largest whole unit.
-pub fn short_age(secs: i64) -> String {
-    match secs {
-        ..MINUTE => "now".into(),
-        MINUTE..HOUR => format!("{}m", secs / MINUTE),
-        HOUR..DAY => format!("{}h", secs / HOUR),
-        s if s < 7 * DAY => format!("{}d", s / DAY),
-        s if s < 30 * DAY => format!("{}w", s / (7 * DAY)),
-        s if s < 365 * DAY => format!("{}mo", s / (30 * DAY)),
-        s => format!("{}y", s / (365 * DAY)),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Age {
+    pub count: Option<u64>,
+    pub suffix: &'static str,
+}
+
+impl Age {
+    pub fn width(self) -> usize {
+        self.suffix.len() + self.count.map_or(0, |count| count.ilog10() as usize + 1)
     }
+}
+
+pub fn short_age(secs: i64) -> Age {
+    let (unit, suffix) = match secs {
+        ..MINUTE => return Age { count: None, suffix: "now" },
+        MINUTE..HOUR => (MINUTE, "m"),
+        HOUR..DAY => (HOUR, "h"),
+        s if s < 7 * DAY => (DAY, "d"),
+        s if s < 30 * DAY => (7 * DAY, "w"),
+        s if s < 365 * DAY => (30 * DAY, "mo"),
+        _ => (365 * DAY, "y"),
+    };
+    Age { count: Some(u64::try_from(secs / unit).expect("past age is positive")), suffix }
 }
 
 /// Round only when there is no room for a second unit.
@@ -66,17 +79,23 @@ pub fn duration(seconds: i64, detail: Detail) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::short_age;
+    use super::{Age, short_age};
 
     #[test]
     fn ages_use_the_largest_whole_unit() {
         let ages = [0, 59, 60, 70 * 60, 3 * 3600, 26 * 3600, 8 * 86400, 40 * 86400, 800 * 86400];
-        let short: Vec<String> = ages.into_iter().map(short_age).collect();
+        let short: Vec<String> = ages
+            .into_iter()
+            .map(|age| {
+                let Age { count, suffix } = short_age(age);
+                count.map_or_else(|| suffix.to_string(), |n| format!("{n}{suffix}"))
+            })
+            .collect();
         assert_eq!(short, ["now", "now", "1m", "1h", "3h", "1d", "1w", "1mo", "2y"]);
     }
 
     #[test]
     fn a_commit_dated_in_the_future_is_now() {
-        assert_eq!(short_age(-500), "now");
+        assert_eq!(short_age(-500), Age { count: None, suffix: "now" });
     }
 }

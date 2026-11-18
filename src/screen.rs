@@ -1,9 +1,10 @@
 //! Draws styled cells and flushes only what differs from the last frame.
 
 use std::io::{self, Write};
+use std::ops::Range;
 
 use crate::picture::Picture;
-use crate::width::{char_width, str_width};
+use crate::width::{char_width, is_combining, str_width};
 
 // ANSI palette indices, so colours follow the terminal theme.
 pub const RED: u8 = 1;
@@ -125,13 +126,67 @@ impl Style {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
-    ch: char,
+    glyph: Glyph,
     st: Style,
 }
 
-const BLANK: Cell = Cell { ch: ' ', st: Style::PLAIN };
+impl Cell {
+    const fn new(ch: char, st: Style) -> Self {
+        Self { glyph: Glyph(ch as u32), st }
+    }
+}
+
+/// A Unicode scalar or an index past that range into the frame's marked glyphs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Glyph(u32);
+
+const MARKED: u32 = char::MAX as u32 + 1;
+
+impl Glyph {
+    fn scalar(self) -> char {
+        char::from_u32(self.0).expect("unmarked glyph is a Unicode scalar")
+    }
+
+    fn marked(self) -> Option<usize> {
+        self.0.checked_sub(MARKED).map(|i| i as usize)
+    }
+}
+
+/// Only glyphs with combining marks need spill storage. Both buffers
+/// are reused across frames; ordinary cells stay a single scalar wide.
+#[derive(Default)]
+struct Marks {
+    text: String,
+    ranges: Vec<Range<usize>>,
+}
+
+impl Marks {
+    fn clear(&mut self) {
+        self.text.clear();
+        self.ranges.clear();
+    }
+
+    fn get(&self, glyph: Glyph) -> Option<&str> {
+        glyph.marked().map(|i| &self.text[self.ranges[i].clone()])
+    }
+
+    fn add(&mut self, glyph: &mut Glyph, mark: char) {
+        let i = glyph.marked().unwrap_or_else(|| {
+            let i = self.ranges.len();
+            let start = self.text.len();
+            self.text.push(glyph.scalar());
+            self.ranges.push(start..start);
+            *glyph = Glyph(MARKED + u32::try_from(i).expect("a screen cannot hold four billion marked glyphs"));
+            i
+        });
+        self.text.push(mark);
+        self.ranges[i].end = self.text.len();
+    }
+}
+
+const BLANK: Cell = Cell::new(' ', Style::PLAIN);
 /// Trailing half of a double-width character.
-const CONT: char = '\0';
+const CONT: Glyph = Glyph(0);
 const SYNC_ON: &[u8] = b"\x1b[?2026h";
 
 /// Where a picture sits on the screen, in cells.
@@ -171,6 +226,8 @@ pub struct Screen {
     pub h: usize,
     cur: Vec<Cell>,
     prev: Vec<Cell>,
+    marks: Marks,
+    prev_marks: Marks,
     out: Vec<u8>,
     light_background: bool,
     /// Each wash is 0 while unknown, otherwise 0x01RRGGBB.
@@ -187,6 +244,8 @@ impl Screen {
             h: 0,
             cur: Vec::new(),
             prev: Vec::new(),
+            marks: Marks::default(),
+            prev_marks: Marks::default(),
             out: SYNC_ON.to_vec(),
             light_background: false,
             washes: [0; 3],
@@ -219,6 +278,8 @@ impl Screen {
         self.cur.resize(w * h, BLANK);
         self.prev.clear();
         // The erase below already puts plain blanks in every cell.
+        self.marks.clear();
+        self.prev_marks.clear();
         self.prev.resize(w * h, BLANK);
         self.out.extend_from_slice(b"\x1b[0m\x1b[2J");
         self.pictures.erased = true;
@@ -226,6 +287,7 @@ impl Screen {
 
     pub fn clear(&mut self) {
         self.cur.fill(BLANK);
+        self.marks.clear();
         self.pictures.wanted.clear();
         self.pictures.data.clear();
     }
@@ -274,33 +336,39 @@ impl Screen {
 
     /// Blanks one row, including its colours.
     pub fn clear_row(&mut self, y: usize) {
-        self.span(0, y, self.w).fill(BLANK);
+        self.span(0, y, self.w).0.fill(BLANK);
     }
 
     /// The cells of row `y` from `x`, at most `w` wide, clipped to the screen.
-    fn span(&mut self, x: usize, y: usize, w: usize) -> &mut [Cell] {
-        if y >= self.h || x >= self.w {
-            return &mut [];
-        }
-        let start = y * self.w + x;
-        &mut self.cur[start..start + w.min(self.w - x)]
+    fn span(&mut self, x: usize, y: usize, w: usize) -> (&mut [Cell], &mut Marks) {
+        let cells = if y >= self.h || x >= self.w {
+            &mut [][..]
+        } else {
+            let start = y * self.w + x;
+            &mut self.cur[start..start + w.min(self.w - x)]
+        };
+        (cells, &mut self.marks)
     }
 
     /// Draws `s` at (x, y) in at most `max_w` columns. Returns the columns used.
     pub fn put(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
-        let row = self.span(x, y, max_w);
-        let mut used = 0;
+        let (row, marks) = self.span(x, y, max_w);
+        let (mut used, mut base) = (0, 0);
         for ch in s.chars() {
             let cw = char_width(ch);
             if cw == 0 {
+                if used > 0 && is_combining(ch) {
+                    marks.add(&mut row[base].glyph, ch);
+                }
                 continue;
             }
             if used + cw > row.len() {
                 break;
             }
-            row[used] = Cell { ch, st };
+            base = used;
+            row[base] = Cell::new(ch, st);
             if cw == 2 {
-                row[used + 1] = Cell { ch: CONT, st };
+                row[base + 1] = Cell { glyph: CONT, st };
             }
             used += cw;
         }
@@ -315,10 +383,11 @@ impl Screen {
     }
 
     /// Draws a decimal number ending just before column `end`.
-    pub fn put_number(&mut self, end: usize, y: usize, mut number: u32, st: Style) {
-        for cell in self.span(0, y, end).iter_mut().rev() {
-            let ch = char::from_digit(number % 10, 10).expect("remainder is a decimal digit");
-            *cell = Cell { ch, st };
+    pub fn put_number(&mut self, end: usize, y: usize, mut number: u64, st: Style) {
+        for cell in self.span(0, y, end).0.iter_mut().rev() {
+            let digit = u8::try_from(number % 10).expect("remainder is a decimal digit");
+            let ch = char::from(b'0' + digit);
+            *cell = Cell::new(ch, st);
             number /= 10;
             if number == 0 {
                 break;
@@ -345,7 +414,8 @@ impl Screen {
             return self.put(x, y, max_w, s, st);
         }
         let tail_chars = (max_w / 3).min(8);
-        let tail_at = s.char_indices().rev().nth(tail_chars - 1).map_or(0, |(i, _)| i);
+        let tail_at =
+            s.char_indices().rev().filter(|&(_, ch)| char_width(ch) > 0).nth(tail_chars - 1).map_or(0, |(i, _)| i);
         let tail_w = str_width(&s[tail_at..]);
         let mut used = self.put(x, y, max_w.saturating_sub(tail_w + 1), s, st);
         used += self.put(x + used, y, 1, "…", st);
@@ -354,40 +424,44 @@ impl Screen {
 
     /// Gives a span a style, keeping what is written there.
     pub fn paint(&mut self, x: usize, y: usize, w: usize, st: Style) {
-        for cell in self.span(x, y, w) {
+        for cell in self.span(x, y, w).0 {
             cell.st = st;
         }
     }
 
     /// Inverts a span, to pick out the changed part of a line.
     pub fn emphasise(&mut self, x: usize, y: usize, w: usize) {
-        for cell in self.span(x, y, w) {
+        for cell in self.span(x, y, w).0 {
             cell.st = cell.st.reverse();
         }
     }
 
     /// Lays a wash behind a span, keeping each cell's own text and colour.
     pub fn wash(&mut self, x: usize, y: usize, w: usize, wash: Wash) {
-        for cell in self.span(x, y, w) {
+        for cell in self.span(x, y, w).0 {
             cell.st = cell.st.with_wash(wash);
         }
     }
 
     /// Writes only the cells that changed since the last flush.
     pub fn flush(&mut self) {
-        self.flush_to(|frame| {
+        self.flush_to(|parts| {
             let mut stdout = io::stdout().lock();
-            let _ = stdout.write_all(frame);
+            for part in parts {
+                if stdout.write_all(part).is_err() {
+                    return;
+                }
+            }
             let _ = stdout.flush();
         });
     }
 
     /// Places, moves or removes the pictures asked for in this frame.
     /// They lie over the cells, outside the frame of text.
-    fn flush_picture(&mut self) {
+    fn flush_picture(&mut self) -> usize {
         let pictures = &mut self.pictures;
         if !pictures.erased && pictures.wanted == pictures.shown {
-            return;
+            return self.out.len();
         }
         for old in &pictures.shown {
             match pictures.wanted.iter().find(|at| at.id == old.id) {
@@ -401,7 +475,7 @@ impl Screen {
                 Some(_) => {}
             }
         }
-        self.out.append(&mut pictures.data);
+        let data_at = self.out.len();
         for at in &pictures.wanted {
             if pictures.erased || !pictures.shown.contains(at) {
                 let _ = write!(
@@ -417,9 +491,10 @@ impl Screen {
         }
         pictures.shown.clone_from(&pictures.wanted);
         pictures.erased = false;
+        data_at
     }
 
-    fn flush_to(&mut self, write_frame: impl FnOnce(&[u8])) {
+    fn flush_to(&mut self, write_frame: impl FnOnce(&[&[u8]])) {
         let washes = &self.washes;
         let prev_washes = &self.prev_washes;
         let palette_changed = washes != prev_washes;
@@ -430,16 +505,23 @@ impl Screen {
             let prev = &mut self.prev[y * self.w..(y + 1) * self.w];
             let mut next_col = usize::MAX;
             for (x, (&cell, old)) in cur.iter().zip(prev).enumerate() {
+                let same = cell.st == old.st
+                    && match (self.marks.get(cell.glyph), self.prev_marks.get(old.glyph)) {
+                        (None, None) => cell.glyph == old.glyph,
+                        (new, old) => new == old,
+                    };
                 if cell != *old {
                     *old = cell;
-                } else if !palette_changed
-                    || !cell.st.wash_id().checked_sub(1).is_some_and(|i| washes[i] != prev_washes[i])
+                }
+                if same
+                    && (!palette_changed
+                        || !cell.st.wash_id().checked_sub(1).is_some_and(|i| washes[i] != prev_washes[i]))
                 {
                     continue;
                 }
                 // A wide glyph must be drawn from its first column, unless
                 // the terminal has already drawn it while painting this row.
-                let (first, glyph) = if cell.ch == CONT {
+                let (first, glyph) = if cell.glyph == CONT {
                     if next_col == x + 1 {
                         continue;
                     }
@@ -454,16 +536,28 @@ impl Screen {
                     glyph.st.sgr(&mut self.out, washes);
                     active = Some(glyph.st);
                 }
-                self.out.extend_from_slice(glyph.ch.encode_utf8(&mut utf8).as_bytes());
-                let wide = cur.get(first + 1).is_some_and(|cell| cell.ch == CONT);
+                if let Some(text) = self.marks.get(glyph.glyph) {
+                    self.out.extend_from_slice(text.as_bytes());
+                } else {
+                    self.out.extend_from_slice(glyph.glyph.scalar().encode_utf8(&mut utf8).as_bytes());
+                }
+                let wide = cur.get(first + 1).is_some_and(|cell| cell.glyph == CONT);
                 next_col = first + 1 + usize::from(wide);
             }
         }
-        self.flush_picture();
+        let data_at = self.flush_picture();
         self.prev_washes = self.washes;
+        self.prev_marks.text.clone_from(&self.marks.text);
+        self.prev_marks.ranges.clone_from(&self.marks.ranges);
         if self.out.len() > SYNC_ON.len() {
             self.out.extend_from_slice(b"\x1b[0m\x1b[?2026l");
-            write_frame(&self.out);
+            if self.pictures.data.is_empty() {
+                write_frame(&[&self.out]);
+            } else {
+                let (before, after) = self.out.split_at(data_at);
+                write_frame(&[before, &self.pictures.data, after]);
+                self.pictures.data.clear();
+            }
             self.out.truncate(SYNC_ON.len());
         }
     }
@@ -483,7 +577,14 @@ impl Screen {
         (0..self.h)
             .map(|y| {
                 let cells = &self.cur[y * self.w..(y + 1) * self.w];
-                let mut line: String = cells.iter().filter(|c| c.ch != CONT).map(|c| c.ch).collect();
+                let mut line = String::new();
+                for cell in cells.iter().filter(|cell| cell.glyph != CONT) {
+                    if let Some(text) = self.marks.get(cell.glyph) {
+                        line.push_str(text);
+                    } else {
+                        line.push(cell.glyph.scalar());
+                    }
+                }
                 line.truncate(line.trim_end_matches(' ').len());
                 line
             })
@@ -513,7 +614,7 @@ impl Screen {
     /// Captures exactly what a flush would send to the terminal.
     pub fn emitted(&mut self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        self.flush_to(|frame| bytes.extend_from_slice(frame));
+        self.flush_to(|parts| bytes.extend(parts.iter().copied().flatten()));
         bytes
     }
 }
@@ -552,10 +653,33 @@ mod tests {
         assert_eq!(screen.text(), ["very-lo….txt"]);
     }
 
+    #[test]
+    fn accents_stay_with_their_base_before_and_after_an_ellipsis() {
+        let mut screen = Screen::sized(8, 2);
+        assert_eq!(screen.put_fit(0, 0, 4, "界e\u{301}more", Style::PLAIN), 4);
+        screen.put_middle(0, 1, 8, "abcde-long-e\u{301}x\u{302}", Style::PLAIN);
+        assert_eq!(screen.text(), ["界e\u{301}…", "abcde…e\u{301}x\u{302}"]);
+    }
+
+    #[test]
+    fn only_attached_printable_marks_are_sent_and_changed_accent_cells_are_redrawn() {
+        let mut screen = Screen::sized(6, 1);
+        screen.put(0, 0, 6, "\u{301}\x1b\u{202e}界\u{301}e\u{200d}\u{302}\u{34f}\u{fe0f}x", Style::PLAIN);
+        let first = frame(&mut screen);
+        assert!(first.contains("界\u{301}e\u{302}x"), "{first:?}");
+        assert!(!first.contains("\u{301}界"));
+
+        screen.clear();
+        screen.put(0, 0, 6, "界\u{301}e\u{302}x", Style::PLAIN);
+        assert_eq!(frame(&mut screen), "");
+        screen.put(0, 0, 6, "界\u{300}ex", Style::PLAIN);
+        let updated = frame(&mut screen);
+        assert!(updated.contains("\x1b[1;1H") && updated.contains("界\u{300}e"), "{updated:?}");
+        assert!(!updated.contains('x'));
+    }
+
     fn frame(screen: &mut Screen) -> String {
-        let mut written = String::new();
-        screen.flush_to(|frame| written = String::from_utf8_lossy(frame).into_owned());
-        written
+        String::from_utf8(screen.emitted()).expect("screen output is UTF-8")
     }
 
     #[test]
@@ -639,25 +763,16 @@ mod tests {
         screen.put(0, 0, 5, "ABC界", Style::PLAIN);
         screen.wash(0, 0, 1, Wash::Bar);
         screen.wash(3, 0, 2, Wash::Added);
-        screen.flush_to(|frame| {
-            assert!(frame.starts_with(b"\x1b[?2026h\x1b[0m\x1b[2J"));
-            assert!(frame.ends_with(b"\x1b[0m\x1b[?2026l"));
-        });
+        let first = screen.emitted();
+        assert!(first.starts_with(b"\x1b[?2026h\x1b[0m\x1b[2J"));
+        assert!(first.ends_with(b"\x1b[0m\x1b[?2026l"));
 
         screen.set_background([0; 3]);
-        let mut wrote = false;
-        screen.flush_to(|frame| {
-            wrote = true;
-            assert_eq!(
-                frame,
-                concat!(
-                    "\x1b[?2026h\x1b[1;1H\x1b[0;48;2;35;35;35mA",
-                    "\x1b[1;4H\x1b[0;48;2;0;30;11m界\x1b[0m\x1b[?2026l"
-                )
+        assert_eq!(
+            screen.emitted(),
+            concat!("\x1b[?2026h\x1b[1;1H\x1b[0;48;2;35;35;35mA", "\x1b[1;4H\x1b[0;48;2;0;30;11m界\x1b[0m\x1b[?2026l")
                 .as_bytes()
-            );
-        });
-        assert!(wrote);
+        );
         screen.set_background([0; 3]);
         screen.flush_to(|_| panic!("the palette did not change"));
     }

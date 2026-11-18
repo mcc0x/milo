@@ -1,18 +1,25 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::PipeReader;
+use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::help::Page;
 use crate::keys::{Input, Key};
 use crate::screen::Screen;
 use crate::term::{self, Wait};
+use crate::ui;
 use crate::watch::{Scope, Watcher};
 
-/// Whether the current pane is still open after a key.
+/// What to do after a key: keep the frame, redraw, or close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum After {
+    Ignored,
     Stay,
     Leave,
 }
@@ -42,8 +49,9 @@ pub trait Pane {
 
 pub type Open<'a> = dyn Fn() -> Result<Box<dyn Pane>, String> + 'a;
 
-/// How a pane starts: already loaded, needing its first check, or offered before another pane.
-pub enum Start {
+/// How a pane starts: a project to read, a loaded pane, a first check, or an offer before the outline.
+pub enum Start<'a> {
+    Reading(&'a Path),
     Loaded,
     Check,
     Offer(fn() -> Result<Box<dyn Pane>, String>),
@@ -158,28 +166,82 @@ fn watch_pane(pane: &dyn Pane, needs_polling: bool) -> (Watcher, Option<Duration
     (watcher, idle)
 }
 
-pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
+/// Avoid a flash on a fast open. The pane stays on this thread; the
+/// waiting thread only borrows the screen, handing it back before drawing.
+fn with_loading<T>(screen: &mut Screen, dir: &Path, open: impl FnOnce() -> T) -> T {
+    std::thread::scope(|scope| {
+        let (done, ready) = mpsc::channel();
+        scope.spawn(move || {
+            if ready.recv_timeout(Duration::from_millis(75)) == Err(mpsc::RecvTimeoutError::Timeout)
+                && !term::TERMINATED.load(Ordering::Relaxed)
+            {
+                let absolute = dir.canonicalize().ok();
+                let dir = absolute.as_deref().unwrap_or(dir);
+                let project = dir.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(dir);
+                let name =
+                    project.file_name().map_or_else(|| project.as_os_str().to_string_lossy(), OsStr::to_string_lossy);
+                let (w, h) = term::size();
+                screen.resize(w, h);
+                let room = w.saturating_sub(2);
+                ui::section_heading(screen, 0, room, &name);
+                screen.put_fit(1, 1, room, "Reading…", ui::FAINT);
+                screen.flush();
+            }
+        });
+        let opened = open();
+        let _ = done.send(());
+        opened
+    })
+}
+
+pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
     let signal = term::listen();
-    let check_on_open = matches!(start, Start::Check);
-    let mut next = if let Start::Offer(open) = start { Some(open) } else { None };
-    let mut pane = open()?;
-    let (mut watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
-    // Asked to stop while still starting up: there is nothing to put back.
-    if term::TERMINATED.load(Ordering::Relaxed) {
-        exit(1);
-    }
-    let mut keyboard = term::enter().map_err(|e| format!("cannot use this terminal: {e}"))?;
+    let mut keyboard = match term::enter() {
+        Ok(keyboard) => keyboard,
+        Err(e) => {
+            // An invalid command path has the same error with or without a terminal.
+            open()?;
+            return Err(format!("cannot use this terminal: {e}"));
+        }
+    };
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         term::leave();
         hook(info);
     }));
+    let result = run_entered(start, open, &mut keyboard, signal.as_ref());
+    term::leave();
+    result
+}
 
+fn run_entered(
+    start: Start<'_>,
+    open: &Open<'_>,
+    keyboard: &mut File,
+    signal: Option<&PipeReader>,
+) -> Result<(), String> {
+    let check_on_open = matches!(start, Start::Check);
+    let mut next = if let Start::Offer(open) = start { Some(open) } else { None };
     let mut screen = Screen::new();
+    let load = |open: &Open<'_>| {
+        let pane = open()?;
+        let (watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
+        Ok::<_, String>((pane, watcher, idle))
+    };
+    let (mut pane, mut watcher, idle) = match start {
+        Start::Reading(dir) => with_loading(&mut screen, dir, || load(open)),
+        _ => load(open),
+    }?;
+    if term::TERMINATED.load(Ordering::Relaxed) {
+        term::leave();
+        exit(1);
+    }
     let mut help = None;
     let mut keys = Vec::new();
     let mut input = Input::default();
     let mut pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
+    let mut redraw = true;
+    let mut frame_due = None;
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
             let (w, h) = term::size();
@@ -187,57 +249,45 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
             if !Page::fits(&screen) {
                 help = None;
             }
+            redraw = true;
         }
-        draw_pane(pane.as_mut(), &mut screen, help.as_mut());
-        screen.flush();
+        if std::mem::take(&mut redraw) {
+            draw_pane(pane.as_mut(), &mut screen, help.as_mut());
+            screen.flush();
+            frame_due = if help.is_some() { None } else { pane.next_frame().map(|wait| Instant::now() + wait) };
+        }
 
-        let drawn = Instant::now();
-        let until_look = pace.as_ref().map(|pace| pace.until_look(drawn));
-        let until_frame = if help.is_some() { None } else { pane.next_frame() };
-        let wait = until_look
+        let now = Instant::now();
+        let wait = pace
+            .as_ref()
+            .map(|pace| pace.until_look(now))
             .into_iter()
-            .chain(until_frame)
+            .chain(frame_due.map(|due: Instant| due.saturating_duration_since(now)))
             // If the signal pipe couldn't be opened, don't sleep through a signal.
             .chain(signal.is_none().then_some(UNWATCHED))
             .min();
-        let event = loop {
-            let timeout_ms = wait.map_or(-1, |wait| {
-                i32::try_from(wait.saturating_sub(drawn.elapsed()).as_millis() + 1).unwrap_or(i32::MAX)
-            });
-            match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
-                Wait::Input => {
-                    input.receive(&mut keyboard, &mut keys);
-                    if !keys.is_empty() {
-                        break Wait::Input;
-                    }
-                    // Ignored input doesn't need a new frame, but timers still run.
-                    if wait.is_some_and(|wait| drawn.elapsed() >= wait) {
-                        break Wait::Timeout;
-                    }
-                }
-                event => break event,
-            }
-        };
-        match event {
+        let timeout_ms = wait.map_or(-1, |wait| i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX));
+        match term::wait(keyboard, signal, timeout_ms, watcher.fd()) {
             Wait::Input => {
+                input.receive(keyboard, &mut keys);
                 for key in keys.drain(..) {
-                    if route_key(pane.as_mut(), &mut screen, &mut help, key) == After::Leave {
-                        if matches!(key, Key::Char('q') | Key::Esc)
-                            && let Some(open) = next.take()
-                        {
-                            pane = match open() {
-                                Ok(pane) => pane,
-                                Err(why) => {
-                                    term::leave();
-                                    return Err(why);
-                                }
-                            };
-                            let (next_watcher, next_idle) = watch_pane(pane.as_ref(), false);
-                            watcher = next_watcher;
-                            pace = next_idle.map(|idle| Pace::new(idle, Instant::now()));
-                            continue;
+                    match route_key(pane.as_mut(), &mut screen, &mut help, key) {
+                        After::Ignored => {}
+                        After::Stay => redraw = true,
+                        After::Leave => {
+                            if matches!(key, Key::Char('q') | Key::Esc)
+                                && let Some(open) = next.take()
+                            {
+                                let (loaded, watching, idle) =
+                                    with_loading(&mut screen, Path::new("."), || load(&open))?;
+                                pane = loaded;
+                                watcher = watching;
+                                pace = idle.map(|idle| Pace::new(idle, Instant::now()));
+                                redraw = true;
+                            } else {
+                                break 'run;
+                            }
                         }
-                        break 'run;
                     }
                 }
             }
@@ -249,16 +299,18 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
             }
             Wait::Timeout | Wait::Interrupted => {}
         }
+        let now = Instant::now();
+        redraw |= frame_due.is_some_and(|due| due <= now);
         if let Some(pace) = &mut pace
-            && pace.until_look(Instant::now()).is_zero()
+            && pace.until_look(now).is_zero()
         {
             pace.look(pane.as_mut(), check_on_open);
+            redraw = true;
         }
     }
     // A picture is not part of the text, so it is taken down by name.
     screen.clear();
     screen.flush();
-    term::leave();
     Ok(())
 }
 
@@ -266,6 +318,14 @@ pub fn run(start: Start, open: &Open<'_>) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::{fixture, git::Repo, outline::Outline};
+
+    #[test]
+    fn a_fast_open_does_not_draw_a_loading_frame() {
+        let mut screen = Screen::new();
+        assert_eq!(with_loading(&mut screen, Path::new("."), || 42), 42);
+        assert_eq!((screen.w, screen.h), (0, 0));
+        assert!(screen.emitted().is_empty());
+    }
 
     #[test]
     fn quiet_projects_get_a_look_even_without_a_report() {
