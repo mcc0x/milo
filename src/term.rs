@@ -236,29 +236,30 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
 pub const RED: u8 = 1;
 pub const GREEN: u8 = 2;
 pub const YELLOW: u8 = 3;
-pub const BLUE: u8 = 4;
 pub const MAGENTA: u8 = 5;
 pub const CYAN: u8 = 6;
 pub const GRAY: u8 = 8;
 
-/// Packed cell style: fg in bits 0-4, bg in bits 5-9 (0 = default, n+1 = ANSI
-/// colour n), then bold and reverse flags.
+/// Packed cell style: fg in bits 0-8, bg in bits 9-17 (0 = default, n+1 =
+/// colour n of the 256-colour palette), then the face flags. Colours 0-15
+/// follow the terminal theme; 16-255 are fixed.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct Style(u16);
+pub struct Style(u32);
 
-const FG: u16 = 31;
-const BOLD: u16 = 1 << 10;
-const REVERSE: u16 = 1 << 11;
-const ITALIC: u16 = 1 << 12;
-const STRIKE: u16 = 1 << 13;
+const FG: u32 = 0x1ff;
+const BG_SHIFT: u32 = 9;
+const BOLD: u32 = 1 << 18;
+const REVERSE: u32 = 1 << 19;
+const ITALIC: u32 = 1 << 20;
+const STRIKE: u32 = 1 << 21;
 /// The flags that are part of the text itself and survive a highlight.
-const FACE: u16 = BOLD | ITALIC | STRIKE;
+const FACE: u32 = BOLD | ITALIC | STRIKE;
 
 impl Style {
     pub const PLAIN: Style = Style(0);
 
     pub const fn fg(c: u8) -> Style {
-        Style(c as u16 + 1)
+        Style(c as u32 + 1)
     }
 
     pub const fn bold(self) -> Style {
@@ -275,8 +276,8 @@ impl Style {
 
     /// A grey background. Grey text would vanish on it, so that turns plain.
     const fn tinted(self) -> Style {
-        let fg = if self.0 & FG == GRAY as u16 + 1 { 0 } else { self.0 & FG };
-        Style(self.0 & FACE | fg | (GRAY as u16 + 1) << 5)
+        let fg = if self.0 & FG == GRAY as u32 + 1 { 0 } else { self.0 & FG };
+        Style(self.0 & FACE | fg | (GRAY as u32 + 1) << BG_SHIFT)
     }
 
     fn sgr(self, out: &mut Vec<u8>) {
@@ -293,12 +294,13 @@ impl Style {
         if self.0 & REVERSE != 0 {
             out.extend_from_slice(b";7");
         }
-        for (color, normal, bright) in [(self.0 & FG, 30, 90), (self.0 >> 5 & FG, 40, 100)] {
-            if color != 0 {
-                let c = color - 1;
-                let code = if c < 8 { normal + c } else { bright + c - 8 };
-                let _ = write!(out, ";{code}");
-            }
+        for (color, base) in [(self.0 & FG, 30), (self.0 >> BG_SHIFT & FG, 40)] {
+            let _ = match color.checked_sub(1) {
+                None => Ok(()),
+                Some(c @ 0..8) => write!(out, ";{}", base + c),
+                Some(c @ 8..16) => write!(out, ";{}", base + 52 + c),
+                Some(c) => write!(out, ";{};5;{c}", base + 8),
+            };
         }
         out.push(b'm');
     }

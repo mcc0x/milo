@@ -169,12 +169,8 @@ impl Outline {
             let room = right.saturating_sub(x + 1);
             // Bold is work not committed yet; committed-but-unpushed stays regular.
             let st = if self.uncommitted.contains(&n.path) { st.bold() } else { st };
-            if n.dir {
-                let icon_st = if pending { st } else { Style::fg(term::BLUE) };
-                x += ui::icon(s, x, y, room, icons::dir(self.is_open(&n.path)), icon_st);
-            } else {
-                x += ui::icon(s, x, y, room, icons::file(&n.name), if pending { st } else { DIM });
-            }
+            let icon = if n.dir { icons::dir(self.is_open(&n.path)) } else { icons::file(&n.name) };
+            x += ui::icon(s, x, y, room, icon);
             s.put_fit(x, y, right.saturating_sub(x + 1), &n.name, st);
             // Grey rather than a solid bar, so the row keeps its own colour;
             // and no bar at all while the keyboard is in another pane.

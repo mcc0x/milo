@@ -1,7 +1,7 @@
 //! Drawing shared by both views.
 
 use crate::git::{Detail, FileChange, Kind, LineKind};
-use crate::icons;
+use crate::icons::{self, Icon};
 use crate::term::{self, Screen, Style};
 
 pub const DIM: Style = Style::fg(term::GRAY);
@@ -79,12 +79,13 @@ pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> u
     w
 }
 
-/// Draws an icon and the gap after it. Returns the columns used.
-pub fn icon(s: &mut Screen, x: usize, y: usize, max_w: usize, icon: &str, st: Style) -> usize {
-    if icon.is_empty() || max_w < 2 {
+/// Draws an icon in its own colour, and the gap after it. Returns the
+/// columns used.
+pub fn icon(s: &mut Screen, x: usize, y: usize, max_w: usize, icon: Icon) -> usize {
+    if icon.glyph.is_empty() || max_w < 2 {
         return 0;
     }
-    s.put(x, y, 1, icon, st);
+    s.put(x, y, 1, icon.glyph, Style::fg(icon.colour));
     2
 }
 
@@ -92,7 +93,7 @@ pub fn icon(s: &mut Screen, x: usize, y: usize, max_w: usize, icon: &str, st: St
 pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &FileChange) -> usize {
     let st = kind_style(f.kind);
     let (dir, name) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
-    let mut used = icon(s, x, y, max_w, icons::file(name), st);
+    let mut used = icon(s, x, y, max_w, icons::file(name));
     used += s.put_fit(x + used, y, max_w - used, name, st.bold());
     if !dir.is_empty() && used + 2 < max_w {
         used += 1 + s.put_fit(x + used + 1, y, max_w - used - 1, dir, DIM);
@@ -167,7 +168,7 @@ fn file_bar(s: &mut Screen, f: &FileChange, area: Rect, y: usize) {
     let room = (area.w - 2).saturating_sub(size_w + word.len() + 3);
     let name = f.path.rsplit_once('/').map_or(f.path.as_str(), |(_, n)| n);
     let mut x = area.x + 1;
-    x += icon(s, x, y, room, icons::file(name), kind_style(f.kind));
+    x += icon(s, x, y, room, icons::file(name));
     x += s.put_fit(x, y, (area.x + 1 + room).saturating_sub(x), &f.path, Style::PLAIN.bold());
     s.put(x + 2, y, word.len(), word, kind_style(f.kind));
     s.tint(area.x, y, area.w);
