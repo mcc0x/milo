@@ -10,22 +10,18 @@ use std::time::{Duration, Instant};
 
 use crate::git::{Commit, FileChange, Kind, Repo};
 use crate::history::{self, Context};
-use crate::icons;
-use crate::rex;
 use crate::term::{self, Key, Screen, Style};
 use crate::tree::{Folds, Tree};
 use crate::ui::{self, DIM};
-use crate::walk;
+use crate::view::View;
+use crate::{help, icons, rex, walk};
 
 /// At or below this height the pane is a horizontal strip.
 const STRIP_ROWS: usize = 7;
 /// From this width each file also says what happened to it.
-const WIDE_COLS: usize = 44;
+const WIDE_COLS: usize = 52;
 /// From this height the last row lists the keys.
 const HINT_ROWS: usize = 12;
-/// Columns for "edited", "removed", … and for "+1234 −1234" beside them.
-const WORD_W: usize = 8;
-const SIZE_W: usize = 11;
 /// Rows of the tree kept in view on either side of the cursor.
 const MARGIN: usize = 2;
 /// How long a mark stays once it has been seen.
@@ -35,8 +31,9 @@ const LIVE: Duration = Duration::from_secs(3);
 const PULSE: Duration = Duration::from_millis(500);
 /// How long a mark nobody has seen is kept.
 const UNSEEN: Duration = Duration::from_secs(300);
-/// Without input for this long, the outline follows the work by itself.
-const FOLLOW_AFTER: Duration = Duration::from_secs(15);
+/// Where the terminal does not say which pane has the keyboard, the
+/// outline follows the work by itself after this long without input.
+const FOLLOW_UNTOLD: Duration = Duration::from_secs(120);
 /// Two clicks on a row within this long are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long something said in place of the key hint stays.
@@ -98,7 +95,11 @@ pub struct Outline {
     /// The path last clicked and when, to tell a double click.
     clicked: Option<(String, Instant)>,
     /// Something to say in place of the key hint, and when it was said.
-    note: Option<(&'static str, Instant)>,
+    note: Option<(String, Instant)>,
+    /// The page of explanations, when it is up, and how far it is scrolled.
+    help: Option<usize>,
+    /// A file being read here, in place of the outline, outside Rex.
+    reading: Option<View>,
 }
 
 impl Outline {
@@ -128,6 +129,8 @@ impl Outline {
             popup: None,
             clicked: None,
             note: None,
+            help: None,
+            reading: None,
         };
         outline.load(None, None, false);
         // Start where the work is, not at the top of the tree.
@@ -217,13 +220,17 @@ impl Outline {
             }
         }
         if let Some(path) = newest.filter(|_| self.following()).map(|f| f.path.clone()) {
-            self.reveal(&path);
+            self.follow(&path);
         }
     }
 
     /// Looks for changes made outside the outline, and takes them in.
     /// Returns false if it is too soon to tell, and worth looking again.
     pub fn check(&mut self) -> bool {
+        // A file being read here is kept up to date, and so is what it covers.
+        if let Some(view) = &mut self.reading {
+            view.check();
+        }
         if self.repo.busy() {
             // Git is part-way through changing many files at once.
             return false;
@@ -242,9 +249,14 @@ impl Outline {
     }
 
     /// Whether the outline should move by itself to where work is
-    /// happening: the keyboard is elsewhere, or has not been used here lately.
+    /// happening: only while the keyboard is in another pane, so that it
+    /// never moves under someone reading it. A terminal that does not say
+    /// where the keyboard is leaves that to a long silence.
     fn following(&self) -> bool {
-        self.focus == Some(false) || self.looked.elapsed() >= FOLLOW_AFTER
+        match self.focus {
+            Some(focused) => !focused,
+            None => self.looked.elapsed() >= FOLLOW_UNTOLD,
+        }
     }
 
     /// How much longer a mark made at `at` stays. It fades `FRESH` after it
@@ -264,9 +276,12 @@ impl Outline {
     /// How long the screen stays right if nothing happens: until a mark
     /// fades or pulses, or a note has been up long enough.
     pub fn next_frame(&self) -> Option<Duration> {
+        if self.reading.is_some() || self.help.is_some() {
+            return None;
+        }
         let marks = self.fresh.values().chain(self.fresh_commits.values());
         let mark = marks.map(|&at| if at.elapsed() < LIVE { PULSE } else { self.mark_left(at) }).min();
-        let note = self.note.map(|(_, at)| NOTE.saturating_sub(at.elapsed()));
+        let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(at.elapsed()));
         [mark, note].into_iter().flatten().min()
     }
 
@@ -276,7 +291,7 @@ impl Outline {
         self.fresh = fresh.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
         let commits = std::mem::take(&mut self.fresh_commits);
         self.fresh_commits = commits.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
-        self.note = self.note.filter(|(_, at)| at.elapsed() < NOTE);
+        self.note = self.note.take().filter(|(_, at)| at.elapsed() < NOTE);
     }
 
     fn selected_path(&self) -> Option<String> {
@@ -306,13 +321,35 @@ impl Outline {
         self.relayout(Some(path.to_string()));
     }
 
-    /// Shows a line in place of the key hint for a few seconds.
-    fn say(&mut self, text: &'static str) {
-        self.note = Some((text, Instant::now()));
+    /// Brings the file being worked on into view and says so, since the
+    /// view moving by itself would otherwise be a puzzle. A folder the
+    /// reader closed stays closed: the cursor goes to it instead.
+    fn follow(&mut self, path: &str) {
+        let mut shown = path;
+        while self.tree.row_of(shown).is_none() {
+            match shown.rsplit_once('/') {
+                Some((dir, _)) => shown = dir,
+                None => return,
+            }
+        }
+        self.sel = self.tree.row_of(shown).unwrap_or(self.sel);
+        self.by_click = false;
+        let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
+        self.say(format!("following {name}"));
     }
 
-    /// Opens a file in a floating window, in place of the one opened before.
+    /// Shows a line in place of the key hint for a few seconds.
+    fn say(&mut self, text: impl Into<String>) {
+        self.note = Some((text.into(), Instant::now()));
+    }
+
+    /// Opens a file to read: in a floating window inside Rex, in place of
+    /// the one opened before, and otherwise here in this pane.
     fn open_file(&mut self, path: &str) {
+        if !rex::inside() {
+            self.reading = View::open(&self.repo.root.join(path));
+            return;
+        }
         match rex::open(&self.repo.root, path, self.popup.as_deref()) {
             Ok(layer) => self.popup = Some(layer),
             Err(why) => {
@@ -323,6 +360,12 @@ impl Outline {
     }
 
     pub fn draw(&mut self, s: &mut Screen) {
+        if let Some(view) = &mut self.reading {
+            return view.draw(s);
+        }
+        if let Some(top) = &mut self.help {
+            return help::draw(s, &help::outline(self.repo.git), top);
+        }
         s.clear();
         self.expire();
         let (w, h) = (s.w, s.h);
@@ -349,10 +392,10 @@ impl Outline {
         // Space, not a rule, keeps the two apart: a column beside, a row
         // beneath. Beside, the heading shares the project's own row.
         if beside > 0 {
-            history::draw(s, &self.history, &ctx, (w - beside, 0), (beside, head + avail));
+            history::draw(s, &self.history, &ctx, (w - beside, 0), (beside, head + avail), true);
         }
         if panel > 0 {
-            history::draw(s, &self.history, &ctx, (0, head + avail - panel + 1), (w, panel - 1));
+            history::draw(s, &self.history, &ctx, (0, head + avail - panel + 1), (w, panel - 1), false);
         }
         self.width = if beside > 0 { w - beside - 1 } else { w };
         self.body = (head, avail - panel);
@@ -365,7 +408,7 @@ impl Outline {
             self.draw_tree(s);
         }
         // A note is said wherever there is a last row, hint or not.
-        if let Some((note, _)) = self.note {
+        if let Some((note, _)) = &self.note {
             s.put(0, h - 1, w, &" ".repeat(w), Style::PLAIN);
             s.put_fit(1, h - 1, w - 2, note, Style::fg(term::YELLOW));
         } else if hint == 1 && self.focus != Some(false) {
@@ -379,7 +422,7 @@ impl Outline {
         let w = self.width;
         let commit = self.files.iter().filter(|f| !f.committed).count();
         let push = self.files.len() - commit;
-        // Spelled out where it fits beside the name; "●3 ↑2" where it does not.
+        // Spelled out where it fits beside the name; "○3 ↑2" where it does not.
         let name_w = term::str_width(&self.repo.name) + term::str_width(&self.repo.branch) + 5;
         let summary = |long: bool| {
             let mut parts = Vec::new();
@@ -401,7 +444,7 @@ impl Outline {
                 }
             }
             if commit > 0 {
-                let text = if long { format!("{commit} to commit") } else { format!("●{commit}") };
+                let text = if long { format!("{commit} to commit") } else { format!("○{commit}") };
                 parts.push((text, Style::PLAIN.bold()));
             }
             if commit > 0 && push > 0 {
@@ -440,13 +483,16 @@ impl Outline {
                 let c = if self.changed_only { "c all files" } else { "c changed only" };
                 // With work pending, stepping through it is the key worth knowing.
                 let first = if self.files.is_empty() { "enter open" } else { "n next change" };
-                format!("{first} · {e} · {c} · q quit")
+                format!("{first} · {e} · {c} · ? help")
             }
-            (true, 30..) if !self.files.is_empty() => "n next · e all · c changed · q quit".to_string(),
-            (true, 30..) => "e open all · c changed · q quit".to_string(),
-            (true, _) => "e all · c changed".to_string(),
-            (false, 30..) => format!("enter open · {e} · q quit"),
-            (false, _) => "e all · q quit".to_string(),
+            // What `c` would do now also says whether it is on.
+            (true, 30..) if !self.files.is_empty() => {
+                format!("n next · {} · ? help", if self.changed_only { "c all files" } else { "c changed" })
+            }
+            (true, 30..) => "enter open · e all · ? help".to_string(),
+            (false, 44..) => format!("enter open · {e} · ? help"),
+            (false, 30..) => "enter open · e all · ? help".to_string(),
+            (_, _) => "? help · q quit".to_string(),
         };
         s.put_fit(1, y, w - 2, &text, DIM);
     }
@@ -470,7 +516,19 @@ impl Outline {
         }
         self.top = self.top.min(len.saturating_sub(h));
 
+        // What happened to each file, and by how much, in two columns no
+        // wider than what there is to say.
         let wide = w >= WIDE_COLS;
+        let (mut word_w, mut size_w) = (0, 0);
+        for &(node, _) in self.tree.rows.iter().filter(|_| wide) {
+            let n = &self.tree.nodes[node as usize];
+            if !n.dir {
+                word_w = word_w.max(ui::kind_word(n.kind).len());
+            }
+            size_w = size_w.max(ui::size_width(n.add, n.del));
+        }
+        // A gap between the two, where there are two.
+        size_w += (size_w > 0) as usize;
         let quiet = self.files.is_empty();
         let rows = self.tree.rows.iter().enumerate().skip(self.top).take(h);
         for (y, (i, &(node, depth))) in (y0..).zip(rows) {
@@ -483,9 +541,9 @@ impl Outline {
             let mut right = w - 1;
             if wide && pending {
                 ui::size_right(s, right, y, n.add, n.del);
-                right -= SIZE_W + WORD_W;
+                right -= size_w + word_w;
                 if !n.dir {
-                    s.put(right, y, WORD_W, ui::kind_word(n.kind), colour);
+                    s.put(right, y, word_w, ui::kind_word(n.kind), ui::kind_colour(n.kind));
                 }
                 right -= 1;
             }
@@ -553,24 +611,31 @@ impl Outline {
             }
             return;
         }
-        let name_w = |&f: &usize| {
-            let path = &self.files[f].path;
-            term::str_width(path.rsplit_once('/').map_or(path, |(_, n)| n))
-        };
-        let col_w = (self.recent.iter().map(name_w).max().unwrap_or(0) + 12).clamp(16, 34).min(w);
-        let shown = (w / col_w).max(1);
+        // Each column is as wide as its own names need, so one long name
+        // does not cost every column its room.
         let total = self.recent.len().div_ceil(h);
-        let first = self.strip_col.min(total.saturating_sub(shown));
-        for col in 0..shown {
-            for row in 0..h {
-                let Some(&f) = self.recent.get((first + col) * h + row) else { break };
-                ui::file_name(s, col * col_w + 1, y0 + row, col_w - 2, &self.files[f]);
+        let first = self.strip_col.min(total - 1);
+        let (mut x, mut col) = (0, first);
+        while col < total {
+            let files = &self.recent[col * h..((col + 1) * h).min(self.recent.len())];
+            let name_w = |&f: &usize| {
+                let path = &self.files[f].path;
+                term::str_width(path.rsplit_once('/').map_or(path, |(_, n)| n))
+            };
+            let col_w = (files.iter().map(name_w).max().unwrap_or(0) + 12).clamp(16, 34).min(w);
+            // A column is drawn whole or not at all, bar the first.
+            if x > 0 && x + col_w > w {
+                break;
             }
+            for (row, &f) in files.iter().enumerate() {
+                ui::file_name(s, x + 1, y0 + row, col_w - 2, &self.files[f]);
+            }
+            (x, col) = (x + col_w, col + 1);
         }
         if first > 0 {
             s.put(0, y0, 1, "‹", DIM);
         }
-        let after = self.recent.len().saturating_sub((first + shown) * h);
+        let after = self.recent.len().saturating_sub(col * h);
         if after > 0 {
             let more = format!("  +{after} more ›");
             s.put(w.saturating_sub(term::str_width(&more) + 1), y0 + h - 1, w, &more, DIM);
@@ -615,7 +680,30 @@ impl Outline {
             }
             return false;
         }
+        // A file read here takes the keys; closing it comes back to the outline.
+        if let Some(view) = &mut self.reading {
+            match key {
+                Key::Ctrl(b'c') | Key::Eof => return true,
+                _ if view.on_key(key) => self.reading = None,
+                _ => {}
+            }
+            self.looked = Instant::now();
+            return false;
+        }
         self.looked = Instant::now();
+        if let Some(top) = self.help {
+            self.help = match key {
+                Key::Ctrl(b'c') | Key::Eof => return true,
+                Key::Char('j') | Key::Down | Key::WheelDown => Some(top + 1),
+                Key::Char('k') | Key::Up | Key::WheelUp => Some(top.saturating_sub(1)),
+                _ => None,
+            };
+            return false;
+        }
+        if key == Key::Char('?') {
+            self.help = Some(0);
+            return false;
+        }
         self.by_click &= matches!(key, Key::Click(..));
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,

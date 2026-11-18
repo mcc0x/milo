@@ -16,6 +16,10 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Vec<String> {
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(root.join(&dir)) else { continue };
         for entry in entries.flatten() {
+            // What the Finder leaves behind in every folder it has shown.
+            if entry.file_name() == ".DS_Store" {
+                continue;
+            }
             let mut path = format!("{dir}{}", entry.file_name().to_string_lossy());
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 if out.len() < CAP && open(&path) {

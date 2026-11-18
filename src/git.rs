@@ -120,6 +120,8 @@ struct Status {
     ahead: u32,
     /// Tracked paths that differ, with where any moved file was before.
     changed: Vec<String>,
+    /// Where the moved ones among them were before.
+    sources: Vec<String>,
     untracked: Vec<String>,
     /// Paths left in conflict by a merge.
     unmerged: Vec<String>,
@@ -143,7 +145,9 @@ fn parse_status(raw: &[u8]) -> Status {
         } else if e.starts_with("2 ") {
             // A rename is followed by its old path, which is not an entry.
             st.changed.extend(path(e, 10));
-            st.changed.extend(entries.next().map(str::to_string));
+            let from = entries.next().unwrap_or_default();
+            st.changed.push(from.to_string());
+            st.sources.push(from.to_string());
         } else if e.starts_with("u ") {
             st.unmerged.extend(path(e, 11));
             st.changed.extend(path(e, 11));
@@ -493,16 +497,29 @@ impl Repo {
         let stamps: HashMap<&str, Stamp> = changed.iter().map(|p| (p.as_str(), stamp(&self.root.join(p)))).collect();
         if !changed.is_empty() {
             let head = if self.tip == "(initial)" { EMPTY_TREE } else { "HEAD" };
-            let mut args = vec!["diff", head, "-M", "--no-color", "--raw", "--numstat", "-z"];
             // Naming the paths spares git the rest of the tree, and spares
-            // the repository an index refreshed on a viewer's account.
-            if changed.len() <= PATHS_LIMIT {
+            // the repository an index refreshed on a viewer's account. It
+            // also lets each file be measured against what is pushed, as
+            // the reader shows it, without listing what is only committed.
+            let named = changed.len() <= PATHS_LIMIT;
+            let mut args = vec!["diff", if named { self.against.as_str() } else { head }];
+            args.extend(["-M", "--no-color", "--raw", "--numstat", "-z"]);
+            if named {
                 args.push("--");
                 args.extend(changed.iter().map(String::as_str));
             }
             match self.git(&args) {
                 Some(raw) => parse_changes(&raw, false, &mut files),
                 None => self.ok = false,
+            }
+            // A file put back to what the remote has differs from nothing
+            // there, and is work not committed all the same.
+            let moved = &self.status.sources;
+            for path in changed.iter().filter(|p| named && !moved.contains(p)) {
+                if !files.iter().any(|f| f.path == *path) {
+                    let kind = if stamps[path.as_str()].is_some() { Kind::Modified } else { Kind::Deleted };
+                    files.push(FileChange::new(path, kind, false));
+                }
             }
         }
         for file in &mut files {

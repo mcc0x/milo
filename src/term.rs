@@ -347,6 +347,11 @@ impl Style {
         Style(self.0 | FAINT)
     }
 
+    /// Text and background swapped.
+    pub const fn reverse(self) -> Style {
+        Style(self.0 | REVERSE)
+    }
+
     /// A grey background. Grey text would vanish on it, so that turns plain.
     const fn tinted(self) -> Style {
         let fg = if self.0 & FG == GRAY as u32 + 1 { 0 } else { self.0 & FG };

@@ -7,11 +7,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::{Kind, Repo, Stamp};
-use crate::icons;
 use crate::read::{self, Content};
 use crate::syntax::{self, Class, Lang, Span, State};
 use crate::term::{self, Key, Screen, Style};
 use crate::ui::{self, ADD, DEL, DIM};
+use crate::{help, icons};
 
 /// Files larger than this are not shown.
 const LIMIT: u64 = 2 << 20;
@@ -58,6 +58,8 @@ pub struct View {
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
+    /// The page of explanations, when it is up, and how far it is scrolled.
+    help: Option<usize>,
 }
 
 /// The colour of each class of code. These follow the terminal's theme.
@@ -201,6 +203,7 @@ impl View {
             top: 0,
             pan: 0,
             rows: 0,
+            help: None,
         };
         view.lang = syntax::for_file(&view.path);
         view.repo.only(&view.path);
@@ -272,8 +275,10 @@ impl View {
             Content::Bytes(bytes) if bytes.contains(&0) => self.note = Some("Not text, so there is nothing to show."),
             Content::Bytes(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
+                // A file git has never seen is new from its first line to its last.
+                let kind = if self.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
                 let line = |(i, l): (usize, &str)| Line {
-                    kind: LineKind::Same,
+                    kind,
                     no: i as u32 + 1,
                     text: clean(l),
                     changed: (0, 0),
@@ -313,10 +318,14 @@ impl View {
         });
         // A change is "at" the top once its lead-in is the first row shown.
         let at = |i: usize| i.saturating_sub(LEAD);
+        // Past the last change comes the first again, as in the outline.
         let hit = if forward {
-            starts.map(at).find(|&t| t > self.top)
+            let mut tops = starts.map(at);
+            let first = tops.next();
+            first.filter(|&t| t > self.top).or_else(|| tops.find(|&t| t > self.top)).or(first)
         } else {
-            starts.map(at).filter(|&t| t < self.top).last()
+            let tops: Vec<usize> = starts.map(at).collect();
+            tops.iter().rev().find(|&&t| t < self.top).or(tops.last()).copied()
         };
         if let Some(top) = hit {
             self.top = top;
@@ -325,6 +334,9 @@ impl View {
     }
 
     pub fn draw(&mut self, s: &mut Screen) {
+        if let Some(top) = &mut self.help {
+            return help::draw(s, &help::reader(), top);
+        }
         s.clear();
         let (w, h) = (s.w, s.h);
         if w < 20 || h < 3 {
@@ -341,6 +353,10 @@ impl View {
         // [space][line number][space][sign][space][text], the last column the thumb's.
         let text_x = digits + 4;
         let text_w = (w - 1).saturating_sub(text_x);
+        // There is no panning past the end of the longest line in view.
+        let shown = || self.lines.iter().skip(self.top).take(self.rows);
+        let longest = shown().map(|l| l.text.chars().count()).max().unwrap_or(0);
+        self.pan = self.pan.min(longest.saturating_sub(text_w));
         for (y, line) in (1..).zip(self.lines.iter().skip(self.top).take(self.rows)) {
             // In a language this knows, an added line keeps the colours of
             // its code and is marked in the margin; otherwise it is green
@@ -352,17 +368,23 @@ impl View {
                 LineKind::Add => ("+", ADD, ADD),
                 LineKind::Del => ("-", DEL, DEL),
             };
-            let no = line.no.to_string();
+            // A removed line has no place in the file as it now reads, so
+            // it has no number either.
+            let no = if line.kind == LineKind::Del { String::new() } else { line.no.to_string() };
             s.put(1 + digits - no.len(), y, digits, &no, margin);
             s.put(digits + 2, y, 1, sign, margin);
-            // Panning skips whole characters off the left of the text.
+            // Panning skips whole characters off the left of the text, and
+            // says that it has.
+            if self.pan > 0 {
+                s.put(text_x - 1, y, 1, "‹", DIM);
+            }
             let skip = line.text.char_indices().nth(self.pan).map_or(line.text.len(), |(i, _)| i);
             s.put(text_x, y, text_w, &line.text[skip..], st);
             // A removed line is not part of the file as it now reads, and
             // is not coloured as code.
             self.spans.clear();
             if let Some(lang) = self.lang.filter(|_| line.kind != LineKind::Del) {
-                lang.scan(&line.text, &mut line.state.clone(), &mut self.spans);
+                lang.scan(&line.text, &mut { line.state }, &mut self.spans);
             }
             // Columns run on from one span to the next, so each is measured once.
             let (mut at, mut col) = (skip, 0);
@@ -384,7 +406,13 @@ impl View {
             }
         }
         ui::thumb(s, w - 1, 1, self.rows, self.lines.len(), self.top);
-        let hint = if self.kind == Kind::None { "↑↓ scroll · q close" } else { "↑↓ scroll · n next change · q close" };
+        let changes = self.lines.iter().any(|l| l.kind == LineKind::Same) && self.kind != Kind::None;
+        let hint = match (changes, w) {
+            (true, 44..) => "↑↓ scroll · n next change · q close · ? help",
+            (true, _) => "n next change · ? help",
+            (false, 36..) => "↑↓ scroll · q close · ? help",
+            (false, _) => "q close · ? help",
+        };
         s.put_fit(1, h - 1, w - 2, hint, DIM);
     }
 
@@ -398,7 +426,7 @@ impl View {
             right -= ui::size_right(s, right, 0, count(LineKind::Add), count(LineKind::Del)).min(right);
             let word = ui::kind_word(self.kind);
             right = right.saturating_sub(word.len() + 2);
-            s.put(right, 0, word.len(), word, ui::kind_style(self.kind));
+            s.put(right, 0, word.len(), word, ui::kind_colour(self.kind));
         }
         let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
         let room = right.saturating_sub(2);
@@ -410,8 +438,19 @@ impl View {
     /// Returns true when the viewer should close.
     pub fn on_key(&mut self, key: Key) -> bool {
         let page = self.rows.max(2) as isize - 1;
+        if let Some(top) = self.help {
+            self.help = match key {
+                Key::Ctrl(b'c') | Key::Eof => return true,
+                Key::Focus(_) => Some(top),
+                Key::Char('j') | Key::Down | Key::WheelDown => Some(top + 1),
+                Key::Char('k') | Key::Up | Key::WheelUp => Some(top.saturating_sub(1)),
+                _ => None,
+            };
+            return false;
+        }
         match key {
             Key::Char('q') | Key::Esc | Key::Ctrl(b'c') | Key::Eof => return true,
+            Key::Char('?') => self.help = Some(0),
             Key::Char('j') | Key::Down => self.scroll(1),
             Key::Char('k') | Key::Up => self.scroll(-1),
             Key::WheelDown => self.scroll(3),

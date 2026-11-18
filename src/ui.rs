@@ -8,17 +8,29 @@ pub const DIM: Style = Style::fg(term::GRAY);
 pub const ADD: Style = Style::fg(term::GREEN);
 pub const DEL: Style = Style::fg(term::RED);
 
-/// Colour says what happened to a file; the face backs it up, so the states
-/// stay apart even where two colours look alike.
-pub fn kind_style(kind: Kind) -> Style {
+/// The colour that says what happened to a file.
+pub fn kind_colour(kind: Kind) -> Style {
     match kind {
         Kind::None => Style::PLAIN,
         Kind::Modified => Style::fg(term::YELLOW),
-        Kind::Added => ADD,
-        Kind::Untracked => ADD.italic(),
-        Kind::Deleted => DEL.strike(),
-        Kind::Renamed => Style::fg(term::CYAN).italic(),
-        Kind::Conflict => Style::fg(term::MAGENTA).bold(),
+        Kind::Added | Kind::Untracked => ADD,
+        Kind::Deleted => DEL,
+        Kind::Renamed => Style::fg(term::CYAN),
+        Kind::Conflict => Style::fg(term::MAGENTA),
+    }
+}
+
+/// How a file's own name is drawn: its colour, and a face to back it up,
+/// so the states stay apart even where two colours look alike. The face is
+/// for the name only; a word such as "removed" struck through would read as
+/// taken back.
+pub fn kind_style(kind: Kind) -> Style {
+    let colour = kind_colour(kind);
+    match kind {
+        Kind::Untracked | Kind::Renamed => colour.italic(),
+        Kind::Deleted => colour.strike(),
+        Kind::Conflict => colour.bold(),
+        _ => colour,
     }
 }
 
@@ -31,6 +43,12 @@ pub fn kind_word(kind: Kind) -> &'static str {
         Kind::Renamed => "moved",
         Kind::Conflict => "conflict",
     }
+}
+
+/// Columns "+12 −3" takes for these counts.
+pub fn size_width(add: u32, del: u32) -> usize {
+    let digits = |n: u32| if n > 0 { n.ilog10() as usize + 2 } else { 0 };
+    digits(add) + digits(del) + (add > 0 && del > 0) as usize
 }
 
 /// Draws "+12 −3" ending just before column `end`. Returns its width.

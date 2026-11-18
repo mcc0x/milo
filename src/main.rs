@@ -1,6 +1,7 @@
 //! strata: a project's files, coloured by what is not yet committed or pushed.
 
 mod git;
+mod help;
 mod history;
 mod icons;
 mod outline;
@@ -47,15 +48,21 @@ It updates on its own.
   e             open every folder   c        changed files only
   t             show or hide recent history
   r             reload              q        quit
+  ?             what the colours and marks mean, and these keys
 
-Enter or a double click on a file opens it in a floating window, when
-running inside Rex. `strata view FILE` is that reader by itself: the file,
-read-only, with the lines it gained and lost marked. n and N step through
-the changes, q closes it.
+Enter or a double click on a file opens it to read: in a floating window
+when running inside Rex, otherwise in the pane itself. `strata view FILE`
+is that reader by itself: the file, read-only, coloured as code, with the
+lines it gained and lost marked. n and N step through the changes, q
+closes it.
 
 Colour is the change: yellow edited, green new, red removed, cyan moved,
 magenta in conflict. Bold is not committed yet; regular weight is
-committed, waiting to be pushed.
+committed, waiting to be pushed. History says the same by weight: bold
+dots are commits still to push, faint ones are already pushed.
+
+While the keyboard is in another pane, the outline moves to whatever file
+is being written and says so. It never moves while you are in it.
 
 Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
 STRATA_ICONS=off shows none.
@@ -133,18 +140,23 @@ fn main() {
     let mut ui = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["-h" | "--help"] => return print!("{USAGE}"),
         ["-V" | "--version"] => return println!("strata {}", env!("CARGO_PKG_VERSION")),
+        ["view"] => fail("which file? strata view FILE".to_string()),
         ["view", file] => match View::open(Path::new(file)) {
             Some(view) => Ui::View(view),
             None => fail(format!("{file} is not in a directory")),
         },
+        [option] if option.starts_with('-') => fail(format!("no option {option}; see strata --help")),
         [] | [_] => {
             let dir = PathBuf::from(args.first().map_or(".", String::as_str));
             match Repo::open(&dir) {
                 Some(repo) => Ui::Outline(Outline::new(repo)),
+                None if dir.is_file() => {
+                    fail(format!("{0} is a file; to read it: strata view {0}", dir.display()))
+                }
                 None => fail(format!("{} is not a directory", dir.display())),
             }
         }
-        _ => fail(format!("too many arguments\n\n{USAGE}")),
+        _ => fail("too many arguments; see strata --help".to_string()),
     };
     let (watcher, idle) = {
         let (paths, fully) = ui.watch();

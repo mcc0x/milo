@@ -32,6 +32,12 @@ fn field(reply: &str, name: &str) -> Option<String> {
     Some(value.split_once('"')?.0.to_string())
 }
 
+/// Whether this is running in a Rex pane, where a file can be opened in a
+/// floating window.
+pub fn inside() -> bool {
+    std::env::var_os("REX_SESSION").is_some()
+}
+
 /// Opens `file` in strata's own reader, in a floating window over the tab
 /// this pane is in, closing the window `previous` first if there is one.
 /// Returns the new window's name for the next call, or what to tell the
