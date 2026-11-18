@@ -1,0 +1,16 @@
+[package]
+name = "strata"
+version = "0.1.0"
+edition = "2021"
+description = "Git history and project outline in one terminal pane."
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
