@@ -1,0 +1,22 @@
+# milo
+
+> milo provides small terminal panes for a live file tree, Git history, usage, and a read-only file reader. The panes work on their own or alongside your shell in Rex.
+
+milo does not write to the project it displays. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+
+## Using milo
+
+- [README](README.md): Installation, Rex setup, pane behavior, keys, and how to read the marks and colors.
+- [Source installer](install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
+- [Agent skill](skills/milo/SKILL.md): How to check milo and open a reader in the user's terminal, including at a Git commit.
+
+## Developing milo
+
+- [Contributing](CONTRIBUTING.md): Build and test instructions, repository safety rules, and source map.
+- [Cargo manifest](Cargo.toml): Rust version, dependencies, license, and release profile.
+- [Command entry point](src/main.rs): Command syntax, CLI help, and shared terminal loop.
+- [Rex setup](src/setup.rs): Setup choices and listener entry point.
+
+## Optional
+
+- [MIT license](LICENSE): License terms.
