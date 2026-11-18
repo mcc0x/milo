@@ -2,7 +2,7 @@
 name = "strata"
 version = "0.1.0"
 edition = "2021"
-description = "Git history and project outline in one terminal pane."
+description = "A project's files in a terminal pane, coloured by what is not yet committed or pushed."
 license = "MIT"
 
 [dependencies]

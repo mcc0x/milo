@@ -1,19 +1,21 @@
-//! The project as a strip, coloured by what is not yet committed or pushed.
+//! The outline: a project's files, coloured by what is not yet committed or
+//! pushed.
 //!
-//! A tall pane shows the file tree. A short one shows only the pending files,
-//! flowed across its width. A wide one adds what happened to each file.
+//! A tall pane shows the file tree, with recent history beneath it. A short
+//! one shows only the pending files, flowed across its width. A wide one
+//! adds what happened to each file and puts history beside the tree.
 
 use std::collections::{HashMap, HashSet};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::git::{Commit, FileChange, Kind, Repo};
+use crate::history::{self, Context};
 use crate::icons;
+use crate::rex;
 use crate::term::{self, Key, Screen, Style};
-use crate::tree::Tree;
+use crate::tree::{Folds, Tree};
 use crate::ui::{self, DIM};
 use crate::walk;
-use crate::when;
 
 /// At or below this height the pane is a horizontal strip.
 const STRIP_ROWS: usize = 7;
@@ -24,11 +26,8 @@ const HINT_ROWS: usize = 12;
 /// Columns for "edited", "removed", … and for "+1234 −1234" beside them.
 const WORD_W: usize = 8;
 const SIZE_W: usize = 11;
-/// How often the repository is checked for changes.
-const CHECK: Duration = Duration::from_secs(2);
-/// How soon after the operating system reports a change it is looked at;
-/// also the least time between two such looks while changes keep coming.
-const SETTLE: Duration = Duration::from_millis(120);
+/// Rows of the tree kept in view on either side of the cursor.
+const MARGIN: usize = 2;
 /// How long a mark stays once it has been seen.
 const FRESH: Duration = Duration::from_secs(4);
 /// How long a row counts as being written right now, and pulses.
@@ -40,38 +39,23 @@ const UNSEEN: Duration = Duration::from_secs(300);
 const FOLLOW_AFTER: Duration = Duration::from_secs(15);
 /// Two clicks on a row within this long are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How long something said in place of the key hint stays.
+const NOTE: Duration = Duration::from_secs(4);
 /// From this height a quarter of the pane shows recent history.
 const HISTORY_ROWS: usize = 20;
 /// From this width history sits beside the outline instead.
 const SIDE_COLS: usize = 90;
-/// From this many rows the history panel leads with its row of dots.
-const DOT_ROWS: usize = 6;
 /// Commits loaded for it: more than any pane has columns for dots.
 const HISTORY_LIMIT: usize = 300;
 
-/// What is pending beneath one directory.
-#[derive(Default, Clone, Copy)]
-struct Sum {
-    files: u32,
-    add: u32,
-    del: u32,
+/// Whether `path` lies inside the directory `dir`.
+fn under(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// What a pending file looked like at one load, to tell when it changes.
-type Seen = (Kind, u32, u32, Option<SystemTime>);
-
-/// The key a commit is marked fresh under; the NUL keeps it apart from paths.
-fn commit_key(hash: &str) -> String {
-    format!("\0{hash}")
-}
-
-/// Length of a leading "scope: " in a commit subject: a short single word
-/// and the colon and space after it. Zero if there is none.
-fn prefix_len(subject: &str) -> usize {
-    match subject.split_once(": ") {
-        Some((scope, _)) if scope.len() <= 24 && !scope.contains(' ') => scope.len() + 2,
-        _ => 0,
-    }
+/// Rows kept between the cursor and the edge of a tree `h` rows tall.
+fn margin(h: usize) -> usize {
+    MARGIN.min(h.saturating_sub(1) / 2)
 }
 
 pub struct Outline {
@@ -82,34 +66,26 @@ pub struct Outline {
     /// Without git, the listing the tree was built from, to notice changes.
     listing: Vec<String>,
     tree: Tree,
-    /// Directories the user opened, and ones they closed again.
-    expanded: HashSet<String>,
-    collapsed: HashSet<String>,
-    /// Pending work beneath each directory; these open unless closed by hand.
-    sums: HashMap<String, Sum>,
-    /// Paths, and the directories above them, with work not committed yet.
-    uncommitted: HashSet<String>,
+    folds: Folds,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
-    /// Recent commits, newest first; empty outside git.
+    /// Recent commits, newest first, and what they were read for.
     history: Vec<Commit>,
+    history_key: (String, Option<String>),
     show_history: bool,
-    /// Files that changed while the outline was open, and when.
+    /// Files that changed while the outline was open, by path, and when.
     fresh: HashMap<String, Instant>,
-    checked: Instant,
-    /// The operating system reported a change that has not been looked at yet.
-    poked: bool,
+    /// Commits that landed while it was open, by hash, and when.
+    fresh_commits: HashMap<String, Instant>,
     /// When the reader last used the pane or returned to it.
     looked: Instant,
-    /// The terminal has reported focus at least once, so `focused` is real.
-    focus_known: bool,
+    /// Whether the pane has the keyboard, once the terminal has said.
+    focus: Option<bool>,
     changed_only: bool,
-    /// Every directory is open, until toggled off again.
-    all_open: bool,
-    /// Whether this pane has the keyboard, as far as the terminal says.
-    focused: bool,
     sel: usize,
     top: usize,
+    /// The cursor was put where it is by a click, so the view stays put.
+    by_click: bool,
     /// First column shown when the strip has more than fits.
     strip_col: usize,
     horizontal: bool,
@@ -119,10 +95,10 @@ pub struct Outline {
     width: usize,
     /// The floating window the last file was opened in, to replace it.
     popup: Option<String>,
-    /// The row last clicked and when, to tell a double click.
-    clicked: Option<(usize, Instant)>,
+    /// The path last clicked and when, to tell a double click.
+    clicked: Option<(String, Instant)>,
     /// Something to say in place of the key hint, and when it was said.
-    note: Option<(String, Instant)>,
+    note: Option<(&'static str, Instant)>,
 }
 
 impl Outline {
@@ -132,23 +108,19 @@ impl Outline {
             files: Vec::new(),
             listing: Vec::new(),
             tree: Tree::default(),
-            expanded: HashSet::new(),
-            collapsed: HashSet::new(),
-            sums: HashMap::new(),
-            uncommitted: HashSet::new(),
+            folds: Folds::default(),
             recent: Vec::new(),
             history: Vec::new(),
+            history_key: (String::new(), None),
             show_history: true,
             fresh: HashMap::new(),
-            checked: Instant::now(),
-            changed_only: false,
-            all_open: false,
-            focused: true,
-            focus_known: false,
+            fresh_commits: HashMap::new(),
             looked: Instant::now(),
-            poked: false,
+            focus: None,
+            changed_only: false,
             sel: 0,
             top: 0,
+            by_click: false,
             strip_col: 0,
             horizontal: false,
             body: (0, 0),
@@ -157,7 +129,7 @@ impl Outline {
             clicked: None,
             note: None,
         };
-        outline.load();
+        outline.load(None, false);
         // Start where the work is, not at the top of the tree.
         let first = outline.tree.rows.iter().position(|&(n, _)| {
             let n = &outline.tree.nodes[n as usize];
@@ -167,139 +139,114 @@ impl Outline {
         outline
     }
 
-    fn seen(&self) -> HashMap<(String, bool), Seen> {
-        let of = |(i, f): (usize, &FileChange)| {
-            ((f.path.clone(), f.committed), (f.kind, f.add, f.del, self.repo.modified(i)))
-        };
-        self.files.iter().enumerate().map(of).collect()
+    /// Whether a watch on the root sees everything that can change here.
+    pub fn watchable(&self) -> bool {
+        self.repo.self_contained()
     }
 
-    /// Loads afresh, and marks what differs from the previous load.
-    fn reload(&mut self) {
-        let before = self.seen();
-        let known: HashSet<String> = self.history.iter().map(|c| c.hash.clone()).collect();
-        self.load();
-        let now = Instant::now();
-        // The file written most recently among those that changed.
-        let mut newest: Option<(Option<SystemTime>, String)> = None;
-        for (key, seen) in self.seen() {
-            if before.get(&key) != Some(&seen) {
-                if newest.as_ref().is_none_or(|(at, _)| *at <= seen.3) {
-                    newest = Some((seen.3, key.0.clone()));
-                }
-                self.fresh.insert(key.0, now);
-            }
-        }
-        // With nothing known before, every commit would count as new.
-        for c in self.history.iter().filter(|c| !known.is_empty() && !known.contains(&c.hash)) {
-            self.fresh.insert(commit_key(&c.hash), now);
-        }
-        // Left alone, the outline keeps the latest work in view.
-        if let Some((_, path)) = newest.filter(|_| self.following()) {
-            self.reveal(path);
-        }
+    pub fn root(&self) -> &std::path::Path {
+        &self.repo.root
     }
 
     /// Every file to show: git's own list, or a plain walk of the open folders.
     fn list(&self) -> Vec<String> {
         if self.repo.git {
-            self.repo.files()
+            self.repo.tracked()
         } else {
-            walk::list(&self.repo.root, |p| self.is_open(p))
+            walk::list(&self.repo.root, |p| self.folds.is_open(p))
         }
     }
 
-    fn load(&mut self) {
+    /// Reads everything afresh. `raw` is a status the repository was just
+    /// asked for, if any; `mark` marks commits that were not there before.
+    fn load(&mut self, raw: Option<Vec<u8>>, mark: bool) {
         let selected = self.selected_path();
-        self.files = self.repo.load();
-        self.checked = Instant::now();
-        let all = self.list();
-        let pending = self.files.iter().map(|f| f.path.as_str());
-        self.tree = Tree::build(all.iter().map(String::as_str).chain(pending));
-        self.listing = if self.repo.git { Vec::new() } else { all };
-        self.history = self.repo.history(HISTORY_LIMIT);
-        // Reversed, so a file both committed and edited again shows its newest state.
-        self.tree.colour(self.files.iter().rev().map(|f| (f.path.as_str(), f.kind)));
+        self.repo.read(raw);
+        self.files = self.repo.pending();
+        let listed = self.list();
+        self.tree = Tree::build(listed.iter().map(String::as_str), &self.files);
+        self.listing = if self.repo.git { Vec::new() } else { listed };
 
-        self.sums.clear();
-        self.uncommitted.clear();
+        // History only changes when the branch or what is pushed does.
+        let key = self.repo.history_key();
+        if key != self.history_key {
+            let history = self.repo.history(HISTORY_LIMIT);
+            // With nothing known before, every commit would count as new.
+            if mark && !self.history.is_empty() {
+                let known: HashSet<&str> = self.history.iter().map(|c| c.hash.as_str()).collect();
+                let now = Instant::now();
+                for c in history.iter().filter(|c| !known.contains(c.hash.as_str())) {
+                    self.fresh_commits.insert(c.hash.clone(), now);
+                }
+            }
+            (self.history, self.history_key) = (history, key);
+        }
+
         self.recent.clear();
         let mut once = HashSet::new();
         for (i, f) in self.files.iter().enumerate() {
-            let first = once.insert(f.path.as_str());
-            if first {
+            if once.insert(f.path.as_str()) {
                 self.recent.push(i);
             }
-            if !f.committed {
-                self.uncommitted.insert(f.path.clone());
-            }
+            // A folder with pending work opens unless the reader closed it,
+            // and stays open after: a commit must not fold the tree away.
             let mut p = f.path.as_str();
             while let Some((dir, _)) = p.rsplit_once('/') {
-                if first {
-                    let sum = self.sums.entry(dir.to_string()).or_default();
-                    sum.files += 1;
-                    sum.add += f.add;
-                    sum.del += f.del;
-                }
-                // A folder with pending work opens, and then stays open: a
-                // commit must not fold the tree away under the reader.
-                self.expanded.insert(dir.to_string());
-                if !f.committed {
-                    self.uncommitted.insert(dir.to_string());
-                }
+                self.folds.suggest(dir);
                 p = dir;
             }
         }
-        let repo = &self.repo;
-        self.recent.sort_by_key(|&i| std::cmp::Reverse(repo.modified(i)));
+        let files = &self.files;
+        self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|(at, _)| at)));
         self.relayout(selected);
     }
 
-    /// Called when nothing has happened for `idle_ms`.
-    pub fn tick(&mut self) {
-        let marks = std::mem::take(&mut self.fresh);
-        self.fresh = marks.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
-        self.check_if_due();
-    }
-
-    /// Called when the operating system reports a change under the root.
-    pub fn changed(&mut self) {
-        self.poked = true;
-        self.check_if_due();
-    }
-
-    /// Looks for changes, at most once per `SETTLE` after being told of one
-    /// and once per `CHECK` regardless.
-    fn check_if_due(&mut self) {
-        let due = if self.poked { SETTLE } else { CHECK };
-        if self.checked.elapsed() < due {
-            return;
+    /// Loads afresh, marks what differs from before and, left alone, brings
+    /// the latest of it into view.
+    fn reload(&mut self, raw: Option<Vec<u8>>) {
+        let old = std::mem::take(&mut self.files);
+        self.load(raw, true);
+        let before: HashMap<(&str, bool), &FileChange> = old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
+        let now = Instant::now();
+        // The file written most recently among those that changed.
+        let mut newest: Option<&FileChange> = None;
+        for f in &self.files {
+            if before.get(&(f.path.as_str(), f.committed)).is_some_and(|old| *old == f) {
+                continue;
+            }
+            self.fresh.insert(f.path.clone(), now);
+            if newest.is_none_or(|n| n.stamp.map(|s| s.0) <= f.stamp.map(|s| s.0)) {
+                newest = Some(f);
+            }
         }
-        (self.checked, self.poked) = (Instant::now(), false);
-        let stale = if self.repo.git { self.repo.stale(&self.files) } else { self.list() != self.listing };
-        if stale {
-            self.reload();
+        if let Some(path) = newest.filter(|_| self.following()).map(|f| f.path.clone()) {
+            self.reveal(&path);
         }
     }
 
-    /// Whether the reader is, as far as can be told, looking at the pane
-    /// right now: it has the keyboard, and the terminal is known to say so.
-    fn watched(&self) -> bool {
-        self.focus_known && self.focused
+    /// Looks for changes made outside the outline, and takes them in.
+    pub fn check(&mut self) {
+        if self.repo.git {
+            if let Some(raw) = self.repo.poll(&self.files) {
+                self.reload(Some(raw));
+            }
+        } else if self.list() != self.listing {
+            self.reload(None);
+        }
     }
 
     /// Whether the outline should move by itself to where work is
     /// happening: the keyboard is elsewhere, or has not been used here lately.
     fn following(&self) -> bool {
-        (self.focus_known && !self.focused) || self.looked.elapsed() >= FOLLOW_AFTER
+        self.focus == Some(false) || self.looked.elapsed() >= FOLLOW_AFTER
     }
 
     /// How much longer a mark made at `at` stays. It fades `FRESH` after it
-    /// has been seen: at once if the pane is being watched, otherwise from
-    /// the next time the reader looks. Unseen, it gives up after `UNSEEN`.
+    /// has been seen: as it appears if the pane is known to have the
+    /// keyboard, otherwise from the next time the reader uses it. Unseen, it
+    /// gives up after `UNSEEN`.
     fn mark_left(&self, at: Instant) -> Duration {
-        // Watching, a mark is seen as it appears, or on returning to the pane.
-        let seen = if self.watched() {
+        let seen = if self.focus == Some(true) {
             Some(at.max(self.looked))
         } else {
             Some(self.looked).filter(|&looked| looked > at)
@@ -308,60 +255,70 @@ impl Outline {
         fade.min(UNSEEN.saturating_sub(at.elapsed()))
     }
 
-    /// How long to wait for input before the next `tick`.
-    pub fn idle_ms(&self) -> i32 {
-        let due = if self.poked { SETTLE } else { CHECK };
-        let mut wait = due.saturating_sub(self.checked.elapsed());
-        for &at in self.fresh.values() {
-            wait = wait.min(self.mark_left(at));
-            // A mark still pulsing needs a redraw at each beat.
-            if at.elapsed() < LIVE {
-                wait = wait.min(PULSE);
-            }
-        }
-        wait.as_millis() as i32 + 1
+    /// How long the screen stays right if nothing happens: until a mark
+    /// fades or pulses, or a note has been up long enough.
+    pub fn next_frame(&self) -> Option<Duration> {
+        let marks = self.fresh.values().chain(self.fresh_commits.values());
+        let mark = marks.map(|&at| if at.elapsed() < LIVE { PULSE } else { self.mark_left(at) }).min();
+        let note = self.note.map(|(_, at)| NOTE.saturating_sub(at.elapsed()));
+        [mark, note].into_iter().flatten().min()
+    }
+
+    /// Forgets marks and notes that have had their time.
+    fn expire(&mut self) {
+        let fresh = std::mem::take(&mut self.fresh);
+        self.fresh = fresh.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
+        let commits = std::mem::take(&mut self.fresh_commits);
+        self.fresh_commits = commits.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
+        self.note = self.note.filter(|(_, at)| at.elapsed() < NOTE);
     }
 
     fn selected_path(&self) -> Option<String> {
         self.tree.row(self.sel).map(|n| n.path.clone())
     }
 
-    fn is_open(&self, path: &str) -> bool {
-        !self.collapsed.contains(path) && (self.all_open || self.expanded.contains(path))
-    }
-
     /// Recomputes the visible rows, keeping the cursor on `selected`.
     fn relayout(&mut self, selected: Option<String>) {
-        let (expanded, collapsed, all) = (&self.expanded, &self.collapsed, self.all_open);
-        let open = |p: &str| !collapsed.contains(p) && (all || expanded.contains(p));
-        self.tree.layout(open, self.changed_only);
+        self.tree.layout(|p| self.folds.is_open(p), self.changed_only);
         let at = selected.and_then(|p| self.tree.row_of(&p)).unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
     }
 
     /// Applies a change to which folders are open. Without git a folder's
     /// contents are only read once it is open, so that means listing again.
-    fn refresh_open(&mut self, selected: Option<String>) {
+    fn refold(&mut self, selected: Option<String>) {
         if self.repo.git {
             self.relayout(selected);
         } else {
-            self.load();
+            self.load(None, false);
         }
     }
 
-    fn set_open(&mut self, path: String, open: bool) {
-        if open {
-            self.collapsed.remove(&path);
-            self.expanded.insert(path.clone());
-        } else {
-            self.expanded.remove(&path);
-            self.collapsed.insert(path.clone());
+    /// Opens whatever folders hide `path` and puts the cursor on it.
+    fn reveal(&mut self, path: &str) {
+        self.folds.open_above(path);
+        self.relayout(Some(path.to_string()));
+    }
+
+    /// Shows a line in place of the key hint for a few seconds.
+    fn say(&mut self, text: &'static str) {
+        self.note = Some((text, Instant::now()));
+    }
+
+    /// Opens a file in a floating window, in place of the one opened before.
+    fn open_file(&mut self, path: &str) {
+        match rex::open(&self.repo.root, path, self.popup.as_deref()) {
+            Ok(layer) => self.popup = Some(layer),
+            Err(why) => {
+                self.popup = None;
+                self.say(why);
+            }
         }
-        self.refresh_open(Some(path));
     }
 
     pub fn draw(&mut self, s: &mut Screen) {
         s.clear();
+        self.expire();
         let (w, h) = (s.w, s.h);
         if w < 12 || h < 1 {
             return;
@@ -371,15 +328,28 @@ impl Outline {
         // A strip of two or three rows has none to spare for a heading.
         let head = (h >= 4) as usize;
         let hint = (h >= HINT_ROWS) as usize;
+        let ctx = Context {
+            remote: self.repo.remote.as_deref(),
+            dirty: self.files.iter().filter(|f| !f.committed).count(),
+            fresh: &self.fresh_commits,
+        };
         // Recent history goes beside the outline where the pane is wide, and
         // beneath the tree where it is only tall.
-        let history = self.show_history && !self.history.is_empty();
-        let beside = if history && w >= SIDE_COLS && h >= 3 { (w / 3).clamp(30, 52) } else { 0 };
-        let beneath = history && beside == 0 && !self.horizontal && h >= HISTORY_ROWS;
-        let panel = if beneath { self.history_rows(h - head - hint) } else { 0 };
-        // The column left over between the two is the space that parts them.
+        let shown = self.show_history && !self.history.is_empty();
+        let beside = if shown && w >= SIDE_COLS && h >= 3 { (w / 3).clamp(30, 52) } else { 0 };
+        let beneath = shown && beside == 0 && !self.horizontal && h >= HISTORY_ROWS;
+        let avail = h - head - hint;
+        let panel = if beneath { history::rows(&self.history, &ctx, avail, self.tree.rows.len()) } else { 0 };
+        // Space, not a rule, keeps the two apart: a column beside, a row
+        // beneath. Beside, the heading shares the project's own row.
+        if beside > 0 {
+            history::draw(s, &self.history, &ctx, (w - beside, 0), (beside, head + avail));
+        }
+        if panel > 0 {
+            history::draw(s, &self.history, &ctx, (0, head + avail - panel + 1), (w, panel - 1));
+        }
         self.width = if beside > 0 { w - beside - 1 } else { w };
-        self.body = (head, h - head - hint - panel);
+        self.body = (head, avail - panel);
         if head == 1 {
             self.header(s);
         }
@@ -388,15 +358,11 @@ impl Outline {
         } else {
             self.draw_tree(s);
         }
-        // Space, not a rule, keeps the two apart: two columns beside, one
-        // row beneath. Beside, the heading shares the project's own row.
-        if beside > 0 {
-            self.draw_history(s, (self.width + 1, 0), (beside, head + self.body.1));
-        }
-        if panel > 0 {
-            self.draw_history(s, (0, self.body.0 + self.body.1 + 1), (w, panel - 1));
-        }
-        if hint == 1 && self.focused {
+        // A note is said wherever there is a last row, hint or not.
+        if let Some((note, _)) = self.note {
+            s.put(0, h - 1, w, &" ".repeat(w), Style::PLAIN);
+            s.put_fit(1, h - 1, w - 2, note, Style::fg(term::YELLOW));
+        } else if hint == 1 && self.focus != Some(false) {
             self.hint(s);
         }
     }
@@ -448,14 +414,10 @@ impl Outline {
     /// The keys, worded for what each would do right now.
     fn hint(&self, s: &mut Screen) {
         let (w, y) = (s.w, s.h - 1);
-        if let Some((note, _)) = self.note.as_ref().filter(|(_, at)| at.elapsed() < FRESH) {
-            s.put_fit(1, y, w - 2, note, Style::fg(term::YELLOW));
-            return;
-        }
+        let e = if self.folds.all() { "e close folders" } else { "e open all" };
         // Without git there is no "changed" to narrow down to.
         let text = match (self.repo.git, w) {
             (true, 60..) => {
-                let e = if self.all_open { "e close folders" } else { "e open all" };
                 let c = if self.changed_only { "c all files" } else { "c changed only" };
                 // With work pending, stepping through it is the key worth knowing.
                 let first = if self.files.is_empty() { "enter open" } else { "n next change" };
@@ -464,10 +426,7 @@ impl Outline {
             (true, 30..) if !self.files.is_empty() => "n next · e all · c changed · q quit".to_string(),
             (true, 30..) => "e open all · c changed · q quit".to_string(),
             (true, _) => "e all · c changed".to_string(),
-            (false, 30..) => {
-                let e = if self.all_open { "e close folders" } else { "e open all" };
-                format!("enter open · {e} · q quit")
-            }
+            (false, 30..) => format!("enter open · {e} · q quit"),
             (false, _) => "e all · q quit".to_string(),
         };
         s.put_fit(1, y, w - 2, &text, DIM);
@@ -481,8 +440,10 @@ impl Outline {
             s.put_fit(1, y0, w - 2, text, DIM);
             return;
         }
-        // Keep a little of the tree in view on both sides of the cursor.
-        let margin = 2.min(h.saturating_sub(1) / 2);
+        // Keep a little of the tree in view on both sides of the cursor,
+        // unless a click put it there: then the rows must not move under
+        // the pointer before a second click.
+        let margin = if self.by_click { 0 } else { margin(h) };
         if self.sel < self.top + margin {
             self.top = self.sel.saturating_sub(margin);
         } else if self.sel + margin >= self.top + h {
@@ -496,19 +457,13 @@ impl Outline {
         for (y, (i, &(node, depth))) in (y0..).zip(rows) {
             let n = &self.tree.nodes[node as usize];
             let pending = n.kind != Kind::None;
-            let open = n.dir && self.is_open(&n.path);
-            let sum = self.sums.get(&n.path).copied().unwrap_or_default();
+            let open = n.dir && self.folds.is_open(&n.path);
             let colour = ui::kind_style(n.kind);
 
             // The last column is the scroll thumb's; text stops before it.
             let mut right = w - 1;
             if wide && pending {
-                let (add, del) = if n.dir {
-                    (sum.add, sum.del)
-                } else {
-                    self.files.iter().find(|f| f.path == n.path).map_or((0, 0), |f| (f.add, f.del))
-                };
-                ui::size_right(s, right, y, add, del);
+                ui::size_right(s, right, y, n.add, n.del);
                 right -= SIZE_W + WORD_W;
                 if !n.dir {
                     s.put(right, y, WORD_W, ui::kind_word(n.kind), colour);
@@ -526,7 +481,7 @@ impl Outline {
 
             // Bold is work not committed yet; committed-but-unpushed stays
             // regular. Everything untouched recedes once anything is pending.
-            let st = if self.uncommitted.contains(&n.path) {
+            let st = if n.uncommitted {
                 colour.bold()
             } else if !pending && !quiet {
                 colour.faint()
@@ -537,8 +492,8 @@ impl Outline {
             if n.dir {
                 x += s.put_fit(x, y, room, &n.name, st);
                 // A closed folder still says how much is inside it.
-                if !open && sum.files > 0 {
-                    s.put(x + 1, y, right.saturating_sub(x + 1), &sum.files.to_string(), DIM);
+                if !open && n.pending > 0 {
+                    s.put(x + 1, y, right.saturating_sub(x + 1), &n.pending.to_string(), DIM);
                 }
             } else {
                 s.put_middle(x, y, room, &n.name, st);
@@ -562,148 +517,11 @@ impl Outline {
             }
             // Grey rather than a solid bar, so the row keeps its own colour;
             // and no bar at all while the keyboard is in another pane.
-            if i == self.sel && self.focused {
+            if i == self.sel && self.focus != Some(false) {
                 s.tint(0, y, w - 1);
             }
         }
-        if len > h {
-            let thumb = (h * h / len).max(1);
-            let at = self.top * (h - thumb) / (len - h);
-            for y in y0 + at..y0 + at + thumb {
-                s.put(w - 1, y, 1, "▐", DIM);
-            }
-        }
-    }
-
-    /// Rows the history panel wants out of `avail`: no more than it has to
-    /// say, about a quarter of the pane, more where the tree leaves room.
-    fn history_rows(&self, avail: usize) -> usize {
-        let unpushed = self.history.iter().filter(|c| !c.pushed).count();
-        let remote_row = (unpushed > 0 && unpushed < self.history.len()) as usize;
-        let dirty = self.files.iter().any(|f| !f.committed) as usize;
-        // A blank row above, the heading, the dots, then one row per line.
-        let content = 3 + dirty + remote_row + self.history.len();
-        let spare = avail.saturating_sub(self.tree.rows.len()).min(avail / 2);
-        content.min((avail / 4).max(DOT_ROWS + 1).max(spare)).min(avail.saturating_sub(3))
-    }
-
-    fn dot_style(&self, i: usize, c: &Commit) -> Style {
-        let st = match (&self.repo.remote, c.pushed) {
-            (None, _) => Style::PLAIN,
-            (Some(_), true) => Style::fg(term::GREEN),
-            (Some(_), false) => Style::fg(term::YELLOW),
-        };
-        // The branch tip is the same dot, bold.
-        if i == 0 { st.bold() } else { st }
-    }
-
-    /// Whether history passes, between two neighbours, from local commits
-    /// to ones the remote has.
-    fn crosses(&self, before: &Commit, c: &Commit) -> bool {
-        self.repo.remote.is_some() && !before.pushed && c.pushed
-    }
-
-    /// The shape of recent history in one row: newest first, a gap between
-    /// days, a tick where the remote is.
-    fn draw_dots(&self, s: &mut Screen, (left, right): (usize, usize), y: usize, dirty: bool) {
-        // Spaced out while every commit fits that way, packed once they do not.
-        let pairs = || self.history.iter().zip(self.history.iter().skip(1));
-        let days = pairs().filter(|(a, b)| a.day != b.day).count();
-        let ticks = pairs().filter(|(a, b)| self.crosses(a, b)).count();
-        let cells = self.history.len() + ticks + dirty as usize;
-        let step = if cells * 2 + days <= right.saturating_sub(left) { 2 } else { 1 };
-        let mut x = left;
-        if dirty {
-            s.put(x, y, 1, "○", Style::PLAIN.bold());
-            x += step;
-        }
-        for (i, c) in self.history.iter().enumerate() {
-            if let Some(before) = i.checked_sub(1).map(|b| &self.history[b]) {
-                if self.crosses(before, c) && x < right {
-                    s.put(x, y, 1, "│", DIM);
-                    x += step;
-                }
-                x += (before.day != c.day) as usize;
-            }
-            if x >= right {
-                break;
-            }
-            s.put(x, y, 1, "●", self.dot_style(i, c));
-            x += step;
-        }
-    }
-
-    /// Recent commits, in the area whose corner is (x0, y0): beneath the
-    /// tree, or beside it in a wide pane. A heading in the project name's
-    /// own weight, a row of dots for the shape where there is room for it,
-    /// then one commit a row. Hollow is work not committed, yellow is
-    /// committed but not pushed, green is on the remote. Without a remote,
-    /// commits are simply uncoloured.
-    fn draw_history(&self, s: &mut Screen, (x0, y0): (usize, usize), (w, rows): (usize, usize)) {
-        // Text keeps one column clear of both edges of the area.
-        let (left, right, end) = (x0 + 1, x0 + w - 1, y0 + rows);
-        let unpushed = self.history.iter().filter(|c| !c.pushed).count();
-        let dirty = self.files.iter().filter(|f| !f.committed).count();
-
-        s.put(left, y0, w - 2, "History", Style::PLAIN.bold());
-        // The project heading counts files to push; this counts commits, and says so.
-        if unpushed > 0 {
-            let text = format!("{unpushed} unpushed");
-            s.put(right.saturating_sub(text.len()), y0, text.len(), &text, Style::fg(term::YELLOW));
-        }
-        // In a short pane every row goes to commits, one beneath the other.
-        let dots = rows >= DOT_ROWS;
-        if dots {
-            self.draw_dots(s, (left, right), y0 + 1, dirty > 0);
-        }
-
-        let text_x = left + 2;
-        let mut y = y0 + 1 + dots as usize;
-        if dirty > 0 && y < end {
-            let text = format!("{dirty} file{} not committed", if dirty == 1 { "" } else { "s" });
-            s.put(left, y, 1, "○", Style::PLAIN.bold());
-            s.put_fit(text_x, y, right.saturating_sub(text_x), &text, Style::PLAIN.bold());
-            y += 1;
-        }
-        let now = when::now();
-        let mut last_age = String::new();
-        for (i, c) in self.history.iter().enumerate() {
-            if i > 0 && self.crosses(&self.history[i - 1], c) && y < end {
-                // Everything below this name is already on the remote.
-                let name = self.repo.remote.as_deref().unwrap_or_default();
-                s.put_fit(text_x, y, right.saturating_sub(text_x), name, DIM);
-                y += 1;
-            }
-            if y >= end {
-                break;
-            }
-            s.put(left, y, 1, "●", self.dot_style(i, c));
-            // An age is only worth its column where it differs from the row above.
-            let age = when::short_age(now - c.time);
-            let mut text_end = right;
-            if age != last_age {
-                text_end -= age.len();
-                s.put(text_end, y, age.len(), &age, DIM);
-                text_end -= 1;
-            }
-            last_age = age;
-
-            let room = text_end.saturating_sub(text_x);
-            let fresh = self.fresh.contains_key(&commit_key(&c.hash));
-            // Merges and what is already pushed recede; a commit that just
-            // landed stands out for a moment.
-            let quiet = c.merge || (c.pushed && self.repo.remote.is_some());
-            let st = match (fresh, quiet) {
-                (true, _) => Style::PLAIN.bold(),
-                (false, true) => Style::PLAIN.faint(),
-                (false, false) => Style::PLAIN,
-            };
-            // A "scope: " prefix steps back so the eye lands on what follows.
-            let split = if fresh || quiet { 0 } else { prefix_len(&c.subject) };
-            let used = s.put(text_x, y, room, &c.subject[..split], Style::PLAIN.faint());
-            s.put_fit(text_x + used, y, room.saturating_sub(used), &c.subject[split..], st);
-            y += 1;
-        }
+        ui::thumb(s, w - 1, y0, h, len, self.top);
     }
 
     /// Pending files only, most recent first, filling columns top to bottom.
@@ -716,7 +534,6 @@ impl Outline {
             }
             return;
         }
-        let file = |i: usize| self.recent.get(i).map(|&f| &self.files[f]);
         let name_w = |&f: &usize| {
             let path = &self.files[f].path;
             term::str_width(path.rsplit_once('/').map_or(path, |(_, n)| n))
@@ -727,8 +544,8 @@ impl Outline {
         let first = self.strip_col.min(total.saturating_sub(shown));
         for col in 0..shown {
             for row in 0..h {
-                let Some(f) = file((first + col) * h + row) else { break };
-                ui::file_name(s, col * col_w + 1, y0 + row, col_w - 2, f);
+                let Some(&f) = self.recent.get((first + col) * h + row) else { break };
+                ui::file_name(s, col * col_w + 1, y0 + row, col_w - 2, &self.files[f]);
             }
         }
         if first > 0 {
@@ -743,102 +560,75 @@ impl Outline {
     }
 
     fn move_by(&mut self, delta: isize) {
-        if self.horizontal {
-            self.strip_col = self.strip_col.saturating_add_signed(delta.signum());
-        } else {
-            let last = self.tree.rows.len().saturating_sub(1);
-            self.sel = self.sel.saturating_add_signed(delta).min(last);
-        }
+        let last = self.tree.rows.len().saturating_sub(1);
+        self.sel = self.sel.saturating_add_signed(delta).min(last);
     }
 
     /// Scrolls the view under the pointer; the cursor only moves to stay in it.
     fn scroll(&mut self, delta: isize) {
-        if self.horizontal {
-            return self.move_by(delta);
-        }
         let (h, len) = (self.body.1.max(1), self.tree.rows.len());
         let last_top = len.saturating_sub(h);
         self.top = self.top.saturating_add_signed(delta).min(last_top);
-        let margin = 2.min((h - 1) / 2);
+        let margin = margin(h);
         let low = if self.top == 0 { 0 } else { self.top + margin };
         let high = if self.top == last_top { len.saturating_sub(1) } else { self.top + h - 1 - margin };
         self.sel = self.sel.clamp(low, high.max(low));
     }
 
-    /// Jumps to the next or previous pending file in tree order, wrapping
-    /// around, and opens whatever folders were hiding it.
-    fn jump_pending(&mut self, forward: bool) {
-        let from = self.tree.rows.get(self.sel).map(|&(n, _)| n);
-        let Some(target) = self.tree.next_pending(from, forward) else { return };
-        let path = self.tree.nodes[target as usize].path.clone();
-        self.reveal(path);
-    }
-
-    /// Opens whatever folders hide `path` and puts the cursor on it.
-    fn reveal(&mut self, path: String) {
-        let mut p = path.as_str();
-        while let Some((dir, _)) = p.rsplit_once('/') {
-            self.collapsed.remove(dir);
-            self.expanded.insert(dir.to_string());
-            p = dir;
-        }
-        self.relayout(Some(path));
-    }
-
-    /// Jumps to the next or previous folder, over the files between.
-    fn jump_folder(&mut self, forward: bool) {
-        let rows = &self.tree.rows;
-        let is_dir = |&(n, _): &(u32, u16)| self.tree.nodes[n as usize].dir;
-        let hit = if forward {
-            rows.iter().skip(self.sel + 1).position(is_dir).map(|i| self.sel + 1 + i)
-        } else {
-            rows.iter().take(self.sel).rposition(is_dir)
-        };
-        self.sel = hit.unwrap_or(self.sel);
-    }
-
-    /// Jumps to the next or previous row at the same depth in the same
-    /// folder, over anything nested in between.
-    fn jump_sibling(&mut self, forward: bool) {
-        let rows = &self.tree.rows;
-        let Some(&(_, depth)) = rows.get(self.sel) else { return };
-        // The folder's rows end at the first one shallower than this.
-        let hit = if forward {
-            let ahead = rows[self.sel + 1..].iter().take_while(|r| r.1 >= depth);
-            ahead.enumerate().find(|(_, r)| r.1 == depth).map(|(i, _)| self.sel + 1 + i)
-        } else {
-            let behind = rows[..self.sel].iter().rev().take_while(|r| r.1 >= depth);
-            behind.enumerate().find(|(_, r)| r.1 == depth).map(|(i, _)| self.sel - 1 - i)
-        };
-        self.sel = hit.unwrap_or(self.sel);
-    }
-
-    /// The row under the cursor, as (path, is a directory, is open, parent node).
-    fn pointed(&self) -> Option<(String, bool, bool, usize)> {
+    /// The row under the cursor, as (path, is a directory, is open).
+    fn pointed(&self) -> Option<(String, bool, bool)> {
         let n = self.tree.row(self.sel)?;
-        Some((n.path.clone(), n.dir, self.is_open(&n.path), n.parent as usize))
+        Some((n.path.clone(), n.dir, self.folds.is_open(&n.path)))
+    }
+
+    fn set_open(&mut self, path: String, open: bool) {
+        self.folds.set(&path, open);
+        self.refold(Some(path));
     }
 
     /// Returns true when the program should quit.
     pub fn on_key(&mut self, key: Key) -> bool {
-        let page = self.body.1.max(2) as isize - 1;
-        // Any key, click or return to the pane is the reader looking at it.
+        if let Key::Focus(focused) = key {
+            self.focus = Some(focused);
+            // Coming back to the pane is the reader looking at it; leaving is not.
+            if focused {
+                self.looked = Instant::now();
+            }
+            return false;
+        }
         self.looked = Instant::now();
+        self.by_click &= matches!(key, Key::Click(..));
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
-            Key::Focus(focused) => {
-                (self.focused, self.focus_known) = (focused, true);
-                if !focused {
-                    return false;
-                }
-            }
-            Key::Char('r') => self.reload(),
+            Key::Char('r') => self.reload(None),
             Key::Char('t') => self.show_history = !self.show_history,
+            _ if self.horizontal => self.strip_key(key),
+            _ => self.tree_key(key),
+        }
+        false
+    }
+
+    /// The strip has no cursor: its keys only move it sideways.
+    fn strip_key(&mut self, key: Key) {
+        match key {
+            Key::Char('l' | 'j') | Key::Right | Key::Down | Key::WheelDown | Key::PgDn => self.strip_col += 1,
+            Key::Char('h' | 'k') | Key::Left | Key::Up | Key::WheelUp | Key::PgUp => {
+                self.strip_col = self.strip_col.saturating_sub(1);
+            }
+            Key::Char('g') | Key::Home => self.strip_col = 0,
+            // The last column is wherever drawing finds it.
+            Key::Char('G') | Key::End => self.strip_col = usize::MAX / 2,
+            _ => {}
+        }
+    }
+
+    fn tree_key(&mut self, key: Key) {
+        let page = self.body.1.max(2) as isize - 1;
+        let sel = self.sel;
+        match key {
             Key::Char('e') => {
-                // Opening everything also forgets what was closed by hand.
-                self.all_open = !self.all_open;
-                self.collapsed.clear();
-                self.refresh_open(self.selected_path());
+                self.folds.toggle_all();
+                self.refold(self.selected_path());
             }
             Key::Char('c') if self.repo.git => {
                 self.changed_only = !self.changed_only;
@@ -848,135 +638,62 @@ impl Outline {
             Key::Char('k') | Key::Up => self.move_by(-1),
             Key::WheelDown => self.scroll(3),
             Key::WheelUp => self.scroll(-3),
-            Key::PgDn | Key::Ctrl(b'f') | Key::Ctrl(b'd') => self.move_by(page),
-            Key::PgUp | Key::Ctrl(b'b') | Key::Ctrl(b'u') => self.move_by(-page),
+            Key::PgDn | Key::Ctrl(b'f') => self.move_by(page),
+            Key::PgUp | Key::Ctrl(b'b') => self.move_by(-page),
+            Key::Ctrl(b'd') => self.move_by(page / 2),
+            Key::Ctrl(b'u') => self.move_by(-page / 2),
             Key::Char('g') | Key::Home => self.move_by(isize::MIN),
             Key::Char('G') | Key::End => self.move_by(isize::MAX),
-            Key::Char('l') | Key::Right if self.horizontal => self.move_by(1),
-            Key::Char('h') | Key::Left if self.horizontal => self.move_by(-1),
-            Key::Char('n') if !self.horizontal => self.jump_pending(true),
-            Key::Char('N') if !self.horizontal => self.jump_pending(false),
-            Key::Char('}') if !self.horizontal => self.jump_folder(true),
-            Key::Char('{') if !self.horizontal => self.jump_folder(false),
-            Key::Char('J') if !self.horizontal => self.jump_sibling(true),
-            Key::Char('K') if !self.horizontal => self.jump_sibling(false),
-            Key::Char('p') if !self.horizontal => {
-                if let Some((.., parent)) = self.pointed().filter(|p| p.3 != 0) {
-                    self.sel = self.tree.row_of(&self.tree.nodes[parent].path).unwrap_or(self.sel);
+            Key::Char('n' | 'N') => {
+                let next = self.tree.next_pending(sel, key == Key::Char('n')).map(str::to_string);
+                if let Some(path) = next {
+                    self.reveal(&path);
                 }
             }
-            Key::Click(x, y)
-                if !self.horizontal && x < self.width && (self.body.0..self.body.0 + self.body.1).contains(&y) =>
-            {
-                let row = self.top + y - self.body.0;
-                if row < self.tree.rows.len() {
-                    // A second click on the same row, soon after the first, reads a file.
-                    let again = self.clicked.is_some_and(|(r, at)| r == row && at.elapsed() < DOUBLE_CLICK);
-                    self.clicked = Some((row, Instant::now()));
-                    self.sel = row;
-                    match self.pointed() {
-                        Some((path, true, open, _)) => self.set_open(path, !open),
-                        Some((path, false, ..)) if again => self.open_file(&path),
-                        _ => {}
-                    }
+            Key::Char('}') => self.sel = self.tree.folder_row(sel, true).unwrap_or(sel),
+            Key::Char('{') => self.sel = self.tree.folder_row(sel, false).unwrap_or(sel),
+            Key::Char('J') => self.sel = self.tree.sibling_row(sel, true).unwrap_or(sel),
+            Key::Char('K') => self.sel = self.tree.sibling_row(sel, false).unwrap_or(sel),
+            Key::Char('p') => self.sel = self.tree.parent_row(sel).unwrap_or(sel),
+            Key::Click(x, y) if x < self.width && (self.body.0..self.body.0 + self.body.1).contains(&y) => {
+                self.click(self.top + y - self.body.0);
+            }
+            Key::Enter | Key::Char(' ') => match self.pointed() {
+                Some((path, true, open)) => self.set_open(path, !open),
+                Some((path, false, _)) if key == Key::Enter => self.open_file(&path),
+                _ => {}
+            },
+            Key::Char('l') | Key::Right => {
+                if let Some((path, true, false)) = self.pointed() {
+                    self.set_open(path, true);
                 }
             }
-            Key::Enter | Key::Char(' ') | Key::Char('l') | Key::Right | Key::Char('h') | Key::Left => {
-                let Some((path, dir, open, parent)) = self.pointed() else { return false };
-                let toggle = matches!(key, Key::Enter | Key::Char(' '));
-                let right = matches!(key, Key::Char('l') | Key::Right);
-                if dir && (toggle || open != right) {
-                    self.set_open(path, !open);
-                } else if !dir && key == Key::Enter {
-                    self.open_file(&path);
-                } else if !toggle && !right && parent != 0 {
-                    // Left on a file or a closed directory steps out to its parent.
-                    self.sel = self.tree.row_of(&self.tree.nodes[parent].path).unwrap_or(self.sel);
-                }
-            }
+            // Left closes an open folder; anywhere else it steps out to the parent.
+            Key::Char('h') | Key::Left => match self.pointed() {
+                Some((path, true, true)) => self.set_open(path, false),
+                _ => self.sel = self.tree.parent_row(sel).unwrap_or(sel),
+            },
             _ => {}
         }
-        false
     }
-}
 
-/// Whether `path` lies inside the directory `dir`.
-fn under(path: &str, dir: &str) -> bool {
-    path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
-}
-
-impl Outline {
-    /// Opens a file in a floating window over the current tab, in place of
-    /// the one opened before it. Rex makes the window, so this only works
-    /// when running inside Rex.
-    fn open_file(&mut self, path: &str) {
-        let Ok(session) = std::env::var("REX_SESSION") else {
-            return self.say("Reading a file needs Rex.");
-        };
-        let Ok(exe) = std::env::current_exe() else { return };
-        if let Some(layer) = self.popup.take() {
-            // It may be closed already; either way it is gone afterwards.
-            let request = format!(r#"{{"session_id":{},"layer_id":{}}}"#, json(&session), json(&layer));
-            rex(&["api", "call", "-s", &session, "session.close_layer", &request]);
-        }
-        // Over the tab the outline is in, wherever the reader is looking;
-        // failing that, over the active one.
-        let window = std::env::var("REX_BLOCK")
-            .ok()
-            .and_then(|block| rex(&["block", "inspect", "-s", &session, &block, "--json"]))
-            .and_then(|reply| field(&reply, "window_id"))
-            .map(|id| format!(r#""window_id":{},"#, json(&id)))
-            .unwrap_or_default();
-        let name = path.rsplit_once('/').map_or(path, |(_, n)| n);
-        let request = format!(
-            concat!(
-                r#"{{"session_id":{},{}"bounds":[0.12,0.08,0.76,0.84],"focus":true,"layout":{{"block":{{"#,
-                r#""flavor":"com.superlogical.terminal.shell","label":{},"#,
-                r#""options":{{"command":[{},"view",{}],"shell":"none","cwd":{}}}}}}}}}"#,
-            ),
-            json(&session),
-            window,
-            json(name),
-            json(&exe.to_string_lossy()),
-            json(&self.repo.root.join(path).to_string_lossy()),
-            json(&self.repo.root.to_string_lossy()),
-        );
-        match rex(&["api", "call", "-s", &session, "session.new_layer", &request]) {
-            Some(reply) => self.popup = field(&reply, "layer_id"),
-            None => self.say("Rex did not open the file."),
+    /// A click selects a row and opens or closes a folder; a second click
+    /// on the same file, soon after the first, reads it.
+    fn click(&mut self, row: usize) {
+        let Some(node) = self.tree.row(row) else { return };
+        let (path, dir) = (node.path.clone(), node.dir);
+        let again = self.clicked.take().is_some_and(|(p, at)| p == path && at.elapsed() < DOUBLE_CLICK);
+        (self.sel, self.by_click) = (row, true);
+        match (dir, again) {
+            (true, false) => {
+                let open = self.folds.is_open(&path);
+                self.clicked = Some((path.clone(), Instant::now()));
+                self.set_open(path, !open);
+            }
+            // A double click on a folder is one toggle, not two.
+            (true, true) => {}
+            (false, false) => self.clicked = Some((path, Instant::now())),
+            (false, true) => self.open_file(&path),
         }
     }
-
-    /// Shows a line in place of the key hint for a few seconds.
-    fn say(&mut self, text: &str) {
-        self.note = Some((text.to_string(), Instant::now()));
-    }
-}
-
-/// Runs the Rex command line and returns what it printed. `None` if it failed.
-fn rex(args: &[&str]) -> Option<String> {
-    let out = Command::new("rex").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// A string as a JSON literal.
-fn json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' | '\\' => out.extend(['\\', c]),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The value of a string field, wherever it first appears in a JSON reply.
-fn field(reply: &str, name: &str) -> Option<String> {
-    let (_, rest) = reply.split_once(&format!("\"{name}\""))?;
-    let value = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
-    Some(value.split_once('"')?.0.to_string())
 }

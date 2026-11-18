@@ -1,6 +1,6 @@
 //! Raw terminal access: mode switching, input decoding and a diffed cell buffer.
 
-use std::io::{self, Write};
+use std::io::{self, ErrorKind, Write};
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -9,9 +9,13 @@ pub static RESIZED: AtomicBool = AtomicBool::new(true);
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
 static ORIG: OnceLock<libc::termios> = OnceLock::new();
 
-// Alternate screen, hidden cursor, mouse buttons in SGR form, focus reporting.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?1004h";
-const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+// Alternate screen, hidden cursor, mouse buttons in SGR form, focus
+// reporting, and no wrapping: a row that turns out wider than reckoned is
+// cut at the edge instead of spilling onto the next.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h";
+const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+/// How long the rest of a split escape sequence is waited for.
+const SEQUENCE_MS: i32 = 25;
 
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
@@ -48,8 +52,11 @@ pub fn enter() -> io::Result<()> {
         }
     }
     install(libc::SIGWINCH, on_winch);
-    install(libc::SIGTERM, on_term);
-    install(libc::SIGHUP, on_term);
+    // Each of these ends the program through the event loop, which puts the
+    // terminal back first.
+    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+        install(sig, on_term);
+    }
     let mut out = io::stdout().lock();
     out.write_all(ENTER)?;
     out.flush()
@@ -128,23 +135,48 @@ pub enum Key {
 pub fn read_keys(keys: &mut Vec<Key>) {
     let mut buf = [0u8; 4096];
     let mut bytes = Vec::new();
-    let mut first = true;
-    loop {
-        let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-        if n <= 0 {
-            // poll() said readable, so an immediate zero-length read is EOF.
-            if n == 0 && first {
-                keys.push(Key::Eof);
+    // An escape sequence can arrive in two pieces. A piece that ends
+    // mid-sequence gets one short wait for the rest, or a lone Esc and a
+    // few stray letters would be read in place of an arrow key.
+    for attempt in 0..2 {
+        loop {
+            let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+            if n < 0 {
+                let again = matches!(io::Error::last_os_error().kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted);
+                // Any other failure will not mend: the terminal is gone.
+                if !again {
+                    keys.push(Key::Eof);
+                }
+                break;
             }
-            break;
+            if n == 0 {
+                // poll() said readable, so an immediate zero-length read is EOF.
+                if bytes.is_empty() && attempt == 0 {
+                    keys.push(Key::Eof);
+                }
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n as usize]);
+            if (n as usize) < buf.len() {
+                break;
+            }
         }
-        first = false;
-        bytes.extend_from_slice(&buf[..n as usize]);
-        if (n as usize) < buf.len() {
+        let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        if !unfinished(&bytes) || unsafe { libc::poll(&mut fd, 1, SEQUENCE_MS) } <= 0 {
             break;
         }
     }
     decode(&bytes, keys);
+}
+
+/// Whether `b` ends partway through an escape sequence.
+fn unfinished(b: &[u8]) -> bool {
+    let Some(esc) = b.iter().rposition(|&c| c == 0x1b) else { return false };
+    match &b[esc + 1..] {
+        [] | [b'O'] => true,
+        [b'[', rest @ ..] => !rest.iter().any(|c| (0x40..=0x7e).contains(c)),
+        _ => false,
+    }
 }
 
 fn decode(b: &[u8], keys: &mut Vec<Key>) {
@@ -455,14 +487,69 @@ impl Screen {
     }
 }
 
-/// Terminal columns a character occupies. Covers control, combining and the
-/// East Asian wide / emoji blocks; everything else is one column.
-pub fn char_width(c: char) -> usize {
+/// Terminal columns a character occupies: none for control, combining and
+/// invisible formatting characters, two for East Asian wide characters and
+/// emoji, one for everything else. Text of unknown origin is drawn through
+/// this, so what it calls zero-width is never sent to the terminal at all.
+fn char_width(c: char) -> usize {
     let c = c as u32;
     match c {
         0..=0x1f | 0x7f..=0x9f => 0,
         0x20..=0x2ff => 1,
-        0x300..=0x36f | 0x200b..=0x200f | 0x2028..=0x202e | 0x2060..=0x2064 | 0xfe00..=0xfe0f | 0xfeff => 0,
+        // Combining marks.
+        0x300..=0x36f
+        | 0x483..=0x489
+        | 0x591..=0x5bd
+        | 0x610..=0x61a
+        | 0x64b..=0x65f
+        | 0x1ab0..=0x1aff
+        | 0x1dc0..=0x1dff
+        | 0x20d0..=0x20ff
+        | 0xfe20..=0xfe2f => 0,
+        // Zero-width and direction-changing characters, variation
+        // selectors and tags: invisible, and able to reorder what is shown.
+        0x61c
+        | 0x200b..=0x200f
+        | 0x2028..=0x202e
+        | 0x2060..=0x206f
+        | 0xfe00..=0xfe0f
+        | 0xfeff
+        | 0xfff9..=0xfffb
+        | 0xe0000..=0xe0fff => 0,
+        // Emoji outside the main blocks that terminals draw two columns wide.
+        0x231a..=0x231b
+        | 0x23e9..=0x23ec
+        | 0x23f0
+        | 0x23f3
+        | 0x25fd..=0x25fe
+        | 0x2614..=0x2615
+        | 0x2648..=0x2653
+        | 0x267f
+        | 0x2693
+        | 0x26a1
+        | 0x26aa..=0x26ab
+        | 0x26bd..=0x26be
+        | 0x26c4..=0x26c5
+        | 0x26ce
+        | 0x26d4
+        | 0x26ea
+        | 0x26f2..=0x26f3
+        | 0x26f5
+        | 0x26fa
+        | 0x26fd
+        | 0x2705
+        | 0x270a..=0x270b
+        | 0x2728
+        | 0x274c
+        | 0x274e
+        | 0x2753..=0x2755
+        | 0x2757
+        | 0x2795..=0x2797
+        | 0x27b0
+        | 0x27bf
+        | 0x2b1b..=0x2b1c
+        | 0x2b50
+        | 0x2b55 => 2,
         0x1100..=0x115f
         | 0x2e80..=0xa4cf
         | 0xac00..=0xd7a3
@@ -471,6 +558,7 @@ pub fn char_width(c: char) -> usize {
         | 0xff00..=0xff60
         | 0xffe0..=0xffe6
         | 0x1f300..=0x1f64f
+        | 0x1f680..=0x1f6ff
         | 0x1f900..=0x1faff
         | 0x20000..=0x3fffd => 2,
         _ => 1,
@@ -479,4 +567,51 @@ pub fn char_width(c: char) -> usize {
 
 pub fn str_width(s: &str) -> usize {
     s.chars().map(char_width).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(bytes: &[u8]) -> Vec<Key> {
+        let mut keys = Vec::new();
+        decode(bytes, &mut keys);
+        keys
+    }
+
+    #[test]
+    fn keys_and_sequences_decode() {
+        assert_eq!(keys(b"j\r\x1b[A\x1b[6~\x03"), [Key::Char('j'), Key::Enter, Key::Up, Key::PgDn, Key::Ctrl(b'c')]);
+        assert_eq!(keys("é".as_bytes()), [Key::Char('é')]);
+        assert_eq!(keys(b"\x1b"), [Key::Esc]);
+        assert_eq!(keys(b"\x1b[I\x1b[O"), [Key::Focus(true), Key::Focus(false)]);
+    }
+
+    #[test]
+    fn mouse_reports_decode() {
+        assert_eq!(keys(b"\x1b[<0;8;3M"), [Key::Click(7, 2)]);
+        assert_eq!(keys(b"\x1b[<0;8;3m"), []);
+        assert_eq!(keys(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [Key::WheelUp, Key::WheelDown]);
+    }
+
+    #[test]
+    fn an_unfinished_sequence_is_recognised() {
+        assert!(unfinished(b"\x1b"));
+        assert!(unfinished(b"j\x1b["));
+        assert!(unfinished(b"\x1b[<0;8"));
+        assert!(unfinished(b"\x1bO"));
+        assert!(!unfinished(b"\x1b[A"));
+        assert!(!unfinished(b"\x1b[<0;8;3M"));
+        assert!(!unfinished(b"abc"));
+    }
+
+    #[test]
+    fn widths_cover_what_breaks_a_row() {
+        assert_eq!(str_width("abc"), 3);
+        assert_eq!(str_width("日本"), 4);
+        assert_eq!(str_width("🚀✨"), 4);
+        // A bidirectional override and a zero-width space take no room.
+        assert_eq!(str_width("a\u{202e}b\u{200b}c\u{2066}"), 3);
+        assert_eq!(str_width("\x1b[31m"), 4);
+    }
 }

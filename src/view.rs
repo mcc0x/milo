@@ -5,10 +5,10 @@
 //! out. Any other file is shown as it is.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
 
-use crate::git::{FileChange, Kind, Repo};
+use crate::git::{Kind, Repo, Stamp};
 use crate::icons;
+use crate::read::{self, Content};
 use crate::term::{self, Key, Screen, Style};
 use crate::ui::{self, ADD, DEL, DIM};
 
@@ -17,19 +17,15 @@ const LIMIT: u64 = 2 << 20;
 const TAB: usize = 4;
 /// Lines of the file kept in view above a change that was jumped to.
 const LEAD: usize = 3;
-/// How often the file is checked for changes, and how soon after the
-/// operating system reports one.
-const CHECK: Duration = Duration::from_secs(2);
-const SETTLE: Duration = Duration::from_millis(120);
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum LineKind {
     Same,
     Add,
     Del,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 struct Line {
     kind: LineKind,
     /// Line number in the file: the current one, or the old one for a removal.
@@ -41,23 +37,19 @@ struct Line {
 
 pub struct View {
     repo: Repo,
-    /// Everything pending in the repository, to notice when that moves.
-    files: Vec<FileChange>,
     /// The file, relative to the repository root.
     path: String,
     abs: PathBuf,
-    stamp: Option<(SystemTime, u64)>,
+    stamp: Stamp,
     lines: Vec<Line>,
     /// Said in place of the content when there is none to show.
     note: Option<&'static str>,
-    /// What is pending for this file: its kind, lines gained, lines lost.
-    change: Option<(Kind, u32, u32)>,
+    /// What is pending for this file; `Kind::None` if nothing is.
+    kind: Kind,
     top: usize,
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
-    checked: Instant,
-    poked: bool,
 }
 
 /// Expands tabs and drops control characters so a line is safe to draw.
@@ -114,11 +106,18 @@ fn mark_changed(lines: &mut [Line]) {
 }
 
 /// Reads a whole-file diff: every line of the file, with removed lines in
-/// place among them.
-fn parse_diff(raw: &[u8]) -> Vec<Line> {
+/// place among them, and what the diff says happened to the file.
+fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
     let mut lines = Vec::new();
+    let mut kind = Kind::None;
     let (mut old, mut new, mut in_hunk) = (1, 1, false);
     for l in String::from_utf8_lossy(raw).lines() {
+        if l.starts_with("diff --git ") {
+            // A file that changed type, say into a link, comes as two diffs.
+            in_hunk = false;
+            kind = kind.max(Kind::Modified);
+            continue;
+        }
         if let Some(hunk) = l.strip_prefix("@@ -") {
             // "@@ -12,5 +14,6 @@"
             let start = |s: &str| s.split([',', ' ']).next().and_then(|n| n.parse().ok()).unwrap_or(1);
@@ -128,9 +127,17 @@ fn parse_diff(raw: &[u8]) -> Vec<Line> {
             continue;
         }
         if !in_hunk {
+            // Between the file's name and its first hunk, git says what
+            // became of it.
+            kind = match l.split(' ').next() {
+                Some("new") => Kind::Added,
+                Some("deleted") => Kind::Deleted,
+                Some("rename") => Kind::Renamed,
+                _ => kind,
+            };
             continue;
         }
-        let (kind, no) = match l.as_bytes().first() {
+        let (line_kind, no) = match l.as_bytes().first() {
             Some(b'+') => (LineKind::Add, &mut new),
             Some(b'-') => (LineKind::Del, &mut old),
             // "\ No newline at end of file"
@@ -140,37 +147,37 @@ fn parse_diff(raw: &[u8]) -> Vec<Line> {
                 (LineKind::Same, &mut new)
             }
         };
-        lines.push(Line { kind, no: *no, text: clean(l.get(1..).unwrap_or("")), changed: (0, 0) });
+        lines.push(Line { kind: line_kind, no: *no, text: clean(l.get(1..).unwrap_or("")), changed: (0, 0) });
         *no += 1;
     }
     mark_changed(&mut lines);
-    lines
+    (lines, kind)
 }
 
 impl View {
-    /// Opens `file`, which need not exist any more if git remembers it.
-    /// `None` if the directory it is in does not exist.
+    /// Opens `file`. It need not exist any more, nor the directory it was
+    /// in, if git remembers it. `None` if nothing above it exists either.
     pub fn open(file: &Path) -> Option<View> {
-        let dir = file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        // The nearest directory that is still there says which repository
+        // this is; the rest of the path is taken on trust.
+        let here = file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let dir = here.ancestors().find(|d| d.is_dir()).filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
         let repo = Repo::open(dir)?;
-        let abs = dir.canonicalize().ok()?.join(file.file_name()?);
+        let abs = dir.canonicalize().ok()?.join(file.strip_prefix(dir).unwrap_or(file));
         let path = abs.strip_prefix(&repo.root).ok()?.to_string_lossy().into_owned();
         let mut view = View {
             repo,
-            files: Vec::new(),
             path,
             abs,
             stamp: None,
             lines: Vec::new(),
             note: None,
-            change: None,
+            kind: Kind::None,
             top: 0,
             pan: 0,
             rows: 0,
-            checked: Instant::now(),
-            poked: false,
         };
-        view.load();
+        view.load(None);
         // Start at the first change, with a little of the file above it.
         let first = view.lines.iter().position(|l| l.kind != LineKind::Same);
         view.top = first.map_or(0, |i| i.saturating_sub(LEAD));
@@ -181,33 +188,52 @@ impl View {
         &self.repo.root
     }
 
-    fn stamp(&self) -> Option<(SystemTime, u64)> {
+    /// Whether a watch on the root sees everything that can change here.
+    pub fn watchable(&self) -> bool {
+        self.repo.self_contained()
+    }
+
+    fn stamp(&self) -> Stamp {
         let m = std::fs::metadata(&self.abs).ok()?;
         Some((m.modified().ok()?, m.len()))
     }
 
-    fn load(&mut self) {
-        self.files = self.repo.load();
+    /// Reads the file and what is pending for it. `raw` is a status the
+    /// repository was just asked for, if any.
+    fn load(&mut self, raw: Option<Vec<u8>>) {
+        self.repo.read(raw);
         self.stamp = self.stamp();
-        self.checked = Instant::now();
-        self.change = self.files.iter().find(|f| f.path == self.path).map(|f| (f.kind, f.add, f.del));
-        self.note = None;
-        if self.stamp.is_some_and(|(_, len)| len > LIMIT) {
-            self.lines.clear();
-            self.note = Some("Too large to show.");
-            return;
+        (self.lines, self.note, self.kind) = (Vec::new(), None, Kind::None);
+        if self.repo.is_untracked(&self.path) {
+            // Git has nothing to compare a file it does not track against.
+            self.kind = Kind::Untracked;
+        } else if self.repo.git {
+            let Some(mut diff) = self.repo.file_diff(&self.path, None) else {
+                self.note = Some("Too large to show.");
+                return;
+            };
+            (self.lines, self.kind) = parse_diff(&diff);
+            // A file that looks new may have been moved here; shown beside
+            // where it was, only what changed in it counts as a change.
+            if self.kind == Kind::Added {
+                if let Some(from) = self.repo.moved_from(&self.path) {
+                    diff = self.repo.file_diff(&self.path, Some(&from)).unwrap_or(diff);
+                    (self.lines, self.kind) = parse_diff(&diff);
+                }
+            }
+            if self.repo.is_unmerged(&self.path) {
+                self.kind = Kind::Conflict;
+            }
         }
-        // Git has nothing to compare a file it does not track against.
-        let tracked = self.change.is_some_and(|(kind, ..)| kind != Kind::Untracked);
-        let diff = if tracked { self.repo.file_diff(&self.path) } else { Vec::new() };
-        self.lines = parse_diff(&diff);
         if !self.lines.is_empty() {
             return;
         }
-        match std::fs::read(&self.abs) {
-            Err(_) => self.note = Some("This file is gone."),
-            Ok(bytes) if bytes.contains(&0) => self.note = Some("Not text, so there is nothing to show."),
-            Ok(bytes) => {
+        match read::file(&self.abs, LIMIT) {
+            Content::Gone => self.note = Some("This file is gone."),
+            Content::NotFile => self.note = Some("Not a file, so there is nothing to show."),
+            Content::TooLarge => self.note = Some("Too large to show."),
+            Content::Bytes(bytes) if bytes.contains(&0) => self.note = Some("Not text, so there is nothing to show."),
+            Content::Bytes(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
                 let line = |(i, l): (usize, &str)| Line {
                     kind: LineKind::Same,
@@ -223,32 +249,13 @@ impl View {
         }
     }
 
-    /// Looks for changes, at most once per `SETTLE` after being told of one
-    /// and once per `CHECK` regardless.
-    fn check_if_due(&mut self) {
-        let due = if self.poked { SETTLE } else { CHECK };
-        if self.checked.elapsed() < due {
-            return;
-        }
-        (self.checked, self.poked) = (Instant::now(), false);
-        if self.repo.stale(&self.files) || self.stamp() != self.stamp {
-            self.load();
+    /// Looks for changes to the file or to the repository around it.
+    pub fn check(&mut self) {
+        let raw = self.repo.poll(&[]);
+        if raw.is_some() || self.stamp() != self.stamp {
+            self.load(raw);
             self.scroll(0);
         }
-    }
-
-    pub fn tick(&mut self) {
-        self.check_if_due();
-    }
-
-    pub fn changed(&mut self) {
-        self.poked = true;
-        self.check_if_due();
-    }
-
-    pub fn idle_ms(&self) -> i32 {
-        let due = if self.poked { SETTLE } else { CHECK };
-        due.saturating_sub(self.checked.elapsed()).as_millis() as i32 + 1
     }
 
     fn scroll(&mut self, delta: isize) {
@@ -310,27 +317,22 @@ impl View {
                 s.emphasise(text_x + from, y, width.min(text_w.saturating_sub(from)));
             }
         }
-        let len = self.lines.len();
-        if len > self.rows {
-            let thumb = (self.rows * self.rows / len).max(1);
-            let at = self.top * (self.rows - thumb) / (len - self.rows);
-            for y in 1 + at..1 + at + thumb {
-                s.put(w - 1, y, 1, "▐", DIM);
-            }
-        }
-        let hint = if self.change.is_some() { "↑↓ scroll · n next change · q close" } else { "↑↓ scroll · q close" };
+        ui::thumb(s, w - 1, 1, self.rows, self.lines.len(), self.top);
+        let hint = if self.kind == Kind::None { "↑↓ scroll · q close" } else { "↑↓ scroll · n next change · q close" };
         s.put_fit(1, h - 1, w - 2, hint, DIM);
     }
 
-    /// The file's name and where it lives, and what is pending for it.
+    /// The file's name and where it lives, and what is pending for it. The
+    /// counts are of the lines shown, so they always agree with the body.
     fn header(&self, s: &mut Screen) {
         let w = s.w;
         let mut right = w - 1;
-        if let Some((kind, add, del)) = self.change {
-            right -= ui::size_right(s, right, 0, add, del);
-            let word = ui::kind_word(kind);
+        if self.kind != Kind::None {
+            let count = |kind| self.lines.iter().filter(|l| l.kind == kind).count() as u32;
+            right -= ui::size_right(s, right, 0, count(LineKind::Add), count(LineKind::Del)).min(right);
+            let word = ui::kind_word(self.kind);
             right = right.saturating_sub(word.len() + 2);
-            s.put(right, 0, word.len(), word, ui::kind_style(kind));
+            s.put(right, 0, word.len(), word, ui::kind_style(self.kind));
         }
         let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
         let room = right.saturating_sub(2);
@@ -361,5 +363,70 @@ impl View {
             _ => {}
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(lines: &[Line]) -> Vec<(LineKind, u32, &str)> {
+        lines.iter().map(|l| (l.kind, l.no, l.text.as_str())).collect()
+    }
+
+    #[test]
+    fn a_diff_becomes_numbered_lines() {
+        let (lines, kind) = parse_diff(
+            b"diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n one\n-two\n+2\n+2.5\n three\n",
+        );
+        assert_eq!(kind, Kind::Modified);
+        assert_eq!(
+            shape(&lines),
+            [
+                (LineKind::Same, 1, "one"),
+                (LineKind::Del, 2, "two"),
+                (LineKind::Add, 2, "2"),
+                (LineKind::Add, 3, "2.5"),
+                (LineKind::Same, 4, "three"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_diff_says_what_became_of_the_file() {
+        let new = b"diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+x\n";
+        assert_eq!(parse_diff(new).1, Kind::Added);
+        let gone = b"diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+        assert_eq!(parse_diff(gone).1, Kind::Deleted);
+        let moved = b"diff --git a/f b/g\nsimilarity index 90%\nrename from f\nrename to g\n@@ -1 +1 @@\n-x\n+y\n";
+        assert_eq!(parse_diff(moved).1, Kind::Renamed);
+        assert_eq!(parse_diff(b"").1, Kind::None);
+    }
+
+    #[test]
+    fn a_second_diff_does_not_leak_its_headers_into_the_text() {
+        // A file replaced by a link: git writes a deletion, then an addition.
+        let raw = b"diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-text\n\
+                    diff --git a/f b/f\nnew file mode 120000\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+target\n";
+        let (lines, _) = parse_diff(raw);
+        assert_eq!(shape(&lines), [(LineKind::Del, 1, "text"), (LineKind::Add, 1, "target")]);
+    }
+
+    #[test]
+    fn an_edited_word_is_picked_out() {
+        let (lines, _) = parse_diff(b"diff --git a/f b/f\n@@ -1 +1 @@\n-let total = count + 1;\n+let total = count + 2;\n");
+        assert_eq!(&lines[0].text[lines[0].changed.0..lines[0].changed.1], "1");
+        assert_eq!(&lines[1].text[lines[1].changed.0..lines[1].changed.1], "2");
+    }
+
+    #[test]
+    fn unrelated_lines_are_not_paired() {
+        let (lines, _) = parse_diff(b"diff --git a/f b/f\n@@ -1 +1 @@\n-alpha\n+zzzzzzzzzz\n");
+        assert_eq!(lines[0].changed, (0, 0));
+    }
+
+    #[test]
+    fn text_is_made_safe_to_draw() {
+        assert_eq!(clean("a\tb\x1b[31m"), "a   b[31m");
     }
 }

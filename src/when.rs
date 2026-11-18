@@ -33,3 +33,20 @@ pub fn short_age(secs: i64) -> String {
         s => format!("{}y", s / (365 * DAY)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::short_age;
+
+    #[test]
+    fn ages_use_the_largest_whole_unit() {
+        let ages = [0, 59, 60, 70 * 60, 3 * 3600, 26 * 3600, 8 * 86400, 40 * 86400, 800 * 86400];
+        let short: Vec<String> = ages.into_iter().map(short_age).collect();
+        assert_eq!(short, ["now", "now", "1m", "1h", "3h", "1d", "1w", "1mo", "2y"]);
+    }
+
+    #[test]
+    fn a_commit_dated_in_the_future_is_now() {
+        assert_eq!(short_age(-500), "now");
+    }
+}

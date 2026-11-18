@@ -72,6 +72,7 @@ mod imp {
             count: isize,
             callbacks: *const Opaque,
         ) -> *const c_void;
+        fn CFRelease(object: *const c_void);
     }
 
     #[link(name = "CoreServices", kind = "framework")]
@@ -117,29 +118,39 @@ mod imp {
                 libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             }
             SIGNAL.store(fds[1], Ordering::Relaxed);
-
-            let bytes = root.as_os_str().as_bytes();
-            let path = CFStringCreateWithBytes(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, UTF8, 0);
-            if path.is_null() {
-                return None;
+            if stream(root) {
+                return Some(fds[0]);
             }
-            let paths = CFArrayCreate(std::ptr::null(), &path, 1, &kCFTypeArrayCallBacks);
-            let stream = FSEventStreamCreate(
-                std::ptr::null(),
-                on_event,
-                std::ptr::null(),
-                paths,
-                SINCE_NOW,
-                LATENCY,
-                NO_DEFER,
-            );
-            if stream.is_null() {
-                return None;
-            }
-            let queue = dispatch_queue_create(c"strata.watch".as_ptr(), std::ptr::null());
-            FSEventStreamSetDispatchQueue(stream, queue);
-            (FSEventStreamStart(stream) != 0).then_some(fds[0])
+            // Nothing will ever write to the pipe: give both ends back.
+            SIGNAL.store(-1, Ordering::Relaxed);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+            None
         }
+    }
+
+    /// Creates the stream on `root` and starts it. The stream keeps its own
+    /// copy of the paths, so the string and the array are released here.
+    unsafe fn stream(root: &Path) -> bool {
+        let bytes = root.as_os_str().as_bytes();
+        let path = CFStringCreateWithBytes(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, UTF8, 0);
+        if path.is_null() {
+            return false;
+        }
+        let paths = CFArrayCreate(std::ptr::null(), &path, 1, &kCFTypeArrayCallBacks);
+        CFRelease(path);
+        if paths.is_null() {
+            return false;
+        }
+        let stream =
+            FSEventStreamCreate(std::ptr::null(), on_event, std::ptr::null(), paths, SINCE_NOW, LATENCY, NO_DEFER);
+        CFRelease(paths);
+        if stream.is_null() {
+            return false;
+        }
+        let queue = dispatch_queue_create(c"strata.watch".as_ptr(), std::ptr::null());
+        FSEventStreamSetDispatchQueue(stream, queue);
+        FSEventStreamStart(stream) != 0
     }
 }
 

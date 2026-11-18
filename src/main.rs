@@ -1,8 +1,11 @@
 //! strata: a project's files, coloured by what is not yet committed or pushed.
 
 mod git;
+mod history;
 mod icons;
 mod outline;
+mod read;
+mod rex;
 mod term;
 mod tree;
 mod ui;
@@ -14,6 +17,7 @@ mod when;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use git::Repo;
 use outline::Outline;
@@ -48,12 +52,23 @@ running inside Rex. `strata view FILE` is that reader by itself: the file,
 read-only, with the lines it gained and lost marked. n and N step through
 the changes, q closes it.
 
-Colour is the change: yellow edited, green new, red removed, cyan moved.
-Bold is not committed yet; regular weight is committed, waiting to be pushed.
+Colour is the change: yellow edited, green new, red removed, cyan moved,
+magenta in conflict. Bold is not committed yet; regular weight is
+committed, waiting to be pushed.
 
 Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
 STRATA_ICONS=off shows none.
 ";
+
+/// How soon after the operating system reports a change it is looked at.
+const SETTLE: Duration = Duration::from_millis(120);
+/// A look is never more than a fifth of the time: after one that took this
+/// long, the next waits four times as long, however fast changes arrive.
+const REST: u32 = 4;
+/// How often to look for changes regardless: seldom where the operating
+/// system reports them, often where it cannot.
+const WATCHED: Duration = Duration::from_secs(30);
+const UNWATCHED: Duration = Duration::from_secs(2);
 
 /// The two things strata can fill a pane with.
 enum Ui {
@@ -77,54 +92,66 @@ impl Ui {
         }
     }
 
-    /// Called when nothing has happened for `idle_ms`.
-    fn tick(&mut self) {
+    /// Looks for changes made outside, and takes them in.
+    fn check(&mut self) {
         match self {
-            Ui::Outline(o) => o.tick(),
-            Ui::View(v) => v.tick(),
+            Ui::Outline(o) => o.check(),
+            Ui::View(v) => v.check(),
         }
     }
 
-    /// Called when the operating system reports a change under the root.
-    fn changed(&mut self) {
+    /// How long the screen stays right if nothing happens.
+    fn next_frame(&self) -> Option<Duration> {
         match self {
-            Ui::Outline(o) => o.changed(),
-            Ui::View(v) => v.changed(),
+            Ui::Outline(o) => o.next_frame(),
+            Ui::View(_) => None,
         }
     }
 
-    fn idle_ms(&self) -> i32 {
+    fn root(&self) -> &Path {
         match self {
-            Ui::Outline(o) => o.idle_ms(),
-            Ui::View(v) => v.idle_ms(),
+            Ui::Outline(o) => o.root(),
+            Ui::View(v) => v.root(),
+        }
+    }
+
+    /// Whether a watch on the root sees everything that can change.
+    fn watchable(&self) -> bool {
+        match self {
+            Ui::Outline(o) => o.watchable(),
+            Ui::View(v) => v.watchable(),
         }
     }
 }
 
+/// Ends the program with a message. A path in it may hold anything, so
+/// control characters are left out.
 fn fail(message: String) -> ! {
-    eprintln!("strata: {message}");
+    let safe: String = message.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+    eprintln!("strata: {safe}");
     exit(1);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (mut ui, root) = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+    let mut ui = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["-h" | "--help"] => return print!("{USAGE}"),
         ["-V" | "--version"] => return println!("strata {}", env!("CARGO_PKG_VERSION")),
-        ["view", file] => {
-            let Some(view) = View::open(Path::new(file)) else { fail(format!("{file} is not in a directory")) };
-            let root = view.root().to_path_buf();
-            (Ui::View(view), root)
-        }
+        ["view", file] => match View::open(Path::new(file)) {
+            Some(view) => Ui::View(view),
+            None => fail(format!("{file} is not in a directory")),
+        },
         [] | [_] => {
             let dir = PathBuf::from(args.first().map_or(".", String::as_str));
-            let Some(repo) = Repo::open(&dir) else { fail(format!("{} is not a directory", dir.display())) };
-            let root = repo.root.clone();
-            (Ui::Outline(Outline::new(repo)), root)
+            match Repo::open(&dir) {
+                Some(repo) => Ui::Outline(Outline::new(repo)),
+                None => fail(format!("{} is not a directory", dir.display())),
+            }
         }
         _ => fail(format!("too many arguments\n\n{USAGE}")),
     };
-    let watcher = Watcher::new(&root);
+    let watcher = Watcher::new(ui.root());
+    let idle = if watcher.fd().is_some() && ui.watchable() { WATCHED } else { UNWATCHED };
     if let Err(e) = term::enter() {
         fail(format!("cannot use this terminal: {e}"));
     }
@@ -136,6 +163,9 @@ fn main() {
 
     let mut screen = Screen::new();
     let mut keys = Vec::new();
+    // When the last look for changes ended, how long it took, and whether
+    // the operating system has reported a change since.
+    let (mut looked, mut took, mut told) = (Instant::now(), Duration::ZERO, false);
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
             let (w, h) = term::size();
@@ -143,7 +173,11 @@ fn main() {
         }
         ui.draw(&mut screen);
         screen.flush();
-        match term::wait(ui.idle_ms(), watcher.fd()) {
+
+        let due = if told { SETTLE.max(took * REST) } else { idle };
+        let until_look = due.saturating_sub(looked.elapsed());
+        let wait = ui.next_frame().map_or(until_look, |frame| frame.min(until_look));
+        match term::wait(wait.as_millis() as i32 + 1, watcher.fd()) {
             Wait::Input => {
                 term::read_keys(&mut keys);
                 for key in keys.drain(..) {
@@ -154,10 +188,15 @@ fn main() {
             }
             Wait::Woken => {
                 watcher.drain();
-                ui.changed();
+                told = true;
             }
-            Wait::Timeout => ui.tick(),
-            Wait::Interrupted => {}
+            Wait::Timeout | Wait::Interrupted => {}
+        }
+        let due = if told { SETTLE.max(took * REST) } else { idle };
+        if looked.elapsed() >= due {
+            let started = Instant::now();
+            ui.check();
+            (looked, took, told) = (Instant::now(), started.elapsed(), false);
         }
     }
     term::leave();

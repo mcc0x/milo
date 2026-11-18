@@ -66,3 +66,16 @@ pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &FileChang
         s.put_fit(x + used + 1, y, max_w - used - 1, dir, DIM);
     }
 }
+
+/// Draws a scroll thumb in column `x` beside `h` rows starting at `y0`, for
+/// a list of `len` rows scrolled to `top`. Nothing if it all fits.
+pub fn thumb(s: &mut Screen, x: usize, y0: usize, h: usize, len: usize, top: usize) {
+    if len <= h || h == 0 {
+        return;
+    }
+    let size = (h * h / len).max(1);
+    let at = top.min(len - h) * (h - size) / (len - h);
+    for y in y0 + at..y0 + at + size {
+        s.put(x, y, 1, "▐", DIM);
+    }
+}
