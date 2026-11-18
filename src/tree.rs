@@ -1,4 +1,4 @@
-//! The whole project as a tree, coloured by what a change touched.
+//! The whole project as a tree, coloured by what is pending.
 
 use std::collections::HashMap;
 
@@ -17,8 +17,6 @@ pub struct Node {
 pub struct Tree {
     pub nodes: Vec<Node>,
     index: HashMap<String, u32>,
-    /// Holds paths that are not in the working tree (files a commit deleted).
-    pub ghosts: bool,
     /// Visible rows as (node, depth).
     pub rows: Vec<(u32, u16)>,
 }
@@ -70,16 +68,9 @@ impl Tree {
         i
     }
 
-    pub fn contains(&self, path: &str) -> bool {
-        self.index.contains_key(path)
-    }
-
     /// Colours the changed files and lets each directory take the strongest
-    /// kind beneath it.
+    /// kind beneath it. A path given twice keeps the later kind.
     pub fn colour<'a>(&mut self, changed: impl Iterator<Item = (&'a str, Kind)>) {
-        for n in &mut self.nodes {
-            n.kind = Kind::None;
-        }
         for (path, kind) in changed {
             let Some(&i) = self.index.get(path) else { continue };
             let mut i = i as usize;
@@ -94,14 +85,19 @@ impl Tree {
         }
     }
 
-    /// Recomputes the visible rows; `open` says which directories are expanded.
-    pub fn layout(&mut self, open: impl Fn(&str) -> bool) {
+    /// Recomputes the visible rows. `open` says which directories are
+    /// expanded; `changed_only` drops everything that is not pending and
+    /// opens the rest.
+    pub fn layout(&mut self, open: impl Fn(&str) -> bool, changed_only: bool) {
         self.rows.clear();
         let mut stack: Vec<(u32, u16)> = self.nodes[0].children.iter().rev().map(|&c| (c, 0)).collect();
         while let Some((i, depth)) = stack.pop() {
             let n = &self.nodes[i as usize];
+            if changed_only && n.kind == Kind::None {
+                continue;
+            }
             self.rows.push((i, depth));
-            if n.dir && open(&n.path) {
+            if n.dir && (changed_only || open(&n.path)) {
                 stack.extend(n.children.iter().rev().map(|&c| (c, depth + 1)));
             }
         }

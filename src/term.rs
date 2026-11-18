@@ -227,26 +227,6 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
     })
 }
 
-/// Copies `text` to the system clipboard through the terminal (OSC 52).
-pub fn copy(text: &str) {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(text.len() * 4 / 3 + 16);
-    out.extend_from_slice(b"\x1b]52;c;");
-    for chunk in text.as_bytes().chunks(3) {
-        let n = (chunk[0] as u32) << 16
-            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
-            | *chunk.get(2).unwrap_or(&0) as u32;
-        out.push(T[(n >> 18) as usize & 63]);
-        out.push(T[(n >> 12) as usize & 63]);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] } else { b'=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] } else { b'=' });
-    }
-    out.extend_from_slice(b"\x1b\\");
-    let mut stdout = io::stdout().lock();
-    let _ = stdout.write_all(&out);
-    let _ = stdout.flush();
-}
-
 // ANSI palette indices, so colours follow the terminal theme.
 pub const RED: u8 = 1;
 pub const GREEN: u8 = 2;

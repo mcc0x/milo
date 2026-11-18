@@ -1,48 +1,64 @@
-//! strata: what changed in a git repository, and when.
+//! strata: what in a git repository is waiting to be committed or pushed.
 
-mod app;
 mod git;
+mod history;
+mod icons;
+mod outline;
 mod term;
 mod tree;
 mod ui;
-mod when;
 
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::atomic::Ordering;
 
-use app::App;
-use term::{Screen, Wait};
+use term::{Key, Screen, Wait};
 
 const USAGE: &str = "\
-strata — what changed in a git repository, and when
+strata — what is waiting to be committed or pushed
 
-Usage: strata [PATH]
+  strata outline [PATH]   the project's files, coloured by what changed.
+                          Fits its pane: a tree when tall, a strip when short.
+  strata history [PATH]   the changed files, and how each one changed.
 
 PATH is any directory inside a git repository (default: the current one).
+Both update on their own as files change. q quits; ? in history lists keys.
 
-Pick a moment in the timeline, see the files it touched, read the change.
-Enter goes deeper, Esc comes back. Press ? inside for every key.
+Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
+STRATA_ICONS=off shows none.
 ";
 
-/// How long the cursor must rest before the change for a row is loaded.
-const SETTLE_MS: i32 = 40;
-/// How often an idle viewer checks the repository for outside changes.
+/// How often an idle view checks the repository for changes.
 const IDLE_MS: i32 = 2000;
 
+/// One full-pane screen of the program.
+pub trait View {
+    fn draw(&mut self, s: &mut Screen);
+    /// Returns true when the program should quit.
+    fn on_key(&mut self, key: Key) -> bool;
+    /// Called when nothing has happened for a while.
+    fn tick(&mut self);
+}
+
 fn main() {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
-        Some("-h" | "--help") => return print!("{USAGE}"),
-        Some("-V" | "--version") => return println!("strata {}", env!("CARGO_PKG_VERSION")),
-        _ => {}
-    }
-    let dir = PathBuf::from(arg.unwrap_or_else(|| ".".into()));
+    let mut args = std::env::args().skip(1);
+    let command = args.next().unwrap_or_default();
+    let open: fn(PathBuf) -> Box<dyn View> = match command.as_str() {
+        "outline" => |root| Box::new(outline::Outline::new(root)),
+        "history" => |root| Box::new(history::History::new(root)),
+        "-V" | "--version" => return println!("strata {}", env!("CARGO_PKG_VERSION")),
+        "" | "-h" | "--help" => return print!("{USAGE}"),
+        other => {
+            eprintln!("strata: no command named {other:?}\n\n{USAGE}");
+            exit(2);
+        }
+    };
+    let dir = PathBuf::from(args.next().unwrap_or_else(|| ".".into()));
     let Some(root) = git::toplevel(&dir) else {
         eprintln!("strata: {} is not inside a git repository", dir.display());
         exit(1);
     };
-    let mut app = App::new(PathBuf::from(root));
+    let mut view = open(PathBuf::from(root));
     if let Err(e) = term::enter() {
         eprintln!("strata: cannot use this terminal: {e}");
         exit(1);
@@ -60,21 +76,18 @@ fn main() {
             let (w, h) = term::size();
             screen.resize(w, h);
         }
-        app.draw(&mut screen);
+        view.draw(&mut screen);
         screen.flush();
-        let pending = app.detail_dirty || app.need_stats;
-        match term::wait(if pending { SETTLE_MS } else { IDLE_MS }) {
+        match term::wait(IDLE_MS) {
             Wait::Input => {
                 term::read_keys(&mut keys);
                 for key in keys.drain(..) {
-                    if app.on_key(key) {
+                    if view.on_key(key) {
                         break 'run;
                     }
                 }
             }
-            Wait::Timeout if app.detail_dirty => app.load_detail(false),
-            Wait::Timeout if app.need_stats => app.load_stats(),
-            Wait::Timeout => app.tick(),
+            Wait::Timeout => view.tick(),
             Wait::Interrupted => {}
         }
     }

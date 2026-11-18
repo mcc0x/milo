@@ -1,11 +1,10 @@
-//! Read-only git plumbing and the parsers for its output.
+//! Read-only git plumbing: what in a repository is not committed or pushed.
 
-use std::collections::HashSet;
 use std::io::Read;
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-
-use crate::when;
+use std::time::SystemTime;
 
 /// Patches larger than this are cut off rather than loaded whole.
 const PATCH_LIMIT: usize = 4 << 20;
@@ -15,9 +14,6 @@ const FILE_LINE_CAP: usize = 3000;
 const NEW_FILE_LIMIT: u64 = 256 << 10;
 /// What an empty repository is compared against before its first commit.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-const LOG_FORMAT: &str = "--format=%x00%H%x00%an%x00%ar%x00%ct%x00%D%x00%s";
-const HEAD_FORMAT: &str = "--format=%H%n%an%n%ar%n%D%n%B%x00";
 const TAB: usize = 4;
 
 fn command(root: &Path, args: &[&str]) -> Command {
@@ -28,7 +24,6 @@ fn command(root: &Path, args: &[&str]) -> Command {
         .arg(root)
         .args(["-c", "core.quotePath=false", "-c", "color.ui=never"])
         .args(args)
-        .env("GIT_LITERAL_PATHSPECS", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     c
@@ -56,13 +51,6 @@ fn run_limited(root: &Path, args: &[&str]) -> (Vec<u8>, bool) {
     (buf, cut)
 }
 
-fn with_path<'a>(mut args: Vec<&'a str>, path: Option<&'a str>) -> Vec<&'a str> {
-    if let Some(p) = path {
-        args.extend(["--", p]);
-    }
-    args
-}
-
 pub fn toplevel(dir: &Path) -> Option<String> {
     let out = run(dir, &["rev-parse", "--show-toplevel"]);
     let s = String::from_utf8(out).ok()?;
@@ -83,192 +71,34 @@ pub enum Kind {
     Conflict,
 }
 
-pub struct StatusFile {
-    pub path: String,
-    pub untracked: bool,
-    /// Has changes in the index.
-    pub staged: bool,
-}
-
 #[derive(Default)]
 pub struct Status {
     pub branch: String,
-    pub oid: String,
+    oid: String,
+    upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
-    pub files: Vec<StatusFile>,
+    untracked: Vec<String>,
 }
 
-pub fn status_raw(root: &Path) -> Vec<u8> {
-    run(root, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"])
-}
-
-pub fn parse_status(raw: &[u8]) -> Status {
+fn parse_status(raw: &[u8]) -> Status {
     let mut st = Status::default();
-    let text = String::from_utf8_lossy(raw);
-    let mut entries = text.split('\0');
-    while let Some(e) = entries.next() {
-        let Some((tag, rest)) = e.split_once(' ') else { continue };
-        // Field counts per entry type are fixed by the porcelain v2 format;
-        // the path is always last and may itself contain spaces.
-        let (fields, staged) = match tag {
-            "#" => {
-                if let Some(v) = rest.strip_prefix("branch.oid ") {
-                    st.oid = v.to_string();
-                } else if let Some(v) = rest.strip_prefix("branch.head ") {
-                    st.branch = v.to_string();
-                } else if let Some(v) = rest.strip_prefix("branch.ab ") {
-                    let mut it = v.split(' ').map(|n| n.get(1..).and_then(|n| n.parse().ok()).unwrap_or(0));
-                    st.ahead = it.next().unwrap_or(0);
-                    st.behind = it.next().unwrap_or(0);
-                }
-                continue;
-            }
-            "?" => {
-                st.files.push(StatusFile { path: rest.to_string(), untracked: true, staged: false });
-                continue;
-            }
-            "1" => (8, !rest.starts_with('.')),
-            "2" => {
-                // A rename entry is followed by its original path.
-                entries.next();
-                (9, !rest.starts_with('.'))
-            }
-            "u" => (10, false),
-            _ => continue,
-        };
-        if let Some(path) = rest.splitn(fields, ' ').last() {
-            st.files.push(StatusFile { path: path.to_string(), untracked: false, staged });
+    for e in String::from_utf8_lossy(raw).split('\0') {
+        if let Some(path) = e.strip_prefix("? ") {
+            st.untracked.push(path.to_string());
+        } else if let Some(v) = e.strip_prefix("# branch.oid ") {
+            st.oid = v.to_string();
+        } else if let Some(v) = e.strip_prefix("# branch.head ") {
+            st.branch = v.to_string();
+        } else if let Some(v) = e.strip_prefix("# branch.upstream ") {
+            st.upstream = Some(v.to_string());
+        } else if let Some(v) = e.strip_prefix("# branch.ab ") {
+            let mut it = v.split(' ').map(|n| n.get(1..).and_then(|n| n.parse().ok()).unwrap_or(0));
+            st.ahead = it.next().unwrap_or(0);
+            st.behind = it.next().unwrap_or(0);
         }
     }
     st
-}
-
-/// Every tracked and untracked-but-not-ignored file, relative to the root.
-pub fn files(root: &Path) -> Vec<String> {
-    let raw = run(root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
-    let mut files: Vec<String> =
-        String::from_utf8_lossy(&raw).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect();
-    files.dedup();
-    files
-}
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub struct Stat {
-    pub files: u32,
-    pub add: u32,
-    pub del: u32,
-}
-
-pub struct Commit {
-    pub graph: String,
-    pub hash: String,
-    pub author: String,
-    /// Relative age, as git words it ("2 hours ago").
-    pub when: String,
-    pub refs: String,
-    pub subject: String,
-    /// Size of the change; filled in lazily for the rows on screen.
-    pub stat: Option<Stat>,
-}
-
-pub enum Row {
-    Uncommitted,
-    Commit(Commit),
-    /// A calendar heading in the simple timeline.
-    Day(String),
-    /// A connector line of the graph that carries no commit.
-    Graph(String),
-}
-
-impl Row {
-    pub fn selectable(&self) -> bool {
-        matches!(self, Row::Uncommitted | Row::Commit(_))
-    }
-}
-
-/// Branch and tag names without git's decoration syntax.
-fn plain_refs(refs: &str) -> String {
-    let names: Vec<&str> = refs
-        .split(", ")
-        .map(|r| r.strip_prefix("HEAD -> ").or_else(|| r.strip_prefix("tag: ")).unwrap_or(r))
-        .filter(|r| !r.is_empty() && *r != "HEAD" && !r.ends_with("/HEAD"))
-        .collect();
-    names.join(", ")
-}
-
-/// Loads up to `limit` commits. With `graph` the rows carry git's branch
-/// graph; without it they are grouped under day headings. Returns the rows
-/// and whether history ended.
-pub fn log(root: &Path, limit: usize, all: bool, graph: bool, path: Option<&str>) -> (Vec<Row>, bool) {
-    let n = limit.to_string();
-    let mut args = vec!["log", "--no-show-signature", LOG_FORMAT, "-n", &n];
-    if graph {
-        args.push("--graph");
-    }
-    if all {
-        args.push("--all");
-    }
-    let raw = run(root, &with_path(args, path));
-    let now = when::now();
-    let mut rows = Vec::new();
-    let (mut commits, mut day) = (0, String::new());
-    for line in String::from_utf8_lossy(&raw).lines() {
-        let mut f = line.split('\0');
-        let lead = f.next().unwrap_or("").trim_end().to_string();
-        let Some(hash) = f.next() else {
-            rows.push(Row::Graph(lead));
-            continue;
-        };
-        commits += 1;
-        let mut field = || f.next().unwrap_or("");
-        let (author, when, time, refs, subject) = (field(), field(), field(), field(), field());
-        if !graph {
-            let label = when::day_label(time.parse().unwrap_or(0), now);
-            if label != day {
-                rows.push(Row::Day(label.clone()));
-                day = label;
-            }
-        }
-        rows.push(Row::Commit(Commit {
-            graph: lead,
-            hash: hash.to_string(),
-            author: author.to_string(),
-            when: when.to_string(),
-            refs: if graph { refs.to_string() } else { plain_refs(refs) },
-            subject: subject.to_string(),
-            stat: None,
-        }));
-    }
-    (rows, commits < limit)
-}
-
-/// Change sizes for the given commits, each against its first parent.
-pub fn stats(root: &Path, hashes: &[&str], path: Option<&str>) -> Vec<(String, Stat)> {
-    let mut args =
-        vec!["log", "--no-walk=unsorted", "--shortstat", "--diff-merges=first-parent", "-M", "--format=%x00%H"];
-    args.extend(hashes);
-    let raw = run(root, &with_path(args, path));
-    String::from_utf8_lossy(&raw)
-        .split('\0')
-        .skip(1)
-        .map(|chunk| {
-            let (hash, rest) = chunk.split_once('\n').unwrap_or((chunk, ""));
-            let mut stat = Stat::default();
-            let mut n = 0;
-            // " 3 files changed, 12 insertions(+), 3 deletions(-)"
-            for tok in rest.split_whitespace() {
-                match tok.parse() {
-                    Ok(v) => n = v,
-                    Err(_) if tok.starts_with("file") => stat.files = n,
-                    Err(_) if tok.starts_with("insertion") => stat.add = n,
-                    Err(_) if tok.starts_with("deletion") => stat.del = n,
-                    Err(_) => {}
-                }
-            }
-            (hash.trim().to_string(), stat)
-        })
-        .collect()
 }
 
 #[derive(PartialEq)]
@@ -278,23 +108,22 @@ pub struct FileChange {
     pub add: u32,
     pub del: u32,
     pub binary: bool,
-    pub staged: bool,
     /// Where this file's section starts in the change view, if it is shown.
     pub line: Option<usize>,
 }
 
 impl FileChange {
     fn new(path: &str, kind: Kind) -> FileChange {
-        FileChange { path: path.to_string(), kind, add: 0, del: 0, binary: false, staged: false, line: None }
+        FileChange { path: path.to_string(), kind, add: 0, del: 0, binary: false, line: None }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
+    /// Heading of a group of files.
     Title,
-    /// Secondary facts: who, when.
+    /// Secondary facts under a heading.
     Meta,
-    /// Prose, such as a commit message body.
     Info,
     /// Heading of a file's section; the index into `Detail::files`.
     File(u32),
@@ -323,10 +152,18 @@ impl Line {
     }
 }
 
-/// Everything shown for one moment of the timeline.
+/// Files that share a state: not committed, or committed but not pushed.
+#[derive(PartialEq)]
+pub struct Group {
+    pub title: &'static str,
+    pub files: Range<usize>,
+}
+
+/// Everything that is not yet pushed, and optionally how it reads.
 #[derive(Default, PartialEq)]
 pub struct Detail {
     pub files: Vec<FileChange>,
+    pub groups: Vec<Group>,
     pub lines: Vec<Line>,
     /// Largest line number shown, to size the gutter.
     pub max_no: u32,
@@ -407,18 +244,19 @@ fn open_file(d: &mut Detail, i: usize) {
 }
 
 /// Appends a git patch as numbered lines under one heading per file. The
-/// patch's own headers are dropped: `d.files` already says what they say.
-fn push_patch(d: &mut Detail, raw: &[u8], detailed: bool) {
+/// patch's own headers are dropped: the files from `first` on already say
+/// what they say.
+fn push_patch(d: &mut Detail, raw: &[u8], first: usize) {
     let text = String::from_utf8_lossy(raw);
-    let (mut next, mut in_hunk, mut skip, mut shown) = (0, false, true, 0);
+    let (mut next, mut in_hunk, mut skip, mut shown) = (first, false, true, 0);
     let (mut old_no, mut new_no) = (0u32, 0u32);
     for l in text.lines() {
         if let Some(names) = l.strip_prefix("diff --git ") {
             let named = |f: &FileChange| names.strip_suffix(f.path.as_str()).is_some_and(|r| r.ends_with(" b/"));
             let i = if d.files.get(next).is_some_and(named) {
                 next
-            } else if let Some(i) = d.files.iter().position(named) {
-                i
+            } else if let Some(i) = d.files[first..].iter().position(named) {
+                first + i
             } else {
                 let path = names.rsplit_once(" b/").map_or(names, |(_, p)| p);
                 d.files.push(FileChange::new(path, Kind::Modified));
@@ -428,7 +266,7 @@ fn push_patch(d: &mut Detail, raw: &[u8], detailed: bool) {
             open_file(d, i);
             let f = &d.files[i];
             (in_hunk, shown) = (false, 0);
-            skip = f.binary || (!detailed && f.kind == Kind::Deleted);
+            skip = f.binary || f.kind == Kind::Deleted;
             if f.binary {
                 d.lines.push(Line::new(LineKind::Note, "Not text, so there is nothing to show."));
             } else if skip {
@@ -480,32 +318,37 @@ fn push_patch(d: &mut Detail, raw: &[u8], detailed: bool) {
     }
 }
 
-/// Appends a file git does not track yet, as entirely new lines.
-fn push_new_file(d: &mut Detail, root: &Path, path: &str, budget: &mut u64) {
+/// Adds a file git does not track yet; with `show`, as entirely new lines.
+fn push_new_file(d: &mut Detail, root: &Path, path: &str, budget: &mut u64, show: bool) {
     d.files.push(FileChange::new(path, Kind::Untracked));
     let i = d.files.len() - 1;
-    open_file(d, i);
+    if show {
+        open_file(d, i);
+    }
+    let note = |d: &mut Detail, text: &str| {
+        if show {
+            d.lines.push(Line::new(LineKind::Note, text));
+        }
+    };
     let full = root.join(path);
     let size = match std::fs::metadata(&full) {
         Ok(m) if m.is_file() => m.len(),
         _ => return,
     };
     if size > NEW_FILE_LIMIT.min(*budget) {
-        d.lines.push(Line::new(LineKind::Note, "A large new file; its content is not shown."));
-        return;
+        return note(d, "A large new file; its content is not shown.");
     }
     let Ok(bytes) = std::fs::read(&full) else { return };
     *budget -= size.min(*budget);
     if bytes.contains(&0) {
         d.files[i].binary = true;
-        d.lines.push(Line::new(LineKind::Note, "Not text, so there is nothing to show."));
-        return;
+        return note(d, "Not text, so there is nothing to show.");
     }
     let text = String::from_utf8_lossy(&bytes);
     let mut count = 0;
     for l in text.lines() {
         count += 1;
-        if count <= FILE_LINE_CAP {
+        if show && count <= FILE_LINE_CAP {
             let mut line = Line::new(LineKind::Add, clean(l));
             line.no = count as u32;
             d.lines.push(line);
@@ -513,7 +356,7 @@ fn push_new_file(d: &mut Detail, root: &Path, path: &str, budget: &mut u64) {
     }
     d.files[i].add = count as u32;
     if count > FILE_LINE_CAP {
-        d.lines.push(Line::new(LineKind::Note, "A very large file; the rest is not shown."));
+        note(d, "A very large file; the rest is not shown.");
     }
 }
 
@@ -553,81 +396,122 @@ fn mark_changed(lines: &mut [Line]) {
     }
 }
 
-fn finish(mut d: Detail, cut: bool) -> Detail {
+/// The commit that is already on the remote, if this branch is ahead of it.
+/// A branch with no upstream is measured against the remote's default branch.
+fn pushed_base(root: &Path, status: &Status) -> Option<String> {
+    if status.oid == "(initial)" || (status.upstream.is_some() && status.ahead == 0) {
+        return None;
+    }
+    let target = status.upstream.as_deref().unwrap_or("origin/HEAD");
+    let base = String::from_utf8(run(root, &["merge-base", "HEAD", target])).ok()?;
+    let base = base.trim();
+    (!base.is_empty() && base != status.oid).then(|| base.to_string())
+}
+
+/// Collects everything not yet pushed: first what is not committed, then
+/// what is committed but still local. With `patches`, also how each reads.
+fn pending(root: &Path, status: &Status, patches: bool) -> Detail {
+    let mut d = Detail::default();
+    let mut cut = false;
+    let head = if status.oid == "(initial)" { EMPTY_TREE } else { "HEAD" };
+
+    d.files = parse_changes(&run(root, &["diff", head, "-M", "--raw", "--numstat", "-z"]));
+    if patches {
+        d.lines.push(Line::new(LineKind::Title, "Not committed yet"));
+        let (raw, c) = run_limited(root, &["diff", head, "-M", "--patch"]);
+        cut |= c;
+        push_patch(&mut d, &raw, 0);
+    }
+    let mut budget = PATCH_LIMIT as u64;
+    for path in &status.untracked {
+        push_new_file(&mut d, root, path, &mut budget, patches);
+    }
+    if d.files.is_empty() {
+        d.lines.clear();
+    } else {
+        d.groups.push(Group { title: "Not committed yet", files: 0..d.files.len() });
+    }
+
+    let first = d.files.len();
+    if let Some(base) = pushed_base(root, status) {
+        d.files.extend(parse_changes(&run(root, &["diff", &base, "HEAD", "-M", "--raw", "--numstat", "-z"])));
+        if patches && d.files.len() > first {
+            if !d.lines.is_empty() {
+                d.lines.push(Line::new(LineKind::Info, ""));
+            }
+            d.lines.push(Line::new(LineKind::Title, "Not pushed yet"));
+            let range = format!("{base}..HEAD");
+            let subjects = run(root, &["log", "--format=%s", "-n", "20", &range]);
+            for subject in String::from_utf8_lossy(&subjects).lines() {
+                d.lines.push(Line::new(LineKind::Meta, format!("○ {}", clean(subject))));
+            }
+            let (raw, c) = run_limited(root, &["diff", &base, "HEAD", "-M", "--patch"]);
+            cut |= c;
+            push_patch(&mut d, &raw, first);
+        }
+    }
+    if d.files.len() > first {
+        d.groups.push(Group { title: "Not pushed yet", files: first..d.files.len() });
+    }
+
     if cut {
-        d.lines.push(Line::new(LineKind::Note, "This change is too large to show in full."));
+        d.lines.push(Line::new(LineKind::Note, "This is too large to show in full."));
     }
     mark_changed(&mut d.lines);
     d.max_no = d.lines.iter().map(|l| l.no).max().unwrap_or(0);
     d
 }
 
-pub fn commit_detail(root: &Path, hash: &str, path: Option<&str>, detailed: bool) -> Detail {
-    let mut d = Detail::default();
-    let common = ["show", "--diff-merges=first-parent", "-M"];
-    let mut args = common.to_vec();
-    args.extend(["--format=", "--raw", "--numstat", "-z", hash]);
-    d.files = parse_changes(&run(root, &with_path(args, path)));
+/// When each pending file was last written, to notice edits cheaply.
+type Stamp = Vec<Option<(SystemTime, u64)>>;
 
-    let mut args = common.to_vec();
-    args.extend(["--patch", HEAD_FORMAT, hash]);
-    let (raw, cut) = run_limited(root, &with_path(args, path));
-    let split = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    let head = String::from_utf8_lossy(&raw[..split]);
-    let mut it = head.lines();
-    let mut field = || it.next().unwrap_or("");
-    let (full, author, when, refs, subject) = (field(), field(), field(), field(), field());
-    d.lines.push(Line::new(LineKind::Title, clean(subject)));
-    let mut meta = format!("{author} · {when}");
-    if detailed {
-        meta.push_str(&format!(" · {}", full.get(..10).unwrap_or(full)));
-        if !refs.is_empty() {
-            meta.push_str(&format!(" · {refs}"));
-        }
-    }
-    d.lines.push(Line::new(LineKind::Meta, clean(&meta)));
-    // One blank line before the body and between its paragraphs, none after.
-    let mut gap = true;
-    for l in it {
-        if l.trim().is_empty() {
-            gap = true;
-            continue;
-        }
-        if std::mem::take(&mut gap) {
-            d.lines.push(Line::new(LineKind::Info, ""));
-        }
-        d.lines.push(Line::new(LineKind::Info, clean(l)));
-    }
-    push_patch(&mut d, raw.get(split..).unwrap_or(&[]), detailed);
-    finish(d, cut)
+pub struct Repo {
+    pub root: PathBuf,
+    pub name: String,
+    pub status: Status,
+    raw: Vec<u8>,
+    stamp: Stamp,
 }
 
-/// Everything that differs from the last commit: edits, staged or not, then
-/// files git does not track yet.
-pub fn worktree_detail(root: &Path, status: &Status, path: Option<&str>, detailed: bool) -> Detail {
-    let mut d = Detail::default();
-    let base = if status.oid == "(initial)" { EMPTY_TREE } else { "HEAD" };
-    d.files = parse_changes(&run(root, &with_path(vec!["diff", base, "-M", "--raw", "--numstat", "-z"], path)));
-    let staged: HashSet<&str> = status.files.iter().filter(|f| f.staged).map(|f| f.path.as_str()).collect();
-    for f in &mut d.files {
-        f.staged = staged.contains(f.path.as_str());
+impl Repo {
+    pub fn open(root: PathBuf) -> Repo {
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Repo { root, name, status: Status::default(), raw: Vec::new(), stamp: Vec::new() }
     }
-    d.lines.push(Line::new(LineKind::Title, "Not committed yet"));
-    d.lines.push(Line::new(LineKind::Meta, ""));
-    let (raw, cut) = run_limited(root, &with_path(vec!["diff", base, "-M", "--patch"], path));
-    push_patch(&mut d, &raw, detailed);
-    let mut budget = PATCH_LIMIT as u64;
-    for f in status.files.iter().filter(|f| f.untracked && path.is_none_or(|p| under(&f.path, p))) {
-        push_new_file(&mut d, root, &f.path, &mut budget);
-    }
-    d.lines[1].text = match d.files.len() {
-        1 => "1 file differs from the last commit".into(),
-        n => format!("{n} files differ from the last commit"),
-    };
-    finish(d, cut)
-}
 
-/// Whether `path` is `filter` itself or lies inside it as a directory.
-pub fn under(path: &str, filter: &str) -> bool {
-    path.strip_prefix(filter).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    fn status_raw(&self) -> Vec<u8> {
+        run(&self.root, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"])
+    }
+
+    fn stamp(&self, detail: &Detail) -> Stamp {
+        let of = |f: &FileChange| {
+            let m = std::fs::metadata(self.root.join(&f.path)).ok()?;
+            Some((m.modified().ok()?, m.len()))
+        };
+        detail.files.iter().map(of).collect()
+    }
+
+    /// Reads what is pending afresh.
+    pub fn load(&mut self, patches: bool) -> Detail {
+        self.raw = self.status_raw();
+        self.status = parse_status(&self.raw);
+        let detail = pending(&self.root, &self.status, patches);
+        self.stamp = self.stamp(&detail);
+        detail
+    }
+
+    /// Whether anything moved since the last load: git's own view of the
+    /// repository, or the content of a file that was already pending.
+    pub fn stale(&self, detail: &Detail) -> bool {
+        self.status_raw() != self.raw || self.stamp(detail) != self.stamp
+    }
+
+    /// Every tracked and untracked-but-not-ignored file, relative to the root.
+    pub fn files(&self) -> Vec<String> {
+        let raw = run(&self.root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+        let mut files: Vec<String> =
+            String::from_utf8_lossy(&raw).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect();
+        files.dedup();
+        files
+    }
 }
