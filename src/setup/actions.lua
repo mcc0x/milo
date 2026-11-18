@@ -1,20 +1,27 @@
 local terminal = "com.superlogical.terminal"
 local labels = { outline = "milo:outline", history = "milo:history", usage = "milo:usage" }
 
--- Find the whole tab the action came from, including floating panes.
+-- Find the caller's tab and its main tiled pane, even if the caller floats.
 local function tab_panes(ctx)
   local view, err = rex.session.view{ session_id = ctx.session_id }
   if err then error(err, 0) end
   if not view or not ctx.block_id then return end
   for _, window in ipairs(view.windows) do
-    local found, panes = false, {}
+    local found, main, panes = false, nil, {}
     for _, layer in ipairs(window.layers) do
       for _, block in ipairs(layer.blocks) do
-        if block.block_id == ctx.block_id then found = true end
-        if block.label then panes[block.label] = block.block_id end
+        local caller = block.block_id == ctx.block_id
+        found = found or caller
+        if layer.kind == "tiled" then
+          if block.label and block.label:sub(1, 5) == "milo:" then
+            panes[block.label] = block.block_id
+          elseif caller or not main then
+            main = block.block_id
+          end
+        end
       end
     end
-    if found then return panes, window end
+    if found then return panes, window, main end
   end
 end
 
@@ -22,7 +29,7 @@ local function pane(name, cwd)
   return rex.layout.block{
     flavor = terminal .. ".shell",
     label = labels[name],
-    options = { command = { "milo", name }, cwd = cwd },
+    options = { command = { milo, name }, cwd = cwd },
   }
 end
 
@@ -36,14 +43,13 @@ local function split(ctx, anchor, direction, side, ratio, layout)
 end
 
 local function arrange(ctx, wanted)
-  local present = tab_panes(ctx)
-  if not present then return end
+  local present, _, main = tab_panes(ctx)
+  if not main then return end
   local outline = wanted.outline and not present[labels.outline]
   local history = wanted.history and not present[labels.history]
   local usage = wanted.usage and not present[labels.usage]
   if not (outline or history or usage) then return end
 
-  local main = ctx.block_id
   local process = rex.block.call(terminal, "process", { block_id = main })
   local cwd = process and ((process.foreground or {}).cwd or (process.child or {}).cwd)
   if outline and history then

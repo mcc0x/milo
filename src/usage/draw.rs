@@ -1,15 +1,17 @@
 //! Gives both tools the same frame, with less detail when the pane is small.
 
 mod digits;
+mod figure;
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use crate::picture::Picture;
-use crate::screen::{GREEN, RED, Screen, Style, YELLOW};
+use crate::screen::{Screen, Style};
 use crate::ui::FAINT;
 use crate::width::str_width;
 
+use self::figure::Figure;
 use super::{AGE_NOTE, Activity, CodexReading, Limits, Usage, Window, time};
 
 const SIDE_BY_SIDE: usize = 64;
@@ -55,6 +57,11 @@ impl Tool {
     }
 }
 
+#[cfg(test)]
+pub(super) fn mark_placements(screen: &Screen) -> impl Iterator<Item = (usize, usize, usize, usize)> + '_ {
+    [Tool::Codex, Tool::Claude].into_iter().filter_map(|tool| screen.placement_of(tool.picture()))
+}
+
 /// What the small line under a figure says about its window.
 #[derive(Clone, Copy)]
 enum When {
@@ -81,8 +88,7 @@ impl When {
 
 struct Metric {
     label: Cow<'static, str>,
-    number: Option<&'static str>,
-    colour: Style,
+    number: Option<Figure>,
     when: When,
     /// Seconds since the figure was reported, once that is worth saying:
     /// one a few minutes old is as good as current.
@@ -107,24 +113,23 @@ impl Metric {
             let when = window.resets.map_or(When::Unknown, |at| When::Running(at.saturating_sub(now)));
             (when, (age >= AGE_NOTE).then_some(age))
         };
-        let colour = match window.percent {
-            90.0.. => RED,
-            70.0..90.0 => YELLOW,
-            _ => GREEN,
-        };
-        Self { label, number: Some(window.number()), colour: Style::fg(colour), when, age }
+        Self { label, number: Some(Figure::new(window.number(), window.percent)), when, age }
     }
 
     fn missing(label: &'static str) -> Self {
-        Self { label: label.into(), number: None, colour: FAINT, when: When::Unknown, age: None }
+        Self { label: label.into(), number: None, when: When::Unknown, age: None }
     }
 
     fn number(&self) -> &str {
-        self.number.unwrap_or("—")
+        self.number.map_or("—", |number| number.text)
     }
 
     fn number_width(&self) -> usize {
-        self.number.map_or(1, str::len)
+        self.number.map_or(1, |number| number.text.len())
+    }
+
+    fn colour(&self) -> Style {
+        self.number.map_or(FAINT, Figure::style)
     }
 
     fn inline_width(&self) -> usize {
@@ -136,24 +141,21 @@ impl Metric {
             row.add(&self.label, FAINT);
             row.add(" ", FAINT);
         }
-        row.add(self.number(), self.colour.bold());
+        row.add(self.number(), self.colour().bold());
     }
 
-    fn panel(&self, screen: &mut Screen, area: Area, rows: Chart) {
+    fn panel(&self, screen: &mut Screen, area: Area, rows: Chart, slot: usize) {
         area.note(screen, rows.label, &self.label);
-        if rows.large
-            && let Some(number) = self.number
-            && digits::width(number) <= area.w
-        {
-            digits::draw(screen, area.x, area.y + rows.label + 1, number, self.colour);
-        } else if self.number_width() <= area.w {
-            screen.put(
-                area.x,
-                area.y + rows.label + 1 + usize::from(rows.large),
-                area.w,
-                self.number(),
-                self.colour.bold(),
-            );
+        let y = area.y + rows.label + 1;
+        match (rows.large, self.number) {
+            (true, Some(number)) if screen.pictures() == Some(true) => number.draw(screen, area, y, slot),
+            (true, Some(number)) if digits::width(number.text) <= area.w => {
+                digits::draw(screen, area.x, y, number.text, number.style());
+            }
+            _ if self.number_width() <= area.w => {
+                screen.put(area.x, y + usize::from(rows.large), area.w, self.number(), self.colour().bold());
+            }
+            _ => {}
         }
         self.when.draw(screen, area, rows.note);
     }
@@ -204,12 +206,24 @@ impl Report {
         Self { tool: Tool::Codex, first, second, hint }
     }
 
+    /// Shows the windows the account has, in the order 5h, week, one
+    /// model's week. A window nobody reported gets no empty place, and the
+    /// two slots go to the first two there are.
     fn claude(limits: Option<Limits>, now: i64) -> Self {
-        let [five, week] = figures(limits, now);
+        let model = limits.and_then(|limits| limits.model_week).map(|model| {
+            let mut metric = Metric::limit(model.window, now);
+            metric.label = format!("{} week", model.label()).into();
+            metric
+        });
+        let mut known = figures(limits, now).into_iter().flatten().chain(model);
+        let (first, second) = match known.next() {
+            Some(first) => (first, known.next()),
+            None => (Metric::missing("5h"), Some(Metric::missing("week"))),
+        };
         Self {
             tool: Tool::Claude,
-            first: five.unwrap_or_else(|| Metric::missing("5h")),
-            second: Some(week.unwrap_or_else(|| Metric::missing("week"))),
+            first,
+            second,
             hint: limits.is_none().then_some(Hint { full: "turn on in milo setup", short: "milo setup" }),
         }
     }
@@ -295,10 +309,12 @@ impl Report {
             24..36 => 2,
             _ => 1,
         };
-        let (first, second) = figures.split(gap);
-        self.first.panel(screen, first, chart);
+        // A lone figure has the whole width, so that its caption fits.
+        let (first, second) = if self.second.is_some() { figures.split(gap) } else { (figures, figures) };
+        let slot = self.tool as usize * 2;
+        self.first.panel(screen, first, chart, slot);
         if let Some(metric) = &self.second {
-            metric.panel(screen, second, chart);
+            metric.panel(screen, second, chart, slot + 1);
         }
         // Activity is not a limit, so it never sits under a window as if it
         // were that window's caption: it has a row of its own, or follows
@@ -462,5 +478,30 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         side_by_side(screen, area, &reports, activity);
     } else {
         stacked(screen, area, &reports, activity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::ModelWeek;
+    use super::*;
+
+    fn labels(limits: Option<Limits>) -> Vec<String> {
+        let report = Report::claude(limits, 1000);
+        std::iter::once(&report.first).chain(&report.second).map(|metric| metric.label.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_shows_the_windows_the_account_has_and_no_empty_place_for_one_it_lacks() {
+        let window = |minutes| Window { minutes, percent: 27.0, resets: Some(5000), observed: 1000 };
+        let week = Limits::new([None, Some(window(10_080))]);
+        assert_eq!(labels(Some(week)), ["week"]);
+        let model_week = ModelWeek::new("fable", window(10_080));
+        assert_eq!(labels(Some(Limits { model_week, ..week })), ["week", "Fable week"]);
+        // With all three, the two all-models windows come first.
+        let all = Limits { base: [Some(window(300)), Some(window(10_080))], model_week };
+        assert_eq!(labels(Some(all)), ["5h", "week"]);
+        // Nothing known at all keeps both places, to say what is missing.
+        assert_eq!(labels(None), ["5h", "week"]);
     }
 }

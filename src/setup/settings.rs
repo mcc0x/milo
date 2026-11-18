@@ -5,6 +5,16 @@ use std::ops::Range;
 const NAME: &str = "statusLine";
 const VALUE: &str = r#"{ "type": "command", "command": "milo claude-status" }"#;
 
+/// A new settings file uses Claude Code's indentation and trailing newline.
+pub(super) const NEW: &str = concat!(
+    "{\n",
+    "  \"statusLine\": {\n",
+    "    \"type\": \"command\",\n",
+    "    \"command\": \"milo claude-status\"\n",
+    "  }\n",
+    "}\n",
+);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Status {
     Absent,

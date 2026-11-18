@@ -1,11 +1,23 @@
 //! A setup save can touch several files. Keep their old bytes until Rex accepts the save.
 
+use std::borrow::Cow;
 use std::env;
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Only the user's settings may be links. Edit their existing target, never
+/// replace the link or create a new file through a dangling link.
+pub(super) fn resolve(path: &Path) -> io::Result<Cow<'_, Path>> {
+    match fs::symlink_metadata(path) {
+        Ok(info) if info.is_symlink() => fs::canonicalize(path).map(Cow::Owned),
+        Ok(_) => Ok(Cow::Borrowed(path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Cow::Borrowed(path)),
+        Err(error) => Err(error),
+    }
+}
 
 #[derive(PartialEq, Eq)]
 pub(super) struct Image {
@@ -93,6 +105,13 @@ impl Change {
         } else {
             fs::remove_file(&self.path)
         }
+    }
+}
+
+#[cfg(test)]
+impl Change {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
     }
 }
 

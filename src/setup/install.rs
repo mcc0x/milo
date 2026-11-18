@@ -1,5 +1,6 @@
 //! Reads and installs the Rex layout and the optional Claude Code status line.
 
+use std::borrow::Cow;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::files::{self, Change, Image, Temp};
 use super::lock;
-use super::settings::{Settings, Status};
+use super::settings::{self, Settings, Status};
 use crate::{paths, rex};
 
 const MANAGED: &[u8] = b"-- Managed by milo setup.";
@@ -48,7 +49,7 @@ impl Default for Layout {
 }
 
 impl Layout {
-    fn enabled(&self) -> bool {
+    pub fn enabled(&self) -> bool {
         self.new_tabs || self.panes.contains(&true)
     }
 
@@ -71,27 +72,82 @@ impl Layout {
     }
 
     fn parse(text: &str) -> Option<Self> {
-        let text = text.strip_prefix(GENERATED)?;
-        let value = |name| text.lines().find_map(|line| line.strip_prefix(name));
+        let mut lines = text.lines();
+        if lines.next()?.trim_end() != GENERATED.trim_end() {
+            return None;
+        }
+        // Only the declarations before the actions are editable here.
+        let mut comment = None;
+        let lines = lines.map(move |line| lua_code(line, &mut comment));
+        let value = |name| {
+            lines.clone().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim_end() == name).then(|| value.trim())
+            })
+        };
         let proportion = |name| {
-            let text = value(name)?.trim();
+            let text = value(name)?;
             let number = text.parse::<f64>().ok()?;
             (number > 0.0 && number < 1.0).then(|| text.to_owned())
         };
-        let width = proportion("local column_width = ")?;
-        let outline_share = proportion("local outline_share = ")?;
-        let rows = value("local usage_rows = ")?.trim();
+        let width = proportion("local column_width")?;
+        let outline_share = proportion("local outline_share")?;
+        let rows = value("local usage_rows")?;
         rows.parse::<u32>().ok().filter(|rows| *rows > 0)?;
-        let new_tabs = match value("local arrange_new_tabs = ")? {
-            "true" => true,
-            "false" => false,
-            _ => return None,
-        };
-        let (_, choices) = text.split_once("local chosen = {\n")?;
-        let (choices, _) = choices.split_once("}\n")?;
-        let panes = NAMES.map(|name| choices.lines().any(|line| line.trim().strip_suffix(" = true,") == Some(name)));
-        Some(Self { width, outline_share, usage_rows: rows.into(), new_tabs, panes })
+        let new_tabs = value("local arrange_new_tabs")?.parse().ok()?;
+        let mut choices = lines.skip_while(|line| {
+            !line.split_once('=').is_some_and(|(key, value)| key.trim_end() == "local chosen" && value.trim() == "{")
+        });
+        choices.next()?;
+        let mut panes = [false; 3];
+        for line in choices {
+            if line == "}" {
+                return Some(Self { width, outline_share, usage_rows: rows.into(), new_tabs, panes });
+            }
+            if let Some((key, value)) = line.split_once('=')
+                && let Some(index) = NAMES.iter().position(|name| *name == key.trim_end())
+            {
+                panes[index] = value.trim().trim_end_matches([',', ';']).trim_end().parse().ok()?;
+            }
+        }
+        None
     }
+}
+
+/// The layout's declarations are one per line, with optional Lua comments.
+fn lua_code<'a>(mut line: &'a str, comment: &mut Option<usize>) -> &'a str {
+    if let Some(depth) = *comment {
+        let Some(tail) = comment_tail(line, depth) else { return "" };
+        *comment = None;
+        line = tail;
+    }
+    loop {
+        let Some((code, rest)) = line.split_once("--") else { return line.trim() };
+        let code = code.trim();
+        let Some((depth, rest)) = long_bracket(rest, '[') else { return code };
+        let tail = comment_tail(rest, depth);
+        *comment = tail.is_none().then_some(depth);
+        if let Some(tail) = tail
+            && code.is_empty()
+        {
+            line = tail;
+        } else {
+            return code;
+        }
+    }
+}
+
+fn comment_tail(line: &str, depth: usize) -> Option<&str> {
+    line.match_indices(']').find_map(|(i, _)| {
+        let (end, tail) = long_bracket(&line[i..], ']')?;
+        (depth == end).then_some(tail)
+    })
+}
+
+fn long_bracket(text: &str, bracket: char) -> Option<(usize, &str)> {
+    let text = text.strip_prefix(bracket)?;
+    let rest = text.trim_start_matches('=');
+    Some((text.len() - rest.len(), rest.strip_prefix(bracket)?))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,6 +163,13 @@ impl Claude {
     pub fn editable(self) -> bool {
         matches!(self, Self::Off | Self::On)
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Saved {
+    Ready,
+    ListenerDidNotStart,
+    ListenerDidNotStop,
 }
 
 pub(super) struct Store {
@@ -136,7 +199,7 @@ impl Store {
     }
 
     pub fn offer_once(&self) -> bool {
-        let Ok(init) = Image::read(&self.init) else { return false };
+        let Ok(init) = settings_path(&self.init).and_then(|path| read(&path)) else { return false };
         if init.as_ref().is_some_and(|file| managed(&file.bytes).is_some()) {
             return false;
         }
@@ -145,15 +208,16 @@ impl Store {
     }
 
     /// An unconfigured screen starts with a suggestion; a previously disabled one starts off.
-    pub fn layout(&self) -> Result<Layout, &'static str> {
-        let init = read(&self.init)?;
+    pub fn layout(&self) -> Result<(Layout, bool), &'static str> {
+        let init = read(&settings_path(&self.init)?)?;
         if init.as_ref().is_none_or(|file| managed(&file.bytes).is_none()) {
             let panes = if self.state.join("layout-disabled").is_file() { [false; 3] } else { [true; 3] };
-            return Ok(Layout { panes, ..Layout::default() });
+            return Ok((Layout { panes, ..Layout::default() }, false));
         }
         read(&self.rex_file())?
             .as_ref()
             .and_then(|file| std::str::from_utf8(&file.bytes).ok().and_then(Layout::parse))
+            .map(|layout| (layout, true))
             .ok_or("Could not read the installed Rex layout.")
     }
 
@@ -161,57 +225,62 @@ impl Store {
         self.claude_files().map_or(Claude::Invalid, |settings| settings.status())
     }
 
-    fn claude_files(&self) -> Result<ClaudeFiles, &'static str> {
+    fn claude_files(&self) -> Result<ClaudeFiles<'_>, &'static str> {
+        let path = settings_path(&self.claude)?;
         let note_path = self.state.join(OWN_CLAUDE);
-        Ok(ClaudeFiles { settings: read(&self.claude)?, note: read(&note_path)?, note_path })
+        Ok(ClaudeFiles { settings: read(&path)?, path, note: read(&note_path)?, note_path })
     }
 
-    pub fn save(&self, layout: Option<&Layout>, claude: Option<bool>, run: &RunRex) -> Result<(), &'static str> {
+    pub fn save(&self, layout: Option<&Layout>, claude: Option<bool>, run: &RunRex) -> Result<Saved, &'static str> {
         let mut changes = Vec::new();
-        let reload = if let Some(layout) = layout { self.plan_rex(layout, &mut changes, run)? } else { false };
+        let new_tabs = layout.is_some_and(|layout| layout.new_tabs);
+        let reload = if let Some(layout) = layout {
+            self.plan_rex(layout, &mut changes, run)? || (new_tabs && !lock::running(&self.state).unwrap_or(false))
+        } else {
+            false
+        };
         if let Some(enabled) = claude {
-            self.claude_files()?.plan(&self.claude, enabled, &mut changes)?;
+            self.claude_files()?.plan(enabled, &mut changes)?;
         }
         files::install(&changes, || !reload || call(run, RELOAD))?;
-        if reload && layout.is_some_and(|layout| !layout.new_tabs) && lock::stop(&self.state).is_err() {
-            return Err("Saved, but could not stop the Rex listener.");
-        }
-        Ok(())
+        Ok(if new_tabs && !lock::wait_running(&self.state).unwrap_or(false) {
+            Saved::ListenerDidNotStart
+        } else if layout.is_some() && !new_tabs && lock::stop(&self.state).is_err() {
+            Saved::ListenerDidNotStop
+        } else {
+            Saved::Ready
+        })
     }
 
     fn plan_rex(&self, layout: &Layout, changes: &mut Vec<Change>, run: &RunRex) -> Result<bool, &'static str> {
-        let init = read(&self.init)?;
+        let init_path = settings_path(&self.init)?;
+        let init = read(&init_path)?;
         let rex_path = self.rex_file();
         let listener_path = self.listener_file();
         let rex_before = read(&rex_path)?;
         let listener_before = read(&listener_path)?;
         let already_installed = init.as_ref().is_some_and(|file| managed(&file.bytes).is_some());
-        let init_after = edit_init(init.as_ref().map(|file| file.bytes.as_slice()), &rex_path, layout.enabled())?;
+        let init_after = edit_init(init.as_ref().map(|file| file.bytes.as_slice()), &rex_path, layout.enabled())?
+            .or_else(|| matches!(init_path, Cow::Owned(_)).then(Vec::new));
         if layout.enabled() {
-            let rex_after = if already_installed
-                && rex_before
-                    .as_ref()
-                    .and_then(|file| std::str::from_utf8(&file.bytes).ok())
-                    .and_then(Layout::parse)
-                    .as_ref()
-                    == Some(layout)
-            {
-                None
-            } else {
-                Some(rex_lua(layout))
-            };
-            if let Some(lua) = rex_after {
-                changes.extend(Change::new(rex_path, rex_before, Some(self.checked(lua, run)?)));
+            let executable = executable()?;
+            let installed = rex_before.as_ref().and_then(|file| std::str::from_utf8(&file.bytes).ok());
+            if !already_installed || installed.is_none_or(|text| !layout_matches(text, layout, &executable)) {
+                changes.extend(Change::new(
+                    rex_path,
+                    rex_before,
+                    Some(self.checked(rex_lua(layout, &executable), run)?),
+                ));
             }
             let listener = listener_lua(&self.rex_file());
             if !already_installed || listener_before.as_ref().is_none_or(|file| file.bytes != listener.as_bytes()) {
                 changes.extend(Change::new(listener_path, listener_before, Some(self.checked(listener, run)?)));
             }
-            changes.extend(Change::new(self.init.clone(), init, init_after));
+            changes.extend(Change::new(init_path.into_owned(), init, init_after));
         } else {
-            changes.extend(Change::new(self.init.clone(), init, init_after));
+            changes.extend(Change::new(init_path.into_owned(), init, init_after));
             for (path, file) in [(rex_path, rex_before), (listener_path, listener_before)] {
-                if file.as_ref().is_some_and(|file| file.bytes.starts_with(GENERATED.as_bytes())) {
+                if file.as_ref().is_some_and(|file| line(&file.bytes, 0).0 == GENERATED.trim_end().as_bytes()) {
                     changes.extend(Change::new(path, file, None));
                 }
             }
@@ -236,26 +305,19 @@ impl Store {
         }
         let scope = [OsStr::new("-s"), target.session.as_os_str(), OsStr::new("-b"), target.block.as_os_str()];
         let action = OsStr::new("milo_layout");
-        let init = read(&self.init)?;
-        let same_as_installed = init.as_ref().is_some_and(|file| managed(&file.bytes).is_some())
-            && self.layout().is_ok_and(|installed| installed == *layout);
-        let done = if same_as_installed {
-            run(&[OsStr::new("do"), action, scope[0], scope[1], scope[2], scope[3]])
-        } else {
-            // First-time and unsaved choices can be tried without installing or reloading anything.
-            let lua = rex_lua(layout);
-            let temp = Temp::staged(&self.config, lua.as_bytes()).map_err(|_| "Could not prepare the Rex layout.")?;
-            run(&[
-                OsStr::new("do"),
-                temp.path().as_os_str(),
-                OsStr::new("--action"),
-                action,
-                scope[0],
-                scope[1],
-                scope[2],
-                scope[3],
-            ])
-        };
+        // Try these exact choices without installing or reloading anything.
+        let lua = rex_lua(layout, &executable()?);
+        let temp = Temp::staged(&self.config, lua.as_bytes()).map_err(|_| "Could not prepare the Rex layout.")?;
+        let done = run(&[
+            OsStr::new("do"),
+            temp.path().as_os_str(),
+            OsStr::new("--action"),
+            action,
+            scope[0],
+            scope[1],
+            scope[2],
+            scope[3],
+        ]);
         if done { Ok(()) } else { Err("Rex could not arrange this tab.") }
     }
 }
@@ -264,17 +326,26 @@ fn read(path: &Path) -> Result<Option<Image>, &'static str> {
     Image::read(path).map_err(|_| "Could not read a settings file. No files were changed.")
 }
 
+fn settings_path(path: &Path) -> Result<Cow<'_, Path>, &'static str> {
+    files::resolve(path).map_err(|_| "Could not read a settings file. No files were changed.")
+}
+
+fn executable() -> Result<PathBuf, &'static str> {
+    env::current_exe().and_then(fs::canonicalize).map_err(|_| "Could not find the full path to milo.")
+}
+
 fn call<const N: usize>(run: &RunRex, args: [&str; N]) -> bool {
     run(&args.map(OsStr::new))
 }
 
-struct ClaudeFiles {
+struct ClaudeFiles<'a> {
+    path: Cow<'a, Path>,
     settings: Option<Image>,
     note: Option<Image>,
     note_path: PathBuf,
 }
 
-impl ClaudeFiles {
+impl ClaudeFiles<'_> {
     fn editor(&self) -> Option<Settings<'_>> {
         let text = self.settings.as_ref().map_or(Some("{\n}\n"), |file| std::str::from_utf8(&file.bytes).ok())?;
         Settings::parse(text)
@@ -294,7 +365,7 @@ impl ClaudeFiles {
         }
     }
 
-    fn plan(self, path: &Path, enabled: bool, changes: &mut Vec<Change>) -> Result<(), &'static str> {
+    fn plan(self, enabled: bool, changes: &mut Vec<Change>) -> Result<(), &'static str> {
         let status = self.status();
         if !status.editable() {
             return Err("Claude Code settings changed. Reopen setup to see them.");
@@ -302,19 +373,22 @@ impl ClaudeFiles {
         let json = self.editor().expect("editable settings are valid");
         match (status, enabled) {
             (Claude::Off, true) => {
-                let text = json.add().expect("the status line is absent");
-                let recorded = if self.settings.is_none() { CLAUDE_CREATED } else { CLAUDE_UPDATED };
-                changes.extend(Change::new(path.to_owned(), self.settings, Some(text.into_bytes())));
+                let created = self.settings.is_none();
+                let text = if created { settings::NEW.into() } else { json.add().expect("the status line is absent") };
+                let recorded = if created { CLAUDE_CREATED } else { CLAUDE_UPDATED };
+                // If milo is interrupted, any status line it wrote is already owned.
                 changes.extend(Change::new(self.note_path, self.note, Some(recorded.to_vec())));
+                changes.extend(Change::new(self.path.into_owned(), self.settings, Some(text.into_bytes())));
             }
             (Claude::On, false) => {
                 let text = json.remove().expect("the status line is milo's");
                 let created = self.note.as_ref().is_some_and(|note| note.bytes == CLAUDE_CREATED);
                 let now_empty = Settings::parse(&text).is_some_and(|settings| settings.is_empty());
+                let delete = created && now_empty && matches!(self.path, Cow::Borrowed(_));
                 changes.extend(Change::new(
-                    path.to_owned(),
+                    self.path.into_owned(),
                     self.settings,
-                    (!(created && now_empty)).then(|| text.into_bytes()),
+                    (!delete).then(|| text.into_bytes()),
                 ));
                 changes.extend(Change::new(self.note_path, self.note, None));
             }
@@ -339,7 +413,20 @@ fn lua_path(path: &Path) -> String {
     literal
 }
 
-fn rex_lua(layout: &Layout) -> String {
+fn layout_matches(text: &str, layout: &Layout, executable: &Path) -> bool {
+    let executable_line = layout_executable(executable);
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(&executable_line)
+            .is_some_and(|tail| tail.trim_start().is_empty() || tail.trim_start().starts_with("--"))
+    }) && Layout::parse(text).as_ref() == Some(layout)
+}
+
+fn layout_executable(executable: &Path) -> String {
+    format!("local milo = {}", lua_path(executable))
+}
+
+fn rex_lua(layout: &Layout, executable: &Path) -> String {
     let mut lua = format!(
         "{GENERATED}\n-- Fraction of the tab for the left column.\nlocal column_width = {}\n\
          -- Fraction of that column for the outline when history is below it.\nlocal outline_share = {}\n\
@@ -354,12 +441,13 @@ fn rex_lua(layout: &Layout) -> String {
         }
     }
     lua.push_str("}\n\n");
+    writeln!(lua, "{}\n", layout_executable(executable)).expect("writing to a string");
     lua.push_str(include_str!("actions.lua"));
     if layout.new_tabs {
         lua.push_str(
             "\n-- During a syntax check or a one-off layout, do not start a listener.\n\
             if not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then\n  \
-            rex.exec.start({ \"milo\", \"listen\" }, { detach = true })\nend\n",
+            rex.exec.start({ milo, \"listen\" }, { detach = true })\nend\n",
         );
     }
     lua
@@ -432,7 +520,7 @@ mod tests {
     use crate::fixture::Fixture;
     use std::cell::RefCell;
     use std::ffi::OsString;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::rc::Rc;
 
     fn store(fixture: &Fixture) -> Store {
@@ -450,12 +538,13 @@ mod tests {
 
     #[test]
     fn generated_actions_use_only_the_chosen_panes_for_the_layout() {
+        let executable = executable().unwrap();
         for width in WIDTHS {
             for mask in 0..8 {
                 for new_tabs in [false, true] {
                     let panes = std::array::from_fn(|i| mask & (1 << i) != 0);
                     let layout = Layout { width: width.into(), panes, new_tabs, ..Layout::default() };
-                    let lua = rex_lua(&layout);
+                    let lua = rex_lua(&layout, &executable);
                     assert!(lua.contains("local usage_rows = 5\n"));
                     let (_, choices) = lua.split_once("local chosen = {\n").unwrap();
                     let (choices, _) = choices.split_once("}\n").unwrap();
@@ -499,7 +588,7 @@ mod tests {
             store.save(Some(&off()), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
             assert_eq!(fs::read(&store.init).ok().as_deref(), original);
             assert!(!store.rex_file().exists() && !store.listener_file().exists());
-            assert_eq!(store.layout().unwrap().panes, [false; 3]);
+            assert_eq!(store.layout().unwrap().0.panes, [false; 3]);
         }
     }
 
@@ -593,5 +682,97 @@ mod tests {
         let before = fs::read(&store.claude).unwrap();
         assert!(store.save(None, Some(false), &not_rex).is_err());
         assert_eq!(fs::read(&store.claude).unwrap(), before);
+    }
+
+    #[test]
+    fn linked_settings_are_edited_through_the_link_without_replacing_it() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let init = fixture.root.join("dotfiles/rex.lua");
+        let claude = fixture.root.join("dotfiles/claude.json");
+        fs::create_dir(init.parent().unwrap()).unwrap();
+        fs::write(&init, b"-- Keep Rex settings\n").unwrap();
+        fs::write(&claude, b"{\"keep\":1}\n").unwrap();
+        symlink("dotfiles/rex.lua", &store.init).unwrap();
+        symlink("dotfiles/claude.json", &store.claude).unwrap();
+
+        assert!(!store.layout().unwrap().1);
+        assert!(store.claude() == Claude::Off);
+        store.save(Some(&Layout::default()), Some(true), &|_| true).unwrap();
+        assert!(managed(&fs::read(&init).unwrap()).is_some());
+        assert!(fs::read_to_string(&claude).unwrap().contains("milo claude-status"));
+        assert!(store.layout().unwrap().1);
+        assert!(store.claude() == Claude::On);
+        assert!(!store.offer_once());
+
+        store.save(Some(&off()), Some(false), &|_| true).unwrap();
+        assert_eq!(fs::read_link(&store.init).unwrap(), Path::new("dotfiles/rex.lua"));
+        assert_eq!(fs::read_link(&store.claude).unwrap(), Path::new("dotfiles/claude.json"));
+        assert_eq!(fs::read(init).unwrap(), b"-- Keep Rex settings\n");
+        assert_eq!(fs::read(claude).unwrap(), b"{\"keep\":1}\n");
+    }
+
+    #[test]
+    fn generated_lua_uses_the_canonical_running_executable_for_panes_and_listener() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let layout = Layout { new_tabs: true, ..Layout::default() };
+        assert_eq!(store.save(Some(&layout), None, &|_| true).unwrap(), Saved::ListenerDidNotStart);
+        let lua = fs::read_to_string(store.rex_file()).unwrap();
+        let executable = fs::canonicalize(env::current_exe().unwrap()).unwrap();
+        assert!(executable.is_absolute());
+        assert!(lua.contains(&format!("local milo = {}\n", lua_path(&executable))));
+        assert!(lua.contains("command = { milo, name }"));
+        assert!(lua.contains("rex.exec.start({ milo, \"listen\" }"));
+    }
+
+    #[test]
+    fn ownership_is_written_before_the_claude_status_line() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let mut changes = Vec::new();
+        store.claude_files().unwrap().plan(true, &mut changes).unwrap();
+        assert_eq!(changes.iter().map(Change::path).collect::<Vec<_>>(), [store.state.join(OWN_CLAUDE), store.claude]);
+    }
+
+    #[test]
+    fn saving_a_layout_with_comments_and_crlf_keeps_hand_edits() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let run = |_: &[&OsStr]| true;
+        store.save(Some(&Layout::default()), None, &run).unwrap();
+        let file = store.rex_file();
+        let hand_edited = fs::read_to_string(&file)
+            .unwrap()
+            .replace("-- Fraction of the tab for the left column.", "--[=[ Old width:\nlocal column_width = 0.52\n]=]")
+            .replace("local column_width = 0.22", "  local column_width=0.27 -- My width")
+            .replace("0.70", "0.67 -- My outline height")
+            .replace("usage_rows = 5", "usage_rows = 7 -- My usage height")
+            .replace("false\n", "false -- Only on demand\n")
+            .replace("  history = true,", "  --[[\n  history = true,\n  ]]\n  history = false, -- Only when needed")
+            .replace('\n', "\r\n");
+        fs::write(&file, &hand_edited).unwrap();
+        let (mut layout, installed) = store.layout().unwrap();
+        assert!(installed);
+        assert_eq!(layout.width, "0.27");
+        assert_eq!(layout.outline_share, "0.67");
+        assert_eq!(layout.usage_rows, "7");
+        assert_eq!(layout.panes, [true, false, true]);
+        store.save(Some(&layout), None, &|_| panic!("an unchanged layout needs no Rex calls")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), hand_edited);
+        layout.panes[1] = true;
+        store.save(Some(&layout), None, &run).unwrap();
+        assert!(store.layout().unwrap().0 == layout);
+    }
+
+    #[test]
+    fn a_new_claude_settings_file_uses_claudes_json_format() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(None, Some(true), &|_| panic!("Claude settings do not need Rex")).unwrap();
+        assert_eq!(
+            fs::read_to_string(&store.claude).unwrap(),
+            "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"milo claude-status\"\n  }\n}\n"
+        );
     }
 }

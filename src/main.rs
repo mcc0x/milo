@@ -144,6 +144,14 @@ impl Pace {
         Self { idle, ended: now, took: Duration::ZERO, reported: false }
     }
 
+    fn for_pane(pane: &mut dyn Pane, idle: Duration, is_usage: bool) -> Self {
+        let mut pace = Self::new(idle, Instant::now());
+        if is_usage {
+            pace.look(pane, true);
+        }
+        pace
+    }
+
     fn report_change(&mut self) {
         self.reported = true;
     }
@@ -157,6 +165,15 @@ impl Pace {
     /// An unsettled look, say during a checkout, is retried as if a change was reported.
     fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
         (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
+    }
+
+    fn look(&mut self, pane: &mut dyn Pane, is_usage: bool) {
+        let started = Instant::now();
+        let settled = pane.check();
+        self.finish_look(started, Instant::now(), settled);
+        if is_usage && self.idle == WATCHED && !pane.watch_scope().complete {
+            self.idle = UNWATCHED;
+        }
     }
 }
 
@@ -222,7 +239,7 @@ enum Command<'a> {
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Path(&'a OsStr),
     Usage,
-    Setup,
+    Setup { offered: bool },
     Listen(bool),
     ClaudeStatus,
     Help,
@@ -253,7 +270,7 @@ fn command<'a>(
             Command::View { file, commit }
         }
         (Some("view"), None) => return Err("which file? milo view FILE [--commit ID]".to_string()),
-        (Some("setup"), None) => Command::Setup,
+        (Some("setup"), None) => Command::Setup { offered: false },
         (Some("usage"), None) => Command::Usage,
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
@@ -267,7 +284,7 @@ fn command<'a>(
         (Some(option), _) if option.starts_with('-') => return Err(format!("no option {option}; see milo --help")),
         (_, None) => match first {
             Some(path) => Command::Path(path),
-            None if offer_setup() => Command::Setup,
+            None if offer_setup() => Command::Setup { offered: true },
             None => Command::Outline(None),
         },
         _ => return Err("expected a command or path; see milo --help".to_string()),
@@ -289,7 +306,7 @@ fn open_pane(command: Command<'_>) -> Result<Box<dyn Pane>, String> {
                 .ok_or_else(|| format!("{} is not in a directory", Path::new(file).display()))?,
         )),
         Command::Usage => Ok(Box::new(usage::Usage::open())),
-        Command::Setup => Ok(Box::new(setup::Setup::open())),
+        Command::Setup { offered } => Ok(Box::new(setup::Setup::open(offered))),
         _ => unreachable!("non-pane commands are handled first"),
     }
 }
@@ -309,13 +326,16 @@ fn main() {
         _ => {}
     }
     let signal = term::listen();
+    let is_usage = command == Command::Usage;
+    let mut offered = matches!(command, Command::Setup { offered: true });
     let mut pane = open_pane(command).unwrap_or_else(|why| fail(&why));
-    let (watcher, idle) = {
+    let watch_pane = |pane: &dyn Pane| {
         let scope = pane.watch_scope();
         let watcher = Watcher::new(&scope);
         let idle = if watcher.fd().is_some() && scope.complete { WATCHED } else { UNWATCHED };
         (watcher, idle)
     };
+    let (mut watcher, idle) = watch_pane(pane.as_ref());
     // Asked to stop while still starting up: there is nothing to put back.
     if term::TERMINATED.load(Ordering::Relaxed) {
         exit(1);
@@ -333,7 +353,7 @@ fn main() {
     let mut screen = Screen::new();
     let mut help = None;
     let mut keys = Vec::new();
-    let mut pace = Pace::new(idle, Instant::now());
+    let mut pace = Pace::for_pane(pane.as_mut(), idle, is_usage);
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
             let (w, h) = term::size();
@@ -357,6 +377,17 @@ fn main() {
                 receive(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
                     if route_key(pane.as_mut(), &mut screen, &mut help, key) {
+                        if offered && matches!(key, Key::Char('q') | Key::Esc) {
+                            pane = open_pane(Command::Outline(None)).unwrap_or_else(|why| {
+                                term::leave();
+                                fail(&why)
+                            });
+                            let (next_watcher, next_idle) = watch_pane(pane.as_ref());
+                            watcher = next_watcher;
+                            pace = Pace::new(next_idle, Instant::now());
+                            offered = false;
+                            continue;
+                        }
                         break 'run;
                     }
                 }
@@ -368,9 +399,7 @@ fn main() {
             Wait::Timeout | Wait::Interrupted => {}
         }
         if pace.until_look(Instant::now()).is_zero() {
-            let started = Instant::now();
-            let settled = pane.check();
-            pace.finish_look(started, Instant::now(), settled);
+            pace.look(pane.as_mut(), is_usage);
         }
     }
     // A picture is not part of the text, so it is taken down by name.
@@ -452,7 +481,7 @@ mod tests {
     #[test]
     fn setup_usage_and_helper_commands_reach_separate_destinations() {
         for (name, arg, expected) in [
-            ("setup", None, Command::Setup),
+            ("setup", None, Command::Setup { offered: false }),
             ("usage", None, Command::Usage),
             ("claude-status", None, Command::ClaudeStatus),
             ("listen", None, Command::Listen(false)),
@@ -469,7 +498,7 @@ mod tests {
 
     #[test]
     fn only_bare_milo_can_offer_setup() {
-        assert_eq!(command(None, None, &[], || true), Ok(Command::Setup));
+        assert_eq!(command(None, None, &[], || true), Ok(Command::Setup { offered: true }));
         let directory = OsStr::new("./work");
         assert_eq!(command(Some(directory), None, &[], || panic!("path was explicit")), Ok(Command::Path(directory)));
     }

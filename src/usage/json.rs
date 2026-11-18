@@ -42,6 +42,20 @@ impl<'a> Value<'a> {
         self.0.starts_with('{')
     }
 
+    pub(super) fn null(self) -> bool {
+        self.0 == "null"
+    }
+
+    pub(super) fn elements(self) -> Option<impl Iterator<Item = Self>> {
+        let mut input = Input(self.0.strip_prefix('[')?);
+        Some(std::iter::from_fn(move || {
+            let value = input.value(0)?;
+            input.space();
+            input.eat(',');
+            Some(value)
+        }))
+    }
+
     pub(super) fn is(self, text: &str) -> bool {
         self.string(text.len()).is_some_and(|s| s == text)
     }
@@ -102,6 +116,7 @@ impl<'a> Input<'a> {
             b'"' => {
                 self.string()?;
             }
+            // Count containers, not the scalar at their innermost level.
             b'{' | b'[' if depth < MAX_DEPTH => self.collection(depth + 1)?,
             b'-' | b'0'..=b'9' => self.number()?,
             b't' => self.0 = start.strip_prefix("true")?,
@@ -167,17 +182,19 @@ impl<'a> Input<'a> {
             b'r' => '\r',
             b't' => '\t',
             b'u' => {
-                let high = self.hex()?;
-                if (0xd800..=0xdbff).contains(&high) {
-                    self.0 = self.0.strip_prefix("\\u")?;
-                    let low = self.hex()?;
-                    if !(0xdc00..=0xdfff).contains(&low) {
-                        return None;
+                let scalar = match self.hex()? {
+                    high @ 0xd800..=0xdbff => {
+                        self.0 = self.0.strip_prefix("\\u")?;
+                        let low = self.hex()?;
+                        if !(0xdc00..=0xdfff).contains(&low) {
+                            return None;
+                        }
+                        0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00)
                     }
-                    char::from_u32(0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00))?
-                } else {
-                    char::from_u32(high)?
-                }
+                    0xdc00..=0xdfff => return None,
+                    scalar => scalar,
+                };
+                char::from_u32(scalar)?
             }
             _ => return None,
         })

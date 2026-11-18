@@ -13,6 +13,16 @@ pub(super) struct Stamp {
 }
 
 impl Stamp {
+    pub(super) const fn seconds(seconds: i64) -> Self {
+        Self { seconds, nanos: 0 }
+    }
+
+    pub(super) fn millis(value: Value<'_>) -> Option<Self> {
+        let ms = value.integer()?;
+        let nanos = u32::try_from(ms % 1000).ok()? * 1_000_000;
+        (ms >= 0).then_some(Self { seconds: ms / 1000, nanos })
+    }
+
     pub(super) fn iso(value: Value<'_>) -> Option<Self> {
         let string = value.string(96)?;
         let b = string.as_bytes();
@@ -37,6 +47,11 @@ impl Stamp {
         let seconds = calendar_days(year, month, day)? * DAY + i64::from(hour * 3600 + min * 60 + sec) - offset(zone)?;
         Some(Self { seconds, nanos })
     }
+}
+
+/// Disk caches specify their reset units; keep the floor rather than guessing units or rounding up.
+pub(super) fn cache_reset(stamp: Stamp, observed: i64) -> Option<i64> {
+    (0..=observed.saturating_add(366 * DAY)).contains(&stamp.seconds).then_some(stamp.seconds)
 }
 
 pub(super) fn reset(value: Value<'_>, observed: i64) -> Option<i64> {

@@ -174,6 +174,7 @@ pub struct Screen {
     cur: Vec<Cell>,
     prev: Vec<Cell>,
     out: Vec<u8>,
+    light_background: bool,
     /// Each wash is 0 while unknown, otherwise 0x01RRGGBB.
     washes: [u32; 3],
     /// The wash colours used for the cells on the terminal.
@@ -189,6 +190,7 @@ impl Screen {
             cur: Vec::new(),
             prev: Vec::new(),
             out: SYNC_ON.to_vec(),
+            light_background: false,
             washes: [0; 3],
             prev_washes: [0; 3],
             pictures: Pictures::default(),
@@ -199,12 +201,17 @@ impl Screen {
     /// the bar towards the text, gained lines towards green, lost lines towards red.
     pub fn set_background(&mut self, bg: [u8; 3]) {
         let bg = bg.map(u32::from);
-        let dark = bg[0] * 299 + bg[1] * 587 + bg[2] * 114 < 128_000;
-        let towards = [if dark { [255; 3] } else { [0; 3] }, [0, 190, 70], [230, 50, 50]];
+        self.light_background = bg[0] * 299 + bg[1] * 587 + bg[2] * 114 >= 128_000;
+        let towards = [if self.light_background { [0; 3] } else { [255; 3] }, [0, 190, 70], [230, 50, 50]];
         for (wash, (to, part)) in self.washes.iter_mut().zip(towards.into_iter().zip([14, 16, 16])) {
             let mix = |i: usize| (bg[i] * (100 - part) + to[i] * part) / 100;
             *wash = 1 << 24 | mix(0) << 16 | mix(1) << 8 | mix(2);
         }
+    }
+
+    /// Whether OSC 11 reported a light background; unknown is treated as dark.
+    pub fn light_background(&self) -> bool {
+        self.light_background
     }
 
     pub fn resize(&mut self, w: usize, h: usize) {
@@ -497,6 +504,18 @@ impl Screen {
     /// All the pictures asked for in this frame, in drawing order.
     pub fn picture_placements(&self) -> impl Iterator<Item = (usize, usize, usize, usize)> + '_ {
         self.pictures.wanted.iter().map(|at| (at.x, at.y, at.cols, at.rows))
+    }
+
+    /// The placement of a particular picture in the current frame.
+    pub fn placement_of(&self, picture: &Picture) -> Option<(usize, usize, usize, usize)> {
+        self.pictures.wanted.iter().find(|at| at.id == picture.id).map(|at| (at.x, at.y, at.cols, at.rows))
+    }
+
+    /// Captures exactly what a flush would send to the terminal.
+    pub fn emitted(&mut self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.flush_to(|frame| bytes.extend_from_slice(frame));
+        bytes
     }
 }
 

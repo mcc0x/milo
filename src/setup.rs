@@ -13,8 +13,9 @@ use crate::keys::Key;
 use crate::screen::{Screen, Style};
 use crate::ui::{FAINT, Pane};
 use crate::watch::Scope;
+use crate::width::char_width;
 use crate::{paths, rex};
-use install::{Claude, Layout, Store};
+use install::{Claude, Layout, Saved, Store};
 
 const CLAUDE: usize = 5;
 const CHOICES: [(&str, &str); 6] = [
@@ -25,13 +26,24 @@ const CHOICES: [(&str, &str); 6] = [
     ("Arrange every new tab", "Only tabs opened as a shell"),
     ("Show Claude Code limits", "For the usage strip"),
 ];
+// The short labels leave room for all three columns in a 28-column pane.
+const COMPACT: [(&str, &str); 6] = [
+    ("Outline", "Files"),
+    ("History", "Git"),
+    ("Usage", "Top"),
+    ("Column width", "Left"),
+    ("New tabs", "Shell"),
+    ("Claude limits", "Usage"),
+];
 
 pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     store: Option<Store>,
     inside: bool,
+    offered: bool,
     target: Option<rex::Target>,
     run: R,
     layout: Layout,
+    installed: Option<bool>,
     claude: Claude,
     show_limits: bool,
     cursor: usize,
@@ -39,8 +51,10 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
 }
 
 impl Setup {
-    pub fn open() -> Self {
-        Self::new(Store::real(), rex::inside(), rex::Target::current(), rex::run)
+    pub fn open(offered: bool) -> Self {
+        let mut setup = Self::new(Store::real(), rex::inside(), rex::Target::current(), rex::run);
+        setup.offered = offered;
+        setup
     }
 }
 
@@ -48,29 +62,59 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
     fn new(store: Option<Store>, inside: bool, target: Option<rex::Target>, run: R) -> Self {
         let mut message = None;
         let mut layout = Layout::default();
+        let mut installed = None;
         if inside && let Some(store) = &store {
             match store.layout() {
-                Ok(installed) => layout = installed,
+                Ok((saved, active)) => {
+                    layout = saved;
+                    installed = Some(active);
+                }
                 Err(why) => message = Some((why, Style::PLAIN.bold())),
             }
         }
         let claude = store.as_ref().map_or(Claude::Invalid, Store::claude);
-        Self { store, inside, target, run, layout, claude, show_limits: claude == Claude::On, cursor: 0, message }
+        Self {
+            store,
+            inside,
+            offered: false,
+            target,
+            run,
+            layout,
+            installed,
+            claude,
+            show_limits: claude == Claude::On,
+            cursor: 0,
+            message,
+        }
     }
 
     fn save(&mut self) -> Result<&'static str, &'static str> {
         let Some(store) = &self.store else { return Err("Could not find your settings folders.") };
-        let limits =
-            (self.claude.editable() && self.show_limits != (self.claude == Claude::On)).then_some(self.show_limits);
-        store.save(self.inside.then_some(&self.layout), limits, &self.run)?;
+        let limits = self.limit_change();
+        let remove = self.inside && !self.layout.enabled() && self.installed == Some(true);
+        let saved = store.save(self.inside.then_some(&self.layout), limits, &self.run)?;
+        if self.inside {
+            self.installed = Some(self.layout.enabled());
+        }
         self.claude = store.claude();
         self.show_limits = self.claude == Claude::On;
-        Ok(match (self.inside, limits) {
-            (true, Some(_)) => "Saved Rex and Claude Code choices.",
-            (true, None) => "Saved Rex layout choices.",
-            (false, Some(_)) => "Saved Claude Code choices.",
-            (false, None) => "No changes to save.",
+        Ok(match saved {
+            Saved::ListenerDidNotStart => "Saved. The Rex listener is not running.",
+            Saved::ListenerDidNotStop if remove => "Removed milo from Rex. The listener is still running.",
+            Saved::ListenerDidNotStop => "Saved. The Rex listener is still running.",
+            Saved::Ready if remove && limits.is_some() => "Removed milo from Rex. Saved Claude Code choices.",
+            Saved::Ready if remove => "Removed milo from Rex.",
+            Saved::Ready if self.inside && self.layout.enabled() && limits.is_some() => {
+                "Saved. Rex and Claude Code choices."
+            }
+            Saved::Ready if self.inside && self.layout.enabled() => "Saved. Rex layout choices.",
+            Saved::Ready if limits.is_some() => "Saved. Claude Code choices.",
+            Saved::Ready => "No changes to save.",
         })
+    }
+
+    fn limit_change(&self) -> Option<bool> {
+        (self.claude.editable() && self.show_limits != (self.claude == Claude::On)).then_some(self.show_limits)
     }
 
     fn arrange(&self) -> Result<(), &'static str> {
@@ -106,70 +150,166 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Setup<R> {
         };
         let selected = i == self.selected();
         let style = if selected { Style::PLAIN.bold() } else { Style::PLAIN };
-        let (name, detail) = CHOICES[i];
+        let (value, explanation, choices) = if width < 49 { (16, 23, COMPACT) } else { (28, 36, CHOICES) };
+        let (name, detail) = choices[i];
         if selected {
             s.put(0, y, 1, "›", style);
         }
-        let end = 3 + s.put_fit(2, y, width.saturating_sub(2), name, style);
-        let end = end + 2 + s.put_fit(end, y, width.saturating_sub(end), status, style);
-        if end < width {
-            s.put_fit(end, y, width - end, detail, FAINT);
-        }
+        s.put_fit(2, y, value.min(width).saturating_sub(3), name, style);
+        s.put_fit(value, y, width.saturating_sub(value).min(6), status, style);
+        s.put_fit(explanation, y, width.saturating_sub(explanation), detail, FAINT);
     }
 
     fn footer(&self, s: &mut Screen) {
-        let keys = if self.inside {
-            "↑↓ move · Space change · a arrange · s save · q leave"
-        } else {
-            "Space change · s save · q leave"
+        let last = match self.offered {
+            true if s.w < 30 => "q next · ? help",
+            true => "q outline · ? help",
+            false => "q quit · ? help",
         };
-        let y = s.h - 1;
-        let w = s.w.saturating_sub(1);
-        if let Some((text, style)) = self.message {
-            let end = 1 + s.put_fit(1, y, w, text, style);
-            if end + 3 < s.w {
-                s.put_fit(end, y, s.w - end, " · ", FAINT);
-                s.put_fit(end + 3, y, s.w - end - 3, keys, FAINT);
-            }
+        let (first, keys): (&str, &[&str]) = if s.w < 40 {
+            ("s save", if self.inside { &["a try"] } else { &["Space"] })
+        } else if self.inside {
+            ("↑↓ move", &["Space change", "a try", "s save"])
         } else {
-            s.put_fit(1, y, w, keys, FAINT);
-        }
+            ("Space change", &["s save"])
+        };
+        help::draw_hint(s, first, keys, last);
     }
 
-    fn draw_choices(&self, s: &mut Screen) {
-        let end = s.h.saturating_sub(1);
-        let top = if self.inside || s.h < 5 {
-            1
-        } else {
-            s.put_fit(1, 1, s.w - 1, "Tab layouts need Rex.", FAINT);
-            s.put_fit(1, 2, s.w - 1, "Panes work anywhere: milo outline, milo history, milo usage.", FAINT);
-            3
-        };
+    fn draw_choices(&self, s: &mut Screen, end: usize) {
+        let mut top = 1;
+        if end > 4 {
+            if self.offered {
+                s.put_fit(1, top, s.w - 1, "Set up panes for Rex tabs.", FAINT);
+                top += 1;
+            }
+            let status = if self.inside {
+                match self.installed {
+                    Some(true) => "Rex layout installed",
+                    Some(false) => "Rex: not set up yet",
+                    None => "Rex setup could not be read",
+                }
+            } else if self.claude == Claude::Off {
+                "Not set up yet"
+            } else {
+                ""
+            };
+            if !status.is_empty() {
+                s.put_fit(1, top, s.w - 1, status, FAINT);
+                top += 1;
+            }
+            if !self.inside && end > 6 {
+                s.put_fit(1, top, s.w - 1, "Tab layouts need Rex.", FAINT);
+                s.put_fit(1, top + 1, s.w - 1, "Panes work anywhere: milo outline, milo history, milo usage.", FAINT);
+                top += 2;
+            }
+        }
         let count = if self.inside { CHOICES.len() } else { 1 };
         let shown = end.saturating_sub(top).min(count);
         let skip = if self.inside { self.cursor.saturating_sub(shown.saturating_sub(1)) } else { 0 };
-        let next = top + shown;
+        let mut next = top + shown;
+        for row in 0..shown {
+            self.choice(s, if self.inside { row + skip } else { CLAUDE }, top + row, s.w);
+        }
+        if next < end {
+            next = self.draw_save_plan(s, next, end);
+        }
         let issue = match self.claude {
             Claude::Foreign => "Claude Code already has a status line; milo will not replace it.",
             Claude::NotOwned => "This Claude Code status line was not added by setup.",
             Claude::Invalid => "Claude Code settings must be a readable JSON object.",
             Claude::On | Claude::Off => "",
         };
-        let notice_rows = usize::from(!issue.is_empty());
-        let side = self.inside && s.w >= 87 && end >= 8 + notice_rows;
-        let width = if side { 51 } else { s.w.saturating_sub(1) };
-        for row in 0..shown {
-            self.choice(s, if self.inside { row + skip } else { CLAUDE }, top + row, width);
+        for text in wrap(issue, s.w - 1) {
+            if next >= end {
+                break;
+            }
+            s.put(1, next, s.w - 1, text, FAINT);
+            next += 1;
         }
-        if !issue.is_empty() && next < end {
-            s.put_fit(2, if side { 8 } else { next }, s.w.saturating_sub(2), issue, FAINT);
-        }
-        if side {
-            sketch(s, 52, 1, &self.layout);
-        } else if self.inside && s.w >= 36 && end >= next + 8 + notice_rows {
-            sketch(s, 2, next + 1 + notice_rows, &self.layout);
+        if self.inside && s.w >= 36 && end >= next + 8 {
+            sketch(s, 2, next + 1, &self.layout);
         }
     }
+
+    fn draw_save_plan(&self, s: &mut Screen, mut y: usize, end: usize) -> usize {
+        let compact = s.w <= 28;
+        let (init, files, reload) = if !self.inside {
+            ("", "", "")
+        } else if self.layout.enabled() {
+            let init = match (self.installed, compact) {
+                (Some(true), true) => "On save: keep milo's line in Rex's init.lua.",
+                (Some(true), false) => "Keep milo's line in Rex's init.lua.",
+                (_, true) => "On save: add one line to Rex's init.lua.",
+                (_, false) => "Add one line to Rex's init.lua.",
+            };
+            let reload =
+                if self.installed == Some(true) { "Ask Rex to reload if needed." } else { "Ask Rex to reload." };
+            (init, "Write milo's two files.", reload)
+        } else if self.installed == Some(true) {
+            let init = if compact {
+                "On save: remove milo's line from Rex's init.lua."
+            } else {
+                "Remove milo's line from Rex's init.lua."
+            };
+            (init, "Delete milo's two files.", "Ask Rex to reload.")
+        } else {
+            ("", "", "")
+        };
+        let listener = if self.inside && self.layout.new_tabs {
+            "Start arranging new tabs."
+        } else if self.inside && self.installed == Some(true) {
+            "Stop arranging new tabs."
+        } else {
+            ""
+        };
+        let claude = match self.limit_change() {
+            Some(true) => "Add milo to Claude Code's status line.",
+            Some(false) => "Take milo off Claude Code's status line.",
+            None => "",
+        };
+        if init.is_empty() && claude.is_empty() {
+            return y;
+        }
+        if !compact || init.is_empty() {
+            s.put(1, y, s.w - 1, "On save:", Style::PLAIN.bold());
+            y += 1;
+        }
+        let width = s.w - 1;
+        for text in [init, files, reload, listener, claude].into_iter().flat_map(|text| wrap(text, width)) {
+            if y == end {
+                break;
+            }
+            s.put(1, y, s.w - 1, text, FAINT);
+            y += 1;
+        }
+        y
+    }
+}
+
+/// Wrap setup notices without allocating or cutting key words off a narrow pane.
+fn wrap(mut text: &str, width: usize) -> impl Iterator<Item = &str> + Clone {
+    std::iter::from_fn(move || {
+        if text.is_empty() {
+            return None;
+        }
+        let mut end = text.len();
+        let mut columns = 0;
+        let mut space = None;
+        for (i, ch) in text.char_indices() {
+            columns += char_width(ch);
+            if columns > width {
+                end = if ch == ' ' { i } else { space.unwrap_or(i) };
+                break;
+            }
+            if ch == ' ' {
+                space = Some(i);
+            }
+        }
+        let (line, rest) = text.split_at(end);
+        text = rest.trim_start();
+        Some(line)
+    })
 }
 
 /// A seven-row sketch. Each room can be read without the explanations beside it.
@@ -227,7 +367,15 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
         if s.h == 1 {
             return;
         }
-        self.draw_choices(s);
+        let mut end = s.h - 1;
+        if let Some((text, style)) = self.message {
+            let rows = wrap(text, s.w - 1).take(end.saturating_sub(1));
+            end -= rows.clone().count();
+            for (row, text) in rows.enumerate() {
+                s.put(1, end + row, s.w - 1, text, style);
+            }
+        }
+        self.draw_choices(s, end);
         self.footer(s);
     }
 
@@ -235,9 +383,9 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
         use help::{heading, key};
         let mut rows = vec![heading("Setup keys"), key("Space", "change (Enter)")];
         if self.inside {
-            rows.extend([key("↑ ↓  ", "move (k j)"), key("a    ", "arrange this tab")]);
+            rows.extend([key("↑↓   ", "move (k j)"), key("a    ", "try in this tab")]);
         }
-        rows.extend([key("s    ", "save choices"), key("q    ", "leave")]);
+        rows.extend([key("s    ", "save choices"), key("q    ", if self.offered { "open outline" } else { "quit" })]);
         Page::new(rows)
     }
 
@@ -254,10 +402,10 @@ impl<R: Fn(&[&OsStr]) -> bool + 'static> Pane for Setup<R> {
             Key::Up | Key::Char('k') if self.inside => self.cursor = self.cursor.saturating_sub(1),
             Key::Down | Key::Char('j') if self.inside => self.cursor = (self.cursor + 1).min(CLAUDE),
             Key::Enter | Key::Char(' ') => self.toggle(),
-            Key::Char('a') if self.inside => match self.arrange() {
-                Ok(()) => return true,
-                Err(why) => return self.report(Err(why)),
-            },
+            Key::Char('a') if self.inside => {
+                let tried = self.arrange().map(|()| "Tried in this tab. Not saved yet: press s to keep it.");
+                return self.report(tried);
+            }
             Key::Char('s') if self.inside || self.claude.editable() => {
                 let saved = self.save();
                 return self.report(saved);
@@ -325,24 +473,24 @@ mod tests {
     fn the_screen_sketch_tracks_panes_and_column_width() {
         let f = Fixture::folder();
         let mut pane = Setup::new(Some(store(&f)), true, None, |_| panic!("drawing needs no Rex"));
-        let before = frame(&mut pane, 64, 18);
+        let before = frame(&mut pane, 64, 24);
         for (label, _) in CHOICES {
-            assert!(before[..7].iter().any(|row| row.contains(label)));
+            assert!(before[..8].iter().any(|row| row.contains(label)));
         }
         for label in ["Outline", "History", "Usage", "Your work"] {
-            assert!(before[7..].iter().any(|row| row.contains(label)));
+            assert!(before[12..].iter().any(|row| row.contains(label)));
         }
         assert!(!pane.key(Key::Char(' ')));
-        let after = frame(&mut pane, 64, 18);
-        assert!(!after[7..].iter().any(|row| row.contains("Outline")));
-        assert!(after[7..].iter().any(|row| row.contains("History")));
+        let after = frame(&mut pane, 64, 24);
+        assert!(!after[12..].iter().any(|row| row.contains("Outline")));
+        assert!(after[12..].iter().any(|row| row.contains("History")));
         for _ in 0..3 {
             pane.key(Key::Down);
         }
         pane.key(Key::Enter);
-        let wider = frame(&mut pane, 64, 18);
-        assert!(wider[4].contains("Medium"));
-        assert_ne!(after[8], wider[8]);
+        let wider = frame(&mut pane, 64, 24);
+        assert!(wider[5].contains("Medium"));
+        assert_ne!(after[14], wider[14]);
     }
 
     #[test]
@@ -352,10 +500,10 @@ mod tests {
         for _ in 0..4 {
             pane.key(Key::Char('j'));
         }
-        let rows = frame(&mut pane, 33, 5);
-        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("Arrange every new tab")));
+        let rows = frame(&mut pane, 28, 5);
+        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("New tabs")));
         assert!(!rows.iter().any(|row| row.contains('┌')));
-        assert!(rows[4].contains("Space"));
+        assert_eq!(rows[4].trim(), "s save · q quit · ? help");
     }
 
     #[test]
@@ -364,15 +512,16 @@ mod tests {
         let store = store(&f);
         let mut pane = Setup::new(Some(store), false, None, |_| panic!("outside Rex"));
         let rows = frame(&mut pane, 75, 10);
-        assert!(rows[1].contains("Tab layouts need Rex"));
-        assert!(rows[2].contains("milo outline, milo history, milo usage"));
-        assert!(rows[3].contains("Show Claude Code limits"));
+        assert!(rows[1].contains("Not set up yet"));
+        assert!(rows[2].contains("Tab layouts need Rex"));
+        assert!(rows[3].contains("milo outline, milo history, milo usage"));
+        assert!(rows[4].contains("Show Claude Code limits"));
         assert!(!rows.iter().any(|row| row.contains("Arrange every new tab")));
         pane.key(Key::Enter);
         pane.key(Key::Char('s'));
         assert!(fs::read_to_string(f.root.join("settings.json")).unwrap().contains("milo claude-status"));
         assert!(!f.root.join("init.lua").exists());
-        assert!(frame(&mut pane, 75, 10)[9].contains("Saved Claude Code choices"));
+        assert_eq!(frame(&mut pane, 75, 10)[8].trim(), "Saved. Claude Code choices.");
     }
 
     #[test]
@@ -387,5 +536,58 @@ mod tests {
         pane.key(Key::Enter);
         pane.key(Key::Char('s'));
         assert_eq!(fs::read_to_string(f.root.join("settings.json")).unwrap(), original);
+    }
+
+    #[test]
+    fn the_save_plan_and_footer_stay_visible_after_trying_at_28_columns() {
+        let f = Fixture::folder();
+        let target = rex::Target { session: "session:test".into(), block: "block:test".into() };
+        let mut pane = Setup::new(Some(store(&f)), true, Some(target), |args| args[0] == "do");
+        pane.offered = true;
+        for _ in 0..4 {
+            pane.key(Key::Down);
+        }
+        pane.key(Key::Enter);
+        pane.key(Key::Down);
+        pane.key(Key::Enter);
+        assert!(!pane.key(Key::Char('a')));
+        let rows = frame(&mut pane, 28, 20);
+        let words = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ");
+        for text in [
+            "Set up panes for Rex tabs.",
+            "not set up yet",
+            "add one line to Rex's init.lua.",
+            "Write milo's two files.",
+            "Ask Rex to reload.",
+            "Start arranging new tabs.",
+            "Add milo to Claude Code's status line.",
+            "Tried in this tab. Not saved yet: press s to keep it.",
+        ] {
+            assert!(words.contains(text), "{text:?} missing from {rows:?}");
+        }
+        assert_eq!(rows[19].trim(), "s save · q next · ? help");
+        assert!(!f.root.join("init.lua").exists());
+    }
+
+    #[test]
+    fn save_and_removal_report_on_a_row_of_their_own() {
+        let f = Fixture::folder();
+        let mut pane = Setup::new(Some(store(&f)), true, None, |_| true);
+        assert!(!pane.key(Key::Char('s')));
+        let rows = frame(&mut pane, 80, 24);
+        assert_eq!(rows[22].trim(), "Saved. Rex layout choices.");
+        assert!(rows[23].ends_with("q quit · ? help"));
+        assert_eq!(rows[2].chars().nth(28), Some('O'));
+        assert_eq!(rows[5].chars().nth(28), Some('T'));
+        for _ in 0..3 {
+            pane.key(Key::Enter);
+            pane.key(Key::Down);
+        }
+        let rows = frame(&mut pane, 80, 24);
+        assert!(rows.iter().any(|row| row.contains("Remove milo's line from Rex's init.lua.")));
+        assert!(!pane.key(Key::Char('s')));
+        let rows = frame(&mut pane, 80, 24);
+        assert_eq!(rows[22].trim(), "Removed milo from Rex.");
+        assert!(rows[23].ends_with("q quit · ? help"));
     }
 }

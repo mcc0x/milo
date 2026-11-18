@@ -63,7 +63,8 @@ impl Picture {
         Self::png(png.into())
     }
 
-    fn png(png: Cow<'static, [u8]>) -> Option<Self> {
+    /// Opens PNG bytes, which can be borrowed or already owned.
+    pub fn png(png: Cow<'static, [u8]>) -> Option<Self> {
         let (width, height) = png_size(&png)?;
         Some(Self { png, width, height, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) })
     }

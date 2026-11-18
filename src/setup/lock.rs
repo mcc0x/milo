@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const LOCK: &str = "listener.lock";
 /// How long a listener asked to stop is given to wind down.
 const WIND_DOWN: Duration = Duration::from_secs(1);
+const POLL: Duration = Duration::from_millis(10);
 
 fn open(path: &Path, create: bool) -> io::Result<File> {
     OpenOptions::new().read(true).write(true).create(create).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
@@ -62,6 +63,35 @@ fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
     Ok((lock.l_type != libc::F_UNLCK && lock.l_pid > 1).then_some(lock.l_pid))
 }
 
+fn existing(dir: &Path) -> io::Result<Option<File>> {
+    match open(&dir.join(LOCK), false) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn running(dir: &Path) -> io::Result<bool> {
+    match existing(dir)? {
+        Some(lock) => holder(&lock).map(|pid| pid.is_some()),
+        None => Ok(false),
+    }
+}
+
+/// Rex starts the listener in the background; give it time to take the lock.
+pub(super) fn wait_running(dir: &Path) -> io::Result<bool> {
+    let started = Instant::now();
+    loop {
+        if running(dir)? {
+            return Ok(true);
+        }
+        if started.elapsed() >= WIND_DOWN {
+            return Ok(false);
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
 /// Becomes the listener, unless one is already running: then this returns
 /// at once. On success it never returns, having turned into `rex`.
 pub(super) fn listen(dir: &Path, script: &Path) -> io::Result<()> {
@@ -81,31 +111,27 @@ pub(super) fn listen(dir: &Path, script: &Path) -> io::Result<()> {
 /// Ends the listener if one is running, and returns once another could
 /// start in its place.
 pub(super) fn stop(dir: &Path) -> io::Result<()> {
-    let lock = match open(&dir.join(LOCK), false) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let Some(listener) = holder(&lock)? else { return Ok(()) };
-    // SAFETY: The system has just named this process as the holder of the
-    // lock, which only a listener takes. Should it end before the signal
-    // arrives, the signal goes nowhere; its number passing to some other
-    // process in the instant between the two calls is all that is left
-    // to chance.
-    if unsafe { libc::kill(listener, libc::SIGTERM) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error);
+    let Some(lock) = existing(dir)? else { return Ok(()) };
+    for _ in 0..2 {
+        let Some(listener) = holder(&lock)? else { return Ok(()) };
+        // SAFETY: The system has just identified the holder of the listener
+        // lock. The only race is PID reuse before the signal arrives.
+        if unsafe { libc::kill(listener, libc::SIGTERM) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        let asked = Instant::now();
+        loop {
+            match holder(&lock)? {
+                None => return Ok(()),
+                Some(pid) if pid != listener || asked.elapsed() >= WIND_DOWN => break,
+                Some(_) => std::thread::sleep(POLL),
+            }
         }
     }
-    let asked = Instant::now();
-    while holder(&lock)?.is_some() {
-        if asked.elapsed() >= WIND_DOWN {
-            return Err(ErrorKind::TimedOut.into());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
+    Err(ErrorKind::TimedOut.into())
 }
 
 // A lock of this kind never stands in the way of the process that holds it,

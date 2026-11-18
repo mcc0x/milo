@@ -3,13 +3,15 @@
 mod draw;
 mod files;
 mod json;
+mod omp;
 mod status;
 mod time;
 
 use std::collections::HashMap;
 use std::io;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::help::{self, Page};
 use crate::keys::Key;
@@ -18,7 +20,7 @@ use crate::ui::Pane;
 use crate::watch::Scope;
 use crate::{paths, when};
 
-use self::files::{Budget, Mark, Sessions, Stream, Tree};
+use self::files::{Budget, Mark, Reverse, Sessions, Stream, Tree};
 use self::json::Value;
 use self::time::{DAY, MINUTE, Stamp};
 
@@ -96,14 +98,61 @@ impl Window {
     }
 }
 
+type BaseWindows = [Option<Window>; 2];
+
+#[derive(Clone, Copy, Default)]
+struct Limits {
+    base: BaseWindows,
+    model_week: Option<ModelWeek>,
+}
+
+impl Limits {
+    const fn new(base: BaseWindows) -> Self {
+        Self { base, model_week: None }
+    }
+
+    /// The two all-models windows; the scoped week is a separate figure.
+    fn map<T>(self, figure: impl FnMut(Option<Window>) -> T) -> [T; 2] {
+        self.base.map(figure)
+    }
+
+    fn windows(self) -> impl Iterator<Item = Window> {
+        self.base.into_iter().flatten().chain(self.model_week.map(|model| model.window))
+    }
+}
+
 #[derive(Clone, Copy)]
-struct CodexReading {
+struct ModelWeek {
+    window: Window,
+    name: [u8; 32],
+    len: usize,
+}
+
+impl ModelWeek {
+    fn new(tier: &str, window: Window) -> Option<Self> {
+        let len = tier.len();
+        if len == 0 || !tier.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
+            return None;
+        }
+        let mut name = [0; 32];
+        name.get_mut(..len)?.copy_from_slice(tier.as_bytes());
+        name[0].make_ascii_uppercase();
+        Some(Self { window, name, len })
+    }
+
+    fn label(&self) -> &str {
+        std::str::from_utf8(&self.name[..self.len]).expect("model labels are ASCII")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Reading {
     at: Stamp,
     // A report with no readable windows still supersedes older reports.
     windows: Limits,
 }
 
-type Limits = [Option<Window>; 2];
+type CodexReading = Reading;
 
 impl CodexReading {
     fn parse(line: &[u8], now: i64) -> Option<Self> {
@@ -116,8 +165,11 @@ impl CodexReading {
         (at.seconds <= now.saturating_add(CLOCK_SKEW)).then_some(())?;
         let [kind, limits] = payload?.fields(["type", "rate_limits"]);
         kind?.is("token_count").then_some(())?;
-        let [primary, secondary] = limits?.fields(["primary", "secondary"]);
-        let windows = [primary, secondary].map(|window| Window::codex(window, at.seconds));
+        let [bucket, primary, secondary] = limits?.fields(["limit_id", "primary", "secondary"]);
+        if bucket.and_then(|v| v.string(32)).is_some_and(|id| id != "codex") {
+            return None;
+        }
+        let windows = Limits::new([primary, secondary].map(|window| Window::codex(window, at.seconds)));
         Some(Self { at, windows })
     }
 }
@@ -130,19 +182,22 @@ struct CodexFile {
 #[derive(Default)]
 struct Codex {
     files: HashMap<PathBuf, CodexFile>,
+    omp: Option<Reading>,
     no_sessions: bool,
 }
 
 impl Codex {
     fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) {
         let Some(root) = root else {
-            *self = Self { no_sessions: true, ..Self::default() };
+            self.files.clear();
+            self.no_sessions = true;
             return;
         };
         let sessions = match Sessions::scan(root, Tree::Codex) {
             Ok(sessions) => sessions,
             Err(error) => {
-                *self = Self { no_sessions: error.kind() == io::ErrorKind::NotFound, ..Self::default() };
+                self.files.clear();
+                self.no_sessions = error.kind() == io::ErrorKind::NotFound;
                 return;
             }
         };
@@ -184,7 +239,7 @@ impl Codex {
     }
 
     fn latest(&self) -> Option<CodexReading> {
-        self.files.values().filter_map(|file| file.reading).max_by_key(|reading| reading.at)
+        self.files.values().filter_map(|file| file.reading).chain(self.omp).max_by_key(|reading| reading.at)
     }
 }
 
@@ -199,9 +254,21 @@ impl Sample {
         if !files::has_marker(line, b"usage") {
             return None;
         }
+        let (at, kind, message) = Self::record(line)?;
+        Self::from_record(at, kind, message)
+    }
+
+    fn record(line: &[u8]) -> Option<(i64, Option<Value<'_>>, Option<Value<'_>>)> {
         let [kind, at, message] = Value::parse(line)?.fields(["type", "timestamp", "message"]);
+        Some((Stamp::iso(at?)?.seconds, kind, message))
+    }
+
+    fn from_record<'a>(
+        at: i64,
+        kind: Option<Value<'_>>,
+        message: Option<Value<'a>>,
+    ) -> Option<(Self, Option<std::borrow::Cow<'a, str>>)> {
         kind?.is("assistant").then_some(())?;
-        let at = Stamp::iso(at?)?.seconds;
         let [usage, id] = message?.fields(["usage", "id"]);
         let counts = usage?.fields(["input_tokens", "output_tokens", "cache_creation_input_tokens"]);
         let mut counts = counts.into_iter().flatten().filter_map(Value::unsigned);
@@ -219,10 +286,12 @@ struct Samples {
 }
 
 impl Samples {
-    fn add(&mut self, sample: Sample, id: Option<&str>, cutoff: i64) {
+    fn add(&mut self, sample: Sample, id: Option<&str>, cutoff: i64, revisiting: bool) {
         if let Some(previous) = id.and_then(|id| self.identified.get_mut(id)) {
             previous.at = previous.at.min(sample.at);
-            previous.tokens = sample.tokens;
+            if !revisiting {
+                previous.tokens = sample.tokens;
+            }
         } else if sample.at >= cutoff {
             if self.identified.len() + self.anonymous.len() >= MAX_SAMPLES {
                 self.incomplete_since = Some(self.incomplete_since.map_or(sample.at, |d| d.max(sample.at)));
@@ -244,13 +313,18 @@ impl Samples {
 struct ClaudeFile {
     mark: Mark,
     stream: Stream,
+    reverse: Option<Reverse>,
     samples: Samples,
-    pending: Option<Sample>,
+    pending: Option<(Sample, Option<Box<str>>)>,
 }
 
 impl ClaudeFile {
+    fn settled(&self) -> bool {
+        self.reverse.is_none() && self.stream.offset == self.mark.len
+    }
+
     fn check(&mut self, sessions: &Sessions, candidate: &files::Candidate, cutoff: i64, budget: &mut Budget) -> bool {
-        if self.mark == candidate.mark && self.stream.offset == self.mark.len {
+        if self.mark == candidate.mark && self.settled() {
             return true;
         }
         if budget.remaining == 0 {
@@ -265,36 +339,90 @@ impl ClaudeFile {
         }
         self.mark = mark;
         self.samples.expire(cutoff);
-        let loaded = self.stream.read(&file, mark.len, budget, |line| {
-            if let Some((sample, id)) = Sample::parse(line) {
-                self.samples.add(sample, id.as_deref(), cutoff);
-            }
-        });
-        self.pending = if self.stream.offset == mark.len {
+        let loaded = self.read(&file, cutoff, budget);
+        self.pending = if self.settled() {
             Sample::parse(self.stream.tail()).and_then(|(sample, id)| {
-                let repeated = id.is_some_and(|id| self.samples.identified.contains_key(id.as_ref()));
-                (!repeated).then_some(sample)
+                let repeated = id.as_ref().is_some_and(|id| self.samples.identified.contains_key(id.as_ref()));
+                (!repeated).then(|| (sample, id.map(|id| id.into_owned().into_boxed_str())))
             })
         } else {
             None
         };
-        loaded.is_err() || self.stream.offset == mark.len
+        loaded.is_err() || self.settled()
+    }
+
+    fn read(&mut self, file: &std::fs::File, cutoff: i64, budget: &mut Budget) -> io::Result<()> {
+        if let Some(reverse) = &mut self.reverse {
+            let mut reached_history = false;
+            while reverse.offset != 0 && budget.remaining != 0 {
+                let (mut old, mut current) = (false, false);
+                let _ = reverse.block::<()>(file, 0, budget, |line, at_end| {
+                    if at_end {
+                        self.stream.remember_tail(line);
+                    } else if let Some((at, kind, message)) = line.and_then(Sample::record) {
+                        old |= at < cutoff;
+                        current |= at >= cutoff;
+                        if let Some((sample, id)) = Sample::from_record(at, kind, message) {
+                            self.samples.add(sample, id.as_deref(), cutoff, true);
+                        }
+                    }
+                    ControlFlow::Continue(())
+                })?;
+                // Transcripts append in time order. Allow mixed timestamps in the
+                // boundary block rather than stopping at the first old record.
+                reached_history = old && !current;
+                if reached_history {
+                    break;
+                }
+            }
+            if !reached_history && reverse.offset != 0 {
+                return Ok(());
+            }
+            self.reverse = None;
+        }
+        self.stream.read(file, self.mark.len, budget, |line| {
+            if let Some((sample, id)) = Sample::parse(line) {
+                self.samples.add(sample, id.as_deref(), cutoff, false);
+            }
+        })
     }
 
     fn new(mark: Mark) -> Self {
-        Self { mark, stream: Stream::default(), samples: Samples::default(), pending: None }
+        Self {
+            mark,
+            stream: Stream::resume(mark.len),
+            reverse: (mark.len != 0).then(|| Reverse::new(mark.len)),
+            samples: Samples::default(),
+            pending: None,
+        }
     }
 
-    fn all(&self) -> impl Iterator<Item = &Sample> {
-        self.samples.identified.values().chain(self.samples.anonymous.iter()).chain(self.pending.iter())
+    fn identified(&self) -> impl Iterator<Item = (&str, Sample)> {
+        self.samples
+            .identified
+            .iter()
+            .map(|(id, sample)| (id.as_ref(), *sample))
+            .chain(self.pending.as_ref().and_then(|(sample, id)| Some((id.as_deref()?, *sample))))
+    }
+
+    fn anonymous(&self) -> impl Iterator<Item = &Sample> {
+        self.samples
+            .anonymous
+            .iter()
+            .chain(self.pending.as_ref().filter(|(_, id)| id.is_none()).map(|(sample, _)| sample))
     }
 }
 
 #[derive(Default)]
 struct Claude {
     files: HashMap<PathBuf, ClaudeFile>,
+    identified: Vec<Sample>,
     limited: bool,
     saved_mark: Option<Mark>,
+    status: Option<Reading>,
+    native_mark: Option<Mark>,
+    native: Option<Reading>,
+    omp: Option<Reading>,
     saved: Option<Limits>,
 }
 
@@ -308,15 +436,14 @@ impl Claude {
     fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
         let Some(sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
             self.files.clear();
+            self.identified.clear();
             self.limited = false;
             return true;
         };
         self.limited = sessions.limited;
         if sessions.files.len() == self.files.len()
             && sessions.files.iter().all(|candidate| {
-                self.files
-                    .get(&candidate.path)
-                    .is_some_and(|file| file.mark == candidate.mark && file.stream.offset == file.mark.len)
+                self.files.get(&candidate.path).is_some_and(|file| file.mark == candidate.mark && file.settled())
             })
         {
             return true;
@@ -326,19 +453,37 @@ impl Claude {
         for candidate in &sessions.files {
             let mut file = previous.remove(&candidate.path).unwrap_or_else(|| ClaudeFile::new(candidate.mark));
             settled &= file.check(&sessions, candidate, cutoff, budget);
-            self.limited |= file.stream.offset < file.mark.len;
+            self.limited |= !file.settled();
             self.files.insert(candidate.path.clone(), file);
         }
+        self.limited |= !settled;
+        // Merge once per changed scan, not on each redraw. The number of
+        // contributors is capped by the session and per-file sample limits.
+        let mut unique = HashMap::<&str, Sample>::new();
+        for (id, sample) in self.files.values().flat_map(ClaudeFile::identified) {
+            unique
+                .entry(id)
+                .and_modify(|old| {
+                    old.at = old.at.min(sample.at);
+                    old.tokens = old.tokens.max(sample.tokens);
+                })
+                .or_insert(sample);
+        }
+        self.identified.clear();
+        self.identified.extend(unique.into_values());
         settled
     }
 
     fn activity(&self, today: i64, now: i64) -> Activity {
         let mut activity = Activity { partial: self.limited, ..Activity::default() };
-        for file in self.files.values() {
-            activity.partial |= file.samples.incomplete_since.is_some_and(|at| at >= today);
-            for sample in file.all().filter(|s| (today..=now).contains(&s.at)) {
-                activity.today = activity.today.saturating_add(sample.tokens);
-            }
+        activity.partial |= self.files.values().any(|file| file.samples.incomplete_since.is_some_and(|at| at >= today));
+        for sample in self
+            .identified
+            .iter()
+            .chain(self.files.values().flat_map(ClaudeFile::anonymous))
+            .filter(|s| (today..=now).contains(&s.at))
+        {
+            activity.today = activity.today.saturating_add(sample.tokens);
         }
         activity
     }
@@ -377,9 +522,12 @@ pub struct Usage {
     codex_dir: Option<PathBuf>,
     claude_dir: Option<PathBuf>,
     limits_file: Option<PathBuf>,
+    claude_config: Option<PathBuf>,
+    omp: omp::Poll,
     codex: Codex,
     claude: Claude,
     today: Today,
+    #[cfg(test)]
     fixed_now: Option<i64>,
     #[cfg(test)]
     bytes_read: u64,
@@ -392,44 +540,74 @@ impl Usage {
         let claude = home.as_ref().map(|p| p.join(".claude/projects"));
         let state = paths::state_dir();
         let mut usage = Self::from_dirs(codex, claude, state, when::now());
-        usage.fixed_now = None;
+        usage.claude_config = home.as_ref().map(|p| p.join(".claude.json"));
+        usage.omp = omp::Poll::new(omp::database(home.as_deref()));
         usage
     }
 
     fn from_dirs(codex_dir: Option<PathBuf>, claude_dir: Option<PathBuf>, state: Option<PathBuf>, now: i64) -> Self {
-        let mut usage = Self {
+        Self {
             codex_dir,
             claude_dir,
             limits_file: state.map(|dir| dir.join(SAVED_LIMITS)),
+            claude_config: None,
+            omp: omp::Poll::default(),
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
+            #[cfg(test)]
             fixed_now: Some(now),
             #[cfg(test)]
             bytes_read: 0,
-        };
-        usage.check();
-        usage
+        }
     }
 
     fn now(&self) -> i64 {
-        self.fixed_now.unwrap_or_else(when::now)
+        #[cfg(test)]
+        if let Some(now) = self.fixed_now {
+            return now;
+        }
+        when::now()
     }
 
     fn refresh(&mut self, now: i64) -> bool {
+        if let Some(reports) = self.omp.check(now, Instant::now()) {
+            self.codex.omp = reports.codex;
+            self.claude.omp = reports.claude;
+        }
         let cutoff = self.today.since(now);
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         if let Some(path) = &self.limits_file {
-            status::read(path, &mut self.claude.saved_mark, &mut self.claude.saved, &mut claude_budget);
+            files::read_cached(
+                path,
+                &mut self.claude.saved_mark,
+                &mut self.claude.status,
+                &mut claude_budget,
+                status::saved,
+            );
         }
+        if let Some(path) = &self.claude_config {
+            files::read_cached(
+                path,
+                &mut self.claude.native_mark,
+                &mut self.claude.native,
+                &mut claude_budget,
+                |file, mark, budget| status::native(file, mark, budget, now),
+            );
+        }
+        self.claude.saved = [self.claude.status, self.claude.native, self.claude.omp]
+            .into_iter()
+            .flatten()
+            .max_by_key(|reading| reading.at)
+            .map(|reading| reading.windows);
         self.codex.check(self.codex_dir.as_deref(), now, &mut codex_budget);
         let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, &mut claude_budget);
         #[cfg(test)]
         {
             self.bytes_read = codex_budget.read + claude_budget.read;
         }
-        claude
+        claude && !self.omp.pending()
     }
 }
 
@@ -474,7 +652,7 @@ impl Pane for Usage {
             .map(|reading| reading.windows)
             .into_iter()
             .chain(self.claude.saved)
-            .flat_map(|windows| windows.into_iter().flatten().filter_map(|w| w.resets))
+            .flat_map(|limits| limits.windows().filter_map(|window| window.resets))
             .filter(|&reset| reset > now)
             .min();
         let wait = earliest.map_or(MINUTE, |ts| ts.saturating_sub(now).min(MINUTE));
@@ -511,7 +689,7 @@ fn help_rows() -> Vec<help::Row> {
 /// Claude Code must get a line and a successful exit even if it sent bad data.
 pub fn claude_status() -> i32 {
     let path = paths::state_dir().map(|dir| dir.join(SAVED_LIMITS));
-    status::run(io::stdin().lock(), io::stdout().lock(), path.as_deref(), when::now())
+    status::run_fd(io::stdin(), io::stdout().lock(), path.as_deref(), when::now())
 }
 
 #[cfg(test)]

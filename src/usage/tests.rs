@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, symlink};
+use std::os::unix::net::UnixStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
@@ -13,6 +14,7 @@ const NOW: i64 = 1_795_100_000;
 const CODEX: &str = "codex/2026/11/18/rollout-a.jsonl";
 const OTHER_CODEX: &str = "codex/2026/11/18/rollout-z.jsonl";
 const CLAUDE: &str = "claude/project/session.jsonl";
+const AGENT: &str = "claude/project/session/subagents/agent-good.jsonl";
 const STATE: &str = "state";
 const STATUS: &[u8] = br#"{
     "rate_limits": {
@@ -49,6 +51,12 @@ fn write(f: &Fixture, path: &str, data: &str, now: i64) {
 }
 
 fn open(f: &Fixture, now: i64) -> Usage {
+    let mut usage = unopened(f, now);
+    usage.check();
+    usage
+}
+
+fn unopened(f: &Fixture, now: i64) -> Usage {
     Usage::from_dirs(Some(f.root.join("codex")), Some(f.root.join("claude")), Some(f.root.join(STATE)), now)
 }
 
@@ -95,6 +103,14 @@ fn assistant(at: i64, input: u64, output: u64, writes: u64) -> String {
         \"input_tokens\":{input},\"output_tokens\":{output},\"cache_creation_input_tokens\":{writes},\
         \"cache_read_input_tokens\":9010011}},\"model\":\"Claude Test\"}}}}\n"
     )
+}
+
+fn identified(line: &str, id: &str) -> String {
+    line.replacen("\"usage\":", &format!("\"id\":\"{id}\",\"usage\":"), 1)
+}
+
+fn activity(usage: &Usage) -> Activity {
+    usage.claude.activity(usage.today.since, usage.now())
 }
 
 fn with_limits() -> Fixture {
@@ -166,8 +182,8 @@ fn codex_allows_a_little_clock_skew_but_ignores_far_future_events() {
     let reset = NOW + HOUR;
     let data = [
         codex(NOW - MINUTE, 41, reset, "null"),
-        codex(NOW + 90, 62, reset, "null"),
-        codex(NOW + DAY, 95, reset, "null"),
+        codex(NOW + 5 * MINUTE, 62, reset, "null"),
+        codex(NOW + 5 * MINUTE + 1, 95, reset, "null"),
     ]
     .concat();
     write(&f, CODEX, &data, NOW);
@@ -193,7 +209,10 @@ fn codex_shows_reset_when_the_time_passes_without_an_append() {
     let mut usage = open(&f, NOW);
     assert!(frame(&mut usage, 85, 2)[0].contains("77%"));
     assert_eq!(usage.next_frame(), Some(Duration::from_secs(5)));
+    usage.fixed_now = Some(NOW + 4);
+    assert!(frame(&mut usage, 85, 2)[0].contains("77%"));
     usage.fixed_now = Some(NOW + 5);
+    assert_eq!(usage.next_frame(), Some(Duration::from_secs(60)));
     let rows = frame(&mut usage, 140, 3);
     assert!(rows[1].contains("0%") && !rows[1].contains("77%"));
     assert!(rows[2].split('│').next().unwrap().contains("reset"));
@@ -207,6 +226,28 @@ fn an_old_codex_snapshot_says_how_old_it_is() {
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].contains("33%"));
     assert!(rows[2].contains("10 d ago"));
+}
+
+#[test]
+fn a_reading_shows_its_age_at_five_minutes_but_not_one_second_earlier() {
+    let f = with_limits();
+    let mut usage = open(&f, NOW + 5 * MINUTE - 1);
+    assert!(!frame(&mut usage, 140, 3)[2].contains("ago"));
+    usage.fixed_now = Some(NOW + 5 * MINUTE);
+    assert_eq!(frame(&mut usage, 140, 3)[2].matches("5 m ago").count(), 2);
+}
+
+#[test]
+fn fractional_reset_times_round_up_to_the_next_second() {
+    let reset = NOW + HOUR;
+    let values = [format!("{}", reset * 1000 + 1), format!("\"{}.000000001Z\"", iso(reset))];
+    for input in &values {
+        let decoded = time::reset(Value::parse(input.as_bytes()).unwrap(), NOW);
+        assert_eq!(decoded, Some(reset + 1));
+        let window = Window { minutes: 300, percent: 42.0, resets: decoded, observed: NOW };
+        assert!(!window.is_reset(reset));
+        assert!(window.is_reset(reset + 1));
+    }
 }
 
 #[test]
@@ -286,6 +327,55 @@ fn session_files_and_folders_are_not_followed_through_links() {
 }
 
 #[test]
+fn claude_counts_only_regular_subagent_transcripts_in_the_session_subagents_folder() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    write(&f, AGENT, &assistant(now, 2000, 0, 0), now);
+    let decoy = assistant(now, 9000, 0, 0);
+    for path in [
+        "claude/project/session/agent-wrong-level.jsonl",
+        "claude/project/session/subagents/not-ours.jsonl",
+        "claude/project/session/subagents/agent-compressed.jsonl.zst",
+        "claude/project/session/subagents/nested/agent-wrong-level.jsonl",
+        "claude/project/session/other/agent-wrong-folder.jsonl",
+        "elsewhere/subagents/agent-symlink.jsonl",
+    ] {
+        write(&f, path, &decoy, now);
+    }
+    fs::create_dir_all(f.root.join("claude/project/other")).unwrap();
+    symlink(f.root.join("elsewhere"), f.root.join("claude/project/linked")).unwrap();
+    symlink(f.root.join("elsewhere/subagents"), f.root.join("claude/project/other/subagents")).unwrap();
+    symlink(
+        f.root.join("elsewhere/subagents/agent-symlink.jsonl"),
+        f.root.join("claude/project/session/subagents/agent-link.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(activity(&open(&f, now)).today, 2000);
+}
+
+#[test]
+fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    fs::create_dir_all(f.root.join("codex")).unwrap();
+    fs::create_dir_all(f.root.join(STATE)).unwrap();
+    write(&f, CLAUDE, &assistant(now, 2000, 0, 0), now);
+    let mut usage = unopened(&f, now);
+    let mut pace = crate::Pace::for_pane(&mut usage, crate::WATCHED, true);
+    assert_eq!(activity(&usage).today, 2000);
+    assert_eq!(pace.idle, crate::WATCHED);
+
+    fs::remove_dir(f.root.join("codex")).unwrap();
+    pace.look(&mut usage, true);
+    assert_eq!(pace.idle, Duration::from_secs(2));
+    write(&f, CODEX, &codex(now, 61, now + HOUR, "null"), now);
+    pace.look(&mut usage, true);
+    assert!(frame(&mut usage, 100, 2)[0].contains("61%"));
+    // A new root is not guaranteed to be covered by the original watcher.
+    assert_eq!(pace.idle, Duration::from_secs(2));
+}
+
+#[test]
 fn claude_activity_only_shows_today_and_never_takes_the_place_of_limits() {
     let f = Fixture::folder();
     let midnight = Today::at(NOW, when::local_day(NOW)).since;
@@ -318,10 +408,92 @@ fn claude_today_includes_earlier_activity_after_five_hours_have_passed() {
 fn multiple_claude_blocks_for_the_same_message_are_not_counted_twice() {
     let f = Fixture::folder();
     let now = local_noon();
-    let add_id = |line: String| line.replace("\"usage\":", "\"id\":\"example-message\",\"usage\":");
-    let records = [add_id(assistant(now - 20, 100, 1800, 100)), add_id(assistant(now - 10, 100, 1800, 100))].concat();
+    let sample = |at, tokens| identified(&assistant(at, tokens, 0, 0), "example-message");
+    write(&f, CLAUDE, &format!("{}{}", sample(now - 20, 1000), sample(now - 10, 2000)), now - 10);
+    let mut usage = open(&f, now);
+    assert_eq!(activity(&usage).today, 2000);
+
+    let mut file = OpenOptions::new().append(true).open(f.root.join(CLAUDE)).unwrap();
+    file.write_all(sample(now, 3000).as_bytes()).unwrap();
+    file.set_modified(mtime(now)).unwrap();
+    assert!(usage.check());
+    assert_eq!(activity(&usage).today, 3000);
+}
+
+#[test]
+fn resumed_and_forked_files_share_message_ids_but_not_anonymous_records() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let anon = assistant(now - 5, 200, 0, 0);
+    let older = identified(&assistant(now - 20, 2000, 0, 0), "shared");
+    let updated = identified(&assistant(now - 10, 4000, 0, 0), "shared");
+    let pending = identified(&assistant(now - 1, 5000, 0, 0), "shared");
+    write(&f, CLAUDE, &format!("{older}{anon}"), now - 5);
+    write(&f, "claude/fork/session.jsonl", &format!("{updated}{anon}"), now - 5);
+    write(&f, AGENT, pending.trim_end(), now);
+    let mut usage = open(&f, now);
+    assert_eq!(activity(&usage).today, 5400);
+    fs::remove_file(f.root.join(AGENT)).unwrap();
+    assert!(usage.check());
+    assert_eq!(activity(&usage).today, 4400);
+}
+
+#[test]
+fn a_file_caps_daily_samples_and_marks_the_total_as_partial() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let records = assistant(now, 1, 0, 0).repeat(MAX_SAMPLES + 1);
     write(&f, CLAUDE, &records, now);
-    assert!(caption(&mut open(&f, now)).contains("2k tokens today"));
+    let usage = open(&f, now);
+    assert_eq!(activity(&usage).today, MAX_SAMPLES as u64);
+    assert!(activity(&usage).partial);
+}
+
+#[test]
+fn first_load_skips_old_blocks_but_keeps_todays_long_unterminated_tail() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let today = Today::at(now, when::local_day(now)).since;
+    let old = assistant(today - 1, 9000, 0, 0).repeat(12_000);
+    let first = assistant(today, 1000, 0, 0);
+    let last = assistant(now, 2000, 0, 0).replacen('{', &format!("{{\"padding\":\"{}\",", "x".repeat(40_000)), 1);
+    write(&f, CLAUDE, &format!("{old}{first}{}", last.trim_end()), now);
+    let mut usage = open(&f, now);
+    assert!(usage.bytes_read < 128 * 1024, "{} bytes read", usage.bytes_read);
+    assert_eq!(activity(&usage).today, 3000);
+    assert!(!activity(&usage).partial);
+
+    let mut file = OpenOptions::new().append(true).open(f.root.join(CLAUDE)).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.set_modified(mtime(now + 1)).unwrap();
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 1);
+    assert_eq!(activity(&usage).today, 3000);
+}
+
+#[test]
+fn a_budget_limited_first_load_resumes_backwards_then_reads_new_appends() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let today = Today::at(now, when::local_day(now)).since;
+    let first = assistant(now - 2, 1000, 0, 0);
+    let second = assistant(now - 1, 2000, 0, 0);
+    write(&f, CLAUDE, &format!("{first}{second}"), now - 1);
+    let mut claude = Claude::default();
+    let root = f.root.join("claude");
+    assert!(!claude.check(Some(&root), today, &mut Budget::new(second.len() as u64 + 3)));
+    assert_eq!(claude.activity(today, now).today, 2000);
+    assert!(claude.activity(today, now).partial);
+
+    let append = assistant(now, 4000, 0, 0);
+    let mut file = OpenOptions::new().append(true).open(f.root.join(CLAUDE)).unwrap();
+    file.write_all(append.as_bytes()).unwrap();
+    file.set_modified(mtime(now)).unwrap();
+    let mut budget = Budget::new(4096);
+    assert!(claude.check(Some(&root), today, &mut budget));
+    assert_eq!(budget.read, (first.len() - 3 + append.len()) as u64);
+    assert_eq!(claude.activity(today, now).today, 7000);
+    assert!(!claude.activity(today, now).partial);
 }
 
 #[test]
@@ -423,8 +595,8 @@ fn claude_status_saves_limits_and_prints_a_short_plain_line() {
     let file = files::open_file(&path).unwrap();
     let mark = Mark::opened(&file).unwrap();
     let saved = status::saved(file, mark, budget).unwrap();
-    assert_eq!(saved[0].unwrap().observed, NOW);
-    assert_eq!(saved[1].unwrap().resets, Some(1_795_219_200));
+    assert_eq!(saved.windows.base[0].unwrap().observed, NOW);
+    assert_eq!(saved.windows.base[1].unwrap().resets, Some(1_795_219_200));
 }
 
 fn claude_report(path: &Path, limits: &str, now: i64) {
@@ -460,6 +632,10 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
     assert!(rows[1].contains("85%") && rows[1].contains("45%"));
     // Keeping the higher, older figures keeps their age too.
     assert_eq!(rows[2].matches("2 h ago").count(), 1);
+
+    let before = fs::read(&path).unwrap();
+    claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":85,"resets_at":{reset}}}}}"#), NOW);
+    assert_eq!(fs::read(&path).unwrap(), before);
 
     claude_report(&path, &format!(r#"{{"seven_day":{{"used_percentage":55,"resets_at":{week}}}}}"#), NOW);
     assert!(usage.check());
@@ -542,6 +718,42 @@ fn claude_status_prints_an_empty_line_and_succeeds_on_garbage_or_too_much_input(
 }
 
 #[test]
+fn claude_status_prints_the_limits_even_when_the_save_cannot_be_made() {
+    let f = Fixture::folder();
+    f.write(STATE, "a file, not a directory");
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    for path in [None, Some(path.as_path())] {
+        let mut output = Vec::new();
+        assert_eq!(status::run(STATUS, &mut output, path, NOW), 0);
+        assert_eq!(String::from_utf8(output).unwrap(), "5h 23% · week 61%\n");
+    }
+}
+
+#[test]
+fn claude_status_prints_a_plain_line_when_its_input_remains_open() {
+    use std::sync::mpsc;
+
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    writer.write_all(b"{\"model\":").unwrap();
+    let (send, receive) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let code = status::run_fd(reader, &mut output, None, NOW);
+        let _ = send.send((code, output));
+    });
+    assert_eq!(receive.recv_timeout(Duration::from_secs(5)).unwrap(), (0, b"\n".to_vec()));
+    drop(writer);
+    thread.join().unwrap();
+
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    writer.write_all(STATUS).unwrap();
+    drop(writer);
+    let mut output = Vec::new();
+    assert_eq!(status::run_fd(reader, &mut output, None, NOW), 0);
+    assert_eq!(String::from_utf8(output).unwrap(), "5h 23% · week 61%\n");
+}
+
+#[test]
 fn malformed_enormous_and_deeply_nested_lines_are_skipped() {
     let f = Fixture::folder();
     let padding = format!("{{\"ignored\":\"{}\",", "a".repeat(2 * 1024 * 1024));
@@ -557,12 +769,297 @@ fn malformed_enormous_and_deeply_nested_lines_are_skipped() {
     assert!(rows[1].contains("23%") && rows[3].contains("1.2k tokens today"));
 }
 
+mod omp_limits {
+    use std::process::Command;
+
+    use super::*;
+
+    const SCHEMA: &str = "
+        CREATE TABLE cache(key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);
+        CREATE TABLE usage_history(id INTEGER PRIMARY KEY, recorded_at INTEGER, provider TEXT,
+            account_key TEXT, email TEXT, account_id TEXT, limit_id TEXT, label TEXT, window_label TEXT,
+            used_fraction REAL, status TEXT, resets_at INTEGER);
+    ";
+
+    fn sqlite(f: &Fixture) -> Option<PathBuf> {
+        if Command::new(omp::sqlite()).arg("-version").output().is_err() {
+            eprintln!("skipping OMP fixture: sqlite3 is not installed");
+            return None;
+        }
+        let path = f.root.join("agent.db");
+        exec(&path, SCHEMA);
+        Some(path)
+    }
+
+    fn exec(path: &Path, sql: &str) {
+        let result =
+            Command::new(omp::sqlite()).args(["-batch", "-init", "/dev/null"]).arg(path).arg(sql).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+
+    fn report(path: &Path, key: &str, provider: &str, ms: i64, limits: &str) {
+        exec(
+            path,
+            &format!(
+                r#"INSERT OR REPLACE INTO cache VALUES ('usage_cache:report:{key}',
+                   '{{"value":{{"provider":"{provider}","fetchedAt":{ms},"limits":{limits}}}}}',0);"#
+            ),
+        );
+    }
+
+    fn window(id: &str, fraction: &str, reset_ms: i64, minutes: u64, tier: &str) -> String {
+        let duration_ms = minutes * 60_000;
+        format!(
+            r#"{{"id":"{id}","amount":{{"usedFraction":{fraction}}},"scope":{{"tier":{tier}}},
+                 "window":{{"durationMs":{duration_ms},"resetsAt":{reset_ms}}}}}"#
+        )
+    }
+
+    fn await_check(usage: &mut Usage) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !usage.check() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn omp_prefers_the_newest_report_per_provider_and_newer_history_per_limit() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = NOW * 1000;
+        let reset = (NOW + DAY) * 1000 + 789;
+        let five = window("anthropic:5h", "0.9", reset, 300, "null");
+        let week = window("anthropic:7d", "0.2", reset, 10_080, "null");
+        let fable = window("anthropic:7d:fable", "0.53", reset, 10_080, r#""fable""#);
+        let other = window("anthropic:7d:opus", "0.35", reset, 10_080, r#""opus""#);
+        let null = window("anthropic:5h", "null", reset, 300, "null");
+        let codex = window("openai-codex:primary", "0.01", reset, 10_080, "null");
+        report(&path, "older-z", "anthropic", now - 3000, &format!("[{five}]"));
+        report(&path, "key-only-secret", "anthropic", now - 1000, &format!("[{week},{fable},{other},{null},\"junk\"]"));
+        report(&path, "codex", "openai-codex", now - 2000, &format!("[{codex}]"));
+        exec(
+            &path,
+            &format!(
+                "INSERT INTO cache VALUES('usage_cache:report:bad','not JSON',0);
+                 INSERT INTO usage_history(provider, recorded_at, limit_id, used_fraction, resets_at, window_label)
+                 VALUES ('anthropic',{now}-2000,'anthropic:5h',0.92,{reset},'5 Hours'),
+                        ('anthropic',{now}-950,'anthropic:7d',0.29,{reset},'7 Day'),
+                        ('anthropic',{now}-900,'anthropic:7d',0.27,{reset},'7 Day'),
+                        ('openai-codex',{now}-2000,'openai-codex:primary',0.8,{reset},'7 days');"
+            ),
+        );
+
+        let bytes = omp::query(omp::sqlite(), &path, Duration::from_secs(1)).unwrap();
+        assert!(!omp::SQL.to_ascii_lowercase().contains("auth_credentials"));
+        assert!(omp::SQL.trim_start().starts_with("PRAGMA query_only=ON;"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("key-only-secret"));
+        let reading = omp::parse(&bytes, NOW).unwrap();
+        let claude = reading.claude.unwrap();
+        assert!(claude.at == Stamp::millis(Value::parse((now - 900).to_string().as_bytes()).unwrap()).unwrap());
+        assert!(claude.windows.base[0].is_none());
+        let week = claude.windows.base[1].unwrap();
+        assert!(week.percent == 27.0 && week.resets == Some(NOW + DAY) && week.observed == NOW - 1);
+        let model = claude.windows.model_week.unwrap();
+        assert_eq!(model.label(), "Fable");
+        assert_eq!(model.window.percent, 53.0);
+        let codex = reading.codex.unwrap();
+        assert!(codex.windows.base[0].is_none());
+        assert_eq!(codex.windows.base[1].unwrap().percent, 1.0);
+    }
+
+    #[test]
+    fn omp_history_fills_newer_windows_and_providers_without_a_report() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = NOW * 1000;
+        report(&path, "recent-empty", "anthropic", now - 10, "null");
+        exec(
+            &path,
+            &format!(
+                "INSERT INTO usage_history(provider, recorded_at, limit_id, used_fraction, resets_at, window_label)
+                 VALUES ('anthropic',{now}-11,'anthropic:7d',0.27,NULL,'7 Day'),
+                        ('anthropic',{now},'anthropic:7d:fable',0.53,NULL,'7 Day'),
+                        ('openai-codex',{now},'openai-codex:primary',0.01,NULL,'7 days');"
+            ),
+        );
+        let reading = omp::read(&path, NOW).unwrap();
+        let claude = reading.claude.unwrap().windows;
+        assert!(claude.base.into_iter().all(|window| window.is_none()));
+        assert_eq!(claude.model_week.unwrap().label(), "Fable");
+        assert_eq!(reading.codex.unwrap().windows.base[1].unwrap().percent, 1.0);
+    }
+
+    #[test]
+    fn omp_errors_are_quiet_and_stop_reading_oversized_or_stalled_children() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let wait = Duration::from_secs(3);
+        assert!(omp::read(&f.root.join("missing.db"), NOW).is_none());
+        assert!(omp::query(f.root.join("missing-sqlite").as_os_str(), &path, wait).is_none());
+        let executable = f.root.join("sqlite-stub");
+        let script = |lines: &str| {
+            fs::write(&executable, format!("#!/bin/sh\n{lines}\n")).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        script("printf '%s' 'not JSON'");
+        let bytes = omp::query(executable.as_os_str(), &path, wait).unwrap();
+        assert!(omp::parse(&bytes, NOW).is_none());
+        script("printf '%70000s' x");
+        assert!(omp::query(executable.as_os_str(), &path, wait).is_none());
+        script("exec 1>&-; exec /bin/sleep 8");
+        let wait = Duration::from_millis(250);
+        let started = Instant::now();
+        assert!(omp::query(executable.as_os_str(), &path, wait).is_none());
+        assert!(started.elapsed() >= wait && started.elapsed() < Duration::from_secs(4));
+        exec(&path, "DROP TABLE usage_history;");
+        assert!(omp::read(&path, NOW).is_none());
+    }
+
+    #[test]
+    fn omp_does_not_create_missing_wal_sidecars() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        exec(&path, "PRAGMA journal_mode=WAL;");
+        for sidecar in ["agent.db-wal", "agent.db-shm"] {
+            assert!(!f.root.join(sidecar).exists());
+        }
+        assert!(omp::read(&path, NOW).is_none());
+        for sidecar in ["agent.db-wal", "agent.db-shm"] {
+            assert!(!f.root.join(sidecar).exists());
+        }
+        // Use a child that would otherwise succeed even on a database without sidecars.
+        assert!(omp::query(std::ffi::OsStr::new("/usr/bin/true"), &path, Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn omp_competes_with_native_sources_by_full_observation_with_no_window_mixing() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let state = f.root.join(STATE).join(SAVED_LIMITS);
+        let reset = NOW + DAY;
+        let codex_week = window("openai-codex:primary", "0.01", reset * 1000, 10_080, "null");
+        let claude_week = window("anthropic:7d", "0.27", reset * 1000, 10_080, "null");
+        report(&path, "codex", "openai-codex", NOW * 1000 - 100, &format!("[{codex_week}]"));
+        report(&path, "claude", "anthropic", NOW * 1000 - 100, &format!("[{claude_week}]"));
+        let secondary = codex_window(9, 300, reset);
+        write(&f, CODEX, &codex(NOW - 1, 45, reset, &secondary), NOW);
+        status::run(STATUS, Vec::new(), Some(&state), NOW - 1);
+        let mut usage = unopened(&f, NOW);
+        usage.omp = omp::Poll::new(Some(path));
+        await_check(&mut usage);
+        let codex = usage.codex.latest().unwrap().windows.base;
+        let claude = usage.claude.saved.unwrap().base;
+        assert!(codex[0].is_none() && codex[1].unwrap().percent == 1.0);
+        assert!(claude[0].is_none() && claude[1].unwrap().percent == 27.0);
+
+        let rollout = codex_at(&format!("{}.950Z", iso(NOW - 1)), 45, reset, &secondary);
+        write(&f, CODEX, &rollout, NOW + 1);
+        claude_report(&state, r#"{"seven_day":{"used_percentage":62,"resets_at":1795219200}}"#, NOW);
+        assert!(usage.check());
+        let codex = usage.codex.latest().unwrap().windows.base;
+        let claude = usage.claude.saved.unwrap().base;
+        assert!(codex.into_iter().flatten().any(|window| window.percent == 45.0));
+        assert!(codex.into_iter().flatten().any(|window| window.percent == 9.0));
+        assert!(claude[0].unwrap().percent == 23.0 && claude[1].unwrap().percent == 62.0);
+    }
+
+    #[test]
+    fn claude_native_cache_is_bounded_and_uses_its_observation_and_rfc3339_reset() {
+        let f = Fixture::folder();
+        let config = f.root.join(".claude.json");
+        let reset = NOW + DAY;
+        let stamp = iso(reset + HOUR);
+        let content = |account: &str| {
+            format!(
+                r#"{{"oauthAccount":{{"accountUuid":"fixture-current"}},
+                     "cachedUsageUtilization":{{"fetchedAtMs":{},"accountUuid":"{account}",
+                      "utilization":{{"five_hour":null,"seven_day":{{"utilization":18,"resets_at":"{stamp}.987+01:00"}}}}}}}}"#,
+                NOW * 1000 + 250
+            )
+        };
+        let state = f.root.join(STATE).join(SAVED_LIMITS);
+        status::run(STATUS, Vec::new(), Some(&state), NOW);
+        let mut usage = unopened(&f, NOW);
+        usage.claude_config = Some(config.clone());
+        write(&f, ".claude.json", &content("fixture-current"), NOW);
+        assert!(usage.check());
+        let windows = usage.claude.saved.unwrap().base;
+        assert!(windows[0].is_none() && windows[1].unwrap().percent == 18.0);
+        assert_eq!(windows[1].unwrap().resets, Some(reset));
+        write(&f, ".claude.json", &content("fixture-other"), NOW + 1);
+        assert!(usage.check());
+        assert_eq!(usage.claude.saved.unwrap().base[1].unwrap().percent, 61.0);
+        write(&f, ".claude.json", &content("fixture-current"), NOW + 2);
+        OpenOptions::new().write(true).open(config).unwrap().set_len(6 * 1024 * 1024).unwrap();
+        assert!(usage.check());
+        assert_eq!(usage.bytes_read, 0);
+        assert_eq!(usage.claude.saved.unwrap().base[1].unwrap().percent, 61.0);
+    }
+
+    #[test]
+    fn omp_poll_does_not_start_another_query_before_twenty_seconds() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let clock = Instant::now();
+        let mut poll = omp::Poll::new(Some(path));
+        assert!(poll.check(NOW, clock).is_none() && poll.pending());
+        while poll.pending() {
+            assert!(clock.elapsed() < Duration::from_secs(3));
+            poll.check(NOW, clock);
+            std::thread::yield_now();
+        }
+        for seconds in 0..20_u64 {
+            assert!(poll.check(NOW, clock + Duration::from_secs(seconds)).is_none());
+            assert!(!poll.pending());
+        }
+        assert!(poll.check(NOW, clock + Duration::from_secs(20)).is_none() && poll.pending());
+        while poll.pending() {
+            assert!(clock.elapsed() < Duration::from_secs(3));
+            poll.check(NOW, clock + Duration::from_secs(20));
+            std::thread::yield_now();
+        }
+        assert_eq!(omp::database_in(Some(&f.root), None).unwrap(), f.root.join(".omp/agent/agent.db"));
+        assert_eq!(omp::database_in(None, Some(&f.root)).unwrap(), f.root.join("agent.db"));
+    }
+}
+
 #[test]
 fn json_reader_validates_nested_values_and_escaped_keys() {
     let json = br#"{"other": [null, true, false, -2.5e+2, {"escaped":"\t\uD83D\uDE00"}], "\u006bey":"caf\u00e9"}"#;
     assert!(Value::parse(json).unwrap().fields(["key"])[0].unwrap().is("café"));
     for input in [b"01".as_slice(), b"[1,]", b"{\"a\":true,}", br#"{"a":"\uD83D"}"#, b"1e-", b"-", b"+1", b"{} extra"] {
         assert!(Value::parse(input).is_none());
+    }
+}
+
+#[test]
+fn json_rejects_unpaired_surrogates_and_decodes_a_valid_pair() {
+    let value = Value::parse(br#""\uD83D\uDE00""#).unwrap();
+    assert_eq!(value.string(4).unwrap(), "\u{1f600}");
+    assert!(value.string(3).is_none());
+    for input in [
+        br#""\uD800""#.as_slice(),
+        br#""\uDFFF""#,
+        br#""\uD800\u0041""#,
+        br#""\uD800\uD801""#,
+        br#""\uDC00\uD800""#,
+        br#"{ "ignored": [ "\uDC00" ] }"#,
+        br#"{ "\uDBFF": null }"#,
+    ] {
+        assert!(Value::parse(input).is_none(), "{input:?}");
+    }
+}
+
+#[test]
+fn json_accepts_exactly_32_nested_containers_and_rejects_deeper_input() {
+    for (open, close) in [("[", "]"), ("{\"a\":", "}")] {
+        for depth in [32, 33, 16_384] {
+            let input = format!("{}null{}", open.repeat(depth), close.repeat(depth));
+            assert_eq!(Value::parse(input.as_bytes()).is_some(), depth == 32, "depth {depth}");
+        }
     }
 }
 
@@ -677,7 +1174,7 @@ fn the_two_marks_fit_four_rows_and_the_fallback_keeps_both_names() {
     for (cell, cols) in [((9, 18), 8), ((12, 12), 4)] {
         screen.set_cell_size(cell.0, cell.1);
         usage.draw(&mut screen);
-        assert_eq!(screen.picture_placements().collect::<Vec<_>>(), [(2, 0, cols, 4), (72, 0, cols, 4)]);
+        assert_eq!(super::draw::mark_placements(&screen).collect::<Vec<_>>(), [(2, 0, cols, 4), (72, 0, cols, 4)]);
         assert!(!screen.text().join("\n").contains("██ Codex"));
         assert!(!screen.text().join("\n").contains("██ Claude"));
     }
@@ -733,7 +1230,7 @@ fn stacked_marks_are_the_same_size_though_one_half_is_a_row_taller() {
     let mut screen = Screen::sized(36, 12);
     screen.set_pictures(true);
     usage.draw(&mut screen);
-    let marks: Vec<_> = screen.picture_placements().collect();
+    let marks: Vec<_> = super::draw::mark_placements(&screen).collect();
     assert_eq!(marks.len(), 2);
     assert_eq!((marks[0].2, marks[0].3), (marks[1].2, marks[1].3), "{marks:?}");
 }

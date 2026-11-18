@@ -15,6 +15,13 @@ use std::time::{Duration, Instant};
 const STAYS: &str = "#!/bin/sh\necho started > \"$HOME/started\"\nexec sleep 20\n";
 /// A stand-in that starts another program, notes its number, and ends.
 const LEAVES_ONE_BEHIND: &str = "#!/bin/sh\nsleep 20 &\necho $! > \"$HOME/left-behind\"\n";
+/// A listener that needs a second request to stop.
+const STOPS_ON_RETRY: &str = "\
+#!/bin/sh
+trap 'if test -f \"$HOME/term\"; then exit; fi; touch \"$HOME/term\"' TERM
+echo started > \"$HOME/started\"
+while :; do sleep 0.02; done
+";
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -139,4 +146,17 @@ fn stopping_with_no_listener_does_nothing() {
     let home = Home::new(STAYS);
     assert!(home.milo(&["listen", "--stop"]).status().unwrap().success());
     assert!(!home.started());
+}
+
+#[test]
+fn stopping_retries_when_the_listener_holds_the_lock_after_the_wait() {
+    let home = Home::new(STOPS_ON_RETRY);
+    let mut listener = home.milo(&["listen"]).spawn().unwrap();
+    assert!(soon(|| home.started()));
+    let stopped = home.milo(&["listen", "--stop"]).status().unwrap().success();
+    if !stopped {
+        let _ = listener.kill();
+    }
+    assert!(soon(|| listener.try_wait().unwrap().is_some()));
+    assert!(stopped);
 }

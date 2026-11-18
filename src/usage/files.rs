@@ -2,13 +2,15 @@
 
 use std::ffi::{CStr, CString, OsStr};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::ops::ControlFlow;
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::time::Instant;
 
 pub(super) const CODEX_FILES: usize = 4;
 const CLAUDE_FILES: usize = 128;
@@ -69,28 +71,99 @@ pub(super) fn open_directory(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).custom_flags(OPEN_FLAGS | libc::O_DIRECTORY).open(path)
 }
 
+/// Reads a regular file only when its size fits, including one byte to detect concurrent growth.
+pub(super) fn read_small(file: File, mark: Mark, cap: u64, budget: &mut Budget) -> Option<Vec<u8>> {
+    if mark.len > cap || budget.remaining <= mark.len {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let result = file.take((cap + 1).min(budget.remaining)).read_to_end(&mut bytes);
+    budget.debit(bytes.len());
+    result.ok()?;
+    let len = u64::try_from(bytes.len()).ok()?;
+    (len <= cap && len == mark.len).then_some(bytes)
+}
+
+/// Reads only changed regular files; a removed or bad file stops being a source.
+pub(super) fn read_cached<T>(
+    path: &Path,
+    previous: &mut Option<Mark>,
+    snapshot: &mut Option<T>,
+    budget: &mut Budget,
+    parse: impl FnOnce(File, Mark, &mut Budget) -> Option<T>,
+) {
+    let Some(mark) = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()) else {
+        *previous = None;
+        *snapshot = None;
+        return;
+    };
+    if *previous == Some(Mark::metadata(&mark)) {
+        return;
+    }
+    *snapshot = open_file(path).ok().and_then(|file| {
+        let mark = Mark::opened(&file)?;
+        *previous = Some(mark);
+        parse(file, mark, budget)
+    });
+}
+
+/// Bounds pipe capture even if its writer stops producing output without closing it.
+pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Option<Vec<u8>> {
+    let fd = input.as_fd();
+    let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let millis = i32::try_from(left.as_millis() + 1).ok()?;
+        // SAFETY: `poll` points to one writable pollfd whose descriptor is live.
+        match unsafe { libc::poll(&raw mut poll, 1, millis) } {
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+            n if n <= 0 => return None,
+            _ => {}
+        }
+        let cap = (max + 1 - bytes.len()).min(buffer.len());
+        // SAFETY: This process is the only reader and poll reported readiness.
+        // `buffer` is writable for `cap` bytes and `fd` remains borrowed above.
+        let read = unsafe { libc::read(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), cap) };
+        match read {
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+            n if n < 0 => return None,
+            0 => return Some(bytes),
+            n => {
+                let n = usize::try_from(n).ok()?;
+                if bytes.len() + n > max {
+                    return None;
+                }
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+        }
+    }
+    None
+}
+
 pub(super) enum Tree {
     Codex,
     Claude { since: i64 },
 }
 
 impl Tree {
-    fn depth(&self) -> usize {
-        match self {
-            Self::Codex => 3,
-            Self::Claude { .. } => 1,
-        }
-    }
-
     fn directory(&self, name: &[u8], depth: usize) -> bool {
-        match self {
-            Self::Codex => name.len() == if depth == 0 { 4 } else { 2 } && name.iter().all(u8::is_ascii_digit),
-            Self::Claude { .. } => true,
+        match (self, depth) {
+            (Self::Codex, 0..=2) => name.len() == if depth == 0 { 4 } else { 2 } && name.iter().all(u8::is_ascii_digit),
+            (Self::Claude { .. }, 0 | 1) => true,
+            (Self::Claude { .. }, 2) => name == b"subagents",
+            _ => false,
         }
     }
 
-    fn file(&self, name: &[u8]) -> bool {
-        name.ends_with(b".jsonl") && (!matches!(self, Self::Codex) || name.starts_with(b"rollout-"))
+    fn file(&self, name: &[u8], depth: usize) -> bool {
+        name.ends_with(b".jsonl")
+            && match (self, depth) {
+                (Self::Codex, 3) => name.starts_with(b"rollout-"),
+                (Self::Claude { .. }, 1) => true,
+                (Self::Claude { .. }, 3) => name.starts_with(b"agent-"),
+                _ => false,
+            }
     }
 
     fn includes(&self, mark: Mark) -> bool {
@@ -171,7 +244,7 @@ struct Scan {
 impl Scan {
     fn directory(&mut self, mut dir: Dir, tree: &Tree, path: &mut PathBuf, depth: usize) {
         let fd = dir.fd();
-        if depth < tree.depth() && matches!(tree, Tree::Codex) {
+        if depth < 3 && matches!(tree, Tree::Codex) {
             for name in codex_folders(&mut dir, tree, depth) {
                 if !self.descend(fd, &name, tree, path, depth) {
                     break;
@@ -184,17 +257,16 @@ impl Scan {
             if bytes == b"." || bytes == b".." {
                 continue;
             }
-            if depth == tree.depth() {
-                if tree.file(bytes)
-                    && let Some(mark) = mark_at(fd, name)
-                    && tree.includes(mark)
-                {
-                    if !self.admit() {
-                        break;
-                    }
-                    self.keep(tree.limit(), path, bytes, mark);
+            if tree.file(bytes, depth)
+                && let Some(mark) = mark_at(fd, name)
+                && tree.includes(mark)
+            {
+                if !self.admit() {
+                    break;
                 }
-            } else if tree.directory(bytes, depth) && !self.descend(fd, name, tree, path, depth) {
+                self.keep(tree.limit(), path, bytes, mark);
+            }
+            if tree.directory(bytes, depth) && !self.descend(fd, name, tree, path, depth) {
                 break;
             }
         }
@@ -341,39 +413,15 @@ pub(super) fn tail<T>(
     find: impl Fn(&[u8]) -> Option<T>,
 ) -> io::Result<(Option<T>, bool)> {
     let stop = len.saturating_sub(max.min(budget.remaining));
-    let mut offset = len;
-    let mut buf = [0; BLOCK];
-    let mut line = Line::default();
-    while offset > stop {
-        let n = usize::try_from((offset - stop).min(BLOCK as u64)).unwrap_or(BLOCK);
-        offset -= n as u64;
-        let mut read = 0;
-        while read < n {
-            let count = budget.read_at(file, &mut buf[read..n], offset + read as u64)?;
-            if count == 0 {
-                return Ok((None, true));
-            }
-            read += count;
-        }
-        let mut parts = buf[..n].rsplit(|b| *b == b'\n').peekable();
-        while let Some(part) = parts.next() {
-            if parts.peek().is_none() && offset != 0 {
-                line.push(part.iter().rev().copied());
-                break;
-            }
-            if !line.skipping && line.bytes.len() + part.len() <= MAX_LINE {
-                let found = if line.bytes.is_empty() {
-                    find(part)
-                } else {
-                    line.push(part.iter().rev().copied());
-                    line.bytes.reverse();
-                    find(&line.bytes)
-                };
-                if found.is_some() {
-                    return Ok((found, false));
-                }
-            }
-            line.clear();
+    let mut reverse = Reverse::new(len);
+    while reverse.offset > stop {
+        match reverse.block(file, stop, budget, |line, _| {
+            line.and_then(&find).map_or(ControlFlow::Continue(()), ControlFlow::Break)
+        }) {
+            Ok(ControlFlow::Break(found)) => return Ok((Some(found), false)),
+            Ok(ControlFlow::Continue(())) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok((None, true)),
+            Err(error) => return Err(error),
         }
     }
     Ok((None, stop != 0))
@@ -403,13 +451,78 @@ impl Line {
     }
 }
 
-#[derive(Default)]
+/// Walks complete lines from the end, keeping the line split across blocks.
+pub(super) struct Reverse {
+    pub offset: u64,
+    line: Line,
+    at_end: bool,
+}
+
+impl Reverse {
+    pub(super) fn new(len: u64) -> Self {
+        Self { offset: len, line: Line::default(), at_end: true }
+    }
+
+    pub(super) fn block<T>(
+        &mut self,
+        file: &File,
+        stop: u64,
+        budget: &mut Budget,
+        mut found: impl FnMut(Option<&[u8]>, bool) -> ControlFlow<T>,
+    ) -> io::Result<ControlFlow<T>> {
+        let mut buf = [0; BLOCK];
+        let n = usize::try_from((self.offset - stop).min(BLOCK as u64).min(budget.remaining)).unwrap_or(BLOCK);
+        let offset = self.offset - n as u64;
+        let mut read = 0;
+        while read < n {
+            let count = budget.read_at(file, &mut buf[read..n], offset + read as u64)?;
+            if count == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            read += count;
+        }
+        self.offset = offset;
+        let mut parts = buf[..n].rsplit(|b| *b == b'\n').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() && offset != 0 {
+                self.line.push(part.iter().rev().copied());
+                break;
+            }
+            let line = if self.line.bytes.is_empty() && !self.line.skipping {
+                Some(part)
+            } else {
+                self.line.push(part.iter().rev().copied());
+                self.line.bytes.reverse();
+                (!self.line.skipping).then_some(self.line.bytes.as_slice())
+            };
+            if let ControlFlow::Break(value) = found(line, self.at_end) {
+                return Ok(ControlFlow::Break(value));
+            }
+            self.at_end = false;
+            self.line.clear();
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+}
+
 pub(super) struct Stream {
     pub offset: u64,
     line: Line,
 }
 
 impl Stream {
+    pub(super) fn resume(offset: u64) -> Self {
+        Self { offset, line: Line::default() }
+    }
+
+    pub(super) fn remember_tail(&mut self, line: Option<&[u8]>) {
+        if let Some(line) = line {
+            self.line.push(line.iter().copied());
+        } else {
+            self.line.skipping = true;
+        }
+    }
+
     pub(super) fn read(
         &mut self,
         file: &File,
