@@ -9,6 +9,7 @@ mod history;
 mod icons;
 mod keys;
 mod outline;
+mod picture;
 mod read;
 mod reader;
 mod rex;
@@ -85,7 +86,8 @@ Changed files are those waiting to be committed or pushed. Yellow is edited,
 green new, red removed, cyan moved, and magenta in conflict. Uncommitted
 names are bold; unpushed names are regular. In history, bold dots still
 need pushing, faint dots are pushed, and a hollow dot is uncommitted work.
-The reader colours supported code and marks added and removed lines.
+The reader colours supported code and marks added and removed lines. It
+shows a picture as a picture where the terminal can draw one.
 
 Icons use a Nerd Font by default. Set STRATA_ICONS=plain for ordinary
 symbols or STRATA_ICONS=off to hide icons.
@@ -195,6 +197,9 @@ fn route_key(ui: &mut Ui, screen: &mut Screen, help: &mut Option<Page>, key: Key
     match key {
         Key::Ctrl(b'c') | Key::Eof => return true,
         Key::Background(rgb) => screen.set_background(rgb),
+        Key::Pictures(able) => screen.set_pictures(able),
+        Key::CellSize(width, height) => screen.set_cell_size(width, height),
+        Key::Answered => screen.answered(),
         // Focus still matters to the outline underneath the page.
         Key::Focus(_) => return ui.on_key(key),
         _ => {
@@ -310,6 +315,9 @@ fn main() {
             pace.finish_look(started, Instant::now(), settled);
         }
     }
+    // A picture is not part of the text, so it is taken down by name.
+    screen.clear();
+    screen.flush();
     term::leave();
 }
 

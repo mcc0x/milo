@@ -31,6 +31,12 @@ pub enum Key {
     Focus(bool),
     /// The terminal reported its default background colour.
     Background([u8; 3]),
+    /// The terminal said whether it can show pictures.
+    Pictures(bool),
+    /// The terminal reported the size of one cell in pixels: width, height.
+    CellSize(u16, u16),
+    /// The terminal has answered everything it was asked on the way in.
+    Answered,
     /// stdin reached end of file: the terminal is gone.
     Eof,
 }
@@ -109,6 +115,8 @@ fn unfinished(b: &[u8]) -> bool {
         [b'[', rest @ ..] => !rest.iter().any(|c| (0x40..=0x7e).contains(c)),
         // An answer from the terminal runs to a BEL, or to an ESC of its own.
         [b']', rest @ ..] => !rest.contains(&7),
+        // An answer about pictures always ends with an ESC of its own.
+        [b'_', ..] => true,
         _ => false,
     }
 }
@@ -149,6 +157,16 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
                         keys.push(Key::Background(bg));
                     }
                     i = start + len + if b[start + len] == 7 { 1 } else { 2 };
+                }
+                // An answer about pictures: "Gi=31;OK", ended by ESC \.
+                Some(b'_') => {
+                    let start = i + 1;
+                    let Some(len) = b[start..].iter().position(|&c| c == 0x1b) else { return };
+                    let answer = &b[start..start + len];
+                    if answer.starts_with(b"G") {
+                        keys.push(Key::Pictures(answer.ends_with(b";OK")));
+                    }
+                    i = start + len + 2;
                 }
                 // Alt-modified key: drop it rather than act on the bare key.
                 Some(_) => i += 1,
@@ -194,6 +212,14 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
         b'F' => Key::End,
         b'I' => Key::Focus(true),
         b'O' => Key::Focus(false),
+        // "6;height;width t": the size of one cell in pixels.
+        b't' => {
+            let mut parts = std::str::from_utf8(params.strip_prefix(b"6;")?).ok()?.split(';');
+            let (height, width) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+            Key::CellSize(width, height)
+        }
+        // The terminal describing itself: asked for last, so it ends the answers.
+        b'c' if params.starts_with(b"?") => Key::Answered,
         b'~' => match params.split(|&c| c == b';').next()? {
             b"1" | b"7" => Key::Home,
             b"4" | b"8" => Key::End,
@@ -268,6 +294,17 @@ mod tests {
         assert_eq!(keys("é".as_bytes()), [Key::Char('é')]);
         assert_eq!(keys(b"\x1b"), [Key::Esc]);
         assert_eq!(keys(b"\x1b[I\x1b[O"), [Key::Focus(true), Key::Focus(false)]);
+    }
+
+    #[test]
+    fn what_the_terminal_says_of_itself_is_read_between_the_keys() {
+        assert_eq!(
+            keys(b"j\x1b_Gi=31;OK\x1b\\k\x1b[6;16;8t\x1b[?62;22cl"),
+            [Key::Char('j'), Key::Pictures(true), Key::Char('k'), Key::CellSize(8, 16), Key::Answered, Key::Char('l')]
+        );
+        assert_eq!(keys(b"\x1b_Gi=31;ENOTSUPPORTED\x1b\\"), [Key::Pictures(false)]);
+        // An answer still arriving is waited for, not read as an Esc and some letters.
+        assert!(unfinished(b"\x1b_Gi=31;O") && !unfinished(b"\x1b_Gi=31;OK\x1b\\"));
     }
 
     #[test]

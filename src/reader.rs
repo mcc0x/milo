@@ -7,6 +7,7 @@ use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::{Kind, Repo, Stamp};
 use crate::icons;
 use crate::keys::{Direction, Key};
+use crate::picture::{self, Picture};
 use crate::read::{self, Content};
 use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
@@ -43,13 +44,14 @@ pub struct Reader {
 enum Body {
     Text(Text),
     Note(&'static str),
+    Picture(Picture),
 }
 
 impl Body {
     fn lines(&self) -> &[Line] {
         match self {
             Self::Text(text) => &text.lines,
-            Self::Note(_) => &[],
+            Self::Note(_) | Self::Picture(_) => &[],
         }
     }
 }
@@ -260,6 +262,19 @@ impl Reader {
         self.repo.watch_scope()
     }
 
+    /// What to show of a file without diff lines to show: the picture it
+    /// is, the text it holds, or why neither.
+    fn file_body(&mut self, kind: Kind) -> Body {
+        // A link is shown as where it points, never as what is there.
+        if picture::is_picture(&self.path) && !self.absolute.is_symlink() {
+            return Picture::open(&self.absolute).map_or_else(Body::Note, Body::Picture);
+        }
+        match file_lines(&self.absolute, kind) {
+            Ok(lines) => Body::Text(Text::new(lines, self.lang, &mut self.spans)),
+            Err(note) => Body::Note(note),
+        }
+    }
+
     /// Rebuilds the file and diff on screen, keeping the last good result if git fails.
     fn load(&mut self) {
         self.repo.read();
@@ -270,11 +285,16 @@ impl Reader {
         match self.file_diff() {
             Some(FileDiff { lines, kind }) => {
                 self.kind = kind;
-                let lines = if lines.is_empty() { file_lines(&self.absolute, kind) } else { Ok(lines) };
-                self.body = match lines {
-                    Ok(lines) => Body::Text(Text::new(lines, self.lang, &mut self.spans)),
-                    Err(note) => Body::Note(note),
-                };
+                let picture = picture::is_picture(&self.path);
+                // A picture that has not changed is not made ready again.
+                let kept = picture && stamp == self.stamp && matches!(self.body, Body::Picture(_));
+                if !kept {
+                    self.body = if lines.is_empty() || picture {
+                        self.file_body(kind)
+                    } else {
+                        Body::Text(Text::new(lines, self.lang, &mut self.spans))
+                    };
+                }
             }
             None if self.repo.ok() => {
                 self.kind = Kind::None;
@@ -351,6 +371,23 @@ impl Reader {
                 s.put_fit(2, 2, w - 4, note, FAINT);
                 self.pan = 0;
             }
+            Body::Picture(picture) => {
+                self.pan = 0;
+                // The picture sits in the middle of the space between
+                // heading and hint, with a column clear on either side.
+                let (room_w, room_h) = (w - 2, self.rows);
+                match s.pictures() {
+                    Some(true) => {
+                        let (cols, rows) = picture.fit(s.cell_size(), room_w, room_h);
+                        s.show_picture(picture, 1 + (room_w - cols) / 2, 1 + (room_h - rows) / 2, cols, rows);
+                    }
+                    Some(false) => {
+                        s.put_fit(2, 2, w - 4, "This terminal cannot show pictures.", FAINT);
+                    }
+                    // The terminal has not yet said; it will in a moment.
+                    None => {}
+                }
+            }
             Body::Text(text) => {
                 let lines = &text.lines[self.top..];
                 let shown = &lines[..lines.len().min(self.rows)];
@@ -374,10 +411,12 @@ impl Reader {
     fn draw_hint(&self, s: &mut Screen) {
         let changes = self.kind != Kind::None
             && matches!(&self.body, Body::Text(text) if text.lines.len() > (text.added + text.removed) as usize);
+        // A picture has nowhere to scroll to.
+        let still = matches!(self.body, Body::Picture(_));
         let hint = match (changes, s.w) {
             (true, 44..) => "↑↓ scroll · n next change · q close · ? help",
             (true, _) => "n next change · ? help",
-            (false, 36..) => "↑↓ scroll · q close · ? help",
+            (false, 36..) if !still => "↑↓ scroll · q close · ? help",
             (false, _) => "q close · ? help",
         };
         s.put_fit(1, s.h - 1, s.w - 2, hint, FAINT);
@@ -386,6 +425,10 @@ impl Reader {
     /// Keeps the file name ahead of its directory so the name gets the space first.
     fn draw_heading(&self, s: &mut Screen) {
         let mut right = s.w - 1;
+        if let Body::Picture(picture) = &self.body {
+            let size = format!("{}×{}", picture.width, picture.height);
+            right -= s.put_right(right, 0, &size, FAINT).min(right);
+        }
         if self.kind != Kind::None {
             if let Body::Text(text) = &self.body {
                 right -= ui::size_right(s, right, 0, text.added, text.removed).min(right);
@@ -572,6 +615,44 @@ mod tests {
         assert!(reader.check());
         assert!(reader.repo.ok());
         assert!(drawn(&mut reader, 60, 6).iter().any(|row| row.contains("edited while git is not answering")));
+    }
+
+    #[test]
+    fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
+        let dir = Fixture::folder();
+        fs::write(dir.root.join("logo.png"), Picture::sample_png(64, 32)).unwrap();
+        let mut reader = Reader::open(&dir.root.join("logo.png")).unwrap();
+        let mut screen = Screen::sized(40, 10);
+
+        // Until the terminal has said, nothing is claimed either way.
+        reader.draw(&mut screen);
+        assert!(screen.picture_at().is_none() && screen.text()[2].is_empty());
+        assert!(screen.text()[0].ends_with("64×32"));
+
+        // 64 by 32 pixels in cells of 8 by 16 is 8 columns by 2 rows.
+        screen.set_pictures(true);
+        reader.draw(&mut screen);
+        assert_eq!(screen.picture_at(), Some((16, 4, 8, 2)));
+
+        let mut plain = Screen::sized(40, 10);
+        plain.answered();
+        reader.draw(&mut plain);
+        assert!(plain.picture_at().is_none());
+        assert_eq!(plain.text()[2], "  This terminal cannot show pictures.");
+    }
+
+    #[test]
+    fn a_link_named_like_a_picture_is_shown_as_where_it_points() {
+        let dir = Fixture::folder();
+        fs::write(dir.root.join("../outside.png"), Picture::sample_png(8, 8)).unwrap();
+        symlink("../outside.png", dir.root.join("logo.png")).unwrap();
+        let mut reader = Reader::open(&dir.root.join("logo.png")).unwrap();
+        let mut screen = Screen::sized(40, 6);
+        screen.set_pictures(true);
+        reader.draw(&mut screen);
+        assert!(screen.picture_at().is_none());
+        assert_eq!(screen.text()[1], " 1   ../outside.png");
+        fs::remove_file(dir.root.join("../outside.png")).unwrap();
     }
 
     #[test]

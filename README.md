@@ -172,6 +172,12 @@ Click a folder to open or close it, click a file to select it, double-click a fi
 
 The reader colours Rust, Python, JavaScript, TypeScript (with JSX and TSX), Go, Java, C, C++, C#, PHP, shell, JSON, YAML and TOML. It is a small scanner, not a parser: it knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. Now and then it will colour something subtle wrongly; it will never get in the way of reading.
 
+### Pictures
+
+Enter on a picture shows the picture: PNG, JPEG, GIF, WebP, HEIC, TIFF, BMP, icons, SVG, and the first page of a PDF. It is drawn at its own size where that fits, and otherwise as large as the pane allows with its proportions kept.
+
+This needs a terminal that speaks the kitty graphics protocol (kitty, Ghostty, WezTerm, Rex); strata asks at start and says so plainly where the answer is no. Formats other than PNG are converted with `sips`, which comes with macOS; elsewhere only PNG files are shown.
+
 ### With Rex
 
 Inside the Rex terminal multiplexer, Enter or a double-click opens the reader in a floating window over your work, so the outline stays where it is. Everywhere else the reader takes over the pane and `q` brings the outline back.
@@ -235,6 +241,7 @@ About 5,400 lines of Rust and 2,000 of tests, under `src/`:
 | `ui.rs` | drawing helpers the screens share |
 | `icons.rs` | file and folder symbols |
 | `read.rs` | reading a file without being fooled by what it is |
+| `picture.rs` | turning a picture file into something the terminal can show |
 | `rex.rs` | opening the reader in a floating Rex window |
 | `when.rs` | calendar days and short ages |
 | `fixture.rs` | throwaway repositories for tests |

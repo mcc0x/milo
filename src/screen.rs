@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 
+use crate::picture::Picture;
 use crate::width::{char_width, str_width};
 
 // ANSI palette indices, so colours follow the terminal theme.
@@ -135,6 +136,38 @@ const CONT: char = '\0';
 const STALE: Cell = Cell { ch: '\u{1}', st: Style::PLAIN };
 const SYNC_ON: &[u8] = b"\x1b[?2026h";
 
+/// Where a picture sits on the screen, in cells.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    id: u32,
+    x: usize,
+    y: usize,
+    cols: usize,
+    rows: usize,
+}
+
+/// What is known of the terminal's way with pictures, and of the one on it.
+struct Pictures {
+    /// Whether the terminal shows pictures; `None` until it has said.
+    able: Option<bool>,
+    /// The size of one cell in pixels: width, height.
+    cell: (u16, u16),
+    /// The placement asked for in the frame being drawn, and the one on the terminal.
+    wanted: Option<Placement>,
+    shown: Option<Placement>,
+    /// The picture whose data the terminal holds.
+    held: Option<u32>,
+    /// Picture data to send with the next frame.
+    data: Vec<u8>,
+}
+
+impl Default for Pictures {
+    fn default() -> Self {
+        // Most terminals draw a cell about twice as tall as it is wide.
+        Self { able: None, cell: (8, 16), wanted: None, shown: None, held: None, data: Vec::new() }
+    }
+}
+
 pub struct Screen {
     pub w: usize,
     pub h: usize,
@@ -145,6 +178,7 @@ pub struct Screen {
     washes: [u32; 3],
     /// The wash colours used for the cells on the terminal.
     prev_washes: [u32; 3],
+    pictures: Pictures,
 }
 
 impl Screen {
@@ -157,6 +191,7 @@ impl Screen {
             out: SYNC_ON.to_vec(),
             washes: [0; 3],
             prev_washes: [0; 3],
+            pictures: Pictures::default(),
         }
     }
 
@@ -180,10 +215,53 @@ impl Screen {
         self.prev.clear();
         self.prev.resize(w * h, STALE);
         self.out.extend_from_slice(b"\x1b[0m\x1b[2J");
+        // Erasing the screen takes a picture's placement with it.
+        self.pictures.shown = None;
     }
 
     pub fn clear(&mut self) {
         self.cur.fill(BLANK);
+        self.pictures.wanted = None;
+    }
+
+    /// Notes that the terminal can, or cannot, show pictures.
+    pub fn set_pictures(&mut self, able: bool) {
+        self.pictures.able = Some(able);
+    }
+
+    /// Notes the size of one cell in pixels, by which a picture is fitted.
+    pub fn set_cell_size(&mut self, width: u16, height: u16) {
+        if width > 0 && height > 0 {
+            self.pictures.cell = (width, height);
+        }
+    }
+
+    /// Notes that the terminal has answered all it will: one that has not
+    /// said it shows pictures by now does not.
+    pub fn answered(&mut self) {
+        self.pictures.able.get_or_insert(false);
+    }
+
+    /// Whether the terminal shows pictures; `None` until it has said.
+    pub fn pictures(&self) -> Option<bool> {
+        self.pictures.able
+    }
+
+    pub fn cell_size(&self) -> (u16, u16) {
+        self.pictures.cell
+    }
+
+    /// Asks for `picture` over the cells from (x, y), `cols` wide and `rows`
+    /// tall, in the frame being drawn. Its data goes to the terminal once.
+    pub fn show_picture(&mut self, picture: &Picture, x: usize, y: usize, cols: usize, rows: usize) {
+        let pictures = &mut self.pictures;
+        if pictures.held != Some(picture.id) {
+            if let Some(old) = pictures.held.replace(picture.id) {
+                let _ = write!(pictures.data, "\x1b_Ga=d,d=I,i={old},q=2\x1b\\");
+            }
+            picture.transmit(&mut pictures.data);
+        }
+        pictures.wanted = Some(Placement { id: picture.id, x, y, cols, rows });
     }
 
     /// Blanks one row, including its colours.
@@ -296,6 +374,42 @@ impl Screen {
         });
     }
 
+    /// Brings the picture on the terminal in line with the one last asked
+    /// for: placed, moved, or taken away. A picture lies over the cells,
+    /// outside the frame of text, so it is kept track of by itself.
+    fn flush_picture(&mut self) {
+        let pictures = &mut self.pictures;
+        if pictures.wanted == pictures.shown && pictures.data.is_empty() {
+            return;
+        }
+        match pictures.wanted {
+            Some(at) => {
+                if pictures.shown.is_some() {
+                    // Off the screen, but kept by the terminal to place again.
+                    self.out.extend_from_slice(b"\x1b_Ga=d,d=a,q=2\x1b\\");
+                }
+                self.out.append(&mut pictures.data);
+                let _ = write!(
+                    self.out,
+                    "\x1b[{};{}H\x1b_Ga=p,i={},c={},r={},C=1,q=2\x1b\\",
+                    at.y + 1,
+                    at.x + 1,
+                    at.id,
+                    at.cols,
+                    at.rows
+                );
+            }
+            None => {
+                pictures.data.clear();
+                if pictures.held.take().is_some() {
+                    // Off the screen and out of the terminal's memory.
+                    self.out.extend_from_slice(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+                }
+            }
+        }
+        pictures.shown = pictures.wanted;
+    }
+
     fn flush_to(&mut self, write_frame: impl FnOnce(&[u8])) {
         let washes = &self.washes;
         let prev_washes = &self.prev_washes;
@@ -336,6 +450,7 @@ impl Screen {
                 next_col = first + 1 + usize::from(wide);
             }
         }
+        self.flush_picture();
         self.prev_washes = self.washes;
         if self.out.len() > SYNC_ON.len() {
             self.out.extend_from_slice(b"\x1b[0m\x1b[?2026l");
@@ -369,6 +484,11 @@ impl Screen {
     /// Whether the row starts with the cursor's background shade.
     pub fn bar_at(&self, y: usize) -> bool {
         self.cur[y * self.w].st.wash_id() == Wash::Bar as usize
+    }
+
+    /// Where the frame being drawn asks for a picture: x, y, columns, rows.
+    pub fn picture_at(&self) -> Option<(usize, usize, usize, usize)> {
+        self.pictures.wanted.map(|at| (at.x, at.y, at.cols, at.rows))
     }
 }
 
@@ -404,6 +524,39 @@ mod tests {
         let mut screen = Screen::sized(12, 1);
         screen.put_middle(0, 0, 12, "very-long-name.txt", Style::PLAIN);
         assert_eq!(screen.text(), ["very-lo….txt"]);
+    }
+
+    #[test]
+    fn a_picture_is_sent_once_then_only_moved_and_at_last_taken_away() {
+        let frame = |screen: &mut Screen| {
+            let mut written = String::new();
+            screen.flush_to(|frame| written = String::from_utf8_lossy(frame).into_owned());
+            written
+        };
+        let picture = Picture::sample(40, 20);
+        let mut screen = Screen::sized(20, 6);
+        screen.show_picture(&picture, 2, 1, 5, 2);
+        let first = frame(&mut screen);
+        assert!(
+            first.contains("a=t,f=100")
+                && first.ends_with("\x1b[2;3H\x1b_Ga=p,i=1,c=5,r=2,C=1,q=2\x1b\\\x1b[0m\x1b[?2026l")
+        );
+
+        // The same picture in the same place needs nothing said.
+        screen.clear();
+        screen.show_picture(&picture, 2, 1, 5, 2);
+        assert_eq!(frame(&mut screen), "");
+
+        // Moved, it is placed again without its data.
+        screen.clear();
+        screen.show_picture(&picture, 4, 1, 5, 2);
+        let moved = frame(&mut screen);
+        assert!(!moved.contains("a=t") && moved.contains("a=d,d=a") && moved.contains("\x1b[2;5H\x1b_Ga=p"));
+
+        // A frame without it takes it off the terminal altogether.
+        screen.clear();
+        assert!(frame(&mut screen).contains("a=d,d=A"));
+        assert_eq!(frame(&mut screen), "");
     }
 
     #[test]
