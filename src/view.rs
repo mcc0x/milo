@@ -18,6 +18,8 @@ const LIMIT: u64 = 2 << 20;
 const TAB: usize = 4;
 /// Lines of the file kept in view above a change that was jumped to.
 const LEAD: usize = 3;
+/// Columns kept past the right edge so a word cut by it can still be coloured whole.
+const LEAD_OUT: usize = 32;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum LineKind {
@@ -32,10 +34,28 @@ struct Line {
     /// Line number in the file: the current one, or the old one for a removal.
     no: u32,
     text: String,
+    /// Display width, measured once so a long line need not be measured on every draw.
+    width: usize,
     /// Byte range of `text` that differs from its paired line; empty if none.
     changed: (usize, usize),
     /// What was still open in the code where this line begins.
     state: State,
+}
+
+impl Line {
+    fn new(kind: LineKind, no: u32, text: &str) -> Self {
+        let text = clean(text);
+        let width = term::str_width(&text);
+        Self { kind, no, text, width, changed: (0, 0), state: State::default() }
+    }
+
+    /// The byte offset to draw from and the prefix needed to colour what is shown.
+    fn text_for_draw(&self, pan: usize, width: usize) -> (usize, &str) {
+        let skip = term::byte_at_col(&self.text, pan);
+        // A character occupies at most four bytes. Keep the prefix for its syntax.
+        let end = self.text.floor_char_boundary(skip + (width + LEAD_OUT) * 4);
+        (skip, &self.text[..end])
+    }
 }
 
 pub struct View {
@@ -55,6 +75,7 @@ pub struct View {
     /// again for each.
     spans: Vec<Span>,
     top: usize,
+    /// Display columns skipped on the left.
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
@@ -89,6 +110,33 @@ fn clean(line: &str) -> String {
         }
     }
     s
+}
+
+/// Finds the next or previous run of changes, wrapping at either end.
+fn change_top(kinds: impl IntoIterator<Item = LineKind>, top: usize, last: usize, forward: bool) -> Option<usize> {
+    let (mut first, mut final_top, mut previous) = (None, None, None);
+    let mut same = true;
+    for (i, kind) in kinds.into_iter().enumerate() {
+        let starts = same && kind != LineKind::Same;
+        same = kind == LineKind::Same;
+        if !starts {
+            continue;
+        }
+        // Include the lead-in, but never go past the top of the last page.
+        let at = i.saturating_sub(LEAD).min(last);
+        if forward && at > top {
+            return Some(at);
+        }
+        if !forward && at >= top && previous.is_some() {
+            return previous;
+        }
+        first.get_or_insert(at);
+        final_top = Some(at);
+        if at < top {
+            previous = Some(at);
+        }
+    }
+    if forward { first } else { previous.or(final_top) }
 }
 
 /// Bytes two strings share at the start and at the end, without overlap.
@@ -151,14 +199,14 @@ fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
         if !in_hunk {
             // Between the file's name and its first hunk, git says what
             // became of it. "new mode" is not "new file mode".
-            kind = match l {
+            if l.starts_with("new file mode ") {
                 // Deleted and then new again is one file, changed.
-                _ if l.starts_with("new file mode ") && second => Kind::Modified,
-                _ if l.starts_with("new file mode ") => Kind::Added,
-                _ if l.starts_with("deleted file mode ") => Kind::Deleted,
-                _ if l.starts_with("rename from ") => Kind::Renamed,
-                _ => kind,
-            };
+                kind = if second { Kind::Modified } else { Kind::Added };
+            } else if l.starts_with("deleted file mode ") {
+                kind = Kind::Deleted;
+            } else if l.starts_with("rename from ") {
+                kind = Kind::Renamed;
+            }
             continue;
         }
         let (line_kind, no) = match l.as_bytes().first() {
@@ -171,8 +219,7 @@ fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
                 (LineKind::Same, &mut new)
             }
         };
-        let text = clean(l.get(1..).unwrap_or(""));
-        lines.push(Line { kind: line_kind, no: *no, text, changed: (0, 0), state: State::default() });
+        lines.push(Line::new(line_kind, *no, l.get(1..).unwrap_or("")));
         *no += 1;
     }
     mark_changed(&mut lines);
@@ -215,12 +262,13 @@ impl View {
     }
 
     /// The directories to watch, and whether watching them misses nothing.
-    pub fn watch(&self) -> (Vec<&Path>, bool) {
-        (self.repo.watch_paths(), self.repo.watched_fully())
+    pub fn watch(&self) -> crate::watch::Scope {
+        self.repo.watch()
     }
 
+    /// The last write time and length of the path itself, never of a link's target.
     fn stamp(&self) -> Stamp {
-        let m = std::fs::metadata(&self.abs).ok()?;
+        let m = std::fs::symlink_metadata(&self.abs).ok()?;
         Some((m.modified().ok()?, m.len()))
     }
 
@@ -249,7 +297,11 @@ impl View {
             self.kind = Kind::Untracked;
         } else if self.repo.git {
             let Some(mut diff) = self.repo.file_diff(&self.path, None) else {
-                self.note = Some("Too large to show.");
+                self.note = Some(if matches!(read::file(&self.abs, LIMIT), Content::Unreadable) {
+                    "This file cannot be read."
+                } else {
+                    "Too large to show."
+                });
                 return;
             };
             (self.lines, self.kind) = parse_diff(&diff);
@@ -268,23 +320,18 @@ impl View {
         if !self.lines.is_empty() {
             return;
         }
+        // A file git has never seen is new from its first line to its last.
+        let kind = if self.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
         match read::file(&self.abs, LIMIT) {
             Content::Gone => self.note = Some("This file is gone."),
+            Content::Unreadable => self.note = Some("This file cannot be read."),
             Content::NotFile => self.note = Some("Not a file, so there is nothing to show."),
             Content::TooLarge => self.note = Some("Too large to show."),
+            Content::Link(target) => self.lines.push(Line::new(kind, 1, &target.to_string_lossy())),
             Content::Bytes(bytes) if bytes.contains(&0) => self.note = Some("Not text, so there is nothing to show."),
             Content::Bytes(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
-                // A file git has never seen is new from its first line to its last.
-                let kind = if self.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
-                let line = |(i, l): (usize, &str)| Line {
-                    kind,
-                    no: i as u32 + 1,
-                    text: clean(l),
-                    changed: (0, 0),
-                    state: State::default(),
-                };
-                self.lines = text.lines().enumerate().map(line).collect();
+                self.lines = text.lines().enumerate().map(|(i, l)| Line::new(kind, i as u32 + 1, l)).collect();
                 if self.lines.is_empty() {
                     self.note = Some("Empty.");
                 }
@@ -306,30 +353,19 @@ impl View {
         true
     }
 
+    fn last_top(&self) -> usize {
+        self.lines.len().saturating_sub(self.rows.max(1))
+    }
+
     fn scroll(&mut self, delta: isize) {
-        let last = self.lines.len().saturating_sub(self.rows.max(1));
-        self.top = self.top.saturating_add_signed(delta).min(last);
+        self.top = self.top.saturating_add_signed(delta).min(self.last_top());
     }
 
     /// Jumps to the next or previous run of changed lines.
     fn jump(&mut self, forward: bool) {
-        let starts = (0..self.lines.len()).filter(|&i| {
-            self.lines[i].kind != LineKind::Same && (i == 0 || self.lines[i - 1].kind == LineKind::Same)
-        });
-        // A change is "at" the top once its lead-in is the first row shown.
-        let at = |i: usize| i.saturating_sub(LEAD);
-        // Past the last change comes the first again, as in the outline.
-        let hit = if forward {
-            let mut tops = starts.map(at);
-            let first = tops.next();
-            first.filter(|&t| t > self.top).or_else(|| tops.find(|&t| t > self.top)).or(first)
-        } else {
-            let tops: Vec<usize> = starts.map(at).collect();
-            tops.iter().rev().find(|&&t| t < self.top).or(tops.last()).copied()
-        };
-        if let Some(top) = hit {
+        let kinds = self.lines.iter().map(|l| l.kind);
+        if let Some(top) = change_top(kinds, self.top, self.last_top(), forward) {
             self.top = top;
-            self.scroll(0);
         }
     }
 
@@ -354,10 +390,10 @@ impl View {
         let text_x = digits + 4;
         let text_w = (w - 1).saturating_sub(text_x);
         // There is no panning past the end of the longest line in view.
-        let shown = || self.lines.iter().skip(self.top).take(self.rows);
-        let longest = shown().map(|l| l.text.chars().count()).max().unwrap_or(0);
+        let shown = self.lines.iter().skip(self.top).take(self.rows);
+        let longest = shown.clone().map(|l| l.width).max().unwrap_or(0);
         self.pan = self.pan.min(longest.saturating_sub(text_w));
-        for (y, line) in (1..).zip(self.lines.iter().skip(self.top).take(self.rows)) {
+        for (y, line) in (1..).zip(shown) {
             // In a language this knows, an added line keeps the colours of
             // its code and is marked in the margin; otherwise it is green
             // throughout. A removed line is red either way.
@@ -378,30 +414,33 @@ impl View {
             if self.pan > 0 {
                 s.put(text_x - 1, y, 1, "‹", DIM);
             }
-            let skip = line.text.char_indices().nth(self.pan).map_or(line.text.len(), |(i, _)| i);
-            s.put(text_x, y, text_w, &line.text[skip..], st);
+            let (skip, text) = line.text_for_draw(self.pan, text_w);
+            s.put(text_x, y, text_w, &text[skip..], st);
             // A removed line is not part of the file as it now reads, and
             // is not coloured as code.
             self.spans.clear();
             if let Some(lang) = self.lang.filter(|_| line.kind != LineKind::Del) {
-                lang.scan(&line.text, &mut { line.state }, &mut self.spans);
+                lang.scan(text, &mut { line.state }, &mut self.spans);
             }
             // Columns run on from one span to the next, so each is measured once.
             let (mut at, mut col) = (skip, 0);
             for &(start, end, class) in &self.spans {
                 let (start, end) = (start.max(skip), end.max(skip));
-                if start >= end || col >= text_w {
+                if col >= text_w {
+                    break;
+                }
+                if start >= end {
                     continue;
                 }
-                col += term::str_width(&line.text[at..start]);
-                let width = term::str_width(&line.text[start..end]);
+                col += term::str_width(&text[at..start]);
+                let width = term::str_width(&text[start..end]);
                 s.paint(text_x + col, y, width.min(text_w.saturating_sub(col)), class_style(class));
                 (at, col) = (end, col + width);
             }
-            let (a, b) = (line.changed.0.max(skip), line.changed.1.max(skip));
+            let (a, b) = (line.changed.0.clamp(skip, text.len()), line.changed.1.clamp(skip, text.len()));
             if a < b {
-                let from = term::str_width(&line.text[skip..a]);
-                let width = term::str_width(&line.text[a..b]);
+                let from = term::str_width(&text[skip..a]);
+                let width = term::str_width(&text[a..b]);
                 s.emphasise(text_x + from, y, width.min(text_w.saturating_sub(from)));
             }
             // A tint across the row, so a change is seen without reading
@@ -481,6 +520,29 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let dir = std::env::temp_dir().join(format!("strata-view-{}-{time}-{n}", std::process::id()));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn shape(lines: &[Line]) -> Vec<(LineKind, u32, &str)> {
         lines.iter().map(|l| (l.kind, l.no, l.text.as_str())).collect()
@@ -547,5 +609,67 @@ mod tests {
     #[test]
     fn text_is_made_safe_to_draw() {
         assert_eq!(clean("a\tb\x1b[31m"), "a   b[31m");
+    }
+
+    #[test]
+    fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
+        let mut kinds = [LineKind::Same; 100];
+        kinds[9] = LineKind::Del;
+        kinds[10] = LineKind::Add;
+        kinds[94] = LineKind::Add;
+        kinds[96] = LineKind::Del;
+        for (top, forward, expected) in [(6, true, 82), (82, true, 6), (6, false, 82), (82, false, 6)] {
+            assert_eq!(change_top(kinds, top, 82, forward), Some(expected));
+        }
+    }
+
+    #[test]
+    fn panning_can_reach_the_end_of_a_line_of_wide_characters() {
+        let dir = TestDir::new();
+        let file = dir.0.join("text");
+        fs::write(&file, format!("{}最後", "界".repeat(16))).unwrap();
+        let mut view = View::open(&file).unwrap();
+        let mut screen = Screen::new();
+        screen.resize(20, 3);
+        for _ in 0..4 {
+            view.on_key(Key::Right);
+            view.draw(&mut screen);
+        }
+        assert_eq!(view.pan, 22);
+        let (skip, text) = view.lines[0].text_for_draw(view.pan, 14);
+        assert_eq!(&text[skip..], "界界界界界最後");
+    }
+
+    #[test]
+    fn a_link_shows_its_path_even_when_the_target_is_gone() {
+        let dir = TestDir::new();
+        let outside = TestDir::new();
+        let target = outside.0.join("target");
+        let link = dir.0.join("link");
+        fs::write(&target, "outside the project\n").unwrap();
+        symlink(&target, &link).unwrap();
+        let expected = [(LineKind::Same, 1, target.to_str().unwrap())];
+        let view = View::open(&link).unwrap();
+        assert_eq!(shape(&view.lines), expected);
+        assert!(view.stamp.is_some());
+        fs::remove_file(&target).unwrap();
+        assert_eq!(view.stamp(), view.stamp);
+        assert_eq!(shape(&View::open(&link).unwrap().lines), expected);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_not_reported_as_gone() {
+        let dir = TestDir::new();
+        let file = dir.0.join("text");
+        fs::write(&file, "content").unwrap();
+        fs::set_permissions(&file, Permissions::from_mode(0)).unwrap();
+        // Users who can bypass file permissions can still read this file.
+        if fs::File::open(&file).is_ok() {
+            return;
+        }
+        let view = View::open(&file).unwrap();
+        assert_eq!(view.note, Some("This file cannot be read."));
+        fs::remove_file(&file).unwrap();
+        assert_eq!(View::open(&file).unwrap().note, Some("This file is gone."));
     }
 }

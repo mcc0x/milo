@@ -1,15 +1,19 @@
 //! Raw terminal access: mode switching, input decoding and a diffed cell buffer.
 
-use std::io::{self, ErrorKind, Write};
-use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::fs::File;
+use std::io::{self, ErrorKind, IsTerminal, PipeReader, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
 
+/// A resize is pending. The signal handler needs access for the life of the program.
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
+/// A stop is pending. The signal handler needs access for the life of the program.
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
+/// Modes saved for restoration on exit, including from the panic hook.
 static ORIG: OnceLock<libc::termios> = OnceLock::new();
-/// The two ends of the pipe a signal wakes the event loop through.
-static SIGNAL: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+/// The write end of the wake pipe, kept open for handlers until the program exits.
+static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 // Alternate screen, hidden cursor, mouse buttons in SGR form, focus
 // reporting, and no wrapping: a row that turns out wider than reckoned is
@@ -20,28 +24,38 @@ const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h
 /// How long the rest of a split escape sequence is waited for.
 const SEQUENCE_MS: i32 = 25;
 
-/// Tells the event loop a signal came, in case it is not waiting yet.
-fn wake() {
-    let fd = SIGNAL[1].load(Ordering::Relaxed);
-    // A full pipe already says so; a failed write loses nothing.
-    unsafe {
-        libc::write(fd, [1u8].as_ptr().cast(), 1);
+/// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
+pub fn nudge(fd: RawFd) {
+    if fd >= 0 {
+        // SAFETY: The byte lives for the call, and write is async-signal-safe.
+        unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
     }
 }
 
+/// Waits up to `timeout_ms` for descriptors to be ready. Returns the number
+/// ready, zero on timeout, or a negative result on failure or interruption.
+pub fn poll(fds: &mut [libc::pollfd], timeout_ms: i32) -> i32 {
+    let Ok(len) = libc::nfds_t::try_from(fds.len()) else { return -1 };
+    // SAFETY: The slice is writable and holds exactly `len` descriptors.
+    unsafe { libc::poll(fds.as_mut_ptr(), len, timeout_ms) }
+}
+
+// These handlers only load and store atomics and call write, both async-signal-safe.
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
-    wake();
+    nudge(WAKE.load(Ordering::Relaxed));
 }
 
 extern "C" fn on_term(_: libc::c_int) {
     TERMINATED.store(true, Ordering::Relaxed);
-    wake();
+    nudge(WAKE.load(Ordering::Relaxed));
 }
 
 fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
     // sa_flags stays 0: without SA_RESTART a signal interrupts poll(), which
     // is what wakes the event loop.
+    // SAFETY: The action starts zeroed, carries a handler with the C signal
+    // ABI, and lives for both calls. No old action is requested.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = handler as usize;
@@ -50,63 +64,85 @@ fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
     }
 }
 
-pub fn enter() -> io::Result<()> {
-    unsafe {
+pub fn enter() -> io::Result<File> {
+    let stdout = io::stdout();
+    if !stdout.is_terminal() {
+        return Err(io::Error::other("standard output is not a terminal"));
+    }
+    // Stdout treats a bad descriptor as a successful write. The opening
+    // sequence must report that failure so the keyboard can be restored.
+    let mut out = File::from(stdout.as_fd().try_clone_to_owned()?);
+    let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
+    let fd = keyboard.as_raw_fd();
+    // SAFETY: `fd` stays open through the calls, and both mode records are
+    // live and passed by reference. A non-terminal descriptor is refused.
+    let t = unsafe {
         let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(0, &mut t) != 0 {
+        if libc::tcgetattr(fd, &mut t) != 0 {
             return Err(io::Error::last_os_error());
         }
-        let _ = ORIG.set(t);
         let mut raw = t;
         libc::cfmakeraw(&mut raw);
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 0;
-        if libc::tcsetattr(0, libc::TCSAFLUSH, &raw) != 0 {
+        if libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) != 0 {
             return Err(io::Error::last_os_error());
         }
+        t
+    };
+    let _ = ORIG.set(t);
+    if let Err(e) = out.write_all(ENTER) {
+        leave();
+        return Err(e);
     }
-    let mut out = io::stdout().lock();
-    out.write_all(ENTER)?;
-    out.flush()
+    Ok(keyboard)
 }
 
 /// Starts heeding signals. Asked to stop, the program winds down by itself
 /// from then on: it puts the terminal back and takes any git command it is
-/// waiting for down with it. This comes first, before anything can be slow.
-pub fn listen() {
-    // A signal that lands just before a wait begins would otherwise sit
-    // unnoticed until the wait ran out; a byte in a pipe ends it at once.
-    let mut pipe = [-1; 2];
-    if unsafe { libc::pipe(pipe.as_mut_ptr()) } == 0 {
-        for (end, fd) in SIGNAL.iter().zip(pipe) {
-            unsafe {
-                libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+/// waiting for down with it. Returns the listening end of the wake pipe.
+pub fn listen() -> Option<PipeReader> {
+    let reader = io::pipe().ok().and_then(|(reader, writer)| {
+        // A signal just before a wait must still wake it, without ever
+        // blocking the handler or leaving the event loop stuck reading.
+        for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+            // SAFETY: Both pipe ends stay open across this call.
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
+                return None;
             }
-            end.store(fd, Ordering::Relaxed);
         }
-    }
+        WAKE.store(writer.into_raw_fd(), Ordering::Relaxed);
+        Some(reader)
+    });
     install(libc::SIGWINCH, on_winch);
     for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
         install(sig, on_term);
     }
+    reader
 }
 
 pub fn leave() {
+    // Give the keyboard back even if the terminal no longer accepts output.
+    if let Some(t) = ORIG.get() {
+        loop {
+            // SAFETY: `t` contains saved terminal modes and is live for the call.
+            let result = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, t) };
+            if result == 0 || io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
     let mut out = io::stdout().lock();
     let _ = out.write_all(LEAVE);
     let _ = out.flush();
-    if let Some(t) = ORIG.get() {
-        unsafe {
-            libc::tcsetattr(0, libc::TCSAFLUSH, t);
-        }
-    }
 }
 
 pub fn size() -> (usize, usize) {
+    // SAFETY: TIOCGWINSZ writes into the live `winsize` record; on failure
+    // the record is ignored.
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(1, libc::TIOCGWINSZ as _, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ as _, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
             return (ws.ws_col as usize, ws.ws_row as usize);
         }
     }
@@ -123,24 +159,28 @@ pub enum Wait {
 
 /// Waits for the keyboard, or for `extra` to become readable, or for
 /// `timeout_ms` to pass. The keyboard is reported first when both are ready.
-pub fn wait(timeout_ms: i32, extra: Option<RawFd>) -> Wait {
-    let signal = SIGNAL[0].load(Ordering::Relaxed);
+pub fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
     let mut fds = [
-        libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
         libc::pollfd { fd: extra.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: signal, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: signal.map_or(-1, AsRawFd::as_raw_fd), events: libc::POLLIN, revents: 0 },
     ];
-    match unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout_ms) } {
-        0 => Wait::Timeout,
-        n if n < 0 => Wait::Interrupted,
-        _ if fds[2].revents != 0 => {
+    let ready = poll(&mut fds, timeout_ms);
+    if ready == 0 {
+        Wait::Timeout
+    } else if ready < 0 {
+        Wait::Interrupted
+    } else if fds[2].revents != 0 {
+        if let Some(mut reader) = signal {
             let mut buf = [0u8; 64];
-            while unsafe { libc::read(signal, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
-            Wait::Interrupted
+            while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
         }
-        _ if fds[0].revents != 0 => Wait::Input,
-        _ => Wait::Woken,
+        Wait::Interrupted
+    } else if fds[0].revents != 0 {
+        Wait::Input
+    } else {
+        Wait::Woken
     }
 }
 
@@ -164,46 +204,49 @@ pub enum Key {
     WheelDown,
     /// The pane gained or lost keyboard focus.
     Focus(bool),
+    /// The terminal reported its default background colour.
+    Background([u8; 3]),
     /// stdin reached end of file: the terminal is gone.
     Eof,
 }
 
 /// Drains everything currently readable on stdin into `keys`.
-pub fn read_keys(keys: &mut Vec<Key>) {
+pub fn read_keys(keyboard: &mut File, keys: &mut Vec<Key>) {
     let mut buf = [0u8; 4096];
-    let mut bytes = Vec::new();
-    // An escape sequence can arrive in two pieces. A piece that ends
-    // mid-sequence gets one short wait for the rest, or a lone Esc and a
-    // few stray letters would be read in place of an arrow key.
-    for attempt in 0..2 {
-        loop {
-            let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-            if n < 0 {
-                let again = matches!(io::Error::last_os_error().kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted);
-                // Any other failure will not mend: the terminal is gone.
-                if !again {
-                    keys.push(Key::Eof);
+    let mut used = 0;
+    let mut overflow = Vec::new();
+    let mut retried = false;
+    loop {
+        match keyboard.read(&mut buf[used..]) {
+            // poll() said readable, so an immediate zero-length read is EOF.
+            Ok(0) if !retried && used == 0 && overflow.is_empty() => keys.push(Key::Eof),
+            Ok(n) => {
+                used += n;
+                if used == buf.len() {
+                    overflow.extend_from_slice(&buf);
+                    used = 0;
+                    continue;
                 }
-                break;
             }
-            if n == 0 {
-                // poll() said readable, so an immediate zero-length read is EOF.
-                if bytes.is_empty() && attempt == 0 {
-                    keys.push(Key::Eof);
-                }
-                break;
-            }
-            bytes.extend_from_slice(&buf[..n as usize]);
-            if (n as usize) < buf.len() {
-                break;
-            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            // Any other failure will not mend: the terminal is gone.
+            Err(_) => keys.push(Key::Eof),
         }
-        let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-        if !unfinished(&bytes) || unsafe { libc::poll(&mut fd, 1, SEQUENCE_MS) } <= 0 {
-            break;
+        let bytes = if overflow.is_empty() {
+            &buf[..used]
+        } else {
+            overflow.extend_from_slice(&buf[..used]);
+            used = 0;
+            &overflow[..]
+        };
+        // Give a split escape sequence one short wait for its ending.
+        let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        if retried || !unfinished(bytes) || poll(&mut fds, SEQUENCE_MS) <= 0 {
+            decode(bytes, keys);
+            return;
         }
+        retried = true;
     }
-    decode(&bytes, keys);
 }
 
 /// Whether `b` ends partway through an escape sequence.
@@ -251,7 +294,7 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
                     let start = i + 1;
                     let Some(len) = b[start..].iter().position(|&c| c == 7 || c == 0x1b) else { return };
                     if let Some(bg) = background_reply(&b[start..start + len]) {
-                        set_background(bg);
+                        keys.push(Key::Background(bg));
                     }
                     i = start + len + if b[start + len] == 7 { 1 } else { 2 };
                 }
@@ -329,56 +372,52 @@ pub enum Wash {
     Removed = 3,
 }
 
-/// The colour of each wash once the terminal has said what its background
-/// is: 0 until then, otherwise 0x01RRGGBB.
-static WASHES: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
-
-/// Works the washes out from the terminal's background, so each is a shade
-/// of whatever theme is in use: the bar a step towards the text, a gained
-/// line a little green, a lost one a little red.
-fn set_background(bg: [u32; 3]) {
-    let dark = bg[0] * 299 + bg[1] * 587 + bg[2] * 114 < 128_000;
-    let towards: [[u32; 3]; 3] = [if dark { [255; 3] } else { [0; 3] }, [0, 190, 70], [230, 50, 50]];
-    for (wash, (to, part)) in WASHES.iter().zip(towards.into_iter().zip([14, 16, 16])) {
-        let mix = |i: usize| (bg[i] * (100 - part) + to[i] * part) / 100;
-        wash.store(1 << 24 | mix(0) << 16 | mix(1) << 8 | mix(2), Ordering::Relaxed);
-    }
-    // Every cell that carries a wash has to be drawn again.
-    RESIZED.store(true, Ordering::Relaxed);
-}
-
 /// Reads the terminal's answer to being asked its background colour:
 /// "11;rgb:RRRR/GGGG/BBBB", each part one to four hex digits.
-fn background_reply(reply: &[u8]) -> Option<[u32; 3]> {
-    let text = std::str::from_utf8(reply).ok()?.strip_prefix("11;rgb:")?;
-    let mut parts = text.split('/').map(|part| {
-        let value = u32::from_str_radix(part, 16).ok()?;
-        // Scaled from however many digits were given to eight bits.
-        Some(value * 255 / ((1u32 << (4 * part.len().clamp(1, 4))) - 1))
-    });
-    Some([parts.next()??, parts.next()??, parts.next()??])
+fn background_reply(reply: &[u8]) -> Option<[u8; 3]> {
+    let mut parts = reply.strip_prefix(b"11;rgb:")?.split(|&b| b == b'/');
+    let mut component = || {
+        let digits = parts.next()?;
+        if !(1..=4).contains(&digits.len()) {
+            return None;
+        }
+        let mut value = 0;
+        for &digit in digits {
+            value = value * 16 + char::from(digit).to_digit(16)?;
+        }
+        // Scale from the number of digits given to eight bits.
+        Some((value * 255 / ((1 << (4 * digits.len())) - 1)) as u8)
+    };
+    let rgb = [component()?, component()?, component()?];
+    parts.next().is_none().then_some(rgb)
 }
 
-/// Packed cell style: the text colour in bits 0-8 (0 = default, n+1 =
-/// colour n of the 256-colour palette), then the face flags and the wash.
-/// Colours 0-15 follow the terminal theme; 16-255 are fixed.
+/// Packed cell style: bits 0–8 hold the text colour (0 = default, n+1 =
+/// palette colour n); bits 9–13 hold bold, italic, strike, faint and reverse
+/// in that order; bits 14–15 hold the wash (0 = none).
+/// Palette colours 0–15 follow the terminal theme; 16–255 are fixed.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct Style(u32);
+pub struct Style(u16);
 
-const FG: u32 = 0x1ff;
-const BOLD: u32 = 1 << 18;
-const ITALIC: u32 = 1 << 19;
-const STRIKE: u32 = 1 << 20;
-const FAINT: u32 = 1 << 21;
-const REVERSE: u32 = 1 << 22;
-const WASH_SHIFT: u32 = 23;
-const WASH: u32 = 3 << WASH_SHIFT;
+const FG: u16 = 0x1ff;
+const BOLD: u16 = 1 << 9;
+const ITALIC: u16 = 1 << 10;
+const STRIKE: u16 = 1 << 11;
+const FAINT: u16 = 1 << 12;
+const REVERSE: u16 = 1 << 13;
+const WASH_SHIFT: u16 = 14;
+const WASH: u16 = 3 << WASH_SHIFT;
+
+const _: () = assert!(
+    Wash::Bar as u16 == 1 && Wash::Added as u16 == 2 && Wash::Removed as u16 == 3
+        && Wash::Removed as u16 == WASH >> WASH_SHIFT
+);
 
 impl Style {
     pub const PLAIN: Style = Style(0);
 
     pub const fn fg(c: u8) -> Style {
-        Style(c as u32 + 1)
+        Style(c as u16 + 1)
     }
 
     pub const fn bold(self) -> Style {
@@ -403,7 +442,15 @@ impl Style {
         Style(self.0 | REVERSE)
     }
 
-    fn sgr(self, out: &mut Vec<u8>) {
+    fn with_wash(self, wash: Wash) -> Style {
+        Style(self.0 & !WASH | (wash as u16) << WASH_SHIFT)
+    }
+
+    fn wash_id(self) -> usize {
+        ((self.0 & WASH) >> WASH_SHIFT) as usize
+    }
+
+    fn sgr(self, out: &mut Vec<u8>, washes: &[u32; 3]) {
         out.extend_from_slice(b"\x1b[0");
         if self.0 & BOLD != 0 {
             out.extend_from_slice(b";1");
@@ -429,11 +476,11 @@ impl Style {
         // A wash is mixed from the terminal's own background. Where that is
         // not known the bar falls back on the theme's grey, and the other
         // washes on nothing: the lines they mark are marked in the margin too.
-        let wash = self.0 >> WASH_SHIFT & 3;
+        let wash = self.wash_id();
         if wash != 0 {
-            let rgb = WASHES[wash as usize - 1].load(Ordering::Relaxed);
+            let rgb = washes[wash - 1];
             let _ = match (rgb, wash) {
-                (0, 1) => write!(out, ";100"),
+                (0, wash) if wash == Wash::Bar as usize => write!(out, ";100"),
                 (0, _) => Ok(()),
                 _ => write!(out, ";48;2;{};{};{}", rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255),
             };
@@ -453,6 +500,7 @@ const BLANK: Cell = Cell { ch: ' ', st: Style::PLAIN };
 const CONT: char = '\0';
 /// Never drawn, so a row of these differs from any real frame.
 const STALE: Cell = Cell { ch: '\u{1}', st: Style::PLAIN };
+const SYNC_ON: &[u8] = b"\x1b[?2026h";
 
 pub struct Screen {
     pub w: usize,
@@ -460,11 +508,35 @@ pub struct Screen {
     cur: Vec<Cell>,
     prev: Vec<Cell>,
     out: Vec<u8>,
+    /// Each wash is 0 while unknown, otherwise 0x01RRGGBB.
+    washes: [u32; 3],
+    /// The wash colours used for the cells on the terminal.
+    prev_washes: [u32; 3],
 }
 
 impl Screen {
     pub fn new() -> Screen {
-        Screen { w: 0, h: 0, cur: Vec::new(), prev: Vec::new(), out: Vec::new() }
+        Screen {
+            w: 0,
+            h: 0,
+            cur: Vec::new(),
+            prev: Vec::new(),
+            out: SYNC_ON.to_vec(),
+            washes: [0; 3],
+            prev_washes: [0; 3],
+        }
+    }
+
+    /// Mixes the washes with the terminal's background to match its theme:
+    /// the bar towards the text, gained lines towards green, lost lines towards red.
+    pub fn set_background(&mut self, bg: [u8; 3]) {
+        let bg = bg.map(u32::from);
+        let dark = bg[0] * 299 + bg[1] * 587 + bg[2] * 114 < 128_000;
+        let towards = [if dark { [255; 3] } else { [0; 3] }, [0, 190, 70], [230, 50, 50]];
+        for (wash, (to, part)) in self.washes.iter_mut().zip(towards.into_iter().zip([14, 16, 16])) {
+            let mix = |i: usize| (bg[i] * (100 - part) + to[i] * part) / 100;
+            *wash = 1 << 24 | mix(0) << 16 | mix(1) << 8 | mix(2);
+        }
     }
 
     pub fn resize(&mut self, w: usize, h: usize) {
@@ -544,50 +616,72 @@ impl Screen {
     /// Inverts a span, to pick out the changed part of a line.
     pub fn emphasise(&mut self, x: usize, y: usize, w: usize) {
         for cell in self.span(x, y, w) {
-            cell.st = Style(cell.st.0 | REVERSE);
+            cell.st = cell.st.reverse();
         }
     }
 
     /// Lays a wash behind a span, keeping each cell's own text and colour.
     pub fn wash(&mut self, x: usize, y: usize, w: usize, wash: Wash) {
         for cell in self.span(x, y, w) {
-            cell.st = Style(cell.st.0 & !WASH | (wash as u32) << WASH_SHIFT);
+            cell.st = cell.st.with_wash(wash);
         }
     }
 
     /// Writes only the cells that changed since the last flush.
     pub fn flush(&mut self) {
-        let mut active: Option<Style> = None;
+        self.flush_to(|frame| {
+            let mut stdout = io::stdout().lock();
+            let _ = stdout.write_all(frame);
+            let _ = stdout.flush();
+        });
+    }
+
+    fn flush_to(&mut self, write_frame: impl FnOnce(&[u8])) {
+        let washes = &self.washes;
+        let prev_washes = &self.prev_washes;
+        let palette_changed = washes != prev_washes;
+        let mut active = None;
+        let mut utf8 = [0u8; 4];
         for y in 0..self.h {
             let cur = &self.cur[y * self.w..(y + 1) * self.w];
-            let prev = &self.prev[y * self.w..(y + 1) * self.w];
-            let Some(mut first) = (0..self.w).find(|&x| cur[x] != prev[x]) else { continue };
-            let last = (first..self.w).rev().find(|&x| cur[x] != prev[x]).unwrap_or(first);
-            while first > 0 && cur[first].ch == CONT {
-                first -= 1;
-            }
-            let _ = write!(self.out, "\x1b[{};{}H", y + 1, first + 1);
-            let mut utf8 = [0u8; 4];
-            for cell in &cur[first..=last] {
-                if cell.ch == CONT {
+            let prev = &mut self.prev[y * self.w..(y + 1) * self.w];
+            let mut next_col = usize::MAX;
+            for (x, (&cell, old)) in cur.iter().zip(prev).enumerate() {
+                if cell != *old {
+                    *old = cell;
+                } else if !palette_changed
+                    || !cell.st.wash_id().checked_sub(1).is_some_and(|i| washes[i] != prev_washes[i])
+                {
                     continue;
                 }
-                if active != Some(cell.st) {
-                    cell.st.sgr(&mut self.out);
-                    active = Some(cell.st);
+                // A wide glyph must be drawn from its first column, unless
+                // the terminal has already drawn it while painting this row.
+                let (first, glyph) = if cell.ch == CONT {
+                    if next_col == x + 1 {
+                        continue;
+                    }
+                    (x - 1, cur[x - 1])
+                } else {
+                    (x, cell)
+                };
+                if first != next_col {
+                    let _ = write!(self.out, "\x1b[{};{}H", y + 1, first + 1);
                 }
-                self.out.extend_from_slice(cell.ch.encode_utf8(&mut utf8).as_bytes());
+                if active != Some(glyph.st) {
+                    glyph.st.sgr(&mut self.out, washes);
+                    active = Some(glyph.st);
+                }
+                self.out.extend_from_slice(glyph.ch.encode_utf8(&mut utf8).as_bytes());
+                let wide = cur.get(first + 1).is_some_and(|cell| cell.ch == CONT);
+                next_col = first + 1 + usize::from(wide);
             }
         }
-        if self.out.is_empty() {
-            return;
+        self.prev_washes = self.washes;
+        if self.out.len() > SYNC_ON.len() {
+            self.out.extend_from_slice(b"\x1b[0m\x1b[?2026l");
+            write_frame(&self.out);
+            self.out.truncate(SYNC_ON.len());
         }
-        self.out.extend_from_slice(b"\x1b[0m");
-        self.prev.copy_from_slice(&self.cur);
-        let mut stdout = io::stdout().lock();
-        let _ = stdout.write_all(&self.out);
-        let _ = stdout.flush();
-        self.out.clear();
     }
 }
 
@@ -669,6 +763,19 @@ fn char_width(c: char) -> usize {
     }
 }
 
+/// The byte offset of the first character starting at or after column `col`,
+/// or the length of `text` if no character starts there.
+pub fn byte_at_col(text: &str, col: usize) -> usize {
+    let mut start = 0;
+    for (byte, ch) in text.char_indices() {
+        if start >= col {
+            return byte;
+        }
+        start += char_width(ch);
+    }
+    text.len()
+}
+
 pub fn str_width(s: &str) -> usize {
     s.chars().map(char_width).sum()
 }
@@ -684,12 +791,28 @@ mod tests {
     }
 
     #[test]
-    fn the_terminals_background_is_read_and_is_not_a_key() {
+    fn background_reply_requires_three_hex_components() {
         assert_eq!(background_reply(b"11;rgb:0d0d/1111/1717"), Some([13, 17, 23]));
         assert_eq!(background_reply(b"11;rgb:ff/80/0"), Some([255, 128, 0]));
+        assert_eq!(background_reply(b"11;rgb:ABC/123/FFF"), Some([171, 18, 255]));
         assert_eq!(background_reply(b"11;rgb:zz/00/00"), None);
-        // Ended either way, the answer is swallowed and the keys around it kept.
-        assert_eq!(keys(b"j\x1b]10;rgb:1/2/3\x1b\\k\x1b]10;?\x07l"), [Key::Char('j'), Key::Char('k'), Key::Char('l')]);
+        assert_eq!(background_reply(b"11;rgb:00000/0/0"), None);
+        assert_eq!(background_reply(b"11;rgb:ffffffff/0/0"), None);
+        assert_eq!(background_reply(b"11;rgb:+f/0/0"), None);
+        assert_eq!(background_reply(b"11;rgb:/0/0"), None);
+        assert_eq!(background_reply(b"11;rgb:0/0/0/0"), None);
+    }
+
+    #[test]
+    fn background_replies_leave_the_surrounding_keys_intact() {
+        assert_eq!(
+            keys(b"j\x1b]11;rgb:1/2/3\x1b\\k\x1b]11;rgb:0/0/f\x07l"),
+            [
+                Key::Char('j'), Key::Background([17, 34, 51]), Key::Char('k'),
+                Key::Background([0, 0, 255]), Key::Char('l'),
+            ]
+        );
+        assert_eq!(keys(b"j\x1b]10;rgb:1/2/3\x07k"), [Key::Char('j'), Key::Char('k')]);
         assert!(unfinished(b"\x1b]11;rgb:0d0d/11") && !unfinished(b"\x1b]11;rgb:0/0/0\x1b\\"));
     }
 
@@ -727,5 +850,44 @@ mod tests {
         // A bidirectional override and a zero-width space take no room.
         assert_eq!(str_width("a\u{202e}b\u{200b}c\u{2066}"), 3);
         assert_eq!(str_width("\x1b[31m"), 4);
+    }
+
+    #[test]
+    fn column_offsets_always_land_on_character_boundaries() {
+        assert_eq!(byte_at_col("abcd", 2), 2);
+        assert_eq!(byte_at_col("a日b", 1), 1);
+        assert_eq!(byte_at_col("a日b", 2), "a日".len());
+        assert_eq!(byte_at_col("a\u{0301}b", 1), 1);
+        assert_eq!(byte_at_col("a\u{0301}b", 2), "a\u{0301}b".len());
+        assert_eq!(byte_at_col("ab", 20), 2);
+    }
+
+    #[test]
+    fn a_background_reply_repaints_only_the_washed_cells() {
+        let mut screen = Screen::new();
+        screen.resize(5, 1);
+        screen.put(0, 0, 5, "ABC界", Style::PLAIN);
+        screen.wash(0, 0, 1, Wash::Bar);
+        screen.wash(3, 0, 2, Wash::Added);
+        screen.flush_to(|frame| {
+            assert!(frame.starts_with(b"\x1b[?2026h\x1b[0m\x1b[2J"));
+            assert!(frame.ends_with(b"\x1b[0m\x1b[?2026l"));
+        });
+
+        screen.set_background([0; 3]);
+        let mut wrote = false;
+        screen.flush_to(|frame| {
+            wrote = true;
+            assert_eq!(
+                frame,
+                concat!(
+                    "\x1b[?2026h\x1b[1;1H\x1b[0;48;2;35;35;35mA",
+                    "\x1b[1;4H\x1b[0;48;2;0;30;11m界\x1b[0m\x1b[?2026l"
+                ).as_bytes()
+            );
+        });
+        assert!(wrote);
+        screen.set_background([0; 3]);
+        screen.flush_to(|_| panic!("the palette did not change"));
     }
 }

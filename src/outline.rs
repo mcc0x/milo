@@ -14,6 +14,7 @@ use crate::term::{self, Key, Screen, Style, Wash};
 use crate::tree::{Folds, Tree};
 use crate::ui::{self, DIM};
 use crate::view::View;
+use crate::watch::Scope;
 use crate::{help, icons, rex, walk};
 
 /// At or below this height the pane is a horizontal strip.
@@ -132,7 +133,7 @@ impl Outline {
             help: None,
             reading: None,
         };
-        outline.load(None, None, false);
+        let _ = outline.load(None, None, false);
         // Start where the work is, not at the top of the tree.
         let first = outline.tree.rows.iter().position(|&(n, _)| {
             let n = &outline.tree.nodes[n as usize];
@@ -142,9 +143,9 @@ impl Outline {
         outline
     }
 
-    /// The directories to watch, and whether watching them misses nothing.
-    pub fn watch(&self) -> (Vec<&std::path::Path>, bool) {
-        (self.repo.watch_paths(), self.repo.watched_fully())
+    /// What to watch for changes to the outline.
+    pub fn watch(&self) -> Scope {
+        self.repo.watch()
     }
 
     /// Without git, every file in the folders that are open.
@@ -154,14 +155,14 @@ impl Outline {
 
     /// Reads everything afresh. `raw` is a status the repository was just
     /// asked for and `listing` a walk just made, if any; `mark` marks commits
-    /// that were not there before.
-    fn load(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>, mark: bool) {
+    /// that were not there before. Returns the replaced list so the caller
+    /// can compare it to what is pending, if git answered.
+    fn load(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>, mark: bool) -> Option<Vec<FileChange>> {
         let selected = self.selected_path();
         self.repo.read(raw);
-        self.files = self.repo.pending();
+        let old = self.repo.pending().map(|files| std::mem::replace(&mut self.files, files));
         if self.repo.git {
-            let tracked = self.repo.tracked().iter().map(String::as_str);
-            self.tree.rebuild(tracked, &self.files);
+            self.tree.rebuild(self.repo.tracked(), &self.files);
         } else {
             self.listing = listing.unwrap_or_else(|| self.walk());
             self.tree.rebuild(self.listing.iter().map(String::as_str), &self.files);
@@ -170,16 +171,17 @@ impl Outline {
         // History only changes when the branch or what is pushed does.
         let key = self.repo.history_key();
         if key != self.history_key {
-            let history = self.repo.history(HISTORY_LIMIT);
-            // With nothing known before, every commit would count as new.
-            if mark && !self.history.is_empty() {
-                let known: HashSet<&str> = self.history.iter().map(|c| c.hash.as_str()).collect();
-                let now = Instant::now();
-                for c in history.iter().filter(|c| !known.contains(c.hash.as_str())) {
-                    self.fresh_commits.insert(c.hash.clone(), now);
+            if let Some(history) = self.repo.history(HISTORY_LIMIT) {
+                // With nothing known before, every commit would count as new.
+                if mark && !self.history.is_empty() {
+                    let known: HashSet<&str> = self.history.iter().map(|c| c.hash.as_str()).collect();
+                    let now = Instant::now();
+                    for c in history.iter().filter(|c| !known.contains(c.hash.as_str())) {
+                        self.fresh_commits.insert(c.hash.clone(), now);
+                    }
                 }
+                (self.history, self.history_key) = (history, key);
             }
-            (self.history, self.history_key) = (history, key);
         }
 
         self.recent.clear();
@@ -199,13 +201,13 @@ impl Outline {
         let files = &self.files;
         self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|(at, _)| at)));
         self.relayout(selected);
+        old
     }
 
     /// Loads afresh, marks what differs from before and, left alone, brings
     /// the latest of it into view.
     fn reload(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>) {
-        let old = std::mem::take(&mut self.files);
-        self.load(raw, listing, true);
+        let Some(old) = self.load(raw, listing, true) else { return };
         let before: HashMap<(&str, bool), &FileChange> = old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
         let now = Instant::now();
         // The file written most recently among those that changed.
@@ -263,11 +265,11 @@ impl Outline {
     /// has been seen: as it appears if the pane is known to have the
     /// keyboard, otherwise from the next time the reader uses it. Unseen, it
     /// gives up after `UNSEEN`.
-    fn mark_left(&self, at: Instant) -> Duration {
-        let seen = if self.focus == Some(true) {
-            Some(at.max(self.looked))
+    fn mark_left(at: Instant, looked: Instant, focus: Option<bool>) -> Duration {
+        let seen = if focus == Some(true) {
+            Some(at.max(looked))
         } else {
-            Some(self.looked).filter(|&looked| looked > at)
+            Some(looked).filter(|&looked| looked > at)
         };
         let fade = seen.map_or(UNSEEN, |from| FRESH.saturating_sub(from.elapsed()));
         fade.min(UNSEEN.saturating_sub(at.elapsed()))
@@ -280,17 +282,19 @@ impl Outline {
             return None;
         }
         let marks = self.fresh.values().chain(self.fresh_commits.values());
-        let mark = marks.map(|&at| if at.elapsed() < LIVE { PULSE } else { self.mark_left(at) }).min();
+        let mark = marks
+            .map(|&at| if at.elapsed() < LIVE { PULSE } else { Self::mark_left(at, self.looked, self.focus) })
+            .min();
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(at.elapsed()));
         [mark, note].into_iter().flatten().min()
     }
 
     /// Forgets marks and notes that have had their time.
     fn expire(&mut self) {
-        let fresh = std::mem::take(&mut self.fresh);
-        self.fresh = fresh.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
-        let commits = std::mem::take(&mut self.fresh_commits);
-        self.fresh_commits = commits.into_iter().filter(|(_, at)| !self.mark_left(*at).is_zero()).collect();
+        let (looked, focus) = (self.looked, self.focus);
+        let keep = |at| !Self::mark_left(at, looked, focus).is_zero();
+        self.fresh.retain(|_, at| keep(*at));
+        self.fresh_commits.retain(|_, at| keep(*at));
         self.note = self.note.take().filter(|(_, at)| at.elapsed() < NOTE);
     }
 
@@ -311,7 +315,7 @@ impl Outline {
         if self.repo.git {
             self.relayout(selected);
         } else {
-            self.load(None, None, false);
+            let _ = self.load(None, None, false);
         }
     }
 
@@ -553,7 +557,8 @@ impl Outline {
                 s.put(1 + guide, y, 1, "│", DIM);
             }
             let mut x = 1 + indent;
-            let icon = if n.dir { icons::dir(open) } else { icons::file(&n.name) };
+            let name = n.name();
+            let icon = if n.dir { icons::dir(open) } else { icons::file(name) };
             x += ui::icon(s, x, y, right.saturating_sub(x), icon);
 
             // Bold is work not committed yet; committed-but-unpushed stays
@@ -567,13 +572,13 @@ impl Outline {
             };
             let room = right.saturating_sub(x);
             if n.dir {
-                x += s.put_fit(x, y, room, &n.name, st);
+                x += s.put_fit(x, y, room, name, st);
                 // A closed folder still says how much is inside it.
                 if !open && n.pending > 0 {
                     s.put(x + 1, y, right.saturating_sub(x + 1), &n.pending.to_string(), DIM);
                 }
             } else {
-                s.put_middle(x, y, room, &n.name, st);
+                s.put_middle(x, y, room, name, st);
             }
             // A row that changed: pulsing while it is being written, then a
             // quieter mark until it has been seen. A closed folder carries

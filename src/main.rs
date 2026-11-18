@@ -16,7 +16,8 @@ mod walk;
 mod watch;
 mod when;
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use git::Repo;
 use outline::Outline;
 use term::{Key, Screen, Wait};
 use view::View;
-use watch::Watcher;
+use watch::{Scope, Watcher};
 
 const USAGE: &str = "\
 strata — a project's files, coloured by what is not yet committed or pushed
@@ -68,8 +69,8 @@ Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
 STRATA_ICONS=off shows none.
 ";
 
-/// How soon after the operating system reports a change it is looked at.
-const SETTLE: Duration = Duration::from_millis(120);
+/// The least time between looks for changes, even when one is reported.
+const MIN_LOOK_INTERVAL: Duration = Duration::from_millis(120);
 /// A look is never more than a fifth of the time: after one that took this
 /// long, the next waits four times as long, however fast changes arrive.
 const REST: u32 = 4;
@@ -117,8 +118,8 @@ impl Ui {
         }
     }
 
-    /// The directories to watch, and whether watching them misses nothing.
-    fn watch(&self) -> (Vec<&Path>, bool) {
+    /// Where to watch for changes and how much the watch covers.
+    fn watch(&self) -> Scope {
         match self {
             Ui::Outline(o) => o.watch(),
             Ui::View(v) => v.watch(),
@@ -135,20 +136,31 @@ fn fail(message: String) -> ! {
 }
 
 fn main() {
-    term::listen();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut ui = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["-h" | "--help"] => return print!("{USAGE}"),
-        ["-V" | "--version"] => return println!("strata {}", env!("CARGO_PKG_VERSION")),
-        ["view"] => fail("which file? strata view FILE".to_string()),
-        ["view", file] => match View::open(Path::new(file)) {
-            Some(view) => Ui::View(view),
-            None => fail(format!("{file} is not in a directory")),
-        },
-        [option] if option.starts_with('-') => fail(format!("no option {option}; see strata --help")),
-        [] | [_] => {
-            let dir = PathBuf::from(args.first().map_or(".", String::as_str));
-            match Repo::open(&dir) {
+    let signal = term::listen();
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next();
+    let second = args.next();
+    if args.next().is_some() {
+        fail("too many arguments; see strata --help".to_string());
+    }
+    // Paths may contain arbitrary bytes; only the words strata knows are text.
+    let mut ui = match (first.as_deref().and_then(OsStr::to_str), second.as_deref()) {
+        (Some("-h" | "--help"), None) => return print!("{USAGE}"),
+        (Some("-V" | "--version"), None) => return println!("strata {}", env!("CARGO_PKG_VERSION")),
+        (Some("view"), None) => fail("which file? strata view FILE".to_string()),
+        (Some("view"), Some(file)) => {
+            let file = Path::new(file);
+            match View::open(file) {
+                Some(view) => Ui::View(view),
+                None => fail(format!("{} is not in a directory", file.display())),
+            }
+        }
+        (Some(option), None) if option.starts_with('-') => {
+            fail(format!("no option {option}; see strata --help"));
+        }
+        (_, None) => {
+            let dir = first.as_deref().map_or(Path::new("."), Path::new);
+            match Repo::open(dir) {
                 Some(repo) => Ui::Outline(Outline::new(repo)),
                 None if dir.is_file() => {
                     fail(format!("{0} is a file; to read it: strata view {0}", dir.display()))
@@ -159,18 +171,19 @@ fn main() {
         _ => fail("too many arguments; see strata --help".to_string()),
     };
     let (watcher, idle) = {
-        let (paths, fully) = ui.watch();
-        let watcher = Watcher::new(&paths);
-        let idle = if watcher.fd().is_some() && fully { WATCHED } else { UNWATCHED };
+        let scope = ui.watch();
+        let watcher = Watcher::new(&scope);
+        let idle = if watcher.fd().is_some() && scope.complete { WATCHED } else { UNWATCHED };
         (watcher, idle)
     };
     // Asked to stop while still starting up: there is nothing to put back.
     if term::TERMINATED.load(Ordering::Relaxed) {
         exit(1);
     }
-    if let Err(e) = term::enter() {
-        fail(format!("cannot use this terminal: {e}"));
-    }
+    let mut keyboard = match term::enter() {
+        Ok(keyboard) => keyboard,
+        Err(e) => fail(format!("cannot use this terminal: {e}")),
+    };
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         term::leave();
@@ -190,17 +203,18 @@ fn main() {
         ui.draw(&mut screen);
         screen.flush();
 
-        // A look is due soon after a change is reported, and now and then
-        // regardless; either way it rests in proportion to how long the
-        // last one took.
-        let due = |told: bool| if told { SETTLE } else { idle }.max(took * REST);
+        // A report makes a look due as soon as enough time has passed since
+        // the last one. Without a report, wait longer and look anyway.
+        let due = |told: bool| if told { MIN_LOOK_INTERVAL } else { idle }.max(took * REST);
         let until_look = due(told).saturating_sub(looked.elapsed());
         let wait = ui.next_frame().map_or(until_look, |frame| frame.min(until_look));
-        match term::wait(wait.as_millis() as i32 + 1, watcher.fd()) {
+        match term::wait(&keyboard, signal.as_ref(), wait.as_millis() as i32 + 1, watcher.fd()) {
             Wait::Input => {
-                term::read_keys(&mut keys);
+                term::read_keys(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
-                    if ui.on_key(key) {
+                    if let Key::Background(rgb) = key {
+                        screen.set_background(rgb);
+                    } else if ui.on_key(key) {
                         break 'run;
                     }
                 }

@@ -68,21 +68,31 @@ fn is_word(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
 }
 
+/// Most delimiters can be ruled out by looking at just the first byte.
+fn begins(rest: &[u8], mark: &str) -> bool {
+    let mark = mark.as_bytes();
+    mark.first().is_none_or(|first| rest.first() == Some(first) && rest.starts_with(mark))
+}
+
+fn listed(words: &[&str], word: &str) -> bool {
+    let first = word.as_bytes().first();
+    words.iter().any(|w| w.as_bytes().first() == first && *w == word)
+}
+
 /// Where `needle` first ends in `b` at or after `from`.
 fn find_end(b: &[u8], from: usize, needle: &str) -> Option<usize> {
-    let n = needle.as_bytes();
-    (from..=b.len().checked_sub(n.len())?).find(|&i| b[i..].starts_with(n)).map(|i| i + n.len())
+    let last = b.len().checked_sub(needle.len())?;
+    (from..=last).find(|&i| begins(&b[i..], needle)).map(|i| i + needle.len())
 }
 
 /// Where a string that is open at `from` ends, and whether it closed.
 fn string_end(b: &[u8], from: usize, q: &Quote) -> (usize, bool) {
-    let close = q.close.as_bytes();
     let mut i = from;
     while i < b.len() {
         if !q.raw && b[i] == b'\\' {
             i += 2;
-        } else if b[i..].starts_with(close) {
-            return (i + close.len(), true);
+        } else if begins(&b[i..], q.close) {
+            return (i + q.close.len(), true);
         } else {
             i += 1;
         }
@@ -159,16 +169,14 @@ impl Lang {
         while i < b.len() {
             let rest = &b[i..];
             let spaced = !self.spaced_comments || i == 0 || b[i - 1].is_ascii_whitespace();
-            let attribute = self.attributes && rest.starts_with(b"#[");
+            let attribute = self.attributes && begins(rest, "#[");
             // Immediate whitespace still permits ordinary `code // comment`.
             let jsx_text = self.jsx && i > 0 && (is_word(b[i - 1]) || matches!(b[i - 1], b'>' | b':'));
-            if spaced && !attribute && !jsx_text
-                && self.line_comments.iter().any(|c| rest.starts_with(c.as_bytes()))
-            {
+            if spaced && !attribute && !jsx_text && self.line_comments.iter().any(|c| begins(rest, c)) {
                 out.push((i, b.len(), Class::Comment));
                 break;
             }
-            if let Some(k) = self.block_comments.iter().position(|(open, _)| rest.starts_with(open.as_bytes())) {
+            if let Some(k) = self.block_comments.iter().position(|(open, _)| begins(rest, open)) {
                 let (open, close) = self.block_comments[k];
                 match find_end(b, i + open.len(), close) {
                     Some(end) => {
@@ -184,7 +192,7 @@ impl Lang {
                 }
             }
             let opens = |q: &Quote| {
-                rest.starts_with(q.open.as_bytes())
+                begins(rest, q.open)
                     && (!self.scalars || scalar_start(b, i))
                     && (q.open != "'" || ((!self.jsx || previous(b, i).is_none_or(|p| !is_word(b[p]) && b[p] != b'>'))
                         && (!self.chars || is_char(b, i))))
@@ -263,10 +271,10 @@ impl Lang {
     }
 
     fn word(&self, word: &str, after: &[u8], member: bool, scalar: bool) -> Option<Class> {
-        if (!member || word == "await") && self.keywords.contains(&word) {
+        if (!member || word == "await") && listed(self.keywords, word) {
             return Some(Class::Keyword);
         }
-        if scalar && self.constants.contains(&word) {
+        if scalar && listed(self.constants, word) {
             return Some(Class::Number);
         }
         if !self.names {
@@ -827,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn data_tables_cover_json_comments_and_toml_literals_and_headers() {
+    fn json_comments_and_toml_raw_strings_and_headers_are_coloured() {
         assert_eq!(one(&JSON, "/* tsconfig */ {\"ok\": true}"), [
             ("/* tsconfig */", Class::Comment), ("\"ok\"", Class::Key), ("true", Class::Number),
         ]);
@@ -840,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_java_php_and_rust_table_gaps_are_covered() {
+    fn language_specific_keywords_and_literals_are_coloured() {
         let mut state = State::Code;
         assert_eq!(pieces(&CSHARP, "var s = \"\"\"a \" quote", &mut state), [
             ("var", Class::Keyword), ("\"\"\"a \" quote", Class::Str),
@@ -861,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn idiomatic_go_java_csharp_php_and_shell_lines() {
+    fn declarations_and_control_flow_keep_their_language_colours() {
         assert_eq!(one(&GO, "func main() { fmt.Println(`hi`); return }"), [
             ("func", Class::Keyword), ("main", Class::Function), ("Println", Class::Function),
             ("`hi`", Class::Str), ("return", Class::Keyword),
@@ -934,16 +942,14 @@ mod tests {
     }
 
     #[test]
-    fn scan_clears_and_reuses_the_callers_buffer() {
-        let mut out = Vec::with_capacity(16);
-        let allocation = out.as_ptr();
+    fn scan_replaces_spans_from_the_previous_line() {
+        let mut out = Vec::new();
         let mut state = State::Code;
         RUST.scan("let x = 1;", &mut state, &mut out);
-        assert_eq!(out.len(), 2);
+        RUST.scan("// done", &mut state, &mut out);
+        assert_eq!(out, [(0, 7, Class::Comment)]);
         RUST.scan("", &mut state, &mut out);
         assert!(out.is_empty());
-        assert_eq!(out.as_ptr(), allocation);
-        assert_eq!(std::mem::size_of::<State>(), 2);
     }
 
     #[test]

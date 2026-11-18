@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::git::{FileChange, Kind};
 
 pub struct Node {
-    pub name: String,
+    name_at: usize,
     pub path: String,
     pub parent: u32,
     pub children: Vec<u32>,
@@ -25,9 +25,9 @@ pub struct Node {
 }
 
 impl Node {
-    fn new(name: &str, path: &str, parent: u32, dir: bool) -> Node {
+    fn new(path: &str, name_at: usize, parent: u32, dir: bool) -> Node {
         Node {
-            name: name.to_string(),
+            name_at,
             path: path.to_string(),
             parent,
             children: Vec::new(),
@@ -39,6 +39,11 @@ impl Node {
             uncommitted: false,
             marked: false,
         }
+    }
+
+    /// The last part of the path, as it appears in the tree.
+    pub fn name(&self) -> &str {
+        &self.path[self.name_at..]
     }
 }
 
@@ -146,7 +151,7 @@ impl Tree {
         self.nodes.clear();
         self.index.clear();
         self.rows.clear();
-        self.nodes.push(Node::new("", "", 0, true));
+        self.nodes.push(Node::new("", 0, 0, true));
         for path in paths {
             match path.strip_suffix('/') {
                 Some(dir) => self.insert(dir, true),
@@ -160,7 +165,7 @@ impl Tree {
             let mut children = std::mem::take(&mut self.nodes[i].children);
             children.sort_unstable_by(|&a, &b| {
                 let (a, b) = (&self.nodes[a as usize], &self.nodes[b as usize]);
-                b.dir.cmp(&a.dir).then_with(|| natural_cmp(&a.name, &b.name))
+                b.dir.cmp(&a.dir).then_with(|| natural_cmp(a.name(), b.name()))
             });
             self.nodes[i].children = children;
         }
@@ -172,12 +177,12 @@ impl Tree {
             self.nodes[i as usize].dir |= dir;
             return i;
         }
-        let (parent, name) = match path.rsplit_once('/') {
-            Some((dir, name)) => (self.insert(dir, true), name),
-            None => (0, path),
+        let (parent, name_at) = match path.rsplit_once('/') {
+            Some((dir, _)) => (self.insert(dir, true), dir.len() + 1),
+            None => (0, 0),
         };
         let i = self.nodes.len() as u32;
-        self.nodes.push(Node::new(name, path, parent, dir));
+        self.nodes.push(Node::new(path, name_at, parent, dir));
         self.nodes[parent as usize].children.push(i);
         self.index.insert(path.to_string(), i);
         i
@@ -338,6 +343,16 @@ mod tests {
         assert_eq!((src.kind, src.add, src.pending, src.uncommitted), (Kind::Modified, 5, 2, true));
         let sub = tree.row(1).unwrap();
         assert_eq!((sub.kind, sub.pending, sub.uncommitted), (Kind::Added, 1, false));
+        assert_eq!(tree.row(2).unwrap().name(), "c.rs");
+    }
+
+    #[test]
+    fn a_tracked_path_listed_twice_makes_one_node() {
+        let mut tree = Tree::build(["café/猫.rs", "café/猫.rs"].into_iter(), &[]);
+        tree.layout(|_| true, false);
+        assert_eq!(names(&tree), ["café", "café/猫.rs"]);
+        assert_eq!(tree.row(1).unwrap().name(), "猫.rs");
+        assert_eq!(tree.nodes.len(), 3);
     }
 
     #[test]

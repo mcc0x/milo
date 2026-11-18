@@ -4,13 +4,13 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::read::{self, Content};
-use crate::{term, when};
+use crate::{term, watch::Scope, when};
 
 /// New files larger than this are listed without counting their lines.
 const NEW_FILE_LIMIT: u64 = 256 << 10;
@@ -28,7 +28,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// The git program itself. On macOS the `git` on the path is a launcher
 /// that takes as long again to start as git does, so the real one is found
-/// once.
+/// once. If it cannot be found, use `git` from the path.
 static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     let found = Command::new("git").arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null()).output();
     let core = found.ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
@@ -53,6 +53,8 @@ fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
         // Git otherwise checks the index on every core at once, which for a
         // viewer that looks often costs far more than it saves.
         .args(["-c", "core.preloadIndex=false"])
+        // Comparing the whole tree must not write a refreshed index.
+        .args(["-c", "diff.autoRefreshIndex=false"])
         .args(guard)
         .args(args)
         // A path given to git is a name, never a pattern.
@@ -64,11 +66,15 @@ fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
     c
 }
 
-/// Runs a command and returns what it printed, if it succeeded, printed no
-/// more than `limit` bytes, and finished before the deadline. A command that
-/// hangs, or that outlives a request to quit, is killed: nothing here may
-/// leave the program unable to respond.
-fn output(mut command: Command, limit: u64) -> Option<Vec<u8>> {
+fn output(command: Command, limit: u64) -> Option<Vec<u8>> {
+    let (status, out) = run(command, limit)?;
+    status.success().then_some(out)
+}
+
+/// Captures git's answer and exit status. A command that hangs, produces
+/// too much output, or outlives a request to quit is killed: nothing here
+/// may leave the program unable to respond.
+fn run(mut command: Command, limit: u64) -> Option<(ExitStatus, Vec<u8>)> {
     let mut child = command.stdout(Stdio::piped()).spawn().ok()?;
     let mut pipe = child.stdout.take()?;
     let started = Instant::now();
@@ -77,8 +83,8 @@ fn output(mut command: Command, limit: u64) -> Option<Vec<u8>> {
         if started.elapsed() > DEADLINE || term::TERMINATED.load(Ordering::Relaxed) {
             break false;
         }
-        let mut fd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut fd, 1, 200) } <= 0 {
+        let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        if term::poll(&mut fds, 200) <= 0 {
             continue;
         }
         match pipe.read(&mut chunk) {
@@ -93,7 +99,7 @@ fn output(mut command: Command, limit: u64) -> Option<Vec<u8>> {
         let _ = child.kill();
     }
     let status = child.wait().ok()?;
-    (complete && status.success()).then_some(out)
+    complete.then_some((status, out))
 }
 
 /// How a path differs. Ordered by precedence when a directory summarises its
@@ -113,6 +119,7 @@ pub enum Kind {
 struct Status {
     branch: String,
     oid: String,
+    has_commit: bool,
     /// The upstream this branch is measured against.
     upstream: Option<String>,
     /// An upstream that is named but no longer exists.
@@ -123,8 +130,16 @@ struct Status {
     /// Where the moved ones among them were before.
     sources: Vec<String>,
     untracked: Vec<String>,
+    /// Directories git ignores whole; none of their contents are listed.
+    ignored: Vec<String>,
     /// Paths left in conflict by a merge.
     unmerged: Vec<String>,
+}
+
+impl Status {
+    fn head(&self) -> &'static str {
+        if self.has_commit { "HEAD" } else { EMPTY_TREE }
+    }
 }
 
 /// Parses `git status --porcelain=v2 --branch -z`.
@@ -140,6 +155,8 @@ fn parse_status(raw: &[u8]) -> Status {
         if let Some(path) = e.strip_prefix("? ") {
             // A nested repository is reported as a directory, with a slash.
             st.untracked.push(path.trim_end_matches('/').to_string());
+        } else if let Some(dir) = e.strip_prefix("! ").and_then(|path| path.strip_suffix('/')) {
+            st.ignored.push(dir.to_string());
         } else if e.starts_with("1 ") {
             st.changed.extend(path(e, 9));
         } else if e.starts_with("2 ") {
@@ -153,6 +170,7 @@ fn parse_status(raw: &[u8]) -> Status {
             st.changed.extend(path(e, 11));
         } else if let Some(v) = e.strip_prefix("# branch.oid ") {
             st.oid = v.to_string();
+            st.has_commit = v != "(initial)";
         } else if let Some(v) = e.strip_prefix("# branch.head ") {
             st.branch = v.to_string();
         } else if let Some(v) = e.strip_prefix("# branch.upstream ") {
@@ -261,13 +279,13 @@ fn new_file_lines(path: &Path) -> u32 {
 /// The settings that switch off every filter a repository's own
 /// configuration defines. A filter is a program git runs on file content;
 /// one a project brought with it is not to be trusted with that.
-fn filter_guard(root: &Path) -> Vec<String> {
-    let listing = command(root, &[], &["config", "--local", "--name-only", "--get-regexp", r"^filter\."]);
-    let names = output(listing, OUTPUT_LIMIT).unwrap_or_default();
-    let names = String::from_utf8_lossy(&names);
+fn filter_guard(root: &Path) -> Option<Vec<String>> {
+    // Listing all keys succeeds even when there are no filters, unlike a pattern query.
+    let listing = command(root, &[], &["config", "--null", "--name-only", "--list"]);
+    let names = String::from_utf8(output(listing, OUTPUT_LIMIT)?).ok()?;
     // "filter.<name>.<setting>": the name may itself hold dots.
     let mut filters: Vec<&str> =
-        names.lines().filter_map(|key| Some(key.strip_prefix("filter.")?.rsplit_once('.')?.0)).collect();
+        names.split_terminator('\0').filter_map(|key| Some(key.strip_prefix("filter.")?.rsplit_once('.')?.0)).collect();
     filters.sort_unstable();
     filters.dedup();
     let mut guard = Vec::new();
@@ -276,7 +294,7 @@ fn filter_guard(root: &Path) -> Vec<String> {
             guard.extend(["-c".to_string(), format!("filter.{name}.{setting}")]);
         }
     }
-    guard
+    Some(guard)
 }
 
 /// One commit on the current branch.
@@ -310,7 +328,7 @@ pub struct Repo {
     git_dir: Option<PathBuf>,
     common_dir: Option<PathBuf>,
     /// Settings that switch off the repository's own filters.
-    guard: Vec<String>,
+    guard: Option<Vec<String>>,
     /// When set, only this path is asked about.
     scope: Option<String>,
     /// The commit the branch is on.
@@ -332,7 +350,7 @@ pub struct Repo {
     /// What is committed but not pushed, kept while `base` and `tip` stay.
     committed: ((Option<String>, String), Vec<FileChange>),
     /// Every tracked file, kept while the index stays as it was.
-    tracked: (Stamp, Vec<String>),
+    tracked: (Stamp, String),
     /// Where one file was moved from, and what that answer rests on.
     moved: Option<((String, String, String, Stamp), Option<String>)>,
 }
@@ -353,14 +371,15 @@ impl Repo {
         };
         let (git_dir, common_dir) = (lines.next(), lines.next());
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let guard = if git { filter_guard(&root) } else { Vec::new() };
+        let guard = git.then(|| filter_guard(&root)).flatten();
+        let ok = !git || guard.is_some();
         Some(Repo {
             root,
             name,
             branch: String::new(),
             git,
             remote: None,
-            ok: true,
+            ok,
             git_dir,
             common_dir,
             guard,
@@ -374,7 +393,7 @@ impl Repo {
             status: Status::default(),
             counted: HashMap::new(),
             committed: ((None, String::new()), Vec::new()),
-            tracked: (None, Vec::new()),
+            tracked: (None, String::new()),
             moved: None,
         })
     }
@@ -385,30 +404,53 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> Option<Vec<u8>> {
-        output(command(&self.root, &self.guard, args), OUTPUT_LIMIT)
+        output(command(&self.root, self.guard.as_deref()?, args), OUTPUT_LIMIT)
     }
 
-    /// The commit a name stands for, if there is one.
-    fn resolve(&self, name: &str) -> Option<String> {
-        let out = self.git(&["rev-parse", "--verify", "--quiet", "--end-of-options", name])?;
-        Some(String::from_utf8(out).ok()?.trim().to_string()).filter(|oid| !oid.is_empty())
+    /// Reads an object name. A missing ref or unrelated histories can
+    /// legitimately return no object and exit with code 1.
+    fn optional_oid(&self, args: &[&str]) -> Option<Option<String>> {
+        let (status, raw) = run(command(&self.root, self.guard.as_deref()?, args), OUTPUT_LIMIT)?;
+        if status.success() {
+            let mut oid = String::from_utf8(raw).ok()?;
+            oid.truncate(oid.trim_end().len());
+            (!oid.is_empty()).then_some(Some(oid))
+        } else {
+            (status.code() == Some(1) && raw.is_empty()).then_some(None)
+        }
     }
 
-    /// The directories to watch to hear of everything that changes here:
-    /// the files, and the repository's own records where those are kept
-    /// somewhere else, as for a linked worktree.
-    pub fn watch_paths(&self) -> Vec<&Path> {
-        let mut paths = vec![self.root.as_path()];
-        paths.extend(self.common_dir.as_deref().filter(|dir| !dir.starts_with(&self.root)));
-        paths
-    }
-
-    /// Whether watching `watch_paths` is known to miss nothing.
-    pub fn watched_fully(&self) -> bool {
-        // An older git does not say where its records are; then only a
+    /// Watches the worktree and any shared Git directory outside it, as in a
+    /// linked worktree. Exclusions are set at startup; if a directory stops
+    /// being ignored, only the periodic check sees later changes inside it.
+    pub fn watch(&self) -> Scope {
+        let mut roots = vec![self.root.clone()];
+        roots.extend(self.common_dir.as_ref().filter(|dir| !dir.starts_with(&self.root)).cloned());
+        // Older git versions do not say where their records are. Then only a
         // repository that plainly keeps them inside itself can be trusted.
         let inside = || std::fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
-        !self.git || self.common_dir.is_some() || inside()
+        let complete = !self.git || self.common_dir.is_some() || inside();
+
+        // A reader's status covers one file, but the watch covers the whole tree.
+        let full = self.scope.as_ref().and_then(|_| self.status_raw(None)).map(|raw| parse_status(&raw));
+        let status = full.as_ref().unwrap_or(&self.status);
+        let internal = [self.git_dir.as_deref(), self.common_dir.as_deref()]
+            .map(|dir| dir.and_then(|dir| dir.strip_prefix(&self.root).ok()));
+        let file = self.scope.as_deref().map(Path::new);
+        let mut ignored: Vec<_> = status
+            .ignored
+            .iter()
+            .map(Path::new)
+            .filter_map(|dir| {
+                let needed = Path::new(".git").starts_with(dir)
+                    || internal.iter().flatten().any(|git| git.starts_with(dir))
+                    || file.is_some_and(|file| file.starts_with(dir));
+                (!needed).then(|| (dir.components().count(), dir))
+            })
+            .collect();
+        ignored.sort_unstable();
+        let ignored = ignored.into_iter().take(8).map(|(_, dir)| self.root.join(dir)).collect();
+        Scope { roots, ignored, complete }
     }
 
     /// Whether git is in the middle of changing things here, so that what
@@ -417,9 +459,9 @@ impl Repo {
         self.git_dir.as_ref().is_some_and(|dir| dir.join("index.lock").exists())
     }
 
-    fn status_raw(&self) -> Option<Vec<u8>> {
-        let mut args = vec!["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"];
-        if let Some(path) = &self.scope {
+    fn status_raw(&self, scope: Option<&str>) -> Option<Vec<u8>> {
+        let mut args = vec!["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all", "--ignored=matching"];
+        if let Some(path) = scope {
             args.extend(["--", path]);
         }
         self.git(&args)
@@ -429,15 +471,26 @@ impl Repo {
     /// view of the repository, the content of one of `files`, or what stands
     /// in for an upstream. Hand it back to `read` so it is not asked for
     /// twice.
-    pub fn poll(&self, files: &[FileChange]) -> Option<Vec<u8>> {
+    pub fn poll(&mut self, files: &[FileChange]) -> Option<Vec<u8>> {
         if !self.git {
             return None;
         }
-        let raw = self.status_raw()?;
-        let edited = || files.iter().any(|f| stamp(&self.root.join(&f.path)) != f.stamp);
+        let Some(raw) = self.status_raw(self.scope.as_deref()) else {
+            self.ok = false;
+            return None;
+        };
+        if !self.ok || raw != self.raw || files.iter().any(|f| stamp(&self.root.join(&f.path)) != f.stamp) {
+            return Some(raw);
+        }
         // A push or a fetch moves the remote's branch without touching this one.
-        let pushed = || self.stand_in.as_ref().is_some_and(|(name, oid)| self.resolve(name).as_ref() != Some(oid));
-        (raw != self.raw || edited() || pushed()).then_some(raw)
+        let (name, oid) = self.stand_in.as_ref()?;
+        match self.optional_oid(&["rev-parse", "--verify", "--quiet", "--end-of-options", name]) {
+            Some(found) => (found.as_ref() != Some(oid)).then_some(raw),
+            None => {
+                self.ok = false;
+                None
+            }
+        }
     }
 
     /// Takes in the repository's state: the branch, what it is pushed to,
@@ -446,39 +499,50 @@ impl Repo {
         if !self.git {
             return;
         }
-        let Some(raw) = raw.or_else(|| self.status_raw()) else {
+        let Some(raw) = raw.or_else(|| self.status_raw(self.scope.as_deref())) else {
             self.ok = false;
             return;
         };
-        self.ok = true;
         let st = parse_status(&raw);
-        let born = st.oid != "(initial)";
+        let head = st.head();
         // Without an upstream, the default branch of the remote it had, or
         // of `origin`, still says what has been pushed.
-        self.stand_in = None;
-        if st.upstream.is_none() && born {
+        let stand_in = if st.upstream.is_none() && st.has_commit {
             let remote = st.gone.as_deref().and_then(|u| u.split_once('/')).map_or("origin", |(remote, _)| remote);
             let name = format!("{remote}/HEAD");
-            self.stand_in = self.resolve(&name).map(|oid| (name, oid));
-        }
-        let target = st.upstream.clone().or_else(|| self.stand_in.as_ref().map(|(name, _)| name.clone()));
-        self.remote = target.as_ref().map(|t| if st.upstream.is_some() { t.clone() } else { t.trim_end_matches("/HEAD").to_string() });
+            let Some(oid) = self.optional_oid(&["rev-parse", "--verify", "--quiet", "--end-of-options", &name]) else {
+                self.ok = false;
+                return;
+            };
+            oid.map(|oid| (name, oid))
+        } else {
+            None
+        };
+        let target = st.upstream.as_ref().or_else(|| stand_in.as_ref().map(|(name, _)| name));
 
         // The base only moves when the tip, the target or the lead does.
-        let seen = self.stand_in.as_ref().map(|(_, oid)| oid.clone()).or_else(|| st.upstream.clone());
+        let seen = stand_in.as_ref().map(|(_, oid)| oid.clone()).or_else(|| st.upstream.clone());
         let basis = (st.oid.clone(), seen, st.ahead);
         if basis != self.basis {
             // An upstream that this branch is level with has nothing to compare.
             let ahead = st.upstream.is_none() || st.ahead > 0;
-            self.base = target.filter(|_| born && ahead).and_then(|target| {
-                let out = self.git(&["merge-base", "--end-of-options", "HEAD", &target])?;
-                let base = String::from_utf8(out).ok()?;
-                let base = base.trim();
-                (!base.is_empty() && base != st.oid).then(|| base.to_string())
-            });
+            self.base = match target.filter(|_| st.has_commit && ahead) {
+                Some(target) => {
+                    let Some(base) = self.optional_oid(&["merge-base", "--end-of-options", "HEAD", target]) else {
+                        self.ok = false;
+                        return;
+                    };
+                    base.filter(|base| *base != st.oid)
+                }
+                None => None,
+            };
             self.basis = basis;
         }
-        let head = if born { "HEAD" } else { EMPTY_TREE };
+        self.ok = true;
+        self.remote = target.map(|t| {
+            if st.upstream.is_some() { t.clone() } else { t.trim_end_matches("/HEAD").to_string() }
+        });
+        self.stand_in = stand_in;
         self.against = self.base.clone().unwrap_or_else(|| head.to_string());
         self.branch.clone_from(&st.branch);
         self.tip.clone_from(&st.oid);
@@ -486,31 +550,39 @@ impl Repo {
     }
 
     /// Everything not yet pushed, as of the last `read`: first what is not
-    /// committed, then what is committed but still local.
-    pub fn pending(&mut self) -> Vec<FileChange> {
+    /// committed, then what is committed but still local. `None` leaves the
+    /// last list in place when git could not be asked.
+    pub fn pending(&mut self) -> Option<Vec<FileChange>> {
         if !self.git {
-            return Vec::new();
+            return Some(Vec::new());
+        }
+        if !self.ok {
+            return None;
         }
         let mut files = Vec::new();
         // Stamped before git looks, so an edit made meanwhile is not missed.
         let changed = &self.status.changed;
         let stamps: HashMap<&str, Stamp> = changed.iter().map(|p| (p.as_str(), stamp(&self.root.join(p)))).collect();
         if !changed.is_empty() {
-            let head = if self.tip == "(initial)" { EMPTY_TREE } else { "HEAD" };
-            // Naming the paths spares git the rest of the tree, and spares
-            // the repository an index refreshed on a viewer's account. It
-            // also lets each file be measured against what is pushed, as
-            // the reader shows it, without listing what is only committed.
+            // Naming the paths saves comparing the rest of the tree. It
+            // lets each file be measured against what is pushed, as the
+            // reader shows it, without listing what is only committed.
             let named = changed.len() <= PATHS_LIMIT;
-            let mut args = vec!["diff", if named { self.against.as_str() } else { head }];
+            let mut args = vec!["diff", if named { self.against.as_str() } else { self.status.head() }];
             args.extend(["-M", "--no-color", "--raw", "--numstat", "-z"]);
             if named {
                 args.push("--");
                 args.extend(changed.iter().map(String::as_str));
             }
-            match self.git(&args) {
-                Some(raw) => parse_changes(&raw, false, &mut files),
-                None => self.ok = false,
+            let Some(raw) = self.git(&args) else {
+                self.ok = false;
+                return None;
+            };
+            parse_changes(&raw, false, &mut files);
+            if !named {
+                // Without an index refresh the whole-tree diff can list
+                // files that were touched without changing their contents.
+                files.retain(|file| stamps.contains_key(file.path.as_str()));
             }
             // A file put back to what the remote has differs from nothing
             // there, and is work not committed all the same.
@@ -552,10 +624,12 @@ impl Repo {
         if ends != self.committed.0 {
             let mut committed = Vec::new();
             if let Some(base) = &ends.0 {
-                match self.git(&["diff", base, "HEAD", "-M", "--no-color", "--raw", "--numstat", "-z"]) {
-                    Some(raw) => parse_changes(&raw, true, &mut committed),
-                    None => self.ok = false,
-                }
+                let args = ["diff", base, "HEAD", "-M", "--no-color", "--raw", "--numstat", "-z"];
+                let Some(raw) = self.git(&args) else {
+                    self.ok = false;
+                    return None;
+                };
+                parse_changes(&raw, true, &mut committed);
             }
             self.committed = (ends, committed);
         }
@@ -563,22 +637,28 @@ impl Repo {
             file.stamp = stamp(&self.root.join(&file.path));
         }
         files.extend(self.committed.1.iter().cloned());
-        files
+        Some(files)
+    }
+
+    fn index_stamp(&self) -> Stamp {
+        self.git_dir.as_ref().and_then(|dir| stamp(&dir.join("index")))
     }
 
     /// Every tracked file, relative to the root. Untracked ones are in
     /// `pending`.
-    pub fn tracked(&mut self) -> &[String] {
-        let index = self.git_dir.as_ref().and_then(|dir| stamp(&dir.join("index")));
+    pub fn tracked(&mut self) -> impl Iterator<Item = &str> {
+        let index = self.index_stamp();
         if index.is_none() || index != self.tracked.0 {
-            let raw = self.git(&["ls-files", "-z", "--cached"]).unwrap_or_default();
-            let mut files: Vec<String> =
-                String::from_utf8_lossy(&raw).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect();
-            // A file in conflict is listed once per side.
-            files.dedup();
-            self.tracked = (index, files);
+            match self.git(&["ls-files", "-z", "--cached"]) {
+                Some(raw) => {
+                    let files = String::from_utf8(raw)
+                        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned());
+                    self.tracked = (index, files);
+                }
+                None => self.ok = false,
+            }
         }
-        &self.tracked.1
+        self.tracked.1.split_terminator('\0')
     }
 
     pub fn is_untracked(&self, path: &str) -> bool {
@@ -593,16 +673,20 @@ impl Repo {
     /// Finding out means comparing the whole tree, so the answer is kept
     /// until something that could change it does.
     pub fn moved_from(&mut self, path: &str) -> Option<String> {
-        let index = self.git_dir.as_ref().and_then(|dir| stamp(&dir.join("index")));
+        let index = self.index_stamp();
         let key = (path.to_string(), self.against.clone(), self.tip.clone(), index);
         if index.is_none() || self.moved.as_ref().is_none_or(|(kept, _)| *kept != key) {
-            let raw = self.git(&["diff", &self.against, "-M", "--no-color", "--raw", "-z"]).unwrap_or_default();
-            let mut files = Vec::new();
-            parse_changes(&raw, false, &mut files);
-            let from = files.into_iter().find(|f| f.path == path).and_then(|f| f.from);
-            self.moved = Some((key, from));
+            if let Some(raw) = self.git(&["diff", &self.against, "-M", "--no-color", "--raw", "-z"]) {
+                let mut files = Vec::new();
+                parse_changes(&raw, false, &mut files);
+                let from = files.into_iter().find(|f| f.path == path).and_then(|f| f.from);
+                self.moved = Some((key, from));
+            } else {
+                self.ok = false;
+            }
         }
-        self.moved.as_ref()?.1.clone()
+        let ((known, _, _, _), from) = self.moved.as_ref()?;
+        if known == path { from.clone() } else { None }
     }
 
     /// The whole of one file as a diff against what is already pushed, or
@@ -616,7 +700,7 @@ impl Repo {
         args.extend(["--unified=1000000", "--"]);
         args.extend(from);
         args.push(path);
-        output(command(&self.root, &self.guard, &args), DIFF_LIMIT)
+        output(command(&self.root, self.guard.as_deref()?, &args), DIFF_LIMIT)
     }
 
     /// Changes whenever the history that `history` reports would.
@@ -625,20 +709,34 @@ impl Repo {
     }
 
     /// The newest `limit` commits on the current branch, newest first.
-    pub fn history(&self, limit: usize) -> Vec<Commit> {
-        if !self.git {
-            return Vec::new();
+    /// `None` means git could not be asked; keep the last answer in view.
+    pub fn history(&mut self, limit: usize) -> Option<Vec<Commit>> {
+        if !self.ok {
+            return None;
         }
-        let unpushed: HashSet<String> = match &self.base {
+        if !self.git || !self.status.has_commit {
+            // A branch before its first commit has no history to ask for.
+            return Some(Vec::new());
+        }
+        let raw_unpushed = match &self.base {
             Some(base) => {
-                let raw = self.git(&["rev-list", "-n", "1000", &format!("{base}..HEAD")]).unwrap_or_default();
-                String::from_utf8_lossy(&raw).lines().map(str::to_string).collect()
+                let Some(raw) = self.git(&["rev-list", "-n", "1000", &format!("{base}..HEAD")]) else {
+                    self.ok = false;
+                    return None;
+                };
+                raw
             }
-            None => HashSet::new(),
+            None => Vec::new(),
         };
+        let unpushed = String::from_utf8_lossy(&raw_unpushed);
+        let unpushed: HashSet<&str> = unpushed.lines().collect();
         let n = limit.to_string();
-        let raw = self.git(&["log", "-n", &n, "--no-show-signature", "--format=%H%x00%ct%x00%P%x00%s"]);
-        String::from_utf8_lossy(&raw.unwrap_or_default())
+        let args = ["log", "-n", &n, "--no-show-signature", "--format=%H%x00%ct%x00%P%x00%s"];
+        let Some(raw) = self.git(&args) else {
+            self.ok = false;
+            return None;
+        };
+        let commits = String::from_utf8_lossy(&raw)
             .lines()
             .filter_map(|line| {
                 let mut f = line.splitn(4, '\0');
@@ -653,7 +751,8 @@ impl Repo {
                     merge: parents.contains(' '),
                 })
             })
-            .collect()
+            .collect();
+        Some(commits)
     }
 }
 
@@ -675,6 +774,18 @@ mod tests {
         assert_eq!((st.branch.as_str(), st.oid.as_str(), st.ahead), ("main", "abc", 2));
         assert_eq!(st.upstream.as_deref(), Some("origin/main"));
         assert_eq!(st.untracked, ["a b.txt", "nested"]);
+    }
+
+    #[test]
+    fn status_keeps_only_ignored_directories_apart_from_changes() {
+        let st = parse_status(
+            b"! cache with spaces/\0! build.log\0? scratch.txt\0\
+              1 .M N... 100644 100644 100644 h1 h2 source.rs\0",
+        );
+        assert_eq!(st.ignored, ["cache with spaces"]);
+        assert_eq!(st.untracked, ["scratch.txt"]);
+        assert_eq!(st.changed, ["source.rs"]);
+        assert!(st.unmerged.is_empty());
     }
 
     #[test]
