@@ -19,6 +19,8 @@ strata — what is waiting to be committed or pushed
 
   strata outline [PATH]   the project's files, coloured by what changed.
                           Fits its pane: a tree when tall, a strip when short.
+                          enter opens a folder, e opens them all, c shows
+                          changed files only.
   strata history [PATH]   the changed files, and how each one changed.
 
 PATH is any directory inside a git repository (default: the current one).

@@ -306,6 +306,7 @@ impl View for History {
         let reading = self.focus == Side::Change;
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
+            Key::Focus(_) => {}
             Key::Click(x, y) => self.click(x, y),
             Key::Drag(x, _) if self.dragging => self.split = Some(x),
             Key::Release => self.dragging = false,

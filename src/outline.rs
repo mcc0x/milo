@@ -34,6 +34,12 @@ pub struct Outline {
     /// Directories holding something pending; open unless closed by hand.
     touched: HashSet<String>,
     changed_only: bool,
+    /// Every directory is open, until toggled off again.
+    all_open: bool,
+    /// Whether this pane has the keyboard, as far as the terminal says.
+    focused: bool,
+    /// Paths, and the directories above them, with work not committed yet.
+    uncommitted: HashSet<String>,
     sel: usize,
     top: usize,
     /// First column shown when the strip has more than fits.
@@ -52,6 +58,9 @@ impl Outline {
             collapsed: HashSet::new(),
             touched: HashSet::new(),
             changed_only: false,
+            all_open: false,
+            focused: true,
+            uncommitted: HashSet::new(),
             sel: 0,
             top: 0,
             strip_col: 0,
@@ -71,10 +80,17 @@ impl Outline {
         // Reversed, so a file both committed and edited again shows its newest state.
         self.tree.colour(self.detail.files.iter().rev().map(|f| (f.path.as_str(), f.kind)));
         self.touched.clear();
+        self.uncommitted.clear();
         for f in &self.detail.files {
+            if !f.committed {
+                self.uncommitted.insert(f.path.clone());
+            }
             let mut p = f.path.as_str();
             while let Some((dir, _)) = p.rsplit_once('/') {
-                if !self.touched.insert(dir.to_string()) {
+                // Stop climbing once this folder is known in every set it belongs to.
+                let seen = !self.touched.insert(dir.to_string());
+                let marked = f.committed || !self.uncommitted.insert(dir.to_string());
+                if seen && marked {
                     break;
                 }
                 p = dir;
@@ -84,13 +100,14 @@ impl Outline {
     }
 
     fn is_open(&self, path: &str) -> bool {
-        !self.collapsed.contains(path) && (self.expanded.contains(path) || self.touched.contains(path))
+        !self.collapsed.contains(path)
+            && (self.all_open || self.expanded.contains(path) || self.touched.contains(path))
     }
 
     /// Recomputes the visible rows, keeping the cursor on `selected`.
     fn relayout(&mut self, selected: Option<String>) {
-        let (expanded, collapsed, touched) = (&self.expanded, &self.collapsed, &self.touched);
-        let open = |p: &str| !collapsed.contains(p) && (expanded.contains(p) || touched.contains(p));
+        let (expanded, collapsed, touched, all) = (&self.expanded, &self.collapsed, &self.touched, self.all_open);
+        let open = |p: &str| !collapsed.contains(p) && (all || expanded.contains(p) || touched.contains(p));
         self.tree.layout(open, self.changed_only);
         let at = selected.and_then(|p| self.tree.row_of(&p)).unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
@@ -150,16 +167,19 @@ impl Outline {
             }
             let mut x = area.x + 1 + (depth as usize * 2).min(area.w / 3);
             let room = right.saturating_sub(x + 1);
+            // Bold is work not committed yet; committed-but-unpushed stays regular.
+            let st = if self.uncommitted.contains(&n.path) { st.bold() } else { st };
             if n.dir {
                 let icon_st = if pending { st } else { Style::fg(term::BLUE) };
                 x += ui::icon(s, x, y, room, icons::dir(self.is_open(&n.path)), icon_st);
-                s.put_fit(x, y, right.saturating_sub(x + 1), &n.name, st.bold());
             } else {
                 x += ui::icon(s, x, y, room, icons::file(&n.name), if pending { st } else { DIM });
-                s.put_fit(x, y, right.saturating_sub(x + 1), &n.name, st);
             }
-            if i == self.sel {
-                s.select(area.x, y, area.w, true);
+            s.put_fit(x, y, right.saturating_sub(x + 1), &n.name, st);
+            // Grey rather than a solid bar, so the row keeps its own colour;
+            // and no bar at all while the keyboard is in another pane.
+            if i == self.sel && self.focused {
+                s.tint(area.x, y, area.w);
             }
         }
     }
@@ -233,6 +253,14 @@ impl View for Outline {
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
             Key::Char('r') => self.reload(),
+            Key::Focus(focused) => self.focused = focused,
+            Key::Char('e') => {
+                // Opening everything also forgets what was closed by hand.
+                self.all_open = !self.all_open;
+                self.collapsed.clear();
+                let selected = self.tree.row(self.sel).map(|n| n.path.clone());
+                self.relayout(selected);
+            }
             Key::Char('c') => {
                 self.changed_only = !self.changed_only;
                 let selected = self.tree.row(self.sel).map(|n| n.path.clone());

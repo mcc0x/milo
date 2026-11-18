@@ -8,9 +8,10 @@ pub static RESIZED: AtomicBool = AtomicBool::new(true);
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
 static ORIG: OnceLock<libc::termios> = OnceLock::new();
 
-// Alternate screen, hidden cursor, button + drag mouse reporting in SGR form.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h";
-const LEAVE: &[u8] = b"\x1b[0m\x1b[?1006l\x1b[?1002l\x1b[?25h\x1b[?1049l";
+// Alternate screen, hidden cursor, button + drag mouse reporting in SGR form,
+// and focus reporting.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?1004h";
+const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1002l\x1b[?25h\x1b[?1049l";
 
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
@@ -110,6 +111,8 @@ pub enum Key {
     Click(usize, usize),
     Drag(usize, usize),
     Release,
+    /// The pane gained or lost keyboard focus.
+    Focus(bool),
     WheelUp(usize, usize),
     WheelDown(usize, usize),
     /// stdin reached end of file: the terminal is gone.
@@ -216,6 +219,8 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
         b'H' => Key::Home,
         b'F' => Key::End,
         b'Z' => Key::BackTab,
+        b'I' => Key::Focus(true),
+        b'O' => Key::Focus(false),
         b'~' => match params.split(|&c| c == b';').next()? {
             b"1" | b"7" => Key::Home,
             b"4" | b"8" => Key::End,
@@ -244,6 +249,10 @@ pub struct Style(u16);
 const FG: u16 = 31;
 const BOLD: u16 = 1 << 10;
 const REVERSE: u16 = 1 << 11;
+const ITALIC: u16 = 1 << 12;
+const STRIKE: u16 = 1 << 13;
+/// The flags that are part of the text itself and survive a highlight.
+const FACE: u16 = BOLD | ITALIC | STRIKE;
 
 impl Style {
     pub const PLAIN: Style = Style(0);
@@ -256,16 +265,30 @@ impl Style {
         Style(self.0 | BOLD)
     }
 
+    pub const fn italic(self) -> Style {
+        Style(self.0 | ITALIC)
+    }
+
+    pub const fn strike(self) -> Style {
+        Style(self.0 | STRIKE)
+    }
+
     /// A grey background. Grey text would vanish on it, so that turns plain.
     const fn tinted(self) -> Style {
         let fg = if self.0 & FG == GRAY as u16 + 1 { 0 } else { self.0 & FG };
-        Style(self.0 & BOLD | fg | (GRAY as u16 + 1) << 5)
+        Style(self.0 & FACE | fg | (GRAY as u16 + 1) << 5)
     }
 
     fn sgr(self, out: &mut Vec<u8>) {
         out.extend_from_slice(b"\x1b[0");
         if self.0 & BOLD != 0 {
             out.extend_from_slice(b";1");
+        }
+        if self.0 & ITALIC != 0 {
+            out.extend_from_slice(b";3");
+        }
+        if self.0 & STRIKE != 0 {
+            out.extend_from_slice(b";9");
         }
         if self.0 & REVERSE != 0 {
             out.extend_from_slice(b";7");
@@ -376,7 +399,7 @@ impl Screen {
     /// grey background otherwise.
     pub fn select(&mut self, x: usize, y: usize, w: usize, focused: bool) {
         for cell in self.span(x, y, w) {
-            cell.st = if focused { Style(cell.st.0 & BOLD | REVERSE) } else { cell.st.tinted() };
+            cell.st = if focused { Style(cell.st.0 & FACE | REVERSE) } else { cell.st.tinted() };
         }
     }
 

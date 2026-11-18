@@ -23,13 +23,16 @@ impl Rect {
     }
 }
 
+/// Colour says what happened to a file; the face backs it up, so the states
+/// stay apart even where two colours look alike.
 pub fn kind_style(kind: Kind) -> Style {
     match kind {
         Kind::None => Style::PLAIN,
         Kind::Modified => Style::fg(term::YELLOW),
-        Kind::Added | Kind::Untracked => ADD,
-        Kind::Deleted => DEL,
-        Kind::Renamed => Style::fg(term::CYAN),
+        Kind::Added => ADD,
+        Kind::Untracked => ADD.italic(),
+        Kind::Deleted => DEL.strike(),
+        Kind::Renamed => Style::fg(term::CYAN).italic(),
         Kind::Conflict => Style::fg(term::MAGENTA).bold(),
     }
 }

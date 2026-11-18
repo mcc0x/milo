@@ -108,13 +108,15 @@ pub struct FileChange {
     pub add: u32,
     pub del: u32,
     pub binary: bool,
+    /// Already committed, and only waiting to be pushed.
+    pub committed: bool,
     /// Where this file's section starts in the change view, if it is shown.
     pub line: Option<usize>,
 }
 
 impl FileChange {
     fn new(path: &str, kind: Kind) -> FileChange {
-        FileChange { path: path.to_string(), kind, add: 0, del: 0, binary: false, line: None }
+        FileChange { path: path.to_string(), kind, add: 0, del: 0, binary: false, committed: false, line: None }
     }
 }
 
@@ -435,6 +437,9 @@ fn pending(root: &Path, status: &Status, patches: bool) -> Detail {
     let first = d.files.len();
     if let Some(base) = pushed_base(root, status) {
         d.files.extend(parse_changes(&run(root, &["diff", &base, "HEAD", "-M", "--raw", "--numstat", "-z"])));
+        for f in &mut d.files[first..] {
+            f.committed = true;
+        }
         if patches && d.files.len() > first {
             if !d.lines.is_empty() {
                 d.lines.push(Line::new(LineKind::Info, ""));
