@@ -3,7 +3,7 @@ name = "milo"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "A terminal file tree with git status and a read-only file reader."
+description = "Terminal panes for a git file tree, commit history and a read-only reader."
 homepage = "https://usemilo.net"
 license = "MIT"
 

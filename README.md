@@ -2,13 +2,13 @@
 
 <p align="center">
   <b>Your project's files, coloured by what you haven't committed or pushed yet.</b><br>
-  A terminal pane that sits beside your work and stays up to date by itself.
+  Terminal panes that sit beside your work and stay up to date by themselves.
 </p>
 
 <p align="center"><a href="https://usemilo.net">usemilo.net</a></p>
 
 <p align="center">
-  <img src="docs/img/outline.png" width="820" alt="The milo outline: a file tree with edited, new, removed and moved files in colour, and recent history beside it">
+  <img src="docs/img/outline.png" width="820" alt="The milo outline: a file tree with edited, new, removed and moved files in colour">
 </p>
 
 <p align="center">
@@ -28,6 +28,7 @@ When an editor, a script or a coding agent is changing files for you, the questi
 - **The whole tree, not a list.** You see changed files where they live, among the ones that did not change.
 - **Two states at a glance.** Bold is work you have not committed. Regular weight is committed but not pushed. Plain is safe on the remote.
 - **Live.** Save a file and its row lights up a moment later. Nothing to refresh.
+- **A pane for commits.** See what is still to push, and press Enter on a commit to see the files it touched.
 - **A reader built in.** Press Enter on a file to read it, with the lines it gained and lost marked and its code coloured.
 
 ## A look around
@@ -45,8 +46,8 @@ The whole file, not just the hunks: added lines carry a green wash and keep thei
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/img/strip-side.png" width="330" alt="milo in a narrow column: a compact header, the tree, and a few lines of history beneath"><br>
-      <sub><b>A narrow column</b> beside your editor: the tree, a compact count, a few lines of history.</sub>
+      <img src="docs/img/strip-side.png" width="330" alt="milo in a narrow column: a compact header and the tree"><br>
+      <sub><b>A narrow column</b> beside your editor: the tree and a compact count.</sub>
     </td>
     <td align="center" width="50%">
       <img src="docs/img/help.png" width="330" alt="The milo help page explaining colours, weights, marks and keys"><br>
@@ -60,12 +61,14 @@ The whole file, not just the hunks: added lines carry a green wash and keep thei
   <sub><b>A short pane</b> under your terminal: only the changed files, most recently written first.</sub>
 </p>
 
-| The pane is… | milo shows… |
-| --- | --- |
-| 7 rows or fewer | a strip of the changed files, flowed across the width |
-| 20 rows or more | the tree, with recent history beneath it |
-| 52 columns or more | what happened to each file and how many lines it gained and lost |
-| 90 columns or more | history in its own column beside the tree |
+| Pane | Size | What changes |
+| --- | --- | --- |
+| Outline | 7 rows or fewer | a strip of changed files in a git project, flowed across the width |
+| Outline | 52 columns or more | what happened to each file and how many lines it gained and lost |
+| Outline and history | 12 rows or more | room for a key hint |
+| History | 3 rows or fewer | the newest commits without the heading, dots or divider |
+| History | 52 columns and 8 rows or more | a row of dots above the commit list when there are several commits |
+| History | narrow | a compact count such as `↑2` for two commits to push |
 
 ## Reading it
 
@@ -84,7 +87,7 @@ flowchart LR
 | Cyan, italic | moved | | `+7 −5` | lines gained and lost |
 | Magenta | left in conflict by a merge | | `○5 ↑2` | 5 files to commit, 2 to push (narrow panes) |
 
-In history, a hollow dot is work not committed yet, a bold dot is a commit still to push, and a faint dot is already on the remote.
+In history, a hollow dot is work not committed yet, a bold dot is a commit still to push, and a faint dot is already on the remote. A `•` beside a commit means it arrived while the pane was open. Open a commit to see its files in the same colours as the outline, with the type and size of each change.
 
 While the keyboard is in another pane, milo moves its cursor to whatever file is being written and says so (`following Cart.tsx`). It never moves while you are using it, and it leaves folders you closed closed.
 
@@ -101,12 +104,13 @@ cp target/release/milo ~/.local/bin/     # or anywhere on your PATH
 ## Use
 
 ```sh
-milo              # the project you are in
-milo ~/code/app   # some other project
-milo view FILE    # read one file
+milo                     # shorthand for milo outline
+milo outline ~/code/app  # the file tree
+milo history [PATH]      # recent commits
+milo view FILE           # read one file
 ```
 
-Inside a git repository milo shows the whole project from its root. Anywhere else it is a plain file tree with nothing coloured.
+Outline and history default to the current directory and use the project root inside a git repository. In a plain folder the outline shows the files and history says there is no history. To outline a directory named like a command, give its path explicitly: `milo ./history`.
 
 Icons need a [Nerd Font](https://www.nerdfonts.com). Without one, set `MILO_ICONS=plain` for ordinary symbols or `MILO_ICONS=off` for none.
 
@@ -114,16 +118,15 @@ Icons need a [Nerd Font](https://www.nerdfonts.com). Without one, set `MILO_ICON
 
 The essentials:
 
-| Key | In the outline | In the reader |
-| --- | --- | --- |
-| `↑` `↓` or `k` `j` | move | scroll |
-| `Enter` | open a folder, or read a file | |
-| `n` `N` | next, previous changed file | next, previous change |
-| `c` | changed files only | |
-| `e` | open every folder; again to go back | |
-| `t` | show or hide history | |
-| `?` | help | help |
-| `q` | quit | close |
+| Key | In the outline | In history | In the reader |
+| --- | --- | --- | --- |
+| `↑` `↓` or `k` `j` | move | move | scroll |
+| `Enter` | open a folder, or read a file | show or hide a commit's files | |
+| `n` `N` | next, previous changed file | | next, previous change |
+| `c` | changed files only | | |
+| `e` | open every folder; again to go back | | |
+| `?` | help | help | help |
+| `q` | quit | quit | close |
 
 <details>
 <summary><b>Every key</b></summary>
@@ -146,12 +149,26 @@ The essentials:
 | `e` | Open every folder, or go back to how they were |
 | `n` / `N` | Next or previous changed file, including inside closed folders |
 | `c` | Switch between all files and changed files only |
-| `t` | Show or hide history when there is room for it |
 | `r` | Reload |
 | `?` | Help |
 | `q` | Quit |
 
 Click a folder to open or close it, click a file to select it, double-click a file to read it. The wheel scrolls. In the strip there is no cursor: `←` / `→` or `h` / `l` move a column at a time, `Home` / `End` or `g` / `G` go to either end.
+
+#### History
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` or `k` / `j` | Move the cursor |
+| `Page Up` / `Page Down` or `Ctrl-B` / `Ctrl-F` | Move by a page |
+| `Ctrl-U` / `Ctrl-D` | Move by half a page |
+| `Home` / `End` or `g` / `G` | Go to the first or last commit or file |
+| `Enter` | Show or hide the selected commit's files |
+| `r` | Reload |
+| `?` | Help |
+| `q` | Quit |
+
+The mouse wheel also moves through the list. A merge shows what changed compared with its first parent.
 
 #### Reader
 
@@ -190,17 +207,16 @@ Inside the Rex terminal multiplexer, Enter or a double-click opens the reader in
 flowchart LR
     FS["File system<br/>(FSEvents)"] -- "something changed" --> L
     K["Keys and mouse"] --> L
-    L(["Event loop<br/>paces its looks"]) -- "check" --> G["Repository<br/>read-only git"]
-    G --> T["Tree and<br/>changed files"]
-    T --> D["Outline · Reader"]
-    D -- "changed cells only" --> S["Screen"]
+    L(["Shared event loop<br/>paces its looks"]) -- "check" --> P["Outline · History · Reader"]
+    P -- "read" --> G["Repository<br/>read-only git"]
+    P -- "draw" --> S["Screen<br/>changed cells only"]
 ```
 
-milo asks git, and only git, what state the project is in, then draws it. A few decisions keep that cheap:
+One terminal loop runs every pane: it handles terminal replies, help and when to check for changes. Each pane keeps what it shows and asks git, and only git, what state the project is in. A few decisions keep that cheap:
 
 - **It waits to be told.** On macOS the file system reports changes as they happen, so an idle milo does nothing: no wake-ups, and one `git status` every thirty seconds as a safety net. Directories git ignores are left out of the watch, so a build churning in `target/` does not wake it at all. On other systems it looks every two seconds.
 - **It never looks more than a fifth of the time.** After a look that took a while, the next one waits four times as long, however fast changes arrive.
-- **It remembers what cannot have changed.** The list of tracked files is kept until the index changes; what is committed but not pushed is kept until the branch moves.
+- **It remembers what cannot have changed.** The list of tracked files is kept until the index changes; what is committed but not pushed is kept until the branch moves. Once opened, a commit's files are read from the cache.
 - **It repaints only what differs.** Each frame is compared with the last, and only the cells that changed are written, inside a synchronized update so the terminal never shows half a frame.
 - **It mixes its shades from your theme.** At start it asks the terminal for its background colour and derives the cursor bar and the green and red washes from that, so it sits naturally in a light or a dark theme.
 
@@ -215,11 +231,11 @@ Colouring 2 MB of Rust takes about 10 ms. Measured on an Apple Silicon laptop; a
 <details>
 <summary><b>Source map</b></summary>
 
-About 5,400 lines of Rust and 2,000 of tests, under `src/`:
+The Rust modules and their tests live under `src/`:
 
 | Module | Its one job |
 | --- | --- |
-| `main.rs` | command-line arguments and the event loop |
+| `main.rs` | command selection, help overlay and the shared event loop |
 | `outline.rs` | what the outline knows and how it stays current |
 | `outline/draw.rs` | layout and drawing for the tree, the strip and the header |
 | `outline/input.rs` | what keys and clicks do in the outline |
@@ -228,7 +244,7 @@ About 5,400 lines of Rust and 2,000 of tests, under `src/`:
 | `diff.rs` | a whole-file diff as numbered lines, and the changed part of an edited line |
 | `syntax.rs` | the scanner that finds what to colour |
 | `syntax/langs.rs` | each language's rules, as data |
-| `history.rs` | the recent-commits panel |
+| `history.rs` | the live commit list and the files a commit touched |
 | `help.rs` | the help pages |
 | `git.rs` | what is known about a repository, and when to ask again |
 | `git/run.rs` | running git safely: read-only, hardened, with a deadline |
@@ -240,7 +256,7 @@ About 5,400 lines of Rust and 2,000 of tests, under `src/`:
 | `keys.rs` | keyboard and mouse input |
 | `term.rs` | entering, waiting on and restoring the terminal |
 | `width.rs` | how many columns text takes |
-| `ui.rs` | drawing helpers the screens share |
+| `ui.rs` | the `Pane` trait and shared drawing helpers |
 | `icons.rs` | file and folder symbols |
 | `read.rs` | reading a file without being fooled by what it is |
 | `picture.rs` | turning a picture file into something the terminal can show |

@@ -1,4 +1,4 @@
-//! Selects the outline or reader and runs the terminal event loop.
+//! Opens the requested pane and runs the terminal event loop.
 
 mod diff;
 #[cfg(test)]
@@ -31,25 +31,30 @@ use std::time::{Duration, Instant};
 
 use git::Repo;
 use help::Page;
+use history::History;
 use keys::{Key, receive};
 use outline::Outline;
 use reader::Reader;
 use screen::Screen;
 use term::Wait;
-use watch::{Scope, Watcher};
+use ui::Pane;
+use watch::Watcher;
 
 const USAGE: &str = "\
-milo — a file tree with git status and a read-only file reader
+milo — a file outline, commit history, and read-only file reader
 
-Usage: milo [PATH]
+Usage: milo outline [PATH]
+       milo history [PATH]
        milo view FILE
+       milo [PATH]
        milo --help | --version
 
-PATH defaults to the current directory. Inside a git repository the outline
-shows the whole project; elsewhere it shows a file tree without git status.
-It updates on its own. Short git panes show a strip of changed files; wider
-trees show line counts and what happened to each file. Recent history can
-sit beside the outline in a wide pane or beneath it in a tall one.
+PATH defaults to the current directory. Bare milo [PATH] opens the outline.
+To open a directory named like a command, use a path such as ./history.
+In a git repository the outline shows the whole project and history shows
+its recent commits. Both stay up to date on their own. Elsewhere the outline
+is a plain file tree. Short git outlines show a strip of changed files;
+wider trees show line counts and what happened to each file.
 
 Outline (tree):
   ↑ ↓ or k j    move
@@ -63,13 +68,18 @@ Outline (tree):
   e             open every folder or restore earlier choices
   n N           next/previous changed file
   c             switch between all files and changed files only
-  t             show or hide history
   r             reload
   q             quit
 
 In the strip, use ← → or h l to move between columns. In the tree, click a
 folder to toggle it, click a file to select it, or double-click to open it.
 Files open in a floating reader inside Rex and in the same pane elsewhere.
+
+History:
+  ↑ ↓ or k j    move
+  Enter         show or hide the files a commit touched
+  r             reload
+  q             quit
 
 Reader (also opened by milo view FILE):
   ↑ ↓ or k j    scroll by a line
@@ -79,8 +89,8 @@ Reader (also opened by milo view FILE):
   n N           next/previous block of changed lines
   q or Esc      close
 
-In both screens, ? opens help and Ctrl-C quits. The tree and reader also
-support the mouse wheel, Page Up/Down and Home/End.
+In every pane, ? opens help and Ctrl-C quits. The outline, history and
+reader support the mouse wheel, Page Up/Down and Home/End.
 
 Changed files are those waiting to be committed or pushed. Yellow is edited,
 green new, red removed, cyan moved, and magenta in conflict. Uncommitted
@@ -122,7 +132,7 @@ impl Pace {
         self.reported = true;
     }
 
-    /// Time until the next look: the event loop's call to `Ui::check`.
+    /// Time until the event loop next calls `Pane::check`.
     fn until_look(&self, now: Instant) -> Duration {
         let rest = if self.reported { MIN_LOOK_INTERVAL } else { self.idle }.max(self.took * REST);
         rest.saturating_sub(now.saturating_duration_since(self.ended))
@@ -134,85 +144,34 @@ impl Pace {
     }
 }
 
-/// The two things milo can fill a pane with.
-enum Ui {
-    Outline(Box<Outline>),
-    Reader(Box<Reader>),
-}
-
-impl Ui {
-    fn draw(&mut self, s: &mut Screen, help: Option<&mut Page>) {
-        if let Some(page) = help {
-            page.draw(s);
-            return;
-        }
-        match self {
-            Ui::Outline(o) => o.draw(s),
-            Ui::Reader(reader) => reader.draw(s),
-        }
-    }
-
-    /// Returns true when the program should quit.
-    fn on_key(&mut self, key: Key) -> bool {
-        match self {
-            Ui::Outline(o) => o.on_key(key),
-            Ui::Reader(reader) => reader.on_key(key),
-        }
-    }
-
-    fn help(&self) -> Page {
-        match self {
-            Ui::Outline(o) => o.help(),
-            Ui::Reader(_) => Page::reader(),
-        }
-    }
-
-    /// Takes in changes made outside milo. Returns false if the screen needs
-    /// another check soon because the repository is busy.
-    fn check(&mut self) -> bool {
-        match self {
-            Ui::Outline(o) => o.check(),
-            Ui::Reader(reader) => reader.check(),
-        }
-    }
-
-    /// How long the screen stays right if nothing happens.
-    fn next_frame(&self) -> Option<Duration> {
-        match self {
-            Ui::Outline(o) => o.next_frame(),
-            Ui::Reader(_) => None,
-        }
-    }
-
-    /// Where to watch for changes and how much the watch covers.
-    fn watch_scope(&self) -> Scope {
-        match self {
-            Ui::Outline(o) => o.watch_scope(),
-            Ui::Reader(reader) => reader.watch_scope(),
-        }
+fn draw_pane(pane: &mut dyn Pane, screen: &mut Screen, help: Option<&mut Page>) {
+    if let Some(page) = help {
+        page.draw(screen);
+    } else {
+        pane.draw(screen);
     }
 }
 
-/// Routes terminal replies and help keys before the Outline or Reader sees a key.
+/// Routes terminal replies and help keys before the pane sees them.
 /// Returns true when the program should quit.
-fn route_key(ui: &mut Ui, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> bool {
+fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> bool {
     match key {
         Key::Ctrl(b'c') | Key::Eof => return true,
         Key::Background(rgb) => screen.set_background(rgb),
         Key::Pictures(able) => screen.set_pictures(able),
         Key::CellSize(width, height) => screen.set_cell_size(width, height),
         Key::Answered => screen.answered(),
-        // Focus still matters to the outline underneath the page.
-        Key::Focus(_) => return ui.on_key(key),
+        // The pane still sees focus changes while its help is up.
+        Key::Focus(_) => return pane.on_key(key),
         _ => {
             if let Some(page) = help {
                 if !page.scroll(key, screen.h) {
                     *help = None;
                 }
             } else if key == Key::Char('?') {
-                *help = Some(ui.help());
+                *help = Some(pane.help());
             } else {
-                return ui.on_key(key);
+                return pane.on_key(key);
             }
         }
     }
@@ -222,9 +181,40 @@ fn route_key(ui: &mut Ui, screen: &mut Screen, help: &mut Option<Page>, key: Key
 /// Ends the program with a message. A path in it may hold anything, so
 /// control characters are left out.
 fn fail(message: &str) -> ! {
-    let safe: String = message.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+    let safe: String = message.chars().filter(|c| !c.is_control()).collect();
     eprintln!("milo: {safe}");
     exit(1);
+}
+
+fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
+    let dir = path.map_or(Path::new("."), Path::new);
+    Repo::open(dir).ok_or_else(|| {
+        if dir.is_file() {
+            format!("{0} is a file; to read it: milo view {0}", dir.display())
+        } else {
+            format!("{} is not a directory", dir.display())
+        }
+    })
+}
+
+/// Only known command words are text; a path can hold arbitrary bytes.
+fn open_pane(first: Option<&OsStr>, second: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
+    match (first.and_then(OsStr::to_str), second) {
+        (Some("outline"), path) => Ok(Box::new(Outline::new(open_repo(path)?, rex::inside()))),
+        (Some("history"), path) => Ok(Box::new(History::new(open_repo(path)?))),
+        (Some("view"), Some(file)) => Ok(Box::new(
+            Reader::open(Path::new(file))
+                .ok_or_else(|| format!("{} is not in a directory", Path::new(file).display()))?,
+        )),
+        (Some("view"), None) => Err("which file? milo view FILE".to_string()),
+        (Some(option), _) if option.starts_with('-') => Err(format!("no option {option}; see milo --help")),
+        (_, None) => open_default(first),
+        _ => Err("expected outline, history, or view; see milo --help".to_string()),
+    }
+}
+
+fn open_default(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
+    open_pane(Some(OsStr::new("outline")), path).map_err(|why| format!("{why}; commands: outline, history, view"))
 }
 
 fn main() {
@@ -235,33 +225,16 @@ fn main() {
     if args.next().is_some() {
         fail("too many arguments; see milo --help");
     }
-    // Paths may contain arbitrary bytes; only the words milo knows are text.
-    let mut ui = match (first.as_deref().and_then(OsStr::to_str), second.as_deref()) {
-        (Some("-h" | "--help"), None) => return print!("{USAGE}"),
-        (Some("-V" | "--version"), None) => return println!("milo {}", env!("CARGO_PKG_VERSION")),
-        (Some("view"), None) => fail("which file? milo view FILE"),
-        (Some("view"), Some(file)) => {
-            let file = Path::new(file);
-            match Reader::open(file) {
-                Some(reader) => Ui::Reader(Box::new(reader)),
-                None => fail(&format!("{} is not in a directory", file.display())),
-            }
+    if second.is_none() {
+        match first.as_deref().and_then(OsStr::to_str) {
+            Some("-h" | "--help") => return print!("{USAGE}"),
+            Some("-V" | "--version") => return println!("milo {}", env!("CARGO_PKG_VERSION")),
+            _ => {}
         }
-        (Some(option), None) if option.starts_with('-') => {
-            fail(&format!("no option {option}; see milo --help"));
-        }
-        (_, None) => {
-            let dir = first.as_deref().map_or(Path::new("."), Path::new);
-            match Repo::open(dir) {
-                Some(repo) => Ui::Outline(Box::new(Outline::new(repo, rex::inside()))),
-                None if dir.is_file() => fail(&format!("{0} is a file; to read it: milo view {0}", dir.display())),
-                None => fail(&format!("{} is not a directory", dir.display())),
-            }
-        }
-        _ => fail("too many arguments; see milo --help"),
-    };
+    }
+    let mut pane = open_pane(first.as_deref(), second.as_deref()).unwrap_or_else(|why| fail(&why));
     let (watcher, idle) = {
-        let scope = ui.watch_scope();
+        let scope = pane.watch_scope();
         let watcher = Watcher::new(&scope);
         let idle = if watcher.fd().is_some() && scope.complete { WATCHED } else { UNWATCHED };
         (watcher, idle)
@@ -289,18 +262,21 @@ fn main() {
             let (w, h) = term::size();
             screen.resize(w, h);
         }
-        ui.draw(&mut screen, help.as_mut());
+        draw_pane(pane.as_mut(), &mut screen, help.as_mut());
         screen.flush();
 
         let until_look = pace.until_look(Instant::now());
-        let wait =
-            if help.is_some() { until_look } else { ui.next_frame().map_or(until_look, |frame| frame.min(until_look)) };
+        let wait = if help.is_some() {
+            until_look
+        } else {
+            pane.next_frame().map_or(until_look, |frame| frame.min(until_look))
+        };
         let timeout_ms = i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX);
         match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
             Wait::Input => {
                 receive(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
-                    if route_key(&mut ui, &mut screen, &mut help, key) {
+                    if route_key(pane.as_mut(), &mut screen, &mut help, key) {
                         break 'run;
                     }
                 }
@@ -313,7 +289,7 @@ fn main() {
         }
         if pace.until_look(Instant::now()).is_zero() {
             let started = Instant::now();
-            let settled = ui.check();
+            let settled = pane.check();
             pace.finish_look(started, Instant::now(), settled);
         }
     }
@@ -326,6 +302,57 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn command_frame(first: Option<&OsStr>, second: Option<&OsStr>) -> Vec<String> {
+        let mut pane = open_pane(first, second).unwrap();
+        let mut screen = Screen::sized(65, 12);
+        pane.draw(&mut screen);
+        screen.text()
+    }
+
+    #[test]
+    fn each_command_opens_its_own_pane() {
+        let f = fixture::Fixture::new();
+        f.write("page.txt", "a file\n");
+        f.commit("first commit");
+        let dir = f.root.as_os_str();
+        let outline = command_frame(Some(OsStr::new("outline")), Some(dir));
+        assert!(outline.iter().any(|row| row.contains("page.txt")));
+        assert!(!outline.iter().any(|row| row.contains("first commit")));
+        assert_eq!(command_frame(Some(dir), None), outline);
+
+        let history = command_frame(Some(OsStr::new("history")), Some(dir));
+        assert!(history.iter().any(|row| row.contains("first commit")));
+        assert!(!history.iter().any(|row| row.contains("page.txt")));
+        let file = f.root.join("page.txt");
+        let reader = command_frame(Some(OsStr::new("view")), Some(file.as_os_str()));
+        assert!(reader[0].contains("page.txt"));
+        assert!(reader[1].ends_with("a file"));
+    }
+
+    #[test]
+    fn no_arguments_open_the_outline_in_the_current_directory() {
+        assert_eq!(command_frame(None, None), command_frame(Some(OsStr::new("outline")), None));
+    }
+
+    #[test]
+    fn a_directory_named_like_a_command_is_reachable_by_path() {
+        let f = fixture::Fixture::folder();
+        f.write("history/page.txt", "a file\n");
+        let path = f.root.join("./history");
+        let rows = command_frame(Some(path.as_os_str()), None);
+        assert_eq!(rows[0], " history");
+        assert!(rows.iter().any(|row| row.contains("page.txt")));
+    }
+
+    #[test]
+    fn an_unknown_word_names_the_commands() {
+        let Err(why) = open_pane(Some(OsStr::new("not-a-milo-command")), None) else {
+            panic!("unknown word opened a pane");
+        };
+        assert!(why.contains("not-a-milo-command") && why.contains("outline, history, view"), "{why}");
+        assert_eq!(why.lines().count(), 1);
+    }
 
     #[test]
     fn quiet_projects_get_a_look_even_without_a_report() {
@@ -375,25 +402,25 @@ mod tests {
     fn help_scrolls_by_a_page_and_escape_restores_the_outline() {
         let f = fixture::Fixture::new();
         f.write("page.txt", "a file\n");
-        let mut ui = Ui::Outline(Box::new(Outline::new(Repo::open(&f.root).unwrap(), false)));
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
         let mut screen = Screen::sized(65, 12);
         let mut help = None;
-        ui.draw(&mut screen, help.as_mut());
+        draw_pane(&mut pane, &mut screen, help.as_mut());
         let before = screen.text();
 
-        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Char('?')));
-        ui.draw(&mut screen, help.as_mut());
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Char('?')));
+        draw_pane(&mut pane, &mut screen, help.as_mut());
         let first = screen.text();
         assert!(first[0].trim_start().starts_with("Files"));
         assert!(first[11].contains("Esc closes"));
-        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::PgDn));
-        ui.draw(&mut screen, help.as_mut());
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::PgDn));
+        draw_pane(&mut pane, &mut screen, help.as_mut());
         assert_eq!(screen.text()[0], first[10]);
-        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::PgUp));
-        ui.draw(&mut screen, help.as_mut());
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::PgUp));
+        draw_pane(&mut pane, &mut screen, help.as_mut());
         assert_eq!(screen.text(), first);
-        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Esc));
-        ui.draw(&mut screen, help.as_mut());
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Esc));
+        draw_pane(&mut pane, &mut screen, help.as_mut());
         assert_eq!(screen.text(), before);
     }
 
@@ -401,14 +428,14 @@ mod tests {
     fn help_uses_the_nested_reader_page_and_terminal_quit_bypasses_it() {
         let f = fixture::Fixture::new();
         f.write("page.txt", "a file\n");
-        let mut ui = Ui::Outline(Box::new(Outline::new(Repo::open(&f.root).unwrap(), false)));
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
         let mut screen = Screen::sized(65, 12);
         let mut help = None;
-        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Enter));
-        assert!(!route_key(&mut ui, &mut screen, &mut help, Key::Char('?')));
-        ui.draw(&mut screen, help.as_mut());
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Enter));
+        assert!(!route_key(&mut pane, &mut screen, &mut help, Key::Char('?')));
+        draw_pane(&mut pane, &mut screen, help.as_mut());
         assert!(screen.text()[0].trim_start().starts_with("Lines"));
-        assert!(route_key(&mut ui, &mut screen, &mut help, Key::Ctrl(b'c')));
-        assert!(route_key(&mut ui, &mut screen, &mut help, Key::Eof));
+        assert!(route_key(&mut pane, &mut screen, &mut help, Key::Ctrl(b'c')));
+        assert!(route_key(&mut pane, &mut screen, &mut help, Key::Eof));
     }
 }

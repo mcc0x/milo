@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::keys::Direction::{Next, Previous};
 use crate::keys::Key;
+use crate::ui::Pane;
 
 use super::Outline;
 use super::draw::margin;
@@ -18,29 +19,25 @@ enum Pointed<'a> {
 }
 
 impl Outline {
-    /// Returns true to quit the program; closing the reader returns to the tree.
-    pub fn on_key(&mut self, key: Key) -> bool {
+    pub(super) fn outline_key(&mut self, key: Key) {
         let now = Instant::now();
         if let Key::Focus(here) = key {
             self.attention.focus(here, now);
-            return false;
+            return;
         }
         self.attention.used(now);
         if let Some(reader) = &mut self.reading {
             if reader.on_key(key) {
                 self.reading = None;
             }
-            return false;
+            return;
         }
         self.by_click &= matches!(key, Key::Click(..));
         match key {
-            Key::Char('q') => return true,
             Key::Char('r') => self.reload(),
-            Key::Char('t') => self.show_history = !self.show_history,
             _ if self.painted.strip => self.strip_key(key),
             _ => self.tree_key(key, now),
         }
-        false
     }
 
     /// The strip has no cursor: its keys move it a column at a time.

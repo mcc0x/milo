@@ -191,6 +191,8 @@ pub struct Repo {
     unpushed: Unpushed,
     tracked: Tracked,
     moved: Option<RenameLookup>,
+    /// Files a commit touched stay the same even when the worktree or branch moves.
+    committed: HashMap<String, Vec<PendingFile>>,
 }
 
 /// Git versions without `--path-format` can still give the project root.
@@ -554,6 +556,39 @@ impl Repo {
         }
     }
 
+    /// Counts paths with work to commit, counting a move once.
+    pub fn uncommitted_count(&self) -> usize {
+        self.status.tracked_uncommitted.len() - self.status.sources.len() + self.status.untracked.len()
+    }
+
+    pub fn upstream_ahead(&self) -> Option<u32> {
+        self.status.upstream.as_ref().map(|_| self.status.ahead)
+    }
+
+    /// Counts the whole range, not just the commits the pane has loaded.
+    pub fn commits_to_push(&self) -> Option<u32> {
+        if let Some(ahead) = self.upstream_ahead() {
+            return Some(ahead);
+        }
+        let Some(base) = &self.ends().base else { return Some(0) };
+        let raw = self.git(&["rev-list", "--count", &format!("{base}..HEAD")])?;
+        self.require(std::str::from_utf8(&raw).ok().and_then(|n| n.trim_end().parse().ok()))
+    }
+
+    /// Loads the files once per commit. A failed read can be tried again.
+    pub fn load_commit_files(&mut self, commit: &Commit) {
+        if !self.committed.contains_key(&commit.hash)
+            && let Some(guard) = &self.guard
+            && let Some(raw) = run::commit_diff(&self.root, guard, &commit.hash)
+        {
+            self.committed.insert(commit.hash.clone(), parse_files(&raw));
+        }
+    }
+
+    pub fn commit_files(&self, commit: &Commit) -> Option<&[PendingFile]> {
+        self.committed.get(&commit.hash).map(Vec::as_slice)
+    }
+
     /// The newest `limit` commits, newest first, or `None` on failure.
     pub fn history(&self, limit: usize) -> Option<Vec<Commit>> {
         if !self.ok() {
@@ -562,8 +597,13 @@ impl Repo {
         if !self.ends().has_commit() {
             return Some(Vec::new());
         }
-        let unpushed = match &self.ends().base {
-            Some(base) => self.git(&["rev-list", "-n", "1000", &format!("{base}..HEAD")])?,
+        let target = match self.upstream_ahead() {
+            Some(0) => None,
+            Some(_) => self.status.upstream.as_deref(),
+            None => self.ends().base.as_deref(),
+        };
+        let unpushed = match target {
+            Some(target) => self.git(&["rev-list", "-n", "1000", "--end-of-options", &format!("{target}..HEAD")])?,
             None => Vec::new(),
         };
         let raw =

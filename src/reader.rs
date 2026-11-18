@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::{Kind, Repo, Stamp};
+use crate::help::Page;
 use crate::icons;
 use crate::keys::{Direction, Key};
 use crate::picture::{self, Picture};
 use crate::read::{self, Content};
 use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
-use crate::ui::{self, ADD, DEL, FAINT};
+use crate::ui::{self, ADD, DEL, FAINT, Pane};
 use crate::width::{byte_at_col, str_width};
 
 /// How many bytes to read when there is no diff text to show.
@@ -257,11 +258,6 @@ impl Reader {
         Some(reader)
     }
 
-    /// The directories to watch, and whether watching them misses nothing.
-    pub fn watch_scope(&self) -> crate::watch::Scope {
-        self.repo.watch_scope()
-    }
-
     /// What to show of a file without diff lines to show: the picture it
     /// is, the text it holds, or why neither.
     fn file_body(&mut self, kind: Kind) -> Body {
@@ -330,18 +326,6 @@ impl Reader {
         self.repo.ok().then_some(diff)
     }
 
-    /// Takes in changes made outside milo. Returns false while git is busy.
-    pub fn check(&mut self) -> bool {
-        if self.repo.busy() {
-            return false;
-        }
-        if self.repo.poll(&[]) || (self.repo.ok() && Stamp::at(&self.absolute) != self.stamp) {
-            self.load();
-            self.top = self.top.min(self.last_top());
-        }
-        true
-    }
-
     fn last_top(&self) -> usize {
         self.body.lines().len().saturating_sub(self.rows.max(1))
     }
@@ -356,8 +340,50 @@ impl Reader {
             self.top = top;
         }
     }
+}
 
-    pub fn draw(&mut self, s: &mut Screen) {
+impl Pane for Reader {
+    fn help(&self) -> Page {
+        Page::reader()
+    }
+
+    fn watch_scope(&self) -> crate::watch::Scope {
+        self.repo.watch_scope()
+    }
+
+    fn check(&mut self) -> bool {
+        if self.repo.busy() {
+            return false;
+        }
+        if self.repo.poll(&[]) || (self.repo.ok() && Stamp::at(&self.absolute) != self.stamp) {
+            self.load();
+            self.top = self.top.min(self.last_top());
+        }
+        true
+    }
+
+    fn key(&mut self, key: Key) -> bool {
+        let key = match key {
+            Key::Char(' ') => Key::PgDn,
+            Key::Char('b') => Key::PgUp,
+            _ => key,
+        };
+        match key {
+            Key::Esc => return true,
+            Key::Char('n') => self.jump(Direction::Next),
+            Key::Char('N') => self.jump(Direction::Previous),
+            Key::Char('l') | Key::Right => self.pan += 8,
+            Key::Char('h') | Key::Left => self.pan = self.pan.saturating_sub(8),
+            _ => {
+                if let Some(rows) = key.rows(self.rows) {
+                    self.scroll(rows);
+                }
+            }
+        }
+        false
+    }
+
+    fn draw(&mut self, s: &mut Screen) {
         s.clear();
         let (w, h) = (s.w, s.h);
         if w < 20 || h < 3 {
@@ -407,7 +433,9 @@ impl Reader {
         }
         self.draw_hint(s);
     }
+}
 
+impl Reader {
     fn draw_hint(&self, s: &mut Screen) {
         let changes = self.kind != Kind::None
             && matches!(&self.body, Body::Text(text) if text.lines.len() > (text.added + text.removed) as usize);
@@ -443,28 +471,6 @@ impl Reader {
         let mut x = 1 + ui::icon(s, 1, 0, room, icons::file(name));
         x += s.put_fit(x, 0, room.saturating_sub(x), name, Style::PLAIN.bold());
         s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, FAINT);
-    }
-
-    /// Returns true when the Reader should close.
-    pub fn on_key(&mut self, key: Key) -> bool {
-        let key = match key {
-            Key::Char(' ') => Key::PgDn,
-            Key::Char('b') => Key::PgUp,
-            _ => key,
-        };
-        match key {
-            Key::Char('q') | Key::Esc => return true,
-            Key::Char('n') => self.jump(Direction::Next),
-            Key::Char('N') => self.jump(Direction::Previous),
-            Key::Char('l') | Key::Right => self.pan += 8,
-            Key::Char('h') | Key::Left => self.pan = self.pan.saturating_sub(8),
-            _ => {
-                if let Some(rows) = key.rows(self.rows) {
-                    self.scroll(rows);
-                }
-            }
-        }
-        false
     }
 }
 

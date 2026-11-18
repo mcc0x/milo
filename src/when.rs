@@ -1,4 +1,4 @@
-//! Gives the history panel local calendar days and short commit ages.
+//! Gives the history pane local calendar days and short commit ages.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

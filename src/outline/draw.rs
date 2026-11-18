@@ -1,10 +1,9 @@
-//! Lays out and draws the project heading, history, and file tree or strip.
+//! Lays out and draws the project heading and file tree or strip.
 
 use std::borrow::Cow;
 use std::time::Instant;
 
-use crate::git::{Commit, Kind, PendingFile};
-use crate::history::{self, Placement};
+use crate::git::{Kind, PendingFile};
 use crate::icons;
 use crate::screen::{self, Screen, Style, Wash};
 use crate::tree::Node;
@@ -19,10 +18,6 @@ const HEADING_ROWS: usize = 4;
 const STRIP_ROWS: usize = 7;
 /// From this height the last row can show the keys.
 const HINT_ROWS: usize = 12;
-/// From this height history can sit beneath the outline.
-const HISTORY_ROWS: usize = 20;
-/// From this width history can sit beside the outline.
-const SIDE_COLS: usize = 90;
 /// From this outline width each file also says what happened to it.
 const WIDE_COLS: usize = 52;
 
@@ -35,7 +30,6 @@ pub(super) struct Layout {
     heading: bool,
     hint: bool,
     wide: bool,
-    history: Option<Placement>,
 }
 
 impl Layout {
@@ -53,7 +47,7 @@ impl Layout {
     }
 }
 
-fn arrange(w: usize, h: usize, git: bool, history: &[Commit], uncommitted: usize, tree_rows: usize) -> Layout {
+fn arrange(w: usize, h: usize, git: bool) -> Layout {
     if w < 12 || h == 0 {
         return Layout::default();
     }
@@ -61,21 +55,8 @@ fn arrange(w: usize, h: usize, git: bool, history: &[Commit], uncommitted: usize
     let heading = h >= HEADING_ROWS;
     let hint = h >= HINT_ROWS;
     let body_top = usize::from(heading);
-    let avail = h - body_top - usize::from(hint);
-    let (mut width, mut body_rows, mut panel) = (w, avail, None);
-    if !history.is_empty() {
-        if w >= SIDE_COLS && h >= 3 {
-            let panel_width = (w / 3).clamp(30, 52);
-            let left = w - panel_width;
-            width = left - 1; // Leave one column between the outline and history.
-            panel = Some(Placement::Beside { left, width: panel_width, rows: body_top + avail });
-        } else if !strip && h >= HISTORY_ROWS {
-            let rows = history::below_rows(history, uncommitted, avail, tree_rows);
-            body_rows -= rows;
-            panel = Some(Placement::Beneath { top: body_top + body_rows + 1, width: w, rows: rows - 1 });
-        }
-    }
-    Layout { strip, width, body_top, body_rows, heading, hint, wide: width >= WIDE_COLS, history: panel }
+    let body_rows = h - body_top - usize::from(hint);
+    Layout { strip, width: w, body_top, body_rows, heading, hint, wide: w >= WIDE_COLS }
 }
 
 /// Rows to keep between the cursor and the edge of the tree, when possible.
@@ -84,23 +65,15 @@ pub(super) fn margin(rows: usize) -> usize {
 }
 
 impl Outline {
-    pub fn draw(&mut self, s: &mut Screen) {
-        if let Some(reader) = &mut self.reading {
-            return reader.draw(s);
-        }
+    pub(super) fn draw_outline(&mut self, s: &mut Screen) {
         s.clear();
         let now = Instant::now();
         self.expire(now);
         let uncommitted = self.pending.partition_point(|file| !file.unpushed);
-        let history = if self.show_history { &self.history[..] } else { &[] };
-        let layout = arrange(s.w, s.h, self.repo.git, history, uncommitted, self.tree.rows.len());
+        let layout = arrange(s.w, s.h, self.repo.git);
         if layout.width == 0 {
             self.painted = layout;
             return;
-        }
-        if let Some(placement) = layout.history {
-            let context = history::Context { remote: self.repo.remote(), uncommitted, new_commits: &self.new_commits };
-            history::draw(s, &self.history, &context, placement);
         }
         if layout.heading {
             self.draw_heading(s, layout.width, uncommitted);
@@ -416,63 +389,29 @@ mod tests {
 
     #[test]
     fn the_shortest_panes_spend_their_rows_on_files() {
-        let short = arrange(40, 3, true, &[], 0, 0);
+        let short = arrange(40, 3, true);
         assert!(!short.heading);
         assert_eq!((short.body_top, short.body_rows), (0, 3));
-        let headed = arrange(40, 4, true, &[], 0, 0);
+        let headed = arrange(40, 4, true);
         assert!(headed.heading);
         assert_eq!((headed.body_top, headed.body_rows), (1, 3));
-        assert!(arrange(40, 7, true, &[], 0, 0).strip);
-        assert!(!arrange(40, 8, true, &[], 0, 0).strip);
-        assert!(!arrange(40, 7, false, &[], 0, 0).strip);
+        assert!(arrange(40, 7, true).strip);
+        assert!(!arrange(40, 8, true).strip);
+        assert!(!arrange(40, 7, false).strip);
     }
 
     #[test]
     fn the_twelfth_row_can_show_a_hint() {
-        let before = arrange(52, 11, true, &[], 0, 0);
-        let after = arrange(52, 12, true, &[], 0, 0);
+        let before = arrange(52, 11, true);
+        let after = arrange(52, 12, true);
         assert!(!before.hint && after.hint);
         assert_eq!(before.body_rows, 10);
         assert_eq!(after.body_rows, 10);
     }
 
     #[test]
-    fn history_can_claim_five_rows_beneath_a_full_tree_or_more_in_a_tall_pane() {
-        let history = commits();
-        assert_eq!(arrange(89, 19, true, &history, 0, 99).history, None);
-        let ordinary = arrange(89, 20, true, &history, 0, 99);
-        assert_eq!(ordinary.history, Some(Placement::Beneath { top: 15, width: 89, rows: 4 }));
-        assert_eq!(ordinary.body_rows, 13);
-        let tall = arrange(89, 34, true, &history, 0, 99);
-        assert_eq!(tall.history, Some(Placement::Beneath { top: 26, width: 89, rows: 7 }));
-        assert_eq!(tall.body_rows, 24);
-    }
-
-    #[test]
-    fn history_goes_beside_the_outline_when_wide_enough() {
-        let history = commits();
-        assert_eq!(arrange(89, 11, true, &history, 0, 99).history, None);
-        assert_eq!(arrange(90, 2, true, &history, 0, 99).history, None);
-        let wide = arrange(90, 20, true, &history, 0, 99);
-        assert_eq!(wide.history, Some(Placement::Beside { left: 60, width: 30, rows: 19 }));
-        assert_eq!(wide.width, 59);
-        assert_eq!(wide.body_rows, 18);
-    }
-
-    #[test]
-    fn extra_columns_require_enough_width_in_the_outline_itself() {
-        assert!(!arrange(51, 8, true, &[], 0, 99).wide);
-        assert!(arrange(52, 8, true, &[], 0, 99).wide);
-    }
-
-    fn commits() -> [Commit; 8] {
-        std::array::from_fn(|_| Commit {
-            hash: String::new(),
-            subject: String::new(),
-            time: 0,
-            day: 0,
-            unpushed: false,
-            merge: false,
-        })
+    fn extra_columns_require_enough_width() {
+        assert!(!arrange(51, 8, true).wide);
+        assert!(arrange(52, 8, true).wide);
     }
 }

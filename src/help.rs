@@ -50,12 +50,6 @@ fn outline(git: bool) -> Vec<Row> {
             sample("● ○     ", Style::PLAIN.bold(), "being written"),
             sample("•       ", Style::PLAIN, "just changed"),
             Row::new(),
-            heading("History"),
-            sample("○", Style::PLAIN.bold(), "files to commit"),
-            sample("●", Style::PLAIN.bold(), "a commit to push"),
-            sample("●", Style::PLAIN.faint(), "already pushed"),
-            sample("●", Style::PLAIN, "no remote"),
-            Row::new(),
         ]);
     }
     rows.extend([
@@ -72,13 +66,34 @@ fn outline(git: bool) -> Vec<Row> {
         key("e    ", "open all/restore"),
     ]);
     if git {
-        rows.extend([key("n N  ", "next/prev change"), key("c    ", "changed only"), key("t    ", "toggle history")]);
+        rows.extend([key("n N  ", "next/prev change"), key("c    ", "changed only")]);
     }
     rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
     if git {
         rows.extend([Row::new(), heading("Strip keys"), key("← →  ", "scroll (h l)"), key("g G  ", "first/last")]);
     }
     rows
+}
+
+fn history() -> Vec<Row> {
+    vec![
+        heading("Commits"),
+        sample("○", Style::PLAIN.bold(), "files to commit"),
+        sample("●", Style::PLAIN.bold(), "a commit to push"),
+        sample("●", FAINT, "already pushed"),
+        sample("●", Style::PLAIN, "no remote"),
+        sample("•", Style::PLAIN.bold(), "just arrived"),
+        sample("+2", ADD, "lines added"),
+        sample("−1", DEL, "lines removed"),
+        Row::new(),
+        heading("Keys"),
+        key("↑ ↓  ", "move (k j)"),
+        key("Pg↑↓ ", "move by a page"),
+        key("g G  ", "first/last"),
+        key("Enter", "show/hide files"),
+        key("r    ", "reload"),
+        key("q    ", "quit"),
+    ]
 }
 
 fn reader() -> Vec<Row> {
@@ -108,6 +123,10 @@ pub struct Page {
 impl Page {
     pub fn outline(git: bool) -> Self {
         Self { rows: outline(git), top: 0 }
+    }
+
+    pub fn history() -> Self {
+        Self { rows: history(), top: 0 }
     }
 
     pub fn reader() -> Self {
@@ -152,7 +171,7 @@ mod tests {
     fn every_help_row_fits_a_28_column_pane() {
         let room = 28 - 2; // The first and last columns are reserved.
         assert!(str_width(FOOTER) <= room);
-        for row in outline(true).into_iter().chain(outline(false)).chain(reader()) {
+        for row in outline(true).into_iter().chain(outline(false)).chain(history()).chain(reader()) {
             let width: usize = row.iter().map(|(text, _)| str_width(text)).sum();
             assert!(width <= room, "{width} columns: {:?}", row.iter().map(|(text, _)| text).collect::<Vec<_>>());
         }

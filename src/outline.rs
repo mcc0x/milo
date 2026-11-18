@@ -1,4 +1,4 @@
-//! Keeps the outline's tree, pending files, history and recent marks up to date.
+//! Keeps the outline's tree, pending files and recent marks up to date.
 
 mod attention;
 mod draw;
@@ -7,10 +7,13 @@ mod input;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::git::{Commit, Ends, Kind, PendingFile, Repo};
+use crate::git::{Kind, PendingFile, Repo};
 use crate::help::Page;
+use crate::keys::Key;
 use crate::reader::Reader;
+use crate::screen::Screen;
 use crate::tree::{Folds, Tree};
+use crate::ui::Pane;
 use crate::watch::Scope;
 use crate::{rex, walk};
 
@@ -23,8 +26,6 @@ const LIVE: Duration = Duration::from_secs(3);
 const PULSE: Duration = Duration::from_millis(500);
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
-/// Recent commits to keep for the timeline of dots and the list beneath it.
-const HISTORY_LIMIT: usize = 300;
 
 pub struct Outline {
     repo: Repo,
@@ -37,14 +38,8 @@ pub struct Outline {
     folds: Folds,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
-    /// Recent commits, newest first, and what they were read for.
-    history: Vec<Commit>,
-    history_key: Ends,
-    show_history: bool,
     /// Files that changed while the outline was open, by path, and when.
     file_marks: HashMap<String, Instant>,
-    /// Commits that landed while the outline was open, by hash, and when.
-    new_commits: HashMap<String, Instant>,
     attention: Attention,
     pending_only: bool,
     sel: usize,
@@ -66,11 +61,6 @@ pub struct Outline {
     reading: Option<Reader>,
 }
 
-struct Replaced {
-    pending: Vec<PendingFile>,
-    history: Vec<Commit>,
-}
-
 impl Outline {
     pub fn new(repo: Repo, inside_rex: bool) -> Outline {
         let mut outline = Outline {
@@ -80,11 +70,7 @@ impl Outline {
             tree: Tree::default(),
             folds: Folds::default(),
             recent: Vec::new(),
-            history: Vec::new(),
-            history_key: Ends::default(),
-            show_history: true,
             file_marks: HashMap::new(),
-            new_commits: HashMap::new(),
             attention: Attention::new(Instant::now()),
             pending_only: false,
             sel: 0,
@@ -108,11 +94,6 @@ impl Outline {
         outline
     }
 
-    /// What to watch for changes to the outline.
-    pub fn watch_scope(&self) -> Scope {
-        self.repo.watch_scope()
-    }
-
     /// Refreshes the plain-folder listing, reporting whether its paths changed.
     fn relist(&mut self) -> bool {
         let listing = walk::list(&self.repo.root, |p| self.folds.is_open(p));
@@ -129,9 +110,8 @@ impl Outline {
         self.relayout(selected);
     }
 
-    /// Rebuilds what the outline shows. On a successful git refresh, returns
-    /// the old lists so `reload` can mark what is new.
-    fn load(&mut self) -> Option<Replaced> {
+    /// Rebuilds what the outline shows, returning the old files so new work can be marked.
+    fn load(&mut self) -> Option<Vec<PendingFile>> {
         if !self.repo.git {
             self.relist();
             self.build_folder();
@@ -145,19 +125,7 @@ impl Outline {
         self.tree.rebuild(tracked, &self.pending);
         self.update_recent();
         self.relayout(selected);
-        let history = self.load_history();
-        Some(Replaced { pending: files, history })
-    }
-
-    /// Keep the history while the branch tip and comparison base stay the same.
-    fn load_history(&mut self) -> Vec<Commit> {
-        if self.repo.ends() != &self.history_key
-            && let Some(history) = self.repo.history(HISTORY_LIMIT)
-        {
-            self.history_key.clone_from(self.repo.ends());
-            return std::mem::replace(&mut self.history, history);
-        }
-        Vec::new()
+        Some(files)
     }
 
     fn update_recent(&mut self) {
@@ -179,26 +147,14 @@ impl Outline {
         self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|s| s.written)));
     }
 
-    /// Rebuilds the outline and marks new commits and changed pending files.
+    /// Rebuilds the outline and marks changed pending files.
     fn reload(&mut self) {
         let Some(old) = self.load() else { return };
         let now = Instant::now();
-        self.highlight_commits(&old.history, now);
         let following = self.attention.following(now);
-        let newest = self.mark_files(&old.pending, now).filter(|_| following).map(str::to_owned);
+        let newest = self.mark_files(&old, now).filter(|_| following).map(str::to_owned);
         if let Some(newest) = newest {
             self.follow(&newest);
-        }
-    }
-
-    fn highlight_commits(&mut self, before: &[Commit], now: Instant) {
-        // With nothing known before, every commit would count as new.
-        if before.is_empty() {
-            return;
-        }
-        let known: HashSet<&str> = before.iter().map(|c| c.hash.as_str()).collect();
-        for c in self.history.iter().filter(|c| !known.contains(c.hash.as_str())) {
-            self.new_commits.insert(c.hash.clone(), now);
         }
     }
 
@@ -223,45 +179,10 @@ impl Outline {
         newest.map(|f| f.path.as_str())
     }
 
-    /// Takes in changes made outside milo. Returns false while git is busy.
-    /// The reader in this pane, if open, is checked as well.
-    pub fn check(&mut self) -> bool {
-        if let Some(reader) = &mut self.reading {
-            reader.check();
-        }
-        if self.repo.busy() {
-            return false;
-        }
-        if self.repo.git {
-            if self.repo.poll(&self.pending) {
-                self.reload();
-            }
-        } else if self.relist() {
-            self.build_folder();
-        }
-        true
-    }
-
-    /// How long the screen stays right if nothing happens: until a mark
-    /// fades or pulses, or a note has been up long enough.
-    pub fn next_frame(&self) -> Option<Duration> {
-        if self.reading.is_some() {
-            return None;
-        }
-        let now = Instant::now();
-        let marks = self.file_marks.values().chain(self.new_commits.values());
-        let mark = marks
-            .map(|&at| if now.saturating_duration_since(at) < LIVE { PULSE } else { self.attention.mark_left(at, now) })
-            .min();
-        let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
-        [mark, note].into_iter().flatten().min()
-    }
-
     /// Forgets marks and notes that have had their time.
     fn expire(&mut self, now: Instant) {
         let keep = |at| !self.attention.mark_left(at, now).is_zero();
         self.file_marks.retain(|_, at| keep(*at));
-        self.new_commits.retain(|_, at| keep(*at));
         if self.note.as_ref().is_some_and(|(_, at)| now.saturating_duration_since(*at) >= NOTE) {
             self.note = None;
         }
@@ -331,10 +252,63 @@ impl Outline {
             }
         }
     }
+}
 
-    /// The help page for the Outline or its open Reader.
-    pub fn help(&self) -> Page {
-        if self.reading.is_some() { Page::reader() } else { Page::outline(self.repo.git) }
+impl Pane for Outline {
+    fn draw(&mut self, screen: &mut Screen) {
+        if let Some(reader) = &mut self.reading {
+            reader.draw(screen);
+        } else {
+            self.draw_outline(screen);
+        }
+    }
+
+    fn key(&mut self, key: Key) -> bool {
+        self.outline_key(key);
+        false
+    }
+
+    fn close(&mut self) -> bool {
+        self.attention.used(Instant::now());
+        self.reading.take().is_none()
+    }
+
+    fn watch_scope(&self) -> Scope {
+        self.repo.watch_scope()
+    }
+
+    /// Checks both the outline and the reader when they share a pane.
+    fn check(&mut self) -> bool {
+        let reader_settled = self.reading.as_mut().is_none_or(Pane::check);
+        if self.repo.busy() {
+            return false;
+        }
+        if self.repo.git {
+            if self.repo.poll(&self.pending) {
+                self.reload();
+            }
+        } else if self.relist() {
+            self.build_folder();
+        }
+        reader_settled
+    }
+
+    fn next_frame(&self) -> Option<Duration> {
+        if self.reading.is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        let mark = self
+            .file_marks
+            .values()
+            .map(|&at| if now.saturating_duration_since(at) < LIVE { PULSE } else { self.attention.mark_left(at, now) })
+            .min();
+        let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
+        [mark, note].into_iter().flatten().min()
+    }
+
+    fn help(&self) -> Page {
+        self.reading.as_ref().map_or_else(|| Page::outline(self.repo.git), Pane::help)
     }
 }
 
@@ -344,8 +318,6 @@ mod tests {
 
     use super::*;
     use crate::fixture::Fixture;
-    use crate::keys::Key;
-    use crate::screen::Screen;
 
     fn project() -> Fixture {
         let f = Fixture::new();
@@ -526,24 +498,12 @@ mod tests {
     }
 
     #[test]
-    fn a_twentieth_row_makes_room_for_history_beneath_the_tree() {
+    fn the_twelfth_row_shows_the_key_hint() {
         let f = project();
         let mut o = open(&f);
-        assert!(!draw(&mut o, 65, 19).text().iter().any(|row| row.contains("History")));
-        let tall = draw(&mut o, 65, 20).text();
-        let history = tall.iter().position(|row| row.trim_start() == "History").unwrap();
-        assert!(tall[..history].iter().any(|row| row.contains("main.rs")));
-        assert!(tall[history + 1..].iter().any(|row| row.contains("first")));
-    }
-
-    #[test]
-    fn a_ninetieth_column_puts_history_beside_the_tree() {
-        let f = project();
-        let mut o = open(&f);
-        assert!(!draw(&mut o, 89, 11).text().iter().any(|row| row.contains("History")));
-        let wide = draw(&mut o, 90, 11).text();
-        assert!(wide[0].starts_with(" project") && wide[0].ends_with("History"), "{wide:?}");
-        assert!(wide.iter().any(|row| row.contains("first")));
+        assert!(!draw(&mut o, 65, 11).text().iter().any(|row| row.contains("? help")));
+        let tall = draw(&mut o, 65, 12).text();
+        assert!(tall[11].contains("? help"), "{tall:?}");
     }
 
     #[test]
@@ -561,14 +521,14 @@ mod tests {
     fn clicks_refer_to_the_painted_layout_until_the_next_frame() {
         let f = project();
         let mut o = open(&f);
-        let rows = draw(&mut o, 90, 11).text();
-        let y = rows.iter().position(|row| row.contains("README.md")).unwrap();
+        let mut screen = draw(&mut o, 60, 11);
+        let y = screen.text().iter().position(|row| row.contains("README.md")).unwrap();
         let before = o.selected_path();
-        o.on_key(Key::Char('t'));
+        screen.resize(90, 11);
         o.on_key(Key::Click(65, y));
         assert_eq!(o.selected_path(), before);
 
-        draw(&mut o, 90, 11);
+        o.draw(&mut screen);
         o.on_key(Key::Click(65, y));
         assert_eq!(o.selected_path().as_deref(), Some("README.md"));
     }

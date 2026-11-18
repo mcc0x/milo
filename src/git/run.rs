@@ -39,6 +39,26 @@ pub(super) fn limited_output(root: &Path, guard: &[String], args: &[&str], limit
     checked_output(command(root, guard, args), limit)
 }
 
+/// Reads one commit against its first parent, or the empty tree for a root commit.
+pub(super) fn commit_diff(root: &Path, guard: &[String], hash: &str) -> Option<Vec<u8>> {
+    let args = [
+        "diff-tree",
+        "--root",
+        "--diff-merges=first-parent",
+        "--no-commit-id",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-r",
+        "-M",
+        "--raw",
+        "--numstat",
+        "-z",
+        hash,
+        "--",
+    ];
+    output(root, guard, &args)
+}
+
 /// A missing ref or unrelated histories can give no object and exit with code 1.
 pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Option<Option<String>> {
     let (status, raw) = capture(command(root, guard, args), OUTPUT_LIMIT).ok()?;

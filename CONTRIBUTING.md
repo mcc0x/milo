@@ -10,7 +10,8 @@ You need Rust 1.91 or later, git, and a terminal.
 git clone <your fork>
 cd milo
 cargo build --release
-./target/release/milo            # the outline, in this repository
+./target/release/milo outline    # the outline, in this repository
+./target/release/milo history    # recent commits
 ./target/release/milo view src/main.rs
 ```
 
@@ -60,6 +61,7 @@ The README has a one-line description of every module. The short version:
 | what a row, the header or the hint line looks like | `src/outline/draw.rs` |
 | what a key or click does in the outline | `src/outline/input.rs` |
 | when the outline follows work, or how long a mark stays | `src/outline/attention.rs` |
+| the history heading, commit list or opened files | `src/history.rs` |
 | the reader | `src/reader.rs`, and `src/diff.rs` for how a diff becomes lines |
 | which git commands run, and how safely | `src/git/run.rs` |
 | what is read from git's output | `src/git/parse.rs` |
@@ -67,6 +69,13 @@ The README has a one-line description of every module. The short version:
 | how the screen is drawn and what a style is | `src/screen.rs` |
 | keys and mouse input | `src/keys.rs` |
 | how often milo looks for changes | `Pace` in `src/main.rs` |
+| the contract a pane implements | `Pane` in `src/ui.rs` |
+
+### Adding a pane
+
+Put the screen in a new module under `src/` and implement `ui::Pane`. The trait gives the shared loop a frame to draw, keys to pass on, a help page, and a place to watch and check for changes. A pane with timed redraws can also implement `next_frame`.
+
+Declare the module in `src/main.rs`, add one arm to `open_pane`, and list the command in `--help`. Do not add a second event loop.
 
 ### Adding a language to the reader
 
