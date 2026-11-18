@@ -28,6 +28,10 @@ changed files when short, with what happened to each when wide. It updates
 on its own.
 
   ↑ ↓ or j k    move                enter    open or close a folder
+  n N           next, previous changed file
+  } {           next, previous folder
+  J K           next, previous beside this one, over anything nested
+  p             up to the parent folder
   e             open every folder   c        changed files only
   r             reload              q        quit
 

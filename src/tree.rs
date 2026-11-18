@@ -147,4 +147,27 @@ impl Tree {
         let node = *self.index.get(path)?;
         self.rows.iter().position(|&(n, _)| n == node)
     }
+
+    /// The nearest pending file after (or before) node `from` in tree order,
+    /// wrapping around, whether or not its folders are open.
+    pub fn next_pending(&self, from: Option<u32>, forward: bool) -> Option<u32> {
+        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut stack: Vec<u32> = self.nodes[0].children.iter().rev().copied().collect();
+        while let Some(i) = stack.pop() {
+            order.push(i);
+            stack.extend(self.nodes[i as usize].children.iter().rev());
+        }
+        let pending = |&&n: &&u32| !self.nodes[n as usize].dir && self.nodes[n as usize].kind != Kind::None;
+        let at = from.and_then(|n| order.iter().position(|&x| x == n));
+        let (before, after) = match at {
+            Some(at) => (&order[..at], &order[at + 1..]),
+            None => (&order[..0], &order[..]),
+        };
+        let hit = if forward {
+            after.iter().chain(before).find(pending)
+        } else {
+            before.iter().rev().chain(after.iter().rev()).find(pending)
+        };
+        hit.copied()
+    }
 }

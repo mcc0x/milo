@@ -312,8 +312,11 @@ impl Outline {
             (true, 60..) => {
                 let e = if self.all_open { "e close folders" } else { "e open all" };
                 let c = if self.changed_only { "c all files" } else { "c changed only" };
-                format!("enter open · {e} · {c} · q quit")
+                // With work pending, stepping through it is the key worth knowing.
+                let first = if self.files.is_empty() { "enter open" } else { "n next change" };
+                format!("{first} · {e} · {c} · q quit")
             }
+            (true, 30..) if !self.files.is_empty() => "n next · e all · c changed · q quit".to_string(),
             (true, 30..) => "e open all · c changed · q quit".to_string(),
             (true, _) => "e all · c changed".to_string(),
             (false, 30..) => {
@@ -472,6 +475,49 @@ impl Outline {
         self.sel = self.sel.clamp(low, high.max(low));
     }
 
+    /// Jumps to the next or previous pending file in tree order, wrapping
+    /// around, and opens whatever folders were hiding it.
+    fn jump_pending(&mut self, forward: bool) {
+        let from = self.tree.rows.get(self.sel).map(|&(n, _)| n);
+        let Some(target) = self.tree.next_pending(from, forward) else { return };
+        let path = self.tree.nodes[target as usize].path.clone();
+        let mut p = path.as_str();
+        while let Some((dir, _)) = p.rsplit_once('/') {
+            self.collapsed.remove(dir);
+            self.expanded.insert(dir.to_string());
+            p = dir;
+        }
+        self.relayout(Some(path));
+    }
+
+    /// Jumps to the next or previous folder, over the files between.
+    fn jump_folder(&mut self, forward: bool) {
+        let rows = &self.tree.rows;
+        let is_dir = |&(n, _): &(u32, u16)| self.tree.nodes[n as usize].dir;
+        let hit = if forward {
+            rows.iter().skip(self.sel + 1).position(is_dir).map(|i| self.sel + 1 + i)
+        } else {
+            rows.iter().take(self.sel).rposition(is_dir)
+        };
+        self.sel = hit.unwrap_or(self.sel);
+    }
+
+    /// Jumps to the next or previous row at the same depth in the same
+    /// folder, over anything nested in between.
+    fn jump_sibling(&mut self, forward: bool) {
+        let rows = &self.tree.rows;
+        let Some(&(_, depth)) = rows.get(self.sel) else { return };
+        // The folder's rows end at the first one shallower than this.
+        let hit = if forward {
+            let ahead = rows[self.sel + 1..].iter().take_while(|r| r.1 >= depth);
+            ahead.enumerate().find(|(_, r)| r.1 == depth).map(|(i, _)| self.sel + 1 + i)
+        } else {
+            let behind = rows[..self.sel].iter().rev().take_while(|r| r.1 >= depth);
+            behind.enumerate().find(|(_, r)| r.1 == depth).map(|(i, _)| self.sel - 1 - i)
+        };
+        self.sel = hit.unwrap_or(self.sel);
+    }
+
     /// The row under the cursor, as (path, is a directory, is open, parent node).
     fn pointed(&self) -> Option<(String, bool, bool, usize)> {
         let n = self.tree.row(self.sel)?;
@@ -505,6 +551,17 @@ impl Outline {
             Key::Char('G') | Key::End => self.move_by(isize::MAX),
             Key::Char('l') | Key::Right if self.horizontal => self.move_by(1),
             Key::Char('h') | Key::Left if self.horizontal => self.move_by(-1),
+            Key::Char('n') if !self.horizontal => self.jump_pending(true),
+            Key::Char('N') if !self.horizontal => self.jump_pending(false),
+            Key::Char('}') if !self.horizontal => self.jump_folder(true),
+            Key::Char('{') if !self.horizontal => self.jump_folder(false),
+            Key::Char('J') if !self.horizontal => self.jump_sibling(true),
+            Key::Char('K') if !self.horizontal => self.jump_sibling(false),
+            Key::Char('p') if !self.horizontal => {
+                if let Some((.., parent)) = self.pointed().filter(|p| p.3 != 0) {
+                    self.sel = self.tree.row_of(&self.tree.nodes[parent].path).unwrap_or(self.sel);
+                }
+            }
             Key::Click(y) if !self.horizontal && (self.body.0..self.body.0 + self.body.1).contains(&y) => {
                 let row = self.top + y - self.body.0;
                 if row < self.tree.rows.len() {
