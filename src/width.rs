@@ -1,9 +1,7 @@
 //! Measures text in terminal columns.
 
-/// Terminal columns a character occupies: none for control, combining and
-/// invisible formatting characters, two for East Asian wide characters and
-/// emoji, one for everything else. Text of unknown origin is drawn through
-/// this, so what it calls zero-width is never sent to the terminal at all.
+/// Approximates a character's terminal width. Drawing skips characters this
+/// returns zero for, including terminal controls and direction overrides.
 pub fn char_width(c: char) -> usize {
     let c = u32::from(c);
     match c {

@@ -1,8 +1,8 @@
-//! Hears from the operating system the moment anything under a directory
-//! changes, so the outline need not wait for its next periodic check.
+//! Reports directory changes to the event loop through macOS file notifications.
+//! Other systems skip notifications and depend on periodic checks.
 //!
-//! On macOS this is FSEvents, which watches a whole tree through one stream.
-//! Elsewhere there is no watcher and the periodic check does all the work.
+//! FSEvents watches a whole directory tree through a single stream.
+//! The loop also checks periodically on macOS in case notifications miss a change.
 
 use std::io::{ErrorKind, PipeReader, Read};
 use std::os::fd::{AsRawFd, RawFd};
@@ -16,7 +16,7 @@ pub struct Scope {
 }
 
 /// One watcher per process: the callback finds its pipe through a static.
-/// The stream, its queue and the pipe's write end live until the process exits.
+/// A running stream, its queue and its write end last until the process exits.
 pub struct Watcher {
     /// Readable whenever something changed since the last `drain`.
     heard: Option<PipeReader>,
@@ -32,7 +32,7 @@ impl Watcher {
         self.heard.as_ref().map(AsRawFd::as_raw_fd)
     }
 
-    /// Forgets the changes heard so far.
+    /// Clears the waiting notification bytes; they carry no path details.
     pub fn drain(&self) {
         let Some(mut pipe) = self.heard.as_ref() else { return };
         let mut buf = [0u8; 256];
@@ -56,7 +56,7 @@ mod imp {
     use std::ptr::{null, null_mut};
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    /// Changes within this many seconds of each other arrive as one event.
+    /// Seconds FSEvents can wait to combine follow-up notifications.
     const LATENCY: f64 = 0.05;
     const SINCE_NOW: u64 = u64::MAX;
     /// Deliver the first event of a burst at once, not after `LATENCY`.
@@ -124,13 +124,12 @@ mod imp {
         fn dispatch_release(object: *mut c_void);
     }
 
-    /// Runs on the stream's own queue. It only says "something changed": the
-    /// outline works out what by looking, as it does for its periodic check.
+    /// Runs on the stream's queue. The event loop checks what actually changed.
     extern "C" fn on_event(_: *const c_void, _: *mut c_void, _: usize, _: *mut c_void, _: *const u32, _: *const u64) {
-        crate::term::nudge(SIGNAL.load(Ordering::Relaxed));
+        crate::term::wake(SIGNAL.load(Ordering::Relaxed));
     }
 
-    pub fn start(roots: &[PathBuf], ignored: &[PathBuf]) -> Option<PipeReader> {
+    pub(super) fn start(roots: &[PathBuf], ignored: &[PathBuf]) -> Option<PipeReader> {
         let (reader, writer) = io::pipe().ok()?;
         for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
             // SAFETY: each fd is an open pipe end; F_SETFL accepts an integer flag.
@@ -235,7 +234,7 @@ mod imp {
     use std::io::PipeReader;
     use std::path::PathBuf;
 
-    pub fn start(_: &[PathBuf], _: &[PathBuf]) -> Option<PipeReader> {
+    pub(super) fn start(_: &[PathBuf], _: &[PathBuf]) -> Option<PipeReader> {
         None
     }
 }

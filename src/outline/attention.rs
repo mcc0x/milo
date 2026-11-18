@@ -1,4 +1,4 @@
-//! Decides when the outline may follow work and when its marks have been seen.
+//! Uses keyboard focus to decide whether to follow work and when to fade marks.
 
 use std::time::{Duration, Instant};
 
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 const FOLLOW_UNTOLD: Duration = Duration::from_secs(120);
 /// How long a mark stays after it has been seen.
 const FADE: Duration = Duration::from_secs(4);
-/// How long a mark can wait to be seen.
+/// How long a mark can stay visible even if the user never sees it.
 const UNSEEN: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Fixture {
@@ -36,13 +36,19 @@ impl Fixture {
         fixture
     }
 
-    /// Runs git in this project and returns its output.
-    pub fn git(&self, args: &[&str]) -> String {
+    /// Runs git quietly, reporting the command and stderr on failure.
+    pub fn git(&self, args: &[&str]) {
         let mut command = Command::new(&*crate::git::run::GIT);
         isolate_git(&mut command);
-        let out = command.arg("-C").arg(&self.root).args(["-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        let out = command
+            .arg("-C")
+            .arg(&self.root)
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(Stdio::null())
+            .output()
+            .unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8(out.stdout).unwrap()
     }
 
     pub fn write(&self, path: &str, text: &str) {
@@ -51,7 +57,7 @@ impl Fixture {
         fs::write(full, text).unwrap();
     }
 
-    /// Commits all changes, including new and removed files.
+    /// Commits all uncommitted work, including untracked and removed files.
     pub fn commit(&self, message: &str) {
         self.git(&["add", "-A"]);
         self.git(&["commit", "-q", "-m", message]);
@@ -77,7 +83,7 @@ impl Drop for Fixture {
     }
 }
 
-/// Keeps both fixture commands and strata's own reads independent of user git settings.
+/// Uses the fixture's author and date without depending on the user's git settings.
 pub(crate) fn isolate_git(command: &mut Command) {
     command
         .env_remove("GIT_CONFIG_COUNT")

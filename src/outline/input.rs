@@ -1,4 +1,4 @@
-//! Handles keys and clicks for the Outline and its open Reader.
+//! Handles keys and clicks in the outline, or passes them to its reader.
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ enum Pointed<'a> {
 }
 
 impl Outline {
-    /// Returns true when the Outline should quit, not when its Reader closes.
+    /// Returns true to quit the program; closing the reader returns to the tree.
     pub fn on_key(&mut self, key: Key) -> bool {
         let now = Instant::now();
         if let Key::Focus(here) = key {
@@ -68,7 +68,7 @@ impl Outline {
                 self.refold(self.selected_path());
             }
             Key::Char('c') if self.repo.git => {
-                self.changed_only = !self.changed_only;
+                self.pending_only = !self.pending_only;
                 self.relayout(self.selected_path());
             }
             Key::Char('n' | 'N') => {

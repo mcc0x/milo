@@ -2,7 +2,8 @@
 name = "strata"
 version = "0.1.0"
 edition = "2024"
-description = "A project's files in a terminal pane, coloured by what is not yet committed or pushed."
+rust-version = "1.91"
+description = "A terminal file tree with git status and a read-only file reader."
 license = "MIT"
 
 [dependencies]
@@ -19,8 +20,13 @@ cast_possible_wrap = "warn"
 cast_sign_loss = "warn"
 
 [profile.release]
+# Favour runtime speed in release builds.
 opt-level = 3
+# Optimise across crate boundaries.
 lto = true
+# Optimise the crate together rather than in separate units.
 codegen-units = 1
+# Omit stack unwinding to keep the binary smaller.
 panic = "abort"
+# Remove symbols from the installed binary.
 strip = true

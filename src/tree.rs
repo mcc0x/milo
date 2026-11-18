@@ -1,9 +1,9 @@
-//! The whole project as a tree, each node knowing what is pending beneath it.
+//! Builds the file tree, counts pending files and lays out rows using folder folds.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use crate::git::{FileChange, Kind};
+use crate::git::{Kind, PendingFile};
 use crate::keys::Direction;
 
 pub struct Node {
@@ -19,9 +19,9 @@ pub struct Node {
     pub del: u32,
     /// Pending files beneath a directory.
     pub pending: u32,
-    /// Holds work that is not committed yet.
+    /// This file or a file beneath this folder is uncommitted.
     pub uncommitted: bool,
-    /// A pending file by this very path has been counted here.
+    /// Keeps a path that is both uncommitted and unpushed from counting twice.
     counted: bool,
 }
 
@@ -79,8 +79,7 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     (x.len() - i).cmp(&(y.len() - j)).then_with(|| a.cmp(b))
 }
 
-/// Which folders are open. A folder is open or closed because someone said
-/// so; one nobody has spoken for follows `all`.
+/// Folder choices override the default for folders with no choice.
 #[derive(Default)]
 pub struct Folds {
     choice: HashMap<String, bool>,
@@ -150,11 +149,11 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// Makes this the tree of `paths`, where one ending in `/` is a
-    /// directory in its own right, and counts what is pending from `files`.
-    /// The tree is rebuilt in the storage it already has: a large project
-    /// is rebuilt often, and memory given back each time is not reused well.
-    pub fn rebuild<'a>(&mut self, paths: impl Iterator<Item = &'a str>, files: &[FileChange]) {
+    /// Builds the tree from paths relative to the root; a trailing `/` marks a
+    /// folder. Reuses the tree's storage and counts pending files on their ancestors.
+    ///
+    /// `files` lists uncommitted entries before unpushed entries.
+    pub fn rebuild<'a>(&mut self, paths: impl Iterator<Item = &'a str>, files: &[PendingFile]) {
         self.nodes.clear();
         self.index.clear();
         self.rows.clear();
@@ -196,14 +195,13 @@ impl Tree {
     }
 
     /// Records one pending file on its node and on every directory above it.
-    /// A file listed twice, not committed and then committed, counts once,
-    /// as it first appears.
-    fn count(&mut self, file: &FileChange) {
+    /// Use the uncommitted entry when the same path is also unpushed.
+    fn count(&mut self, file: &PendingFile) {
         let mut i = self.insert(&file.path, false);
         let first = !std::mem::replace(&mut self.node_mut(i).counted, true);
         loop {
             let n = self.node_mut(i);
-            n.uncommitted |= !file.committed;
+            n.uncommitted |= !file.unpushed;
             if first {
                 if n.kind < file.kind {
                     n.kind = file.kind;
@@ -220,13 +218,13 @@ impl Tree {
     }
 
     /// Recomputes the visible rows. `open` says which directories are
-    /// expanded; `changed_only` drops everything that is not pending.
-    pub fn layout(&mut self, open: impl Fn(&str) -> bool, changed_only: bool) {
+    /// expanded; `pending_only` drops everything that is not pending.
+    pub fn layout(&mut self, open: impl Fn(&str) -> bool, pending_only: bool) {
         self.rows.clear();
         let mut stack: Vec<_> = self.node(0).children.iter().rev().map(|&node| Row { node, depth: 0 }).collect();
         while let Some(row) = stack.pop() {
             let n = self.node(row.node);
-            if changed_only && n.kind == Kind::None {
+            if pending_only && n.kind == Kind::None {
                 continue;
             }
             if n.dir && open(&n.path) {
@@ -313,8 +311,10 @@ impl Tree {
 mod tests {
     use super::*;
 
-    fn file(path: &str, kind: Kind, add: u32, committed: bool) -> FileChange {
-        FileChange { path: path.to_string(), from: None, kind, add, del: 0, committed, stamp: None }
+    fn file(path: &str, kind: Kind, add: u32, unpushed: bool) -> PendingFile {
+        let mut file = PendingFile::new(path, kind);
+        (file.add, file.unpushed) = (add, unpushed);
+        file
     }
 
     fn names(tree: &Tree) -> Vec<&str> {
@@ -322,7 +322,7 @@ mod tests {
     }
 
     impl Tree {
-        fn build<'a>(paths: impl Iterator<Item = &'a str>, files: &[FileChange]) -> Tree {
+        fn build<'a>(paths: impl Iterator<Item = &'a str>, files: &[PendingFile]) -> Tree {
             let mut tree = Tree::default();
             tree.rebuild(paths, files);
             tree
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_only_keeps_closed_folders_closed() {
+    fn pending_only_keeps_closed_folders_closed() {
         let files = [file("src/a.rs", Kind::Modified, 1, false)];
         let mut tree = Tree::build(["src/a.rs", "docs/x.md"].into_iter(), &files);
         tree.layout(|_| false, true);

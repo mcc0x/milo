@@ -1,4 +1,4 @@
-//! Draws styled cells and sends changed cells to the terminal.
+//! Draws styled cells and flushes only what differs from the last frame.
 
 use std::io::{self, Write};
 
@@ -252,8 +252,11 @@ impl Screen {
     /// Like `put`, but shortens a string that does not fit in the middle,
     /// so a file name keeps both its start and its extension.
     pub fn put_middle(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
-        if max_w < 8 || str_width(s) <= max_w {
+        if max_w < 8 {
             return self.put_fit(x, y, max_w, s, st);
+        }
+        if str_width(s) <= max_w {
+            return self.put(x, y, max_w, s, st);
         }
         let tail_chars = (max_w / 3).min(8);
         let tail_at = s.char_indices().rev().nth(tail_chars - 1).map_or(0, |(i, _)| i);

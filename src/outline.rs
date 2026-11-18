@@ -1,4 +1,4 @@
-//! Tracks the project's files, what is pending, and what has changed since it opened.
+//! Keeps the outline's tree, pending files, history and recent marks up to date.
 
 mod attention;
 mod draw;
@@ -7,7 +7,7 @@ mod input;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::git::{Commit, Ends, FileChange, Kind, Repo};
+use crate::git::{Commit, Ends, Kind, PendingFile, Repo};
 use crate::help::Page;
 use crate::reader::Reader;
 use crate::tree::{Folds, Tree};
@@ -17,8 +17,9 @@ use crate::{rex, walk};
 use self::attention::Attention;
 use self::draw::Layout;
 
-/// How long a row counts as being written right now, and pulses.
+/// How long a file mark pulses after a recent change.
 const LIVE: Duration = Duration::from_secs(3);
+/// Time between the two states of a pulsing mark.
 const PULSE: Duration = Duration::from_millis(500);
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
@@ -27,9 +28,9 @@ const HISTORY_LIMIT: usize = 300;
 
 pub struct Outline {
     repo: Repo,
-    /// Pending files, all uncommitted entries before the committed ones.
+    /// Pending files, with all uncommitted entries before the unpushed entries.
     /// A path can occur once in each group.
-    files: Vec<FileChange>,
+    pending: Vec<PendingFile>,
     /// Without git, the listing the tree was built from, to notice changes.
     listing: Vec<String>,
     tree: Tree,
@@ -45,7 +46,7 @@ pub struct Outline {
     /// Commits that landed while the outline was open, by hash, and when.
     new_commits: HashMap<String, Instant>,
     attention: Attention,
-    changed_only: bool,
+    pending_only: bool,
     sel: usize,
     top: usize,
     /// The cursor was put where it is by a click, so the view stays put.
@@ -66,7 +67,7 @@ pub struct Outline {
 }
 
 struct Replaced {
-    files: Vec<FileChange>,
+    pending: Vec<PendingFile>,
     history: Vec<Commit>,
 }
 
@@ -74,7 +75,7 @@ impl Outline {
     pub fn new(repo: Repo, inside_rex: bool) -> Outline {
         let mut outline = Outline {
             repo,
-            files: Vec::new(),
+            pending: Vec::new(),
             listing: Vec::new(),
             tree: Tree::default(),
             folds: Folds::default(),
@@ -85,7 +86,7 @@ impl Outline {
             file_marks: HashMap::new(),
             new_commits: HashMap::new(),
             attention: Attention::new(Instant::now()),
-            changed_only: false,
+            pending_only: false,
             sel: 0,
             top: 0,
             by_click: false,
@@ -108,8 +109,8 @@ impl Outline {
     }
 
     /// What to watch for changes to the outline.
-    pub fn watch(&self) -> Scope {
-        self.repo.watch()
+    pub fn watch_scope(&self) -> Scope {
+        self.repo.watch_scope()
     }
 
     /// Refreshes the plain-folder listing, reporting whether its paths changed.
@@ -124,11 +125,12 @@ impl Outline {
 
     fn build_folder(&mut self) {
         let selected = self.selected_path();
-        self.tree.rebuild(self.listing.iter().map(String::as_str), &self.files);
+        self.tree.rebuild(self.listing.iter().map(String::as_str), &self.pending);
         self.relayout(selected);
     }
 
-    /// Reads the current project. Returns the lists replaced by a git refresh.
+    /// Rebuilds what the outline shows. On a successful git refresh, returns
+    /// the old lists so `reload` can mark what is new.
     fn load(&mut self) -> Option<Replaced> {
         if !self.repo.git {
             self.relist();
@@ -139,15 +141,15 @@ impl Outline {
         self.repo.read();
         let files = self.repo.pending()?;
         let tracked = self.repo.tracked()?;
-        let files = std::mem::replace(&mut self.files, files);
-        self.tree.rebuild(tracked, &self.files);
+        let files = std::mem::replace(&mut self.pending, files);
+        self.tree.rebuild(tracked, &self.pending);
         self.update_recent();
         self.relayout(selected);
         let history = self.load_history();
-        Some(Replaced { files, history })
+        Some(Replaced { pending: files, history })
     }
 
-    /// History only changes when the branch or what is pushed does.
+    /// Keep the history while the branch tip and comparison base stay the same.
     fn load_history(&mut self) -> Vec<Commit> {
         if self.repo.ends() != &self.history_key
             && let Some(history) = self.repo.history(HISTORY_LIMIT)
@@ -161,29 +163,29 @@ impl Outline {
     fn update_recent(&mut self) {
         self.recent.clear();
         let mut once = HashSet::new();
-        for (i, f) in self.files.iter().enumerate() {
+        for (i, f) in self.pending.iter().enumerate() {
             if once.insert(f.path.as_str()) {
                 self.recent.push(i);
             }
-            // Pending work opens a folder unless you closed it. A commit
-            // shouldn't fold away a folder you've been looking at.
+            // Pending work opens a folder unless the user closed it.
+            // Suggested folds persist so committing work does not hide it.
             let mut p = f.path.as_str();
             while let Some((dir, _)) = p.rsplit_once('/') {
                 self.folds.suggest(dir);
                 p = dir;
             }
         }
-        let files = &self.files;
+        let files = &self.pending;
         self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|s| s.written)));
     }
 
-    /// Reloads the project, highlighting new commits and recent file changes.
+    /// Rebuilds the outline and marks new commits and changed pending files.
     fn reload(&mut self) {
         let Some(old) = self.load() else { return };
         let now = Instant::now();
         self.highlight_commits(&old.history, now);
         let following = self.attention.following(now);
-        let newest = self.mark_files(&old.files, now).filter(|_| following).map(str::to_owned);
+        let newest = self.mark_files(&old.pending, now).filter(|_| following).map(str::to_owned);
         if let Some(newest) = newest {
             self.follow(&newest);
         }
@@ -201,12 +203,12 @@ impl Outline {
     }
 
     /// Marks files that changed, and finds the path written most recently.
-    fn mark_files(&mut self, old: &[FileChange], now: Instant) -> Option<&str> {
-        let before: HashMap<(&str, bool), &FileChange> =
-            old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
-        let mut newest: Option<&FileChange> = None;
-        for f in &self.files {
-            if before.get(&(f.path.as_str(), f.committed)).is_some_and(|old| *old == f) {
+    fn mark_files(&mut self, old: &[PendingFile], now: Instant) -> Option<&str> {
+        let before: HashMap<(&str, bool), &PendingFile> =
+            old.iter().map(|f| ((f.path.as_str(), f.unpushed), f)).collect();
+        let mut newest: Option<&PendingFile> = None;
+        for f in &self.pending {
+            if before.get(&(f.path.as_str(), f.unpushed)).is_some_and(|old| *old == f) {
                 continue;
             }
             if let Some(at) = self.file_marks.get_mut(&f.path) {
@@ -221,19 +223,17 @@ impl Outline {
         newest.map(|f| f.path.as_str())
     }
 
-    /// Looks for changes made outside the outline, and takes them in.
-    /// Returns false if it is too soon to tell, and worth looking again.
+    /// Takes in changes made outside strata. Returns false while git is busy.
+    /// The reader in this pane, if open, is checked as well.
     pub fn check(&mut self) -> bool {
-        // A file being read here is kept up to date, and so is what it covers.
         if let Some(reader) = &mut self.reading {
             reader.check();
         }
         if self.repo.busy() {
-            // Git is part-way through changing many files at once.
             return false;
         }
         if self.repo.git {
-            if self.repo.poll(&self.files) {
+            if self.repo.poll(&self.pending) {
                 self.reload();
             }
         } else if self.relist() {
@@ -273,13 +273,13 @@ impl Outline {
 
     /// Recomputes the visible rows, keeping the cursor on `selected`.
     fn relayout(&mut self, selected: Option<String>) {
-        self.tree.layout(|p| self.folds.is_open(p), self.changed_only);
+        self.tree.layout(|p| self.folds.is_open(p), self.pending_only);
         let at = selected.and_then(|p| self.tree.row_of(&p)).unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
     }
 
-    /// Applies a change to which folders are open. Without git a folder's
-    /// contents are only read once it is open, so that means listing again.
+    /// Applies the folder choices. A plain tree must list its open folders again
+    /// because it does not keep the contents of closed folders.
     fn refold(&mut self, selected: Option<String>) {
         if self.repo.git {
             self.relayout(selected);
@@ -294,9 +294,8 @@ impl Outline {
         self.relayout(Some(path));
     }
 
-    /// Brings the file being worked on into view and says so, since the
-    /// view moving by itself would otherwise be a puzzle. Folders you
-    /// closed stay closed: the cursor goes to the nearest visible one.
+    /// Brings the latest marked file into view and says why the cursor moved.
+    /// If the user closed a folder, stop at the nearest visible ancestor.
     fn follow(&mut self, path: &str) {
         let mut shown = path;
         self.sel = loop {
@@ -318,8 +317,7 @@ impl Outline {
         self.note = Some((text.into(), Instant::now()));
     }
 
-    /// Opens a file to read: in a floating window inside Rex, in place of
-    /// the one opened before, and otherwise here in this pane.
+    /// Opens the reader in this pane, or replaces the floating reader in Rex.
     fn open_file(&mut self, path: &str) {
         if !self.inside_rex {
             self.reading = Reader::open(&self.repo.root.join(path));
@@ -394,7 +392,7 @@ mod tests {
         assert!(o.check());
         assert!(draw(&mut o, 60, 10).text()[0].ends_with("1 to commit · 1 to push"));
         assert!(draw(&mut o, 29, 10).text()[0].ends_with("○1 ↑1"));
-        let pending: Vec<_> = o.files.iter().map(|f| (f.path.as_str(), f.committed)).collect();
+        let pending: Vec<_> = o.pending.iter().map(|f| (f.path.as_str(), f.unpushed)).collect();
         assert_eq!(pending, [("note.txt", false), ("page.txt", true)]);
         assert!(o.tree.row(o.tree.row_of("note.txt").unwrap()).unwrap().uncommitted);
         assert!(!o.tree.row(o.tree.row_of("page.txt").unwrap()).unwrap().uncommitted);
@@ -402,7 +400,7 @@ mod tests {
         f.push();
         assert!(o.check());
         assert!(draw(&mut o, 60, 10).text()[0].ends_with("1 to commit"));
-        let pending: Vec<_> = o.files.iter().map(|f| (f.path.as_str(), f.committed)).collect();
+        let pending: Vec<_> = o.pending.iter().map(|f| (f.path.as_str(), f.unpushed)).collect();
         assert_eq!(pending, [("note.txt", false)]);
         assert_eq!(o.tree.row(o.tree.row_of("page.txt").unwrap()).unwrap().kind, Kind::None);
     }
@@ -476,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_only_hides_untouched_files_and_the_hint_says_how_to_show_them_again() {
+    fn pending_only_hides_untouched_files_and_the_hint_says_how_to_show_them_again() {
         let f = project();
         let mut o = open(&f);
         let all = draw(&mut o, 65, 12).text();
@@ -484,11 +482,11 @@ mod tests {
         assert!(all[11].contains("c changed only"));
 
         o.on_key(Key::Char('c'));
-        let changed = draw(&mut o, 65, 12).text();
-        assert!(!changed.iter().any(|row| row.contains("README.md")));
-        assert!(changed.iter().any(|row| row.contains("main.rs")));
-        assert!(changed.iter().any(|row| row.contains("notes.txt")));
-        assert!(changed[11].contains("c all files"));
+        let pending = draw(&mut o, 65, 12).text();
+        assert!(!pending.iter().any(|row| row.contains("README.md")));
+        assert!(pending.iter().any(|row| row.contains("main.rs")));
+        assert!(pending.iter().any(|row| row.contains("notes.txt")));
+        assert!(pending[11].contains("c all files"));
         o.on_key(Key::Char('c'));
         assert_eq!(draw(&mut o, 65, 12).text(), all);
     }

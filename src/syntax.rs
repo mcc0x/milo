@@ -190,7 +190,7 @@ impl Lang {
         let rest = &b[i..];
         let spaced = !self.spaced_comments || i == 0 || b[i - 1].is_ascii_whitespace();
         let attribute = self.attributes && begins(rest, "#[");
-        // Immediate whitespace still permits ordinary `code // comment`.
+        // Suppress likely prose or URL markers without suppressing `code // comment`.
         let jsx_text = self.jsx && i > 0 && (is_word(b[i - 1]) || matches!(b[i - 1], b'>' | b':'));
         if spaced && !attribute && !jsx_text && self.line_comments.iter().any(|c| begins(rest, c)) {
             out.push((i, b.len(), Class::Comment));
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn adversarial_lines_preserve_span_invariants_with_carried_state() {
+    fn malformed_source_produces_ordered_spans_on_character_boundaries() {
         let lines = [
             "", " ", "////", "/*", "", "*/", "'''", "\"\"\"", "'", "\"", "`", "\\", "\\é", "é☕中文", "'unterminated",
             "\"unterminated", "/* unterminated", "", "r##\"raw", "\"##", "<<<TEXT", "TEXT;", "#[", "[[", "0..é",

@@ -1,4 +1,4 @@
-//! Reading a file's content without trusting what the path leads to.
+//! Reads regular files and symbolic link targets without following the final link.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read as _};
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub enum Content {
     Bytes(Vec<u8>),
-    /// The path a symbolic link points to, not what is there.
+    /// The destination written in a symbolic link, not its contents.
     Link(PathBuf),
     /// More than the limit asked for.
     TooLarge,
@@ -24,10 +24,9 @@ fn unavailable(error: io::Error) -> Content {
     }
 }
 
-/// Reads up to `limit` bytes of a regular file, or returns a link's target path.
-///
-/// The file is opened without following links or waiting on pipes. Once open,
-/// it is checked to be a regular file before any bytes are read.
+/// Reads a regular file up to `limit` bytes, or returns a link's destination.
+/// Opens the last path component without following links and without waiting
+/// on a pipe, then checks that it is a regular file before reading bytes.
 pub fn file(path: &Path, limit: u64) -> Content {
     let file = match OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path) {
         Ok(file) => file,

@@ -1,4 +1,4 @@
-//! Small clock helpers for the history panel.
+//! Gives the history panel local calendar days and short commit ages.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6,26 +6,21 @@ pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// The local calendar day `ts` falls on, as a day count: equal for two
-/// moments on the same day here, whatever the time zone.
+/// A day number for the local time zone, used to separate days in the timeline.
 pub fn local_day(ts: i64) -> i64 {
     let Ok(t) = libc::time_t::try_from(i128::from(ts)) else { return ts.div_euclid(86400) };
     // SAFETY: Zero is valid for the integer fields and null is valid for the raw zone pointer.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: `t` is readable and `tm` is writable for the call. If localtime_r fails, use
-    // the zeroed value's offset (UTC), ignoring any fields it may have written.
+    // SAFETY: `t` is readable and `tm` is writable for the call.
     let local = unsafe { libc::localtime_r(&t, &mut tm) };
+    // Use UTC if the local time is unavailable.
     let offset: libc::c_long = if local.is_null() { 0 } else { tm.tm_gmtoff };
-    #[cfg_attr(
-        target_pointer_width = "64",
-        expect(clippy::useless_conversion, reason = "c_long is already i64 on 64-bit Unix")
-    )]
+    #[cfg(not(target_pointer_width = "64"))]
     let offset = i64::from(offset);
     (ts + offset).div_euclid(86400)
 }
 
-/// How long ago, in the largest whole unit: "now", "50m", "1h", "3d", "6w",
-/// "4mo", "2y". Seventy minutes is "1h", never "70m".
+/// Age to fit next to a commit subject. Uses the largest whole unit.
 pub fn short_age(secs: i64) -> String {
     const MIN: i64 = 60;
     const HOUR: i64 = 60 * MIN;

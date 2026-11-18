@@ -1,12 +1,12 @@
-//! Reads keystrokes and terminal replies.
+//! Decodes keys, mouse events, focus and other terminal replies from input.
 
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::os::fd::AsRawFd;
 
-use crate::term::poll;
+use crate::term::wait_ready;
 
-/// How long the rest of a split escape sequence is waited for.
+/// Milliseconds to wait for the rest of a split escape sequence.
 const SEQUENCE_MS: i32 = 25;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,14 +63,14 @@ impl Key {
 }
 
 /// Drains everything currently readable on stdin into `keys`.
-pub fn read_keys(keyboard: &mut File, keys: &mut Vec<Key>) {
+pub fn receive(keyboard: &mut File, keys: &mut Vec<Key>) {
     let mut buf = [0u8; 4096];
     let mut used = 0;
     let mut overflow = Vec::new();
     let mut retried = false;
     loop {
         match keyboard.read(&mut buf[used..]) {
-            // poll() said readable, so an immediate zero-length read is EOF.
+            // Input was ready, so an empty first read is EOF.
             Ok(0) if !retried && used == 0 && overflow.is_empty() => keys.push(Key::Eof),
             Ok(n) => {
                 used += n;
@@ -93,7 +93,7 @@ pub fn read_keys(keyboard: &mut File, keys: &mut Vec<Key>) {
         };
         // Give a split escape sequence one short wait for its ending.
         let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-        if retried || !unfinished(bytes) || poll(&mut fds, SEQUENCE_MS) <= 0 {
+        if retried || !unfinished(bytes) || wait_ready(&mut fds, SEQUENCE_MS) <= 0 {
             decode(bytes, keys);
             return;
         }
@@ -205,8 +205,7 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
     })
 }
 
-/// Reads the terminal's answer to being asked its background colour:
-/// "11;rgb:RRRR/GGGG/BBBB", each part one to four hex digits.
+/// Decodes an OSC 11 background-colour reply with one to four hex digits per component.
 fn background_reply(reply: &[u8]) -> Option<[u8; 3]> {
     let mut parts = reply.strip_prefix(b"11;rgb:")?.split(|&b| b == b'/');
     let mut component = || {
@@ -218,8 +217,6 @@ fn background_reply(reply: &[u8]) -> Option<[u8; 3]> {
         for &digit in digits {
             value = value * 16 + char::from(digit).to_digit(16)?;
         }
-        // A component scales to 0–255 because the divisor is the largest
-        // value with that many hex digits.
         u8::try_from(value * 255 / ((1 << (4 * digits.len())) - 1)).ok()
     };
     let rgb = [component()?, component()?, component()?];

@@ -1,16 +1,11 @@
-//! The recent-history panel: the newest commits spelled out, under a row of
-//! dots for the shape of it where the panel has a column to itself.
-//!
-//! Weight says where a commit is, as it does for files: bold is still to be
-//! pushed, faint is already on the remote. A hollow dot is work not
-//! committed at all. Colour is left to the files.
+//! Lays out recent commits and marks uncommitted work and the remote boundary.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::git::Commit;
 use crate::screen::{Screen, Style};
-use crate::ui::DIM;
+use crate::ui::FAINT;
 use crate::when;
 
 /// From this many rows a panel beside the outline leads with a row of dots.
@@ -22,9 +17,8 @@ const TALL_ROWS: usize = 30;
 
 /// What the panel needs to know besides the commits themselves.
 pub struct Context<'a> {
-    /// What the branch is pushed to, by name.
+    /// The name to show at the boundary with pushed commits.
     pub remote: Option<&'a str>,
-    /// Files not committed yet.
     pub uncommitted: usize,
     /// Commits that landed while the outline was open, by hash.
     pub new_commits: &'a HashMap<String, Instant>,
@@ -38,8 +32,7 @@ pub enum Placement {
     Beneath { top: usize, width: usize, rows: usize },
 }
 
-/// Length of a leading "scope: " in a commit subject: a short single word
-/// and the colon and space after it. Zero if there is none.
+/// A leading `scope: ` is dimmed so the rest of the subject stands out.
 fn prefix_len(subject: &str) -> usize {
     match subject.split_once(": ") {
         Some((scope, _)) if scope.len() <= 24 && !scope.contains(' ') => scope.len() + 2,
@@ -47,29 +40,23 @@ fn prefix_len(subject: &str) -> usize {
     }
 }
 
-/// Whether a commit is already where the branch is pushed to.
-fn settled(c: &Commit, ctx: &Context) -> bool {
-    c.pushed && ctx.remote.is_some()
-}
-
 fn dot_style(c: &Commit, ctx: &Context) -> Style {
-    match (ctx.remote, c.pushed) {
+    match (ctx.remote, c.unpushed) {
         (None, _) => Style::PLAIN,
-        (Some(_), true) => Style::PLAIN.faint(),
-        (Some(_), false) => Style::PLAIN.bold(),
+        (Some(_), false) => Style::PLAIN.faint(),
+        (Some(_), true) => Style::PLAIN.bold(),
     }
 }
 
-/// Whether history passes, between two neighbours, from local commits to
-/// ones the remote has.
-fn crosses(before: &Commit, c: &Commit, ctx: &Context) -> bool {
-    ctx.remote.is_some() && !before.pushed && c.pushed
+/// Whether adjacent commits straddle the boundary with pushed history.
+fn crosses_remote(before: &Commit, c: &Commit, ctx: &Context) -> bool {
+    ctx.remote.is_some() && before.unpushed && !c.unpushed
 }
 
 /// Rows to set aside when history sits beneath a tree of `tree_rows`:
 /// enough for its content, several on its own, more if the tree leaves room.
 pub fn below_rows(commits: &[Commit], uncommitted: usize, avail: usize, tree_rows: usize) -> usize {
-    let unpushed = commits.iter().filter(|c| !c.pushed).count();
+    let unpushed = commits.iter().filter(|c| c.unpushed).count();
     let remote_row = (unpushed > 0 && unpushed < commits.len()) as usize;
     // A blank row above and the heading, then one row per line.
     let content = 2 + usize::from(uncommitted > 0) + remote_row + commits.len();
@@ -84,7 +71,7 @@ fn draw_dots(s: &mut Screen, commits: &[Commit], ctx: &Context, (left, right): (
     // Spaced out while every commit fits that way, packed once they do not.
     let pairs = || commits.iter().zip(commits.iter().skip(1));
     let days = pairs().filter(|(a, b)| a.day != b.day).count();
-    let ticks = pairs().filter(|(a, b)| crosses(a, b, ctx)).count();
+    let ticks = pairs().filter(|(a, b)| crosses_remote(a, b, ctx)).count();
     let cells = commits.len() + ticks + usize::from(ctx.uncommitted > 0);
     let step = if cells * 2 + days <= right.saturating_sub(left) { 2 } else { 1 };
     let mut x = left;
@@ -94,8 +81,8 @@ fn draw_dots(s: &mut Screen, commits: &[Commit], ctx: &Context, (left, right): (
     }
     for (i, c) in commits.iter().enumerate() {
         if let Some(before) = i.checked_sub(1).map(|b| &commits[b]) {
-            if crosses(before, c, ctx) && x < right {
-                s.put(x, y, 1, "│", DIM);
+            if crosses_remote(before, c, ctx) && x < right {
+                s.put(x, y, 1, "│", FAINT);
                 x += step;
             }
             x += (before.day != c.day) as usize;
@@ -106,6 +93,10 @@ fn draw_dots(s: &mut Screen, commits: &[Commit], ctx: &Context, (left, right): (
         s.put(x, y, 1, "●", dot_style(c, ctx));
         x += step;
     }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// Draws the heading and recent commits in the panel's part of the pane.
@@ -119,12 +110,12 @@ pub fn draw(s: &mut Screen, commits: &[Commit], ctx: &Context, placement: Placem
     }
     // Text keeps one column clear of both edges of the area.
     let (left, right, end) = (x0 + 1, x0 + w - 1, y0 + rows);
-    let unpushed = commits.iter().filter(|c| !c.pushed).count();
+    let unpushed = commits.iter().filter(|c| c.unpushed).count();
 
     s.put(left, y0, w - 2, "History", Style::PLAIN.bold());
     // The project heading counts files; this counts commits, and says so.
     if unpushed > 0 && ctx.remote.is_some() {
-        let text = format!("{unpushed} commit{} to push", if unpushed == 1 { "" } else { "s" });
+        let text = format!("{unpushed} commit{} to push", plural(unpushed));
         if text.len() + 9 < w {
             s.put_right(right, y0, &text, Style::PLAIN);
         }
@@ -136,7 +127,7 @@ pub fn draw(s: &mut Screen, commits: &[Commit], ctx: &Context, placement: Placem
     let text_x = left + 2;
     let mut y = y0 + 1 + dots as usize;
     if ctx.uncommitted > 0 && y < end {
-        let text = format!("{} file{} to commit", ctx.uncommitted, if ctx.uncommitted == 1 { "" } else { "s" });
+        let text = format!("{} file{} to commit", ctx.uncommitted, plural(ctx.uncommitted));
         s.put(left, y, 1, "○", Style::PLAIN.bold());
         s.put_fit(text_x, y, right.saturating_sub(text_x), &text, Style::PLAIN.bold());
         y += 1;
@@ -144,10 +135,10 @@ pub fn draw(s: &mut Screen, commits: &[Commit], ctx: &Context, placement: Placem
     let now = when::now();
     let mut last_age = String::new();
     for (i, c) in commits.iter().enumerate() {
-        if i > 0 && crosses(&commits[i - 1], c, ctx) && y < end {
+        if i > 0 && crosses_remote(&commits[i - 1], c, ctx) && y < end {
             // Everything below this is already on the remote.
             let text = format!("pushed to {}", ctx.remote.unwrap_or_default());
-            s.put_fit(text_x, y, right.saturating_sub(text_x), &text, DIM);
+            s.put_fit(text_x, y, right.saturating_sub(text_x), &text, FAINT);
             y += 1;
         }
         if y >= end {
@@ -158,7 +149,7 @@ pub fn draw(s: &mut Screen, commits: &[Commit], ctx: &Context, placement: Placem
         let age = when::short_age(now - c.time);
         let mut text_end = right;
         if age != last_age {
-            let used = s.put_right(right, y, &age, DIM);
+            let used = s.put_right(right, y, &age, FAINT);
             text_end = right.saturating_sub(used + 1);
         }
         last_age = age;
@@ -167,7 +158,7 @@ pub fn draw(s: &mut Screen, commits: &[Commit], ctx: &Context, placement: Placem
         let new = ctx.new_commits.contains_key(&c.hash);
         // Merges and what is already pushed recede; a commit that just
         // landed stands out for a moment.
-        let quiet = c.merge || settled(c, ctx);
+        let quiet = c.merge || (!c.unpushed && ctx.remote.is_some());
         let st = match (new, quiet) {
             (true, _) => Style::PLAIN.bold(),
             (false, true) => Style::PLAIN.faint(),

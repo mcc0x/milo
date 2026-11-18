@@ -1,4 +1,4 @@
-//! Enters, waits on and restores the terminal device.
+//! Sets terminal modes and waits for keyboard input, signals or file notifications.
 
 use std::fs::File;
 use std::io::{self, ErrorKind, IsTerminal, PipeReader, Read, Write};
@@ -6,9 +6,9 @@ use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-/// A resize is pending. The signal handler needs access for the life of the program.
+/// Redraw at the current size after startup or a resize signal.
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
-/// A stop is pending. The signal handler needs access for the life of the program.
+/// Wind down after a termination signal, including while waiting on git.
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
 /// Modes saved for restoration on exit, including from the panic hook.
 static ORIG: OnceLock<libc::termios> = OnceLock::new();
@@ -23,7 +23,7 @@ const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1
 const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 /// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
-pub fn nudge(fd: RawFd) {
+pub fn wake(fd: RawFd) {
     if fd >= 0 {
         // SAFETY: The byte lives for the call, and write is async-signal-safe.
         unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
@@ -32,7 +32,7 @@ pub fn nudge(fd: RawFd) {
 
 /// Waits up to `timeout_ms` for descriptors to be ready. Returns the number
 /// ready, zero on timeout, or a negative result on failure or interruption.
-pub fn poll(fds: &mut [libc::pollfd], timeout_ms: i32) -> i32 {
+pub fn wait_ready(fds: &mut [libc::pollfd], timeout_ms: i32) -> i32 {
     let Ok(len) = libc::nfds_t::try_from(fds.len()) else { return -1 };
     // SAFETY: The slice is writable and holds exactly `len` descriptors.
     unsafe { libc::poll(fds.as_mut_ptr(), len, timeout_ms) }
@@ -41,17 +41,16 @@ pub fn poll(fds: &mut [libc::pollfd], timeout_ms: i32) -> i32 {
 // These handlers only load and store atomics and call write, both async-signal-safe.
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
-    nudge(WAKE.load(Ordering::Relaxed));
+    wake(WAKE.load(Ordering::Relaxed));
 }
 
 extern "C" fn on_term(_: libc::c_int) {
     TERMINATED.store(true, Ordering::Relaxed);
-    nudge(WAKE.load(Ordering::Relaxed));
+    wake(WAKE.load(Ordering::Relaxed));
 }
 
 fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
-    // sa_flags stays 0: without SA_RESTART a signal interrupts poll(), which
-    // is what wakes the event loop.
+    // With no SA_RESTART, signals can also interrupt a wait on descriptors.
     // SAFETY: A zeroed sigaction has no flags and no handler; fill both the
     // handler and the signal mask before passing it to sigaction.
     let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -119,7 +118,7 @@ pub fn listen() -> Option<PipeReader> {
 }
 
 pub fn leave() {
-    // Give the keyboard back even if the terminal no longer accepts output.
+    // Restore keyboard modes even if writes to the terminal fail.
     if let Some(t) = ORIG.get() {
         loop {
             // SAFETY: `t` contains saved terminal modes and is live for the call.
@@ -153,8 +152,8 @@ pub enum Wait {
     Interrupted,
 }
 
-/// Waits for the keyboard, or for `extra` to become readable, or for
-/// `timeout_ms` to pass. The keyboard is reported first when both are ready.
+/// Waits for input, a signal, the extra descriptor or a timeout.
+/// Signals take priority, then the keyboard, then the extra descriptor.
 pub fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
     let mut fds = [
         libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 },
@@ -162,7 +161,7 @@ pub fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra
         libc::pollfd { fd: extra.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: signal.map_or(-1, AsRawFd::as_raw_fd), events: libc::POLLIN, revents: 0 },
     ];
-    let ready = poll(&mut fds, timeout_ms);
+    let ready = wait_ready(&mut fds, timeout_ms);
     if ready == 0 {
         Wait::Timeout
     } else if ready < 0 {
@@ -189,14 +188,14 @@ mod tests {
     fn keyboard_readiness_takes_priority_over_an_extra_wakeup() {
         let (keyboard, input) = io::pipe().unwrap();
         let keyboard = File::from(OwnedFd::from(keyboard));
-        let (extra, wake) = io::pipe().unwrap();
+        let (extra, writer) = io::pipe().unwrap();
         let extra = Some(extra.as_raw_fd());
         assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Timeout));
 
-        nudge(wake.as_raw_fd());
+        wake(writer.as_raw_fd());
         assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Woken));
 
-        nudge(input.as_raw_fd());
+        wake(input.as_raw_fd());
         assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Input));
     }
 }

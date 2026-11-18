@@ -1,4 +1,7 @@
-//! Keeps the last known state of a repository and decides when to ask git again.
+//! Discovers a repository and keeps its last known status, files and history.
+//!
+//! Pending work has not been pushed. It is uncommitted if it has not been
+//! committed, and unpushed if it has been committed but not pushed.
 
 mod parse;
 pub(crate) mod run;
@@ -10,23 +13,22 @@ use std::time::SystemTime;
 
 use crate::read::{self, Content};
 use crate::watch::Scope;
-use parse::{Status, parse_changes, parse_history, parse_status};
+use parse::{Status, parse_files, parse_history, parse_status};
 use run::OutputError;
 
 /// New files larger than this are listed without counting their lines.
 const NEW_FILE_LIMIT: u64 = 256 << 10;
 /// A diff of one file larger than this is not loaded.
 const DIFF_LIMIT: u64 = 8 << 20;
-/// Up to this many changed paths are named to `git diff`; beyond it the
-/// whole tree is compared.
+/// Maximum number of uncommitted paths passed to `git diff` by name.
+/// For more paths, compare the whole tree to the last commit.
 const PATHS_LIMIT: usize = 300;
 /// The object name git reports before a branch has its first commit.
 const UNBORN: &str = "(initial)";
-/// What an empty repository is compared against before its first commit.
+/// The empty tree serves as the base until the first commit.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// How a path differs. Ordered by precedence when a directory summarises its
-/// children.
+/// How a path differs, in order of precedence when a folder summarises its contents.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Kind {
     None,
@@ -47,29 +49,28 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    pub fn read(path: &Path) -> Option<Self> {
+    pub fn at(path: &Path) -> Option<Self> {
         let m = std::fs::symlink_metadata(path).ok()?;
         Some(Self { written: m.modified().ok()?, len: m.len() })
     }
 }
 
-/// One file that is not yet pushed.
+/// A pending file in either the uncommitted or unpushed group.
 #[derive(Clone, PartialEq, Debug)]
-pub struct FileChange {
+pub struct PendingFile {
     pub path: String,
     /// Where a moved file was before.
-    pub from: Option<String>,
+    from: Option<String>,
     pub kind: Kind,
     pub add: u32,
     pub del: u32,
-    /// Already committed, and only waiting to be pushed.
-    pub committed: bool,
+    pub unpushed: bool,
     pub stamp: Option<Stamp>,
 }
 
-impl FileChange {
-    fn new(path: &str, kind: Kind) -> Self {
-        Self { path: path.to_string(), from: None, kind, add: 0, del: 0, committed: false, stamp: None }
+impl PendingFile {
+    pub(crate) fn new(path: &str, kind: Kind) -> Self {
+        Self { path: path.to_string(), from: None, kind, add: 0, del: 0, unpushed: false, stamp: None }
     }
 }
 
@@ -81,9 +82,7 @@ fn new_file_lines(path: &Path) -> u32 {
     }
     match read::file(path, NEW_FILE_LIMIT) {
         Content::Bytes(bytes) if !bytes.contains(&0) => {
-            #[expect(clippy::cast_possible_truncation, reason = "a 256 KiB file has at most 262,144 lines")]
-            let count = bytes.split_inclusive(|&b| b == b'\n').count() as u32;
-            count
+            u32::try_from(bytes.split_inclusive(|&b| b == b'\n').count()).expect("256 KiB of lines fits in a u32")
         }
         _ => 0,
     }
@@ -97,13 +96,13 @@ pub struct Commit {
     pub time: i64,
     /// The local calendar day of `time`, to tell one day's work from the next.
     pub day: i64,
-    /// Already on the remote. Always true when there is no remote.
-    pub pushed: bool,
-    /// Joins two lines of history rather than changing anything itself.
+    /// False when there is no remote to compare with.
+    pub unpushed: bool,
+    /// A merge commit has more than one parent.
     pub merge: bool,
 }
 
-/// The local tip and the newest commit already pushed, when the branch is ahead.
+/// The local tip and, when it is ahead, the commit used as the comparison base.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Ends {
     base: Option<String>,
@@ -144,7 +143,7 @@ impl<'a> Basis<'a> {
 #[derive(Default)]
 struct Unpushed {
     ends: Ends,
-    files: Vec<FileChange>,
+    files: Vec<PendingFile>,
 }
 
 #[derive(Default)]
@@ -158,7 +157,7 @@ struct Counted {
     lines: u32,
 }
 
-/// Where a file was moved from, and the tree and index used to find it.
+/// A rename's source and the state it was found in.
 struct RenameLookup {
     path: String,
     ends: Ends,
@@ -170,7 +169,7 @@ struct RenameLookup {
 pub struct Repo {
     pub root: PathBuf,
     pub name: String,
-    /// False for a plain folder, where nothing is pending.
+    /// A plain folder has no git state.
     pub git: bool,
     ok: Cell<bool>,
     /// Where this checkout keeps its index, and where the repository keeps
@@ -189,12 +188,12 @@ pub struct Repo {
     polled: Option<Vec<u8>>,
     /// Line counts of untracked files, kept while their stamp stays the same.
     counted: HashMap<String, Counted>,
-    committed: Unpushed,
+    unpushed: Unpushed,
     tracked: Tracked,
     moved: Option<RenameLookup>,
 }
 
-/// Older gits do not know --path-format; they still say where the top is.
+/// Git versions without `--path-format` can still give the project root.
 fn git_dirs(dir: &Path) -> Option<String> {
     let ask = |args: &[&str]| String::from_utf8(run::output(dir, &[], args)?).ok();
     ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])
@@ -204,7 +203,6 @@ fn git_dirs(dir: &Path) -> Option<String> {
 impl Repo {
     /// Opens the repository containing `dir`, or the directory as a plain folder.
     pub fn open(dir: &Path) -> Option<Self> {
-        // A failed discovery is normal outside a repository.
         let found = git_dirs(dir);
         let mut lines = found.as_deref().unwrap_or("").lines().filter(|l| !l.is_empty()).map(PathBuf::from);
         let top = lines.next();
@@ -243,7 +241,7 @@ impl Repo {
         &self.status.ends
     }
 
-    /// What pending changes are measured against: the base, else the last commit.
+    /// Compare pending files to the base when there is one, otherwise to HEAD.
     fn against(&self) -> &str {
         self.ends().base.as_deref().unwrap_or_else(|| self.ends().head())
     }
@@ -271,7 +269,7 @@ impl Repo {
     /// Watches the worktree and any shared Git directory outside it, as in a
     /// linked worktree. Exclusions are set at startup; if a directory stops
     /// being ignored, only the periodic check sees later changes inside it.
-    pub fn watch(&self) -> Scope {
+    pub fn watch_scope(&self) -> Scope {
         let mut roots = vec![self.root.clone()];
         roots.extend(self.common_dir.as_ref().filter(|dir| !dir.starts_with(&self.root)).cloned());
         // Older git versions do not say where their records are. Then only a
@@ -323,9 +321,9 @@ impl Repo {
         run::output(&self.root, self.guard.as_deref()?, args)
     }
 
-    /// Notices a changed git status, a file edit or a moved stand-in ref.
-    /// Keeps the fresh status so `read` does not need to ask for it again.
-    pub fn poll(&mut self, files: &[FileChange]) -> bool {
+    /// Asks git whether the repository state has moved and checks pending file stamps.
+    /// Keeps a changed status for `read`, rather than asking git for it again.
+    pub fn poll(&mut self, files: &[PendingFile]) -> bool {
         self.polled = None;
         if !self.git {
             return false;
@@ -333,7 +331,7 @@ impl Repo {
         let Some(raw) = self.require(self.status_raw(self.file.as_deref())) else { return false };
         let changed = !self.ok()
             || raw != self.raw
-            || files.iter().any(|f| Stamp::read(&self.root.join(&f.path)) != f.stamp)
+            || files.iter().any(|f| Stamp::at(&self.root.join(&f.path)) != f.stamp)
             || self.stand_in_moved();
         self.polled = changed.then_some(raw);
         changed
@@ -346,7 +344,7 @@ impl Repo {
             .is_some_and(|r| self.resolve(&r.name).is_some_and(|oid| oid.as_deref() != Some(r.oid.as_str())))
     }
 
-    /// Takes in the branch and what has been pushed, keeping both on failure.
+    /// Takes in the repository's status and comparison base, keeping both on failure.
     pub fn read(&mut self) {
         if !self.git {
             return;
@@ -384,45 +382,44 @@ impl Repo {
         Some(base.filter(|base| *base != status.ends.tip))
     }
 
-    /// Everything not yet pushed, as of the last `read`: first what is not
-    /// committed, then what is committed but still local. `None` leaves the
-    /// last list in place when git could not be asked.
-    pub fn pending(&mut self) -> Option<Vec<FileChange>> {
+    /// Returns pending files from the last `read`, uncommitted before unpushed.
+    /// Returns `None` if git cannot answer.
+    pub fn pending(&mut self) -> Option<Vec<PendingFile>> {
         if !self.ok() {
             return None;
         }
-        let mut files = self.uncommitted()?;
+        let mut files = self.tracked_uncommitted()?;
         self.add_untracked(&mut files);
         self.add_unpushed(&mut files)?;
         Some(files)
     }
 
-    fn uncommitted(&self) -> Option<Vec<FileChange>> {
-        let changed = &self.status.changed;
-        if changed.is_empty() {
+    fn tracked_uncommitted(&self) -> Option<Vec<PendingFile>> {
+        let paths = &self.status.tracked_uncommitted;
+        if paths.is_empty() {
             return Some(Vec::new());
         }
-        // Stamp before git looks so an edit made meanwhile is not missed.
-        let stamps: HashMap<&str, _> = changed.iter().map(|p| (p.as_str(), Stamp::read(&self.root.join(p)))).collect();
-        let named = changed.len() <= PATHS_LIMIT;
-        // Naming the paths lets the outline compare with what is pushed, as
-        // the Reader does, without listing files that are only committed.
+        // An edit during the diff must leave a different stamp for the next poll.
+        let stamps: HashMap<&str, _> = paths.iter().map(|p| (p.as_str(), Stamp::at(&self.root.join(p)))).collect();
+        let named = paths.len() <= PATHS_LIMIT;
+        // Naming the paths lets the outline use the Reader's base without
+        // including files that are only unpushed.
         let against = if named { self.against() } else { self.ends().head() };
         let args = ["diff", against, "-M", "--no-color", "--raw", "--numstat", "-z"];
         let raw = if named {
-            let mut scoped = Vec::with_capacity(args.len() + 1 + changed.len());
+            let mut scoped = Vec::with_capacity(args.len() + 1 + paths.len());
             scoped.extend(args);
             scoped.push("--");
-            scoped.extend(changed.iter().map(String::as_str));
+            scoped.extend(paths.iter().map(String::as_str));
             self.git(&scoped)?
         } else {
             self.git(&args)?
         };
-        let mut files = parse_changes(&raw);
+        let mut files = parse_files(&raw);
         if named {
-            self.add_missing_changes(&mut files, &stamps);
+            self.add_missing_files(&mut files, &stamps);
         } else {
-            // The whole-tree diff may include touched but unchanged files.
+            // The whole-tree diff does not limit itself to these paths.
             files.retain(|file| stamps.contains_key(file.path.as_str()));
         }
         for file in &mut files {
@@ -432,65 +429,65 @@ impl Repo {
         Some(files)
     }
 
-    fn mark_conflicts(&self, files: &mut Vec<FileChange>) {
-        // A conflict reads as an ordinary edit in that diff, or not at all.
+    fn mark_conflicts(&self, files: &mut Vec<PendingFile>) {
+        // Git can report a conflict as an ordinary edit or omit it from the diff.
         for path in &self.status.unmerged {
             match files.iter_mut().find(|f| f.path == *path) {
                 Some(file) => file.kind = Kind::Conflict,
-                None => files.push(FileChange::new(path, Kind::Conflict)),
+                None => files.push(PendingFile::new(path, Kind::Conflict)),
             }
         }
     }
 
-    fn add_missing_changes(&self, files: &mut Vec<FileChange>, stamps: &HashMap<&str, Option<Stamp>>) {
+    fn add_missing_files(&self, files: &mut Vec<PendingFile>, stamps: &HashMap<&str, Option<Stamp>>) {
         // A file put back to what the remote has can still differ from HEAD.
-        for path in &self.status.changed {
+        for path in &self.status.tracked_uncommitted {
             if !self.status.sources.contains(path) && !files.iter().any(|f| f.path == *path) {
                 let kind = if stamps[path.as_str()].is_some() { Kind::Modified } else { Kind::Deleted };
-                files.push(FileChange::new(path, kind));
+                files.push(PendingFile::new(path, kind));
             }
         }
     }
 
-    fn add_untracked(&mut self, files: &mut Vec<FileChange>) {
+    fn add_untracked(&mut self, files: &mut Vec<PendingFile>) {
         let mut counted = HashMap::with_capacity(self.status.untracked.len());
         for path in &self.status.untracked {
             let full = self.root.join(path);
-            let stamp = Stamp::read(&full);
+            let stamp = Stamp::at(&full);
             let lines = match self.counted.get(path) {
                 Some(previous) if previous.stamp == stamp => previous.lines,
                 _ => new_file_lines(&full),
             };
             counted.insert(path.clone(), Counted { stamp, lines });
-            let mut file = FileChange::new(path, Kind::Untracked);
+            let mut file = PendingFile::new(path, Kind::Untracked);
             (file.add, file.stamp) = (lines, stamp);
             files.push(file);
         }
         self.counted = counted;
     }
 
-    fn add_unpushed(&mut self, files: &mut Vec<FileChange>) -> Option<()> {
+    fn add_unpushed(&mut self, files: &mut Vec<PendingFile>) -> Option<()> {
         let ends = self.ends();
-        if *ends != self.committed.ends {
+        if *ends != self.unpushed.ends {
             let parsed = match &ends.base {
                 Some(base) => {
                     let args = ["diff", base, "HEAD", "-M", "--no-color", "--raw", "--numstat", "-z"];
-                    parse_changes(&self.git(&args)?)
+                    parse_files(&self.git(&args)?)
                 }
                 None => Vec::new(),
             };
-            self.committed = Unpushed { ends: ends.clone(), files: parsed };
+            self.unpushed = Unpushed { ends: ends.clone(), files: parsed };
         }
-        files.extend(self.committed.files.iter().cloned().map(|mut file| {
-            file.committed = true;
-            file.stamp = Stamp::read(&self.root.join(&file.path));
+        files.extend(self.unpushed.files.iter().cloned().map(|mut file| {
+            file.unpushed = true;
+            file.stamp = Stamp::at(&self.root.join(&file.path));
             file
         }));
         Some(())
     }
 
     fn index_stamp(&self) -> Option<Stamp> {
-        Stamp::read(&self.git_dir.as_ref()?.join("index"))
+        Stamp::at(&self.git_dir.as_ref()?.join("index"))
     }
 
     /// Tracked paths relative to the root. A failed refresh leaves the cache intact.
@@ -515,9 +512,8 @@ impl Repo {
         self.status.unmerged.iter().any(|p| p == path)
     }
 
-    /// Where the file now at `path` was before, if it was moved there.
-    /// Finding out means comparing the whole tree, so the answer is kept
-    /// until something that could change it does.
+    /// Finds the source of a rename. The whole-tree comparison is cached
+    /// for the same path, refs and index.
     pub fn moved_from(&mut self, path: &str) -> Option<String> {
         let index = self.index_stamp();
         let fresh = index.is_some()
@@ -527,7 +523,7 @@ impl Repo {
                 .is_some_and(|known| known.path == path && &known.ends == self.ends() && known.index == index);
         if !fresh {
             let raw = self.git(&["diff", self.against(), "-M", "--no-color", "--raw", "-z"])?;
-            let from = parse_changes(&raw).into_iter().find(|f| f.path == path).and_then(|f| f.from);
+            let from = parse_files(&raw).into_iter().find(|f| f.path == path).and_then(|f| f.from);
             self.moved = Some(RenameLookup { path: path.to_string(), ends: self.ends().clone(), index, from });
         }
         self.moved.as_ref().filter(|known| known.path == path)?.from.clone()
@@ -590,14 +586,14 @@ mod tests {
         repo
     }
 
-    fn assert_only_page_to_push(files: &[FileChange]) {
+    fn assert_only_unpushed_page(files: &[PendingFile]) {
         assert_eq!(files.len(), 1, "{files:?}");
         let page = &files[0];
-        assert_eq!((page.path.as_str(), page.committed, page.add, page.del), ("page.txt", true, 1, 1));
+        assert_eq!((page.path.as_str(), page.unpushed, page.add, page.del), ("page.txt", true, 1, 1));
     }
 
     #[test]
-    fn changes_ahead_of_upstream_stop_being_pending_when_the_upstream_catches_up() {
+    fn pushing_to_upstream_clears_the_pending_files() {
         let f = Fixture::new();
         f.write("page.txt", "first\n");
         f.commit("first");
@@ -608,15 +604,15 @@ mod tests {
         let mut repo = read_repo(&f);
         assert_eq!(repo.remote(), Some("origin/main"));
         let pending = repo.pending().unwrap();
-        assert_only_page_to_push(&pending);
-        assert!(!repo.history(1).unwrap()[0].pushed);
+        assert_only_unpushed_page(&pending);
+        assert!(repo.history(1).unwrap()[0].unpushed);
 
         f.push();
         assert!(repo.poll(&pending), "the upstream caught up");
         repo.read();
         assert_eq!(repo.remote(), Some("origin/main"));
         assert!(repo.pending().unwrap().is_empty());
-        assert!(repo.history(1).unwrap()[0].pushed);
+        assert!(!repo.history(1).unwrap()[0].unpushed);
     }
 
     #[test]
@@ -639,9 +635,9 @@ mod tests {
         assert!(repo.poll(&[]), "the upstream branch was deleted");
         repo.read();
         assert_eq!(repo.remote(), Some("mirror"));
-        assert_only_page_to_push(&repo.pending().unwrap());
+        assert_only_unpushed_page(&repo.pending().unwrap());
         let history = repo.history(2).unwrap();
-        assert!(!history[0].pushed && history[1].pushed);
+        assert!(history[0].unpushed && !history[1].unpushed);
     }
 
     #[test]
@@ -658,10 +654,10 @@ mod tests {
         let pending = repo.pending().unwrap();
         assert_eq!(pending.len(), 1);
         let page = &pending[0];
-        assert_eq!((page.path.as_str(), page.committed, page.add, page.del), ("page.txt", false, 1, 0));
+        assert_eq!((page.path.as_str(), page.unpushed, page.add, page.del), ("page.txt", false, 1, 0));
         let history = repo.history(2).unwrap();
         assert_eq!(history.len(), 2);
-        assert!(history.iter().all(|c| c.pushed));
+        assert!(history.iter().all(|c| !c.unpushed));
     }
 
     #[test]
@@ -678,9 +674,9 @@ mod tests {
         let mut repo = read_repo(&f);
         assert_eq!(repo.remote(), Some("origin"));
         let pending = repo.pending().unwrap();
-        assert_only_page_to_push(&pending);
+        assert_only_unpushed_page(&pending);
         let history = repo.history(2).unwrap();
-        assert!(!history[0].pushed && history[1].pushed);
+        assert!(history[0].unpushed && !history[1].unpushed);
         assert!(!repo.poll(&pending));
 
         f.git(&["push", "-q", "origin", "HEAD:main"]);
@@ -688,7 +684,7 @@ mod tests {
         repo.read();
         assert_eq!(repo.remote(), Some("origin"));
         assert!(repo.pending().unwrap().is_empty());
-        assert!(repo.history(1).unwrap()[0].pushed);
+        assert!(!repo.history(1).unwrap()[0].unpushed);
     }
 
     #[test]
@@ -716,7 +712,7 @@ mod tests {
         assert_eq!(repo.moved_from("page.txt"), None);
         assert!(!repo.poll(&pending));
         repo.only("page.txt");
-        assert!(repo.watch().complete);
+        assert!(repo.watch_scope().complete);
         assert!(repo.ok());
         for marker in ["filter-ran", "hook-ran", "fsmonitor-ran"] {
             assert!(!f.root.join(".git").join(marker).exists(), "reading ran the driver for {marker}");
@@ -755,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_changes_are_reused_while_the_ends_are_unchanged() {
+    fn unpushed_files_can_still_be_shown_when_the_diff_objects_are_unavailable() {
         let f = Fixture::new();
         f.write("page.txt", "first\n");
         f.commit("first");
@@ -765,9 +761,9 @@ mod tests {
         let mut warm = read_repo(&f);
         let mut cold = read_repo(&f);
         let pending = warm.pending().unwrap();
-        assert_only_page_to_push(&pending);
+        assert_only_unpushed_page(&pending);
 
-        // The uncached diff needs objects that are no longer available.
+        // Hide the objects so a new diff cannot succeed.
         fs::rename(f.root.join(".git/objects"), f.root.join(".git/hidden-objects")).unwrap();
         assert!(cold.pending().is_none());
         assert!(!cold.ok());

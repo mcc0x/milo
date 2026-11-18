@@ -1,4 +1,4 @@
-//! Shows one file, read-only, with its pending changes and code colours.
+//! Shows one file read-only, with code colours and a line diff of pending work.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -10,14 +10,14 @@ use crate::keys::{Direction, Key};
 use crate::read::{self, Content};
 use crate::screen::{self, Screen, Style, Wash};
 use crate::syntax::{self, Class, Lang, Span, State};
-use crate::ui::{self, ADD, DEL, DIM};
+use crate::ui::{self, ADD, DEL, FAINT};
 use crate::width::{byte_at_col, str_width};
 
-/// Files larger than this are not shown.
+/// How many bytes to read when there is no diff text to show.
 const LIMIT: u64 = 2 << 20;
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
-/// Extra columns for colouring a word that crosses the right edge.
+/// Extra room in the scan limit for a token that crosses the right edge.
 const LEAD_OUT: usize = 32;
 
 /// The file open in a pane and the position from which it is shown.
@@ -27,7 +27,7 @@ pub struct Reader {
     path: String,
     absolute: PathBuf,
     stamp: Option<Stamp>,
-    /// What is pending for this file; `Kind::None` if nothing is.
+    /// The file's status, if it has pending work.
     kind: Kind,
     body: Body,
     lang: Option<&'static Lang>,
@@ -88,7 +88,7 @@ impl Text {
 }
 
 /// Reads the file itself when its diff has no lines to show.
-fn read_lines(path: &Path, kind: Kind) -> Result<Vec<Line>, &'static str> {
+fn file_lines(path: &Path, kind: Kind) -> Result<Vec<Line>, &'static str> {
     let line_kind = if kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
     match read::file(path, LIMIT) {
         Content::Gone => Err("This file is gone."),
@@ -149,7 +149,7 @@ fn text_for_draw(text: &str, pan: usize, width: usize) -> (usize, &str) {
 /// The colours use the terminal's palette so they follow its theme.
 fn class_style(class: Class) -> Style {
     match class {
-        Class::Comment => DIM.italic(),
+        Class::Comment => FAINT.italic(),
         Class::Str => Style::fg(screen::GREEN),
         Class::Number => Style::fg(screen::YELLOW),
         Class::Keyword => Style::fg(screen::MAGENTA),
@@ -169,7 +169,7 @@ struct LinePainter<'a> {
 impl LinePainter<'_> {
     fn draw_line(&mut self, s: &mut Screen, y: usize, line: &Line, mut state: State) {
         let (sign, text_style, margin_style) = match line.kind {
-            LineKind::Same => (" ", Style::PLAIN, DIM),
+            LineKind::Same => (" ", Style::PLAIN, FAINT),
             LineKind::Add if self.lang.is_some() => ("+", Style::PLAIN, ADD.bold()),
             LineKind::Add => ("+", ADD, ADD),
             LineKind::Del => ("-", DEL, DEL),
@@ -179,7 +179,7 @@ impl LinePainter<'_> {
         }
         s.put(self.x - 2, y, 1, sign, margin_style);
         if self.pan > 0 {
-            s.put(self.x - 1, y, 1, "‹", DIM);
+            s.put(self.x - 1, y, 1, "‹", FAINT);
         }
         let (skip, text) = text_for_draw(&line.text, self.pan, self.width);
         s.put(self.x, y, self.width, &text[skip..], text_style);
@@ -256,21 +256,21 @@ impl Reader {
     }
 
     /// The directories to watch, and whether watching them misses nothing.
-    pub fn watch(&self) -> crate::watch::Scope {
-        self.repo.watch()
+    pub fn watch_scope(&self) -> crate::watch::Scope {
+        self.repo.watch_scope()
     }
 
-    /// Loads the file and its pending changes, keeping the last good result if git fails.
+    /// Rebuilds the file and diff on screen, keeping the last good result if git fails.
     fn load(&mut self) {
         self.repo.read();
-        let stamp = Stamp::read(&self.absolute);
+        let stamp = Stamp::at(&self.absolute);
         if !self.repo.ok() {
             return;
         }
-        match self.read_diff() {
+        match self.file_diff() {
             Some(FileDiff { lines, kind }) => {
                 self.kind = kind;
-                let lines = if lines.is_empty() { read_lines(&self.absolute, kind) } else { Ok(lines) };
+                let lines = if lines.is_empty() { file_lines(&self.absolute, kind) } else { Ok(lines) };
                 self.body = match lines {
                     Ok(lines) => Body::Text(Text::new(lines, self.lang, &mut self.spans)),
                     Err(note) => Body::Note(note),
@@ -289,20 +289,20 @@ impl Reader {
         self.stamp = stamp;
     }
 
-    fn read_diff(&mut self) -> Option<FileDiff> {
+    fn file_diff(&mut self) -> Option<FileDiff> {
         if self.repo.is_untracked(&self.path) {
             return Some(FileDiff { lines: Vec::new(), kind: Kind::Untracked });
         }
         if !self.repo.git {
             return Some(FileDiff { lines: Vec::new(), kind: Kind::None });
         }
-        let mut diff = diff::read(&self.repo.file_diff(&self.path, None)?);
+        let mut diff = diff::parse(&self.repo.file_diff(&self.path, None)?);
         // A file that looks new may have been moved here; compare it with its old path.
         if diff.kind == Kind::Added
             && let Some(from) = self.repo.moved_from(&self.path)
             && let Some(raw) = self.repo.file_diff(&self.path, Some(&from))
         {
-            diff = diff::read(&raw);
+            diff = diff::parse(&raw);
         }
         if self.repo.is_unmerged(&self.path) {
             diff.kind = Kind::Conflict;
@@ -310,12 +310,12 @@ impl Reader {
         self.repo.ok().then_some(diff)
     }
 
-    /// Looks for outside changes and takes them in. Returns false if git is busy.
+    /// Takes in changes made outside strata. Returns false while git is busy.
     pub fn check(&mut self) -> bool {
         if self.repo.busy() {
             return false;
         }
-        if self.repo.poll(&[]) || (self.repo.ok() && Stamp::read(&self.absolute) != self.stamp) {
+        if self.repo.poll(&[]) || (self.repo.ok() && Stamp::at(&self.absolute) != self.stamp) {
             self.load();
             self.top = self.top.min(self.last_top());
         }
@@ -337,7 +337,6 @@ impl Reader {
         }
     }
 
-    /// Draws the file, its status, and the keys available in the pane.
     pub fn draw(&mut self, s: &mut Screen) {
         s.clear();
         let (w, h) = (s.w, s.h);
@@ -346,10 +345,10 @@ impl Reader {
         }
         self.rows = h - 2;
         self.top = self.top.min(self.last_top());
-        self.header(s);
+        self.draw_heading(s);
         match &self.body {
             Body::Note(note) => {
-                s.put_fit(2, 2, w - 4, note, DIM);
+                s.put_fit(2, 2, w - 4, note, FAINT);
                 self.pan = 0;
             }
             Body::Text(text) => {
@@ -381,11 +380,11 @@ impl Reader {
             (false, 36..) => "↑↓ scroll · q close · ? help",
             (false, _) => "q close · ? help",
         };
-        s.put_fit(1, s.h - 1, s.w - 2, hint, DIM);
+        s.put_fit(1, s.h - 1, s.w - 2, hint, FAINT);
     }
 
-    /// The file's name, its directory, and what is pending for it.
-    fn header(&self, s: &mut Screen) {
+    /// Keeps the file name ahead of its directory so the name gets the space first.
+    fn draw_heading(&self, s: &mut Screen) {
         let mut right = s.w - 1;
         if self.kind != Kind::None {
             if let Body::Text(text) = &self.body {
@@ -400,7 +399,7 @@ impl Reader {
         let room = right.saturating_sub(2);
         let mut x = 1 + ui::icon(s, 1, 0, room, icons::file(name));
         x += s.put_fit(x, 0, room.saturating_sub(x), name, Style::PLAIN.bold());
-        s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, DIM);
+        s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, FAINT);
     }
 
     /// Returns true when the Reader should close.

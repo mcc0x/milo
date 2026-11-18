@@ -1,4 +1,4 @@
-//! The delimiters and words to colour in each supported language.
+//! Defines the code-colouring rules and selects them by file extension.
 
 use super::{Lang, Quote};
 
@@ -250,7 +250,7 @@ static TOML: Lang = Lang {
     ..PLAIN
 };
 
-/// The file extensions that select each language.
+/// Extensions are listed together when they use the same colouring rules.
 pub(super) const FILE_LANGS: &[(&[&str], &Lang)] = &[
     (&["rs"], &RUST),
     (&["py", "pyi"], &PYTHON),

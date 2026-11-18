@@ -1,4 +1,4 @@
-//! Reads a whole-file git diff and marks the parts of edited lines that differ.
+//! Parses whole-file diffs and marks the bytes that differ in paired lines.
 
 use std::ops::Range;
 
@@ -18,7 +18,7 @@ pub enum LineKind {
 /// One numbered line of a whole-file diff or of the file itself.
 pub struct Line {
     pub kind: LineKind,
-    /// The current line number, or the old one for a removal.
+    /// The current line number, or its number in the base if it was removed.
     pub number: u32,
     pub text: String,
     /// Display width, measured once so long lines need not be measured on every draw.
@@ -61,7 +61,7 @@ fn common_ends(a: &str, b: &str) -> (usize, usize) {
     (prefix, suffix)
 }
 
-/// Pairs equally sized runs of removed and added lines to mark small edits.
+/// Looks for small edits where consecutive removals and additions pair up.
 fn mark_edits(mut lines: &mut [Line]) {
     while let Some(start) = lines.iter().position(|l| l.kind == LineKind::Del) {
         lines = &mut lines[start..];
@@ -89,8 +89,8 @@ pub struct FileDiff {
     pub kind: Kind,
 }
 
-/// Reads every line, including removals in place, and what became of the file.
-pub fn read(raw: &[u8]) -> FileDiff {
+/// Parses the file's status and each line, leaving removals in place.
+pub fn parse(raw: &[u8]) -> FileDiff {
     let mut lines = Vec::new();
     let mut kind = Kind::None;
     let (mut old, mut new, mut in_hunk, mut second) = (1, 1, false, false);
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn a_diff_becomes_numbered_lines() {
-        let FileDiff { lines, kind } = read(
+        let FileDiff { lines, kind } = parse(
             b"diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n one\n-two\n+2\n+2.5\n three\n",
         );
         assert_eq!(kind, Kind::Modified);
@@ -160,43 +160,43 @@ mod tests {
     #[test]
     fn a_diff_says_what_became_of_the_file() {
         let new = b"diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+x\n";
-        assert_eq!(read(new).kind, Kind::Added);
+        assert_eq!(parse(new).kind, Kind::Added);
         let gone = b"diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
-        assert_eq!(read(gone).kind, Kind::Deleted);
+        assert_eq!(parse(gone).kind, Kind::Deleted);
         let moved = b"diff --git a/f b/g\nsimilarity index 90%\nrename from f\nrename to g\n@@ -1 +1 @@\n-x\n+y\n";
-        assert_eq!(read(moved).kind, Kind::Renamed);
-        assert_eq!(read(b"").kind, Kind::None);
+        assert_eq!(parse(moved).kind, Kind::Renamed);
+        assert_eq!(parse(b"").kind, Kind::None);
         let mode = b"diff --git a/f b/f\nold mode 100644\nnew mode 100755\n";
-        assert_eq!(read(mode).kind, Kind::Modified);
+        assert_eq!(parse(mode).kind, Kind::Modified);
         let swapped = b"diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n\
                         diff --git a/f b/f\nnew file mode 120000\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+t\n";
-        assert_eq!(read(swapped).kind, Kind::Modified);
+        assert_eq!(parse(swapped).kind, Kind::Modified);
     }
 
     #[test]
-    fn a_second_diff_does_not_leak_its_headers_into_the_text() {
+    fn a_file_type_change_does_not_mix_diff_headers_into_the_text() {
         let raw = b"diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-text\n\
                     diff --git a/f b/f\nnew file mode 120000\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+target\n";
-        assert_eq!(shape(&read(raw).lines), [(LineKind::Del, 1, "text"), (LineKind::Add, 1, "target")]);
+        assert_eq!(shape(&parse(raw).lines), [(LineKind::Del, 1, "text"), (LineKind::Add, 1, "target")]);
     }
 
     #[test]
     fn an_edited_word_is_picked_out() {
-        let lines = read(b"diff --git a/f b/f\n@@ -1 +1 @@\n-let total = count + 1;\n+let total = count + 2;\n").lines;
+        let lines = parse(b"diff --git a/f b/f\n@@ -1 +1 @@\n-let total = count + 1;\n+let total = count + 2;\n").lines;
         assert_eq!(&lines[0].text[lines[0].changed.clone()], "1");
         assert_eq!(&lines[1].text[lines[1].changed.clone()], "2");
     }
 
     #[test]
     fn an_edit_range_includes_whole_multibyte_characters() {
-        let lines = read("diff --git a/f b/f\n@@ -1 +1 @@\n-色 is a colour\n+红 is a colour\n".as_bytes()).lines;
+        let lines = parse("diff --git a/f b/f\n@@ -1 +1 @@\n-色 is a colour\n+红 is a colour\n".as_bytes()).lines;
         assert_eq!(&lines[0].text[lines[0].changed.clone()], "色");
         assert_eq!(&lines[1].text[lines[1].changed.clone()], "红");
     }
 
     #[test]
     fn unrelated_lines_are_not_paired() {
-        let lines = read(b"diff --git a/f b/f\n@@ -1 +1 @@\n-alpha\n+zzzzzzzzzz\n").lines;
+        let lines = parse(b"diff --git a/f b/f\n@@ -1 +1 @@\n-alpha\n+zzzzzzzzzz\n").lines;
         assert_eq!(lines[0].changed, 0..0);
     }
 

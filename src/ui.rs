@@ -1,12 +1,11 @@
-//! Small drawing helpers.
+//! Shares status styles, line counts, icons and scroll thumbs across screens.
 
-use crate::git::{FileChange, Kind};
+use crate::git::{Kind, PendingFile};
 use crate::icons::{self, Icon};
 use crate::screen::{self, Screen, Style};
 
-/// Text that steps back. Faint, not grey: it stays a shade of the theme's
-/// own text colour, where a theme's grey can match its background.
-pub const DIM: Style = Style::PLAIN.faint();
+/// Faint text follows the theme's foreground, unlike a fixed grey.
+pub const FAINT: Style = Style::PLAIN.faint();
 pub const ADD: Style = Style::fg(screen::GREEN);
 pub const DEL: Style = Style::fg(screen::RED);
 
@@ -22,10 +21,8 @@ pub fn kind_colour(kind: Kind) -> Style {
     }
 }
 
-/// How a file's own name is drawn: its colour, and a face to back it up,
-/// so the states stay apart even where two colours look alike. The face is
-/// for the name only; a word such as "removed" struck through would read as
-/// taken back.
+/// Names have a second cue besides colour, such as italics or a strike.
+/// Status labels use colour alone so a word like "removed" stays legible.
 pub fn kind_style(kind: Kind) -> Style {
     let colour = kind_colour(kind);
     match kind {
@@ -77,14 +74,14 @@ pub fn icon(s: &mut Screen, x: usize, y: usize, max_w: usize, icon: Icon) -> usi
 }
 
 /// "name parent/dir": the file name first, so it survives a narrow column.
-pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &FileChange) {
+pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &PendingFile) {
     let st = kind_style(f.kind);
-    let st = if f.committed { st } else { st.bold() };
+    let st = if f.unpushed { st } else { st.bold() };
     let (dir, name) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
     let mut used = icon(s, x, y, max_w, icons::file(name));
     used += s.put_middle(x + used, y, max_w - used, name, st);
     if !dir.is_empty() && used + 2 < max_w {
-        s.put_fit(x + used + 1, y, max_w - used - 1, dir, DIM);
+        s.put_fit(x + used + 1, y, max_w - used - 1, dir, FAINT);
     }
 }
 
@@ -97,6 +94,6 @@ pub fn thumb(s: &mut Screen, x: usize, y0: usize, h: usize, len: usize, top: usi
     let size = (h * h / len).max(1);
     let at = top.min(len - h) * (h - size) / (len - h);
     for y in y0 + at..y0 + at + size {
-        s.put(x, y, 1, "▐", DIM);
+        s.put(x, y, 1, "▐", FAINT);
     }
 }

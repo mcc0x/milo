@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use super::{Commit, Ends, FileChange, Kind};
+use super::{Commit, Ends, Kind, PendingFile};
 use crate::when;
 
 #[derive(Default)]
@@ -11,11 +11,11 @@ pub(super) struct Status {
     pub(super) ends: Ends,
     /// The upstream this branch is measured against.
     pub(super) upstream: Option<String>,
-    /// An upstream that is named but no longer exists.
+    /// A named upstream whose branch is missing.
     pub(super) gone: Option<String>,
     pub(super) ahead: u32,
-    /// Tracked paths that differ, including both names of a moved file.
-    pub(super) changed: Vec<String>,
+    /// Includes both paths of a move.
+    pub(super) tracked_uncommitted: Vec<String>,
     /// Where the moved ones among them were before.
     pub(super) sources: Vec<String>,
     pub(super) untracked: Vec<String>,
@@ -30,7 +30,7 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
     let mut st = Status::default();
     let text = String::from_utf8_lossy(raw);
     let mut entries = text.split('\0');
-    // An upstream that no longer exists is still named, but not measured.
+    // Git names a missing upstream but omits the ahead/behind line.
     let mut measured = false;
     // The path is the last of a fixed number of fields, and may hold spaces.
     let path = |entry: &str, fields: usize| entry.splitn(fields, ' ').nth(fields - 1).map(str::to_string);
@@ -41,16 +41,16 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
         } else if let Some(dir) = e.strip_prefix("! ").and_then(|path| path.strip_suffix('/')) {
             st.ignored.push(dir.to_string());
         } else if e.starts_with("1 ") {
-            st.changed.extend(path(e, 9));
+            st.tracked_uncommitted.extend(path(e, 9));
         } else if e.starts_with("2 ") {
             // A rename is followed by its old path, which is not an entry.
-            st.changed.extend(path(e, 10));
+            st.tracked_uncommitted.extend(path(e, 10));
             let from = entries.next().unwrap_or_default();
-            st.changed.push(from.to_string());
+            st.tracked_uncommitted.push(from.to_string());
             st.sources.push(from.to_string());
         } else if e.starts_with("u ") {
             st.unmerged.extend(path(e, 11));
-            st.changed.extend(path(e, 11));
+            st.tracked_uncommitted.extend(path(e, 11));
         } else if let Some(v) = e.strip_prefix("# branch.oid ") {
             st.ends.tip = v.to_string();
         } else if let Some(v) = e.strip_prefix("# branch.head ") {
@@ -70,7 +70,7 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
 
 /// Parses `--raw --numstat -z` output: what happened to each path, then how
 /// many lines each gained and lost.
-pub(super) fn parse_changes(raw: &[u8]) -> Vec<FileChange> {
+pub(super) fn parse_files(raw: &[u8]) -> Vec<PendingFile> {
     let mut files = Vec::new();
     let text = String::from_utf8_lossy(raw);
     let mut tokens = text.split('\0').filter(|t| !t.is_empty());
@@ -88,7 +88,7 @@ pub(super) fn parse_changes(raw: &[u8]) -> Vec<FileChange> {
             // Renames and copies list the old path first.
             let old = if matches!(code, b'R' | b'C') { tokens.next() } else { None };
             if let Some(path) = tokens.next() {
-                let mut file = FileChange::new(path, kind);
+                let mut file = PendingFile::new(path, kind);
                 file.from = old.filter(|_| code == b'R').map(str::to_string);
                 files.push(file);
             }
@@ -118,7 +118,7 @@ pub(super) fn parse_changes(raw: &[u8]) -> Vec<FileChange> {
     files
 }
 
-/// Parses the log and marks commits that the remote does not yet have.
+/// Parses history and marks the commits in the unpushed list.
 pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Vec<Commit> {
     let unpushed = String::from_utf8_lossy(unpushed);
     let unpushed: HashSet<&str> = unpushed.lines().collect();
@@ -129,7 +129,7 @@ pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Vec<Commit> {
             let (hash, time, parents, subject) = (f.next()?, f.next()?, f.next()?, f.next()?);
             let time = time.parse().unwrap_or(0);
             Some(Commit {
-                pushed: !unpushed.contains(hash),
+                unpushed: unpushed.contains(hash),
                 hash: hash.to_string(),
                 subject: subject.to_string(),
                 time,
@@ -144,10 +144,6 @@ pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Vec<Commit> {
 mod tests {
     use super::*;
 
-    fn changes(raw: &str) -> Vec<FileChange> {
-        parse_changes(raw.as_bytes())
-    }
-
     #[test]
     fn status_reads_branch_and_untracked() {
         let st = parse_status(
@@ -159,20 +155,19 @@ mod tests {
     }
 
     #[test]
-    fn status_keeps_only_ignored_directories_apart_from_changes() {
+    fn status_separates_ignored_directories_from_uncommitted_files() {
         let st = parse_status(
             b"! cache with spaces/\0! build.log\0? scratch.txt\0\
               1 .M N... 100644 100644 100644 h1 h2 source.rs\0",
         );
         assert_eq!(st.ignored, ["cache with spaces"]);
         assert_eq!(st.untracked, ["scratch.txt"]);
-        assert_eq!(st.changed, ["source.rs"]);
+        assert_eq!(st.tracked_uncommitted, ["source.rs"]);
         assert!(st.unmerged.is_empty());
     }
 
     #[test]
     fn status_sets_aside_an_upstream_that_is_gone() {
-        // Git still names a deleted upstream but prints no ahead/behind for it.
         let st = parse_status(b"# branch.oid abc\0# branch.head topic\0# branch.upstream gh/topic\0");
         assert_eq!((st.upstream, st.gone.as_deref()), (None, Some("gh/topic")));
     }
@@ -194,14 +189,14 @@ mod tests {
               2 R. N... 100644 100644 100644 h1 h2 R100 new name.txt\0old name.txt\0\
               u UU N... 100644 100644 100644 100644 h1 h2 h3 both.txt\0? loose.txt\0",
         );
-        assert_eq!(st.changed, ["src/a b.rs", "new name.txt", "old name.txt", "both.txt"]);
+        assert_eq!(st.tracked_uncommitted, ["src/a b.rs", "new name.txt", "old name.txt", "both.txt"]);
     }
 
     #[test]
-    fn changes_pair_kinds_with_counts() {
-        let files = changes(
-            ":100644 100644 a b M\0src/a.rs\0:000000 100644 0 c A\0new file.txt\0:100644 000000 d 0 D\0gone\0\
-             3\t1\tsrc/a.rs\x005\t0\tnew file.txt\x000\t7\tgone\0",
+    fn diff_pairs_kinds_with_counts() {
+        let files = parse_files(
+            b":100644 100644 a b M\0src/a.rs\0:000000 100644 0 c A\0new file.txt\0:100644 000000 d 0 D\0gone\0\
+              3\t1\tsrc/a.rs\x005\t0\tnew file.txt\x000\t7\tgone\0",
         );
         let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.kind, f.add, f.del)).collect();
         assert_eq!(
@@ -211,8 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn changes_keep_where_a_moved_file_was() {
-        let files = changes(":100644 100644 a b R090\0old/name.rs\0new/name.rs\x002\t1\t\0old/name.rs\0new/name.rs\0");
+    fn diff_keeps_the_source_of_a_rename() {
+        let files =
+            parse_files(b":100644 100644 a b R090\0old/name.rs\0new/name.rs\x002\t1\t\0old/name.rs\0new/name.rs\0");
         assert_eq!(files.len(), 1);
         assert_eq!((files[0].path.as_str(), files[0].kind), ("new/name.rs", Kind::Renamed));
         assert_eq!(files[0].from.as_deref(), Some("old/name.rs"));
@@ -220,13 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn changes_leave_binary_counts_at_zero() {
-        let files = changes(":100644 100644 a b M\0logo.png\0-\t-\tlogo.png\0");
+    fn binary_files_have_no_line_counts() {
+        let files = parse_files(b":100644 100644 a b M\0logo.png\0-\t-\tlogo.png\0");
         assert_eq!((files[0].add, files[0].del), (0, 0));
     }
 
     #[test]
-    fn changes_survive_a_truncated_entry() {
-        assert!(changes(":100644 100644 a b \0").is_empty());
+    fn a_diff_with_a_missing_path_produces_no_file() {
+        assert!(parse_files(b":100644 100644 a b \0").is_empty());
     }
 }

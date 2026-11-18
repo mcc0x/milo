@@ -1,10 +1,8 @@
-//! Asking Rex, the terminal this may be running inside, to open a floating
-//! window. Everything goes through the `rex` command line.
+//! Opens and replaces a floating reader through the Rex command line.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Runs the Rex command line and returns what it printed. `None` if it failed.
 fn rex(args: &[&str]) -> Option<String> {
     let out = Command::new("rex").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -25,7 +23,7 @@ fn json(s: &str) -> String {
     out
 }
 
-/// The value of a string field, wherever it first appears in a JSON reply.
+/// Extracts a simple ID such as `layer:1` from a Rex reply.
 fn field(reply: &str, name: &str) -> Option<String> {
     let (_, rest) = reply.split_once(&format!("\"{name}\""))?;
     let value = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
@@ -38,15 +36,13 @@ pub fn inside() -> bool {
     std::env::var_os("REX_SESSION").is_some()
 }
 
-/// Opens `file` in a Reader, in a floating window over the tab
-/// this pane is in, closing the window `previous` first if there is one.
-/// Returns the new window's name for the next call, or what to tell the
-/// user when it could not be done.
+/// Opens a floating reader in the outline's tab and returns its layer ID.
+/// If a previous layer is known, try to close it first.
 pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &'static str> {
     let session = std::env::var("REX_SESSION").map_err(|_| "Reading a file needs Rex.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
     if let Some(layer) = previous {
-        // It may be closed already; either way it is gone afterwards.
+        // The user may already have closed the layer; still try to open the file.
         let request = format!(r#"{{"session_id":{},"layer_id":{}}}"#, json(&session), json(layer));
         rex(&["api", "call", "-s", &session, "session.close_layer", &request]);
     }
@@ -58,7 +54,7 @@ pub fn open(root: &Path, file: &str, previous: Option<&str>) -> Result<String, &
         .and_then(|reply| field(&reply, "window_id"))
         .map(|id| format!(r#""window_id":{},"#, json(&id)))
         .unwrap_or_default();
-    let name = file.rsplit_once('/').map_or(file, |(_, n)| n);
+    let (_, name) = file.rsplit_once('/').unwrap_or(("", file));
     let request = format!(
         concat!(
             r#"{{"session_id":{},{}"bounds":[0.12,0.08,0.76,0.84],"focus":true,"layout":{{"block":{{"#,

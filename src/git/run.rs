@@ -10,14 +10,12 @@ use std::time::{Duration, Instant};
 
 use crate::term;
 
-/// No general answer from git is kept beyond this.
+/// Maximum output kept from a git command without a smaller per-command limit.
 const OUTPUT_LIMIT: u64 = 256 << 20;
 /// How long a git command may run before it is killed.
 const DEADLINE: Duration = Duration::from_secs(15);
 
-/// The git program itself. On macOS the `git` on the path is a launcher
-/// that takes as long again to start as git does, so the real one is found
-/// once. If it cannot be found, use `git` from the path.
+/// Cache the executable so frequent commands can bypass the macOS git launcher.
 pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     let mut launcher = Command::new("git");
     launcher.arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null());
@@ -53,7 +51,7 @@ pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Opti
     }
 }
 
-/// A filter is a program run on file content. Turn off every filter a project defines.
+/// A filter can run a program on file contents. Disable each configured filter.
 pub(super) fn filter_guard(root: &Path) -> Option<Vec<String>> {
     // Listing all keys succeeds even when there are no filters, unlike a pattern query.
     let names = String::from_utf8(output(root, &[], &["config", "--null", "--name-only", "--list"])?).ok()?;
@@ -71,9 +69,7 @@ pub(super) fn filter_guard(root: &Path) -> Option<Vec<String>> {
     Some(guard)
 }
 
-/// A repository's configuration can name programs for git to run: a file
-/// monitor, hooks, filters, a transport for fetching what is missing.
-/// Looking at a project must not run them.
+/// Disable the repository's own programs and avoid writing to its index.
 fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
     let mut c = Command::new(&*GIT);
     c.arg("--no-optional-locks")
@@ -122,7 +118,7 @@ fn collect(mut pipe: ChildStdout, limit: u64, started: Instant) -> Result<Vec<u8
     let mut chunk = [0u8; 1 << 16];
     while running(started) {
         let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-        if term::poll(&mut fds, 200) <= 0 {
+        if term::wait_ready(&mut fds, 200) <= 0 {
             continue;
         }
         match pipe.read(&mut chunk) {

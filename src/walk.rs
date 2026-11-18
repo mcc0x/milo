@@ -2,21 +2,18 @@
 
 use std::path::Path;
 
-/// Entries listed before the walk stops descending, so opening every folder
-/// of something enormous cannot hang the outline.
+/// Stop adding folders to the walk after this many entries have been listed.
 const CAP: usize = 50_000;
 
-/// Every entry of `root` and of each directory `open` says is expanded, as
-/// sorted paths relative to `root`. Directories end with `/`; one that is not
-/// open is listed without its contents, which are read when it is opened.
-/// Symbolic links are listed, never followed.
+/// Sorted paths relative to `root`. Folders end in `/` and their contents are
+/// listed only if `open` says to descend. Symbolic links are not followed.
 pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut dirs = vec![String::new()];
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(root.join(&dir)) else { continue };
         for entry in entries.flatten() {
-            // What the Finder leaves behind in every folder it has shown.
+            // Hide Finder's folder metadata in the plain tree.
             if entry.file_name() == ".DS_Store" {
                 continue;
             }

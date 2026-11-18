@@ -3,12 +3,12 @@
 use std::borrow::Cow;
 use std::time::Instant;
 
-use crate::git::{Commit, FileChange, Kind};
+use crate::git::{Commit, Kind, PendingFile};
 use crate::history::{self, Placement};
 use crate::icons;
 use crate::screen::{self, Screen, Style, Wash};
 use crate::tree::Node;
-use crate::ui::{self, DIM};
+use crate::ui::{self, FAINT};
 use crate::width::str_width;
 
 use super::{LIVE, Outline, PULSE};
@@ -91,7 +91,7 @@ impl Outline {
         s.clear();
         let now = Instant::now();
         self.expire(now);
-        let uncommitted = self.files.partition_point(|file| !file.committed);
+        let uncommitted = self.pending.partition_point(|file| !file.unpushed);
         let history = if self.show_history { &self.history[..] } else { &[] };
         let layout = arrange(s.w, s.h, self.repo.git, history, uncommitted, self.tree.rows.len());
         if layout.width == 0 {
@@ -132,7 +132,7 @@ impl Outline {
 
     fn draw_summary(&self, s: &mut Screen, width: usize, name_width: usize, uncommitted: usize) -> usize {
         let count = |n: usize| if n == 0 { String::new() } else { n.to_string() };
-        let (commit, push) = (count(uncommitted), count(self.files.len() - uncommitted));
+        let (commit, push) = (count(uncommitted), count(self.pending.len() - uncommitted));
         let long = self.summary_parts(&commit, &push, Form::Long);
         let long_width = text_width(&long);
         let (parts, used) = if name_width + long_width <= width {
@@ -171,7 +171,7 @@ impl Outline {
             };
             parts[0] = (text, Style::fg(screen::GREEN));
             if matches!((form, remote), (Form::Long, false)) {
-                parts[1] = (" · no remote", DIM);
+                parts[1] = (" · no remote", FAINT);
             }
         } else {
             parts = pending_parts(commit, push, form);
@@ -179,33 +179,34 @@ impl Outline {
         parts
     }
 
-    /// Words the keys for what they would do, with shorter hints in narrow panes.
+    /// Words the keys for what they would do, with shorter hints in narrow
+    /// panes. On screen a pending file is simply one that changed.
     fn draw_hint(&self, s: &mut Screen) {
-        let folders = if self.folds.all() { "e close folders" } else { "e open all" };
-        let pending = !self.files.is_empty();
+        let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
+        let pending = !self.pending.is_empty();
         let text = match (self.repo.git, s.w) {
             (true, 60..) => {
-                let filter = if self.changed_only { "c all files" } else { "c changed only" };
+                let filter = if self.pending_only { "c all files" } else { "c changed only" };
                 let open = if pending { "n next change" } else { "enter open" };
                 Cow::Owned(format!("{open} · {folders} · {filter} · ? help"))
             }
             (true, 30..) if pending => {
-                let filter = if self.changed_only { "c all files" } else { "c changed" };
+                let filter = if self.pending_only { "c all files" } else { "c changed" };
                 Cow::Owned(format!("n next · {filter} · ? help"))
             }
             (false, 44..) => Cow::Owned(format!("enter open · {folders} · ? help")),
             (_, 30..) => Cow::Borrowed("enter open · e all · ? help"),
             _ => Cow::Borrowed("? help · q quit"),
         };
-        s.put_fit(1, s.h - 1, s.w - 2, &text, DIM);
+        s.put_fit(1, s.h - 1, s.w - 2, &text, FAINT);
     }
 
     fn draw_tree(&mut self, s: &mut Screen, layout: &Layout, now: Instant) {
         let (y0, rows) = (layout.body_top, layout.body_rows);
         let len = self.tree.rows.len();
         if len == 0 {
-            let text = if self.changed_only { "Nothing to commit or push." } else { "No files." };
-            s.put_fit(1, y0, layout.width - 2, text, DIM);
+            let text = if self.pending_only { "Nothing to commit or push." } else { "No files." };
+            s.put_fit(1, y0, layout.width - 2, text, FAINT);
             return;
         }
         self.keep_in_view(rows);
@@ -246,10 +247,10 @@ impl Outline {
         let row = self.tree.rows[i];
         let node = self.tree.node(row.node);
         let open = node.dir && self.folds.is_open(&node.path);
-        let right = columns.draw_change(s, y, node);
+        let right = columns.draw_details(s, y, node);
         let indent = (usize::from(row.depth) * 2).min(columns.width / 3);
         for guide in (0..indent).step_by(2) {
-            s.put(1 + guide, y, 1, "│", DIM);
+            s.put(1 + guide, y, 1, "│", FAINT);
         }
         self.draw_name(s, y, 1 + indent..right, node, open);
         self.draw_mark(s, y, node, open, now);
@@ -266,7 +267,7 @@ impl Outline {
         let colour = ui::kind_style(node.kind);
         let style = if node.uncommitted {
             colour.bold()
-        } else if node.kind == Kind::None && !self.files.is_empty() {
+        } else if node.kind == Kind::None && !self.pending.is_empty() {
             colour.faint()
         } else {
             colour
@@ -275,7 +276,7 @@ impl Outline {
         if node.dir {
             x += s.put_fit(x, y, room, name, style);
             if !open && node.pending > 0 {
-                s.put(x + 1, y, right.saturating_sub(x + 1), &node.pending.to_string(), DIM);
+                s.put(x + 1, y, right.saturating_sub(x + 1), &node.pending.to_string(), FAINT);
             }
         } else {
             s.put_middle(x, y, room, name, style);
@@ -306,14 +307,14 @@ impl Outline {
         let (w, y0, rows) = (layout.width, layout.body_top, layout.body_rows);
         if self.recent.is_empty() {
             if !layout.heading {
-                s.put_fit(1, 0, w - 2, "Nothing to commit or push.", DIM);
+                s.put_fit(1, 0, w - 2, "Nothing to commit or push.", FAINT);
             }
             return;
         }
         let first = self.strip_col.min(layout.last_column(self.recent.len()));
         let mut x = 0;
         let mut shown = first * rows;
-        let files = &self.files;
+        let files = &self.pending;
         for column in self.recent.chunks(rows).skip(first) {
             let width = strip_width(column.iter().map(|&i| &files[i])).min(w);
             if x > 0 && x + width > w {
@@ -326,11 +327,11 @@ impl Outline {
             shown += column.len();
         }
         if first > 0 {
-            s.put(0, y0, 1, "‹", DIM);
+            s.put(0, y0, 1, "‹", FAINT);
         }
         let after = self.recent.len() - shown;
         if after > 0 {
-            s.put_right(w - 1, y0 + rows - 1, &format!("  +{after} more ›"), DIM);
+            s.put_right(w - 1, y0 + rows - 1, &format!("  +{after} more ›"), FAINT);
         }
         self.strip_col = first;
     }
@@ -357,14 +358,14 @@ fn pending_parts<'a>(commit: &'a str, push: &'a str, form: Form) -> Summary<'a> 
         Form::Long => [
             (commit, bold),
             (when(to_commit, " to commit"), bold),
-            (when(to_commit && to_push, " · "), DIM),
+            (when(to_commit && to_push, " · "), FAINT),
             (push, plain),
             (when(to_push, " to push"), plain),
         ],
         Form::Compact => [
             (when(to_commit, "○"), bold),
             (commit, bold),
-            (when(to_commit && to_push, " "), DIM),
+            (when(to_commit && to_push, " "), FAINT),
             (when(to_push, "↑"), plain),
             (push, plain),
         ],
@@ -383,7 +384,7 @@ struct ChangeColumns {
 
 impl Columns {
     /// Draws the change and its size when there is room, returning where the name ends.
-    fn draw_change(&self, s: &mut Screen, y: usize, node: &Node) -> usize {
+    fn draw_details(&self, s: &mut Screen, y: usize, node: &Node) -> usize {
         let right = self.width - 1; // The last column belongs to the scroll thumb.
         let Some(details) = &self.details else { return right };
         if node.kind == Kind::None {
@@ -403,8 +404,9 @@ fn under(path: &str, dir: &str) -> bool {
 }
 
 /// Each strip column is only as wide as its own names need.
-fn strip_width<'a>(files: impl Iterator<Item = &'a FileChange>) -> usize {
-    let longest = files.map(|file| str_width(file.path.rsplit('/').next().unwrap_or(&file.path))).max().unwrap_or(0);
+fn strip_width<'a>(files: impl Iterator<Item = &'a PendingFile>) -> usize {
+    let longest =
+        files.map(|file| str_width(file.path.rsplit_once('/').map_or(&file.path, |(_, name)| name))).max().unwrap_or(0);
     (longest + 12).clamp(16, 34)
 }
 
@@ -469,7 +471,7 @@ mod tests {
             subject: String::new(),
             time: 0,
             day: 0,
-            pushed: true,
+            unpushed: false,
             merge: false,
         })
     }

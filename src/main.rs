@@ -1,4 +1,4 @@
-//! strata: a project's files, coloured by what is not yet committed or pushed.
+//! Selects the outline or reader and runs the terminal event loop.
 
 mod diff;
 #[cfg(test)]
@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use git::Repo;
 use help::Page;
-use keys::{Key, read_keys};
+use keys::{Key, receive};
 use outline::Outline;
 use reader::Reader;
 use screen::Screen;
@@ -38,53 +38,67 @@ use term::Wait;
 use watch::{Scope, Watcher};
 
 const USAGE: &str = "\
-strata — a project's files, coloured by what is not yet committed or pushed
+strata — a file tree with git status and a read-only file reader
 
 Usage: strata [PATH]
        strata view FILE
+       strata --help | --version
 
-PATH is any directory (default: the current one). Inside a git repository
-it shows the whole project; anywhere else it is a plain file tree, with
-nothing coloured. It fits its pane: a file tree when tall, a strip of the
-changed files when short, with what happened to each when wide. Recent
-history sits beneath the tree in a tall pane and beside it in a wide one.
-It updates on its own.
+PATH defaults to the current directory. Inside a git repository the outline
+shows the whole project; elsewhere it shows a file tree without git status.
+It updates on its own. Short git panes show a strip of changed files; wider
+trees show line counts and what happened to each file. Recent history can
+sit beside the outline in a wide pane or beneath it in a tall one.
 
-  ↑ ↓ or j k    move                enter    open a folder, or read a file
-  n N           next, previous changed file
-  } {           next, previous folder
-  J K           next, previous beside this one, over anything nested
-  p             up to the parent folder
-  e             open every folder   c        changed files only
-  t             show or hide recent history
-  r             reload              q        quit
-  ?             what the colours and marks mean, and common keys
+Outline (tree):
+  ↑ ↓ or k j    move
+  Enter         toggle a folder or open a file
+  Space         toggle a folder
+  ← or h        close an open folder or go to the parent
+  → or l        open a closed folder
+  { }           previous/next visible folder
+  K J           previous/next item in the same folder
+  p             go to the parent folder
+  e             open every folder or restore earlier choices
+  n N           next/previous changed file
+  c             switch between all files and changed files only
+  t             show or hide history
+  r             reload
+  q             quit
 
-Enter or a double click on a file opens it to read: in a floating window
-when running inside Rex, otherwise in the pane itself. `strata view FILE`
-opens the file on its own, read-only, coloured as code, with the lines it
-gained and lost marked. n and N step through the changes, q closes it.
+In the strip, use ← → or h l to move between columns. In the tree, click a
+folder to toggle it, click a file to select it, or double-click to open it.
+Files open in a floating reader inside Rex and in the same pane elsewhere.
 
-Colour is the change: yellow edited, green new, red removed, cyan moved,
-magenta in conflict. Bold is not committed yet; regular weight is
-committed, waiting to be pushed. History says the same by weight: bold
-dots are commits still to push, faint ones are already pushed.
+Reader (also opened by strata view FILE):
+  ↑ ↓ or k j    scroll by a line
+  ← → or h l    scroll sideways
+  Space / b     page down/up
+  g G           top/bottom
+  n N           next/previous block of changed lines
+  q or Esc      close
 
-While the keyboard is in another pane, the outline moves to whatever file
-is being written and says so. It never moves while you are in it.
+In both screens, ? opens help and Ctrl-C quits. The tree and reader also
+support the mouse wheel, Page Up/Down and Home/End.
 
-Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
-STRATA_ICONS=off shows none.
+Changed files are those waiting to be committed or pushed. Yellow is edited,
+green new, red removed, cyan moved, and magenta in conflict. Uncommitted
+names are bold; unpushed names are regular. In history, bold dots still
+need pushing, faint dots are pushed, and a hollow dot is uncommitted work.
+The reader colours supported code and marks added and removed lines.
+
+Icons use a Nerd Font by default. Set STRATA_ICONS=plain for ordinary
+symbols or STRATA_ICONS=off to hide icons.
 ";
 
-/// How long to rest after a look when a change has been reported.
+/// Minimum rest after a look if the watcher has reported a change.
 const MIN_LOOK_INTERVAL: Duration = Duration::from_millis(120);
-/// Rests this many times as long as the last look took, even after a report.
-/// Repeated looks at the same cost thus take at most a fifth of the time.
+/// Rest at least this many times the cost of the last look, so repeated
+/// looks at the same cost take at most a fifth of the time.
 const REST: u32 = 4;
-/// How long to rest without a report when the watcher covers everything.
+/// Time between looks when the watcher is expected to cover the project.
 const WATCHED: Duration = Duration::from_secs(30);
-/// A shorter rest where the watcher can miss changes or is unavailable.
+/// Time between looks when the watcher cannot cover the project.
 const UNWATCHED: Duration = Duration::from_secs(2);
 
 /// When to look for changes again, with or without a report from the watcher.
@@ -104,14 +118,14 @@ impl Pace {
         self.reported = true;
     }
 
-    /// How long from `now` until the next look is due.
-    fn wait(&self, now: Instant) -> Duration {
+    /// Time until the next look: the event loop's call to `Ui::check`.
+    fn until_look(&self, now: Instant) -> Duration {
         let rest = if self.reported { MIN_LOOK_INTERVAL } else { self.idle }.max(self.took * REST);
         rest.saturating_sub(now.saturating_duration_since(self.ended))
     }
 
     /// An unsettled look, say during a checkout, is retried as if a change was reported.
-    fn finished(&mut self, started: Instant, ended: Instant, settled: bool) {
+    fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
         (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
     }
 }
@@ -149,8 +163,8 @@ impl Ui {
         }
     }
 
-    /// Looks for changes made outside, and takes them in. Returns false if
-    /// it is too soon to tell.
+    /// Takes in changes made outside strata. Returns false if the screen needs
+    /// another check soon because the repository is busy.
     fn check(&mut self) -> bool {
         match self {
             Ui::Outline(o) => o.check(),
@@ -167,10 +181,10 @@ impl Ui {
     }
 
     /// Where to watch for changes and how much the watch covers.
-    fn watch(&self) -> Scope {
+    fn watch_scope(&self) -> Scope {
         match self {
-            Ui::Outline(o) => o.watch(),
-            Ui::Reader(reader) => reader.watch(),
+            Ui::Outline(o) => o.watch_scope(),
+            Ui::Reader(reader) => reader.watch_scope(),
         }
     }
 }
@@ -240,7 +254,7 @@ fn main() {
         _ => fail("too many arguments; see strata --help"),
     };
     let (watcher, idle) = {
-        let scope = ui.watch();
+        let scope = ui.watch_scope();
         let watcher = Watcher::new(&scope);
         let idle = if watcher.fd().is_some() && scope.complete { WATCHED } else { UNWATCHED };
         (watcher, idle)
@@ -271,13 +285,13 @@ fn main() {
         ui.draw(&mut screen, help.as_mut());
         screen.flush();
 
-        let until_look = pace.wait(Instant::now());
+        let until_look = pace.until_look(Instant::now());
         let wait =
             if help.is_some() { until_look } else { ui.next_frame().map_or(until_look, |frame| frame.min(until_look)) };
         let timeout_ms = i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX);
         match term::wait(&keyboard, signal.as_ref(), timeout_ms, watcher.fd()) {
             Wait::Input => {
-                read_keys(&mut keyboard, &mut keys);
+                receive(&mut keyboard, &mut keys);
                 for key in keys.drain(..) {
                     if route_key(&mut ui, &mut screen, &mut help, key) {
                         break 'run;
@@ -290,10 +304,10 @@ fn main() {
             }
             Wait::Timeout | Wait::Interrupted => {}
         }
-        if pace.wait(Instant::now()).is_zero() {
+        if pace.until_look(Instant::now()).is_zero() {
             let started = Instant::now();
             let settled = ui.check();
-            pace.finished(started, Instant::now(), settled);
+            pace.finish_look(started, Instant::now(), settled);
         }
     }
     term::leave();
@@ -304,12 +318,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quiet_projects_are_checked_even_without_a_report() {
+    fn quiet_projects_get_a_look_even_without_a_report() {
         let start = Instant::now();
         for (idle, seconds) in [(WATCHED, 30), (UNWATCHED, 2)] {
             let pace = Pace::new(idle, start);
-            assert_eq!(pace.wait(start + Duration::from_secs(1)), Duration::from_secs(seconds - 1));
-            assert_eq!(pace.wait(start + Duration::from_secs(seconds)), Duration::ZERO);
+            assert_eq!(pace.until_look(start + Duration::from_secs(1)), Duration::from_secs(seconds - 1));
+            assert_eq!(pace.until_look(start + Duration::from_secs(seconds)), Duration::ZERO);
         }
     }
 
@@ -318,8 +332,8 @@ mod tests {
         let start = Instant::now();
         let mut pace = Pace::new(WATCHED, start);
         pace.report_change();
-        assert_eq!(pace.wait(start + Duration::from_millis(20)), Duration::from_millis(100));
-        assert_eq!(pace.wait(start + Duration::from_secs(1)), Duration::ZERO);
+        assert_eq!(pace.until_look(start + Duration::from_millis(20)), Duration::from_millis(100));
+        assert_eq!(pace.until_look(start + Duration::from_secs(1)), Duration::ZERO);
     }
 
     #[test]
@@ -327,11 +341,11 @@ mod tests {
         let start = Instant::now();
         let ended = start + Duration::from_secs(1);
         let mut pace = Pace::new(UNWATCHED, start);
-        pace.finished(start, ended, true);
-        assert_eq!(pace.wait(ended), Duration::from_secs(4));
+        pace.finish_look(start, ended, true);
+        assert_eq!(pace.until_look(ended), Duration::from_secs(4));
         pace.report_change();
-        assert_eq!(pace.wait(ended + Duration::from_secs(1)), Duration::from_secs(3));
-        assert_eq!(pace.wait(ended + Duration::from_secs(4)), Duration::ZERO);
+        assert_eq!(pace.until_look(ended + Duration::from_secs(1)), Duration::from_secs(3));
+        assert_eq!(pace.until_look(ended + Duration::from_secs(4)), Duration::ZERO);
     }
 
     #[test]
@@ -339,12 +353,12 @@ mod tests {
         let start = Instant::now();
         let ended = start + Duration::from_millis(10);
         let mut pace = Pace::new(WATCHED, start);
-        pace.finished(start, ended, false);
-        assert_eq!(pace.wait(ended), Duration::from_millis(120));
+        pace.finish_look(start, ended, false);
+        assert_eq!(pace.until_look(ended), Duration::from_millis(120));
         let retry = ended + Duration::from_millis(120);
-        assert_eq!(pace.wait(retry), Duration::ZERO);
-        pace.finished(retry, retry + Duration::from_millis(10), true);
-        assert_eq!(pace.wait(retry + Duration::from_millis(10)), Duration::from_secs(30));
+        assert_eq!(pace.until_look(retry), Duration::ZERO);
+        pace.finish_look(retry, retry + Duration::from_millis(10), true);
+        assert_eq!(pace.until_look(retry + Duration::from_millis(10)), Duration::from_secs(30));
     }
 
     #[test]
@@ -361,7 +375,7 @@ mod tests {
         ui.draw(&mut screen, help.as_mut());
         let first = screen.text();
         assert!(first[0].trim_start().starts_with("Files"));
-        assert!(first[11].contains("other keys close this"));
+        assert!(first[11].contains("Esc closes"));
         assert!(!route_key(&mut ui, &mut screen, &mut help, Key::PgDn));
         ui.draw(&mut screen, help.as_mut());
         assert_eq!(screen.text()[0], first[10]);

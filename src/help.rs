@@ -1,27 +1,33 @@
-//! What the colours, weights and marks mean, and the keys: a page shown
-//! over the pane on `?`, so nobody has to leave to find out.
+//! Draws and scrolls the in-pane guide to marks and keys.
 
 use crate::git::Kind;
 use crate::keys::Key;
 use crate::screen::{Screen, Style};
-use crate::ui::{self, ADD, DEL, DIM};
+use crate::ui::{self, ADD, DEL, FAINT};
 
 /// One row of a page: pieces of text, each in its own style.
 type Row = Vec<(&'static str, Style)>;
+
+const FOOTER: &str = "↑↓ scroll · Esc closes";
 
 fn heading(text: &'static str) -> Row {
     vec![(text, Style::PLAIN.bold())]
 }
 
-/// A sample drawn as it appears, then what it means. Only the sample's own
-/// letters take its style: a struck-through gap would be a stray line.
+/// Leave the sample's padding plain so a strike stops at the last letter.
 fn sample(text: &'static str, st: Style, meaning: &'static str) -> Row {
     let shown = text.trim_end();
-    vec![("  ", Style::PLAIN), (shown, st), (&text[shown.len()..], Style::PLAIN), ("  ", Style::PLAIN), (meaning, DIM)]
+    vec![
+        ("  ", Style::PLAIN),
+        (shown, st),
+        (&text[shown.len()..], Style::PLAIN),
+        ("  ", Style::PLAIN),
+        (meaning, FAINT),
+    ]
 }
 
 fn key(keys: &'static str, does: &'static str) -> Row {
-    vec![("  ", Style::PLAIN), (keys, Style::PLAIN), ("  ", Style::PLAIN), (does, DIM)]
+    vec![("  ", Style::PLAIN), (keys, Style::PLAIN), ("  ", Style::PLAIN), (does, FAINT)]
 }
 
 /// The page for the outline. Without git there are no colours to explain.
@@ -38,27 +44,43 @@ fn outline(git: bool) -> Vec<Row> {
             sample("conflict", name(Kind::Conflict), "needs merging"),
             sample("bold    ", Style::PLAIN.bold(), "to commit"),
             sample("regular ", Style::PLAIN, "to push"),
-            sample("docs 3  ", Style::PLAIN, "3 changed inside"),
-            sample("+2 −1   ", ADD, "lines changed"),
-            sample("●       ", Style::PLAIN.bold(), "being written"),
-            sample("•       ", Style::PLAIN, "changed, unseen"),
+            sample("docs 3  ", Style::PLAIN, "3 changed"),
+            sample("+2", ADD, "lines added"),
+            sample("−1", DEL, "lines removed"),
+            sample("● ○", Style::PLAIN.bold(), "being written"),
+            sample("•", Style::PLAIN, "changed, unseen"),
             Row::new(),
             heading("History"),
             sample("○", Style::PLAIN.bold(), "files to commit"),
             sample("●", Style::PLAIN.bold(), "a commit to push"),
             sample("●", Style::PLAIN.faint(), "already pushed"),
+            sample("●", Style::PLAIN, "no remote"),
             Row::new(),
         ]);
     }
-    rows.extend([heading("Keys"), key("↑ ↓  ", "move"), key("enter", "open"), key("e    ", "open every folder")]);
+    rows.extend([
+        heading("Tree keys"),
+        key("↑ ↓  ", "move (k j)"),
+        key("Enter", "toggle folder"),
+        key("Enter", "open file"),
+        key("Space", "toggle folder"),
+        key("←    ", "close or parent"),
+        key("→    ", "open folder"),
+        key("{ }  ", "prev/next folder"),
+        key("K J  ", "prev/next sibling"),
+        key("p    ", "parent folder"),
+        key("e    ", "open all/restore"),
+    ]);
     if git {
-        rows.extend([key("n N  ", "next, previous"), key("c    ", "changed only"), key("t    ", "history on or off")]);
+        rows.extend([key("n N  ", "next/prev change"), key("c    ", "changed only"), key("t    ", "toggle history")]);
     }
     rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
+    if git {
+        rows.extend([Row::new(), heading("Strip keys"), key("← →  ", "scroll (h l)"), key("g G  ", "first/last")]);
+    }
     rows
 }
 
-/// The Reader's help page.
 fn reader() -> Vec<Row> {
     vec![
         heading("Lines"),
@@ -67,13 +89,13 @@ fn reader() -> Vec<Row> {
         sample("word", Style::PLAIN.reverse(), "what changed"),
         Row::new(),
         heading("Keys"),
-        key("↑ ↓  ", "scroll"),
-        key("space", "page down"),
+        key("↑ ↓  ", "scroll (k j)"),
+        key("Space", "page down"),
         key("b    ", "page up"),
-        key("n N  ", "next, previous"),
-        key("← →  ", "see long lines"),
-        key("g G  ", "top, bottom"),
-        key("q    ", "close"),
+        key("n N  ", "next/prev change"),
+        key("← →  ", "scroll (h l)"),
+        key("g G  ", "top/bottom"),
+        key("q Esc", "close"),
     ]
 }
 
@@ -107,7 +129,7 @@ impl Page {
             }
         }
         ui::thumb(s, w - 1, 0, shown, self.rows.len(), self.top);
-        s.put_fit(1, h - 1, w - 2, "scroll keys move · other keys close this", DIM);
+        s.put_fit(1, h - 1, w - 2, FOOTER, FAINT);
     }
 
     /// Scrolls the page. Returns false when the key closes it instead.
@@ -118,5 +140,21 @@ impl Page {
         let last = self.rows.len().saturating_sub(shown);
         self.top = self.top.saturating_add_signed(rows).min(last);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::width::str_width;
+
+    #[test]
+    fn every_help_row_fits_a_28_column_pane() {
+        let room = 28 - 2; // The first and last columns are reserved.
+        assert!(str_width(FOOTER) <= room);
+        for row in outline(true).into_iter().chain(outline(false)).chain(reader()) {
+            let width: usize = row.iter().map(|(text, _)| str_width(text)).sum();
+            assert!(width <= room, "{width} columns: {:?}", row.iter().map(|(text, _)| text).collect::<Vec<_>>());
+        }
     }
 }
