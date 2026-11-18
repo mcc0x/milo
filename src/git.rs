@@ -178,14 +178,23 @@ pub struct Repo {
     pub root: PathBuf,
     pub name: String,
     pub branch: String,
+    /// False for a folder outside any repository: files are listed, and
+    /// nothing is ever pending.
+    pub git: bool,
     raw: Vec<u8>,
     stamp: Stamp,
 }
 
 impl Repo {
-    pub fn open(root: PathBuf) -> Repo {
+    /// Opens the repository `dir` is in, or `dir` itself as a plain folder
+    /// when it is in none. `None` if `dir` is not a directory.
+    pub fn open(dir: &Path) -> Option<Repo> {
+        let (root, git) = match toplevel(dir) {
+            Some(top) => (PathBuf::from(top), true),
+            None => (dir.canonicalize().ok().filter(|d| d.is_dir())?, false),
+        };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Repo { root, name, branch: String::new(), raw: Vec::new(), stamp: Vec::new() }
+        Some(Repo { root, name, branch: String::new(), git, raw: Vec::new(), stamp: Vec::new() })
     }
 
     fn status_raw(&self) -> Vec<u8> {
@@ -202,6 +211,9 @@ impl Repo {
 
     /// Reads what is pending afresh.
     pub fn load(&mut self) -> Vec<FileChange> {
+        if !self.git {
+            return Vec::new();
+        }
         self.raw = self.status_raw();
         let status = parse_status(&self.raw);
         let files = pending(&self.root, &status);
@@ -218,7 +230,7 @@ impl Repo {
     /// Whether anything moved since the last load: git's own view of the
     /// repository, or the content of a file that was already pending.
     pub fn stale(&self, files: &[FileChange]) -> bool {
-        self.status_raw() != self.raw || self.stamp(files) != self.stamp
+        self.git && (self.status_raw() != self.raw || self.stamp(files) != self.stamp)
     }
 
     /// Every tracked and untracked-but-not-ignored file, relative to the root.

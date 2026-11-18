@@ -4,7 +4,6 @@
 //! flowed across its width. A wide one adds what happened to each file.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::git::{FileChange, Kind, Repo};
@@ -12,6 +11,7 @@ use crate::icons;
 use crate::term::{self, Key, Screen, Style};
 use crate::tree::Tree;
 use crate::ui::{self, DIM};
+use crate::walk;
 
 /// At or below this height the pane is a horizontal strip.
 const STRIP_ROWS: usize = 7;
@@ -43,6 +43,8 @@ pub struct Outline {
     /// Pending files; one both committed and edited again appears twice,
     /// the uncommitted state first.
     files: Vec<FileChange>,
+    /// Without git, the listing the tree was built from, to notice changes.
+    listing: Vec<String>,
     tree: Tree,
     /// Directories the user opened, and ones they closed again.
     expanded: HashSet<String>,
@@ -71,10 +73,11 @@ pub struct Outline {
 }
 
 impl Outline {
-    pub fn new(root: PathBuf) -> Outline {
+    pub fn new(repo: Repo) -> Outline {
         let mut outline = Outline {
-            repo: Repo::open(root),
+            repo,
             files: Vec::new(),
+            listing: Vec::new(),
             tree: Tree::default(),
             expanded: HashSet::new(),
             collapsed: HashSet::new(),
@@ -121,13 +124,23 @@ impl Outline {
         }
     }
 
+    /// Every file to show: git's own list, or a plain walk of the open folders.
+    fn list(&self) -> Vec<String> {
+        if self.repo.git {
+            self.repo.files()
+        } else {
+            walk::list(&self.repo.root, |p| self.is_open(p))
+        }
+    }
+
     fn load(&mut self) {
         let selected = self.selected_path();
         self.files = self.repo.load();
         self.checked = Instant::now();
-        let all = self.repo.files();
+        let all = self.list();
         let pending = self.files.iter().map(|f| f.path.as_str());
         self.tree = Tree::build(all.iter().map(String::as_str).chain(pending));
+        self.listing = if self.repo.git { Vec::new() } else { all };
         // Reversed, so a file both committed and edited again shows its newest state.
         self.tree.colour(self.files.iter().rev().map(|f| (f.path.as_str(), f.kind)));
 
@@ -170,7 +183,8 @@ impl Outline {
         self.fresh.retain(|_, at| at.elapsed() < FRESH);
         if self.checked.elapsed() >= CHECK {
             self.checked = Instant::now();
-            if self.repo.stale(&self.files) {
+            let stale = if self.repo.git { self.repo.stale(&self.files) } else { self.list() != self.listing };
+            if stale {
                 self.reload();
             }
         }
@@ -200,6 +214,16 @@ impl Outline {
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
     }
 
+    /// Applies a change to which folders are open. Without git a folder's
+    /// contents are only read once it is open, so that means listing again.
+    fn refresh_open(&mut self, selected: Option<String>) {
+        if self.repo.git {
+            self.relayout(selected);
+        } else {
+            self.load();
+        }
+    }
+
     fn set_open(&mut self, path: String, open: bool) {
         if open {
             self.collapsed.remove(&path);
@@ -208,7 +232,7 @@ impl Outline {
             self.expanded.remove(&path);
             self.collapsed.insert(path.clone());
         }
-        self.relayout(Some(path));
+        self.refresh_open(Some(path));
     }
 
     pub fn draw(&mut self, s: &mut Screen) {
@@ -217,7 +241,8 @@ impl Outline {
         if w < 12 || h < 1 {
             return;
         }
-        self.horizontal = h <= STRIP_ROWS;
+        // The strip lists what is pending, so it needs git to have anything.
+        self.horizontal = self.repo.git && h <= STRIP_ROWS;
         // A strip of two or three rows has none to spare for a heading.
         let head = (h >= 4) as usize;
         let hint = (h >= HINT_ROWS) as usize;
@@ -263,8 +288,8 @@ impl Outline {
             let width: usize = parts.iter().map(|(t, _)| term::str_width(t)).sum();
             (parts, width)
         };
-        let (mut parts, mut sum_w) = summary(true);
-        if name_w + sum_w > w {
+        let (mut parts, mut sum_w) = if self.repo.git { summary(true) } else { (Vec::new(), 0) };
+        if self.repo.git && name_w + sum_w > w {
             (parts, sum_w) = summary(false);
         }
         if sum_w + 12 > w {
@@ -282,14 +307,20 @@ impl Outline {
     /// The keys, worded for what each would do right now.
     fn hint(&self, s: &mut Screen) {
         let (w, y) = (s.w, s.h - 1);
-        let text = if w >= 60 {
-            let e = if self.all_open { "e close folders" } else { "e open all" };
-            let c = if self.changed_only { "c all files" } else { "c changed only" };
-            format!("enter open · {e} · {c} · q quit")
-        } else if w >= 30 {
-            "e open all · c changed · q quit".to_string()
-        } else {
-            "e all · c changed".to_string()
+        // Without git there is no "changed" to narrow down to.
+        let text = match (self.repo.git, w) {
+            (true, 60..) => {
+                let e = if self.all_open { "e close folders" } else { "e open all" };
+                let c = if self.changed_only { "c all files" } else { "c changed only" };
+                format!("enter open · {e} · {c} · q quit")
+            }
+            (true, 30..) => "e open all · c changed · q quit".to_string(),
+            (true, _) => "e all · c changed".to_string(),
+            (false, 30..) => {
+                let e = if self.all_open { "e close folders" } else { "e open all" };
+                format!("enter open · {e} · q quit")
+            }
+            (false, _) => "e all · q quit".to_string(),
         };
         s.put_fit(1, y, w - 2, &text, DIM);
     }
@@ -458,9 +489,9 @@ impl Outline {
                 // Opening everything also forgets what was closed by hand.
                 self.all_open = !self.all_open;
                 self.collapsed.clear();
-                self.relayout(self.selected_path());
+                self.refresh_open(self.selected_path());
             }
-            Key::Char('c') => {
+            Key::Char('c') if self.repo.git => {
                 self.changed_only = !self.changed_only;
                 self.relayout(self.selected_path());
             }

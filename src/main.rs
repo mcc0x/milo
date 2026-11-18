@@ -6,11 +6,13 @@ mod outline;
 mod term;
 mod tree;
 mod ui;
+mod walk;
 
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::atomic::Ordering;
 
+use git::Repo;
 use outline::Outline;
 use term::{Screen, Wait};
 
@@ -19,9 +21,11 @@ strata — a project's files, coloured by what is not yet committed or pushed
 
 Usage: strata [PATH]
 
-PATH is any directory inside a git repository (default: the current one).
-It fits its pane: a file tree when tall, a strip of the changed files when
-short, with what happened to each when wide. It updates on its own.
+PATH is any directory (default: the current one). Inside a git repository
+it shows the whole project; anywhere else it is a plain file tree, with
+nothing coloured. It fits its pane: a file tree when tall, a strip of the
+changed files when short, with what happened to each when wide. It updates
+on its own.
 
   ↑ ↓ or j k    move                enter    open or close a folder
   e             open every folder   c        changed files only
@@ -42,11 +46,11 @@ fn main() {
         _ => {}
     }
     let dir = PathBuf::from(arg.unwrap_or_else(|| ".".into()));
-    let Some(root) = git::toplevel(&dir) else {
-        eprintln!("strata: {} is not inside a git repository", dir.display());
+    let Some(repo) = Repo::open(&dir) else {
+        eprintln!("strata: {} is not a directory", dir.display());
         exit(1);
     };
-    let mut outline = Outline::new(PathBuf::from(root));
+    let mut outline = Outline::new(repo);
     if let Err(e) = term::enter() {
         eprintln!("strata: cannot use this terminal: {e}");
         exit(1);

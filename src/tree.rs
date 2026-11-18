@@ -64,8 +64,12 @@ impl Tree {
             kind: Kind::None,
         };
         let mut tree = Tree { nodes: vec![root], ..Tree::default() };
+        // A path ending in `/` is a directory in its own right, possibly empty.
         for path in paths {
-            tree.insert(path, false);
+            match path.strip_suffix('/') {
+                Some(dir) => tree.insert(dir, true),
+                None => tree.insert(path, false),
+            };
         }
         for i in 0..tree.nodes.len() {
             let mut children = std::mem::take(&mut tree.nodes[i].children);
