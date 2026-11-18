@@ -2,12 +2,14 @@
 
 use std::io::{self, ErrorKind, Write};
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
 
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
 static ORIG: OnceLock<libc::termios> = OnceLock::new();
+/// The two ends of the pipe a signal wakes the event loop through.
+static SIGNAL: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
 
 // Alternate screen, hidden cursor, mouse buttons in SGR form, focus
 // reporting, and no wrapping: a row that turns out wider than reckoned is
@@ -17,12 +19,23 @@ const LEAVE: &[u8] = b"\x1b[0m\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h
 /// How long the rest of a split escape sequence is waited for.
 const SEQUENCE_MS: i32 = 25;
 
+/// Tells the event loop a signal came, in case it is not waiting yet.
+fn wake() {
+    let fd = SIGNAL[1].load(Ordering::Relaxed);
+    // A full pipe already says so; a failed write loses nothing.
+    unsafe {
+        libc::write(fd, [1u8].as_ptr().cast(), 1);
+    }
+}
+
 extern "C" fn on_winch(_: libc::c_int) {
     RESIZED.store(true, Ordering::Relaxed);
+    wake();
 }
 
 extern "C" fn on_term(_: libc::c_int) {
     TERMINATED.store(true, Ordering::Relaxed);
+    wake();
 }
 
 fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
@@ -51,15 +64,31 @@ pub fn enter() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    install(libc::SIGWINCH, on_winch);
-    // Each of these ends the program through the event loop, which puts the
-    // terminal back first.
-    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
-        install(sig, on_term);
-    }
     let mut out = io::stdout().lock();
     out.write_all(ENTER)?;
     out.flush()
+}
+
+/// Starts heeding signals. Asked to stop, the program winds down by itself
+/// from then on: it puts the terminal back and takes any git command it is
+/// waiting for down with it. This comes first, before anything can be slow.
+pub fn listen() {
+    // A signal that lands just before a wait begins would otherwise sit
+    // unnoticed until the wait ran out; a byte in a pipe ends it at once.
+    let mut pipe = [-1; 2];
+    if unsafe { libc::pipe(pipe.as_mut_ptr()) } == 0 {
+        for (end, fd) in SIGNAL.iter().zip(pipe) {
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            end.store(fd, Ordering::Relaxed);
+        }
+    }
+    install(libc::SIGWINCH, on_winch);
+    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+        install(sig, on_term);
+    }
 }
 
 pub fn leave() {
@@ -94,14 +123,21 @@ pub enum Wait {
 /// Waits for the keyboard, or for `extra` to become readable, or for
 /// `timeout_ms` to pass. The keyboard is reported first when both are ready.
 pub fn wait(timeout_ms: i32, extra: Option<RawFd>) -> Wait {
+    let signal = SIGNAL[0].load(Ordering::Relaxed);
     let mut fds = [
         libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
         libc::pollfd { fd: extra.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: signal, events: libc::POLLIN, revents: 0 },
     ];
-    match unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) } {
+    match unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout_ms) } {
         0 => Wait::Timeout,
         n if n < 0 => Wait::Interrupted,
+        _ if fds[2].revents != 0 => {
+            let mut buf = [0u8; 64];
+            while unsafe { libc::read(signal, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+            Wait::Interrupted
+        }
         _ if fds[0].revents != 0 => Wait::Input,
         _ => Wait::Woken,
     }

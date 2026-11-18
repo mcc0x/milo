@@ -34,8 +34,8 @@ struct Line {
     text: String,
     /// Byte range of `text` that differs from its paired line; empty if none.
     changed: (usize, usize),
-    /// The pieces of `text` to colour as code, in order.
-    spans: Vec<Span>,
+    /// What was still open in the code where this line begins.
+    state: State,
 }
 
 pub struct View {
@@ -51,6 +51,9 @@ pub struct View {
     kind: Kind,
     /// The language the file is written in, if it is one this colours.
     lang: Option<&'static Lang>,
+    /// The coloured pieces of the line being drawn, kept to save making it
+    /// again for each.
+    spans: Vec<Span>,
     top: usize,
     pan: usize,
     /// Rows of content on screen, set by the last draw.
@@ -127,11 +130,11 @@ fn mark_changed(lines: &mut [Line]) {
 fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
     let mut lines = Vec::new();
     let mut kind = Kind::None;
-    let (mut old, mut new, mut in_hunk) = (1, 1, false);
+    let (mut old, mut new, mut in_hunk, mut second) = (1, 1, false, false);
     for l in String::from_utf8_lossy(raw).lines() {
         if l.starts_with("diff --git ") {
             // A file that changed type, say into a link, comes as two diffs.
-            in_hunk = false;
+            (in_hunk, second) = (false, kind != Kind::None);
             kind = kind.max(Kind::Modified);
             continue;
         }
@@ -145,11 +148,13 @@ fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
         }
         if !in_hunk {
             // Between the file's name and its first hunk, git says what
-            // became of it.
-            kind = match l.split(' ').next() {
-                Some("new") => Kind::Added,
-                Some("deleted") => Kind::Deleted,
-                Some("rename") => Kind::Renamed,
+            // became of it. "new mode" is not "new file mode".
+            kind = match l {
+                // Deleted and then new again is one file, changed.
+                _ if l.starts_with("new file mode ") && second => Kind::Modified,
+                _ if l.starts_with("new file mode ") => Kind::Added,
+                _ if l.starts_with("deleted file mode ") => Kind::Deleted,
+                _ if l.starts_with("rename from ") => Kind::Renamed,
                 _ => kind,
             };
             continue;
@@ -165,7 +170,7 @@ fn parse_diff(raw: &[u8]) -> (Vec<Line>, Kind) {
             }
         };
         let text = clean(l.get(1..).unwrap_or(""));
-        lines.push(Line { kind: line_kind, no: *no, text, changed: (0, 0), spans: Vec::new() });
+        lines.push(Line { kind: line_kind, no: *no, text, changed: (0, 0), state: State::default() });
         *no += 1;
     }
     mark_changed(&mut lines);
@@ -192,11 +197,13 @@ impl View {
             note: None,
             kind: Kind::None,
             lang: None,
+            spans: Vec::new(),
             top: 0,
             pan: 0,
             rows: 0,
         };
         view.lang = syntax::for_file(&view.path);
+        view.repo.only(&view.path);
         view.load(None);
         // Start at the first change, with a little of the file above it.
         let first = view.lines.iter().position(|l| l.kind != LineKind::Same);
@@ -204,13 +211,9 @@ impl View {
         Some(view)
     }
 
-    pub fn root(&self) -> &Path {
-        &self.repo.root
-    }
-
-    /// Whether a watch on the root sees everything that can change here.
-    pub fn watchable(&self) -> bool {
-        self.repo.self_contained()
+    /// The directories to watch, and whether watching them misses nothing.
+    pub fn watch(&self) -> (Vec<&Path>, bool) {
+        (self.repo.watch_paths(), self.repo.watched_fully())
     }
 
     fn stamp(&self) -> Stamp {
@@ -218,16 +221,19 @@ impl View {
         Some((m.modified().ok()?, m.len()))
     }
 
-    /// Reads the file and what is pending for it, and colours it. `raw` is
-    /// a status the repository was just asked for, if any.
+    /// Reads the file and what is pending for it. `raw` is a status the
+    /// repository was just asked for, if any.
     fn load(&mut self, raw: Option<Vec<u8>>) {
         self.read(raw);
         let Some(lang) = self.lang else { return };
-        // What a removed line was is not part of the file as it now reads,
-        // so the lines before and after it are scanned as neighbours.
+        // Only what is on screen is ever coloured, when it is drawn. For
+        // that, each line remembers what was still open where it begins: a
+        // comment, say. A removed line is not part of the file as it now
+        // reads, so the lines either side of it are neighbours.
         let mut state = State::default();
         for line in self.lines.iter_mut().filter(|l| l.kind != LineKind::Del) {
-            line.spans = lang.line(&line.text, &mut state);
+            line.state = state;
+            lang.scan(&line.text, &mut state, &mut self.spans);
         }
     }
 
@@ -271,7 +277,7 @@ impl View {
                     no: i as u32 + 1,
                     text: clean(l),
                     changed: (0, 0),
-                    spans: Vec::new(),
+                    state: State::default(),
                 };
                 self.lines = text.lines().enumerate().map(line).collect();
                 if self.lines.is_empty() {
@@ -282,12 +288,17 @@ impl View {
     }
 
     /// Looks for changes to the file or to the repository around it.
-    pub fn check(&mut self) {
+    /// Returns false if it is too soon to tell, and worth looking again.
+    pub fn check(&mut self) -> bool {
+        if self.repo.busy() {
+            return false;
+        }
         let raw = self.repo.poll(&[]);
         if raw.is_some() || self.stamp() != self.stamp {
             self.load(raw);
             self.scroll(0);
         }
+        true
     }
 
     fn scroll(&mut self, delta: isize) {
@@ -347,9 +358,15 @@ impl View {
             // Panning skips whole characters off the left of the text.
             let skip = line.text.char_indices().nth(self.pan).map_or(line.text.len(), |(i, _)| i);
             s.put(text_x, y, text_w, &line.text[skip..], st);
+            // A removed line is not part of the file as it now reads, and
+            // is not coloured as code.
+            self.spans.clear();
+            if let Some(lang) = self.lang.filter(|_| line.kind != LineKind::Del) {
+                lang.scan(&line.text, &mut line.state.clone(), &mut self.spans);
+            }
             // Columns run on from one span to the next, so each is measured once.
             let (mut at, mut col) = (skip, 0);
-            for &(start, end, class) in &line.spans {
+            for &(start, end, class) in &self.spans {
                 let (start, end) = (start.max(skip), end.max(skip));
                 if start >= end || col >= text_w {
                     continue;
@@ -450,6 +467,13 @@ mod tests {
         let moved = b"diff --git a/f b/g\nsimilarity index 90%\nrename from f\nrename to g\n@@ -1 +1 @@\n-x\n+y\n";
         assert_eq!(parse_diff(moved).1, Kind::Renamed);
         assert_eq!(parse_diff(b"").1, Kind::None);
+        // A file made runnable is edited, not new: "new mode", not "new file mode".
+        let mode = b"diff --git a/f b/f\nold mode 100644\nnew mode 100755\n";
+        assert_eq!(parse_diff(mode).1, Kind::Modified);
+        // One swapped for a link comes as a deletion and then an addition.
+        let swapped = b"diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n\
+                        diff --git a/f b/f\nnew file mode 120000\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+t\n";
+        assert_eq!(parse_diff(swapped).1, Kind::Modified);
     }
 
     #[test]

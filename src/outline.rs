@@ -129,7 +129,7 @@ impl Outline {
             clicked: None,
             note: None,
         };
-        outline.load(None, false);
+        outline.load(None, None, false);
         // Start where the work is, not at the top of the tree.
         let first = outline.tree.rows.iter().position(|&(n, _)| {
             let n = &outline.tree.nodes[n as usize];
@@ -139,33 +139,30 @@ impl Outline {
         outline
     }
 
-    /// Whether a watch on the root sees everything that can change here.
-    pub fn watchable(&self) -> bool {
-        self.repo.self_contained()
+    /// The directories to watch, and whether watching them misses nothing.
+    pub fn watch(&self) -> (Vec<&std::path::Path>, bool) {
+        (self.repo.watch_paths(), self.repo.watched_fully())
     }
 
-    pub fn root(&self) -> &std::path::Path {
-        &self.repo.root
-    }
-
-    /// Every file to show: git's own list, or a plain walk of the open folders.
-    fn list(&self) -> Vec<String> {
-        if self.repo.git {
-            self.repo.tracked()
-        } else {
-            walk::list(&self.repo.root, |p| self.folds.is_open(p))
-        }
+    /// Without git, every file in the folders that are open.
+    fn walk(&self) -> Vec<String> {
+        walk::list(&self.repo.root, |p| self.folds.is_open(p))
     }
 
     /// Reads everything afresh. `raw` is a status the repository was just
-    /// asked for, if any; `mark` marks commits that were not there before.
-    fn load(&mut self, raw: Option<Vec<u8>>, mark: bool) {
+    /// asked for and `listing` a walk just made, if any; `mark` marks commits
+    /// that were not there before.
+    fn load(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>, mark: bool) {
         let selected = self.selected_path();
         self.repo.read(raw);
         self.files = self.repo.pending();
-        let listed = self.list();
-        self.tree = Tree::build(listed.iter().map(String::as_str), &self.files);
-        self.listing = if self.repo.git { Vec::new() } else { listed };
+        if self.repo.git {
+            let tracked = self.repo.tracked().iter().map(String::as_str);
+            self.tree.rebuild(tracked, &self.files);
+        } else {
+            self.listing = listing.unwrap_or_else(|| self.walk());
+            self.tree.rebuild(self.listing.iter().map(String::as_str), &self.files);
+        }
 
         // History only changes when the branch or what is pushed does.
         let key = self.repo.history_key();
@@ -203,9 +200,9 @@ impl Outline {
 
     /// Loads afresh, marks what differs from before and, left alone, brings
     /// the latest of it into view.
-    fn reload(&mut self, raw: Option<Vec<u8>>) {
+    fn reload(&mut self, raw: Option<Vec<u8>>, listing: Option<Vec<String>>) {
         let old = std::mem::take(&mut self.files);
-        self.load(raw, true);
+        self.load(raw, listing, true);
         let before: HashMap<(&str, bool), &FileChange> = old.iter().map(|f| ((f.path.as_str(), f.committed), f)).collect();
         let now = Instant::now();
         // The file written most recently among those that changed.
@@ -225,14 +222,23 @@ impl Outline {
     }
 
     /// Looks for changes made outside the outline, and takes them in.
-    pub fn check(&mut self) {
+    /// Returns false if it is too soon to tell, and worth looking again.
+    pub fn check(&mut self) -> bool {
+        if self.repo.busy() {
+            // Git is part-way through changing many files at once.
+            return false;
+        }
         if self.repo.git {
             if let Some(raw) = self.repo.poll(&self.files) {
-                self.reload(Some(raw));
+                self.reload(Some(raw), None);
             }
-        } else if self.list() != self.listing {
-            self.reload(None);
+        } else {
+            let listing = self.walk();
+            if listing != self.listing {
+                self.reload(None, Some(listing));
+            }
         }
+        true
     }
 
     /// Whether the outline should move by itself to where work is
@@ -290,7 +296,7 @@ impl Outline {
         if self.repo.git {
             self.relayout(selected);
         } else {
-            self.load(None, false);
+            self.load(None, None, false);
         }
     }
 
@@ -377,9 +383,22 @@ impl Outline {
         let name_w = term::str_width(&self.repo.name) + term::str_width(&self.repo.branch) + 5;
         let summary = |long: bool| {
             let mut parts = Vec::new();
+            if !self.repo.ok {
+                // Nothing below can be trusted, so nothing is claimed.
+                let text = if long { "git did not answer" } else { "! git" };
+                return (vec![(text.to_string(), ui::DEL)], term::str_width(text));
+            }
             if commit + push == 0 {
-                let text = if long { "✓ all committed and pushed" } else { "✓ clean" };
+                // Nothing can be called pushed where there is nowhere to push.
+                let text = match (long, self.repo.remote.is_some()) {
+                    (true, true) => "✓ all committed and pushed",
+                    (true, false) => "✓ all committed",
+                    (false, _) => "✓ clean",
+                };
                 parts.push((text.to_string(), Style::fg(term::GREEN)));
+                if long && self.repo.remote.is_none() {
+                    parts.push((" · no remote".to_string(), DIM));
+                }
             }
             if commit > 0 {
                 let text = if long { format!("{commit} to commit") } else { format!("●{commit}") };
@@ -600,7 +619,7 @@ impl Outline {
         self.by_click &= matches!(key, Key::Click(..));
         match key {
             Key::Char('q') | Key::Ctrl(b'c') | Key::Eof => return true,
-            Key::Char('r') => self.reload(None),
+            Key::Char('r') => self.reload(None, None),
             Key::Char('t') => self.show_history = !self.show_history,
             _ if self.horizontal => self.strip_key(key),
             _ => self.tree_key(key),

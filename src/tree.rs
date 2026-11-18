@@ -20,6 +20,26 @@ pub struct Node {
     pub pending: u32,
     /// Holds work that is not committed yet.
     pub uncommitted: bool,
+    /// A pending file by this very path has been counted here.
+    marked: bool,
+}
+
+impl Node {
+    fn new(name: &str, path: &str, parent: u32, dir: bool) -> Node {
+        Node {
+            name: name.to_string(),
+            path: path.to_string(),
+            parent,
+            children: Vec::new(),
+            dir,
+            kind: Kind::None,
+            add: 0,
+            del: 0,
+            pending: 0,
+            uncommitted: false,
+            marked: false,
+        }
+    }
 }
 
 fn trim_zeros(digits: &[u8]) -> &[u8] {
@@ -118,40 +138,32 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// Builds the tree of `paths`, where one ending in `/` is a directory in
-    /// its own right, and marks what is pending from `files`.
-    pub fn build<'a>(paths: impl Iterator<Item = &'a str>, files: &[FileChange]) -> Tree {
-        let root = Node {
-            name: String::new(),
-            path: String::new(),
-            parent: 0,
-            children: Vec::new(),
-            dir: true,
-            kind: Kind::None,
-            add: 0,
-            del: 0,
-            pending: 0,
-            uncommitted: false,
-        };
-        let mut tree = Tree { nodes: vec![root], ..Tree::default() };
+    /// Makes this the tree of `paths`, where one ending in `/` is a
+    /// directory in its own right, and marks what is pending from `files`.
+    /// The tree is rebuilt in the storage it already has: a large project
+    /// is rebuilt often, and memory given back each time is not reused well.
+    pub fn rebuild<'a>(&mut self, paths: impl Iterator<Item = &'a str>, files: &[FileChange]) {
+        self.nodes.clear();
+        self.index.clear();
+        self.rows.clear();
+        self.nodes.push(Node::new("", "", 0, true));
         for path in paths {
             match path.strip_suffix('/') {
-                Some(dir) => tree.insert(dir, true),
-                None => tree.insert(path, false),
+                Some(dir) => self.insert(dir, true),
+                None => self.insert(path, false),
             };
         }
         for file in files {
-            tree.mark(file);
+            self.mark(file);
         }
-        for i in 0..tree.nodes.len() {
-            let mut children = std::mem::take(&mut tree.nodes[i].children);
+        for i in 0..self.nodes.len() {
+            let mut children = std::mem::take(&mut self.nodes[i].children);
             children.sort_unstable_by(|&a, &b| {
-                let (a, b) = (&tree.nodes[a as usize], &tree.nodes[b as usize]);
+                let (a, b) = (&self.nodes[a as usize], &self.nodes[b as usize]);
                 b.dir.cmp(&a.dir).then_with(|| natural_cmp(&a.name, &b.name))
             });
-            tree.nodes[i].children = children;
+            self.nodes[i].children = children;
         }
-        tree
     }
 
     fn insert(&mut self, path: &str, dir: bool) -> u32 {
@@ -165,18 +177,7 @@ impl Tree {
             None => (0, path),
         };
         let i = self.nodes.len() as u32;
-        self.nodes.push(Node {
-            name: name.to_string(),
-            path: path.to_string(),
-            parent,
-            children: Vec::new(),
-            dir,
-            kind: Kind::None,
-            add: 0,
-            del: 0,
-            pending: 0,
-            uncommitted: false,
-        });
+        self.nodes.push(Node::new(name, path, parent, dir));
         self.nodes[parent as usize].children.push(i);
         self.index.insert(path.to_string(), i);
         i
@@ -187,7 +188,7 @@ impl Tree {
     /// as it first appears.
     fn mark(&mut self, file: &FileChange) {
         let mut i = self.insert(&file.path, false) as usize;
-        let first = self.nodes[i].kind == Kind::None;
+        let first = !std::mem::replace(&mut self.nodes[i].marked, true);
         loop {
             let n = &mut self.nodes[i];
             n.uncommitted |= !file.committed;
@@ -297,6 +298,14 @@ mod tests {
         tree.rows.iter().map(|&(n, _)| tree.nodes[n as usize].path.as_str()).collect()
     }
 
+    impl Tree {
+        fn build<'a>(paths: impl Iterator<Item = &'a str>, files: &[FileChange]) -> Tree {
+            let mut tree = Tree::default();
+            tree.rebuild(paths, files);
+            tree
+        }
+    }
+
     #[test]
     fn names_sort_as_a_person_would() {
         let mut names = ["File10.txt", "Zebra.md", "file2.txt", "apple.md", "a", "A"];
@@ -342,8 +351,10 @@ mod tests {
 
     #[test]
     fn a_directory_replaced_by_a_file_still_shows_what_it_held() {
-        let files = [file("dir", Kind::Untracked, 1, false), file("dir/a.txt", Kind::Deleted, 0, false)];
+        // The order git reports them in: what was deleted, then what is new.
+        let files = [file("dir/a.txt", Kind::Deleted, 0, false), file("dir", Kind::Untracked, 1, false)];
         let mut tree = Tree::build(["dir"].into_iter(), &files);
+        assert_eq!((tree.nodes[0].pending, tree.nodes[0].add), (2, 1));
         tree.layout(|_| true, false);
         assert_eq!(names(&tree), ["dir", "dir/a.txt"]);
     }

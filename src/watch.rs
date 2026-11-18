@@ -13,8 +13,8 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    pub fn new(root: &Path) -> Watcher {
-        Watcher { fd: imp::start(root) }
+    pub fn new(roots: &[&Path]) -> Watcher {
+        Watcher { fd: imp::start(roots) }
     }
 
     /// A descriptor to wait on alongside the keyboard, if watching works here.
@@ -104,9 +104,9 @@ mod imp {
         }
     }
 
-    /// Starts watching `root` for the life of the process. Returns the read
+    /// Starts watching `roots` for the life of the process. Returns the read
     /// end of a pipe that becomes readable on every change.
-    pub fn start(root: &Path) -> Option<RawFd> {
+    pub fn start(roots: &[&Path]) -> Option<RawFd> {
         let mut fds = [0 as RawFd; 2];
         unsafe {
             if libc::pipe(fds.as_mut_ptr()) != 0 {
@@ -118,7 +118,7 @@ mod imp {
                 libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             }
             SIGNAL.store(fds[1], Ordering::Relaxed);
-            if stream(root) {
+            if stream(roots) {
                 return Some(fds[0]);
             }
             // Nothing will ever write to the pipe: give both ends back.
@@ -129,16 +129,26 @@ mod imp {
         }
     }
 
-    /// Creates the stream on `root` and starts it. The stream keeps its own
-    /// copy of the paths, so the string and the array are released here.
-    unsafe fn stream(root: &Path) -> bool {
-        let bytes = root.as_os_str().as_bytes();
-        let path = CFStringCreateWithBytes(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, UTF8, 0);
-        if path.is_null() {
-            return false;
+    /// Creates one stream over `roots` and starts it. The stream keeps its
+    /// own copy of the paths, so the strings and the array are released here.
+    unsafe fn stream(roots: &[&Path]) -> bool {
+        let mut strings = Vec::with_capacity(roots.len());
+        for root in roots {
+            let bytes = root.as_os_str().as_bytes();
+            let path = CFStringCreateWithBytes(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, UTF8, 0);
+            if !path.is_null() {
+                strings.push(path);
+            }
         }
-        let paths = CFArrayCreate(std::ptr::null(), &path, 1, &kCFTypeArrayCallBacks);
-        CFRelease(path);
+        // A path that could not be watched would be a change never heard.
+        let paths = if strings.len() == roots.len() {
+            CFArrayCreate(std::ptr::null(), strings.as_ptr(), strings.len() as isize, &kCFTypeArrayCallBacks)
+        } else {
+            std::ptr::null()
+        };
+        for path in strings {
+            CFRelease(path);
+        }
         if paths.is_null() {
             return false;
         }
@@ -159,7 +169,7 @@ mod imp {
     use std::os::fd::RawFd;
     use std::path::Path;
 
-    pub fn start(_: &Path) -> Option<RawFd> {
+    pub fn start(_: &[&Path]) -> Option<RawFd> {
         None
     }
 }

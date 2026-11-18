@@ -93,8 +93,9 @@ impl Ui {
         }
     }
 
-    /// Looks for changes made outside, and takes them in.
-    fn check(&mut self) {
+    /// Looks for changes made outside, and takes them in. Returns false if
+    /// it is too soon to tell.
+    fn check(&mut self) -> bool {
         match self {
             Ui::Outline(o) => o.check(),
             Ui::View(v) => v.check(),
@@ -109,18 +110,11 @@ impl Ui {
         }
     }
 
-    fn root(&self) -> &Path {
+    /// The directories to watch, and whether watching them misses nothing.
+    fn watch(&self) -> (Vec<&Path>, bool) {
         match self {
-            Ui::Outline(o) => o.root(),
-            Ui::View(v) => v.root(),
-        }
-    }
-
-    /// Whether a watch on the root sees everything that can change.
-    fn watchable(&self) -> bool {
-        match self {
-            Ui::Outline(o) => o.watchable(),
-            Ui::View(v) => v.watchable(),
+            Ui::Outline(o) => o.watch(),
+            Ui::View(v) => v.watch(),
         }
     }
 }
@@ -134,6 +128,7 @@ fn fail(message: String) -> ! {
 }
 
 fn main() {
+    term::listen();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut ui = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["-h" | "--help"] => return print!("{USAGE}"),
@@ -151,8 +146,16 @@ fn main() {
         }
         _ => fail(format!("too many arguments\n\n{USAGE}")),
     };
-    let watcher = Watcher::new(ui.root());
-    let idle = if watcher.fd().is_some() && ui.watchable() { WATCHED } else { UNWATCHED };
+    let (watcher, idle) = {
+        let (paths, fully) = ui.watch();
+        let watcher = Watcher::new(&paths);
+        let idle = if watcher.fd().is_some() && fully { WATCHED } else { UNWATCHED };
+        (watcher, idle)
+    };
+    // Asked to stop while still starting up: there is nothing to put back.
+    if term::TERMINATED.load(Ordering::Relaxed) {
+        exit(1);
+    }
     if let Err(e) = term::enter() {
         fail(format!("cannot use this terminal: {e}"));
     }
@@ -175,8 +178,11 @@ fn main() {
         ui.draw(&mut screen);
         screen.flush();
 
-        let due = if told { SETTLE.max(took * REST) } else { idle };
-        let until_look = due.saturating_sub(looked.elapsed());
+        // A look is due soon after a change is reported, and now and then
+        // regardless; either way it rests in proportion to how long the
+        // last one took.
+        let due = |told: bool| if told { SETTLE } else { idle }.max(took * REST);
+        let until_look = due(told).saturating_sub(looked.elapsed());
         let wait = ui.next_frame().map_or(until_look, |frame| frame.min(until_look));
         match term::wait(wait.as_millis() as i32 + 1, watcher.fd()) {
             Wait::Input => {
@@ -193,11 +199,12 @@ fn main() {
             }
             Wait::Timeout | Wait::Interrupted => {}
         }
-        let due = if told { SETTLE.max(took * REST) } else { idle };
-        if looked.elapsed() >= due {
+        if looked.elapsed() >= due(told) {
             let started = Instant::now();
-            ui.check();
-            (looked, took, told) = (Instant::now(), started.elapsed(), false);
+            // Too soon to tell, say in the middle of a checkout: look again
+            // once things have settled.
+            let settled = ui.check();
+            (looked, took, told) = (Instant::now(), started.elapsed(), !settled);
         }
     }
     term::leave();
