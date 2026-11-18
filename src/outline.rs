@@ -31,6 +31,8 @@ const FRESH: Duration = Duration::from_secs(4);
 const HISTORY_ROWS: usize = 20;
 /// From this width history sits beside the outline instead.
 const SIDE_COLS: usize = 90;
+/// From this many rows the history panel leads with its row of dots.
+const DOT_ROWS: usize = 6;
 /// Commits loaded for it: more than any pane has columns for dots.
 const HISTORY_LIMIT: usize = 300;
 
@@ -287,7 +289,7 @@ impl Outline {
         let beside = if history && w >= SIDE_COLS && h >= 3 { (w / 3).clamp(30, 52) } else { 0 };
         let beneath = history && beside == 0 && !self.horizontal && h >= HISTORY_ROWS;
         let panel = if beneath { self.history_rows(h - head - hint) } else { 0 };
-        // One column between the two is the rule that separates them.
+        // The column left over between the two is the space that parts them.
         self.width = if beside > 0 { w - beside - 1 } else { w };
         self.body = (head, h - head - hint - panel);
         if head == 1 {
@@ -298,16 +300,13 @@ impl Outline {
         } else {
             self.draw_tree(s);
         }
+        // Space, not a rule, keeps the two apart: two columns beside, one
+        // row beneath. Beside, the heading shares the project's own row.
         if beside > 0 {
-            for y in head..head + self.body.1 {
-                s.put(self.width, y, 1, "│", DIM);
-            }
-            self.draw_history(s, (self.width + 1, head), (beside, self.body.1));
-            // The panel's own rule meets the one between the two halves.
-            s.put(self.width, head, 1, "┬", DIM);
+            self.draw_history(s, (self.width + 1, 0), (beside, head + self.body.1));
         }
         if panel > 0 {
-            self.draw_history(s, (0, self.body.0 + self.body.1), (w, panel));
+            self.draw_history(s, (0, self.body.0 + self.body.1 + 1), (w, panel - 1));
         }
         if hint == 1 && self.focused {
             self.hint(s);
@@ -317,7 +316,7 @@ impl Outline {
     /// The project and branch, and how much is waiting: in bold what is not
     /// committed, in regular weight what is only not pushed, as in the rows.
     fn header(&self, s: &mut Screen) {
-        let w = s.w;
+        let w = self.width;
         let commit = self.files.iter().filter(|f| !f.committed).count();
         let push = self.files.len() - commit;
         // Spelled out where it fits beside the name; "●3 ↑2" where it does not.
@@ -474,62 +473,47 @@ impl Outline {
     /// say, about a quarter of the pane, more where the tree leaves room.
     fn history_rows(&self, avail: usize) -> usize {
         let unpushed = self.history.iter().filter(|c| !c.pushed).count();
-        let divider = (unpushed > 0 && unpushed < self.history.len()) as usize;
+        let remote_row = (unpushed > 0 && unpushed < self.history.len()) as usize;
         let dirty = self.files.iter().any(|f| !f.committed) as usize;
-        let content = 2 + dirty + divider + self.history.len();
+        // A blank row above, the heading, the dots, then one row per line.
+        let content = 3 + dirty + remote_row + self.history.len();
         let spare = avail.saturating_sub(self.tree.rows.len()).min(avail / 2);
-        content.min((avail / 4).max(5).max(spare)).min(avail.saturating_sub(3))
+        content.min((avail / 4).max(DOT_ROWS + 1).max(spare)).min(avail.saturating_sub(3))
     }
 
-    /// Recent commits, in the area whose corner is (x0, y0): beneath the
-    /// tree, or beside it in a wide pane. One row of dots gives the shape:
-    /// newest first, a gap between days, a tick where the remote is. Below
-    /// it the newest few are spelled out. Hollow is work not committed,
-    /// yellow is committed but not pushed, green is on the remote, and the
-    /// bold dot is where the branch is now. Without a remote, commits are
-    /// simply uncoloured.
-    fn draw_history(&self, s: &mut Screen, (x0, y0): (usize, usize), (w, rows): (usize, usize)) {
-        // Text keeps one column clear of both edges of the area.
-        let (left, right, end) = (x0 + 1, x0 + w - 1, y0 + rows);
-        let remote = self.repo.remote.as_deref();
-        let unpushed = self.history.iter().filter(|c| !c.pushed).count();
-        let dirty = self.files.iter().filter(|f| !f.committed).count();
-        let dot = |i: usize, c: &Commit| {
-            let st = match (remote, c.pushed) {
-                (None, _) => Style::PLAIN,
-                (Some(_), true) => Style::fg(term::GREEN),
-                (Some(_), false) => Style::fg(term::YELLOW),
-            };
-            if i == 0 { st.bold() } else { st }
+    fn dot_style(&self, i: usize, c: &Commit) -> Style {
+        let st = match (&self.repo.remote, c.pushed) {
+            (None, _) => Style::PLAIN,
+            (Some(_), true) => Style::fg(term::GREEN),
+            (Some(_), false) => Style::fg(term::YELLOW),
         };
-        // Where history passes from local commits to ones the remote has.
-        let crosses = |before: &Commit, c: &Commit| remote.is_some() && !before.pushed && c.pushed;
+        // The branch tip is the same dot, bold.
+        if i == 0 { st.bold() } else { st }
+    }
 
-        s.put(x0, y0, w, &"─".repeat(w), DIM);
-        s.put(left, y0, w - 2, " History ", Style::PLAIN);
-        // The heading counts files to push; this counts commits, and says so.
-        if unpushed > 0 {
-            let text = format!(" {unpushed} unpushed ");
-            s.put(right.saturating_sub(text.len()), y0, text.len(), &text, Style::fg(term::YELLOW));
-        }
-        if rows < 2 {
-            return;
-        }
+    /// Whether history passes, between two neighbours, from local commits
+    /// to ones the remote has.
+    fn crosses(&self, before: &Commit, c: &Commit) -> bool {
+        self.repo.remote.is_some() && !before.pushed && c.pushed
+    }
 
+    /// The shape of recent history in one row: newest first, a gap between
+    /// days, a tick where the remote is.
+    fn draw_dots(&self, s: &mut Screen, (left, right): (usize, usize), y: usize, dirty: bool) {
         // Spaced out while every commit fits that way, packed once they do not.
         let pairs = || self.history.iter().zip(self.history.iter().skip(1));
         let days = pairs().filter(|(a, b)| a.day != b.day).count();
-        let ticks = pairs().filter(|(a, b)| crosses(a, b)).count();
-        let cells = self.history.len() + ticks + (dirty > 0) as usize;
-        let step = if cells * 2 + days <= w - 2 { 2 } else { 1 };
-        let (mut x, y) = (left, y0 + 1);
-        if dirty > 0 {
+        let ticks = pairs().filter(|(a, b)| self.crosses(a, b)).count();
+        let cells = self.history.len() + ticks + dirty as usize;
+        let step = if cells * 2 + days <= right.saturating_sub(left) { 2 } else { 1 };
+        let mut x = left;
+        if dirty {
             s.put(x, y, 1, "○", Style::PLAIN.bold());
             x += step;
         }
         for (i, c) in self.history.iter().enumerate() {
             if let Some(before) = i.checked_sub(1).map(|b| &self.history[b]) {
-                if crosses(before, c) && x < right {
+                if self.crosses(before, c) && x < right {
                     s.put(x, y, 1, "│", DIM);
                     x += step;
                 }
@@ -538,12 +522,37 @@ impl Outline {
             if x >= right {
                 break;
             }
-            s.put(x, y, 1, "●", dot(i, c));
+            s.put(x, y, 1, "●", self.dot_style(i, c));
             x += step;
+        }
+    }
+
+    /// Recent commits, in the area whose corner is (x0, y0): beneath the
+    /// tree, or beside it in a wide pane. A heading in the project name's
+    /// own weight, a row of dots for the shape where there is room for it,
+    /// then one commit a row. Hollow is work not committed, yellow is
+    /// committed but not pushed, green is on the remote. Without a remote,
+    /// commits are simply uncoloured.
+    fn draw_history(&self, s: &mut Screen, (x0, y0): (usize, usize), (w, rows): (usize, usize)) {
+        // Text keeps one column clear of both edges of the area.
+        let (left, right, end) = (x0 + 1, x0 + w - 1, y0 + rows);
+        let unpushed = self.history.iter().filter(|c| !c.pushed).count();
+        let dirty = self.files.iter().filter(|f| !f.committed).count();
+
+        s.put(left, y0, w - 2, "History", Style::PLAIN.bold());
+        // The project heading counts files to push; this counts commits, and says so.
+        if unpushed > 0 {
+            let text = format!("{unpushed} unpushed");
+            s.put(right.saturating_sub(text.len()), y0, text.len(), &text, Style::fg(term::YELLOW));
+        }
+        // In a short pane every row goes to commits, one beneath the other.
+        let dots = rows >= DOT_ROWS;
+        if dots {
+            self.draw_dots(s, (left, right), y0 + 1, dirty > 0);
         }
 
         let text_x = left + 2;
-        let mut y = y0 + 2;
+        let mut y = y0 + 1 + dots as usize;
         if dirty > 0 && y < end {
             let text = format!("{dirty} file{} not committed", if dirty == 1 { "" } else { "s" });
             s.put(left, y, 1, "○", Style::PLAIN.bold());
@@ -553,16 +562,16 @@ impl Outline {
         let now = when::now();
         let mut last_age = String::new();
         for (i, c) in self.history.iter().enumerate() {
-            if i > 0 && crosses(&self.history[i - 1], c) && y < end {
-                // Everything below this line is already on the remote.
-                s.put(left, y, w - 2, &"╌".repeat(w - 2), DIM);
-                s.put(text_x, y, right.saturating_sub(text_x), &format!(" {} ", remote.unwrap_or_default()), DIM);
+            if i > 0 && self.crosses(&self.history[i - 1], c) && y < end {
+                // Everything below this name is already on the remote.
+                let name = self.repo.remote.as_deref().unwrap_or_default();
+                s.put_fit(text_x, y, right.saturating_sub(text_x), name, DIM);
                 y += 1;
             }
             if y >= end {
                 break;
             }
-            s.put(left, y, 1, "●", dot(i, c));
+            s.put(left, y, 1, "●", self.dot_style(i, c));
             // An age is only worth its column where it differs from the row above.
             let age = when::short_age(now - c.time);
             let mut text_end = right;
@@ -577,7 +586,7 @@ impl Outline {
             let fresh = self.fresh.contains_key(&commit_key(&c.hash));
             // Merges and what is already pushed recede; a commit that just
             // landed stands out for a moment.
-            let quiet = c.merge || (c.pushed && remote.is_some());
+            let quiet = c.merge || (c.pushed && self.repo.remote.is_some());
             let st = match (fresh, quiet) {
                 (true, _) => Style::PLAIN.bold(),
                 (false, true) => Style::PLAIN.faint(),
