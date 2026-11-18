@@ -39,11 +39,11 @@ use term::Wait;
 use watch::{Scope, Watcher};
 
 const USAGE: &str = "\
-strata — a file tree with git status and a read-only file reader
+milo — a file tree with git status and a read-only file reader
 
-Usage: strata [PATH]
-       strata view FILE
-       strata --help | --version
+Usage: milo [PATH]
+       milo view FILE
+       milo --help | --version
 
 PATH defaults to the current directory. Inside a git repository the outline
 shows the whole project; elsewhere it shows a file tree without git status.
@@ -71,7 +71,7 @@ In the strip, use ← → or h l to move between columns. In the tree, click a
 folder to toggle it, click a file to select it, or double-click to open it.
 Files open in a floating reader inside Rex and in the same pane elsewhere.
 
-Reader (also opened by strata view FILE):
+Reader (also opened by milo view FILE):
   ↑ ↓ or k j    scroll by a line
   ← → or h l    scroll sideways
   Space / b     page down/up
@@ -89,8 +89,10 @@ need pushing, faint dots are pushed, and a hollow dot is uncommitted work.
 The reader colours supported code and marks added and removed lines. It
 shows a picture as a picture where the terminal can draw one.
 
-Icons use a Nerd Font by default. Set STRATA_ICONS=plain for ordinary
-symbols or STRATA_ICONS=off to hide icons.
+Icons use a Nerd Font by default. Set MILO_ICONS=plain for ordinary
+symbols or MILO_ICONS=off to hide icons.
+
+https://usemilo.net
 ";
 
 /// Minimum rest after a look if the watcher has reported a change.
@@ -132,7 +134,7 @@ impl Pace {
     }
 }
 
-/// The two things strata can fill a pane with.
+/// The two things milo can fill a pane with.
 enum Ui {
     Outline(Box<Outline>),
     Reader(Box<Reader>),
@@ -165,7 +167,7 @@ impl Ui {
         }
     }
 
-    /// Takes in changes made outside strata. Returns false if the screen needs
+    /// Takes in changes made outside milo. Returns false if the screen needs
     /// another check soon because the repository is busy.
     fn check(&mut self) -> bool {
         match self {
@@ -221,7 +223,7 @@ fn route_key(ui: &mut Ui, screen: &mut Screen, help: &mut Option<Page>, key: Key
 /// control characters are left out.
 fn fail(message: &str) -> ! {
     let safe: String = message.chars().filter(|c| !c.is_control() || *c == '\n').collect();
-    eprintln!("strata: {safe}");
+    eprintln!("milo: {safe}");
     exit(1);
 }
 
@@ -231,13 +233,13 @@ fn main() {
     let first = args.next();
     let second = args.next();
     if args.next().is_some() {
-        fail("too many arguments; see strata --help");
+        fail("too many arguments; see milo --help");
     }
-    // Paths may contain arbitrary bytes; only the words strata knows are text.
+    // Paths may contain arbitrary bytes; only the words milo knows are text.
     let mut ui = match (first.as_deref().and_then(OsStr::to_str), second.as_deref()) {
         (Some("-h" | "--help"), None) => return print!("{USAGE}"),
-        (Some("-V" | "--version"), None) => return println!("strata {}", env!("CARGO_PKG_VERSION")),
-        (Some("view"), None) => fail("which file? strata view FILE"),
+        (Some("-V" | "--version"), None) => return println!("milo {}", env!("CARGO_PKG_VERSION")),
+        (Some("view"), None) => fail("which file? milo view FILE"),
         (Some("view"), Some(file)) => {
             let file = Path::new(file);
             match Reader::open(file) {
@@ -246,17 +248,17 @@ fn main() {
             }
         }
         (Some(option), None) if option.starts_with('-') => {
-            fail(&format!("no option {option}; see strata --help"));
+            fail(&format!("no option {option}; see milo --help"));
         }
         (_, None) => {
             let dir = first.as_deref().map_or(Path::new("."), Path::new);
             match Repo::open(dir) {
                 Some(repo) => Ui::Outline(Box::new(Outline::new(repo, rex::inside()))),
-                None if dir.is_file() => fail(&format!("{0} is a file; to read it: strata view {0}", dir.display())),
+                None if dir.is_file() => fail(&format!("{0} is a file; to read it: milo view {0}", dir.display())),
                 None => fail(&format!("{} is not a directory", dir.display())),
             }
         }
-        _ => fail("too many arguments; see strata --help"),
+        _ => fail("too many arguments; see milo --help"),
     };
     let (watcher, idle) = {
         let scope = ui.watch_scope();

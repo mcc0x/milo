@@ -223,7 +223,7 @@ impl Outline {
         newest.map(|f| f.path.as_str())
     }
 
-    /// Takes in changes made outside strata. Returns false while git is busy.
+    /// Takes in changes made outside milo. Returns false while git is busy.
     /// The reader in this pane, if open, is checked as well.
     pub fn check(&mut self) -> bool {
         if let Some(reader) = &mut self.reading {

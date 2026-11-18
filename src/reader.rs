@@ -330,7 +330,7 @@ impl Reader {
         self.repo.ok().then_some(diff)
     }
 
-    /// Takes in changes made outside strata. Returns false while git is busy.
+    /// Takes in changes made outside milo. Returns false while git is busy.
     pub fn check(&mut self) -> bool {
         if self.repo.busy() {
             return false;

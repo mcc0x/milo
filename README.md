@@ -1,12 +1,14 @@
-<h1 align="center">strata</h1>
+<h1 align="center">milo</h1>
 
 <p align="center">
   <b>Your project's files, coloured by what you haven't committed or pushed yet.</b><br>
   A terminal pane that sits beside your work and stays up to date by itself.
 </p>
 
+<p align="center"><a href="https://usemilo.net">usemilo.net</a></p>
+
 <p align="center">
-  <img src="docs/img/outline.png" width="820" alt="The strata outline: a file tree with edited, new, removed and moved files in colour, and recent history beside it">
+  <img src="docs/img/outline.png" width="820" alt="The milo outline: a file tree with edited, new, removed and moved files in colour, and recent history beside it">
 </p>
 
 <p align="center">
@@ -21,7 +23,7 @@
 
 ## Why
 
-When an editor, a script or a coding agent is changing files for you, the question is always the same: *what has been touched, and where does it stand?* `git status` answers once, as a list. strata answers all the time, in place:
+When an editor, a script or a coding agent is changing files for you, the question is always the same: *what has been touched, and where does it stand?* `git status` answers once, as a list. milo answers all the time, in place:
 
 - **The whole tree, not a list.** You see changed files where they live, among the ones that did not change.
 - **Two states at a glance.** Bold is work you have not committed. Regular weight is committed but not pushed. Plain is safe on the remote.
@@ -33,7 +35,7 @@ When an editor, a script or a coding agent is changing files for you, the questi
 ### The reader
 
 <p align="center">
-  <img src="docs/img/reader.png" width="720" alt="The strata reader showing a TypeScript file with added lines washed green, removed lines washed red, and syntax colours">
+  <img src="docs/img/reader.png" width="720" alt="The milo reader showing a TypeScript file with added lines washed green, removed lines washed red, and syntax colours">
 </p>
 
 The whole file, not just the hunks: added lines carry a green wash and keep their code colours, removed lines sit in place in red, and the part of an edited line that actually changed is picked out. `n` and `N` step through the changes.
@@ -43,22 +45,22 @@ The whole file, not just the hunks: added lines carry a green wash and keep thei
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/img/strip-side.png" width="330" alt="strata in a narrow column: a compact header, the tree, and a few lines of history beneath"><br>
+      <img src="docs/img/strip-side.png" width="330" alt="milo in a narrow column: a compact header, the tree, and a few lines of history beneath"><br>
       <sub><b>A narrow column</b> beside your editor: the tree, a compact count, a few lines of history.</sub>
     </td>
     <td align="center" width="50%">
-      <img src="docs/img/help.png" width="330" alt="The strata help page explaining colours, weights, marks and keys"><br>
+      <img src="docs/img/help.png" width="330" alt="The milo help page explaining colours, weights, marks and keys"><br>
       <sub><b><code>?</code></b> explains every colour, mark and key without leaving the pane.</sub>
     </td>
   </tr>
 </table>
 
 <p align="center">
-  <img src="docs/img/strip.png" width="820" alt="strata in a pane five rows tall: only the changed files, flowed across the width, most recent first"><br>
+  <img src="docs/img/strip.png" width="820" alt="milo in a pane five rows tall: only the changed files, flowed across the width, most recent first"><br>
   <sub><b>A short pane</b> under your terminal: only the changed files, most recently written first.</sub>
 </p>
 
-| The pane is… | strata shows… |
+| The pane is… | milo shows… |
 | --- | --- |
 | 7 rows or fewer | a strip of the changed files, flowed across the width |
 | 20 rows or more | the tree, with recent history beneath it |
@@ -84,29 +86,29 @@ flowchart LR
 
 In history, a hollow dot is work not committed yet, a bold dot is a commit still to push, and a faint dot is already on the remote.
 
-While the keyboard is in another pane, strata moves its cursor to whatever file is being written and says so (`following Cart.tsx`). It never moves while you are using it, and it leaves folders you closed closed.
+While the keyboard is in another pane, milo moves its cursor to whatever file is being written and says so (`following Cart.tsx`). It never moves while you are using it, and it leaves folders you closed closed.
 
 ## Install
 
 You need Rust 1.91 or later and git.
 
 ```sh
-git clone <this repository> && cd strata
+git clone <this repository> && cd milo
 cargo build --release
-cp target/release/strata ~/.local/bin/     # or anywhere on your PATH
+cp target/release/milo ~/.local/bin/     # or anywhere on your PATH
 ```
 
 ## Use
 
 ```sh
-strata              # the project you are in
-strata ~/code/app   # some other project
-strata view FILE    # read one file
+milo              # the project you are in
+milo ~/code/app   # some other project
+milo view FILE    # read one file
 ```
 
-Inside a git repository strata shows the whole project from its root. Anywhere else it is a plain file tree with nothing coloured.
+Inside a git repository milo shows the whole project from its root. Anywhere else it is a plain file tree with nothing coloured.
 
-Icons need a [Nerd Font](https://www.nerdfonts.com). Without one, set `STRATA_ICONS=plain` for ordinary symbols or `STRATA_ICONS=off` for none.
+Icons need a [Nerd Font](https://www.nerdfonts.com). Without one, set `MILO_ICONS=plain` for ordinary symbols or `MILO_ICONS=off` for none.
 
 ### Keys
 
@@ -176,7 +178,7 @@ The reader colours Rust, Python, JavaScript, TypeScript (with JSX and TSX), Go, 
 
 Enter on a picture shows the picture: PNG, JPEG, GIF, WebP, HEIC, TIFF, BMP, icons, SVG, and the first page of a PDF. It is drawn at its own size where that fits, and otherwise as large as the pane allows with its proportions kept.
 
-This needs a terminal that speaks the kitty graphics protocol (kitty, Ghostty, WezTerm, Rex); strata asks at start and says so plainly where the answer is no. Formats other than PNG are converted with `sips`, which comes with macOS; elsewhere only PNG files are shown.
+This needs a terminal that speaks the kitty graphics protocol (kitty, Ghostty, WezTerm, Rex); milo asks at start and says so plainly where the answer is no. Formats other than PNG are converted with `sips`, which comes with macOS; elsewhere only PNG files are shown.
 
 ### With Rex
 
@@ -194,9 +196,9 @@ flowchart LR
     D -- "changed cells only" --> S["Screen"]
 ```
 
-strata asks git, and only git, what state the project is in, then draws it. A few decisions keep that cheap:
+milo asks git, and only git, what state the project is in, then draws it. A few decisions keep that cheap:
 
-- **It waits to be told.** On macOS the file system reports changes as they happen, so an idle strata does nothing: no wake-ups, and one `git status` every thirty seconds as a safety net. Directories git ignores are left out of the watch, so a build churning in `target/` does not wake it at all. On other systems it looks every two seconds.
+- **It waits to be told.** On macOS the file system reports changes as they happen, so an idle milo does nothing: no wake-ups, and one `git status` every thirty seconds as a safety net. Directories git ignores are left out of the watch, so a build churning in `target/` does not wake it at all. On other systems it looks every two seconds.
 - **It never looks more than a fifth of the time.** After a look that took a while, the next one waits four times as long, however fast changes arrive.
 - **It remembers what cannot have changed.** The list of tracked files is kept until the index changes; what is committed but not pushed is kept until the branch moves.
 - **It repaints only what differs.** Each frame is compared with the last, and only the cells that changed are written, inside a synchronized update so the terminal never shows half a frame.
@@ -250,15 +252,15 @@ About 5,400 lines of Rust and 2,000 of tests, under `src/`:
 
 ## Safe to point at code you have not read
 
-Looking at a project should never run anything from it. A repository's own configuration can name programs for git to start: hooks, content filters, an external diff tool, a file-system monitor, a transport for fetching missing objects. strata switches each of them off for every git command it runs, gives every command a deadline, and caps what it will read back.
+Looking at a project should never run anything from it. A repository's own configuration can name programs for git to start: hooks, content filters, an external diff tool, a file-system monitor, a transport for fetching missing objects. milo switches each of them off for every git command it runs, gives every command a deadline, and caps what it will read back.
 
-It also never follows a symbolic link to show you a file from outside the project, never opens a device or a pipe as if it were a file, and strips control characters from file names, branch names and commit messages before they reach your terminal. And it only ever reads: strata does not change a repository.
+It also never follows a symbolic link to show you a file from outside the project, never opens a device or a pipe as if it were a file, and strips control characters from file names, branch names and commit messages before they reach your terminal. And it only ever reads: milo does not change a repository.
 
 ## Requirements
 
 - git, and a Unix terminal with 256 colours.
 - macOS for instant updates. On Linux it works by checking every two seconds.
-- A Nerd Font for icons, or `STRATA_ICONS=plain`.
+- A Nerd Font for icons, or `MILO_ICONS=plain`.
 
 ## Contributing
 

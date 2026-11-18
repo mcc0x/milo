@@ -2,7 +2,7 @@
 //!
 //! The colour belongs to the kind of file and never to its git state: the
 //! name beside it carries that. The default set uses Nerd Font glyphs.
-//! `STRATA_ICONS=plain` uses ordinary symbols; `off` or `none` hides them.
+//! `MILO_ICONS=plain` uses ordinary symbols; `off` or `none` hides them.
 
 use std::sync::LazyLock;
 
@@ -12,7 +12,7 @@ enum Set {
     Off,
 }
 
-static SET: LazyLock<Set> = LazyLock::new(|| match std::env::var("STRATA_ICONS").as_deref() {
+static SET: LazyLock<Set> = LazyLock::new(|| match std::env::var("MILO_ICONS").as_deref() {
     _ if cfg!(test) => Set::Plain,
     Ok("plain") => Set::Plain,
     Ok("off" | "none") => Set::Off,

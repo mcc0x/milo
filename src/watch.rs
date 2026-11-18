@@ -207,7 +207,7 @@ mod imp {
             }
         }
         // SAFETY: the label is a NUL-terminated string; null asks for a serial queue.
-        let queue = unsafe { dispatch_queue_create(c"strata.watch".as_ptr(), null()) };
+        let queue = unsafe { dispatch_queue_create(c"milo.watch".as_ptr(), null()) };
         if queue.is_null() {
             // SAFETY: stream is live and has not been scheduled.
             unsafe { FSEventStreamRelease(stream) };

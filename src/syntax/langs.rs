@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn data_files_colour_their_field_names() {
         assert_eq!(
-            one(&JSON, r#"  "name": "strata", "n": 3, "ok": true"#).iter().map(|p| p.1).collect::<Vec<_>>(),
+            one(&JSON, r#"  "name": "milo", "n": 3, "ok": true"#).iter().map(|p| p.1).collect::<Vec<_>>(),
             [Class::Key, Class::Str, Class::Key, Class::Number, Class::Key, Class::Number]
         );
         assert_eq!(

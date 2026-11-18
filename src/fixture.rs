@@ -17,7 +17,7 @@ impl Fixture {
         let temp = std::env::temp_dir().canonicalize().unwrap();
         let home = loop {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = temp.join(format!("strata-test-{}-{n}", std::process::id()));
+            let path = temp.join(format!("milo-test-{}-{n}", std::process::id()));
             match fs::create_dir(&path) {
                 Ok(()) => break path,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -94,10 +94,10 @@ pub(crate) fn isolate_git(command: &mut Command) {
         .env_remove("GIT_COMMON_DIR")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Strata Test")
+        .env("GIT_AUTHOR_NAME", "Milo Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.com")
         .env("GIT_AUTHOR_DATE", "2001-02-03T04:05:06Z")
-        .env("GIT_COMMITTER_NAME", "Strata Test")
+        .env("GIT_COMMITTER_NAME", "Milo Test")
         .env("GIT_COMMITTER_EMAIL", "test@example.com")
         .env("GIT_COMMITTER_DATE", "2001-02-03T04:05:06Z");
 }

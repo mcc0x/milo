@@ -1,6 +1,6 @@
-# Contributing to strata
+# Contributing to milo
 
-Thanks for wanting to help. strata is small on purpose, and the bar for a change is that it leaves the program simpler, faster or more correct without making it larger than it needs to be.
+Thanks for wanting to help. milo is small on purpose, and the bar for a change is that it leaves the program simpler, faster or more correct without making it larger than it needs to be.
 
 ## Getting set up
 
@@ -8,10 +8,10 @@ You need Rust 1.91 or later, git, and a terminal.
 
 ```sh
 git clone <your fork>
-cd strata
+cd milo
 cargo build --release
-./target/release/strata            # the outline, in this repository
-./target/release/strata view src/main.rs
+./target/release/milo            # the outline, in this repository
+./target/release/milo view src/main.rs
 ```
 
 ## Before you open a pull request
@@ -31,13 +31,13 @@ Then run the program and look at the thing you changed. Tests read the screen as
 
 **It solves one thing.** A bug fix does not also rename a module. A refactoring does not also change behaviour.
 
-**It adds no dependency.** strata depends on `libc` and nothing else. If you believe a crate would earn its place, open an issue first and say what it replaces.
+**It adds no dependency.** milo depends on `libc` and nothing else. If you believe a crate would earn its place, open an issue first and say what it replaces.
 
-**It is tested by what the user sees.** Most tests build a throwaway git repository (`src/fixture.rs`), open strata on it, and assert on the frame of text it draws. Write tests that would fail if the behaviour broke, not tests that repeat the code. A bug fix comes with the test that would have caught it.
+**It is tested by what the user sees.** Most tests build a throwaway git repository (`src/fixture.rs`), open milo on it, and assert on the frame of text it draws. Write tests that would fail if the behaviour broke, not tests that repeat the code. A bug fix comes with the test that would have caught it.
 
-**It keeps untrusted repositories safe.** strata is often pointed at code its user has not read. It must never run a program a repository names (hooks, filters, external diff tools, file-system monitors), never follow a link out of the project to show a file, and never write an escape sequence from a file name or a commit message to the terminal. `git/run.rs` is where git is called; nothing else should start a process except `rex.rs`.
+**It keeps untrusted repositories safe.** milo is often pointed at code its user has not read. It must never run a program a repository names (hooks, filters, external diff tools, file-system monitors), never follow a link out of the project to show a file, and never write an escape sequence from a file name or a commit message to the terminal. `git/run.rs` is where git is called; nothing else should start a process except `rex.rs`.
 
-**It stays read-only.** strata never changes a repository. Every git command it runs only reads.
+**It stays read-only.** milo never changes a repository. Every git command it runs only reads.
 
 ## Style
 
@@ -63,10 +63,10 @@ The README has a one-line description of every module. The short version:
 | the reader | `src/reader.rs`, and `src/diff.rs` for how a diff becomes lines |
 | which git commands run, and how safely | `src/git/run.rs` |
 | what is read from git's output | `src/git/parse.rs` |
-| what strata remembers about a repository | `src/git.rs` |
+| what milo remembers about a repository | `src/git.rs` |
 | how the screen is drawn and what a style is | `src/screen.rs` |
 | keys and mouse input | `src/keys.rs` |
-| how often strata looks for changes | `Pace` in `src/main.rs` |
+| how often milo looks for changes | `Pace` in `src/main.rs` |
 
 ### Adding a language to the reader
 
@@ -76,15 +76,15 @@ Code colouring is a small scanner (`src/syntax.rs`) driven by tables (`src/synta
 2. Map its file extensions in `for_file`.
 3. Add a test with a few idiomatic lines and the classes you expect.
 
-The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for strata to colour it imperfectly.
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly.
 
 ## Commit messages
 
-One line in the imperative that says what the commit does for someone using or reading strata ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.
+One line in the imperative that says what the commit does for someone using or reading milo ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.
 
 ## Reporting a bug
 
-Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. For anything that looks like a security problem (strata running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. For anything that looks like a security problem (milo running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
 
 ## Licence
 

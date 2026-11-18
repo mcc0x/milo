@@ -129,7 +129,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(id: u32) -> Self {
-        Self(std::env::temp_dir().join(format!("strata-{}-{id}.png", std::process::id())))
+        Self(std::env::temp_dir().join(format!("milo-{}-{id}.png", std::process::id())))
     }
 }
 
@@ -169,7 +169,7 @@ fn convert(_: &Path) -> Option<Vec<u8>> {
 
 /// Runs a command to its end and says whether it succeeded. One that takes
 /// too long, or outlives a request to quit, is stopped: a file made to
-/// stall a converter must not stall strata.
+/// stall a converter must not stall milo.
 #[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "only macOS has a converter to run"))]
 fn finishes(mut command: Command) -> bool {
     let started = Instant::now();
@@ -209,7 +209,7 @@ fn base64(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 impl Picture {
     /// The start of a PNG that declares this size: enough to be taken for
-    /// a picture, which is as far as strata itself ever reads one.
+    /// a picture, which is as far as milo itself ever reads one.
     pub fn sample_png(width: u32, height: u32) -> Vec<u8> {
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
         png.extend(width.to_be_bytes());
