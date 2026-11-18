@@ -4,6 +4,7 @@
 //! flowed across its width. A wide one adds what happened to each file.
 
 use std::collections::{HashMap, HashSet};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::git::{Commit, FileChange, Kind, Repo};
@@ -37,6 +38,8 @@ const PULSE: Duration = Duration::from_millis(500);
 const UNSEEN: Duration = Duration::from_secs(300);
 /// Without input for this long, the outline follows the work by itself.
 const FOLLOW_AFTER: Duration = Duration::from_secs(15);
+/// Two clicks on a row within this long are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// From this height a quarter of the pane shows recent history.
 const HISTORY_ROWS: usize = 20;
 /// From this width history sits beside the outline instead.
@@ -114,6 +117,12 @@ pub struct Outline {
     body: (usize, usize),
     /// Columns the outline itself has, with history beside it or not.
     width: usize,
+    /// The floating window the last file was opened in, to replace it.
+    popup: Option<String>,
+    /// The row last clicked and when, to tell a double click.
+    clicked: Option<(usize, Instant)>,
+    /// Something to say in place of the key hint, and when it was said.
+    note: Option<(String, Instant)>,
 }
 
 impl Outline {
@@ -144,6 +153,9 @@ impl Outline {
             horizontal: false,
             body: (0, 0),
             width: 0,
+            popup: None,
+            clicked: None,
+            note: None,
         };
         outline.load();
         // Start where the work is, not at the top of the tree.
@@ -436,6 +448,10 @@ impl Outline {
     /// The keys, worded for what each would do right now.
     fn hint(&self, s: &mut Screen) {
         let (w, y) = (s.w, s.h - 1);
+        if let Some((note, _)) = self.note.as_ref().filter(|(_, at)| at.elapsed() < FRESH) {
+            s.put_fit(1, y, w - 2, note, Style::fg(term::YELLOW));
+            return;
+        }
         // Without git there is no "changed" to narrow down to.
         let text = match (self.repo.git, w) {
             (true, 60..) => {
@@ -854,9 +870,14 @@ impl Outline {
             {
                 let row = self.top + y - self.body.0;
                 if row < self.tree.rows.len() {
+                    // A second click on the same row, soon after the first, reads a file.
+                    let again = self.clicked.is_some_and(|(r, at)| r == row && at.elapsed() < DOUBLE_CLICK);
+                    self.clicked = Some((row, Instant::now()));
                     self.sel = row;
-                    if let Some((path, true, open, _)) = self.pointed() {
-                        self.set_open(path, !open);
+                    match self.pointed() {
+                        Some((path, true, open, _)) => self.set_open(path, !open),
+                        Some((path, false, ..)) if again => self.open_file(&path),
+                        _ => {}
                     }
                 }
             }
@@ -866,6 +887,8 @@ impl Outline {
                 let right = matches!(key, Key::Char('l') | Key::Right);
                 if dir && (toggle || open != right) {
                     self.set_open(path, !open);
+                } else if !dir && key == Key::Enter {
+                    self.open_file(&path);
                 } else if !toggle && !right && parent != 0 {
                     // Left on a file or a closed directory steps out to its parent.
                     self.sel = self.tree.row_of(&self.tree.nodes[parent].path).unwrap_or(self.sel);
@@ -880,4 +903,80 @@ impl Outline {
 /// Whether `path` lies inside the directory `dir`.
 fn under(path: &str, dir: &str) -> bool {
     path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
+}
+
+impl Outline {
+    /// Opens a file in a floating window over the current tab, in place of
+    /// the one opened before it. Rex makes the window, so this only works
+    /// when running inside Rex.
+    fn open_file(&mut self, path: &str) {
+        let Ok(session) = std::env::var("REX_SESSION") else {
+            return self.say("Reading a file needs Rex.");
+        };
+        let Ok(exe) = std::env::current_exe() else { return };
+        if let Some(layer) = self.popup.take() {
+            // It may be closed already; either way it is gone afterwards.
+            let request = format!(r#"{{"session_id":{},"layer_id":{}}}"#, json(&session), json(&layer));
+            rex(&["api", "call", "-s", &session, "session.close_layer", &request]);
+        }
+        // Over the tab the outline is in, wherever the reader is looking;
+        // failing that, over the active one.
+        let window = std::env::var("REX_BLOCK")
+            .ok()
+            .and_then(|block| rex(&["block", "inspect", "-s", &session, &block, "--json"]))
+            .and_then(|reply| field(&reply, "window_id"))
+            .map(|id| format!(r#""window_id":{},"#, json(&id)))
+            .unwrap_or_default();
+        let name = path.rsplit_once('/').map_or(path, |(_, n)| n);
+        let request = format!(
+            concat!(
+                r#"{{"session_id":{},{}"bounds":[0.12,0.08,0.76,0.84],"focus":true,"layout":{{"block":{{"#,
+                r#""flavor":"com.superlogical.terminal.shell","label":{},"#,
+                r#""options":{{"command":[{},"view",{}],"shell":"none","cwd":{}}}}}}}}}"#,
+            ),
+            json(&session),
+            window,
+            json(name),
+            json(&exe.to_string_lossy()),
+            json(&self.repo.root.join(path).to_string_lossy()),
+            json(&self.repo.root.to_string_lossy()),
+        );
+        match rex(&["api", "call", "-s", &session, "session.new_layer", &request]) {
+            Some(reply) => self.popup = field(&reply, "layer_id"),
+            None => self.say("Rex did not open the file."),
+        }
+    }
+
+    /// Shows a line in place of the key hint for a few seconds.
+    fn say(&mut self, text: &str) {
+        self.note = Some((text.to_string(), Instant::now()));
+    }
+}
+
+/// Runs the Rex command line and returns what it printed. `None` if it failed.
+fn rex(args: &[&str]) -> Option<String> {
+    let out = Command::new("rex").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A string as a JSON literal.
+fn json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => out.extend(['\\', c]),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The value of a string field, wherever it first appears in a JSON reply.
+fn field(reply: &str, name: &str) -> Option<String> {
+    let (_, rest) = reply.split_once(&format!("\"{name}\""))?;
+    let value = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    Some(value.split_once('"')?.0.to_string())
 }

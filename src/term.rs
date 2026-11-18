@@ -105,6 +105,7 @@ pub enum Key {
     Char(char),
     Ctrl(u8),
     Enter,
+    Esc,
     Up,
     Down,
     Left,
@@ -153,7 +154,7 @@ fn decode(b: &[u8], keys: &mut Vec<Key>) {
         i += 1;
         match c {
             0x1b => match b.get(i) {
-                None => {}
+                None => keys.push(Key::Esc),
                 Some(b'[') => {
                     let start = i + 1;
                     let mut end = start;
@@ -249,6 +250,7 @@ const BOLD: u32 = 1 << 18;
 const ITALIC: u32 = 1 << 19;
 const STRIKE: u32 = 1 << 20;
 const FAINT: u32 = 1 << 21;
+const REVERSE: u32 = 1 << 22;
 /// The flags that are part of the text itself and survive a highlight.
 const FACE: u32 = BOLD | ITALIC | STRIKE | FAINT;
 
@@ -292,6 +294,9 @@ impl Style {
         }
         if self.0 & FAINT != 0 {
             out.extend_from_slice(b";2");
+        }
+        if self.0 & REVERSE != 0 {
+            out.extend_from_slice(b";7");
         }
         if self.0 & STRIKE != 0 {
             out.extend_from_slice(b";9");
@@ -398,6 +403,13 @@ impl Screen {
         let mut used = self.put(x, y, max_w.saturating_sub(tail_w + 1), s, st);
         used += self.put(x + used, y, 1, "…", st);
         used + self.put(x + used, y, tail_w, &s[tail_at..], st)
+    }
+
+    /// Inverts a span, to pick out the changed part of a line.
+    pub fn emphasise(&mut self, x: usize, y: usize, w: usize) {
+        for cell in self.span(x, y, w) {
+            cell.st = Style(cell.st.0 | REVERSE);
+        }
     }
 
     /// Gives a span a grey background that keeps each cell's own colour.

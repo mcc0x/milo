@@ -20,6 +20,8 @@ fn run(root: &Path, args: &[&str]) -> Vec<u8> {
         .arg(root)
         .args(["-c", "core.quotePath=false"])
         .args(args)
+        // A path given to git is a name, never a pattern.
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -203,6 +205,8 @@ pub struct Repo {
     pub remote: Option<String>,
     /// The newest commit the remote already has, when this branch is ahead.
     base: Option<String>,
+    /// What pending changes are measured against: `base`, else the last commit.
+    against: String,
     raw: Vec<u8>,
     stamp: Stamp,
 }
@@ -217,7 +221,7 @@ impl Repo {
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let (branch, base, raw, stamp) = (String::new(), None, Vec::new(), Vec::new());
-        Some(Repo { root, name, branch, git, remote: None, base, raw, stamp })
+        Some(Repo { root, name, branch, git, remote: None, base, against: String::new(), raw, stamp })
     }
 
     fn status_raw(&self) -> Vec<u8> {
@@ -240,6 +244,8 @@ impl Repo {
         self.raw = self.status_raw();
         let status = parse_status(&self.raw);
         self.base = pushed_base(&self.root, &status);
+        let head = if status.oid == "(initial)" { EMPTY_TREE } else { "HEAD" };
+        self.against = self.base.clone().unwrap_or_else(|| head.to_string());
         let files = pending(&self.root, &status, self.base.as_deref());
         // Without an upstream, the remote's default branch still counts as one.
         let origin = || !run(&self.root, &["rev-parse", "--verify", "--quiet", "origin/HEAD"]).is_empty();
@@ -247,6 +253,13 @@ impl Repo {
         self.branch = status.branch;
         self.stamp = self.stamp(&files);
         files
+    }
+
+    /// The whole of one file as a diff against what is already pushed, or
+    /// against the last commit when nothing is waiting to be pushed: every
+    /// line, with the lines it lost in place. Empty if it does not differ.
+    pub fn file_diff(&self, path: &str) -> Vec<u8> {
+        run(&self.root, &["diff", &self.against, "-M", "--unified=1000000", "--", path])
     }
 
     /// The newest `limit` commits on the current branch, newest first.

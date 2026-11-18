@@ -5,8 +5,8 @@ use crate::icons::{self, Icon};
 use crate::term::{self, Screen, Style};
 
 pub const DIM: Style = Style::fg(term::GRAY);
-const ADD: Style = Style::fg(term::GREEN);
-const DEL: Style = Style::fg(term::RED);
+pub const ADD: Style = Style::fg(term::GREEN);
+pub const DEL: Style = Style::fg(term::RED);
 
 /// Colour says what happened to a file; the face backs it up, so the states
 /// stay apart even where two colours look alike.
