@@ -520,32 +520,63 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::Fixture;
     use std::fs::{self, Permissions};
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new() -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-            let dir = std::env::temp_dir().join(format!("strata-view-{}-{time}-{n}", std::process::id()));
-            fs::create_dir(&dir).unwrap();
-            Self(dir)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn shape(lines: &[Line]) -> Vec<(LineKind, u32, &str)> {
         lines.iter().map(|l| (l.kind, l.no, l.text.as_str())).collect()
+    }
+
+    fn drawn(view: &mut View, w: usize, h: usize) -> Vec<String> {
+        let mut screen = Screen::sized(w, h);
+        view.draw(&mut screen);
+        screen.text()
+    }
+
+    #[test]
+    fn the_reader_counts_added_and_removed_lines_and_numbers_only_the_current_file() {
+        let f = Fixture::new();
+        f.write("file.txt", "one\nbefore\nfour\n");
+        f.commit("first");
+        f.write("file.txt", "one\nafter\nthree\nfour\n");
+
+        let mut view = View::open(&f.root.join("file.txt")).unwrap();
+        let rows = drawn(&mut view, 40, 8);
+        assert!(rows[0].ends_with("+2 −1"), "{rows:?}");
+        assert_eq!(&rows[1..6], [" 1   one", "   - before", " 2 + after", " 3 + three", " 4   four"]);
+    }
+
+    #[test]
+    fn every_line_of_an_untracked_file_is_added() {
+        let f = Fixture::new();
+        f.write("file.txt", "first\nlast without a newline");
+
+        let mut view = View::open(&f.root.join("file.txt")).unwrap();
+        let rows = drawn(&mut view, 45, 6);
+        assert!(rows[0].contains("new") && rows[0].ends_with("+2"), "{rows:?}");
+        assert_eq!(&rows[1..3], [" 1 + first", " 2 + last without a newline"]);
+    }
+
+    #[test]
+    fn next_change_wraps_from_the_last_page_back_to_the_first_change() {
+        let f = Fixture::new();
+        let lines = |changed| {
+            (1..=100)
+                .map(|n| format!("line {n}{}\n", if changed && matches!(n, 10 | 95) { " edited" } else { "" }))
+                .collect::<String>()
+        };
+        f.write("file.txt", &lines(false));
+        f.commit("first");
+        f.write("file.txt", &lines(true));
+
+        let mut view = View::open(&f.root.join("file.txt")).unwrap();
+        for n in [10, 95, 10, 95] {
+            let rows = drawn(&mut view, 45, 22);
+            let change = format!("+ line {n} edited");
+            assert!(rows.iter().any(|row| row.contains(&change)), "{rows:?}");
+            view.on_key(Key::Char('n'));
+        }
     }
 
     #[test]
@@ -625,8 +656,8 @@ mod tests {
 
     #[test]
     fn panning_can_reach_the_end_of_a_line_of_wide_characters() {
-        let dir = TestDir::new();
-        let file = dir.0.join("text");
+        let dir = Fixture::folder();
+        let file = dir.root.join("text");
         fs::write(&file, format!("{}最後", "界".repeat(16))).unwrap();
         let mut view = View::open(&file).unwrap();
         let mut screen = Screen::new();
@@ -642,34 +673,35 @@ mod tests {
 
     #[test]
     fn a_link_shows_its_path_even_when_the_target_is_gone() {
-        let dir = TestDir::new();
-        let outside = TestDir::new();
-        let target = outside.0.join("target");
-        let link = dir.0.join("link");
+        let f = Fixture::new();
+        let target = f.root.join("../target.txt");
+        let link = f.root.join("link");
         fs::write(&target, "outside the project\n").unwrap();
-        symlink(&target, &link).unwrap();
-        let expected = [(LineKind::Same, 1, target.to_str().unwrap())];
-        let view = View::open(&link).unwrap();
-        assert_eq!(shape(&view.lines), expected);
-        assert!(view.stamp.is_some());
-        fs::remove_file(&target).unwrap();
-        assert_eq!(view.stamp(), view.stamp);
-        assert_eq!(shape(&View::open(&link).unwrap().lines), expected);
+        symlink("../target.txt", &link).unwrap();
+        let mut view = View::open(&link).unwrap();
+        let rows = drawn(&mut view, 60, 6);
+        assert!(rows[0].ends_with("+1"), "{rows:?}");
+        assert_eq!(rows[1], " 1 + ../target.txt");
+        assert!(!rows.iter().any(|row| row.contains("outside the project")));
+        fs::remove_file(target).unwrap();
+        let mut view = View::open(&link).unwrap();
+        assert_eq!(drawn(&mut view, 60, 6), rows);
     }
 
     #[test]
     fn an_unreadable_file_is_not_reported_as_gone() {
-        let dir = TestDir::new();
-        let file = dir.0.join("text");
+        let dir = Fixture::folder();
+        let file = dir.root.join("text");
         fs::write(&file, "content").unwrap();
         fs::set_permissions(&file, Permissions::from_mode(0)).unwrap();
         // Users who can bypass file permissions can still read this file.
         if fs::File::open(&file).is_ok() {
             return;
         }
-        let view = View::open(&file).unwrap();
-        assert_eq!(view.note, Some("This file cannot be read."));
+        let mut view = View::open(&file).unwrap();
+        assert_eq!(drawn(&mut view, 60, 6)[2].trim_start(), "This file cannot be read.");
         fs::remove_file(&file).unwrap();
-        assert_eq!(View::open(&file).unwrap().note, Some("This file is gone."));
+        let mut gone = View::open(&file).unwrap();
+        assert_eq!(drawn(&mut gone, 60, 6)[2].trim_start(), "This file is gone.");
     }
 }

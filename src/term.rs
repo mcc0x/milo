@@ -685,6 +685,33 @@ impl Screen {
     }
 }
 
+#[cfg(test)]
+impl Screen {
+    /// A screen for drawing on without a terminal.
+    pub fn sized(w: usize, h: usize) -> Self {
+        let mut screen = Self::new();
+        screen.resize(w, h);
+        screen
+    }
+
+    /// The text of each row, without trailing blanks.
+    pub fn text(&self) -> Vec<String> {
+        (0..self.h)
+            .map(|y| {
+                let cells = &self.cur[y * self.w..(y + 1) * self.w];
+                let mut line: String = cells.iter().filter(|c| c.ch != CONT).map(|c| c.ch).collect();
+                line.truncate(line.trim_end_matches(' ').len());
+                line
+            })
+            .collect()
+    }
+
+    /// Whether the row starts with the cursor's background shade.
+    pub fn bar_at(&self, y: usize) -> bool {
+        self.cur[y * self.w].st.wash_id() == Wash::Bar as usize
+    }
+}
+
 /// Terminal columns a character occupies: none for control, combining and
 /// invisible formatting characters, two for East Asian wide characters and
 /// emoji, one for everything else. Text of unknown origin is drawn through
@@ -783,6 +810,29 @@ pub fn str_width(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_wider_than_the_screen_stops_at_the_end_of_its_row() {
+        let mut screen = Screen::sized(4, 2);
+        screen.put(1, 0, 8, "abcdef", Style::PLAIN);
+        assert_eq!(screen.text(), [" abc", ""]);
+    }
+
+    #[test]
+    fn a_wide_character_fits_only_when_both_columns_are_in_its_row() {
+        let mut screen = Screen::sized(4, 2);
+        screen.put(2, 0, 4, "界", Style::PLAIN);
+        screen.put(3, 0, 4, "界 should not spill", Style::PLAIN);
+        screen.put(3, 1, 4, "界", Style::PLAIN);
+        assert_eq!(screen.text(), ["  界", ""]);
+    }
+
+    #[test]
+    fn a_shortened_file_name_keeps_its_extension() {
+        let mut screen = Screen::sized(12, 1);
+        screen.put_middle(0, 0, 12, "very-long-name.txt", Style::PLAIN);
+        assert_eq!(screen.text(), ["very-lo….txt"]);
+    }
 
     fn keys(bytes: &[u8]) -> Vec<Key> {
         let mut keys = Vec::new();

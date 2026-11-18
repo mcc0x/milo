@@ -91,6 +91,7 @@ pub struct Outline {
     body: (usize, usize),
     /// Columns the outline itself has, with history beside it or not.
     width: usize,
+    inside_rex: bool,
     /// The floating window the last file was opened in, to replace it.
     popup: Option<String>,
     /// The path last clicked and when, to tell a double click.
@@ -104,7 +105,7 @@ pub struct Outline {
 }
 
 impl Outline {
-    pub fn new(repo: Repo) -> Outline {
+    pub fn new(repo: Repo, inside_rex: bool) -> Outline {
         let mut outline = Outline {
             repo,
             files: Vec::new(),
@@ -127,6 +128,7 @@ impl Outline {
             horizontal: false,
             body: (0, 0),
             width: 0,
+            inside_rex,
             popup: None,
             clicked: None,
             note: None,
@@ -350,7 +352,7 @@ impl Outline {
     /// Opens a file to read: in a floating window inside Rex, in place of
     /// the one opened before, and otherwise here in this pane.
     fn open_file(&mut self, path: &str) {
-        if !rex::inside() {
+        if !self.inside_rex {
             self.reading = View::open(&self.repo.root.join(path));
             return;
         }
@@ -808,5 +810,293 @@ impl Outline {
             (false, false) => self.clicked = Some((path, Instant::now())),
             (false, true) => self.open_file(&path),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use std::fs;
+
+    fn project() -> Fixture {
+        let f = Fixture::new();
+        f.write("src/main.rs", "fn main() {}\n");
+        f.write("src/deep/util.rs", "fn util() {}\n");
+        f.write("README.md", "# hello\n");
+        f.commit("first");
+        f.write("src/main.rs", "fn main() {\n    run();\n}\n");
+        f.write("notes.txt", "one\ntwo\n");
+        f
+    }
+
+    fn open(f: &Fixture) -> Outline {
+        Outline::new(Repo::open(&f.root).unwrap(), false)
+    }
+
+    fn draw(o: &mut Outline, w: usize, h: usize) -> Screen {
+        let mut screen = Screen::sized(w, h);
+        o.draw(&mut screen);
+        screen
+    }
+
+    fn file_row<'a>(rows: &'a [String], name: &str) -> &'a str {
+        rows.iter().find(|row| row.split_whitespace().any(|word| word == name)).unwrap().as_str()
+    }
+
+    #[test]
+    fn the_header_distinguishes_work_to_commit_from_work_to_push() {
+        let f = Fixture::new();
+        f.write("page.txt", "before\n");
+        f.commit("first");
+        let mut o = open(&f);
+        assert!(draw(&mut o, 60, 10).text()[0].ends_with("✓ all committed · no remote"));
+
+        f.push();
+        assert!(o.check());
+        assert!(draw(&mut o, 60, 10).text()[0].ends_with("✓ all committed and pushed"));
+
+        f.write("page.txt", "after\n");
+        assert!(o.check());
+        assert!(o.tree.row(o.tree.row_of("page.txt").unwrap()).unwrap().uncommitted);
+        f.commit("second");
+        f.write("note.txt", "not committed\n");
+        assert!(o.check());
+        assert!(draw(&mut o, 60, 10).text()[0].ends_with("1 to commit · 1 to push"));
+        assert!(draw(&mut o, 29, 10).text()[0].ends_with("○1 ↑1"));
+        let pending: Vec<_> = o.files.iter().map(|f| (f.path.as_str(), f.committed)).collect();
+        assert_eq!(pending, [("note.txt", false), ("page.txt", true)]);
+        assert!(o.tree.row(o.tree.row_of("note.txt").unwrap()).unwrap().uncommitted);
+        assert!(!o.tree.row(o.tree.row_of("page.txt").unwrap()).unwrap().uncommitted);
+
+        f.push();
+        assert!(o.check());
+        assert!(draw(&mut o, 60, 10).text()[0].ends_with("1 to commit"));
+        let pending: Vec<_> = o.files.iter().map(|f| (f.path.as_str(), f.committed)).collect();
+        assert_eq!(pending, [("note.txt", false)]);
+        assert_eq!(o.tree.row(o.tree.row_of("page.txt").unwrap()).unwrap().kind, Kind::None);
+    }
+
+    #[test]
+    fn file_rows_name_the_change_and_the_reader_agrees_on_its_size() {
+        let f = Fixture::new();
+        f.write("edit.txt", "before\nsame\n");
+        f.write("gone.txt", "remove me\n");
+        f.write("old.txt", "keep this text\n");
+        f.commit("first");
+        f.write("edit.txt", "after\nextra\nsame\n");
+        f.write("staged.txt", "stage me\n");
+        f.write("loose.txt", "not yet tracked\n");
+        f.git(&["add", "staged.txt"]);
+        f.git(&["mv", "old.txt", "moved.txt"]);
+        fs::remove_file(f.root.join("gone.txt")).unwrap();
+
+        let mut o = open(&f);
+        let rows = draw(&mut o, 65, 12).text();
+        for (name, label) in [
+            ("edit.txt", "edited +2 −1"),
+            ("staged.txt", "new +1"),
+            ("gone.txt", "removed −1"),
+            ("moved.txt", "moved"),
+            ("loose.txt", "new +1"),
+        ] {
+            let row = file_row(&rows, name);
+            let tail = row.split_once(name).unwrap().1.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(tail, label, "{row}");
+        }
+        assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
+
+        let mut view = View::open(&f.root.join("edit.txt")).unwrap();
+        let mut screen = Screen::sized(65, 12);
+        view.draw(&mut screen);
+        let counts = |row: &str| row.split_whitespace().rev().take(2).collect::<Vec<_>>().join(" ");
+        assert_eq!(counts(file_row(&rows, "edit.txt")), counts(&screen.text()[0]));
+    }
+
+    #[test]
+    fn a_folder_opens_for_pending_work_but_stays_closed_when_the_user_closes_it() {
+        let f = project();
+        let mut o = open(&f);
+        let rows = draw(&mut o, 40, 12).text();
+        assert!(rows.iter().any(|row| row == " ▾ src"));
+        assert!(rows.iter().any(|row| row.contains("main.rs")));
+
+        o.on_key(Key::Char('p'));
+        o.on_key(Key::Enter);
+        assert!(draw(&mut o, 40, 12).text().iter().any(|row| row.trim_start() == "▸ src 1"));
+        f.write("src/deep/util.rs", "fn util() { more(); }\n");
+        assert!(o.check());
+        let rows = draw(&mut o, 40, 12).text();
+        assert!(rows.iter().any(|row| row.contains("▸ src 2")), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.contains("main.rs") || row.contains("util.rs")), "{rows:?}");
+    }
+
+    #[test]
+    fn opening_every_folder_twice_restores_the_previous_folds() {
+        let f = project();
+        let mut o = open(&f);
+        let before = draw(&mut o, 40, 12).text();
+        assert!(before.iter().any(|row| row.contains("▸ deep")));
+        o.on_key(Key::Char('e'));
+        let all = draw(&mut o, 40, 12).text();
+        assert!(all.iter().any(|row| row.contains("▾ deep")));
+        assert!(all.iter().any(|row| row.contains("util.rs")));
+        o.on_key(Key::Char('e'));
+        assert_eq!(draw(&mut o, 40, 12).text(), before);
+    }
+
+    #[test]
+    fn changed_only_hides_untouched_files_and_the_hint_says_how_to_show_them_again() {
+        let f = project();
+        let mut o = open(&f);
+        let all = draw(&mut o, 65, 12).text();
+        assert!(all.iter().any(|row| row.contains("README.md")));
+        assert!(all[11].contains("c changed only"));
+
+        o.on_key(Key::Char('c'));
+        let changed = draw(&mut o, 65, 12).text();
+        assert!(!changed.iter().any(|row| row.contains("README.md")));
+        assert!(changed.iter().any(|row| row.contains("main.rs")));
+        assert!(changed.iter().any(|row| row.contains("notes.txt")));
+        assert!(changed[11].contains("c all files"));
+        o.on_key(Key::Char('c'));
+        assert_eq!(draw(&mut o, 65, 12).text(), all);
+    }
+
+    #[test]
+    fn the_outline_follows_writes_only_when_the_keyboard_is_elsewhere() {
+        let f = project();
+        let mut o = open(&f);
+        o.on_key(Key::Focus(true));
+        let before = o.selected_path().unwrap();
+        assert_ne!(before, "src/deep/util.rs");
+        f.write("src/deep/util.rs", "fn util() { more(); }\n");
+        assert!(o.check());
+        assert_eq!(o.selected_path().as_deref(), Some(before.as_str()));
+        let focused = draw(&mut o, 65, 12).text();
+        assert!(focused.iter().any(|row| row.contains("util.rs")));
+        assert!(!focused[11].contains("following"));
+
+        o.on_key(Key::Focus(false));
+        f.write("src/deep/util.rs", "fn util() { even_more(); }\n");
+        assert!(o.check());
+        assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
+        assert_eq!(draw(&mut o, 65, 12).text()[11].trim_start(), "following util.rs");
+    }
+
+    #[test]
+    fn at_seven_rows_the_tree_becomes_a_strip_of_pending_files() {
+        let f = project();
+        let mut o = open(&f);
+        let tree = draw(&mut o, 40, 8).text();
+        assert!(tree.iter().any(|row| row.contains("▾ src")));
+        assert!(tree.iter().any(|row| row.contains("README.md")));
+        let strip = draw(&mut o, 40, 7).text();
+        assert!(strip.iter().any(|row| row.contains("main.rs src")));
+        assert!(strip.iter().any(|row| row.contains("notes.txt")));
+        assert!(!strip.iter().any(|row| row.contains("▾ src") || row.contains("README.md")));
+    }
+
+    #[test]
+    fn a_twentieth_row_makes_room_for_history_beneath_the_tree() {
+        let f = project();
+        let mut o = open(&f);
+        assert!(!draw(&mut o, 65, 19).text().iter().any(|row| row.contains("History")));
+        let tall = draw(&mut o, 65, 20).text();
+        let history = tall.iter().position(|row| row.trim_start() == "History").unwrap();
+        assert!(tall[..history].iter().any(|row| row.contains("main.rs")));
+        assert!(tall[history + 1..].iter().any(|row| row.contains("first")));
+    }
+
+    #[test]
+    fn a_ninetieth_column_puts_history_beside_the_tree() {
+        let f = project();
+        let mut o = open(&f);
+        assert!(!draw(&mut o, 89, 11).text().iter().any(|row| row.contains("History")));
+        let wide = draw(&mut o, 90, 11).text();
+        assert!(wide[0].starts_with(" project") && wide[0].ends_with("History"), "{wide:?}");
+        assert!(wide.iter().any(|row| row.contains("first")));
+    }
+
+    #[test]
+    fn a_wide_tree_has_columns_for_the_kind_and_size_of_a_change() {
+        let f = project();
+        let mut o = open(&f);
+        let narrow = draw(&mut o, 51, 10).text();
+        let wide = draw(&mut o, 52, 10).text();
+        assert!(file_row(&narrow, "main.rs").ends_with("main.rs"));
+        let row = file_row(&wide, "main.rs");
+        assert!(row.contains("edited") && row.ends_with("+3 −1"), "{row}");
+    }
+
+    #[test]
+    fn next_and_previous_pending_follow_tree_order_open_folders_and_wrap() {
+        let f = project();
+        f.write("src/deep/util.rs", "fn util() { more(); }\n");
+        let mut o = open(&f);
+        assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
+        o.on_key(Key::Char('p'));
+        o.on_key(Key::Enter);
+        assert!(!draw(&mut o, 40, 12).text().iter().any(|row| row.contains("util.rs")));
+        o.on_key(Key::Char('n'));
+        assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
+        assert!(draw(&mut o, 40, 12).text().iter().any(|row| row.contains("util.rs")));
+        for (key, paths) in [
+            ('n', ["src/main.rs", "notes.txt", "src/deep/util.rs"]),
+            ('N', ["notes.txt", "src/main.rs", "src/deep/util.rs"]),
+        ] {
+            for path in paths {
+                o.on_key(Key::Char(key));
+                assert_eq!(o.selected_path().as_deref(), Some(path));
+            }
+        }
+    }
+
+    #[test]
+    fn reading_in_the_outline_pane_returns_to_the_same_cursor_on_quit() {
+        let f = project();
+        let mut o = open(&f);
+        o.on_key(Key::Char('n'));
+        let before = draw(&mut o, 65, 12);
+        let rows = before.text();
+        let cursor = rows.iter().position(|row| row.contains("notes.txt")).unwrap();
+        assert!(before.bar_at(cursor));
+        assert!(!o.on_key(Key::Enter));
+        let reader = draw(&mut o, 65, 12).text();
+        assert!(reader[0].contains("notes.txt"));
+        assert_eq!(reader[1], " 1 + one");
+        assert!(!o.on_key(Key::Char('q')));
+        let back = draw(&mut o, 65, 12);
+        assert_eq!(back.text(), rows);
+        assert!(back.bar_at(cursor));
+    }
+
+    #[test]
+    fn question_mark_shows_help_and_escape_restores_the_outline() {
+        let f = project();
+        let mut o = open(&f);
+        let before = draw(&mut o, 65, 12).text();
+        assert!(!o.on_key(Key::Char('?')));
+        let help = draw(&mut o, 65, 12).text();
+        assert!(help[0].trim_start().starts_with("Files"));
+        assert!(help[11].contains("any key closes this"));
+        assert!(!o.on_key(Key::Esc));
+        assert_eq!(draw(&mut o, 65, 12).text(), before);
+    }
+
+    #[test]
+    fn a_plain_folder_has_no_git_counts_and_picks_up_new_files_on_check() {
+        let f = Fixture::folder();
+        f.write("sub/a.txt", "a\n");
+        f.write("b.txt", "b\n");
+        let mut o = open(&f);
+        assert_eq!(draw(&mut o, 40, 8).text(), [" project", " ▸ sub", " • b.txt", "", "", "", "", ""]);
+        o.on_key(Key::Enter);
+        assert!(draw(&mut o, 40, 8).text().iter().any(|row| row.contains("a.txt")));
+        f.write("sub/new.txt", "new\n");
+        assert!(o.check());
+        let rows = draw(&mut o, 40, 8).text();
+        assert_eq!(rows[0], " project");
+        assert!(rows.iter().any(|row| row.contains("new.txt")), "{rows:?}");
     }
 }

@@ -29,7 +29,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// The git program itself. On macOS the `git` on the path is a launcher
 /// that takes as long again to start as git does, so the real one is found
 /// once. If it cannot be found, use `git` from the path.
-static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
+pub(super) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     let found = Command::new("git").arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null()).output();
     let core = found.ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
     let real = Path::new(core.trim()).join("git");
@@ -63,6 +63,8 @@ fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(test)]
+    crate::fixture::isolate_git(&mut c);
     c
 }
 
@@ -759,6 +761,149 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::Fixture;
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn read_repo(f: &Fixture) -> Repo {
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read(None);
+        assert!(repo.ok);
+        repo
+    }
+
+    fn assert_only_page_to_push(files: &[FileChange]) {
+        assert_eq!(files.len(), 1, "{files:?}");
+        let page = &files[0];
+        assert_eq!((page.path.as_str(), page.committed, page.add, page.del), ("page.txt", true, 1, 1));
+    }
+
+    #[test]
+    fn changes_ahead_of_upstream_stop_being_pending_when_the_upstream_catches_up() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.push();
+        f.write("page.txt", "second\n");
+        f.commit("second");
+
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.remote.as_deref(), Some("origin/main"));
+        let pending = repo.pending().unwrap();
+        assert_only_page_to_push(&pending);
+        assert!(!repo.history(1).unwrap()[0].pushed);
+
+        f.push();
+        let raw = repo.poll(&pending).expect("the upstream caught up");
+        repo.read(Some(raw));
+        assert_eq!(repo.remote.as_deref(), Some("origin/main"));
+        assert!(repo.pending().unwrap().is_empty());
+        assert!(repo.history(1).unwrap()[0].pushed);
+    }
+
+    #[test]
+    fn a_deleted_upstream_falls_back_to_its_own_remotes_default_branch() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.push();
+        f.git(&["remote", "rename", "origin", "mirror"]);
+        f.git(&["remote", "set-head", "mirror", "main"]);
+        f.git(&["switch", "-q", "-c", "topic"]);
+        f.write("page.txt", "second\n");
+        f.commit("second");
+        f.git(&["push", "-q", "-u", "mirror", "topic"]);
+
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.remote.as_deref(), Some("mirror/topic"));
+        assert!(repo.pending().unwrap().is_empty());
+        f.git(&["push", "-q", "--delete", "mirror", "topic"]);
+        let raw = repo.poll(&[]).expect("the upstream branch was deleted");
+        repo.read(Some(raw));
+        assert_eq!(repo.remote.as_deref(), Some("mirror"));
+        assert_only_page_to_push(&repo.pending().unwrap());
+        let history = repo.history(2).unwrap();
+        assert!(!history[0].pushed && history[1].pushed);
+    }
+
+    #[test]
+    fn without_a_remote_only_work_since_the_last_commit_is_pending() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.write("page.txt", "first\nsecond\n");
+        f.commit("second");
+        f.write("page.txt", "first\nsecond\nthird\n");
+
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.remote, None);
+        let pending = repo.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        let page = &pending[0];
+        assert_eq!((page.path.as_str(), page.committed, page.add, page.del), ("page.txt", false, 1, 0));
+        let history = repo.history(2).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|c| c.pushed));
+    }
+
+    #[test]
+    fn a_branch_without_an_upstream_uses_origin_head_and_notices_a_push_to_it() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.push();
+        f.git(&["remote", "set-head", "origin", "main"]);
+        f.git(&["switch", "-q", "-c", "topic"]);
+        f.write("page.txt", "second\n");
+        f.commit("second");
+
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.remote.as_deref(), Some("origin"));
+        let pending = repo.pending().unwrap();
+        assert_only_page_to_push(&pending);
+        let history = repo.history(2).unwrap();
+        assert!(!history[0].pushed && history[1].pushed);
+        assert!(repo.poll(&pending).is_none());
+
+        f.git(&["push", "-q", "origin", "HEAD:main"]);
+        let raw = repo.poll(&pending).expect("origin/HEAD moved without changing the worktree or local branch");
+        repo.read(Some(raw));
+        assert_eq!(repo.remote.as_deref(), Some("origin"));
+        assert!(repo.pending().unwrap().is_empty());
+        assert!(repo.history(1).unwrap()[0].pushed);
+    }
+
+    #[test]
+    fn reading_a_repository_does_not_run_its_filters_hooks_or_file_monitor() {
+        let f = Fixture::new();
+        f.write(".gitattributes", "*.txt filter=mark\n");
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.write("page.txt", "changed\n");
+
+        f.write(".git/test-hooks/post-index-change", "#!/bin/sh\ntouch .git/hook-ran\n");
+        fs::set_permissions(f.root.join(".git/test-hooks/post-index-change"), Permissions::from_mode(0o755)).unwrap();
+        f.git(&["config", "core.hooksPath", ".git/test-hooks"]);
+        f.git(&["config", "filter.mark.clean", "touch .git/filter-ran; cat"]);
+        f.git(&["config", "filter.mark.required", "true"]);
+        f.git(&["config", "core.fsmonitor", "touch .git/fsmonitor-ran"]);
+
+        let mut repo = read_repo(&f);
+        let pending = repo.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].path, "page.txt");
+        assert_eq!(repo.tracked().collect::<Vec<_>>(), [".gitattributes", "page.txt"]);
+        assert_eq!(repo.history(1).unwrap()[0].subject, "first");
+        assert!(repo.file_diff("page.txt", None).unwrap().windows(b"+changed".len()).any(|s| s == b"+changed"));
+        assert_eq!(repo.moved_from("page.txt"), None);
+        assert!(repo.poll(&pending).is_none());
+        repo.only("page.txt");
+        assert!(repo.watch().complete);
+        assert!(repo.ok);
+        for marker in ["filter-ran", "hook-ran", "fsmonitor-ran"] {
+            assert!(!f.root.join(".git").join(marker).exists(), "reading ran the driver for {marker}");
+        }
+    }
 
     fn changes(raw: &str) -> Vec<FileChange> {
         let mut files = Vec::new();

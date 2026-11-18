@@ -14,6 +14,7 @@ enum Set {
 }
 
 static SET: LazyLock<Set> = LazyLock::new(|| match std::env::var("STRATA_ICONS").as_deref() {
+    _ if cfg!(test) => Set::Plain,
     Ok("plain") => Set::Plain,
     Ok("off" | "none") => Set::Off,
     _ => Set::Nerd,

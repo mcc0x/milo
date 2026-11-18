@@ -1,5 +1,7 @@
 //! strata: a project's files, coloured by what is not yet committed or pushed.
 
+#[cfg(test)]
+mod fixture;
 mod git;
 mod help;
 mod history;
@@ -69,15 +71,44 @@ Icons need a Nerd Font. STRATA_ICONS=plain uses ordinary symbols instead,
 STRATA_ICONS=off shows none.
 ";
 
-/// The least time between looks for changes, even when one is reported.
+/// How long to rest after a look when a change has been reported.
 const MIN_LOOK_INTERVAL: Duration = Duration::from_millis(120);
-/// A look is never more than a fifth of the time: after one that took this
-/// long, the next waits four times as long, however fast changes arrive.
+/// Rests this many times as long as the last look took, even after a report.
+/// Repeated looks at the same cost thus take at most a fifth of the time.
 const REST: u32 = 4;
-/// How often to look for changes regardless: seldom where the operating
-/// system reports them, often where it cannot.
+/// How long to rest without a report when the watcher covers everything.
 const WATCHED: Duration = Duration::from_secs(30);
+/// A shorter rest where the watcher can miss changes or is unavailable.
 const UNWATCHED: Duration = Duration::from_secs(2);
+
+/// When to look for changes again, with or without a report from the watcher.
+struct Pace {
+    idle: Duration,
+    ended: Instant,
+    took: Duration,
+    reported: bool,
+}
+
+impl Pace {
+    fn new(idle: Duration, now: Instant) -> Self {
+        Self { idle, ended: now, took: Duration::ZERO, reported: false }
+    }
+
+    fn report_change(&mut self) {
+        self.reported = true;
+    }
+
+    /// How long from `now` until the next look is due.
+    fn wait(&self, now: Instant) -> Duration {
+        let rest = if self.reported { MIN_LOOK_INTERVAL } else { self.idle }.max(self.took * REST);
+        rest.saturating_sub(now.saturating_duration_since(self.ended))
+    }
+
+    /// An unsettled look, say during a checkout, is retried as if a change was reported.
+    fn finished(&mut self, started: Instant, ended: Instant, settled: bool) {
+        (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
+    }
+}
 
 /// The two things strata can fill a pane with.
 enum Ui {
@@ -161,7 +192,7 @@ fn main() {
         (_, None) => {
             let dir = first.as_deref().map_or(Path::new("."), Path::new);
             match Repo::open(dir) {
-                Some(repo) => Ui::Outline(Outline::new(repo)),
+                Some(repo) => Ui::Outline(Outline::new(repo, rex::inside())),
                 None if dir.is_file() => {
                     fail(format!("{0} is a file; to read it: strata view {0}", dir.display()))
                 }
@@ -192,9 +223,7 @@ fn main() {
 
     let mut screen = Screen::new();
     let mut keys = Vec::new();
-    // When the last look for changes ended, how long it took, and whether
-    // the operating system has reported a change since.
-    let (mut looked, mut took, mut told) = (Instant::now(), Duration::ZERO, false);
+    let mut pace = Pace::new(idle, Instant::now());
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
             let (w, h) = term::size();
@@ -203,10 +232,7 @@ fn main() {
         ui.draw(&mut screen);
         screen.flush();
 
-        // A report makes a look due as soon as enough time has passed since
-        // the last one. Without a report, wait longer and look anyway.
-        let due = |told: bool| if told { MIN_LOOK_INTERVAL } else { idle }.max(took * REST);
-        let until_look = due(told).saturating_sub(looked.elapsed());
+        let until_look = pace.wait(Instant::now());
         let wait = ui.next_frame().map_or(until_look, |frame| frame.min(until_look));
         match term::wait(&keyboard, signal.as_ref(), wait.as_millis() as i32 + 1, watcher.fd()) {
             Wait::Input => {
@@ -221,17 +247,64 @@ fn main() {
             }
             Wait::Woken => {
                 watcher.drain();
-                told = true;
+                pace.report_change();
             }
             Wait::Timeout | Wait::Interrupted => {}
         }
-        if looked.elapsed() >= due(told) {
+        if pace.wait(Instant::now()).is_zero() {
             let started = Instant::now();
-            // Too soon to tell, say in the middle of a checkout: look again
-            // once things have settled.
             let settled = ui.check();
-            (looked, took, told) = (Instant::now(), started.elapsed(), !settled);
+            pace.finished(started, Instant::now(), settled);
         }
     }
     term::leave();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_projects_are_checked_even_without_a_report() {
+        let start = Instant::now();
+        for (idle, seconds) in [(WATCHED, 30), (UNWATCHED, 2)] {
+            let pace = Pace::new(idle, start);
+            assert_eq!(pace.wait(start + Duration::from_secs(1)), Duration::from_secs(seconds - 1));
+            assert_eq!(pace.wait(start + Duration::from_secs(seconds)), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn a_report_is_due_immediately_if_the_last_look_has_had_enough_rest() {
+        let start = Instant::now();
+        let mut pace = Pace::new(WATCHED, start);
+        pace.report_change();
+        assert_eq!(pace.wait(start + Duration::from_millis(20)), Duration::from_millis(100));
+        assert_eq!(pace.wait(start + Duration::from_secs(1)), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_slow_look_rests_four_times_as_long_even_when_changes_are_reported() {
+        let start = Instant::now();
+        let ended = start + Duration::from_secs(1);
+        let mut pace = Pace::new(UNWATCHED, start);
+        pace.finished(start, ended, true);
+        assert_eq!(pace.wait(ended), Duration::from_secs(4));
+        pace.report_change();
+        assert_eq!(pace.wait(ended + Duration::from_secs(1)), Duration::from_secs(3));
+        assert_eq!(pace.wait(ended + Duration::from_secs(4)), Duration::ZERO);
+    }
+
+    #[test]
+    fn an_unsettled_look_is_retried_soon_and_a_settled_look_goes_back_to_idle() {
+        let start = Instant::now();
+        let ended = start + Duration::from_millis(10);
+        let mut pace = Pace::new(WATCHED, start);
+        pace.finished(start, ended, false);
+        assert_eq!(pace.wait(ended), Duration::from_millis(120));
+        let retry = ended + Duration::from_millis(120);
+        assert_eq!(pace.wait(retry), Duration::ZERO);
+        pace.finished(retry, retry + Duration::from_millis(10), true);
+        assert_eq!(pace.wait(retry + Duration::from_millis(10)), Duration::from_secs(30));
+    }
 }
