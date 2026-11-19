@@ -5,6 +5,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use super::files::{self, Change, Image, staged};
@@ -132,8 +133,9 @@ impl Store {
 
     /// Rex checks a temporary copy so rejecting it leaves the existing layout untouched.
     fn checked(&self, lua: String, run: &RunRex<'_>) -> Result<Vec<u8>, &'static str> {
-        let stage = staged(&self.config, lua.as_bytes()).map_err(|_| "Could not prepare the Rex files.")?;
-        if !run(&[OsStr::new("config"), OsStr::new("check"), stage.path().as_os_str()]) {
+        let stage = staged(lua.as_bytes()).map_err(|_| "Could not prepare the Rex files.")?;
+        let fd = format!("/dev/fd/{}", stage.as_raw_fd());
+        if !run(&[OsStr::new("config"), OsStr::new("check"), OsStr::new(&fd)]) {
             return Err("Rex could not check the layout. No files were changed.");
         }
         Ok(lua.into_bytes())

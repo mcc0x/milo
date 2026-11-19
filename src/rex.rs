@@ -123,9 +123,17 @@ fn probe_output(command: &mut Command, wait: Duration) -> Option<Vec<u8>> {
 /// Setup reports its own messages, not process output that can contain paths or settings.
 pub fn run(args: &[&OsStr]) -> bool {
     let mut command = Command::new("rex");
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    if args.starts_with(&[OsStr::new("config"), OsStr::new("check")]) {
-        command.env("MILO_CHECKING_REX", "1");
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    if let [config, check, path] = args
+        && *config == "config"
+        && *check == "check"
+    {
+        // The staging descriptor is close-on-exec. Pass it as Rex's stdin
+        // rather than leaking it (or a named settings file) across exec.
+        let Ok(input) = std::fs::File::open(path) else { return false };
+        command.args([*config, *check, OsStr::new("/dev/stdin")]).stdin(input).env("MILO_CHECKING_REX", "1");
+    } else {
+        command.args(args).stdin(Stdio::null());
     }
     command.status().is_ok_and(|status| status.success())
 }

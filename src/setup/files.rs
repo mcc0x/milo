@@ -68,10 +68,11 @@ fn temp(dir: &Path, bytes: &[u8], mode: u32) -> io::Result<Temp> {
     Err(ErrorKind::AlreadyExists.into())
 }
 
-/// Checking and trying a layout do not create the directory it would be installed in.
-pub(super) fn staged(near: &Path, bytes: &[u8]) -> io::Result<Temp> {
-    let dir = near.ancestors().find(|p| p.is_dir());
-    dir.map_or_else(|| temp(&env::temp_dir(), bytes, 0o600), |dir| temp(dir, bytes, 0o600))
+/// Validation can outlive the setup process. Keep only an open handle, not
+/// a named Lua file that a killed setup would leave in the user's config.
+pub(super) fn staged(bytes: &[u8]) -> io::Result<File> {
+    let scratch = temp(&env::temp_dir(), bytes, 0o600)?;
+    fs_ops::open_read(scratch.path())
 }
 
 /// A planned edit carries the old state, so a concurrent edit is not overwritten.

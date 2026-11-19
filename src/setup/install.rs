@@ -164,7 +164,7 @@ mod tests {
     use std::cell::RefCell;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
-    use std::rc::Rc;
+    use std::os::unix::fs::MetadataExt as _;
 
     fn store(fixture: &Fixture) -> Store {
         store_at(&fixture.root)
@@ -239,12 +239,11 @@ mod tests {
         let store = store(&fixture);
         fs::write(&store.init, b"-- Keep this").unwrap();
         fs::write(&store.claude, b"{\"keep\":1}").unwrap();
-        let checked = Rc::new(RefCell::new(None));
-        let path = Rc::clone(&checked);
-        let run = move |args: &[&OsStr]| {
+        let run = |args: &[&OsStr]| {
             assert_eq!(&args[..2], &["config", "check"].map(OsStr::new));
             assert!(fs::read(args[2]).unwrap().starts_with(GENERATED.as_bytes()));
-            *path.borrow_mut() = Some(PathBuf::from(args[2]));
+            // Even a SIGKILL during Rex validation cannot strand this file.
+            assert_eq!(fs::File::open(args[2]).unwrap().metadata().unwrap().nlink(), 0);
             false
         };
         assert!(store.save(Some(&Layout::default()), Some(true), &run).unwrap_err().contains("could not check"));
@@ -252,7 +251,6 @@ mod tests {
         assert_eq!(fs::read(&store.claude).unwrap(), b"{\"keep\":1}");
         assert!(!store.config.exists());
         assert!(!store.rex_reload_pending() && !store.state.join(OWN_CLAUDE).exists());
-        assert!(!checked.borrow().as_ref().unwrap().exists());
     }
 
     #[test]
