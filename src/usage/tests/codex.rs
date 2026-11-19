@@ -145,6 +145,137 @@ fn codex_reads_only_the_newest_plain_sessions_and_reuses_unchanged_tails() {
     assert_eq!(usage.bytes_read, 0);
 }
 
+fn append(f: &Fixture, data: &str, now: i64) {
+    let mut file = OpenOptions::new().append(true).open(f.root.join(CODEX)).unwrap();
+    file.write_all(data.as_bytes()).unwrap();
+    file.set_modified(mtime(now)).unwrap();
+}
+
+#[test]
+fn codex_growth_reads_the_suffix_and_keeps_the_last_report() {
+    let f = Fixture::folder();
+    let first = codex(NOW - 1, 23, NOW + DAY, "null");
+    write(&f, CODEX, &format!("{first}{}", "{}\n".repeat(32_768)), NOW - 1);
+    let mut usage = open(&f, NOW);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    let other =
+        codex(NOW, 98, NOW + DAY, "null").replace("\"rate_limits\":{", "\"rate_limits\":{\"limit_id\":\"other\",");
+    append(&f, &other, NOW);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, other.len() as u64 + 1);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    let latest = codex(NOW, 64, NOW + DAY, "null");
+    append(&f, &latest, NOW + 1);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, latest.len() as u64 + 1);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0);
+}
+
+#[test]
+fn codex_resumes_a_partial_line_and_rechecks_a_report_without_a_newline() {
+    let f = Fixture::folder();
+    let first = codex(NOW - 1, 23, NOW + DAY, "null");
+    let newest =
+        codex(NOW, 64, NOW + DAY, "null").replacen('{', &format!("{{\"padding\":\"{}\",", "x".repeat(40_000)), 1);
+    let (prefix, suffix) = newest.split_at(36_000);
+    write(&f, CODEX, &format!("{first}{prefix}"), NOW);
+    let mut usage = open(&f, NOW);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    append(&f, suffix.trim_end(), NOW + 1);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, suffix.len() as u64);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+
+    append(&f, "broken\n", NOW + 2);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 8);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    let latest = codex(NOW + 1, 64, NOW + DAY, "null");
+    let (prefix, suffix) = latest.split_at(latest.len() / 2);
+    append(&f, prefix, NOW + 3);
+    assert!(usage.check());
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+    append(&f, suffix.trim_end(), NOW + 4);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, suffix.len() as u64);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+    append(&f, "\n{}\n", NOW + 5);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 5);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+}
+
+#[test]
+fn codex_truncation_rewrite_and_replacement_reset_the_cursor() {
+    let f = Fixture::folder();
+    let first = codex(NOW - 1, 23, NOW + DAY, "null");
+    write(&f, CODEX, &format!("{first}{{\"unfinished\":"), NOW - 1);
+    let mut usage = open(&f, NOW);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+    write(&f, CODEX, "{}\n", NOW);
+    assert!(usage.check());
+    assert!(usage.codex.reported().is_none());
+
+    let latest = codex(NOW, 64, NOW + DAY, "null");
+    append(&f, &latest, NOW + 1);
+    assert!(usage.check());
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+
+    let rewrite = codex(NOW, 41, NOW + DAY, "null");
+    write(&f, CODEX, &format!("{{}}\n{rewrite}"), NOW + 2);
+    assert!(usage.check());
+    assert!(frame(&mut usage, 100, 2)[0].contains("59%"));
+
+    let rewrite = codex(NOW, 52, NOW + DAY, "null");
+    write(&f, CODEX, &format!("{rewrite}{{}} \n"), NOW + 3);
+    assert!(usage.check());
+    assert!(frame(&mut usage, 100, 2)[0].contains("48%"));
+
+    let larger = format!("{}x\n", "{}\n".repeat(latest.len()));
+    write(&f, "replacement", &larger, NOW + 4);
+    fs::rename(f.root.join("replacement"), f.root.join(CODEX)).unwrap();
+    assert!(usage.check());
+    assert!(usage.codex.reported().is_none());
+}
+
+#[test]
+fn codex_large_growth_uses_a_bounded_tail_and_resumes_at_its_new_end() {
+    let f = Fixture::folder();
+    let first = codex(NOW - 1, 23, NOW + DAY, "null");
+    write(&f, CODEX, &first, NOW - 1);
+    let mut usage = open(&f, NOW);
+
+    let large = "x".repeat(TAIL_BYTES as usize);
+    append(&f, &large, NOW);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, TAIL_BYTES);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    // The skipped record has no newline yet. Its suffix must not be treated as a new report.
+    let ignored = codex(NOW, 98, NOW + DAY, "null");
+    append(&f, &ignored, NOW + 1);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, ignored.len() as u64);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    let latest = codex(NOW, 64, NOW + DAY, "null");
+    append(&f, &format!("{large}\n{latest}"), NOW + 2);
+    assert!(usage.check());
+    assert!(usage.bytes_read < TAIL_BYTES);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+
+    append(&f, "{}\n", NOW + 3);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 4);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+}
+
 #[test]
 fn no_codex_sessions_and_sessions_without_limits_have_different_notes() {
     let f = Fixture::folder();

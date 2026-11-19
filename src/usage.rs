@@ -216,10 +216,58 @@ impl Source {
     }
 }
 
-/// Remember the file version so an unchanged transcript does not need another read.
+/// Retain the most recent complete report and the state needed to read appends.
 struct CodexFile {
     version: FileVersion,
+    stream: Stream,
     reading: Option<Reading>,
+    pending: Option<Reading>,
+}
+
+impl CodexFile {
+    fn read(
+        file: &std::fs::File,
+        version: FileVersion,
+        cached: Option<Self>,
+        now: i64,
+        budget: &mut Budget,
+    ) -> io::Result<Self> {
+        let floor = budget.remaining.saturating_sub(TAIL_BYTES);
+        let mut retained = None;
+        let parse = |line: &[u8]| Reading::codex(line, now);
+        if let Some(mut old) = cached {
+            if version == old.version {
+                return Ok(old);
+            }
+            let growing = version.same_file(old.version) && version.len > old.version.len;
+            if growing && old.stream.can_resume(file, budget)? {
+                if version.len - old.version.len <= budget.remaining - floor {
+                    old.stream.read(file, version.len, budget, |line| {
+                        if let Some(reading) = parse(line) {
+                            old.reading = Some(reading);
+                        }
+                    })?;
+                    if old.stream.offset != version.len {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    old.pending = parse(old.stream.tail());
+                    old.version = version;
+                    return Ok(old);
+                }
+                // A large append can push the previous report out of the bounded tail.
+                retained = old.pending.or(old.reading);
+            }
+        }
+
+        let (reading, stream) = files::tail(file, version.len, budget.remaining - floor, budget, parse)?;
+        let pending = parse(stream.tail());
+        Ok(Self { version, stream, reading: reading.or(retained), pending })
+    }
+
+    /// A valid last line is usable before its newline, but may still change.
+    fn reported(&self) -> Option<&Reading> {
+        self.pending.as_ref().or(self.reading.as_ref())
+    }
 }
 
 #[derive(Default)]
@@ -284,7 +332,6 @@ impl Codex {
         }
     }
 
-    /// A bounded tail can miss an older report in a growing file; keep it if so.
     fn check_file(
         sessions: &Sessions,
         candidate: &files::Candidate,
@@ -292,25 +339,18 @@ impl Codex {
         now: i64,
         budget: &mut Budget,
     ) -> Option<CodexFile> {
-        if cached.as_ref().is_some_and(|file| file.version == candidate.version) {
+        if budget.remaining == 0 || cached.as_ref().is_some_and(|file| file.version == candidate.version) {
             return cached;
         }
         let (file, version) = sessions.open(&candidate.path)?;
-        let (mut reading, partial) =
-            files::tail(&file, version.len, TAIL_BYTES, budget, |line| Reading::codex(line, now)).ok()?;
-        if partial
-            && let Some(old) = cached.filter(|file| version.same_file(file.version) && version.len > file.version.len)
-        {
-            reading = reading.or(old.reading);
-        }
-        Some(CodexFile { version, reading })
+        CodexFile::read(&file, version, cached, now, budget).ok()
     }
 
     /// Different sources can describe the same account, not separate limits to add.
     fn reported(&self) -> Option<(&Reading, Source)> {
         self.files
             .values()
-            .filter_map(|file| file.reading.as_ref().map(|r| (r, Source::CodexSession)))
+            .filter_map(|file| file.reported().map(|r| (r, Source::CodexSession)))
             .chain(self.omp.iter().map(|r| (r, Source::Omp)))
             .max_by_key(|(r, _)| r.at)
     }

@@ -441,27 +441,33 @@ impl Budget {
     }
 }
 
-/// Reads backwards in blocks, touching only enough of the tail to find a record.
+/// Finds the last complete report and carries the final unterminated line into the stream.
 pub(super) fn tail<T>(
     file: &File,
     len: u64,
     max: u64,
     budget: &mut Budget,
     find: impl Fn(&[u8]) -> Option<T>,
-) -> io::Result<(Option<T>, bool)> {
+) -> io::Result<(Option<T>, Stream)> {
     let stop = len.saturating_sub(max.min(budget.remaining));
     let mut reverse = Reverse::new(len);
+    let mut stream = Stream::resume(len);
     while reverse.offset > stop {
-        match reverse.block(file, stop, budget, |line, _| {
+        if let ControlFlow::Break(found) = reverse.block(file, stop, budget, |line, at_end| {
+            if at_end {
+                stream.remember_tail(line);
+                return ControlFlow::Continue(());
+            }
             line.and_then(&find).map_or(ControlFlow::Continue(()), ControlFlow::Break)
-        }) {
-            Ok(ControlFlow::Break(found)) => return Ok((Some(found), false)),
-            Ok(ControlFlow::Continue(())) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok((None, true)),
-            Err(error) => return Err(error),
+        })? {
+            return Ok((Some(found), stream));
         }
     }
-    Ok((None, stop != 0))
+    if len != 0 && reverse.at_end {
+        // The last line crosses the read boundary. Ignore its unseen prefix.
+        stream.remember_tail(None);
+    }
+    Ok((None, stream))
 }
 
 #[derive(Default)]
@@ -562,6 +568,16 @@ impl Stream {
         } else {
             self.line.skipping = true;
         }
+    }
+
+    /// A changed byte at the old end means the suffix may no longer be line-aligned.
+    pub(super) fn can_resume(&self, file: &File, budget: &mut Budget) -> io::Result<bool> {
+        if self.offset == 0 || self.line.skipping {
+            return Ok(true);
+        }
+        let expected = self.tail().last().copied().unwrap_or(b'\n');
+        let mut byte = [0];
+        Ok(budget.read_at(file, &mut byte, self.offset - 1)? == 1 && byte[0] == expected)
     }
 
     /// Stop at the observed size; bytes appended during the read belong to the next check.
