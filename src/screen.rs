@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::ops::Range;
 
 use crate::picture::Picture;
-use crate::width::{char_width, is_combining, str_width};
+use crate::width::{CellWidth, cell_width, char_width, str_width};
 
 // ANSI palette indices, so colours follow the terminal theme.
 pub const RED: u8 = 1;
@@ -133,7 +133,7 @@ impl Cell {
     }
 }
 
-/// A Unicode scalar or an index past that range into the frame's marked glyphs.
+/// A Unicode scalar or an index past that range into the frame's multi-scalar glyphs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Glyph(u32);
 
@@ -149,7 +149,7 @@ impl Glyph {
     }
 }
 
-/// Only glyphs with combining marks need spill storage. Both buffers
+/// Only glyphs with attached scalars need spill storage. Both buffers
 /// are reused across frames; ordinary cells stay a single scalar wide.
 #[derive(Default)]
 struct Marks {
@@ -383,13 +383,17 @@ impl Screen {
         let starts_on_cont = row.first().is_some_and(|cell| cell.glyph == CONT);
         let (mut used, mut base) = (0, 0);
         for ch in s.chars() {
-            let cw = char_width(ch);
-            if cw == 0 {
-                if used > 0 && is_combining(ch) {
-                    marks.add(&mut row[base].glyph, ch);
+            let cw = match cell_width(ch) {
+                CellWidth::Attach => {
+                    if used > 0 {
+                        marks.add(&mut row[base].glyph, ch);
+                    }
+                    continue;
                 }
-                continue;
-            }
+                CellWidth::Skip => continue,
+                CellWidth::Narrow => 1,
+                CellWidth::Wide => 2,
+            };
             if used + cw > row.len() {
                 break;
             }
@@ -749,6 +753,30 @@ mod tests {
         let updated = frame(&mut screen);
         assert!(updated.contains("\x1b[1;1H") && updated.contains("界\u{300}e"), "{updated:?}");
         assert!(!updated.contains('x'));
+    }
+
+    #[test]
+    fn repaint_preserves_unicode_text_and_clears_the_rest_of_the_row() {
+        for (text, cols) in [("กิกิกิ", 3), ("क़कि", 3), ("한글", 4), ("ꥠힰퟋ", 2)]
+        {
+            let mut screen = Screen::sized(16, 1);
+            screen.put(0, 0, 16, "0123456789012345", Style::PLAIN);
+            frame(&mut screen);
+
+            screen.clear();
+            assert_eq!(screen.put(0, 0, cols, text, Style::PLAIN), cols, "{text:?}");
+            screen.put(cols, 0, 1, "|", Style::PLAIN);
+            let output = frame(&mut screen);
+            let expected = format!("\x1b[1;1H\x1b[0m{text}|{}", " ".repeat(15 - cols));
+            assert!(output.contains(&expected), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn emoji_skin_tone_is_not_filtered_from_terminal_output() {
+        let mut screen = Screen::sized(8, 1);
+        screen.put(0, 0, 8, "👍🏽", Style::PLAIN);
+        assert!(frame(&mut screen).contains("👍🏽"));
     }
 
     fn frame(screen: &mut Screen) -> String {
