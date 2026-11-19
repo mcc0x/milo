@@ -82,13 +82,17 @@ impl History {
         self.keep_cursor_in_view();
         let click_offset = self.clicked.map(|click| click.offset);
         let below_click = click_offset.map_or(self.shown, |offset| self.shown.saturating_sub(offset + 1));
-        let room = (self.shown / 2).min(DETAIL_ROWS).min(below_click);
+        let selected = self.selected();
+        // An expanded commit needs a second row for its files or empty note.
+        let list_rows =
+            if matches!(selected, Some(TimelineRow::Commit(i)) if self.open_index() == Some(i)) { 2 } else { 1 };
+        let room = (self.shown / 2).min(DETAIL_ROWS).min(below_click).min(self.shown.saturating_sub(list_rows));
         let previous_detail = self.detail.take();
         let mut detail = [""; DETAIL_ROWS];
         let mut remaining = "";
         let mut detail_rows = 0;
         if self.focused && s.w <= DETAIL_COLS && room > 0 {
-            let commit = match self.selected() {
+            let commit = match selected {
                 Some(TimelineRow::Commit(i)) => Some(i),
                 Some(TimelineRow::File(_) | TimelineRow::More) => self.open_index(),
                 _ => None,

@@ -454,6 +454,26 @@ fn an_empty_commit_opened_at_the_edge_shows_why_it_has_no_files() {
 }
 
 #[test]
+fn a_two_row_focused_pane_keeps_the_open_commit_preview_visible() {
+    let f = Fixture::new();
+    commit(&f, "first chapter second chapter final chapter");
+    commit(&f, "newer");
+    let mut history = open(&f);
+    draw(&mut history, 21, 2);
+    history.key(Key::Down);
+    assert!(draw(&mut history, 21, 2).text()[1].contains("↳ first chapter"));
+
+    history.key(Key::Enter);
+    let screen = draw(&mut history, 21, 2);
+    let rows = screen.text();
+    assert!(screen.bar_at(0) && rows[0].contains("first chapter"), "{rows:?}");
+    assert!(rows[1].contains("No files changed."), "{rows:?}");
+
+    history.key(Key::Left);
+    assert!(draw(&mut history, 21, 2).text()[1].contains("↳ first chapter"));
+}
+
+#[test]
 fn the_newest_commit_preview_can_scroll_past_the_uncommitted_row() {
     let f = Fixture::new();
     commit(&f, "first");
