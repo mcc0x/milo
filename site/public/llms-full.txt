@@ -143,11 +143,13 @@ In narrow Settings panes, rows use shorter labels. When there's room, the full n
 
 Save for **this worktree** to keep a project-specific setup, or save a **global default** for projects without an override. Worktrees of the same repository can have different choices. Preferences live on the machine running Milo, outside the repository. A project cannot install actions or supply a command for Milo to execute.
 
+Saving appearance or workflow preferences changes only the settings you edited. A worktree still inherits global values for any settings it does not override, and saving global defaults does not copy worktree overrides.
+
 Usage starts as a two-row strip in the shared sidebar. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that Git worktree automatically. To save a layout explicitly or make it the global default, use **Milo: Remember This Layout…**. Milo stores pane roles and proportions, not processes or live pane IDs. Mixed rails containing another app are left alone.
 
 ![A Rex tab with Outline, History and the compact Usage readout in one rail beside the shell](https://github.com/mcc0x/milo/blob/main/docs/img/tab.png)
 
-Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. If Usage is sized in rows, Milo waits for a Rex client to measure the tab, so a background tab may arrange when you first show it. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save to stop arranging new tabs. The panes also work on their own outside Rex.
+Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. Save this switch globally; changing it alone does not replace either the global or worktree layout. If Usage is sized in rows, Milo waits for a Rex client to measure the tab, so a background tab may arrange when you first show it. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save globally to stop arranging new tabs. The panes also work on their own outside Rex.
 
 Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
 
@@ -223,6 +225,8 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
+
+If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.
 
 Untracked files appear before Milo counts their lines. In a wide outline, `?` means the count is not ready, not zero. The outline counts the files in view in small batches as you scroll; a folder shows `?` while any of its new files are still uncounted.
 
@@ -486,6 +490,8 @@ cargo test                         # everything passes
 
 Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
+When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
+
 ## Tagging a release
 
 Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. GitHub Actions runs `cargo test --release --locked` on an arm64 macOS runner. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
@@ -542,7 +548,10 @@ over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
 explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
 
 Run `cargo test setup::` for generation, screen and installation tests. The
-tests use throwaway settings and a stand-in for Rex. To check a generated
+tests use throwaway settings and a stand-in for Rex. With Lua 5.1 installed,
+run `cargo test --locked --bin milo rex_lua_fixtures -- --ignored` for the
+action and listener scenarios. Set `LUA51` if the executable is not `lua5.1`.
+No running Rex session is needed. To check a generated
 file with Rex itself, run `MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`
 on a scratch copy. The flag prevents the actions file starting a listener
 during the check. Check both files and try the pane choices. Only try a

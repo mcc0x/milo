@@ -10,6 +10,15 @@ permissions:
   contents: read
 
 jobs:
+  docs-bundle:
+    name: Published documentation matches source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: python3 site/bundle-docs.py --check
+
   rex-fixtures:
     name: Rex Lua 5.1 fixtures
     runs-on: ubuntu-latest
