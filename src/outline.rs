@@ -269,15 +269,20 @@ impl Outline {
             Err(why) => self.say(why),
         }
     }
+
+    fn draw_at(&mut self, screen: &mut Screen, now: Instant) {
+        self.scan_untracked(now, false);
+        if let Some(reader) = &mut self.reading {
+            reader.draw(screen);
+        } else {
+            self.draw_outline(screen, now);
+        }
+    }
 }
 
 impl Pane for Outline {
     fn draw(&mut self, screen: &mut Screen) {
-        if let Some(reader) = &mut self.reading {
-            reader.draw(screen);
-        } else {
-            self.draw_outline(screen, Instant::now());
-        }
+        self.draw_at(screen, Instant::now());
     }
 
     fn key(&mut self, key: Key) -> After {
@@ -305,15 +310,22 @@ impl Pane for Outline {
         reader_settled
     }
 
-    fn next_frame(&self) -> Option<Duration> {
-        if self.reading.is_some() {
-            return None;
+    fn filesystem_changed(&mut self) {
+        if self.repo.git {
+            self.untracked.request_sweep();
         }
+    }
+
+    fn next_frame(&self) -> Option<Duration> {
         let now = Instant::now();
+        let sweep = self.untracked.next_sweep(now);
+        if self.reading.is_some() {
+            return sweep;
+        }
         let mark = self.attention.next_mark_frame(now, self.static_marks);
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
         let counts = (self.painted.body_rows > 0).then(|| self.untracked.next_frame()).flatten();
-        [mark, note, counts].into_iter().flatten().min()
+        [mark, note, counts, sweep].into_iter().flatten().min()
     }
 
     fn help(&self) -> Page {
@@ -409,7 +421,7 @@ mod tests {
 
     fn draw_at(o: &mut Outline, w: usize, h: usize, now: Instant) -> Screen {
         let mut screen = Screen::sized(w, h);
-        o.draw_outline(&mut screen, now);
+        o.draw_at(&mut screen, now);
         screen
     }
 
@@ -559,6 +571,60 @@ mod tests {
         assert!(file_row(&rows, "a.txt").ends_with("+1"));
         assert!(file_row(&rows, "b.txt").ends_with("+2"));
         assert!(o.attention.marked_at("b.txt", false).is_some());
+    }
+
+    #[test]
+    fn one_notification_refreshes_a_large_offscreen_set_without_continued_checks() {
+        const FILES: usize = 2_049;
+        let f = Fixture::new();
+        for i in 0..FILES {
+            f.write(&format!("file{i:04}.txt"), "one\n");
+        }
+        let mut o = open(&f);
+        let (head, tail) = ("file0000.txt", "file2048.txt");
+        let tail_index = o.pending.iter().position(|f| f.path == tail).unwrap();
+        let head_index = o.pending.iter().position(|f| f.path == head).unwrap();
+        o.key(Key::Focus(true));
+        o.key(Key::End);
+        assert!(file_row(&draw(&mut o, 80, 9).text(), tail).trim_end_matches('▐').ends_with("+1"));
+        o.key(Key::Home);
+        assert!(file_row(&draw(&mut o, 80, 9).text(), head).trim_end_matches('▐').ends_with("+1"));
+        for _ in 0..FILES {
+            if o.untracked.next_frame().is_none() {
+                break;
+            }
+            draw(&mut o, 80, 9);
+        }
+        assert_eq!(o.untracked.next_frame(), None, "initial timestamp discovery must finish");
+        o.static_marks = true;
+
+        f.write(head, "one\ntwo\n");
+        f.write(tail, "one\ntwo\n");
+        o.filesystem_changed();
+        assert!(o.check());
+        assert!(o.pending[head_index].lines_pending, "visible edits should be detected first");
+        assert!(!o.pending[tail_index].lines_pending, "the first batch must not scan the whole set");
+        let mut now = Instant::now();
+        assert!(o.untracked.next_sweep(now).is_some());
+        assert!(o.next_frame().is_some_and(|delay| delay < Duration::from_secs(1)));
+
+        f.write("added-after-check", "not part of the timestamp sweep\n");
+        let mut batches = 0;
+        while let Some(wait) = o.untracked.next_sweep(now) {
+            assert!(batches < 100, "the sweep must finish");
+            now += wait;
+            draw_at(&mut o, 80, 9, now);
+            batches += 1;
+        }
+        assert!(batches >= 32, "offscreen work should stay in short batches");
+        assert!(o.pending[tail_index].lines_pending);
+        assert!(o.attention.marked_at(tail, false).is_some());
+        assert_eq!(o.pending.len(), FILES, "timestamp batches should not refresh Git status");
+
+        o.key(Key::End);
+        let rows = draw_at(&mut o, 80, 9, now + Duration::from_secs(5)).text();
+        assert!(file_row(&rows, tail).trim_end_matches('▐').ends_with("+2"));
+        assert_eq!(o.next_frame(), None, "no further frames once sweep and marks have finished");
     }
 
     #[test]

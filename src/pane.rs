@@ -59,6 +59,9 @@ pub trait Pane {
         External::Unchanged
     }
 
+    /// Records a filesystem notification before the next scheduled check.
+    fn filesystem_changed(&mut self) {}
+
     /// How long the frame stays right when nothing happens.
     fn next_frame(&self) -> Option<Duration> {
         None
@@ -402,6 +405,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
             }
             Wait::Woken => {
                 watcher.drain();
+                pane.filesystem_changed();
                 if let Some(pace) = &mut pace {
                     pace.report_change();
                 }

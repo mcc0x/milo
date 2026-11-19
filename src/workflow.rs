@@ -118,6 +118,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         self.pane.check()
     }
 
+    fn filesystem_changed(&mut self) {
+        self.pane.filesystem_changed();
+    }
+
     fn external_fd(&self) -> Option<RawFd> {
         self.source.as_ref().map(ShellObserver::fd)
     }

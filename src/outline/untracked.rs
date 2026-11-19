@@ -20,10 +20,17 @@ const SHOWN_STAMPS_PER_CHECK: usize = 96;
 const OTHER_STAMPS_PER_CHECK: usize = 48;
 const NEXT_BATCH: Duration = Duration::from_millis(40);
 
+struct Sweep {
+    remaining: usize,
+    due: Instant,
+}
+
 #[derive(Default)]
 pub(super) struct Untracked {
     files: Range<usize>,
     scan: usize,
+    sweep: Option<Sweep>,
+    reported: bool,
     /// New paths awaiting a timestamp for recency and edit detection.
     unstamped: Vec<usize>,
     /// Pending indices for files actually painted, not all unfolded rows.
@@ -36,7 +43,8 @@ impl Untracked {
     pub(super) fn retain_details(&mut self, old: &[PendingFile], files: &mut [PendingFile]) {
         let start = files.partition_point(|f| f.kind != Kind::Untracked && !f.unpushed);
         let end = start + files[start..].partition_point(|f| f.kind == Kind::Untracked);
-        let cached: HashMap<_, _> = old[self.files.clone()]
+        let old = &old[self.files.clone()];
+        let cached: HashMap<_, _> = old
             .iter()
             .filter(|f| f.stamp.is_some() || !f.lines_pending)
             .map(|f| (f.path.as_str(), f))
@@ -44,14 +52,26 @@ impl Untracked {
         self.files = start..end;
         self.shown.clear();
         self.unstamped.clear();
+        self.scan %= self.files.len().max(1);
+        let mut same_paths = self.sweep.is_some() && old.len() == self.files.len();
         for i in self.files.clone().rev() {
             let file = &mut files[i];
+            if same_paths {
+                same_paths = old[i - start].path == file.path;
+            }
             if let Some(before) = cached.get(file.path.as_str()) {
                 (file.add, file.lines_pending, file.stamp) = (before.add, before.lines_pending, before.stamp);
             }
             if file.stamp.is_none() {
                 self.unstamped.push(i);
             }
+        }
+        if self.files.is_empty() {
+            self.sweep = None;
+        } else if !same_paths && let Some(sweep) = &mut self.sweep {
+            // The cursor is relative to the untracked paths, not the whole pending list.
+            // If their order changed, some paths may have moved behind the cursor.
+            sweep.remaining = self.files.len();
         }
     }
 
@@ -66,6 +86,40 @@ impl Untracked {
 
     pub(super) fn next_frame(&self) -> Option<Duration> {
         (self.count_more || !self.unstamped.is_empty()).then_some(NEXT_BATCH)
+    }
+
+    pub(super) fn request_sweep(&mut self) {
+        self.reported = true;
+    }
+
+    pub(super) fn next_sweep(&self, now: Instant) -> Option<Duration> {
+        self.sweep.as_ref().map(|sweep| sweep.due.saturating_duration_since(now))
+    }
+
+    fn start_sweep(&mut self, now: Instant) {
+        if !std::mem::take(&mut self.reported) || self.files.is_empty() {
+            return;
+        }
+        // A new edit may be behind the cursor. Extend coverage without
+        // restarting the cursor, so repeated notifications cannot starve any path.
+        self.sweep.get_or_insert(Sweep { remaining: 0, due: now }).remaining = self.files.len();
+    }
+
+    fn scan_batch(&mut self, now: Instant, sample: bool) -> usize {
+        let Some(sweep) = &mut self.sweep else {
+            return if sample { self.files.len().min(OTHER_STAMPS_PER_CHECK) } else { 0 };
+        };
+        if now < sweep.due {
+            return 0;
+        }
+        let batch = sweep.remaining.min(OTHER_STAMPS_PER_CHECK);
+        sweep.remaining -= batch;
+        if sweep.remaining == 0 {
+            self.sweep = None;
+        } else {
+            sweep.due = now + NEXT_BATCH;
+        }
+        batch
     }
 }
 
@@ -127,21 +181,25 @@ impl Outline {
         }
     }
 
-    /// Git reports path membership, not edits to untracked file contents. Recheck
-    /// the viewport first, then a rotating slice rather than stat every path.
+    /// Git reports path membership, not edits to untracked file contents.
+    /// Check the viewport promptly, then scan the rest separately from Git.
     pub(super) fn check_untracked(&mut self, now: Instant) {
+        self.untracked.start_sweep(now);
+        self.scan_untracked(now, true);
+    }
+
+    pub(super) fn scan_untracked(&mut self, now: Instant, prioritize_shown: bool) {
         let len = self.untracked.files.len();
-        if len == 0 {
-            return;
-        }
-        let shown = self.untracked.shown.len().min(SHOWN_STAMPS_PER_CHECK);
+        let batch = self.untracked.scan_batch(now, prioritize_shown);
+        let shown = if prioritize_shown { self.untracked.shown.len().min(SHOWN_STAMPS_PER_CHECK) } else { 0 };
         let mut newest = None;
         for pos in 0..shown {
             self.review_untracked(self.untracked.shown[pos], now, &mut newest);
         }
-        for _ in 0..len.min(OTHER_STAMPS_PER_CHECK) {
-            let i = self.untracked.files.start + self.untracked.scan % len;
-            self.untracked.scan = (self.untracked.scan + 1) % len;
+        for _ in 0..batch {
+            let i = self.untracked.files.start + self.untracked.scan;
+            let next = self.untracked.scan + 1;
+            self.untracked.scan = if next == len { 0 } else { next };
             if !self.untracked.shown[..shown].contains(&i) {
                 self.review_untracked(i, now, &mut newest);
             }
