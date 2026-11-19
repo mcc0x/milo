@@ -7,7 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::help::{self, HintHits, Page};
-use crate::keys::Key;
+use crate::keys::{ConfirmClick, Key};
 use crate::pane::{After, Pane};
 use crate::preferences::{IconMode, Preferences};
 use crate::screen::{CYAN, Screen, Style};
@@ -178,6 +178,7 @@ pub struct Welcome {
     notice: Option<String>,
     hit: Option<HitRows>,
     footer: HintHits<'static>,
+    confirm_click: ConfirmClick,
 }
 
 impl Welcome {
@@ -192,7 +193,15 @@ impl Welcome {
     }
 
     fn new(mode: Mode) -> Self {
-        Self { mode, step: Step::Intro, selected: 0, notice: None, hit: None, footer: HintHits::default() }
+        Self {
+            mode,
+            step: Step::Intro,
+            selected: 0,
+            notice: None,
+            hit: None,
+            footer: HintHits::default(),
+            confirm_click: ConfirmClick::default(),
+        }
     }
 
     fn rows(&self) -> &'static [OptionRow] {
@@ -211,6 +220,7 @@ impl Welcome {
         self.notice = notice;
         self.hit = None;
         self.footer = HintHits::default();
+        self.confirm_click.clear();
     }
 
     fn footer_last(&self) -> (&'static str, Key) {
@@ -427,15 +437,23 @@ impl Pane for Welcome {
 
     fn key(&mut self, key: Key) -> After {
         let rows = self.rows();
-        let key = if let Key::Click(x, y) = key {
-            if let Some((index, _)) = self.hit.as_ref().and_then(|hit| hit.row_at(x, y, rows)) {
-                self.selected = index;
-                return self.act(rows[index].2);
+        let (key, click) = if let Key::Click(x, y) = key {
+            let row = self.hit.as_ref().and_then(|hit| hit.row_at(x, y, rows));
+            let key = if row.is_some() {
+                Key::Enter
+            } else {
+                let Some((key, _)) = self.footer_hit(x, y) else { return After::Ignored };
+                key
+            };
+            if self.step == Step::Choose && key == Key::Enter && self.confirm_click.is_repeat(x, y) {
+                return After::Ignored;
             }
-            let Some((key, _)) = self.footer_hit(x, y) else { return After::Ignored };
-            key
+            if let Some((index, _)) = row {
+                self.selected = index;
+            }
+            (key, Some((x, y)))
         } else {
-            key
+            (key, None)
         };
         if let Some(delta) = key.rows(rows.len()) {
             let selected = self.selected.saturating_add_signed(delta).min(rows.len() - 1);
@@ -446,7 +464,14 @@ impl Pane for Welcome {
             return After::Ignored;
         }
         match key {
-            Key::Enter | Key::Char(' ') => self.act(rows[self.selected].2),
+            Key::Enter | Key::Char(' ') => {
+                let step = self.step;
+                let after = self.act(rows[self.selected].2);
+                if step == Step::Intro && self.step == Step::Choose && let Some((x, y)) = click {
+                    self.confirm_click.opened(x, y);
+                }
+                after
+            }
             Key::Esc if self.step == Step::Choose => {
                 self.show(Step::Intro, None);
                 After::Stay
@@ -550,6 +575,36 @@ mod tests {
         welcome.draw(&mut choose);
         assert_eq!(welcome.key(click_on(&choose, "Skip setup")), After::Leave);
         assert!(state.join(COMPLETE).exists());
+    }
+
+    #[test]
+    fn repeated_continue_click_cannot_save_after_a_redraw() {
+        let fixture = Fixture::folder();
+        let state = fixture.root.join("state");
+        // If a save is attempted, it must fail before invoking Rex.
+        fs::write(&state, []).unwrap();
+        for (w, h, opener, target) in [(24, 1, "Continue", "Save tree layout"), (48, 14, CHOOSE_HINT, CHOOSE_HINT)] {
+            let mut welcome = Welcome::new(Mode::Rex(Store {
+                init: fixture.root.join("init.lua"),
+                config: fixture.root.join("config"),
+                state: state.clone(),
+                claude: fixture.root.join("settings.json"),
+            }));
+            let mut screen = Screen::sized(w, h);
+            welcome.draw(&mut screen);
+            let click = click_on(&screen, opener);
+            assert_eq!(welcome.key(click), After::Stay);
+            assert_eq!(welcome.key(click), After::Ignored);
+
+            welcome.draw(&mut screen);
+            assert_eq!(click_on(&screen, target), click);
+            assert_eq!(welcome.key(click), After::Ignored);
+            assert_eq!(welcome.key(click), After::Ignored);
+            assert!(welcome.notice.is_none());
+
+            assert_eq!(welcome.key(Key::Enter), After::Stay);
+            assert!(welcome.notice.is_some(), "an intentional action should try to save");
+        }
     }
 
     #[test]
