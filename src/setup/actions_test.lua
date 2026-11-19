@@ -99,14 +99,53 @@ actions.milo_close_peek(ctx)
 assert(#closed == 1 and closed[1] == "block:peek" and focus[2] == "block:shell")
 window.layers[2] = nil
 
-local function probe(args)
+local function probe(args, profile)
   rex.args, rex.session_id, rex.block_id = args, ctx.session_id, ctx.block_id
   local output, saved_print = nil, print
   print = function(s) output = s end
-  assert(loadstring(prefix .. code))()
+  local declarations = profile and prefix .. "local trial_profile = " .. string.format("%q", profile) .. "\n" or prefix
+  assert(loadstring(declarations .. code))()
   print = saved_print
   return output
 end
+
+-- Doctor reads the caller's tab and measured geometry without changing it.
+local saved_rail, saved_blocks = tiled.layout, tiled.blocks
+local doctor_args = { milo_operation = "doctor", caller = shell.block_id }
+local function observe(profile)
+  return probe(doctor_args, profile or "v1 r 0.32 0.7 2 ohu 101")
+end
+local function sidebar(share)
+  return tree("horizontal", 0.68, leaf(shell),
+    tree("vertical", share, leaf(usage, {0.68, 0, 0.32, share}), leaf(outline)))
+end
+tiled.layout, tiled.blocks = sidebar(0.05), { shell, usage, outline }
+sizes[shell.block_id] = { rows = 40, columns = 80, owner = "client:1" }
+sizes[usage.block_id] = { rows = 3, columns = 22, owner = "client:1" }
+assert(observe() == "ok r 0.32 3 2 ok") -- One row of rounding.
+sizes[usage.block_id].rows = 5
+assert(observe() == "ok r 0.32 5 2 ok") -- A different font, same divider.
+tiled.layout = sidebar(0.25)
+sizes[usage.block_id].rows = 10
+assert(observe() == "ok r 0.32 10 2 different")
+assert(observe("v1 r 0.32 0.7 2 ohu 101 750000 0 250000") == "ok r 0.32 10 10 ok")
+sizes[shell.block_id], sizes[usage.block_id] = nil, { rows = 24 }
+assert(observe() == "ok r 0.32 - - ok") -- The fallback PTY dimensions aren't live.
+window.zoomed_block_id = shell.block_id
+assert(observe() == "zoomed")
+window.zoomed_block_id = nil
+doctor_args.caller = "shell"
+assert(observe() == "no_tab")
+doctor_args.caller = shell.block_id
+session.windows[2] = { window_id = "window:elsewhere", layers = {{ kind = "tiled", layout = tiled.layout,
+  blocks = { usage, outline } }} }
+session.active_window_id = "window:elsewhere"
+window.layers[1] = { kind = "tiled", layout = leaf(shell), blocks = { shell } }
+assert(observe() == "no_rail") -- The rail in the active tab does not count.
+window.layers[1] = tiled
+session.active_window_id, session.windows[2] = window.window_id, nil
+assert(#commands == 2 and #splits == 0 and #closed == 1 and #floats == 1 and #focus == 2)
+tiled.layout, tiled.blocks, sizes[usage.block_id] = saved_rail, saved_blocks, nil
 
 -- An existing rail is safe: trial appears separately without moving or closing it.
 assert(probe{ milo_operation = "trial" } == "ok window:work floating history=block:trial-history outline=block:trial-outline")

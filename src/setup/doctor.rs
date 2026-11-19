@@ -7,7 +7,8 @@ use std::path::Path;
 
 use super::claude::Claude;
 use super::install::{Saved, Store, read};
-use super::layout::{Layout, launcher_matches, owns_actions};
+use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
+use super::profiles::Scope;
 use super::{lock, rex_files};
 use crate::preferences::{IconMode, Preferences, Source, worktree};
 use crate::{rex, usage};
@@ -26,6 +27,8 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
     let mut out = String::from("Milo doctor\n");
     if let Some(path) = root {
         writeln!(out, "Worktree: {path:?}").unwrap();
+    } else {
+        out.push_str("Worktree: none detected\n");
     }
     match Preferences::resolve(root) {
         Ok((p, source)) => {
@@ -63,13 +66,9 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
     let layout = store.layout_for(root);
     match &layout {
         Ok((rail, true, scope)) => {
-            let width = rail.width.parse::<f64>().unwrap_or_default() * 100.0;
-            write!(out, "Rail: {scope:?}, {:?}, {width:.1}% wide;", rail.geometry.side).unwrap();
-            for role in rail.geometry.order.into_iter().filter(|role| rail.chosen(*role)) {
-                write!(out, " {}", role.name()).unwrap();
-            }
-            out.push('\n');
             let executable = rex_files::executable()?;
+            let live = LiveSidebar::read(rail, &executable);
+            write_sidebar(&mut out, rail, *scope, live);
             let file = read(&store.rex_file())?;
             let text = file.as_ref().and_then(|f| std::str::from_utf8(&f.bytes).ok()).unwrap_or("");
             let status = match launcher_matches(text, &executable) {
@@ -127,6 +126,163 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
     }
     out.pop();
     Ok(out)
+}
+
+enum LiveUsage {
+    Absent,
+    Unmeasured,
+    Rows(u32),
+}
+
+enum LiveSidebar {
+    NotObserved(&'static str),
+    Observed { side: Side, width: f64, usage: LiveUsage, expected_rows: Option<u32>, usage_differs: bool },
+}
+
+impl LiveSidebar {
+    fn read(saved: &Layout, executable: &Path) -> Self {
+        let Some(target) = rex::Target::current() else {
+            return Self::NotObserved("run Doctor in the Rex tab you want to check");
+        };
+        let Some(block) = target.block.to_str().filter(|id| id.starts_with("block:")) else {
+            return Self::NotObserved("could not find this Rex tab");
+        };
+        let caller = format!("caller={block}");
+        let lua = probe_lua(saved, executable);
+        rex::script(Some(&target), &target.session, &lua, ["milo_operation=doctor", &caller])
+            .as_deref()
+            .and_then(Self::parse)
+            .unwrap_or(Self::NotObserved("could not read this Rex tab"))
+    }
+
+    fn parse(reply: &str) -> Option<Self> {
+        let reason = match reply {
+            "no_tab" => "could not find this Rex tab",
+            "no_rail" => "no Milo sidebar in this tab",
+            "mixed" => "Milo panes are not in one sidebar",
+            "trial" => "a setup trial is active",
+            "zoomed" => "unzoom this tab and try again",
+            _ => {
+                let mut fields = reply.split_ascii_whitespace();
+                if fields.next()? != "ok" {
+                    return None;
+                }
+                let side = match fields.next()? {
+                    "l" => Side::Left,
+                    "r" => Side::Right,
+                    _ => return None,
+                };
+                let width: f64 = fields.next()?.parse().ok()?;
+                if !(width > 0.0 && width < 1.0) {
+                    return None;
+                }
+                let usage = match fields.next()? {
+                    "absent" => LiveUsage::Absent,
+                    "-" => LiveUsage::Unmeasured,
+                    rows => LiveUsage::Rows(rows.parse::<std::num::NonZeroU32>().ok()?.get()),
+                };
+                let expected_rows = match fields.next()? {
+                    "-" => None,
+                    rows => Some(rows.parse::<std::num::NonZeroU32>().ok()?.get()),
+                };
+                let usage_differs = match fields.next()? {
+                    "different" if matches!(usage, LiveUsage::Rows(_)) && expected_rows.is_some() => true,
+                    "ok" => false,
+                    _ => return None,
+                };
+                return fields.next().is_none().then_some(Self::Observed {
+                    side,
+                    width,
+                    usage,
+                    expected_rows,
+                    usage_differs,
+                });
+            }
+        };
+        Some(Self::NotObserved(reason))
+    }
+}
+
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Left => "left",
+        Side::Right => "right",
+    }
+}
+
+fn row_unit(rows: u32) -> &'static str {
+    if rows == 1 { "row" } else { "rows" }
+}
+
+fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSidebar) {
+    let scope = match scope {
+        Scope::Global => "global default",
+        Scope::Worktree => "worktree override",
+    };
+    let width = saved.width.parse::<f64>().unwrap_or_default();
+    let has_saved_sidebar = saved.panes.contains(&true);
+    if has_saved_sidebar {
+        let side = side_name(saved.geometry.side);
+        writeln!(out, "Saved sidebar: {:.1}% wide, {side} ({scope})", width * 100.0).unwrap();
+        out.push_str("  Panes:");
+        for role in saved.geometry.order.into_iter().filter(|role| saved.chosen(*role)) {
+            write!(out, " {}", role.name()).unwrap();
+        }
+        out.push('\n');
+    } else {
+        writeln!(out, "Saved sidebar: none ({scope})").unwrap();
+    }
+
+    let expected_rows = match &live {
+        LiveSidebar::Observed { expected_rows, .. } => *expected_rows,
+        LiveSidebar::NotObserved(_) => None,
+    };
+    out.push_str("Saved Usage: ");
+    if !saved.chosen(TabPane::Usage) {
+        out.push_str("not included");
+    } else if !saved.chosen(TabPane::Outline) && !saved.chosen(TabPane::History) {
+        out.push_str("fills the sidebar");
+    } else if saved.geometry.shares.is_some() {
+        out.push_str("captured height");
+        if let Some(rows) = expected_rows {
+            write!(out, " (about {rows} {} here)", row_unit(rows)).unwrap();
+        }
+    } else {
+        let saved_rows = saved.usage_rows.parse().unwrap_or_default();
+        write!(out, "{} {}", saved.usage_rows, row_unit(saved_rows)).unwrap();
+        if let Some(rows) = expected_rows.filter(|&rows| rows != saved_rows) {
+            write!(out, " (about {rows} here)").unwrap();
+        }
+    }
+    out.push('\n');
+
+    let (live_width, usage_differs) = match live {
+        LiveSidebar::NotObserved(reason) => {
+            writeln!(out, "Live sidebar: not observed ({reason})").unwrap();
+            return;
+        }
+        LiveSidebar::Observed { side, width, usage, usage_differs, .. } => {
+            let side = side_name(side);
+            writeln!(out, "Live sidebar: {:.1}% wide, {side}", width * 100.0).unwrap();
+            match usage {
+                LiveUsage::Absent => out.push_str("Live Usage: not in this sidebar\n"),
+                LiveUsage::Unmeasured => out.push_str("Live Usage: row count unavailable\n"),
+                LiveUsage::Rows(rows) => {
+                    writeln!(out, "Live Usage: {rows} {}", row_unit(rows)).unwrap();
+                }
+            }
+            (width, usage_differs)
+        }
+    };
+    // Ignore tiny changes in the width fraction that are beneath display precision.
+    if has_saved_sidebar && ((width - live_width).abs() > 0.0005 || usage_differs) {
+        out.push_str(
+            "Sidebar sizes differ from the saved layout.\n\
+             Rex's Autobalance splits can resize panes when they open or close.\n\
+             If enabled, turn it off in Rex Settings → Interface → Splits & Focus.\n\
+             Then close and re-add the Milo panes to apply the saved sizes.\n",
+        );
+    }
 }
 
 fn on(value: bool) -> &'static str {
@@ -195,5 +351,65 @@ fn check_listener(result: Saved) -> Result<(), String> {
         Saved::ListenerDidNotStop => {
             Err("Settings saved, but the listener did not stop. Run milo listen --stop.".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sidebar(saved: &Layout, scope: Scope, response: &str) -> String {
+        let mut report = String::new();
+        write_sidebar(&mut report, saved, scope, LiveSidebar::parse(response).unwrap());
+        report
+    }
+
+    #[test]
+    fn doctor_compares_width_and_usage_against_the_effective_layout() {
+        let saved = Layout::default();
+        let matching = sidebar(&saved, Scope::Worktree, "ok l 0.20001 2 2 ok");
+        assert!(matching.contains("Saved sidebar: 20.0% wide, left (worktree override)"));
+        assert!(matching.contains("Live sidebar: 20.0% wide, left"));
+        assert!(matching.contains("Saved Usage: 2 rows"));
+        assert!(matching.contains("Live Usage: 2 rows"));
+        assert!(!matching.contains("Autobalance"));
+
+        for reply in ["ok r 0.33 2 2 ok", "ok l 0.2 10 2 different"] {
+            let different = sidebar(&saved, Scope::Global, reply);
+            assert!(different.contains("global default"));
+            assert!(different.contains("Autobalance splits can resize panes"));
+            assert!(different.contains("Interface → Splits & Focus"));
+        }
+    }
+
+    #[test]
+    fn doctor_does_not_infer_dimensions_when_the_sidebar_or_size_is_missing() {
+        let saved = Layout::default();
+        for response in ["no_tab", "no_rail", "mixed", "trial", "zoomed"] {
+            let report = sidebar(&saved, Scope::Global, response);
+            assert!(report.contains("Live sidebar: not observed"));
+            assert!(!report.contains("Autobalance"));
+        }
+
+        let no_usage = sidebar(&saved, Scope::Global, "ok l 0.2 absent - ok");
+        assert!(no_usage.contains("Live Usage: not in this sidebar"));
+        let no_size = sidebar(&saved, Scope::Global, "ok l 0.2 - - ok");
+        assert!(no_size.contains("Live Usage: row count unavailable"));
+        assert!(!no_usage.contains("Autobalance"));
+        assert!(!no_size.contains("Autobalance"));
+    }
+
+    #[test]
+    fn doctor_describes_proportional_usage_without_showing_a_stale_row_setting() {
+        let mut saved = Layout::default();
+        saved.geometry.shares = Some([500_000, 250_000, 250_000]);
+        let report = sidebar(&saved, Scope::Global, "ok l 0.2 10 10 ok");
+        assert!(report.contains("Saved Usage: captured height (about 10 rows here)"));
+        assert!(!report.contains("Saved Usage: 2 rows"));
+
+        saved.panes = [false, false, true];
+        let report = sidebar(&saved, Scope::Global, "ok l 0.2 40 - ok");
+        assert!(report.contains("Saved Usage: fills the sidebar"));
+        assert!(!report.contains("Autobalance"));
     }
 }

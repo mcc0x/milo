@@ -275,18 +275,18 @@ local function rect_for(node, block)
   if split then return rect_for(split.before, block) or rect_for(split.after, block) end
 end
 
-local function tab_cells(ctx, layer, source)
+local function tab_cells(ctx, layer, source, measured)
   local preferred = source and rect_for(layer.layout, source)
   if preferred then
-    local cols, rows = cells(ctx, source, preferred)
-    if rows then return cols, rows end
+    local cols, rows, owner = cells(ctx, source, preferred)
+    if rows and (not measured or type(owner) == "string") then return cols, rows end
   end
   for _, block in ipairs(layer.blocks or {}) do
     if block.block_id ~= source and block.creator_name == terminal then
       local rect = rect_for(layer.layout, block.block_id)
       if rect then
-        local cols, rows = cells(ctx, block.block_id, rect)
-        if rows then return cols, rows end
+        local cols, rows, owner = cells(ctx, block.block_id, rect)
+        if rows and (not measured or type(owner) == "string") then return cols, rows end
       end
     end
   end
@@ -547,11 +547,42 @@ local function peek(ctx, closing)
   end
 end
 
+local function diagnose(ctx, window, layer)
+  if window.zoomed_block_id then return "zoomed" end
+  local live, why = inspect_rail(layer)
+  if not live then return why or "no_rail" end
+  local selected = profile(trial_profile)
+  if not selected then return "unavailable" end
+
+  local usage = live.present.usage
+  local size = usage and terminal_call(ctx, usage, "size")
+  -- Before a client measures the pane, Rex can report a fallback PTY size.
+  local rows = size and type(size.owner) == "string" and size.rows and size.rows > 0 and size.rows
+  local expected, different
+  if selected.wanted.usage and (selected.wanted.outline or selected.wanted.history) then
+    local _, tab_rows = tab_cells(ctx, layer, ctx.block_id, true)
+    if tab_rows and tab_rows > 0 then
+      local share = weights(selected, tab_rows)
+      local target = tab_rows * share.usage / (share.usage + (share.outline or 0) + (share.history or 0))
+      expected = math.max(1, math.floor(target + 0.5))
+      -- A lone Usage pane intentionally fills its sidebar. For a stack, allow
+      -- one row of rounding and require the divider to disagree too: fonts can
+      -- change the terminal's row count without moving any divider.
+      different = rows and live.shares.usage < 1 and math.abs(rows - expected) > 1
+        and math.abs(live.shares.usage * tab_rows - target) > 1
+    end
+  end
+  return table.concat({ "ok", live.side, string.format("%.9g", live.width),
+    usage and (rows or "-") or "absent", expected or "-", different and "different" or "ok" }, " ")
+end
+
 -- Setup uses a private script copy of these exact operations before installing anything.
 local operation = rex.args and rex.args.milo_operation
 if operation then
   local ctx = { session_id = rex.session_id, block_id = rex.block_id }
   local function probe()
+    -- The CLI can resolve labels or suffixes. Doctor must only use its caller.
+    if operation == "doctor" and (not rex.args.caller or ctx.block_id ~= rex.args.caller) then return "no_tab" end
     if operation == "undo" or operation == "keep" then
       local session = view(ctx)
       for _, window in ipairs(session and session.windows or {}) do
@@ -582,6 +613,7 @@ if operation then
     local window, session = tab(ctx)
     if not window then return "no_tab" end
     local layer = tiled(window)
+    if operation == "doctor" then return diagnose(ctx, window, layer) end
     if operation == "return_peek" then
       local block = peek_in(window)
       if block and block.block_id == ctx.block_id then restore_focus(ctx, window, session, ctx.block_id, rex.args.origin) end

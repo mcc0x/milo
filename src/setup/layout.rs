@@ -15,6 +15,11 @@ const OLD_START_LISTENER: &str = "\n-- During a syntax check or a one-off layout
     rex.exec.start({ milo, \"listen\" }, { detach = true })\nend\n";
 const ACTIONS: &str = include_str!("actions.lua");
 const LISTENER: &str = include_str!("listener.lua");
+// Older binaries shipped a ten-row default; later templates must not
+// mistake a hand-edited ten-row setting for that old default.
+const TEN_ROW_ACTIONS: [u64; 4] =
+    [0x97cf_a17d_8775_e350, 0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f, 0x1d1f_8dd4_6b14_c588];
+const TWO_ROW_ACTIONS: [u64; 1] = [0x5b89_2e57_9222_edf1];
 
 pub(super) fn probe_lua(layout: &Layout, executable: &Path) -> String {
     let mut lua = actions_prefix(layout, &lua_path(executable));
@@ -266,7 +271,8 @@ impl Layout {
         // other row values, and profiles (parsed separately) exactly as chosen.
         if layout.usage_rows == "10"
             && let Some(exe) = fields.executable
-            && shipped_action_body(text, &layout, exe).is_some_and(|body| body != ACTIONS)
+            && shipped_action_body(text, &layout, exe)
+                .is_some_and(|body| body != ACTIONS && TEN_ROW_ACTIONS.contains(&fingerprint(body)))
         {
             layout.usage_rows = DEFAULT_USAGE_ROWS.to_string();
         }
@@ -488,10 +494,11 @@ fn shipped_actions(text: &str, layout: &Layout, exe: &str) -> bool {
 fn shipped_action_body<'a>(text: &'a str, layout: &Layout, exe: &str) -> Option<&'a str> {
     let tail = text.strip_prefix(&actions_prefix(layout, exe))?;
     let body = tail.strip_suffix(OLD_START_LISTENER).or_else(|| tail.strip_suffix(START_LISTENER)).unwrap_or(tail);
-    (body == ACTIONS
-        || [0x97cf_a17d_8775_e350, 0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f, 0x1d1f_8dd4_6b14_c588]
-            .contains(&fingerprint(body)))
-    .then_some(body)
+    let owns = body == ACTIONS || {
+        let hash = fingerprint(body);
+        TEN_ROW_ACTIONS.contains(&hash) || TWO_ROW_ACTIONS.contains(&hash)
+    };
+    owns.then_some(body)
 }
 
 /// The installed and temporary layouts must run exactly the same actions.
@@ -539,10 +546,7 @@ pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
     text.strip_prefix(&listener_prefix(rex_file)).is_some_and(|body| {
         body == LISTENER
             || [
-                0x9a38_08cb_8bb7_54d8,
-                0x18ff_d6b9_f7bd_6f63,
-                0x3af5_6341_9c89_8eb8,
-                0x6814_92ce_bca8_054a,
+                0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a,
                 0x1ed2_af59_4c5b_4bf4,
             ]
             .contains(&fingerprint(body))
