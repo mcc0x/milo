@@ -63,7 +63,6 @@ impl Reader {
         let source = Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None }));
         let mut reader = Self::new(path, source, icons, note);
         reader.refresh(true);
-        reader.reveal_first_change();
         Some(reader)
     }
 
@@ -103,7 +102,6 @@ impl Reader {
         let (icons, note) = Self::appearance_for(repo);
         let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time }, icons, note);
         reader.body = Body::from_lines(committed_lines(repo, path, hash, file), syntax::for_file(path));
-        reader.reveal_first_change();
         reader
     }
 

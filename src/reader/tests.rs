@@ -446,6 +446,35 @@ fn next_change_wraps_from_the_last_page_back_to_the_first_change() {
 }
 
 #[test]
+fn opening_and_jumping_to_changes_keeps_the_change_visible_in_a_short_reader() {
+    let f = Fixture::new();
+    let original = (1..=20).map(|n| format!("line {n}\n")).collect::<String>();
+    f.write("page.txt", &original);
+    f.commit("original");
+    let edited =
+        original.replace("line 8\n", "first insertion\nline 8\n").replace("line 16\n", "second insertion\nline 16\n");
+    f.write("page.txt", &edited);
+
+    for height in 2..=6 {
+        let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+        assert!(drawn(&mut reader, 40, 1)[0].contains("page.txt"));
+        for (key, change) in [
+            (None, "+ first insertion"),
+            (Some('n'), "+ second insertion"),
+            (Some('n'), "+ first insertion"),
+            (Some('N'), "+ second insertion"),
+            (Some('N'), "+ first insertion"),
+        ] {
+            if let Some(key) = key {
+                assert!(matches!(reader.key(Key::Char(key)), After::Stay));
+            }
+            let rows = drawn(&mut reader, 40, height);
+            assert!(rows.iter().any(|row| row.contains(change)), "height {height}: {rows:?}");
+        }
+    }
+}
+
+#[test]
 fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
     let mut kinds = [LineKind::Same; 100];
     kinds[9] = LineKind::Del;
@@ -455,7 +484,7 @@ fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
     use Direction::{Next, Previous};
     let text = Text::new((1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(), None);
     for (top, direction, expected) in [(6, Next, 82), (82, Next, 6), (6, Previous, 82), (82, Previous, 6)] {
-        assert_eq!(text.change_top(top, 82, direction), Some(expected));
+        assert_eq!(text.change_top(top, 82, LEAD, direction), Some(expected));
     }
 }
 
@@ -473,6 +502,20 @@ fn panning_can_reach_the_end_of_a_line_of_wide_characters() {
     }
     assert_eq!(reader.pan, 22);
     assert!(screen.text()[1].ends_with("界界界界界最後"));
+}
+
+#[test]
+fn panning_a_narrow_reader_does_not_skip_text_or_a_wide_character() {
+    let f = Fixture::folder();
+    f.write("page.txt", "abc界defghijk\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    assert!(drawn(&mut reader, 10, 3)[1].ends_with("abc"));
+
+    for (key, expected) in [(Key::Right, "界de"), (Key::Right, "efgh"), (Key::Right, "hijk"), (Key::Left, "efgh")] {
+        assert!(matches!(reader.key(key), After::Stay));
+        let rows = drawn(&mut reader, 10, 3);
+        assert!(rows[1].ends_with(expected), "{rows:?}");
+    }
 }
 
 #[test]

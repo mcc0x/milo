@@ -106,6 +106,7 @@ impl Reader {
         s.clear();
         let hint = s.h >= 3;
         self.rows = s.h.saturating_sub(1 + usize::from(hint));
+        self.columns = 0;
         if s.w == 0 || s.h == 0 {
             return;
         }
@@ -119,6 +120,9 @@ impl Reader {
     }
 
     fn draw_body(&mut self, s: &mut Screen) {
+        if std::mem::take(&mut self.opening) {
+            self.reveal_first_change();
+        }
         self.top = self.top.min(self.last_top());
         let note = match &self.body {
             Body::Note(note) => Some(*note),
@@ -138,6 +142,7 @@ impl Reader {
                 let gutter = text.digits + 4;
                 let x = if s.w >= gutter + 3 { gutter } else { 0 };
                 let width = s.w - 1 - x;
+                self.columns = width;
                 if self.pan > 0 {
                     let longest = shown.iter().map(|line| line.width).max().unwrap_or(0);
                     self.pan = self.pan.min(longest.saturating_sub(width));

@@ -37,11 +37,15 @@ pub struct Reader {
     body: Body,
     /// Scratch space reused when colouring code.
     spans: Vec<Span>,
+    /// Reveal the first change once the viewport has room for the file.
+    opening: bool,
     top: usize,
     /// Display columns skipped on the left.
     pan: usize,
     /// Rows of content on screen, set by the last draw.
     rows: usize,
+    /// Columns of text on screen, excluding the gutter and scrollbar.
+    columns: usize,
 }
 
 /// A working file can change; a commit needs only its name and date.
@@ -174,8 +178,8 @@ impl Text {
     }
 
     /// Finds the next or previous block, wrapping and skipping duplicate viewport positions.
-    fn change_top(&self, top: usize, last: usize, direction: Direction) -> Option<usize> {
-        let at = |&line: &usize| line.saturating_sub(LEAD).min(last);
+    fn change_top(&self, top: usize, last: usize, lead: usize, direction: Direction) -> Option<usize> {
+        let at = |&line: &usize| line.saturating_sub(lead).min(last);
         let changes = &self.changes;
         match direction {
             Direction::Next => changes.get(changes.partition_point(|line| at(line) <= top)).or(changes.first()),
@@ -202,9 +206,11 @@ impl Reader {
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
             spans: Vec::new(),
+            opening: true,
             top: 0,
             pan: 0,
             rows: 0,
+            columns: 0,
         }
     }
 
@@ -220,8 +226,12 @@ impl Reader {
         if let Body::Text(text) = &self.body
             && let Some(first) = text.changes.first()
         {
-            self.top = first.saturating_sub(LEAD);
+            self.top = first.saturating_sub(self.lead());
         }
+    }
+
+    fn lead(&self) -> usize {
+        LEAD.min(self.rows.saturating_sub(1))
     }
 
     fn last_top(&self) -> usize {
@@ -234,10 +244,22 @@ impl Reader {
 
     fn jump(&mut self, direction: Direction) {
         if let Body::Text(text) = &self.body
-            && let Some(top) = text.change_top(self.top, self.last_top(), direction)
+            && let Some(top) = text.change_top(self.top, self.last_top(), self.lead(), direction)
         {
             self.top = top;
         }
+    }
+
+    fn pan(&mut self, direction: Direction) {
+        if self.columns == 0 {
+            return;
+        }
+        // Leave an overlapping column for a wide glyph clipped at the right edge.
+        let step = self.columns.saturating_sub(1).clamp(1, 8);
+        self.pan = match direction {
+            Direction::Next => self.pan + step,
+            Direction::Previous => self.pan.saturating_sub(step),
+        };
     }
 }
 
@@ -298,8 +320,8 @@ impl Pane for Reader {
             Key::Char('q') | Key::Esc => return After::Leave,
             Key::Char('n') => self.jump(Direction::Next),
             Key::Char('N') => self.jump(Direction::Previous),
-            Key::Char('l') | Key::Right => self.pan += 8,
-            Key::Char('h') | Key::Left => self.pan = self.pan.saturating_sub(8),
+            Key::Char('l') | Key::Right => self.pan(Direction::Next),
+            Key::Char('h') | Key::Left => self.pan(Direction::Previous),
             _ => {
                 if let Some(rows) = key.rows(self.rows) {
                     self.scroll(rows);
