@@ -104,8 +104,21 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    pub fn load(worktree: Option<&Path>) -> io::Result<Self> {
-        Self::resolve(worktree).map(|(prefs, _)| prefs)
+    /// Panes can use the last valid layer, but setup and Doctor must resolve strictly.
+    pub fn for_pane(worktree: Option<&Path>) -> (Self, Option<&'static str>) {
+        if cfg!(test) {
+            return (Self::default(), None);
+        }
+        paths::config_dir().map_or_else(|| (Self::default(), None), |dir| Self::for_pane_in(&dir, worktree))
+    }
+
+    fn for_pane_in(dir: &Path, worktree: Option<&Path>) -> (Self, Option<&'static str>) {
+        let Ok((global, _)) = Self::resolve_in(dir, None) else { return (Self::default(), None) };
+        let Some(root) = worktree else { return (global, None) };
+        match global.read_layer(&config_file(dir, Some(root))) {
+            Ok(prefs) => (prefs.unwrap_or(global), None),
+            Err(_) => (global, Some("milo doctor: worktree prefs ignored")),
+        }
     }
 
     pub fn resolve(worktree: Option<&Path>) -> io::Result<(Self, Source)> {
@@ -121,12 +134,20 @@ impl Preferences {
                 break;
             }
             let file = config_file(dir, root);
-            if let Some(text) = read(&file, 1 << 16)? {
-                prefs.apply(&text).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", file.display())))?;
+            let error_at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", file.display()));
+            if let Some(resolved) = prefs.read_layer(&file).map_err(error_at)? {
+                prefs = resolved;
                 source = layer;
             }
         }
         Ok((prefs, source))
+    }
+
+    /// Parse into a copy so a broken layer cannot leak any partial edits.
+    fn read_layer(mut self, file: &Path) -> io::Result<Option<Self>> {
+        let Some(text) = read(file, 1 << 16)? else { return Ok(None) };
+        self.apply(&text)?;
+        Ok(Some(self))
     }
 
     fn apply(&mut self, text: &str) -> io::Result<()> {
@@ -385,6 +406,35 @@ mod tests {
             Preferences::resolve_in(&config, Some(&left)).unwrap(),
             (Preferences { changes_only: true, ..global }, Source::Worktree),
         );
+    }
+
+    #[test]
+    fn panes_keep_the_global_layer_without_partially_applying_a_broken_override() {
+        let f = Fixture::folder();
+        let config = f.root.join("milo");
+        let root = f.root.join("checkout");
+        let global_path = config_file(&config, None);
+        let file = config_file(&config, Some(&root));
+        update(&global_path, &[("icons", Some("off")), ("changes_only", Some("true"))]).unwrap();
+        Preferences::set_changes_only_in(&config, &root, false).unwrap();
+        let global = Preferences { icons: IconMode::Off, changes_only: true, ..Preferences::default() };
+        assert_eq!(
+            Preferences::for_pane_in(&config, Some(&root)),
+            (Preferences { changes_only: false, ..global }, None),
+        );
+
+        let invalid = "changes_only = false\nhistory_follow_new = not-a-bool\n";
+        fs::write(&file, invalid).unwrap();
+        let (prefs, warning) = Preferences::for_pane_in(&config, Some(&root));
+        assert_eq!(prefs, global);
+        assert_eq!(warning, Some("milo doctor: worktree prefs ignored"));
+
+        let err = Preferences::resolve_in(&config, Some(&root)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains(file.to_str().unwrap()));
+        assert!(err.to_string().contains("history_follow_new"));
+        assert!(Preferences::set_changes_only_in(&config, &root, true).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), invalid);
     }
 
     #[test]

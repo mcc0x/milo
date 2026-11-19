@@ -19,28 +19,27 @@ pub fn project(
     shell: Option<&OsStr>,
     make: impl Fn(Repo, &Preferences) -> Box<dyn Pane> + 'static,
 ) -> Box<dyn Pane> {
-    let prefs = panel_preferences(&repo);
-    let Some(block) = shell.filter(|_| prefs.project_mode == ProjectMode::Follow) else {
+    let (prefs, preference_note) = panel_preferences(&repo);
+    let shell = shell.filter(|_| prefs.project_mode == ProjectMode::Follow);
+    if shell.is_none() && preference_note.is_none() {
         return make(repo, &prefs);
-    };
-    let source = ShellObserver::start(block);
+    }
+    let source = shell.and_then(ShellObserver::start);
     Box::new(Project {
-        root: repo.root.clone(),
+        root: source.as_ref().map_or_else(PathBuf::new, |_| repo.root.clone()),
         git: repo.git,
         pane: make(repo, &prefs),
         make,
-        note: source.is_none().then_some(NO_CWD),
+        note: (shell.is_some() && source.is_none()).then_some(NO_CWD),
+        preference_note,
         source,
         last_dir: None,
         focus: None,
     })
 }
 
-fn panel_preferences(repo: &Repo) -> Preferences {
-    if cfg!(test) {
-        return Preferences::default();
-    }
-    Preferences::load(repo.git.then_some(repo.root.as_path())).unwrap_or_default()
+fn panel_preferences(repo: &Repo) -> (Preferences, Option<&'static str>) {
+    Preferences::for_pane(repo.git.then_some(repo.root.as_path()))
 }
 
 const NO_CWD: &str = "Pinned: no shell cwd";
@@ -54,6 +53,7 @@ struct Project<F> {
     source: Option<ShellObserver>,
     last_dir: Option<PathBuf>,
     note: Option<&'static str>,
+    preference_note: Option<&'static str>,
     focus: Option<bool>,
 }
 
@@ -69,7 +69,8 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
         if self.root == repo.root && self.git == repo.git {
             return self.set_note(None);
         }
-        let prefs = panel_preferences(&repo);
+        let (prefs, preference_note) = panel_preferences(&repo);
+        self.preference_note = preference_note;
         self.root.clone_from(&repo.root);
         self.git = repo.git;
         self.pane = (self.make)(repo, &prefs);
@@ -104,6 +105,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         }
         screen.h += 1;
         screen.put_fit(1, screen.h - 1, screen.w.saturating_sub(2), note, Style::fg(screen::YELLOW));
+    }
+
+    fn notice(&self) -> Option<&'static str> {
+        self.preference_note.or_else(|| self.pane.notice())
     }
 
     fn help(&self) -> Page {
@@ -179,6 +184,7 @@ mod tests {
             source: None,
             last_dir: None,
             note: None,
+            preference_note: None,
             focus: Some(false),
         };
         assert!(matches!(pane.observe(first.root.join("src")), External::Unchanged));

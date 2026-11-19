@@ -304,11 +304,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             };
             Ok(Box::new(reader))
         }),
-        Command::Usage => run(Start::Check, &|| {
-            let root = preferences::worktree(Path::new("."));
-            let prefs = preferences::Preferences::load(root.as_deref()).unwrap_or_default();
-            Ok(Box::new(usage::Usage::open().with_large_figures(prefs.usage_large_figures)))
-        }),
+        Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),

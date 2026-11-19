@@ -375,6 +375,75 @@ fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
 }
 
 #[test]
+fn panes_keep_global_preferences_when_a_worktree_override_is_invalid() {
+    let project = Project::new();
+    let initialized = project
+        .command("git")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    fs::write(project.0.join("project/page.txt"), "project text\n").unwrap();
+    let command = || {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        command.env_remove("REX_CONFIG").env("CLAUDE_CONFIG_DIR", project.0.join("claude"));
+        command
+    };
+
+    // Let Outline pick the worktree's settings file instead of duplicating its path hash.
+    let mut outline = Terminal::run(command().arg("outline"));
+    outline.until("c changed only");
+    outline.master.write_all(b"c").unwrap();
+    outline.until("all files");
+    outline.master.write_all(b"q").unwrap();
+    assert!(outline.wait_for_exit().success());
+
+    let config = project.0.join("config/milo");
+    let file = fs::read_dir(config.join("worktrees")).unwrap().next().unwrap().unwrap().path();
+    let invalid = "changes_only = false\nhistory_follow_new = broken\n";
+    fs::write(&file, invalid).unwrap();
+    fs::write(config.join("preferences.conf"), "changes_only = true\n").unwrap();
+
+    for (args, content) in [
+        (&["outline"][..], "c all files"),
+        (&["history"][..], "No commits yet."),
+        (&["view", "page.txt"][..], "project text"),
+        (&["usage"][..], "Codex"),
+    ] {
+        let mut tty = Terminal::run(command().args(args));
+        tty.until("milo doctor: worktree prefs ignored");
+        tty.until(content);
+        if args[0] == "outline" {
+            tty.master.write_all(b"c").unwrap();
+            tty.until("Could not save changes-only preference");
+        }
+        tty.master.write_all(b"q").unwrap();
+        assert!(tty.wait_for_exit().success());
+    }
+
+    let skipped = command().args(["setup", "--skip-onboarding"]).output().unwrap();
+    assert!(skipped.status.success());
+    let mut setup = Terminal::run(command().arg("setup"));
+    setup.until("Could not read Milo's pane preferences.");
+    setup.master.write_all(b"q").unwrap();
+    assert!(setup.wait_for_exit().success());
+
+    let doctor = command().arg("doctor").output().unwrap();
+    assert!(doctor.status.success());
+    let report = String::from_utf8(doctor.stdout).unwrap();
+    assert!(report.contains("Preferences: unreadable"), "{report}");
+    assert!(report.contains(file.file_name().unwrap().to_str().unwrap()), "{report}");
+    assert!(report.contains("invalid preference history_follow_new"), "{report}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), invalid);
+}
+
+#[test]
 fn unattended_skip_is_shared_by_home_and_settings_without_applying_preferences() {
     let project = Project::new();
     let milo = env!("CARGO_BIN_EXE_milo");

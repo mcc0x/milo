@@ -20,7 +20,7 @@ use crate::pane::{After, External, Pane};
 use crate::screen::Screen;
 use crate::watch::Scope;
 use crate::when::{DAY, MINUTE};
-use crate::{paths, when};
+use crate::{paths, preferences, when};
 
 use self::files::{Budget, FileVersion, Reverse, Sessions, Stream, Tree};
 use self::time::Timestamp;
@@ -665,6 +665,7 @@ pub struct Usage {
     claude: Claude,
     today: Today,
     large_figures: bool,
+    preference_note: Option<&'static str>,
     #[cfg(test)]
     fixed_now: Option<i64>,
     #[cfg(test)]
@@ -673,8 +674,11 @@ pub struct Usage {
 
 impl Usage {
     pub fn open() -> Self {
+        let root = preferences::worktree(Path::new("."));
+        let (prefs, note) = preferences::Preferences::for_pane(root.as_deref());
         let home = paths::home();
-        let mut usage = Self::for_home(home.as_deref(), when::now());
+        let mut usage = Self::for_home(home.as_deref(), when::now()).with_large_figures(prefs.usage_large_figures);
+        usage.preference_note = note;
         usage.omp = omp::Poll::new(omp::database(home.as_deref()), omp::QUERY_WAIT);
         usage
     }
@@ -704,6 +708,7 @@ impl Usage {
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
             large_figures: false,
+            preference_note: None,
             #[cfg(test)]
             fixed_now: Some(now),
             #[cfg(test)]
@@ -789,6 +794,10 @@ pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
 }
 
 impl Pane for Usage {
+    fn notice(&self) -> Option<&'static str> {
+        self.preference_note
+    }
+
     fn check(&mut self) -> bool {
         self.refresh(self.now(), false)
     }

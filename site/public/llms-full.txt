@@ -145,6 +145,8 @@ Save for **this worktree** to keep a project-specific setup, or save a **global 
 
 Saving appearance or workflow preferences changes only the settings you edited. A worktree still inherits global values for any settings it does not override, and saving global defaults does not copy worktree overrides.
 
+If a worktree's preferences file is unreadable, panes keep using the global preferences and leave the file alone. Run `milo doctor` from that worktree to find the file and the error. Correct the file and reopen the panes.
+
 Usage starts as a two-row strip in the shared sidebar. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that Git worktree automatically. To save a layout explicitly or make it the global default, use **Milo: Remember This Layout…**. Milo stores pane roles and proportions, not processes or live pane IDs. Mixed rails containing another app are left alone.
 
 ![A Rex tab with Outline, History and the compact Usage readout in one rail beside the shell](https://github.com/mcc0x/milo/blob/main/docs/img/tab.png)

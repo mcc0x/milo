@@ -34,6 +34,10 @@ pub enum External {
 pub trait Pane {
     fn draw(&mut self, screen: &mut Screen);
     fn help(&self) -> Page;
+    /// A noninteractive warning, shown only when the pane has a spare row.
+    fn notice(&self) -> Option<&'static str> {
+        None
+    }
     fn tracks_hover(&self) -> bool {
         false
     }
@@ -157,21 +161,26 @@ impl Pace {
 fn draw_pane(pane: &mut dyn Pane, screen: &mut Screen, help: Option<&mut Page>) {
     if let Some(page) = help {
         page.draw(screen);
+    } else if let Some(note) = pane.notice().filter(|_| screen.h > 1) {
+        draw_notice(screen, note, |screen| pane.draw(screen));
     } else {
         pane.draw(screen);
     }
 }
 
-fn draw_git_wait(pane: &mut dyn Pane, screen: &mut Screen) {
-    if screen.h == 0 {
-        return;
-    }
+fn draw_notice(screen: &mut Screen, note: &str, draw: impl FnOnce(&mut Screen)) {
     // Leave room for the notice rather than covering a selectable row or picture.
     screen.h -= 1;
-    pane.draw(screen);
+    draw(screen);
     screen.h += 1;
-    let margin = usize::from(screen.w >= WAITING_FOR_GIT.len() + 2);
-    screen.put_fit(margin, screen.h - 1, screen.w - margin * 2, WAITING_FOR_GIT, Style::fg(YELLOW));
+    let margin = usize::from(screen.w >= note.len() + 2);
+    screen.put_fit(margin, screen.h - 1, screen.w - margin * 2, note, Style::fg(YELLOW));
+}
+
+fn draw_git_wait(pane: &mut dyn Pane, screen: &mut Screen) {
+    if screen.h > 0 {
+        draw_notice(screen, WAITING_FOR_GIT, |screen| draw_pane(pane, screen, None));
+    }
 }
 
 fn hover_at(pane: &dyn Pane, help: Option<&Page>, x: usize, y: usize) -> Option<(usize, Range<usize>)> {

@@ -31,6 +31,7 @@ pub struct Reader {
     /// The name git uses, relative to the repository root.
     path: String,
     icons: IconMode,
+    preference_note: Option<&'static str>,
     /// What happened to the working file.
     kind: Kind,
     body: Body,
@@ -192,11 +193,12 @@ impl Reader {
         }
     }
 
-    fn new(path: String, source: Source, icons: IconMode) -> Self {
+    fn new(path: String, source: Source, icons: IconMode, preference_note: Option<&'static str>) -> Self {
         Self {
             source,
             path,
             icons,
+            preference_note,
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
             spans: Vec::new(),
@@ -206,11 +208,12 @@ impl Reader {
         }
     }
 
-    fn icons_for(repo: &Repo) -> IconMode {
+    fn appearance_for(repo: &Repo) -> (IconMode, Option<&'static str>) {
         if cfg!(test) {
-            return Preferences::default().icons;
+            return (Preferences::default().icons, None);
         }
-        Preferences::load(repo.git.then_some(repo.root.as_path())).unwrap_or_default().icons.effective()
+        let (prefs, note) = Preferences::for_pane(repo.git.then_some(repo.root.as_path()));
+        (prefs.icons.effective(), note)
     }
 
     fn reveal_first_change(&mut self) {
@@ -239,6 +242,10 @@ impl Reader {
 }
 
 impl Pane for Reader {
+    fn notice(&self) -> Option<&'static str> {
+        self.preference_note
+    }
+
     fn help(&self) -> Page {
         use help::{HelpRow, heading, key, note, sample};
 
