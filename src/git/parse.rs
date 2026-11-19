@@ -1,6 +1,9 @@
 //! Turns git's status, diff and log output into the repository's data.
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 
 use super::{Commit, CommitId, CommitVersion, Ends, Kind, PendingFile};
 use crate::when;
@@ -20,7 +23,7 @@ pub(super) struct Status {
     pub(super) sources: Vec<String>,
     pub(super) untracked: Vec<String>,
     /// Directories git ignores whole; none of their contents are listed.
-    pub(super) ignored: Vec<String>,
+    pub(super) ignored: Vec<PathBuf>,
     /// Paths left in conflict by a merge.
     pub(super) unmerged: Vec<String>,
 }
@@ -28,26 +31,30 @@ pub(super) struct Status {
 /// Parses `git status --porcelain=v2 --branch -z`.
 pub(super) fn parse_status(raw: &[u8]) -> Status {
     let mut st = Status::default();
-    let text = String::from_utf8_lossy(raw);
-    let mut entries = text.split('\0');
+    let mut entries = raw.split(|&b| b == 0);
     // Git names a missing upstream but omits the ahead/behind line.
     let mut measured = false;
     // The path is the last of a fixed number of fields, and may hold spaces.
     let path = |entry: &str, fields: usize| entry.splitn(fields, ' ').nth(fields - 1).map(str::to_string);
-    while let Some(e) = entries.next() {
+    while let Some(bytes) = entries.next() {
+        if let Some(dir) = bytes.strip_prefix(b"! ").and_then(|path| path.strip_suffix(b"/")) {
+            // Don't accidentally exclude a different path with a replacement character.
+            st.ignored.push(PathBuf::from(OsStr::from_bytes(dir)));
+            continue;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let e = text.as_ref();
         if let Some(path) = e.strip_prefix("? ") {
             // A nested repository is reported as a directory, with a slash.
             st.untracked.push(path.trim_end_matches('/').to_string());
-        } else if let Some(dir) = e.strip_prefix("! ").and_then(|path| path.strip_suffix('/')) {
-            st.ignored.push(dir.to_string());
         } else if e.starts_with("1 ") {
             st.tracked_uncommitted.extend(path(e, 9));
         } else if e.starts_with("2 ") {
             // A rename is followed by its old path, which is not an entry.
             st.tracked_uncommitted.extend(path(e, 10));
-            let from = entries.next().unwrap_or_default();
+            let from = String::from_utf8_lossy(entries.next().unwrap_or_default());
             st.tracked_uncommitted.push(from.to_string());
-            st.sources.push(from.to_string());
+            st.sources.push(from.into_owned());
         } else if e.starts_with("u ") {
             st.unmerged.extend(path(e, 11));
             st.tracked_uncommitted.extend(path(e, 11));
@@ -164,10 +171,12 @@ mod tests {
     #[test]
     fn status_separates_ignored_directories_from_uncommitted_files() {
         let st = parse_status(
-            b"! cache with spaces/\0! build.log\0? scratch.txt\0\
+            b"! cache with spaces/\0! raw-\xff/\0! build.log\0? scratch.txt\0\
               1 .M N... 100644 100644 100644 h1 h2 source.rs\0",
         );
-        assert_eq!(st.ignored, ["cache with spaces"]);
+        assert_eq!(st.ignored[0], PathBuf::from("cache with spaces"));
+        assert_eq!(st.ignored[1].as_os_str().as_bytes(), b"raw-\xff");
+        assert_eq!(st.ignored.len(), 2);
         assert_eq!(st.untracked, ["scratch.txt"]);
         assert_eq!(st.tracked_uncommitted, ["source.rs"]);
         assert!(st.unmerged.is_empty());

@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
 use crate::fs_ops;
-use crate::pane::{Pace, WATCHED};
+use crate::pane::{WATCHED, check_watched_pane, watch_pane};
 use crate::when::HOUR;
 use crate::width::str_width;
 
@@ -186,18 +186,18 @@ fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
     fs::create_dir_all(f.root.join(STATE)).unwrap();
     write(&f, CLAUDE, &assistant(now, 2000, 0, 0), now);
     let mut usage = unopened(&f, now);
-    let mut pace = Pace::for_pane(&mut usage, WATCHED, true);
+    let (mut watcher, mut pace) = watch_pane(&mut usage, true);
     assert_eq!(activity(&usage).today, 2000);
-    assert_eq!(pace.idle(), WATCHED);
+    let covered = if watcher.fd().is_some() { WATCHED } else { Duration::from_secs(2) };
+    assert_eq!(pace.as_ref().unwrap().idle(), covered);
 
     fs::remove_dir(f.root.join("codex")).unwrap();
-    pace.look(&mut usage, true);
-    assert_eq!(pace.idle(), Duration::from_secs(2));
+    check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
+    assert_eq!(pace.as_ref().unwrap().idle(), Duration::from_secs(2));
     write(&f, CODEX, &codex(now, 61, now + HOUR, "null"), now);
-    pace.look(&mut usage, true);
+    check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
     assert!(frame(&mut usage, 100, 2)[0].contains("39%"));
-    // A new root is not guaranteed to be covered by the original watcher.
-    assert_eq!(pace.idle(), Duration::from_secs(2));
+    assert_eq!(pace.as_ref().unwrap().idle(), covered, "recreated roots are watched again when supported");
 }
 
 fn claude_report(path: &Path, limits: &str, now: i64) {

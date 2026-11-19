@@ -7,7 +7,7 @@ The reader can show where a file link points without reading its target. It refu
 ## Updates and drawing
 
 - One terminal loop handles replies, input, help and checks for changes. It ignores bracketed paste rather than treating pasted text as keys. If opening takes more than a moment, it draws `Reading…`; when it can identify a project, it shows its name too.
-- On macOS, file-system notifications wake the Git panes. The outline and history leave out known ignored directories. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
+- On macOS, file-system notifications wake the Git panes. The outline and history refresh ignored-directory exclusions as Git discovers them. FSEvents handles up to eight exclusions directly; Milo filters the rest before waking a pane. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
 - A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened.

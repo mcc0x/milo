@@ -779,7 +779,7 @@ impl Pane for Usage {
                 complete = false;
             }
         }
-        Scope { roots, ignored: Vec::new(), complete }
+        Scope { roots, ignored: Default::default(), complete }
     }
 
     fn key(&mut self, key: Key) -> After {

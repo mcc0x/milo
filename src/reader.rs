@@ -259,7 +259,7 @@ impl Pane for Reader {
     fn watch_scope(&self) -> Scope {
         match &self.source {
             Source::Working(work) => work.repo.watch_scope(),
-            Source::Committed { .. } => Scope { roots: Vec::new(), ignored: Vec::new(), complete: true },
+            Source::Committed { .. } => Scope { roots: Vec::new(), ignored: Default::default(), complete: true },
         }
     }
 

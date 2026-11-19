@@ -43,7 +43,7 @@ pub trait Pane {
 
     /// An empty, complete scope means nothing outside the pane can change it.
     fn watch_scope(&self) -> Scope {
-        Scope { roots: Vec::new(), ignored: Vec::new(), complete: true }
+        Scope { roots: Vec::new(), ignored: Default::default(), complete: true }
     }
 
     /// Takes in changes from outside. False asks the loop to check again soon.
@@ -103,14 +103,6 @@ impl Pace {
         Self { idle, ended: now, took: Duration::ZERO, reported: false }
     }
 
-    pub(super) fn for_pane(pane: &mut dyn Pane, idle: Duration, check_on_open: bool) -> Self {
-        let mut pace = Self::new(idle, Instant::now());
-        if check_on_open {
-            pace.look(pane, true);
-        }
-        pace
-    }
-
     #[cfg(test)]
     pub(super) fn idle(&self) -> Duration {
         self.idle
@@ -129,15 +121,6 @@ impl Pace {
     /// An unsettled look, say during a checkout, is retried as if a change was reported.
     fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
         (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
-    }
-
-    pub(super) fn look(&mut self, pane: &mut dyn Pane, watch_may_shrink: bool) {
-        let started = Instant::now();
-        let settled = pane.check();
-        self.finish_look(started, Instant::now(), settled);
-        if watch_may_shrink && self.idle == WATCHED && !pane.watch_scope().complete {
-            self.idle = UNWATCHED;
-        }
     }
 }
 
@@ -193,17 +176,44 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
     }
 }
 
-fn watch_pane(pane: &dyn Pane, needs_polling: bool) -> (Watcher, Option<Duration>) {
-    let scope = pane.watch_scope();
-    let watcher = Watcher::new(&scope);
-    let idle = if !needs_polling && scope.complete && scope.roots.is_empty() {
+fn watch_idle(watcher: &Watcher, keep_polling: bool) -> Option<Duration> {
+    let scope = watcher.scope();
+    if !keep_polling && scope.complete && scope.roots.is_empty() {
         None
     } else if watcher.fd().is_some() && scope.complete {
         Some(WATCHED)
     } else {
         Some(UNWATCHED)
-    };
-    (watcher, idle)
+    }
+}
+
+pub(super) fn watch_pane(pane: &mut dyn Pane, check_on_open: bool) -> (Watcher, Option<Pace>) {
+    let mut watcher = Watcher::new(pane.watch_scope());
+    let mut pace = watch_idle(&watcher, check_on_open).map(|idle| Pace::new(idle, Instant::now()));
+    if check_on_open {
+        check_watched_pane(pane, &mut watcher, &mut pace, true);
+    }
+    (watcher, pace)
+}
+
+pub(super) fn check_watched_pane(
+    pane: &mut dyn Pane,
+    watcher: &mut Watcher,
+    pace: &mut Option<Pace>,
+    keep_polling: bool,
+) {
+    let Some(timing) = pace else { return };
+    let started = Instant::now();
+    let settled = pane.check();
+    // A snapshot cannot see edits made just after it. If coverage changed,
+    // check again under the new scope rather than relying on the old event queue.
+    let handoff = watcher.refresh(pane.watch_scope());
+    if let Some(idle) = watch_idle(watcher, keep_polling) {
+        timing.idle = idle;
+        timing.finish_look(started, Instant::now(), settled && !handoff);
+    } else {
+        *pace = None;
+    }
 }
 
 fn draw_loading(screen: &mut Screen, dir: Option<&Path>, w: usize, h: usize) {
@@ -290,8 +300,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
     let mut input = Input::default();
     let load = |open: &Open<'_>| {
         let mut pane = open()?;
-        let (watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
-        let pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
+        let (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
         Ok::<_, String>((pane, watcher, pace))
     };
     let opened = match start {
@@ -401,9 +410,10 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                 External::Unchanged => {}
                 External::Redraw => redraw = true,
                 External::NewScope => {
-                    let (next_watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
-                    watcher = next_watcher;
-                    pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
+                    (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
+                    if !check_on_open && let Some(pace) = &mut pace {
+                        pace.report_change();
+                    }
                     help = help.map(|_| pane.help());
                     redraw = true;
                 }
@@ -416,10 +426,8 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         }
         let now = Instant::now();
         redraw |= frame_due.is_some_and(|due| due <= now);
-        if let Some(pace) = &mut pace
-            && pace.until_look(now).is_zero()
-        {
-            pace.look(pane.as_mut(), check_on_open);
+        if pace.as_ref().is_some_and(|pace| pace.until_look(now).is_zero()) {
+            check_watched_pane(pane.as_mut(), &mut watcher, &mut pace, check_on_open);
             redraw = true;
         }
     }
@@ -597,6 +605,39 @@ mod tests {
         assert_eq!(pace.until_look(retry), Duration::ZERO);
         pace.finish_look(retry, retry + Duration::from_millis(10), true);
         assert_eq!(pace.until_look(retry + Duration::from_millis(10)), Duration::from_secs(30));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn changed_git_exclusions_get_one_followup_snapshot_under_the_new_stream() {
+        let f = fixture::Fixture::new();
+        f.write(".gitignore", "build/\n");
+        f.write("build/source.rs", "first\n");
+        f.git(&["add", "-f", "--", "build/source.rs"]);
+        f.commit("first");
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let (mut watcher, mut pace) = watch_pane(&mut pane, false);
+        let original = watcher.fd().unwrap();
+        assert!(watcher.scope().ignored.is_empty());
+
+        f.write("build/generated/output", "first build\n");
+        check_watched_pane(&mut pane, &mut watcher, &mut pace, false);
+        let ignored = pane.watch_scope().ignored;
+        assert_eq!(ignored.as_ref(), [f.root.join("build/generated")]);
+        let current = watcher.fd().unwrap();
+        assert_ne!(original, current);
+        assert!(pace.as_ref().unwrap().reported);
+
+        // A force-tracked file under the ignore rule is still source. A
+        // post-snapshot write must be noticed even without a wakeup byte.
+        f.write("build/source.rs", "first\nsecond\n");
+        check_watched_pane(&mut pane, &mut watcher, &mut pace, false);
+        let mut screen = Screen::sized(80, 12);
+        pane.draw(&mut screen);
+        assert!(screen.text().iter().any(|row| row.contains("source.rs") && row.ends_with("+1")));
+        assert!(std::rc::Rc::ptr_eq(&ignored, &pane.watch_scope().ignored));
+        assert_eq!(watcher.fd(), Some(current), "unchanged exclusions must not restart the stream");
+        assert!(!pace.as_ref().unwrap().reported, "an unchanged scope must not request another check");
     }
 
     #[test]

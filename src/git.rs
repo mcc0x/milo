@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use crate::read::{self, Content};
@@ -225,6 +226,8 @@ pub struct Repo {
     /// The status last read, as git printed it and as parsed.
     raw: Vec<u8>,
     status: Status,
+    /// Shared with the watcher until Git reports a different ignored-directory list.
+    watch_ignored: Rc<[PathBuf]>,
     /// A status `poll` found to differ, kept for `read` to take in.
     polled: Option<Vec<u8>>,
     unpushed: Unpushed,
@@ -288,6 +291,9 @@ impl Repo {
     pub fn only(&mut self, path: &str) {
         self.file = Some(path.to_string());
         self.polled = None;
+        if !self.status.ignored.is_empty() {
+            self.watch_ignored = self.exclusions(&self.status.ignored);
+        }
     }
 
     pub fn branch(&self) -> &str {
@@ -343,8 +349,7 @@ impl Repo {
     }
 
     /// Watches the worktree and any shared Git directory outside it, as in a
-    /// linked worktree. Exclusions are set at startup; if a directory stops
-    /// being ignored, only the periodic check sees later changes inside it.
+    /// linked worktree. The current status supplies the ignored directories.
     pub fn watch_scope(&self) -> Scope {
         let mut roots = vec![self.root.clone()];
         roots.extend(self.common_dir.as_ref().filter(|dir| !dir.starts_with(&self.root)).cloned());
@@ -352,17 +357,18 @@ impl Repo {
         // repository that plainly keeps them inside itself can be trusted.
         let inside = || std::fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
         let complete = !self.git || self.common_dir.is_some() || inside();
+        Scope { roots, ignored: Rc::clone(&self.watch_ignored), complete }
+    }
 
+    fn exclusions(&self, paths: &[PathBuf]) -> Rc<[PathBuf]> {
         // A file-limited status cannot find all the ignored directories.
         // Missing exclusions are fine: they widen the watch, not the checks.
         let internal = [self.git_dir.as_deref(), self.common_dir.as_deref()]
             .map(|dir| dir.and_then(|dir| dir.strip_prefix(&self.root).ok()));
         let file = self.file.as_deref().map(Path::new);
-        let mut ignored: Vec<_> = self
-            .status
-            .ignored
+        let mut ignored: Vec<_> = paths
             .iter()
-            .map(Path::new)
+            .map(PathBuf::as_path)
             .filter_map(|dir| {
                 let needed = Path::new(".git").starts_with(dir)
                     || internal.iter().flatten().any(|git| git.starts_with(dir))
@@ -371,8 +377,7 @@ impl Repo {
             })
             .collect();
         ignored.sort_unstable();
-        let ignored = ignored.into_iter().take(8).map(|(_, dir)| self.root.join(dir)).collect();
-        Scope { roots, ignored, complete }
+        ignored.into_iter().map(|(_, dir)| self.root.join(dir)).collect()
     }
 
     /// Whether git is in the middle of changing things here, so that what
@@ -446,6 +451,9 @@ impl Repo {
                 let Some(base) = self.merge_base(&status, stand_in.as_ref()) else { return };
                 status.ends.base = base;
             }
+        }
+        if status.ignored != self.status.ignored {
+            self.watch_ignored = self.exclusions(&status.ignored);
         }
         (self.raw, self.status, self.stand_in) = (raw, status, stand_in);
         self.ok.set(true);
