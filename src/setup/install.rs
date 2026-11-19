@@ -341,7 +341,7 @@ mod tests {
         assert!(store.claude() == Claude::Off);
         store.save(Some(&Layout::default()), Some(true), &|_| true).unwrap();
         assert!(managed(&fs::read(&init).unwrap(), &loader(&store.rex_file())).is_some());
-        assert!(fs::read_to_string(&claude).unwrap().contains("milo claude-status"));
+        assert!(store.claude_files().unwrap().launcher_matches());
         assert!(store.layout().unwrap().1);
         assert!(store.claude() == Claude::On);
 
@@ -668,10 +668,10 @@ mod tests {
         let fixture = Fixture::folder();
         let store = store(&fixture);
         store.save(None, Some(true), &|_| panic!("Claude settings do not need Rex")).unwrap();
-        assert_eq!(
-            fs::read_to_string(&store.claude).unwrap(),
-            "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"milo claude-status\"\n  }\n}\n"
-        );
+        let text = fs::read_to_string(&store.claude).unwrap();
+        assert!(text.starts_with("{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"'/"));
+        assert!(text.ends_with("' claude-status\"\n  }\n}\n"));
+        assert!(store.claude_files().unwrap().launcher_matches());
     }
 
     #[test]

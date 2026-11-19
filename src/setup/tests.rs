@@ -527,7 +527,7 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
     pane.key(Key::Char('3'));
     assert_eq!(choose(&mut pane, Row::ClaudeLimits), After::Stay);
     assert_eq!(choose(&mut pane, Row::SaveClaude), After::Stay);
-    assert!(fs::read_to_string(f.root.join("settings.json")).unwrap().contains("milo claude-status"));
+    assert!(store(&f).claude_files().unwrap().launcher_matches());
     assert!(!f.root.join("init.lua").exists());
 }
 

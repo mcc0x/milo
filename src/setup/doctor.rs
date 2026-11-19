@@ -204,8 +204,12 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
     )
     .unwrap();
     out.push_str("Claude status line: ");
-    match store.claude() {
+    let claude = store.claude_files();
+    match claude.as_ref().map_or(Claude::Invalid, |files| files.status()) {
         Claude::Off => out.push_str("not installed\n"),
+        Claude::On if claude.is_ok_and(|files| !files.launcher_matches()) => {
+            out.push_str("managed by Milo, but uses an old launcher; turn limits off and back on in setup.\n");
+        }
         Claude::On => out.push_str("managed by Milo\n"),
         Claude::Foreign | Claude::NotOwned => out.push_str("user-managed; left alone\n"),
         Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => writeln!(
