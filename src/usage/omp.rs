@@ -38,9 +38,10 @@ WITH cache_json AS (
     SELECT *, row_number() OVER (PARTITION BY provider ORDER BY observed_ms DESC) AS rank
     FROM reports WHERE provider IN ('anthropic','openai-codex') AND typeof(observed_ms)='integer'
 ), history AS (
-    SELECT provider, recorded_at, limit_id, used_fraction, resets_at, window_label,
-           row_number() OVER (PARTITION BY provider,limit_id ORDER BY recorded_at DESC,id DESC) AS rank
-    FROM usage_history WHERE provider IN ('anthropic','openai-codex')
+    SELECT h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at, h.window_label,
+           row_number() OVER (PARTITION BY h.provider,h.limit_id ORDER BY h.recorded_at DESC,h.id DESC) AS rank
+    FROM usage_history h LEFT JOIN picked r ON r.provider=h.provider AND r.rank=1
+    WHERE h.provider IN ('anthropic','openai-codex') AND (r.observed_ms IS NULL OR h.recorded_at>r.observed_ms)
 )
 SELECT r.provider, r.observed_ms, json_extract(l.value,'$.id') AS limit_id,
        json_extract(l.value,'$.amount.usedFraction') AS used_fraction,
@@ -50,13 +51,11 @@ SELECT r.provider, r.observed_ms, json_extract(l.value,'$.id') AS limit_id,
 FROM picked r LEFT JOIN json_each(r.limits) l ON l.type='object' AND NOT EXISTS (
     SELECT 1 FROM history h WHERE h.rank=1 AND h.provider=r.provider
        AND h.limit_id=CASE l.type WHEN 'object' THEN json_extract(l.value,'$.id') END
-       AND h.recorded_at>r.observed_ms
 ) WHERE r.rank=1
 UNION ALL
 SELECT h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at,
        NULL, NULL, h.window_label, 1
-FROM history h LEFT JOIN picked r ON r.rank=1 AND r.provider=h.provider
-WHERE h.rank=1 AND (r.observed_ms IS NULL OR h.recorded_at>r.observed_ms)
+FROM history h WHERE h.rank=1
 ORDER BY observed_ms,limit_id;
 ";
 
