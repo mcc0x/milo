@@ -528,6 +528,23 @@ fn scrolling_keeps_the_cursor_on_screen() {
 }
 
 #[test]
+fn switching_branches_does_not_mark_existing_commits_as_arrivals() {
+    let f = Fixture::new();
+    commit(&f, "original");
+    let mut history = open(&f);
+    f.git(&["switch", "--orphan", "other"]);
+    commit(&f, "unrelated");
+    for branch in ["other", "main"] {
+        f.git(&["switch", branch]);
+        history.check();
+        let rows = draw(&mut history, 65, 8).text();
+        let subject = if branch == "main" { "original" } else { "unrelated" };
+        let row = rows.iter().find(|row| row.contains(subject)).unwrap();
+        assert!(!row.starts_with('•'), "{row}");
+    }
+}
+
+#[test]
 fn a_commit_that_lands_while_open_appears_marked_on_check() {
     let f = Fixture::new();
     let mut history = open(&f);

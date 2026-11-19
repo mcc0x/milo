@@ -175,6 +175,7 @@ enum ReadFor {
 
 /// The state a loaded history list was drawn from.
 pub struct HistoryVersion {
+    pub branch: String,
     tip: String,
     target: Option<String>,
     pub ahead: Option<u32>,
@@ -183,6 +184,7 @@ pub struct HistoryVersion {
 impl HistoryVersion {
     pub fn matches(&self, repo: &Repo) -> bool {
         self.tip == repo.ends().tip
+            && self.branch == repo.branch()
             && self.target.as_deref() == repo.history_target()
             && self.ahead == repo.upstream_ahead()
     }
@@ -610,6 +612,7 @@ impl Repo {
 
     pub fn history_version(&self) -> HistoryVersion {
         HistoryVersion {
+            branch: self.branch().to_owned(),
             tip: self.ends().tip.clone(),
             target: self.history_target().map(str::to_owned),
             ahead: self.upstream_ahead(),
