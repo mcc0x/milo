@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::help::Page;
-use crate::keys::{Input, Key};
+use crate::keys::{ConfirmClick, Input, Key};
 use crate::screen::{Screen, Style, YELLOW};
 use crate::term::{self, Session, Wait, milliseconds};
 use crate::ui;
@@ -355,6 +355,7 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
 fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Result<(), String> {
     let check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
+    let mut handoff_click = ConfirmClick::default();
     let mut screen = Screen::new();
     let mut input = Input::default();
     let load = |open: &Open<'_>| {
@@ -436,8 +437,11 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                         pointer = None;
                         redraw |= highlighted.is_some();
                     }
-                    if overlay_changed && matches!(key, Key::Click(..)) {
-                        continue; // Wait for a frame showing the new click targets.
+                    // Skip stale help targets and the repeated click that left onboarding.
+                    if let Key::Click(x, y) = key
+                        && (overlay_changed || handoff_click.is_repeat(x, y))
+                    {
+                        continue;
                     }
                     let had_help = help.is_some();
                     match route_key(pane.as_mut(), &mut screen, &mut help, key) {
@@ -454,6 +458,10 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                                 && let Some(open) = next.take()
                             {
                                 (pane, watcher, pace) = load(&open)?;
+                                // The same physical click target may perform another action after onboarding.
+                                if let Key::Click(x, y) = key {
+                                    handoff_click.opened(x, y);
+                                }
                                 redraw = true;
                             } else {
                                 break 'run;

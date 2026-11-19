@@ -35,7 +35,7 @@ pub(crate) struct Home {
     selected: usize,
     picker: Picker,
     footer: HintHits<'static>,
-    confirm_click: crate::keys::ConfirmClick,
+    transition_click: crate::keys::ConfirmClick,
 }
 
 enum View {
@@ -52,7 +52,7 @@ impl Home {
             selected: 0,
             picker: Picker::default(),
             footer: HintHits::default(),
-            confirm_click: Default::default(),
+            transition_click: Default::default(),
         }
     }
 
@@ -60,11 +60,17 @@ impl Home {
         // Clicks received before the next draw must not hit controls from the previous view.
         self.picker = Picker::default();
         self.footer = HintHits::default();
-        if !matches!(view, View::Confirm { .. }) {
-            self.confirm_click.clear();
-        }
+        self.transition_click.clear();
         self.view = view;
         After::Stay
+    }
+
+    fn show_guarded(&mut self, view: View, click: Option<(usize, usize)>) -> After {
+        let after = self.show(view);
+        if let Some((x, y)) = click {
+            self.transition_click.opened(x, y);
+        }
+        after
     }
 
     fn footer_hit(&self, x: usize, y: usize) -> Option<(Key, Range<usize>)> {
@@ -200,33 +206,33 @@ impl Pane for Home {
     }
 
     fn key(&mut self, key: Key) -> After {
-        let key = if let Key::Click(x, y) = key
-            && !matches!(self.view, View::Settings(_))
-        {
-            if matches!(self.view, View::Confirm { .. }) && self.confirm_click.is_repeat(x, y) {
+        let (key, click) = if let Key::Click(x, y) = key {
+            if self.transition_click.is_repeat(x, y) {
                 return After::Ignored;
             }
-            let Some(key) = self.click(x, y) else { return After::Ignored };
-            if matches!(self.view, View::Menu) && self.selected == 2 && key == Key::Enter {
-                self.confirm_click.opened(x, y);
-            }
-            key
+            let key = if matches!(self.view, View::Settings(_)) {
+                key
+            } else {
+                let Some(key) = self.click(x, y) else { return After::Ignored };
+                key
+            };
+            (key, Some((x, y)))
         } else {
-            key
+            (key, None)
         };
         let back = matches!(key, Key::Esc | Key::Char('q'));
         let choose = matches!(key, Key::Enter | Key::Char(' '));
         match &mut self.view {
             View::Menu if back => After::Leave,
-            View::Menu if choose => self.show(match self.selected {
-                0 => View::Settings(Box::new(Setup::open())),
-                1 => View::Report(Report::new("Milo doctor", doctor::report())),
-                2 => View::Confirm { selected: 0 },
+            View::Menu if choose => match self.selected {
+                0 => self.show_guarded(View::Settings(Box::new(Setup::open())), click),
+                1 => self.show(View::Report(Report::new("Milo doctor", doctor::report()))),
+                2 => self.show_guarded(View::Confirm { selected: 0 }, click),
                 _ => unreachable!("selection stays within the menu"),
-            }),
+            },
             View::Menu => move_selection(&mut self.selected, MENU.len(), key),
             View::Settings(setup) => match setup.key(key) {
-                After::Leave => self.show(View::Menu),
+                After::Leave => self.show_guarded(View::Menu, click),
                 after => after,
             },
             View::Report(_) if back => self.show(View::Menu),

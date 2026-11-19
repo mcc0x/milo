@@ -15,7 +15,7 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// A second click on the same item within this long opens it.
 pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
-/// Don't let the opening double-click confirm a destructive dialog underneath it.
+/// Keeps a double click that opened a new view from acting on the controls underneath it.
 #[derive(Default)]
 pub struct ConfirmClick(Option<(usize, usize, Instant)>);
 

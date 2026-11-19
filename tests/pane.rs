@@ -148,6 +148,10 @@ impl Terminal {
         }
     }
 
+    fn click(&mut self, col: u16, row: u16, then: &str) {
+        self.master.write_all(format!("\x1b[<0;{col};{row}M{then}").as_bytes()).unwrap();
+    }
+
     fn output(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.bytes)
     }
@@ -498,4 +502,76 @@ fn unattended_skip_is_shared_by_home_and_settings_without_applying_preferences()
     }
     assert!(!project.0.join("config/milo/preferences.conf").exists());
     assert!(!project.0.join("config/rex/init.lua").exists());
+}
+
+#[test]
+fn repeat_clicks_do_not_cross_between_home_and_settings() {
+    let project = Project::new();
+    let milo = env!("CARGO_BIN_EXE_milo");
+    assert!(project.command(milo).args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    let version = concat!("v", env!("CARGO_PKG_VERSION"));
+
+    for (cols, rows) in [(40, 16), (28, 12)] {
+        let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
+        tty.until("Uninstall");
+        // At 40 columns Settings opens over Project tracking; at 28 it opens over Save prefs.
+        let (col, row) = if cols == 40 { (32, 6) } else { (12, 8) };
+        tty.click(col, row, "");
+        tty.until("Workflow");
+        tty.bytes.clear();
+        tty.click(col, row, "2");
+        tty.until("Pulse");
+        assert!(!tty.output().contains("Unsaved"), "the repeat must not pin the project");
+
+        // The quit labels overlap at 28 columns. A double-click must return
+        // to Home without quitting it, and the help key must still work.
+        tty.bytes.clear();
+        tty.click(15, rows, "");
+        tty.until(version);
+        tty.bytes.clear();
+        tty.click(15, rows, "?");
+        tty.until("Milo home");
+
+        if cols == 40 {
+            tty.master.write_all(b"q").unwrap();
+            tty.until(version);
+            std::thread::sleep(Duration::from_millis(450));
+            tty.bytes.clear();
+            tty.click(col, row, "");
+            tty.until("Workflow");
+        }
+        tty.master.write_all(b"qq").unwrap();
+        assert!(tty.wait_for_exit().success());
+    }
+}
+
+#[test]
+fn repeat_clicks_do_not_cross_the_onboarding_handoff() {
+    let milo = env!("CARGO_BIN_EXE_milo");
+    for (cols, rows, skip_footer, skip_row) in [(40, 16, 27, 10), (28, 12, 17, 8)] {
+        let project = Project::new();
+        let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
+        tty.until("q skip");
+        tty.click(skip_footer, rows, "");
+        tty.until("Uninstall");
+        // "q skip" gives way to "q quit" at the same position.
+        tty.click(skip_footer, rows, "?");
+        tty.until("Milo home");
+        tty.master.write_all(b"qq").unwrap();
+        assert!(tty.wait_for_exit().success());
+
+        let project = Project::new();
+        let mut tty = Terminal::sized(project.command(milo).arg("setup"), cols, rows);
+        tty.until("Continue");
+        tty.click(4, skip_row, "");
+        tty.until("Workflow");
+        // The same cell is now a save action; activating it would block key 2.
+        tty.bytes.clear();
+        tty.click(4, skip_row, "2");
+        tty.until("Pulse");
+        tty.click(5, skip_row, "");
+        tty.until("Save preferences for");
+        tty.master.write_all(b"qq").unwrap();
+        assert!(tty.wait_for_exit().success());
+    }
 }
