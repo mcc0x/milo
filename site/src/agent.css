@@ -178,7 +178,5 @@
   .term-pane.agent { block-size: var(--phone-pane-height); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .agent-session, .agent-chrome { transition: none; }
-  .agent-step:not([hidden]), .composer-caret, .activity-glyph { animation: none; }
-}
+.terminal[data-still] :is(.agent-session, .agent-chrome) { transition: none; }
+.terminal[data-still] :is(.agent-step, .composer-caret, .activity-glyph) { animation: none; }

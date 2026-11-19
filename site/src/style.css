@@ -136,6 +136,26 @@ h1 {
 .install button[data-state='copied'] { background: #b2d8c3; color: #203b30; }
 .install button[data-state='copied']::before { content: '✓ '; }
 
+.demo-playback {
+  grid-column: 3;
+  grid-row: 1;
+  justify-self: end;
+  min-width: 6.5rem;
+  min-height: 2.5rem;
+  padding: .35rem .55rem;
+  border: 1px solid transparent;
+  border-radius: .45rem;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+  font: 650 .875rem/1.15 Bricolage, system-ui, sans-serif;
+}
+.demo-playback:hover, .demo-playback:focus-visible {
+  border-color: #ffffffa8;
+  background: #ffffff63;
+  color: var(--ink);
+}
+
 /* Under the window: where the code is. */
 .source {
   display: flex;

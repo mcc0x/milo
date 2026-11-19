@@ -56,7 +56,7 @@
         </div>
 
         <!-- A demo that plays by itself; its label says what it shows. -->
-        <div class="terminal" id="demo" data-view="whole" role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work">
+        <div class="terminal" id="demo" data-view="whole" data-still role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work">
           <div class="rex-titlebar">
             <span class="window-lights"><i></i><i></i><i></i></span>
             <span class="rex-tab">tidebook</span><span>Rex</span>
@@ -97,7 +97,10 @@
             </section>
           </div>
         </div>
-        <p class="caption" id="caption" aria-hidden="true"></p>
+        <div class="demo-footer">
+          <p class="caption" id="caption" aria-hidden="true"></p>
+          <button class="demo-playback" id="demo-playback" type="button" aria-controls="demo" hidden>Pause demo</button>
+        </div>
       </section>
     </main>
   </body>

@@ -5,20 +5,17 @@ const demo = element('demo');
 const reader = element('reader-pane');
 const caption = element('caption');
 const composer = element('composer-text');
+const playback = document.querySelector<HTMLButtonElement>('#demo-playback')!;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 // How long the agent's side fades before the scene starts again; matches the CSS transition.
 const fade = 320;
-let timers: number[] = [];
 let activeHarness = 0;
-
-function later(ms: number, run: () => void) {
-  timers.push(window.setTimeout(run, ms));
-}
-
-function stopScene() {
-  for (const timer of timers) clearTimeout(timer);
-  timers = [];
-}
+let userPaused = false;
+let nextCue = 0;
+let elapsed = 0;
+let startedAt: number | undefined;
+let timer = 0;
+const suspendedAnimations: Animation[] = [];
 
 /** Draws one step: its panes, the pane it draws the eye to, and the line that says why. */
 function show({ phase, focus, say }: typeof scene[number]) {
@@ -39,44 +36,93 @@ function show({ phase, focus, say }: typeof scene[number]) {
     }
   }
   composer.textContent = '';
-  if (phase !== 'compose') return;
-  const perLetter = typing.length / request.length;
-  for (let letters = 1; letters <= request.length; letters++) {
-    later(typing.start + letters * perLetter, () => {
-      composer.textContent = request.slice(0, letters);
-    });
-  }
 }
 
-/**
- * Plays the scene over and over, each pass in the next harness's tab.
- * People who ask for less motion get its last frame, still.
- */
-function play() {
-  stopScene();
+// The typing, pane changes and fade all share one clock; a pause shifts that
+// clock instead of redrawing a frame or restarting any part of the loop.
+const cues = [
+  ...Array.from({ length: request.length }, (_, index) => ({
+    at: typing.start + (index + 1) * typing.length / request.length,
+    run: () => { composer.textContent = request.slice(0, index + 1); },
+  })),
+  ...scene.slice(1).map(step => ({ at: step.at, run: () => show(step) })),
+  { at: loopLength - fade, run: () => demo.classList.add('scene-out') },
+  { at: loopLength, run: () => {
+    activeHarness = (activeHarness + 1) % harnesses.length;
+    beginLoop();
+    startedAt = performance.now();
+  } },
+];
+
+function beginLoop() {
+  nextCue = 0;
+  elapsed = 0;
+  delete demo.dataset.still;
   demo.classList.remove('scene-out');
   renderHarness(harnesses[activeHarness]);
-  const [first, ...rest] = scene;
-  if (reduceMotion.matches) {
-    show(scene[scene.length - 1]);
-    return;
-  }
-  show(first);
-  for (const step of rest) later(step.at, () => show(step));
-  later(loopLength - fade, () => demo.classList.add('scene-out'));
-  later(loopLength, () => {
-    activeHarness = (activeHarness + 1) % harnesses.length;
-    play();
-  });
+  show(scene[0]);
 }
 
-reduceMotion.addEventListener('change', play);
-// Nothing plays to a hidden page; it starts from the top when the person comes back.
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopScene();
-  else play();
+function scheduleCue() {
+  if (startedAt === undefined) return;
+  const cue = cues[nextCue];
+  timer = window.setTimeout(() => {
+    nextCue++;
+    cue.run();
+    scheduleCue();
+  }, cue.at - (performance.now() - startedAt));
+}
+
+function syncPlayback() {
+  playback.hidden = reduceMotion.matches;
+  if (userPaused || document.hidden || reduceMotion.matches) {
+    if (startedAt !== undefined) {
+      elapsed = performance.now() - startedAt;
+      startedAt = undefined;
+      clearTimeout(timer);
+    }
+    if ('paused' in demo.dataset) return;
+    demo.dataset.paused = '';
+    // CSS holds the keyframes (including any created by a responsive layout
+    // change). The Web Animations API also catches transitions and the caption.
+    for (const animation of [...demo.getAnimations({ subtree: true }), ...caption.getAnimations()]) {
+      if (animation.playState !== 'running') continue;
+      const time = animation.currentTime;
+      animation.pause();
+      // Don't let an animation advance while its pause task waits for a paint.
+      if (time !== null) animation.currentTime = time;
+      suspendedAnimations.push(animation);
+    }
+    return;
+  }
+
+  if (startedAt !== undefined) return;
+  delete demo.dataset.paused;
+  if ('still' in demo.dataset) beginLoop();
+  for (const animation of suspendedAnimations) {
+    if (animation.playState === 'paused') animation.play();
+  }
+  suspendedAnimations.length = 0;
+  startedAt = performance.now() - elapsed;
+  scheduleCue();
+}
+
+playback.addEventListener('click', () => {
+  userPaused = !userPaused;
+  playback.textContent = userPaused ? 'Resume demo' : 'Pause demo';
+  syncPlayback();
 });
-play();
+reduceMotion.addEventListener('change', syncPlayback);
+document.addEventListener('visibilitychange', syncPlayback);
+
+if (reduceMotion.matches) {
+  // A visitor who asks for less motion sees the complete demo without a loop.
+  renderHarness(harnesses[activeHarness]);
+  show(scene[scene.length - 1]);
+} else {
+  beginLoop();
+}
+syncPlayback();
 
 const button = document.querySelector<HTMLButtonElement>('#copy-command')!;
 const command = document.querySelector<HTMLElement>('#install-command')!;

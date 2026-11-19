@@ -42,11 +42,18 @@
   .brand-lockup { width: 7rem; }
 }
 
-/* Under the window: what the scene is showing at this moment. */
+/* Under the window: what the scene is showing and its playback control. */
+.demo-footer {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, 1fr) auto minmax(6.5rem, 1fr);
+  align-items: start;
+  margin-block: .35rem auto;
+}
 .caption {
+  grid-column: 2;
+  grid-row: 1;
   min-height: 1.6rem;
-  margin-top: .8rem;
-  margin-bottom: auto;
+  padding-block: .45rem;
   color: var(--ink);
   font-weight: 500;
   font-size: 1.05rem;
@@ -242,10 +249,9 @@
 .reader-content .diff-line { grid-template-columns: 2ch 1ch minmax(0, 1fr); }
 .reader-content .term-hint { margin-top: .5em; }
 
-@media (prefers-reduced-motion: reduce) {
-  .term-lit, .reader:not([hidden]) { animation: none; }
-  .term-pane { transition: none; }
-}
+#demo[data-paused] * { animation-play-state: paused; }
+.terminal[data-still] :is(.term-lit, .reader) { animation: none; }
+.terminal[data-still] .term-pane { transition: none; }
 
 @media (min-width: 45.001rem) and (max-width: 62rem) {
   .term-hint { font-size: .84em; }
@@ -255,7 +261,10 @@
 @media (max-width: 45rem) {
   .hero { width: calc(100% - 1.5rem); padding-block: .9rem; }
   /* Room for two lines, so a longer caption moves nothing below it. */
-  .caption { min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
+  .demo-footer { grid-template-columns: minmax(0, 1fr) auto; column-gap: .35rem; }
+  .caption { grid-column: 1; min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
+  .demo-footer:has(.demo-playback:not([hidden])) .caption { text-align: start; }
+  .demo-footer .demo-playback { grid-column: 2; }
   .terminal { --pane-x: .65rem; --line: 1.45em; display: block; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
   .terminal-panes {
     --phone-pane-height: max(22rem, calc(var(--head) + var(--line) * 18 + var(--pane-y)));
