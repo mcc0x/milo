@@ -339,9 +339,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn exiting_with_only_auto_arrange(&self) -> bool {
-        self.exit_from.is_some()
-            && self.auto_arrange_dirty()
-            && self.saved.as_ref().is_some_and(|saved| same_geometry(saved, &self.layout))
+        self.exit_from.is_some() && self.only_auto_arrange_dirty()
+    }
+
+    fn only_auto_arrange_dirty(&self) -> bool {
+        self.auto_arrange_dirty() && self.saved.as_ref().is_some_and(|saved| same_geometry(saved, &self.layout))
     }
 
     fn prefs_dirty(&self) -> bool {
@@ -425,8 +427,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let auto_changed = self.auto_arrange_dirty();
         let draft_auto = self.layout.new_tabs;
         let global;
-        let layout = if scope == Scope::Global && self.exiting_with_only_auto_arrange() && self.scope == Scope::Worktree
-        {
+        let layout = if scope == Scope::Global && self.only_auto_arrange_dirty() && self.scope == Scope::Worktree {
             // A worktree layout must not become the global layout just because
             // the remaining draft is the global auto-arrange switch.
             let (mut saved, _, _) = self.store()?.layout_for(None)?;

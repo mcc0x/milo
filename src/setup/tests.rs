@@ -386,6 +386,37 @@ fn the_save_shortcut_opens_a_scope_chooser_without_writing() {
 }
 
 #[test]
+fn saving_only_auto_arrange_globally_preserves_both_layouts() {
+    let f = Fixture::folder();
+    let store = store(&f);
+    let root = f.root.join("worktree");
+    let global = Layout::parse_rail("v1 r .321 .6 14 uho 111 300000 420000 280000").unwrap();
+    let worktree = Layout::parse_rail("v1 l .231 .8 6 hou 011 0 600000 400000").unwrap();
+    store.save_for(&global, Scope::Global, None, None, &|_| true).unwrap();
+    store.save_for(&worktree, Scope::Worktree, Some(&root), None, &|_| true).unwrap();
+    let global_profile = store.config.join("layouts/global");
+    let before = fs::read(&global_profile).unwrap();
+
+    let mut pane = Setup::new(Some(store), true, None, Some(root.clone()), |_| true);
+    assert_eq!(pane.scope, Scope::Worktree);
+    assert!(pane.layout == worktree);
+    choose(&mut pane, Row::Tune);
+    choose(&mut pane, Row::AutoArrange);
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+
+    let store = pane.store().unwrap();
+    assert_eq!(fs::read(global_profile).unwrap(), before);
+    for (root, layout, scope) in [(None, global, Scope::Global), (Some(root.as_path()), worktree, Scope::Worktree)] {
+        let (saved, _, saved_scope) = store.layout_for(root).unwrap();
+        assert_eq!(saved.rail_code(), layout.rail_code());
+        assert!(saved.new_tabs);
+        assert_eq!(saved_scope, scope);
+    }
+    assert!(!pane.layout_dirty());
+}
+
+#[test]
 fn worktree_scope_and_inheritance_only_change_after_explicit_confirmation() {
     let f = Fixture::new();
     let mut pane = Setup::new(Some(store(&f)), true, None, Some(f.root.clone()), |_| true);
