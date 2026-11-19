@@ -295,6 +295,10 @@ impl Pane for History {
             match reader.key(key) {
                 After::Leave => {
                     self.reading = None;
+                    // A watch check may have been skipped while the reader was open.
+                    if !self.git_busy() {
+                        self.check();
+                    }
                     After::Stay
                 }
                 after => after,

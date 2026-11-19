@@ -326,6 +326,29 @@ fn reading_a_file_shows_its_commit_and_returns_to_the_same_row() {
 }
 
 #[test]
+fn closing_the_standalone_reader_picks_up_changes_and_keeps_its_file_selected() {
+    let f = Fixture::new();
+    f.write("page.txt", "historical content\n");
+    f.commit("read this commit");
+    let mut history = open(&f);
+    history.key(Key::Enter);
+    let reading = read_next(&mut history, "page.txt");
+
+    commit(&f, "arrived while reading");
+    f.write("pending.txt", "uncommitted work\n");
+    assert!(history.check());
+    assert_eq!(draw(&mut history, 65, 12).text(), reading);
+
+    assert_eq!(history.key(Key::Esc), After::Stay);
+    let screen = draw(&mut history, 65, 12);
+    let rows = screen.text();
+    assert!(rows.iter().any(|line| line.contains("1 file to commit")), "{rows:?}");
+    assert!(row(&rows, "arrived while reading").starts_with('•'));
+    assert!(row(&rows, "read this commit").contains("▾"));
+    assert!(active_row(&screen, "page.txt"));
+}
+
+#[test]
 fn a_removed_file_and_moves_read_from_the_right_paths() {
     let f = Fixture::new();
     let start = "first retained line\nsecond retained line\nthird retained line\n";
