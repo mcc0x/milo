@@ -12,27 +12,14 @@
 /* The colours are the cat's: its blue, the sky of its highlight, the
    lavender of its tile, the navy of its eyes. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --page: #eceafb;
   --surface: #f9f8ff;
   --ink: #1b2466;
-  --on-ink: #fff;
   --secondary: #4d5280;
   --blue: #2a89fb;
   --edge: #cecae8;
   --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page: #0d1030;
-    --surface: #151a45;
-    --ink: #eef0ff;
-    --on-ink: #0d1030;
-    --secondary: #a7acd8;
-    --blue: #5aa5ff;
-    --edge: #262d66;
-  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -145,7 +132,7 @@ h1 {
   border: 0;
   border-radius: .45rem;
   background: var(--ink);
-  color: var(--on-ink);
+  color: #fff;
   cursor: pointer;
   font: 650 .875rem/1 Bricolage, system-ui, sans-serif;
   transition: background-color .2s ease, scale .12s ease;
