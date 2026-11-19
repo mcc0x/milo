@@ -20,12 +20,13 @@ const MAX_ENTRIES: usize = 32_768;
 const MAX_LINE: usize = 2 * 1024 * 1024;
 const BLOCK: usize = 32 * 1024;
 
-/// A transcript may be replaced or appended; remember its identity as well as its size and time.
+/// A transcript can be rewritten in place without changing its size or mtime.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct FileVersion {
     device: i128,
     inode: u128,
     modified: (i128, i128),
+    changed: (i128, i128),
     pub len: u64,
 }
 
@@ -40,6 +41,7 @@ impl FileVersion {
             device: i128::from(stat.st_dev).rem_euclid(1_i128 << 64),
             inode: u128::from(stat.st_ino),
             modified: (i128::from(stat.st_mtime), i128::from(stat.st_mtime_nsec)),
+            changed: (i128::from(stat.st_ctime), i128::from(stat.st_ctime_nsec)),
             len: u64::try_from(stat.st_size).ok()?,
         })
     }
@@ -50,6 +52,7 @@ impl FileVersion {
             device: i128::from(metadata.dev()),
             inode: u128::from(metadata.ino()),
             modified: (i128::from(metadata.mtime()), i128::from(metadata.mtime_nsec())),
+            changed: (i128::from(metadata.ctime()), i128::from(metadata.ctime_nsec())),
             len: metadata.len(),
         }
     }
@@ -638,6 +641,27 @@ pub(super) fn has_marker(line: &[u8], marker: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    #[test]
+    fn the_cache_reloads_a_same_size_rewrite_with_a_restored_mtime() {
+        let f = Fixture::folder();
+        let path = f.root.join("limits.json");
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        f.write("limits.json", "false");
+        File::open(&path).unwrap().set_modified(modified).unwrap();
+        let (mut previous, mut snapshot) = (None, None);
+        let mut budget = Budget::new(32);
+        let parse = |file, version, budget: &mut Budget| read_small(file, version, 16, budget);
+        read_cached(&path, &mut previous, &mut snapshot, &mut budget, parse);
+        assert_eq!(snapshot.as_deref(), Some(b"false".as_slice()));
+
+        // Allow the inode change time to advance on filesystems with coarse clocks.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        f.write("limits.json", "true ");
+        File::open(&path).unwrap().set_modified(modified).unwrap();
+        read_cached(&path, &mut previous, &mut snapshot, &mut budget, parse);
+        assert_eq!(snapshot.as_deref(), Some(b"true ".as_slice()));
+    }
 
     #[test]
     fn the_walk_budget_is_spent_in_the_newest_year_month_and_day_first() {
