@@ -191,7 +191,7 @@ pub fn inside() -> bool {
     std::env::var_os("REX_SESSION").is_some()
 }
 
-/// Opens a floating reader in the caller's tab and returns its layer ID.
+/// Opens a floating reader in the caller's tab and returns its block ID.
 /// The old reader stays in place if the replacement cannot be created.
 pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str>) -> Result<String, &'static str> {
     let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
@@ -206,7 +206,7 @@ pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str
         json(&root.to_string_lossy()),
     );
     script(Some(&target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
-        .filter(|reply| reply.starts_with("layer:") && !reply.contains(char::is_whitespace))
+        .filter(|reply| reply.starts_with("block:") && !reply.contains(char::is_whitespace))
         .ok_or("Rex did not open the file.")
 }
 

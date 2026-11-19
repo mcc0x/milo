@@ -82,12 +82,12 @@ pub enum ReadFile<'a> {
 /// Opens a file here, or replaces the last floating reader in Rex.
 pub enum OpenReader {
     Here,
-    Floating { layer: Option<String> },
+    Floating { block: Option<String> },
 }
 
 impl OpenReader {
     pub fn new(inside_rex: bool) -> Self {
-        if inside_rex { Self::Floating { layer: None } } else { Self::Here }
+        if inside_rex { Self::Floating { block: None } } else { Self::Here }
     }
 
     pub fn open(&mut self, repo: &Repo, target: ReadFile<'_>) -> Result<Option<Reader>, &'static str> {
@@ -98,12 +98,12 @@ impl OpenReader {
                     Some(Reader::committed(repo, &file.path, &commit.hash, commit.time, Some(file)))
                 }
             }),
-            Self::Floating { layer } => {
+            Self::Floating { block } => {
                 let (path, hash) = match target {
                     ReadFile::Working(path) => (path, None),
                     ReadFile::Committed { commit, file } => (file.path.as_str(), Some(commit.hash.as_str())),
                 };
-                *layer = Some(rex::open(&repo.root, path, hash, layer.as_deref())?);
+                *block = Some(rex::open(&repo.root, path, hash, block.as_deref())?);
                 Ok(None)
             }
         }

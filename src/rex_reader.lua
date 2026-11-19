@@ -7,9 +7,10 @@ local opened = rex.session.new_layer{
   layout = {block = {flavor = "com.superlogical.terminal.shell", label = a.label,
     options = {command = a.command, shell = "none", cwd = a.cwd}}},
 }
-if not (opened and opened.layer_id) then return end
-if a.previous and a.previous ~= opened.layer_id then
-  -- Closing the old reader by hand is normal; its absence isn't an open failure.
-  rex.session.close_layer{layer_id = a.previous}
+local block = opened and opened.block_ids and opened.block_ids[1]
+if not block then return end
+if a.previous and a.previous ~= block then
+  -- The old block may already be gone, or share its layer with other blocks.
+  rex.call("block.close", {session_id = rex.session_id, block_id = a.previous})
 end
-print(opened.layer_id)
+print(block)

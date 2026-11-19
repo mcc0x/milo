@@ -582,6 +582,7 @@ mod tests {
         };
         run("actions_test.lua", &[Path::new("actions.lua")]);
         run("listener_test.lua", &[&listener, &disabled]);
+        run("../rex_reader_test.lua", &[Path::new("../rex_reader.lua")]);
     }
 
     #[test]

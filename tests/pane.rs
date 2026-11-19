@@ -191,7 +191,7 @@ fn modes(slave: &File) -> libc::termios {
 }
 
 #[test]
-fn retrying_a_failed_reader_replaces_the_still_open_layer() {
+fn retrying_a_failed_reader_replaces_the_still_open_block() {
     let project = Project::new();
     fs::write(project.0.join("project/page.txt"), "data").unwrap();
     let rex = project.0.join("rex");
@@ -202,9 +202,9 @@ cat >/dev/null
 for last do :; done
 echo "$last" >> "$HOME/opens"
 case $(wc -l < "$HOME/opens" | tr -d ' ') in
-    1) echo layer:first ;;
+    1) echo block:first ;;
     2) exit 1 ;;
-    *) echo layer:next ;;
+    *) echo block:next ;;
 esac
 "#,
     )
@@ -222,7 +222,7 @@ esac
     assert!(tty.wait_for_exit().success());
     let requests = fs::read_to_string(project.0.join("opens")).unwrap();
     let retry = requests.lines().nth(2).expect("the third open reached Rex");
-    assert!(retry.contains(r#""previous":"layer:first""#), "{retry}");
+    assert!(retry.contains(r#""previous":"block:first""#), "{retry}");
 }
 
 #[test]
