@@ -40,6 +40,33 @@ pub(super) fn limited_output(root: &Path, guard: &[String], args: &[&str], limit
     checked_output(command(root, guard, args), limit)
 }
 
+pub(super) fn working_diff(
+    root: &Path,
+    guard: &[String],
+    against: &str,
+    path: &str,
+    from: Option<&str>,
+) -> Result<Vec<u8>, OutputError> {
+    let mut cmd = command(root, guard, &["diff", against, "-M", "--unified=1000000", "--"]);
+    cmd.env_remove("GIT_LITERAL_PATHSPECS").args(from.into_iter().chain(std::iter::once(path)).map(exact_pathspec));
+    checked_output(cmd, DIFF_LIMIT)
+}
+
+fn exact_pathspec(path: &str) -> String {
+    // Even a literal pathspec also matches children. Escaping the final character
+    // makes Git use a whole-path glob, with no unescaped metacharacters.
+    const MAGIC: &str = ":(glob)";
+    let mut spec = String::with_capacity(MAGIC.len() + path.len() + 1);
+    spec.push_str(MAGIC);
+    for (i, ch) in path.char_indices() {
+        if matches!(ch, '*' | '?' | '[' | '\\') || i + ch.len_utf8() == path.len() {
+            spec.push('\\');
+        }
+        spec.push(ch);
+    }
+    spec
+}
+
 pub(super) enum CommitDiff<'a> {
     Files,
     Paths,

@@ -590,9 +590,7 @@ impl Repo {
     /// Every line, including losses, against the base or last commit.
     /// `None` means too large to show or that git could not be asked.
     pub fn file_diff(&self, path: &str, from: Option<&str>) -> Option<Vec<u8>> {
-        let args = ["diff", self.against(), "-M", "--unified=1000000", "--", from.unwrap_or(path), path];
-        let args = if from.is_some() { &args[..] } else { &args[..args.len() - 1] };
-        match run::limited_output(&self.root, self.guard(), args, DIFF_LIMIT) {
+        match run::working_diff(&self.root, self.guard(), self.against(), path, from) {
             Ok(diff) => Some(diff),
             // An oversized diff is not a git failure.
             Err(OutputError::TooLarge) => None,
@@ -927,6 +925,44 @@ mod tests {
         for marker in ["filter-ran", "hook-ran", "fsmonitor-ran"] {
             assert!(!f.root.join(".git").join(marker).exists(), "reading ran the driver for {marker}");
         }
+    }
+
+    #[test]
+    fn a_working_file_diff_excludes_former_directory_children() {
+        use crate::diff::{self, LineKind};
+
+        let f = Fixture::new();
+        let line = "x".repeat(1023) + "\n";
+        f.write("lib/child", &line.repeat((DIFF_LIMIT / 1024) as usize));
+        f.commit("add directory");
+        fs::remove_dir_all(f.root.join("lib")).unwrap();
+        std::os::unix::fs::symlink("page.txt", f.root.join("lib")).unwrap();
+        f.git(&["add", "-A"]);
+
+        let repo = read_repo(&f);
+        let patch = diff::parse(&repo.file_diff("lib", None).unwrap());
+        assert_eq!(patch.kind, Kind::Added);
+        assert_eq!(patch.lines.len(), 1);
+        assert_eq!((patch.lines[0].kind, patch.lines[0].text.as_str()), (LineKind::Add, "page.txt"));
+    }
+
+    #[test]
+    fn a_working_file_diff_detects_a_rename_from_a_former_child() {
+        let f = Fixture::new();
+        let from = ":[page]*/old?.txt";
+        let path = ":[page]*";
+        f.write(from, "same content\n");
+        f.write(":[page]*/other.txt", "unrelated content\n");
+        f.commit("add directory");
+        fs::remove_dir_all(f.root.join(path)).unwrap();
+        f.write(path, "same content\n");
+        f.git(&["add", "-A"]);
+
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.moved_from(path).as_deref(), Some(from));
+        let patch = crate::diff::parse(&repo.file_diff(path, Some(from)).unwrap());
+        assert_eq!(patch.kind, Kind::Renamed);
+        assert!(patch.lines.is_empty());
     }
 
     #[test]
