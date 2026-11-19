@@ -32,12 +32,14 @@
   align-items: center;
   gap: .4rem;
 }
-.mascot { flex: none; width: 2rem; }
-.mascot img {
+.brand-lockup {
   display: block;
-  width: 100%;
+  width: 9rem;
   height: auto;
-  filter: drop-shadow(0 6px 8px #11154d2e);
+}
+
+@media (max-width: 45rem) {
+  .brand-lockup { width: 7rem; }
 }
 
 /* Under the window: what the scene is showing at this moment. */
