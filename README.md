@@ -1,6 +1,4 @@
-<p align="center"><img src="docs/img/milo.png" width="140" alt="Milo, a blue cat"></p>
-
-<h1 align="center">milo</h1>
+<p align="center"><strong>Milo</strong></p>
 
 <p align="center">A Git-aware file tree, commit history, diff reader and usage limits in native panes for <a href="https://www.superlogical.com/rex">Superlogical’s Rex terminal</a>.</p>
 
