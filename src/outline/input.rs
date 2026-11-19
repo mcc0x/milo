@@ -46,7 +46,7 @@ impl Outline {
                     self.repo.invalidate_tracked_diff();
                     self.reload();
                 } else {
-                    self.refresh_folder(self.selected_path());
+                    self.check_folder();
                 }
                 true
             }

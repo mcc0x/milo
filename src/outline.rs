@@ -142,6 +142,29 @@ impl Outline {
         self.listing = listing;
     }
 
+    fn check_folder(&mut self) {
+        let Some(repo) = self.repo.discover_git() else {
+            self.refresh_folder(self.selected_path());
+            return;
+        };
+        if self.remember {
+            let (prefs, _) = Preferences::for_pane(Some(&repo.root));
+            self.icons = prefs.icons.effective();
+            self.static_marks = prefs.static_marks;
+            self.text_git_marks = prefs.text_git_marks;
+            self.follow_activity = prefs.follow_activity;
+            self.pending_only = prefs.changes_only;
+            self.fold_store = FoldStore::for_worktree(&repo.root);
+            let choices = self.fold_store.as_ref().and_then(|store| store.load().ok());
+            if let Some(choices) = choices.filter(|choices| !choices.is_empty()) {
+                self.folds = Folds::remembered(choices);
+            }
+        }
+        self.repo = repo;
+        self.listing = walk::Listing::default();
+        self.load();
+    }
+
     /// Rebuilds what the outline shows, returning the old files so new work can be marked.
     fn load(&mut self) -> Option<Vec<PendingFile>> {
         let selected = self.selected_path();
@@ -315,7 +338,7 @@ impl Pane for Outline {
                 self.reload();
             }
         } else {
-            self.refresh_folder(self.selected_path());
+            self.check_folder();
         }
         reader_settled
     }
@@ -1081,6 +1104,21 @@ mod tests {
         let rows = draw(&mut o, 40, 8).text();
         assert_eq!(rows[0], " project");
         assert!(rows.iter().any(|row| row.contains("new.txt")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_plain_folder_outline_promotes_on_explicit_refresh_even_with_a_gitfile() {
+        let f = Fixture::folder();
+        f.write("page.txt", "before\n");
+        let mut outline = open(&f);
+        let git_dir = f.root.with_file_name("metadata");
+        f.git(&["init", "-q", "--template=", "-b", "main", "--separate-git-dir", git_dir.to_str().unwrap()]);
+        f.commit("first");
+        f.write("page.txt", "after\n");
+
+        assert_eq!(outline.key(Key::Char('r')), After::Stay);
+        assert!(draw(&mut outline, 60, 8).text()[0].ends_with("1 to commit"));
+        assert_eq!(outline.watch_scope().roots, [f.root.clone(), git_dir]);
     }
 
     #[test]

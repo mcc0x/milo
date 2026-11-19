@@ -12,7 +12,7 @@ use crate::git::{Commit, HistoryVersion, PendingFile, Repo};
 use crate::help::Page;
 use crate::keys::Key;
 use crate::pane::{After, Pane};
-use crate::preferences::IconMode;
+use crate::preferences::{IconMode, Preferences};
 use crate::reader::{OpenReader, Reader};
 use crate::screen::Screen;
 use crate::watch::Scope;
@@ -133,6 +133,20 @@ impl History {
         self.icons = icons;
         self.text_git_marks = text_git_marks;
         self
+    }
+
+    fn refresh(&mut self) {
+        if !self.repo.git {
+            let Some(repo) = self.repo.discover_git() else { return };
+            if !cfg!(test) {
+                let (prefs, _) = Preferences::for_pane(Some(&repo.root));
+                self.follow_new = prefs.history_follow_new;
+                self.icons = prefs.icons.effective();
+                self.text_git_marks = prefs.text_git_marks;
+            }
+            self.repo = repo.for_history();
+        }
+        self.load();
     }
 
     fn load(&mut self) {
@@ -277,11 +291,11 @@ impl Pane for History {
     }
 
     fn check(&mut self) -> bool {
-        if !self.repo.git || self.reading.is_some() {
+        if self.reading.is_some() {
             return true;
         }
-        if self.repo.poll(&[]) {
-            self.load();
+        if !self.repo.git || self.repo.poll(&[]) {
+            self.refresh();
         }
         true
     }

@@ -36,6 +36,23 @@ impl Project {
         command
     }
 
+    fn git(&self, args: &[&str]) -> String {
+        let output = self
+            .command("git")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .args(["-c", "user.name=Milo Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    }
+
     fn slow_git(&self, command: &mut Command) {
         let git = self.0.join("git");
         fs::write(
@@ -283,28 +300,12 @@ fn unavailable_git_is_distinguished_from_a_plain_folder() {
 #[test]
 fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
     let project = Project::new();
-    let git = |args: &[&str]| {
-        let output = project
-            .command("git")
-            .env_remove("GIT_CONFIG_COUNT")
-            .env_remove("GIT_CONFIG_PARAMETERS")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .args(["-c", "user.name=Milo Test", "-c", "user.email=test@example.com"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8(output.stdout).unwrap()
-    };
     let root = project.0.join("project");
-    git(&["init"]);
+    project.git(&["init"]);
     fs::write(root.join("page.txt"), "before\n").unwrap();
-    git(&["add", "page.txt"]);
-    git(&["commit", "-m", "Baseline"]);
-    let later = git(&["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "UnlockedCommit"]);
+    project.git(&["add", "page.txt"]);
+    project.git(&["commit", "-m", "Baseline"]);
+    let later = project.git(&["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "UnlockedCommit"]);
     let lock = root.join(".git/index.lock");
     fs::write(&lock, "held by Git").unwrap();
 
@@ -321,10 +322,59 @@ fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
 
     fs::write(root.join("later.txt"), "new file\n").unwrap();
     fs::write(root.join("page.txt"), "updated\n").unwrap();
-    git(&["update-ref", "HEAD", later.trim()]);
+    project.git(&["update-ref", "HEAD", later.trim()]);
     fs::remove_file(lock).unwrap();
     for (terminal, updated) in &mut panes {
         terminal.until(updated);
+        terminal.master.write_all(b"q").unwrap();
+        assert!(terminal.wait_for_exit().success());
+    }
+}
+
+#[test]
+fn both_panes_promote_a_plain_folder_while_idle_and_load_worktree_choices() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    let milo = env!("CARGO_BIN_EXE_milo");
+    fs::create_dir(root.join("saved")).unwrap();
+    fs::write(root.join("saved/kept.txt"), "keep\n").unwrap();
+    fs::write(root.join("page.txt"), "before\n").unwrap();
+    project.git(&["init", "-q", "--template="]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "FirstGitCommit"]);
+
+    let config = project.0.join("config/milo");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("preferences.conf"), "changes_only = true\n").unwrap();
+    let mut seed = Terminal::run(project.command(milo).arg("outline"));
+    seed.until("c all files");
+    seed.master.write_all(b"c").unwrap();
+    seed.until("changed only");
+    seed.master.write_all(b"q").unwrap();
+    assert!(seed.wait_for_exit().success());
+
+    // The preference created by the pane identifies its matching fold store.
+    let prefs = fs::read_dir(config.join("worktrees")).unwrap().next().unwrap().unwrap().path();
+    let folds = project.0.join("state/milo/worktrees").join(prefs.with_extension("folds").file_name().unwrap());
+    fs::create_dir_all(folds.parent().unwrap()).unwrap();
+    fs::write(folds, "+73617665642f\n").unwrap(); // Open "saved/".
+
+    // Make the folder plain again without losing the saved settings or tracked files.
+    let metadata = project.0.join("metadata");
+    fs::rename(root.join(".git"), &metadata).unwrap();
+    fs::remove_file(root.join("page.txt")).unwrap();
+    let mut outline = Terminal::run(project.command(milo).arg("outline"));
+    let mut history = Terminal::run(project.command(milo).arg("history"));
+    outline.until("saved");
+    assert!(!outline.output().contains("kept.txt"));
+    history.until("Not a Git project.");
+
+    fs::rename(metadata, root.join(".git")).unwrap();
+    outline.until("to commit");
+    outline.until("changed only");
+    outline.until("kept.txt");
+    history.until("FirstGitCommit");
+    for terminal in [&mut outline, &mut history] {
         terminal.master.write_all(b"q").unwrap();
         assert!(terminal.wait_for_exit().success());
     }

@@ -23,7 +23,7 @@ impl History {
                     return After::Ignored;
                 }
             }
-            Key::Char('r') => self.load(),
+            Key::Char('r') => self.refresh(),
             _ => {
                 if let Some(delta) = key.rows(self.shown) {
                     let before = (self.cursor, self.top);

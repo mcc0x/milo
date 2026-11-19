@@ -642,6 +642,19 @@ fn a_plain_folder_says_it_is_not_a_git_project() {
 }
 
 #[test]
+fn a_plain_folder_history_promotes_on_explicit_refresh() {
+    let f = Fixture::folder();
+    let mut history = open(&f);
+    f.git(&["init", "-q", "--template=", "-b", "main"]);
+    commit(&f, "first in the new repository");
+
+    assert_eq!(history.key(Key::Char('r')), After::Stay);
+    let rows = draw(&mut history, 50, 8).text();
+    assert!(rows[0].starts_with(" project  main"), "{rows:?}");
+    assert!(rows[1].contains("first in the new repository"), "{rows:?}");
+}
+
+#[test]
 fn a_narrow_focus_peek_wraps_the_subject_and_restores_the_same_list_on_blur() {
     let f = Fixture::new();
     let subject = "fix: preserve 界é input across narrow rails";
