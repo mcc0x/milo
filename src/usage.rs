@@ -111,7 +111,7 @@ impl Window {
 type BaseWindows = [Option<Window>; 2];
 
 /// Keep the optional model week separate so it never replaces an all-models limit.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct Limits {
     base: BaseWindows,
     model_week: Option<ModelWeek>,
@@ -129,7 +129,7 @@ impl Limits {
 }
 
 /// Store the short provider label inline so a reading can stay cheap to copy.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct ModelWeek {
     window: Window,
     caption: [u8; 37],
@@ -161,7 +161,7 @@ impl ModelWeek {
 }
 
 /// The newest reading wins even if a provider did not report a usable window.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Reading {
     at: Timestamp,
     windows: Limits,
@@ -745,12 +745,16 @@ impl Usage {
         claude
     }
 
+    /// A background result only needs a new frame when it changes a snapshot.
     fn collect_omp(&mut self) -> bool {
+        let checking = self.omp.checking();
         let Some(result) = self.omp.collect() else { return false };
-        if let Some(reports) = result {
-            self.codex.omp = reports.codex;
-            self.claude.omp = reports.claude;
+        let Some(reports) = result else { return checking };
+        if self.codex.omp == reports.codex && self.claude.omp == reports.claude {
+            return checking;
         }
+        self.codex.omp = reports.codex;
+        self.claude.omp = reports.claude;
         true
     }
 

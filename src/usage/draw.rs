@@ -414,6 +414,7 @@ impl<'a> Report<'a> {
     }
 
     fn summary_line(&self, screen: &mut Screen, area: Area, label: &str, value: &str, end: SummaryEnd, style: Style) {
+        let can_stand_alone = matches!(end, SummaryEnd::Left(_));
         let (required, fallback, detail) = match end {
             SummaryEnd::Plain => ("", "", None),
             SummaryEnd::Left(reset) => ("", " left", reset.map(|seconds| (" left · resets ", seconds, ""))),
@@ -459,9 +460,16 @@ impl<'a> Report<'a> {
             }
             return;
         }
-        // A tiny pane cannot always say what an old figure means.
-        let value = if !required.is_empty() || str_width(value) > area.w { "—" } else { value };
-        writer.add(value, style);
+        // Only a current figure can stand on its own. When a status or stale
+        // figure will not fit, keep the provider identifiable instead.
+        if can_stand_alone {
+            writer.add(if value.len() <= area.w { value } else { "—" }, style);
+        } else if let Some(name) = names.into_iter().find(|name| name.len() <= area.w) {
+            writer.add(name, self.tool.colour().bold());
+            if writer.left >= 2 {
+                writer.add(" —", FAINT);
+            }
+        }
     }
 
     /// Shorten the name and labels before giving up a reported figure.

@@ -177,6 +177,15 @@ fn a_tiny_frame_keeps_an_intact_figure_for_the_tightest_limit() {
 }
 
 #[test]
+fn a_tiny_rail_keeps_provider_names_when_status_text_does_not_fit() {
+    let f = Fixture::folder();
+    let reset = NOW + MINUTE;
+    write(&f, CODEX, &codex(NOW, 80, reset, "null"), NOW);
+    let mut usage = open(&f, reset);
+    assert_eq!(frame(&mut usage, 8, 2), ["Codex —", "Claude —"]);
+}
+
+#[test]
 fn every_usage_help_row_fits_a_28_column_pane() {
     for row in help_rows() {
         let width = row.iter().map(|(text, _)| str_width(text)).sum::<usize>();
@@ -394,5 +403,5 @@ fn a_short_stale_summary_is_labeled_even_without_a_spare_line() {
     usage.fixed_now = Some(NOW + 5 * MINUTE);
     assert_eq!(frame(&mut usage, 22, 1), ["Codex week · 20% last"]);
     assert_eq!(frame(&mut usage, 12, 6)[0], "Cx 20% last");
-    assert!(!frame(&mut usage, 6, 1)[0].contains('%'));
+    assert_eq!(frame(&mut usage, 6, 1), ["Codex"]);
 }

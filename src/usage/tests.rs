@@ -275,8 +275,12 @@ mod omp_limits {
         }
     }
 
-    /// The pane's external fd must wake without a filesystem event or another scheduled check.
     fn finish_omp(usage: &mut Usage) {
+        assert!(matches!(wait_omp(usage), External::Redraw));
+    }
+
+    /// The pane's external fd must wake without a filesystem event or another scheduled check.
+    fn wait_omp(usage: &mut Usage) -> External {
         let mut ready = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
         let timeout = i32::try_from(TEST_WAIT.as_millis()).unwrap();
         loop {
@@ -288,9 +292,10 @@ mod omp_limits {
             assert_eq!(result, 1, "OMP query did not wake the pane");
             break;
         }
-        assert!(matches!(usage.check_external(), External::Redraw));
+        let result = usage.check_external();
         assert!(usage.external_fd().is_none());
         assert!(matches!(usage.check_external(), External::Unchanged));
+        result
     }
 
     #[test]
@@ -562,7 +567,7 @@ mod omp_limits {
         let Some(path) = sqlite(&f) else { return };
         report(&path, "claude", "anthropic", NOW * 1000, "[]");
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
+        usage.omp = omp::Poll::new(Some(path.clone()), TEST_WAIT);
 
         let checking = ["Codex · checking", "Claude · checking"];
         let settled = ["Codex · no source", "Claude · no limits"];
@@ -574,13 +579,19 @@ mod omp_limits {
 
         usage.omp.start(NOW, next_poll);
         assert_eq!(frame(&mut usage, 22, 2), settled);
-        finish_omp(&mut usage);
+        assert!(matches!(wait_omp(&mut usage), External::Unchanged));
         assert_eq!(frame(&mut usage, 22, 2), settled);
 
         assert_eq!(usage.key(Key::Char('r')), After::Stay);
         assert_eq!(frame(&mut usage, 22, 2), checking);
         finish_omp(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), settled);
+
+        let week = window("anthropic:7d", "0.32", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "claude", "anthropic", NOW * 1000, &format!("[{week}]"));
+        usage.omp.start(NOW, Instant::now() + Duration::from_secs(20));
+        finish_omp(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex · no source", "Claude week · 68% left"]);
     }
 
     #[test]
