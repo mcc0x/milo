@@ -20,7 +20,7 @@ const PLAIN: Lang = Lang {
     table_headers: false,
 };
 
-const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, escape: Escape::Backslash };
+const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, escape: Escape::Backslash, extra_quotes: 0 };
 const SINGLE: Quote = Quote { open: "'", close: "'", ..DOUBLE };
 const C_COMMENTS: &[(&str, &str)] = &[("/*", "*/")];
 const C_QUOTES: &[Quote] = &[DOUBLE, SINGLE];
@@ -93,7 +93,7 @@ static GO: Lang = Lang {
     chars: true,
     line_comments: &["//"],
     block_comments: C_COMMENTS,
-    quotes: &[Quote { open: "`", close: "`", multiline: true, escape: Escape::None }, DOUBLE, SINGLE],
+    quotes: &[Quote { open: "`", close: "`", multiline: true, escape: Escape::None, ..DOUBLE }, DOUBLE, SINGLE],
     keywords: &[
         "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go",
         "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type",
@@ -221,8 +221,8 @@ static YAML: Lang = Lang {
 static TOML: Lang = Lang {
     line_comments: &["#"],
     quotes: &[
-        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE },
-        Quote { open: "'''", close: "'''", multiline: true, escape: Escape::None },
+        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, extra_quotes: 2, ..DOUBLE },
+        Quote { open: "'''", close: "'''", multiline: true, escape: Escape::None, extra_quotes: 2 },
         DOUBLE,
         Quote { escape: Escape::None, ..SINGLE },
     ],
@@ -545,6 +545,26 @@ mod tests {
         assert_eq!(state, State::Code);
         assert_eq!(one(&TOML, " [table] # name"), [("[table]", Class::Key), ("# name", Class::Comment)]);
         assert_eq!(one(&TOML, "[[array.table]]"), [("[[array.table]]", Class::Key)]);
+    }
+
+    #[test]
+    fn toml_multiline_strings_keep_extra_closing_quotes_inside_the_span() {
+        for close in ["\"\"\"\"", "\"\"\"\"\"", "''''", "'''''"] {
+            let open = &close[..3];
+            let body = format!("quoted text{close}");
+            let comment = "# comment";
+            let line = format!("{body} {comment}");
+            let mut state = State::Code;
+            pieces(&TOML, &format!("text = {open}"), &mut state);
+            assert_eq!(pieces(&TOML, &line, &mut state), [(body.as_str(), Class::Str), (comment, Class::Comment)]);
+            assert_eq!(state, State::Code);
+
+            let value = format!("{open}{body}");
+            assert_eq!(
+                one(&TOML, &format!("text = {value} {comment}")),
+                [("text", Class::Key), (value.as_str(), Class::Str), (comment, Class::Comment)]
+            );
+        }
     }
 
     #[test]

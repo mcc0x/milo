@@ -34,6 +34,8 @@ struct Quote {
     /// May run on over several lines.
     multiline: bool,
     escape: Escape,
+    /// How many quotes may appear immediately before the closing delimiter.
+    extra_quotes: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -150,7 +152,9 @@ fn string_end(b: &[u8], from: usize, q: &Quote) -> Option<usize> {
         } else if begins(&b[i..], q.close) {
             let end = i + q.close.len();
             if !matches!(q.escape, Escape::Doubled) || !begins(&b[end..], q.close) {
-                return Some(end);
+                // TOML permits one or two literal quotes just before its closing triple.
+                let extra = b[end..].iter().take(q.extra_quotes.into()).take_while(|&&c| c == b[i]).count();
+                return Some(end + extra);
             }
             i = end + q.close.len();
         } else {

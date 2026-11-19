@@ -149,7 +149,8 @@ impl Barrier {
             Self::Comment => find_end(b, i, "*/"),
             Self::Quote(mark) => {
                 let close = if mark == b'\'' { "'" } else { "\"" };
-                string_end(b, i, &Quote { open: close, close, multiline: false, escape: Escape::Backslash })
+                let q = Quote { open: close, close, multiline: false, escape: Escape::Backslash, extra_quotes: 0 };
+                string_end(b, i, &q)
             }
         }
     }
