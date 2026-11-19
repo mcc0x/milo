@@ -5,13 +5,13 @@
 <p align="center">A Git-aware file tree, commit history, diff reader and usage limits in native panes for <a href="https://www.superlogical.com/rex">Superlogical’s Rex terminal</a>.</p>
 
 <p align="center">
-  <a href="https://site-production-ad7e256b.up.railway.app">
+  <a href="https://usemilo.net">
     <picture>
       <source media="(max-width: 600px)" srcset="docs/img/web-demo-mobile.webp">
       <img src="docs/img/web-demo.webp" width="960" alt="Milo’s web demo: a file tree and commit history beside a Claude Code transcript, with Codex and Claude usage percentages above it">
     </picture>
   </a>
-  <br><sub><a href="https://site-production-ad7e256b.up.railway.app">Watch the demo</a> cycle through Claude Code, Codex and omp. The project and usage figures are examples.</sub>
+  <br><sub><a href="https://usemilo.net">Watch the demo</a> cycle through Claude Code, Codex and omp. The project and usage figures are examples.</sub>
 </p>
 
 ## Install

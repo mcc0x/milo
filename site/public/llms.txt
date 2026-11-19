@@ -7,7 +7,7 @@ milo does not write to the project it displays. The v0.1.0 prebuilt release is f
 ## Using milo
 
 - [README](https://github.com/mcc0x/milo#readme): Installation, a picture of each pane and the main commands.
-- [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh): Downloads the v0.1.0 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain. Use this GitHub URL while the website's DNS is being set up.
+- [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh): Downloads the v0.1.0 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
 - [Source installer](https://github.com/mcc0x/milo/blob/main/install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
 - [Agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md): How to check milo and open a reader in the user's terminal, including at a Git commit.
 - [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Rex actions, new shell tabs and the Claude Code status line.
