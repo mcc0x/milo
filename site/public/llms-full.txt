@@ -1,0 +1,675 @@
+# Milo — full documentation
+
+Documentation from the main branch. The pinned release may not include every feature described here.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/README.md
+
+<p align="center">
+  <a href="https://usemilo.net">
+    <img src="https://github.com/mcc0x/milo/blob/main/docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. A Git-aware file tree, commit history, diff reader and usage limits in native panes for Superlogical’s Rex terminal.">
+  </a><br>
+  <a href="https://usemilo.net">
+    <picture>
+      <source media="(max-width: 600px)" srcset="https://github.com/mcc0x/milo/blob/main/docs/img/web-demo-mobile.webp">
+      <img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-demo.webp" width="960" alt="Milo’s web demo: a file tree and commit history beside a Claude Code transcript, with Codex and Claude usage percentages above it">
+    </picture>
+  </a>
+  <br><sub><a href="https://usemilo.net">Watch the demo</a> cycle through Claude Code, Codex and omp in <a href="https://www.superlogical.com/rex">Rex</a>. The project and usage figures are examples.</sub>
+</p>
+
+## Install
+
+The v0.1.0 release is available for Apple Silicon Macs. Install it with Homebrew:
+
+```sh
+brew install mcc0x/milo/milo
+```
+
+Without Homebrew, download and run the installer from the release tag:
+
+```sh
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh &&
+  sh milo-install.sh
+```
+
+The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. See [setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) for source installation and uninstall instructions.
+
+The install commands above install **v0.1.0**. To try the workspace preferences described here before the next release, build this checkout with `cargo build` and run `./target/debug/milo setup` inside Rex.
+
+<p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/home.png" width="510" alt="Milo’s blue mascot and version beside Settings, Doctor and Uninstall"></p>
+
+Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone.
+
+You can also run each pane on its own.
+
+## Outline
+
+<p align="center">
+  <img src="https://github.com/mcc0x/milo/blob/main/docs/img/outline.png" width="570" alt="Project files with colours and line counts for changes to commit or push">
+</p>
+
+See changed files in the project tree as you work. Bold colours mark changes to commit; regular colours mark changes to push. Press `Enter` on a file to read it.
+
+## History
+
+<p align="center">
+  <img src="https://github.com/mcc0x/milo/blob/main/docs/img/history.png" width="570" alt="Recent commits, with the newest commit open to show its changed files">
+</p>
+
+See recent commits and, when the branch tracks a remote branch, how many still need to be pushed. Press `Enter` on a commit to see the files it touched, then on a file to read that version.
+
+## Usage
+
+<p align="center">
+  <img src="https://github.com/mcc0x/milo/blob/main/docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent left, time until reset and an Opus weekly limit">
+</p>
+
+See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
+
+## Reader
+
+<p align="center">
+  <img src="https://github.com/mcc0x/milo/blob/main/docs/img/reader.png" width="675" alt="A TypeScript file with coloured code and green and red lines showing edits">
+</p>
+
+Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks.
+
+## Commands
+
+| Command | Opens |
+| --- | --- |
+| `milo` | Milo home: Settings, Doctor and Uninstall |
+| `milo outline [PATH]` | File tree |
+| `milo history [PATH]` | Recent commits |
+| `milo usage` | Usage limits |
+| `milo view FILE [--commit ID]` | File reader |
+| `milo setup` | Setup screen |
+| `milo doctor` | Read-only preference and integration report |
+
+`milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
+
+## Documentation
+
+[Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) · [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) · [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md) · [Pane behaviour](https://github.com/mcc0x/milo/blob/main/docs/panes.md) · [How it works](https://github.com/mcc0x/milo/blob/main/docs/internals.md)
+
+[Contributing](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md) · [MIT licence](https://github.com/mcc0x/milo/blob/main/LICENSE)
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/setup.md
+
+# Set up milo
+
+![Milo’s layout picker with the project sidebar selected beside its split preview](https://github.com/mcc0x/milo/blob/main/docs/img/setup.png)
+
+## Install
+
+The v0.1.0 prebuilt release is for Apple Silicon macOS. Use Homebrew:
+
+```sh
+brew install mcc0x/milo/milo
+```
+
+Or download the versioned release installer from GitHub:
+
+```sh
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh &&
+  sh milo-install.sh
+```
+
+The installer checks the binary against a pinned SHA-256 checksum before placing it in `~/.local/bin`. Set `MILO_BIN_DIR` to choose a different directory. The prebuilt installer does not need a compiler, Cargo or Git.
+
+To build from source instead, install Git and Rust 1.91 or later, then run:
+
+```sh
+git clone https://github.com/mcc0x/milo.git
+cd milo
+sh install.sh
+```
+
+The source installer also honours `MILO_BIN_DIR` and defaults to `~/.local/bin`.
+
+## In Rex
+
+In a Rex shell run `milo setup`. Pick **Just the tree**, **Project sidebar**, or start from the tab you already arranged. Adjust the individual panes and appearance if needed. Trying the layout does not change your saved default; undo the trial before saving if it isn't what you want.
+
+In Home, the welcome guide and Settings, moving the pointer over a clickable control underlines it without changing your keyboard selection. **Click once** to open a menu, switch sections or change a value. Click **Save** and choose a scope to keep your changes. Terminals without mouse-motion reporting still support the arrow keys and Enter.
+
+In narrow Settings panes, rows use shorter labels. When there's room, the full name and value of the selected setting appear below the list.
+
+**Unsaved changes** stays visible while you edit. If you leave Settings from Home or `milo setup`, choose **Save**, **Discard**, or **Keep editing**. Save asks for a scope for each changed group: layout, then appearance and workflow together. Claude Code choices apply to your account and do not need a scope. Each confirmed save takes effect as you go, so going back does not undo changes you have already saved. Leaving also undoes any layout trial you haven't kept by saving it.
+
+Save for **this worktree** to keep a project-specific setup, or save a **global default** for projects without an override. Worktrees of the same repository can have different choices. Preferences live on the machine running Milo, outside the repository. A project cannot install actions or supply a command for Milo to execute.
+
+Usage starts as a two-row strip in the shared sidebar. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that Git worktree automatically. To save a layout explicitly or make it the global default, use **Milo: Remember This Layout…**. Milo stores pane roles and proportions, not processes or live pane IDs. Mixed rails containing another app are left alone.
+
+![A Rex tab with Outline, History and the compact Usage readout in one rail beside the shell](https://github.com/mcc0x/milo/blob/main/docs/img/tab.png)
+
+Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. If Usage is sized in rows, Milo waits for a Rex client to measure the tab, so a background tab may arrange when you first show it. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save to stop arranging new tabs. The panes also work on their own outside Rex.
+
+Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
+
+**Text zoom is separate from split size.** On Rex preview.21 (server API 18), Milo can read a terminal's cell dimensions, but creating or resizing a terminal does not set the font the Mac app renders. The app exposes relative font actions and an app-wide [starting font size](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-typography-font-size), not an absolute per-pane zoom setting. Milo therefore remembers divider positions, not text zoom, for Outline, History and Usage.
+
+Run `milo` for Home or `milo setup` to go directly to Settings. Both share the same first-run guide. To skip it in an install script, run `milo setup --skip-onboarding`; it records the skip and exits without requiring a terminal or installing integrations. `milo outline` and the other direct pane commands never show the guide. Terminal panes work without Rex; split geometry and shell-following require Rex.
+
+## Rex actions
+
+Saving installs these actions in the Rex command palette:
+
+| Action | Name for a key binding |
+| --- | --- |
+| Milo: Arrange This Tab | `milo_layout` |
+| Milo: Add the Outline | `milo_outline` |
+| Milo: Add the History | `milo_history` |
+| Milo: Add the Usage | `milo_usage` |
+| Milo: Close Panes in This Tab | `milo_close` |
+| Milo: Peek Outline | `milo_peek_outline` |
+| Close the outline peek | `milo_close_peek` |
+| Remember the current rail | `milo_remember_layout` |
+| Reset a remembered layout | `milo_reset_layout` |
+
+Milo does not install key bindings. For an optional shortcut, check Rex's shortcut settings and `rex keymap` first; the latter lists config bindings, not every Mac app shortcut. If the chord is free, put a binding such as `rex.bind("cmd+shift+m", "milo_peek_outline")` in your own Rex `init.lua`. Actions also work directly in the palette without any binding.
+
+Peek opens a floating outline and takes focus. Invoking it again raises the same peek. Dismiss it to return to the originating pane. Adding the docked Outline instead keeps the shell focused. Your existing custom actions remain yours.
+
+Setup adds two marked lines at the top of `~/.config/rex/init.lua` (after the interpreter line, if it has one) and asks Rex to reload. The actions live in `~/.config/milo/rex.lua`. `~/.config/milo/listener.lua` watches for divider changes even when arranging new shell tabs is off. If `$XDG_CONFIG_HOME` is an absolute path, both folders live there instead. `$REX_CONFIG` can point directly to a different settings file. Milo keeps its saved state in `~/.local/state/milo` or under an absolute `$XDG_STATE_HOME`.
+
+Setup does not rewrite your actions or key bindings. It refuses to change read-only settings files or use a linked milo configuration folder. The settings file itself may be a symbolic link: setup edits the target and keeps the link.
+
+## Claude Code limits
+
+**Show Claude Code limits** adds milo to `~/.claude/settings.json` only if you do not already have a status line. Turning it off removes milo's entry, not one you added yourself. If the option is unavailable because you already have a status line, milo leaves it alone; [other sources](https://github.com/mcc0x/milo/blob/main/docs/usage.md#where-the-figures-come-from) may already provide limits.
+
+## Remove milo
+
+From Home, choose **Uninstall** to review and confirm removal. **Health → Remove integration** and `milo setup --remove` only disconnect the managed integrations; they do not remove the executable. For manual removal:
+
+1. To diagnose a setup before changing it, run `milo doctor`. To fix the managed integration after an upgrade or executable move, run `milo setup --repair` with the binary you intend to keep.
+2. Before deleting the binary, run `milo setup --remove` to disconnect the managed Rex and Claude Code integrations. Saved preferences and user-edited files are not an uninstall target. Close any live Milo panes separately.
+3. Remove the binary with `brew uninstall milo` if you installed with Homebrew. If you used the release installer, run `sh milo-install.sh --uninstall` with your downloaded copy. If you built from source, run `sh install.sh --uninstall` from the checkout. For either script, use the same `MILO_BIN_DIR` you installed to if you set one. Removing the binary does not change Rex or Claude Code settings or remove milo's saved state.
+
+## Troubleshooting
+
+- **`milo` is not found:** for Homebrew, check that Homebrew is on `PATH`. The scripts put milo in `~/.local/bin` unless you set `MILO_BIN_DIR`. Add the install directory to `PATH`, or run the binary by its full path.
+- **Setup says milo's Rex lines were moved, copied or changed:** setup leaves the file alone. Put a single copy of the original two lines back at the top, just after any interpreter line, then reopen setup and save.
+- **A save was interrupted or actions are missing:** run `milo doctor`. If it reports a stale launcher, pending reload or missing managed actions, run `milo setup --repair` with the binary you intend Rex to use. The **Health** section in setup offers the same diagnostics, repair and removal.
+- **The sidebar opens at a different size:** run `milo doctor` from that Rex tab to compare the saved sidebar width and Usage height with what's live. If the sizes differ, check [Autobalance splits](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-splits-focus-autobalance-splits) under **Settings → Interface → Splits & Focus**. If it is on, turn it off, then close and re-add the Milo panes to apply the saved sizes.
+- **Another setup is saving:** only one setup can save at a time. Wait for it to finish before retrying.
+- **New shell tabs are not arranged:** enable **Arrange new shell tabs** under **Customize panes**, then save globally. The listener is an account setting, not a per-project switch. `milo doctor` checks whether it is actually running.
+- **Icons appear as boxes:** choose plain symbols or no icons in setup, or override one launch with `MILO_ICONS=plain` or `MILO_ICONS=off`. Choose a Nerd Font in Rex only if you want one for all of your terminals.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/panes.md
+
+# Using the panes
+
+Run the panes in a Unix terminal with 256 colours. Outline and history start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, outline shows just the files and history says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
+
+## What fits in a pane
+
+| Pane | Size | What you see |
+| --- | --- | --- |
+| Outline | 7 rows or fewer | A strip of changed files in a Git project, most recently written first, flowed across the width |
+| Outline | 52 columns or more | In the tree, the type of change and how many lines each file gained and lost |
+| Outline and history | 12 rows or more | A key hint |
+| History | 3 rows or fewer | Recent commits without the heading, dots or divider |
+| History | 52 columns and 8 rows or more | A row of dots when there is more than one commit |
+| History | Narrow | A shorter summary, such as `↑2` for two commits to push or `no tracking` for a branch that does not track a remote branch |
+| History | Narrow and focused | The selected commit's subject wraps so you can read it without widening the rail |
+| Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
+
+The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
+
+Untracked files appear before Milo counts their lines. In a wide outline, `?` means the count is not ready, not zero. The outline counts the files in view in small batches as you scroll; a folder shows `?` while any of its new files are still uncounted.
+
+## Comparing commits
+
+History counts commits to push against the branch's tracked remote branch. `no branch tracked` means there is no tracked branch, not that all commits have been pushed. Milo can still use the remote's default branch to mark commits for comparison. `no remote` means the project has no remote configured.
+
+A shallow clone has only part of the project's history. Milo lists the commits Git has, but it cannot list a commit's changed files if its parent is missing. In that case history shows `Git did not answer for this commit.` instead of showing every file as new.
+
+## Reading files
+
+Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader, leaving the original pane in place. Elsewhere the reader takes over that pane; `q` brings you back.
+
+For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
+
+`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+
+The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, shell, JSON, YAML and TOML. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
+
+## Reading pictures
+
+The working-file reader can show PNG, JPEG, GIF, WebP, HEIC and HEIF, TIFF, BMP, ICO and ICNS, SVG, PSD and the first page of a PDF, where conversion is supported. It fits the picture without changing its proportions. On macOS, `/usr/bin/sips` converts other formats and resizes large PNGs; other systems show only PNGs that do not need conversion. Ordinary text still shows as text if a file has a picture extension. At a commit, the reader shows the stored file as text or a note, not as a picture.
+
+Pictures need a terminal that supports the kitty graphics protocol, such as Rex. Milo asks the terminal whether it can draw pictures and shows a message if it cannot.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/keys.md
+
+# Keys and marks
+
+Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses.
+
+## Moving around
+
+These keys work in the outline tree, history and reader. The reader and help page scroll instead of moving a selection.
+
+| Key | Action |
+| --- | --- |
+| Up / Down or `k` / `j` | Move one row |
+| Page Up / Page Down or `Ctrl-B` / `Ctrl-F` | Move one page |
+| `Ctrl-U` / `Ctrl-D` | Move half a page |
+| Home / End or `g` / `G` | Go to the first or last row |
+| Mouse wheel | Scroll |
+
+### Outline
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Open or close a folder, or read a file |
+| `Space` | Open or close a folder |
+| Left or `h` | Close an open folder, or go to the parent |
+| Right or `l` | Open a closed folder |
+| `{` / `}` | Previous or next visible folder |
+| `K` / `J` | Previous or next item in the same folder, skipping nested rows |
+| `p` | Go to the parent folder |
+| `e` | Open every folder; press again to restore your choices |
+| `n` / `N` | Next or previous changed file, including in closed folders |
+| `c` | Switch between the whole tree and changed files only |
+| `r` | Reload |
+| `q` | Quit |
+
+Click a folder to open or close it, click a file to select it, or double-click a file to read it. In the short outline strip there is no cursor: Left / Right or `h` / `l` scroll by one column, and Home / End or `g` / `G` go to either end. The arrow keys, `j` / `k`, the wheel and Page Up / Page Down also scroll the strip one column at a time.
+
+### History
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Show or hide a commit's files, show the rest of a long file list, or read the selected file |
+| Left or `h` | From a file, return to its commit; from an open commit, close its file list |
+| Right or `l` | Read the next part of a long subject in the narrow focused History pane |
+| `r` | Reload |
+| `q` | Quit |
+
+Click a commit to toggle its files, click a file to select it, or double-click to read it as it was at that commit. For a merge, the file list compares the commit with its first parent.
+
+### Reader
+
+| Key | Action |
+| --- | --- |
+| `b` / `Space` | Scroll a page up or down |
+| Left / Right or `h` / `l` | Scroll sideways |
+| `n` / `N` | Next or previous block of added or removed lines |
+| `q` or `Esc` | Close |
+
+### Usage and setup
+
+In Usage, `r` checks local data without bypassing the [oh-my-pi read interval](https://github.com/mcc0x/milo/blob/main/docs/usage.md#where-the-figures-come-from), and `q` quits. In setup, use `1`–`4` or `Tab` for Layout, Appearance, Workflow and Health. Up / Down or `k` / `j` selects a row; `Enter` or `Space` activates it. In Layout, `a` tries the current draft and `u` undoes the trial. `s` asks **where** to save; choose the scope and confirm. `Esc` backs out of a confirmation without saving.
+
+## Colours and marks
+
+In a Git outline, **bold** means changes to commit and regular coloured names mean changes to push. Plain names have no changes marked.
+
+If color or font weight is hard to distinguish, enable text change marks in setup. For a still outline while tools write files, choose static activity marks. Neither option changes the terminal's appearance for other programs.
+
+| Colour | Change |
+| --- | --- |
+| Yellow | Edited |
+| Green | Added; italic if Git does not track it yet |
+| Red, struck through | Removed |
+| Cyan, italic | Moved |
+| Magenta | Left in conflict by a merge |
+
+| Mark | Meaning |
+| --- | --- |
+| Pulsing `●` / `○` at the left edge | Being written now |
+| `•` at the left edge | Changed since you last looked |
+| `docs 3` on a closed folder | Three changed files inside |
+| `+7 −5` | Seven lines added and five removed |
+| `○5 ↑2` in a narrow outline | Five files to commit and two to push |
+
+When focus is elsewhere, the outline can follow the file being written (for example, `following tides.ts`). It does not move the cursor while you use it or reopen a folder you closed.
+
+Following file activity and following a shell are different choices. File activity moves the outline selection within a project; shell following changes the project shown by an attached pane. Pin a pane's project if you want to keep reading it while the shell moves elsewhere.
+
+In history, a hollow dot means uncommitted work. With a remote branch to compare against, a bold dot marks a commit not on that branch, and a faint dot marks one already on it. A regular dot means there is no comparison. The heading says `no branch tracked` if the current branch does not track a remote branch; that does not mean there are no commits to push. A `•` beside a commit means it arrived while the pane was open. Open a commit to see what changed in each file, in the same colours as the outline.
+
+In the reader, added lines have a green background and keep their code colours; removed lines stay in place with a red background. If only part of a line changed, that part is highlighted.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/usage.md
+
+# Usage limits
+
+`milo usage` shows how much of a reported limit is **left**, not how much has been used. The two-row rail gives each provider one line for its most constrained window. When there's room, it adds the reset countdown for a recent reading or when an older reading was last seen. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a taller rail too.
+
+A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%. Run `milo doctor` to see which local source supplied each provider's reading.
+
+## Where the figures come from
+
+| Source | What milo reads |
+| --- | --- |
+| oh-my-pi | Limits the harness saves for Codex and Claude in `~/.omp/agent/agent.db` (or `$PI_CODING_AGENT_DIR/agent.db`). Milo reads only the usage data, using `/usr/bin/sqlite3` in read-only mode. Automatic reads are at least 20 seconds apart per pane. |
+| Codex | Limit reports in recent Codex session files under `~/.codex/sessions` |
+| Claude Code | Its own saved limits in `~/.claude.json`, or limits sent through the status line if you turn it on in setup. |
+
+For each tool, milo uses the newest report it can read. When there is room, it also shows **tokens today** from Claude Code's local session files under `~/.claude/projects`. This is local activity since midnight, not a limit. It counts new input, output and cache writes, not cache reads. A `+` after the number means the total may be incomplete.
+
+Milo labels reports as older after five minutes, or ten minutes for oh-my-pi to allow for its provider refresh cadence. This uses the time the provider's window was last observed, not the time Milo read the file.
+
+**Show Claude Code limits** in `milo setup` adds a status line if you do not already have one. Claude Code calls `milo claude-status` to show a short line and save the reported limits to `~/.local/state/milo/claude-limits.json` (or under an absolute `$XDG_STATE_HOME`). It does not save prompts or replies. You do not need to enable it if Claude Code or oh-my-pi already saves a report.
+
+An unchanged status-line reading confirms the same window, but Milo saves that confirmation at most once a minute per window. A lower figure for the same window or an older reset does not replace or refresh the saved figure.
+
+## What milo does not do
+
+The usage pane reads local data. It does not call the providers, run their tools, sign in, read credentials or guess limits from token counts. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
+
+## If a figure is missing
+
+- Make the pane taller and wider to see labels, reset times and hints. Where the terminal can show pictures, including in Rex, milo draws the logos and large figures as pictures. Otherwise it draws with text. Short panes use text either way.
+- Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. Reload does not ask a provider for a fresh reading.
+- `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. A narrow pane may shorten these hints.
+- For oh-my-pi, check that `/usr/bin/sqlite3` is available and the harness has saved a report. For Claude Code, see [setup](https://github.com/mcc0x/milo/blob/main/docs/setup.md#claude-code-limits) if neither saved source has a reading.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md
+
+---
+name: milo
+description: Use milo in a user's terminal to show a Git file tree, recent commits, usage, or a file from the working tree or a commit, and to guide Rex setup.
+---
+
+# milo
+
+## Check first
+
+- Run `command -v milo` and `milo --version` in the environment where the pane
+  will run. A version confirms the binary is available, not that Rex is set up.
+- In this checkout, `milo doctor` explains effective preferences, integration
+  health and usage sources without changing anything. For an older installed
+  binary, check `milo --help`; `rex actions` (without `-C` or `REX_CLIENT`)
+  lists server actions such as `milo_layout`.
+- Open `milo setup` for interactive configuration. Trying a layout is not
+  permission to save it. Distinguish the global default from the override for
+  this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
+  `milo_peek_outline` opens a temporary floating outline instead of docking it.
+- Use `milo setup --repair` or `--remove` only when asked to change the
+  integration. Do not change Rex's global theme, font or keyboard shortcuts.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `milo` | Opens the interactive home menu. |
+| `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
+| `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
+| `milo history [PATH]` | Shows recent commits and the files they touched. |
+| `milo usage` | Shows available local usage limits and, when there is room, Claude Code activity. |
+| `milo view FILE [--commit ID]` | Opens the read-only reader. |
+| `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
+| `milo listen [--stop]` | Starts or stops layout memory and automatic new-tab arrangement; normally managed by setup. |
+| `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
+
+`PATH` defaults to the current directory. Use direct pane commands when launching a pane for the user; they bypass the home menu and onboarding. Use `milo --help` for the CLI guide and `?` for pane keys.
+
+## Open a file for the user
+
+In an interactive terminal, use `milo view "$file"` for the working copy or
+`milo view "$file" --commit "$id"` for the file as of a commit. For the second
+form, start at the repository root, use the path relative to that root as it
+existed at the commit, and pass a full or abbreviated hex Git commit ID.
+
+To open a reader from a non-interactive agent shell, start a terminal tab in
+the user's intended Rex session. Pass the file and commit as separate quoted
+arguments. For example, with the session and project directory identified:
+
+```sh
+rex run -s "$session" -c "$project_dir" -- milo view "$file"
+rex run -s "$session" -c "$project_dir" -- milo view "$file" --commit "$id"
+```
+
+The user can press `n` or `N` to move between changed blocks and `q` or `Esc`
+to close the reader. In Rex, opening a file from the outline or history also
+opens a floating reader.
+
+## Do not
+
+- Do not edit the user's Rex or Claude Code configuration directly. Use
+  `milo setup` and save only with the user's approval.
+- Do not run full-screen panes in your own non-interactive shell. They need
+  an interactive terminal. If you cannot target the user's terminal, give
+  the user the command to run instead.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md
+
+# Contributing to milo
+
+Keep changes small and make milo simpler, faster or more correct.
+
+## Getting set up
+
+You need Rust 1.91 or later, git, and a terminal.
+
+Set `fork_url` to the URL of a fork you can access, then run:
+
+```sh
+git clone "$fork_url" milo
+cd milo
+cargo build --release
+./target/release/milo outline    # the outline, in this repository
+./target/release/milo history    # recent commits
+./target/release/milo usage      # usage at a glance
+./target/release/milo view src/main.rs
+```
+
+## Before you open a pull request
+
+Run these checks:
+
+```sh
+cargo build --release              # no warnings
+cargo clippy --all-targets         # no warnings; the lint set is in Cargo.toml
+cargo fmt -- --check               # no diff; the settings are in rustfmt.toml
+cargo test                         # everything passes
+```
+
+Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
+
+## Tagging a release
+
+Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. GitHub Actions runs `cargo test --release --locked` on an arm64 macOS runner. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
+
+## What a good change looks like
+
+**It solves one thing.** A bug fix does not also rename a module. A refactoring does not also change behaviour.
+
+**It adds no dependency.** milo depends on `libc` and nothing else. If you believe a crate would earn its place, open an issue first and say what it replaces.
+
+**It is tested by what the user sees.** Use throwaway Git repositories (`src/fixture.rs`) and check the frames the program draws where practical. Write tests that would fail if the behaviour broke, not tests that repeat the code. A bug fix comes with the test that would have caught it.
+
+**It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
+
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/omp.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+
+**It stays read-only.** milo never changes a repository. Every git command it runs only reads.
+
+## Style
+
+The code is written to be read. A few habits keep it that way:
+
+- **Comments say what and why, in plain words.** Write for someone who knows Rust but has never seen this file. Do not describe how the code used to be, and do not restate the line below.
+- **One word per idea.** *Pending* is anything not yet pushed; *uncommitted* is the part of that not yet committed; *unpushed* is the part committed but still local. `check` takes in changes made outside; `poll` asks git whether anything moved; `load` rebuilds what a screen shows. If you need a new word, define it in a doc comment where the idea is introduced.
+- **Small functions with one job.** If a function runs past about forty lines and is not a plain table, it is probably doing two things.
+- **Names over positions.** Prefer a small struct or enum to a tuple or a bare `bool` argument when a reader would otherwise have to remember an order or a meaning.
+- **No leftovers.** No commented-out code, no `TODO`, no parameter that is always the same value, no helper kept for a caller that is gone.
+- **`unsafe` explains itself.** Every block has a `// SAFETY:` comment directly above it giving the actual argument. The lints enforce that the comment exists; reviewers check that it is true.
+- **On screen, plain words.** Text the user reads says "changed", "to commit", "to push". Words such as *pending* are for the code.
+
+## Finding your way around
+
+The [source map](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md#source-map) lists the files under `src/` and `tests/`.
+
+### Adding a pane
+
+Put the pane in a module under `src/` and implement `pane::Pane`: `draw` fills a `Screen`, `help` returns its own `Page::new` guide, and `key` handles pane-specific input. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to keep the frame. For outside changes, add `watch_scope` and `check`; for timed redraws, add `next_frame`. A pane with no watch or timer sleeps until input, resize or a signal.
+
+Declare the module in `src/main.rs`. Add the command to `Command`, the argument parser, `dispatch` and `--help`. Use the shared loop; choose whether the pane starts loaded, does a first check or shows `Reading…` on a slow open.
+
+### Changing the Rex layout
+
+The two Lua templates are in `src/setup/`. `layout.rs` adds the choices and
+proportions above the actions in `rex.lua`, and the path to that file above
+the handler in `listener.lua`. `rex_files.rs` asks Rex to check changed
+generated files before writing settings. The listener snapshots existing rails
+after Rex attaches, without replacing a baseline already captured from an event.
+
+`setup/profiles.rs` stores rail geometry separately from those integration files.
+Persist roles, side, order and proportions, never Rex block IDs. A trial is the
+exception: its IDs are transient and are the only blocks its undo may close.
+`preferences.rs` resolves pane settings outside the repository, per worktree
+over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
+explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
+
+Run `cargo test setup::` for generation, screen and installation tests. The
+tests use throwaway settings and a stand-in for Rex. To check a generated
+file with Rex itself, run `MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`
+on a scratch copy. The flag prevents the actions file starting a listener
+during the check. Check both files and try the pane choices. Only try a
+reload or the actions on a disposable Rex configuration and session, never
+as part of the automated tests.
+
+### Adding a language to the reader
+
+Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings whose closing marks depend on the opener. Adding a language normally means changing only the tables:
+
+1. Add a `Lang` constant: its line and block comments, its quotes (list a longer opener before any opener it starts with), its keywords and constants.
+2. Map its file extensions in `for_file`.
+3. Add a test with a few idiomatic lines and the classes you expect.
+
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly.
+
+## Commit messages
+
+One line in the imperative that says what the commit does for someone using or reading milo ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.
+
+## Reporting a bug
+
+Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. For anything that looks like a security problem (milo running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+
+## Licence
+
+By contributing you agree that your work is released under the MIT licence that covers the project (see `LICENSE`).
+
+## Source map
+
+| File | Purpose |
+| --- | --- |
+| `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
+| `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
+| `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
+| `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
+| `src/git/parse.rs` | Reads Git status, diff, and log output. |
+| `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden. |
+| `src/help.rs` | Draws and scrolls the in-pane help page. |
+| `src/history.rs` | Keeps commits, opened file lists, and selection state. |
+| `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
+| `src/history/input.rs` | Handles history keys and mouse clicks. |
+| `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
+| `src/icons.rs` | Chooses file and folder symbols and their colours. |
+| `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
+| `src/keys.rs` | Decodes keys, mouse events, paste markers, and terminal replies. |
+| `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
+| `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
+| `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
+| `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
+| `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
+| `src/paths.rs` | Finds milo's configuration and state folders. |
+| `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
+| `src/read.rs` | Reads regular files and the names that file links point to. |
+| `src/reader.rs` | Keeps reader state and handles navigation and updates. |
+| `src/reader/content.rs` | Locates files and loads text, diffs, or pictures. |
+| `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
+| `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
+| `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
+| `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
+| `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes. |
+| `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
+| `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
+| `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
+| `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
+| `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs. |
+| `src/setup/listener_test.lua` | Checks the new-tab and new-session handlers with a stand-in for Rex. |
+| `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
+| `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
+| `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
+| `src/syntax.rs` | Scans source text to find spans to colour. |
+| `src/syntax/delimiters.rs` | Handles string closers that depend on their openers. |
+| `src/syntax/langs.rs` | Defines language rules and maps them to file extensions. |
+| `src/term.rs` | Sets and restores terminal modes and waits for events. |
+| `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
+| `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
+| `src/usage.rs` | Collects the latest limits and today's Claude Code activity. |
+| `src/usage/draw.rs` | Lays out usage figures, reset times, and hints. |
+| `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
+| `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
+| `src/usage/files.rs` | Scans session files and bounds how much a refresh reads. |
+| `src/usage/marks/Inter-OFL.txt` | Records the licence for the font used in usage figures. |
+| `src/usage/marks/README.md` | Records artwork sources and figure generation instructions. |
+| `src/usage/marks/claude.png` | Embeds the Claude mark shown in the pane. |
+| `src/usage/marks/claude.svg` | Stores the SVG source for the Claude mark. |
+| `src/usage/marks/codex.png` | Embeds the Codex mark shown in the pane. |
+| `src/usage/marks/codex.svg` | Wraps the original Codex bitmap in SVG. |
+| `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
+| `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
+| `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
+| `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
+| `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
+| `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
+| `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
+| `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
+| `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
+| `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
+| `src/walk.rs` | Lists files and folders outside Git. |
+| `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
+| `src/when.rs` | Works out local dates and wording for ages and durations. |
+| `src/width.rs` | Measures and shortens text in terminal columns. |
+| `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
+| `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/internals.md
+
+# How milo works
+
+Milo is read-only when looking at a project. It keeps the user's Git settings, such as global ignore rules, but overrides settings that could run a program. That includes hooks, content filters, external diff and text converters, file-system monitors and on-demand fetching. It caps Git's time and output. Git reports a change to the commit recorded for a submodule; milo does not inspect uncommitted or untracked files inside it.
+
+The reader can show where a file link points without reading its target. It refuses a path through a folder link that leaves the project and does not read devices or pipes as files. Text from the project cannot send terminal controls.
+
+## Updates and drawing
+
+- One terminal loop handles replies, input, help and checks for changes. It ignores bracketed paste rather than treating pasted text as keys. If opening takes more than a moment, it draws `Reading…`; when it can identify a project, it shows its name too.
+- On macOS, file-system notifications wake the Git panes. The outline and history refresh ignored-directory exclusions as Git discovers them. FSEvents handles up to eight exclusions directly; Milo filters the rest before waking a pane. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
+- A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
+- After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
+- The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened.
+- Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.
+
+The crate depends only on `libc`.
+
+## Source map
+
+The [source map](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md#source-map) lists every source and test file.
