@@ -2,21 +2,24 @@
 
 <h1 align="center">milo</h1>
 
-<p align="center">milo puts your files, commits, and coding tool limits in terminal panes beside your work.</p>
+<p align="center">A Git-aware file tree, commit history, diff reader and usage limits in native panes for <a href="https://www.superlogical.com/rex">Superlogical’s Rex terminal</a>.</p>
 
 <p align="center">
-  <img src="docs/img/tab.png" width="860" alt="A Rex tab layout with the outline, history and usage on the left of the shell">
-  <br><sub>A sample Rex tab with made-up usage figures. The <a href="https://usemilo.net">web demo</a> plays the same edit in Claude Code, Codex and omp.</sub>
+  <a href="https://usemilo.net">
+    <picture>
+      <source media="(max-width: 600px)" srcset="docs/img/web-demo-mobile.webp">
+      <img src="docs/img/web-demo.webp" width="960" alt="Milo’s web demo: a file tree and commit history beside a Claude Code transcript, with Codex and Claude usage percentages above it">
+    </picture>
+  </a>
+  <br><sub><a href="https://usemilo.net">Watch the demo</a> cycle through Claude Code, Codex and omp. The project and usage figures are examples.</sub>
 </p>
 
 ## Install
 
-You need Git and Rust 1.91 or later. The repository is private, so you need access to clone it.
+The installer builds Milo from source. You need Git, Rust 1.91 or later, and access to clone this repository.
 
 ```sh
-git clone https://github.com/mcc0x/milo.git
-cd milo
-sh install.sh
+curl -fsSL https://usemilo.net/install.sh | sh
 ```
 
 In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes. Check **On save:** and press `s` to save. Turn on **Arrange new shell tabs** to use the layout in new shell tabs and new sessions.
