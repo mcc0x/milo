@@ -27,7 +27,7 @@
 .lockup {
   display: flex;
   align-items: center;
-  gap: .35rem;
+  gap: 1rem;
   /* The cat is lighter than the word; nudged so the pair looks centred. */
   margin-inline-start: -.9rem;
 }
