@@ -156,10 +156,11 @@ fn declarations(text: &str) -> Option<Declarations<'_>> {
         return None;
     }
     let mut comment = None;
-    let mut lines = lines.map(move |line| lua_code(line, &mut comment)).filter(|line| !line.is_empty());
+    let mut lines = lines.map(move |line| lua_code(line, &mut comment)).filter(|line| *line != Some(""));
     let mut values = [None; 4];
     let mut insert_panes = None;
     for line in lines.by_ref() {
+        let line = line?;
         let (key, value) = line.split_once('=')?;
         let value = value.trim();
         let field = match key.trim_end() {
@@ -168,8 +169,7 @@ fn declarations(text: &str) -> Option<Declarations<'_>> {
             "local usage_rows" => 2,
             "local arrange_new_tabs" => 3,
             "local chosen" if value == "{" => {
-                let start = value.as_ptr().addr() - text.as_ptr().addr();
-                insert_panes = text[start..].find('\n').map(|end| start + end + 1);
+                insert_panes = Some(value.as_ptr().addr() - text.as_ptr().addr() + 1);
                 break;
             }
             _ => return None,
@@ -182,10 +182,12 @@ fn declarations(text: &str) -> Option<Declarations<'_>> {
     let insert_panes = insert_panes?;
     let mut panes = [None; 3];
     for line in lines.by_ref() {
+        let line = line?;
         if line == "}" {
-            let executable = lines.next().and_then(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim_end() == "local milo").then(|| value.trim())
+            let tail = &text[line.as_ptr().addr() - text.as_ptr().addr() + 1..];
+            let executable = tail.strip_prefix("\n\nlocal milo = ").and_then(|tail| {
+                let (literal, _) = tail.split_once('\n')?;
+                (lua_string_end(literal) == Some(literal.len())).then_some(literal)
             });
             return Some(Declarations { values: [width, outline, rows, new_tabs], panes, insert_panes, executable });
         }
@@ -199,35 +201,29 @@ fn declarations(text: &str) -> Option<Declarations<'_>> {
     None
 }
 
-/// The layout's declarations are one per line, with optional Lua comments.
-fn lua_code<'a>(mut line: &'a str, comment: &mut Option<usize>) -> &'a str {
+/// Take a single declaration, not a second statement hiding after a comment.
+fn lua_code<'a>(mut line: &'a str, comment: &mut Option<usize>) -> Option<&'a str> {
     if let Some(depth) = *comment {
-        let Some(tail) = comment_tail(line, depth) else { return "" };
+        let Some(tail) = comment_tail(line, depth) else { return Some("") };
         *comment = None;
         line = tail;
     }
+    let mut declaration = "";
     loop {
-        // The executable is the only quoted declaration. Dashes in its
-        // path are not the start of a Lua comment.
-        if let Some(rest) = line.trim_start().strip_prefix("local milo")
-            && let Some(literal) = rest.trim_start().strip_prefix('=').map(str::trim_start)
-            && let Some(end) = lua_string_end(literal)
-        {
-            let end = literal.as_ptr().addr() - line.as_ptr().addr() + end;
-            return line[..end].trim();
-        }
-        let Some((code, rest)) = line.split_once("--") else { return line.trim() };
+        let (code, rest) = line.split_once("--").unwrap_or((line, ""));
         let code = code.trim();
-        let Some((depth, rest)) = long_bracket(rest, '[') else { return code };
-        let tail = comment_tail(rest, depth);
-        *comment = tail.is_none().then_some(depth);
-        if let Some(tail) = tail
-            && code.is_empty()
-        {
-            line = tail;
-        } else {
-            return code;
+        if !code.is_empty() {
+            if !declaration.is_empty() {
+                return None;
+            }
+            declaration = code;
         }
+        let Some((depth, rest)) = long_bracket(rest, '[') else { return Some(declaration) };
+        let Some(tail) = comment_tail(rest, depth) else {
+            *comment = Some(depth);
+            return Some(declaration);
+        };
+        line = tail;
     }
 }
 
@@ -287,7 +283,7 @@ pub(super) fn update_actions(text: &str, layout: &Layout, executable: &Path) -> 
     let mut edits = Vec::new();
     let mut replace = |before: &str, after: &str| {
         if before != after {
-            // The declarations are slices of the input, including any leading indentation.
+            // Each value is a slice of the input.
             let start = before.as_ptr().addr() - text.as_ptr().addr();
             edits.push((start..start + before.len(), after.to_owned()));
         }
@@ -301,14 +297,15 @@ pub(super) fn update_actions(text: &str, layout: &Layout, executable: &Path) -> 
     for (before, after) in fields.values.into_iter().zip(values) {
         replace(before, after);
     }
-    let newline = if text.as_bytes().contains(&b'\r') && text.contains("\r\n") { "\r\n" } else { "\n" };
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut added = String::new();
     for (pane, before) in TabPane::ALL.into_iter().zip(fields.panes) {
         let chosen = layout.chosen(pane);
         if let Some(before) = before {
             replace(before, if chosen { "true" } else { "false" });
         } else if chosen {
-            write!(added, "  {} = true,{newline}", pane.name()).expect("writing to a string");
+            // Insert immediately after the opening brace, before any following comment.
+            write!(added, "{newline}  {} = true,", pane.name()).expect("writing to a string");
         }
     }
     let start = fields.insert_panes;

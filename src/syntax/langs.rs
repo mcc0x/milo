@@ -261,6 +261,26 @@ pub fn for_file(name: &str) -> Option<&'static Lang> {
         .find_map(|(extensions, lang)| extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)).then_some(*lang))
 }
 
+impl Lang {
+    /// Only colour a script when its explicit interpreter agrees with the extension.
+    pub fn agrees_with_shebang(&self, first: &str) -> bool {
+        let Some(command) = first.trim_start_matches('\u{feff}').strip_prefix("#!") else { return true };
+        let mut words = command.split_ascii_whitespace();
+        let Some(program) = words.next().and_then(|path| path.strip_prefix('/')) else { return true };
+        let program = program.rsplit('/').next().unwrap_or("");
+        let program = if program == "env" { words.find(|word| !word.starts_with('-')).unwrap_or("") } else { program };
+        let languages: &[_] = match program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
+            "bash" | "sh" | "zsh" => &[&SHELL],
+            "python" | "pypy" | "uv" => &[&PYTHON],
+            "bun" | "deno" | "node" | "nodejs" => &[&JAVASCRIPT, &TYPESCRIPT, &JSX, &TSX],
+            "php" => &[&PHP],
+            "rust-script" => &[&RUST],
+            _ => return false,
+        };
+        languages.iter().any(|&lang| std::ptr::eq(self, lang))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{

@@ -28,12 +28,16 @@ fn open(path: &Path, create: bool) -> io::Result<File> {
     Ok(file)
 }
 
+fn create(dir: &Path, name: &str) -> io::Result<File> {
+    fs::create_dir_all(dir)?;
+    let _directory = crate::fs_ops::open_dir(dir)?;
+    open(&dir.join(name), true)
+}
+
 /// Keep the marker in place so every setup locks the same file.
 pub(super) fn setup(dir: &Path) -> Result<File, &'static str> {
     fn acquire(dir: &Path) -> io::Result<Option<File>> {
-        fs::create_dir_all(dir)?;
-        let _directory = crate::fs_ops::open_dir(dir)?;
-        let lock = open(&dir.join("setup.lock"), true)?;
+        let lock = create(dir, "setup.lock")?;
         Ok(take(&lock)?.then_some(lock))
     }
     match acquire(dir) {
@@ -83,7 +87,7 @@ fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
 }
 
 fn existing(dir: &Path) -> io::Result<Option<File>> {
-    match open(&dir.join(LISTENER_LOCK), false) {
+    match crate::fs_ops::open_dir(dir).and_then(|_| open(&dir.join(LISTENER_LOCK), false)) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -115,25 +119,33 @@ pub(super) fn wait_running(dir: &Path) -> io::Result<bool> {
 /// Becomes the listener, unless one is already running: then this returns
 /// at once. On success it never returns, having turned into `rex`.
 pub(super) fn listen(dir: &Path, script: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let lock = open(&dir.join(LISTENER_LOCK), true)?;
+    let lock = create(dir, LISTENER_LOCK)?;
     if !take(&lock)? {
         return Ok(());
     }
     if !fs::symlink_metadata(script)?.is_file() {
         return Err(ErrorKind::InvalidInput.into());
     }
+    keep_across_exec(&lock)?;
+    Err(crate::rex::exec_listener(script))
+}
+
+fn keep_across_exec(lock: &File) -> io::Result<()> {
     // SAFETY: The descriptor is open. Left open in `rex`, it keeps the lock:
     // a process gives its lock up when it closes the file.
     if unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    Err(crate::rex::exec_listener(script))
+    Ok(())
 }
 
 /// Ends the listener if one is running, and returns once another could
 /// start in its place.
 pub(super) fn stop(dir: &Path) -> io::Result<()> {
+    stop_when(dir, |asked| asked.elapsed() >= WIND_DOWN)
+}
+
+fn stop_when(dir: &Path, mut expired: impl FnMut(Instant) -> bool) -> io::Result<()> {
     let Some(lock) = existing(dir)? else { return Ok(()) };
     for _ in 0..2 {
         let Some(listener) = holder(&lock)? else { return Ok(()) };
@@ -149,7 +161,7 @@ pub(super) fn stop(dir: &Path) -> io::Result<()> {
         loop {
             match holder(&lock)? {
                 None => return Ok(()),
-                Some(pid) if pid != listener || asked.elapsed() >= WIND_DOWN => break,
+                Some(pid) if pid != listener || expired(asked) => break,
                 Some(_) => std::thread::sleep(POLL),
             }
         }
@@ -163,6 +175,9 @@ pub(super) fn stop(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Command;
+
     use crate::fixture::Fixture;
 
     #[test]
@@ -178,5 +193,51 @@ mod tests {
         let lock = open(&f.root.join(LISTENER_LOCK), true).unwrap();
         assert_eq!(holder(&lock).unwrap(), None);
         stop(&f.root).unwrap();
+    }
+
+    #[test]
+    fn stopping_retries_when_the_listener_holds_the_lock_after_the_wait() {
+        const ROOT: &str = "MILO_TEST_STOP_RETRY";
+        const TEST_WAIT: Duration = Duration::from_secs(30);
+        if let Some(root) = std::env::var_os(ROOT) {
+            let lock = create(Path::new(&root), LISTENER_LOCK).unwrap();
+            assert!(take(&lock).unwrap());
+            keep_across_exec(&lock).unwrap();
+            let error = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(
+                    "trap 'if [ -f \"$1/term\" ]; then exit; fi; : > \"$1/term\"' TERM\n\
+                      : > \"$1/started\"\nwhile :; do /bin/sleep 0.02; done",
+                )
+                .arg("listener")
+                .arg(root)
+                .exec();
+            panic!("{error}");
+        }
+        let f = Fixture::folder();
+        let test = "setup::lock::tests::stopping_retries_when_the_listener_holds_the_lock_after_the_wait";
+        let mut child =
+            Command::new(std::env::current_exe().unwrap()).args(["--exact", test]).env(ROOT, &f.root).spawn().unwrap();
+        let started = f.root.join("started");
+        let first_signal = f.root.join("term");
+        let deadline = Instant::now() + TEST_WAIT;
+        while !started.exists() && Instant::now() < deadline {
+            std::thread::sleep(POLL);
+        }
+        let mut retried = false;
+        let stopped = started.exists()
+            && stop_when(&f.root, |asked| {
+                // Expire the first grace period only once the child has handled the signal.
+                if !retried && first_signal.exists() {
+                    retried = true;
+                    return true;
+                }
+                asked.elapsed() >= TEST_WAIT
+            })
+            .is_ok();
+        if !stopped {
+            let _ = child.kill();
+        }
+        assert!(child.wait().unwrap().success() && stopped && retried);
     }
 }

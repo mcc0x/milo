@@ -3,17 +3,18 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use super::{Body, Reader, Source, Text, WorkingFile};
+use super::{Body, Reader, Source, Stamp, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
-use crate::git::{CommitId, FileStamp, Kind, PendingFile, Repo};
+use crate::git::{CommitId, Kind, PendingFile, Repo};
 use crate::picture::{self, Picture};
 use crate::read::{self, Content};
-use crate::syntax::Lang;
+use crate::syntax;
 
 /// How many bytes to read when there is no diff text to show.
 const LIMIT: u64 = 2 << 20;
 pub(super) const NOT_TEXT: &str = "This file is not text.";
+const NOT_FILE: &str = "Not a file, so there is nothing to show.";
 
 struct Location {
     repo: Repo,
@@ -87,7 +88,7 @@ impl Reader {
     pub(super) fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {
         let short_id = hash[..hash.len().min(7)].to_string();
         let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time });
-        reader.body = Body::from_lines(committed_lines(repo, path, hash, file), reader.lang);
+        reader.body = Body::from_lines(committed_lines(repo, path, hash, file), syntax::for_file(path));
         reader.reveal_first_change();
         reader
     }
@@ -95,25 +96,33 @@ impl Reader {
     /// Rebuilds the working file on screen, keeping the last good result if git fails.
     pub(super) fn load(&mut self) {
         let Source::Working(work) = &mut self.source else { return };
-        work.repo.read();
-        let stamp = FileStamp::at(&work.absolute);
-        if !work.repo.ok() {
+        let metadata = work.absolute.symlink_metadata().ok();
+        let stamp = metadata.as_ref().map(Stamp::of);
+        let outside = work
+            .absolute
+            .parent()
+            .and_then(|dir| dir.canonicalize().ok())
+            .is_some_and(|dir| !dir.starts_with(&work.repo.root));
+        // Git cannot diff a tracked file replaced by a pipe or device.
+        if outside || metadata.is_some_and(|m| !m.is_file() && !m.is_symlink()) {
+            self.kind = Kind::None;
+            self.body = Body::Note(if outside { "This path now leads outside the project." } else { NOT_FILE });
+            work.stamp = stamp;
             return;
         }
-        let patch = match work.file_diff(&self.path) {
-            Some(patch) => patch,
-            None if work.repo.ok() => {
-                let note = if matches!(read::file(&work.absolute, LIMIT), Content::Unreadable) {
-                    "This file cannot be read."
-                } else {
-                    "Too large to show."
-                };
-                self.kind = Kind::None;
-                self.body = Body::Note(note);
-                work.stamp = stamp;
-                return;
-            }
-            None => return,
+        work.repo.read();
+        let Some(patch) = work.repo.ok().then(|| work.file_diff(&self.path)).flatten() else {
+            let note = match read::file(&work.absolute, 0) {
+                Content::Unreadable => "This file cannot be read.",
+                Content::NotFile => NOT_FILE,
+                _ if !work.repo.ok() => return,
+                Content::Gone => "This file is gone.",
+                _ => "Too large to show.",
+            };
+            self.kind = Kind::None;
+            self.body = Body::Note(note);
+            work.stamp = stamp;
+            return;
         };
         let picture = picture::is_picture(&self.path);
         let kept = picture && stamp == work.stamp && matches!(self.body, Body::Picture(_));
@@ -122,11 +131,11 @@ impl Reader {
         if kept {
             return;
         }
-        self.body = working_body(&work.absolute, patch, picture, self.lang);
+        self.body = working_body(&work.absolute, patch, picture, syntax::for_file(&self.path));
     }
 }
 
-fn working_body(path: &Path, patch: FileDiff, picture: bool, lang: Option<&Lang>) -> Body {
+fn working_body(path: &Path, patch: FileDiff, picture: bool, lang: Option<&'static syntax::Lang>) -> Body {
     if !picture {
         if patch.binary {
             return Body::Note(NOT_TEXT);
@@ -137,16 +146,42 @@ fn working_body(path: &Path, patch: FileDiff, picture: bool, lang: Option<&Lang>
     }
     let line_kind = if patch.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
     let lines = match read::file(path, if picture { picture::FILE_LIMIT } else { LIMIT }) {
-        Content::Bytes(bytes) if picture => return Picture::decode(bytes, path).map_or_else(Body::Note, Body::Picture),
         Content::Gone | Content::Link(_) if !patch.lines.is_empty() => Ok(patch.lines),
         Content::Gone => Err("This file is gone."),
         Content::Unreadable => Err("This file cannot be read."),
-        Content::NotFile => Err("Not a file, so there is nothing to show."),
+        Content::NotFile => Err(NOT_FILE),
         Content::TooLarge => Err("Too large to show."),
-        Content::Link(target) => Ok(vec![Line::new(line_kind, 1, &target.to_string_lossy())]),
-        Content::Bytes(bytes) => byte_lines(&bytes, line_kind),
+        Content::Link(target) => {
+            return Body::Text(Text::new(vec![Line::new(line_kind, 1, &target.to_string_lossy())], None));
+        }
+        Content::Bytes(mut bytes) => {
+            if picture && could_be_picture(&bytes) {
+                bytes = match Picture::decode(bytes, path) {
+                    Ok(picture) => return Body::Picture(picture),
+                    Err(bytes) if text(&bytes).is_some() => bytes,
+                    Err(_) => return Body::Note("This file cannot be shown as a picture."),
+                };
+            }
+            if !patch.lines.is_empty() {
+                Ok(patch.lines)
+            } else if bytes.len() as u64 > LIMIT {
+                Err("Too large to show.")
+            } else {
+                byte_lines(&bytes, line_kind)
+            }
+        }
     };
     Body::from_lines(lines, lang)
+}
+
+/// SVG and PDF may also be valid UTF-8; let the converter decide for those.
+fn could_be_picture(bytes: &[u8]) -> bool {
+    let prefix = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes).trim_ascii_start();
+    prefix.starts_with(b"<") || prefix.starts_with(b"%PDF-") || text(bytes).is_none()
+}
+
+fn text(bytes: &[u8]) -> Option<&str> {
+    if bytes.contains(&0) { None } else { std::str::from_utf8(bytes).ok() }
 }
 
 /// Turns a stored file into text, or says why it cannot be shown.
@@ -154,10 +189,7 @@ fn byte_lines(bytes: &[u8], kind: LineKind) -> Result<Vec<Line>, &'static str> {
     if bytes.is_empty() {
         return Err("Empty.");
     }
-    if bytes.contains(&0) {
-        return Err(NOT_TEXT);
-    }
-    let text = String::from_utf8_lossy(bytes);
+    let text = text(bytes).ok_or(NOT_TEXT)?;
     Ok((1..).zip(text.lines()).map(|(no, line)| Line::new(kind, no, line)).collect())
 }
 
@@ -184,9 +216,6 @@ impl WorkingFile {
 
 /// A patch covers all the lines when there are edits. Otherwise, read the stored file.
 fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFile>) -> Result<Vec<Line>, &'static str> {
-    if picture::is_picture(path) {
-        return Err(NOT_TEXT);
-    }
     if let Some(file) = file {
         let raw = repo.file_diff_at(hash, file).map_err(|err| match err {
             OutputError::TooLarge => "Too large to show.",

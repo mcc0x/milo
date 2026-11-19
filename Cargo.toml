@@ -3,9 +3,13 @@ name = "milo"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "Terminal panes for a git file tree, commit history and a read-only reader."
+description = "Terminal panes for browsing Git files and commits, reading code, and checking coding agent usage."
 homepage = "https://usemilo.net"
+repository = "https://github.com/mcc0x/milo"
 license = "MIT"
+keywords = ["terminal", "git", "tui", "rex", "code-reader"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "tests/**", "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml"]
 
 [dependencies]
 libc = "0.2"

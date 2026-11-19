@@ -103,14 +103,13 @@ pub fn folders_above(path: &str) -> impl Iterator<Item = &str> {
 #[derive(Default)]
 pub struct Folds {
     choice: HashMap<String, bool>,
-    all: bool,
-    /// The choices made before everything was opened, to go back to.
-    before_all: HashMap<String, bool>,
+    /// The choices to restore when the default goes back to closed.
+    before_all: Option<HashMap<String, bool>>,
 }
 
 impl Folds {
     pub fn is_open(&self, path: &str) -> bool {
-        self.choice.get(path).copied().unwrap_or(self.all)
+        self.choice.get(path).copied().unwrap_or_else(|| self.all())
     }
 
     pub fn set(&mut self, path: &str, open: bool) {
@@ -139,22 +138,19 @@ impl Folds {
     }
 
     pub fn all(&self) -> bool {
-        self.all
+        self.before_all.is_some()
     }
 
     /// Opens every folder, or goes back to how things were before that.
     pub fn toggle_all(&mut self) {
-        self.all = !self.all;
-        if self.all {
-            self.before_all = std::mem::take(&mut self.choice);
-        } else {
-            // What was decided before wins; anything first decided while
-            // everything was open is kept.
-            let mut choice = std::mem::take(&mut self.before_all);
+        if let Some(mut choice) = self.before_all.take() {
+            // Earlier choices win; keep decisions first made while everything was open.
             for (path, open) in self.choice.drain() {
                 choice.entry(path).or_insert(open);
             }
             self.choice = choice;
+        } else {
+            self.before_all = Some(std::mem::take(&mut self.choice));
         }
     }
 }
@@ -260,7 +256,8 @@ impl Tree {
     /// expanded; `pending_only` drops everything that is not pending.
     pub fn layout(&mut self, open: impl Fn(&str) -> bool, pending_only: bool) {
         self.rows.clear();
-        let mut stack: Vec<_> = self.node(0).children.iter().rev().map(|&node| TreeRow { node, depth: 0 }).collect();
+        let Some(root) = self.nodes.first() else { return };
+        let mut stack: Vec<_> = root.children.iter().rev().map(|&node| TreeRow { node, depth: 0 }).collect();
         while let Some(row) = stack.pop() {
             let n = self.node(row.node);
             if pending_only && n.kind == Kind::None {

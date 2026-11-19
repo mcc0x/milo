@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::help::Page;
 use crate::keys::{Input, Key};
 use crate::screen::Screen;
-use crate::term::{self, Session, Wait};
+use crate::term::{self, Session, Wait, milliseconds};
 use crate::ui;
 use crate::watch::{Scope, Watcher};
 
@@ -53,6 +53,8 @@ pub enum Start<'a> {
     Check,
     Offer(fn() -> Result<Box<dyn Pane>, String>),
 }
+
+const LOADING_DELAY: Duration = Duration::from_millis(75);
 
 /// Minimum rest after a look if the watcher has reported a change.
 const MIN_LOOK_INTERVAL: Duration = Duration::from_millis(120);
@@ -139,25 +141,24 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
     if terminal_reply(screen, key) {
         return After::Stay;
     }
-    match key {
-        Key::Ctrl(b'c') | Key::Eof => return After::Leave,
+    match (key, &mut *help) {
+        (Key::Ctrl(b'c') | Key::Eof, _) => After::Leave,
         // The pane still sees focus changes while its help is up.
-        Key::Focus(_) => return pane.key(key),
-        _ => {
-            if let Some(page) = help {
-                if !page.scroll(key, screen.h) {
-                    *help = None;
-                }
-            } else if key == Key::Char('?') {
-                if Page::fits(screen) {
-                    *help = Some(pane.help());
-                }
-            } else {
-                return pane.key(key);
+        (Key::Focus(_), _) => pane.key(key),
+        (_, Some(page)) => {
+            if !page.scroll(key, screen.h) {
+                *help = None;
             }
+            After::Stay
         }
+        (Key::Char('?'), None) => {
+            if Page::fits(screen) {
+                *help = Some(pane.help());
+            }
+            After::Stay
+        }
+        _ => pane.key(key),
     }
-    After::Stay
 }
 
 fn watch_pane(pane: &dyn Pane, needs_polling: bool) -> (Watcher, Option<Duration>) {
@@ -195,12 +196,13 @@ fn with_loading<T>(
     dir: Option<&Path>,
     terminal: &mut Session,
     input: &mut Input,
+    delay: Duration,
     open: impl FnOnce() -> T,
 ) -> T {
     let Ok((ready, done)) = io::pipe() else { return open() };
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            let delay = Instant::now() + Duration::from_millis(75);
+            let delay = Instant::now() + delay;
             let mut painted = false;
             let mut keys = Vec::new();
             while !term::TERMINATED.load(Ordering::Relaxed) {
@@ -237,10 +239,6 @@ fn with_loading<T>(
     })
 }
 
-fn milliseconds(wait: Duration) -> i32 {
-    i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX)
-}
-
 pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
     let mut terminal = match Session::open() {
         Ok(terminal) => terminal,
@@ -265,8 +263,8 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         Ok::<_, String>((pane, watcher, pace))
     };
     let opened = match start {
-        Start::Reading(dir) => with_loading(&mut screen, Some(dir), terminal, &mut input, || load(open)),
-        Start::Check => with_loading(&mut screen, None, terminal, &mut input, || load(open)),
+        Start::Reading(dir) => with_loading(&mut screen, Some(dir), terminal, &mut input, LOADING_DELAY, || load(open)),
+        Start::Check => with_loading(&mut screen, None, terminal, &mut input, LOADING_DELAY, || load(open)),
         _ => load(open),
     };
     if term::TERMINATED.load(Ordering::Relaxed) {
@@ -278,7 +276,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
     let mut redraw = true;
     let mut frame_due = None;
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
-        if term::RESIZED.swap(false, Ordering::Relaxed) {
+        if term::RESIZED.swap(false, Ordering::Relaxed) || screen.w == 0 {
             let (w, h) = terminal.size();
             screen.resize(w, h);
             if !Page::fits(&screen) {
@@ -316,17 +314,18 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                             if matches!(key, Key::Char('q') | Key::Esc)
                                 && let Some(open) = next.take()
                             {
-                                let opened =
-                                    with_loading(&mut screen, Some(Path::new(".")), terminal, &mut input, || {
-                                        load(&open)
-                                    });
+                                let opened = with_loading(
+                                    &mut screen,
+                                    Some(Path::new(".")),
+                                    terminal,
+                                    &mut input,
+                                    LOADING_DELAY,
+                                    || load(&open),
+                                );
                                 if term::TERMINATED.load(Ordering::Relaxed) {
                                     return Ok(());
                                 }
-                                let (loaded, watching, next_pace) = opened?;
-                                pane = loaded;
-                                watcher = watching;
-                                pace = next_pace;
+                                (pane, watcher, pace) = opened?;
                                 redraw = true;
                             } else {
                                 break 'run;
@@ -363,13 +362,48 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::{Read, Write};
+
     use crate::{fixture, git::Repo, outline::Outline};
+
+    const TEST_WAIT: Duration = Duration::from_secs(60);
+
+    fn read_until(master: &mut File, text: &str) -> String {
+        let until = Instant::now() + TEST_WAIT;
+        let mut output = Vec::new();
+        while !String::from_utf8_lossy(&output).contains(text) {
+            let left = until.saturating_duration_since(Instant::now());
+            let mut fds = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            if left.is_zero() {
+                break;
+            }
+            match term::wait_ready(&mut fds, milliseconds(left)) {
+                0 => break,
+                n if n < 0 => {
+                    let error = io::Error::last_os_error();
+                    assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+                    continue;
+                }
+                _ => {}
+            }
+            let mut bytes = [0; 512];
+            match master.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&bytes[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => panic!("cannot read test terminal: {e}"),
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    }
 
     #[test]
     fn a_fast_open_does_not_draw_a_loading_frame() {
         let mut screen = Screen::new();
         let (mut terminal, _master, _signals) = Session::test_pty();
-        assert_eq!(with_loading(&mut screen, Some(Path::new(".")), &mut terminal, &mut Input::default(), || 42), 42);
+        let value = with_loading(&mut screen, None, &mut terminal, &mut Input::default(), TEST_WAIT, || 42);
+        assert_eq!(value, 42);
         assert_eq!((screen.w, screen.h), (0, 0));
         assert!(screen.emitted().is_empty());
     }
@@ -383,22 +417,11 @@ mod tests {
 
     #[test]
     fn a_slow_first_check_has_a_loading_frame() {
-        use std::fs::File;
-        use std::io::{Read, Write};
-
         struct Checked(File);
         impl Pane for Checked {
             fn check(&mut self) -> bool {
-                let until = Instant::now() + Duration::from_secs(2);
-                let mut output = Vec::new();
-                while !String::from_utf8_lossy(&output).contains("Reading…") {
-                    let mut fds = [libc::pollfd { fd: self.0.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-                    let left = until.saturating_duration_since(Instant::now());
-                    assert!(term::wait_ready(&mut fds, milliseconds(left)) > 0, "nothing was drawn during the check");
-                    let mut bytes = [0; 512];
-                    let n = self.0.read(&mut bytes).unwrap();
-                    output.extend_from_slice(&bytes[..n]);
-                }
+                let output = read_until(&mut self.0, "Reading…");
+                assert!(output.contains("Reading…"), "{output:?}");
                 true
             }
             fn draw(&mut self, screen: &mut Screen) {
@@ -415,6 +438,53 @@ mod tests {
 
         let (mut terminal, master, _signals) = Session::test_pty();
         run_entered(Start::Check, &|| Ok(Box::new(Checked(master.try_clone().unwrap()))), &mut terminal).unwrap();
+    }
+
+    #[test]
+    fn an_ignored_key_leaves_a_frame_alone_but_a_terminal_reply_redraws_it() {
+        struct Quiet {
+            master: File,
+            first: bool,
+        }
+        impl Pane for Quiet {
+            fn draw(&mut self, screen: &mut Screen) {
+                let text = if std::mem::take(&mut self.first) {
+                    self.master.write_all(b"z").unwrap();
+                    "Ready"
+                } else if screen.light_background() {
+                    "Light"
+                } else {
+                    "Wrong"
+                };
+                screen.clear();
+                screen.put(0, 0, screen.w, text, ui::FAINT);
+            }
+            fn help(&self) -> Page {
+                Page::new(vec![])
+            }
+            fn key(&mut self, key: Key) -> After {
+                if key == Key::Char('z') {
+                    // Arrives in a separate input batch, even on a loaded machine.
+                    self.master.write_all(b"\x1b]11;rgb:ff/ff/ff\x1b\\").unwrap();
+                }
+                if key == Key::Char('q') { After::Leave } else { After::Ignored }
+            }
+        }
+
+        let (mut terminal, mut master, _signals) = Session::test_pty();
+        let pane_master = master.try_clone().unwrap();
+        let output = std::thread::scope(|scope| {
+            let read = scope.spawn(|| {
+                let output = read_until(&mut master, "Light");
+                master.write_all(b"q").unwrap();
+                output
+            });
+            let open =
+                || Ok(Box::new(Quiet { master: pane_master.try_clone().unwrap(), first: true }) as Box<dyn Pane>);
+            run_entered(Start::Loaded, &open, &mut terminal).unwrap();
+            read.join().unwrap()
+        });
+        assert!(output.contains("Ready") && output.contains("Light") && !output.contains("Wrong"), "{output:?}");
     }
 
     #[test]

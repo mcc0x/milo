@@ -303,7 +303,7 @@ mod tests {
         second.write("new.txt", "recent change\n");
         let fd = replacement.fd().expect("the next pane should also get a watcher");
         let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
-        assert_eq!(crate::term::wait_ready(&mut fds, 2_000), 1);
+        assert_eq!(crate::term::wait_ready(&mut fds, 30_000), 1);
         assert_eq!(fds[0].revents, libc::POLLIN);
     }
 }

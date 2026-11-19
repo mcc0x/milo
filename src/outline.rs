@@ -230,12 +230,12 @@ impl Pane for Outline {
         if let Some(reader) = &mut self.reading {
             reader.draw(screen);
         } else {
-            self.draw_outline(screen);
+            self.draw_outline(screen, Instant::now());
         }
     }
 
     fn key(&mut self, key: Key) -> After {
-        self.outline_key(key)
+        self.outline_key(key, Instant::now())
     }
 
     fn watch_scope(&self) -> Scope {
@@ -348,6 +348,12 @@ mod tests {
     fn draw(o: &mut Outline, w: usize, h: usize) -> Screen {
         let mut screen = Screen::sized(w, h);
         o.draw(&mut screen);
+        screen
+    }
+
+    fn draw_at(o: &mut Outline, w: usize, h: usize, now: Instant) -> Screen {
+        let mut screen = Screen::sized(w, h);
+        o.draw_outline(&mut screen, now);
         screen
     }
 
@@ -502,7 +508,8 @@ mod tests {
         f.write("src/deep/util.rs", "fn util() { even_more(); }\n");
         assert!(o.check());
         assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
-        assert_eq!(draw(&mut o, 65, 12).text()[11].trim_start(), "following util.rs");
+        let at = o.note.as_ref().unwrap().1;
+        assert_eq!(draw_at(&mut o, 65, 12, at).text()[11].trim_start(), "following util.rs");
     }
 
     #[test]
@@ -676,7 +683,8 @@ mod tests {
         let mut o = open(&f);
         o.key(Key::End);
         o.say("Cannot open this file");
-        let frame = draw(&mut o, 80, 5);
+        let at = o.note.as_ref().unwrap().1;
+        let frame = draw_at(&mut o, 80, 5, at);
         let rows = frame.text();
         assert_eq!(rows[4], " Cannot open this file");
         assert!(rows[3].contains("last.txt") && frame.bar_at(3), "{rows:?}");
@@ -783,30 +791,53 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_tree_shows_the_whole_closed_folder_count() {
+        let f = Fixture::new();
+        for i in 0..16 {
+            f.write(&format!("abcdefghijklmnopqrstuv/file-{i}.txt"), "changed\n");
+        }
+        let mut o = open(&f);
+        o.key(Key::Char('p'));
+        o.key(Key::Char(' '));
+        let rows = draw(&mut o, 28, 20).text();
+        assert!(rows[1].ends_with("… 16"), "{rows:?}");
+    }
+
+    #[test]
     fn a_mark_seen_in_the_outline_fades_after_focus_leaves() {
         let f = project();
         let mut o = open(&f);
         let now = Instant::now();
         o.attention.focus(true, now - Duration::from_secs(1));
         o.mark_files(&[], now);
-        let rows = draw(&mut o, 65, 12).text();
+        let rows = draw_at(&mut o, 65, 12, now).text();
         assert!(!file_row(&rows, "main.rs").starts_with(' '), "{rows:?}");
 
         o.attention.focus(false, now + Duration::from_secs(1));
-        o.expire(now + Duration::from_secs(4));
-        let rows = draw(&mut o, 65, 12).text();
+        let rows = draw_at(&mut o, 65, 12, now + Duration::from_secs(4)).text();
         assert!(file_row(&rows, "main.rs").starts_with(' '), "{rows:?}");
     }
 
     #[test]
-    fn an_initial_git_error_does_not_claim_that_the_tree_is_empty() {
+    fn an_initial_git_error_keeps_the_outline_usable_until_git_answers() {
         let f = project();
+        let index = f.root.join(".git/index");
+        let saved = fs::read(&index).unwrap();
         f.write(".git/index", "corrupt index");
         let mut o = open(&f);
         let rows = draw(&mut o, 80, 24).text();
         assert!(rows[0].ends_with("git did not answer"), "{rows:?}");
         assert!(rows[1].is_empty(), "{rows:?}");
         assert!(draw(&mut o, 10, 20).text()[0].contains("! git"));
+
+        for key in ['c', 'e'] {
+            assert_eq!(o.key(Key::Char(key)), After::Stay);
+            assert!(draw(&mut o, 80, 24).text()[0].ends_with("git did not answer"));
+        }
+
+        fs::write(index, saved).unwrap();
+        assert!(o.check());
+        assert!(draw(&mut o, 80, 24).text()[0].ends_with("2 to commit"));
     }
 
     #[test]
@@ -815,9 +846,11 @@ mod tests {
         f.write("page.txt", "a file\n");
         let mut o = open(&f);
         o.say("Cannot open this file");
-        draw(&mut o, 40, 1);
-        o.key(Key::Click(3, 0));
-        o.key(Key::Click(3, 0));
-        assert_eq!(draw(&mut o, 40, 1).text(), [" Cannot open this file"]);
+        let at = o.note.as_ref().unwrap().1;
+        draw_at(&mut o, 40, 1, at);
+        o.outline_key(Key::Click(3, 0), at);
+        o.outline_key(Key::Click(3, 0), at);
+        assert!(o.reading.is_none());
+        assert_eq!(draw_at(&mut o, 40, 1, at).text(), [" Cannot open this file"]);
     }
 }

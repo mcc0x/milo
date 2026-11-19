@@ -6,7 +6,9 @@
 
 use crate::screen::{Screen, Style};
 
-const DIGITS: [[&str; 3]; 10] = [
+use super::LARGE_ROWS;
+
+const DIGITS: [[&str; LARGE_ROWS]; 10] = [
     ["▟▀▙", "█ █", "▜▄▛"], // 0
     ["▄█ ", " █ ", "▄█▄"], // 1
     ["▀▀▙", "▟▀▀", "█▄▄"], // 2
@@ -18,43 +20,32 @@ const DIGITS: [[&str; 3]; 10] = [
     ["▟▀▙", "▟▀▙", "▜▄▛"], // 8
     ["▟▀▙", "▀▀█", "▄▄▛"], // 9
 ];
-/// Rows a large figure takes.
-const ROWS: usize = 3;
 /// Columns from the start of one large glyph to the start of the next.
 const PITCH: usize = 4;
 
-/// The glyph for one character of a figure, if it is drawn large.
-fn large(ch: u8) -> Option<[&'static str; 3]> {
+fn large(ch: u8) -> [&'static str; LARGE_ROWS] {
     match ch {
-        b'0'..=b'9' => Some(DIGITS[usize::from(ch - b'0')]),
-        b'<' => Some([" ▄▀", "█  ", " ▀▄"]),
-        b'+' => Some([" ▄ ", "▀█▀", " ▀ "]),
-        _ => None,
+        b'0'..=b'9' => DIGITS[usize::from(ch - b'0')],
+        b'<' => [" ▄▀", "█  ", " ▀▄"],
+        b'+' => [" ▄ ", "▀█▀", " ▀ "],
+        _ => unreachable!("the large glyphs are digits or qualifiers"),
     }
 }
 
-/// The columns a figure takes: its large glyphs with a column between
-/// them, and one more for a percent sign.
+/// Each large glyph takes one pitch, including the gap or trailing percent sign.
 pub(super) fn width(figure: &str) -> usize {
-    let glyphs = figure.bytes().filter(|&ch| large(ch).is_some()).count();
-    let small = figure.len() - glyphs;
-    (PITCH * glyphs).saturating_sub(1) + small
+    PITCH * (figure.len() - 1)
 }
 
 /// Draws a figure such as "27%" or "<1%" with its top left at (x, y).
 pub(super) fn draw(screen: &mut Screen, mut x: usize, y: usize, figure: &str, colour: Style) {
-    for ch in figure.bytes() {
-        if let Some(glyph) = large(ch) {
-            for (row, text) in glyph.into_iter().enumerate() {
-                screen.put(x, y + row, PITCH - 1, text, colour);
-            }
-            x += PITCH;
-        } else {
-            // Close up to the last digit, at its foot.
-            x = x.saturating_sub(1);
-            x += screen.put(x, y + ROWS - 1, 1, "%", colour.bold());
+    for ch in figure[..figure.len() - 1].bytes() {
+        for (row, text) in large(ch).into_iter().enumerate() {
+            screen.put(x, y + row, PITCH - 1, text, colour);
         }
+        x += PITCH;
     }
+    screen.put(x - 1, y + LARGE_ROWS - 1, 1, "%", colour.bold());
 }
 
 #[cfg(test)]
@@ -62,7 +53,7 @@ mod tests {
     use super::*;
 
     fn drawn(figure: &str) -> Vec<String> {
-        let mut screen = Screen::sized(width(figure), ROWS);
+        let mut screen = Screen::sized(width(figure), LARGE_ROWS);
         draw(&mut screen, 0, 0, figure, Style::PLAIN);
         screen.text()
     }

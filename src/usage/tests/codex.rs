@@ -53,7 +53,22 @@ fn an_unreadable_codex_report_supersedes_older_figures() {
         let rows = frame(&mut open(&f, NOW), 140, 3);
         let left = |y: usize| rows[y].split_once('│').unwrap().0;
         assert!(left(1).contains('—') && !left(1).contains("40%"));
-        assert!(left(2).contains("no limits reported"));
+        assert!(left(2).contains("no limits to show"));
+    }
+}
+
+#[test]
+fn codex_token_count_without_a_limit_report_does_not_erase_the_previous_figure() {
+    let f = Fixture::folder();
+    let previous = codex(NOW - MINUTE, 40, NOW + DAY, "null");
+    let stamp = iso(NOW);
+    for limits in ["null", "0", "[]"] {
+        let record = format!(
+            "{{\"timestamp\":\"{stamp}Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\
+             \"rate_limits\":{limits}}}}}\n"
+        );
+        write(&f, CODEX, &format!("{previous}{record}"), NOW);
+        assert!(frame(&mut open(&f, NOW), 140, 3)[1].contains("40%"));
     }
 }
 
@@ -133,11 +148,11 @@ fn no_codex_sessions_and_sessions_without_limits_have_different_notes() {
     let f = Fixture::folder();
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
-    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no local source found");
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no sessions found");
     write(&f, CODEX, "{}\n", NOW);
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
-    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no limits reported");
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no limits to show");
 }
 
 #[test]

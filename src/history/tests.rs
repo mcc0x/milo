@@ -72,7 +72,7 @@ fn an_all_pushed_heading_uses_a_check_and_a_narrow_count_still_names_commits() {
 }
 
 #[test]
-fn an_unpushed_branch_names_its_state_when_a_remote_exists() {
+fn the_heading_identifies_a_branch_without_a_configured_push_comparison() {
     let f = Fixture::new();
     commit(&f, "first");
     f.git(&["switch", "-q", "-c", "feature"]);
@@ -82,15 +82,16 @@ fn an_unpushed_branch_names_its_state_when_a_remote_exists() {
     f.git(&["remote", "add", "backup", "../missing"]);
     assert!(history.check());
     let heading = &draw(&mut history, 50, 12).text()[0];
-    assert!(heading.starts_with(" project  feature") && heading.ends_with("not pushed yet"), "{heading}");
-    assert_eq!(heading, &format!(" project  feature{}not pushed yet", " ".repeat(18)));
+    assert!(heading.starts_with(" project  feature") && heading.ends_with("no branch tracked"), "{heading}");
+    assert_eq!(heading, &format!(" project  feature{}no branch tracked", " ".repeat(15)));
     f.git(&["remote", "remove", "backup"]);
     assert!(history.check());
     assert!(draw(&mut history, 50, 12).text()[0].ends_with("no remote"));
     f.push();
+    f.git(&["push", "-q", "origin", "feature:main"]);
     f.git(&["remote", "set-head", "origin", "main"]);
     let mut history = open(&f);
-    assert!(draw(&mut history, 50, 12).text()[0].ends_with("not pushed yet"));
+    assert!(draw(&mut history, 50, 12).text()[0].ends_with("no branch tracked"));
     f.git(&["push", "-q", "-u", "origin", "feature"]);
     assert!(history.check());
     assert!(draw(&mut history, 50, 12).text()[0].ends_with("✓ all pushed"));
@@ -372,6 +373,22 @@ fn a_file_in_the_first_commit_has_only_additions() {
     history.key(Key::Enter);
     let rows = read_next(&mut history, "first.txt");
     assert_eq!(&rows[1..3], [" 1 + first line", " 2 + second line"]);
+}
+
+#[test]
+fn a_shallow_boundary_does_not_claim_unchanged_files_were_added() {
+    let f = Fixture::new();
+    f.write("old.txt", "already there\n");
+    f.commit("first");
+    f.write("new.txt", "just added\n");
+    f.commit("second");
+    f.git(&["clone", "-q", "--depth=1", &format!("file://{}", f.root.display()), "shallow"]);
+    let mut history = History::new(Repo::open(&f.root.join("shallow")).unwrap(), false);
+    history.key(Key::Enter);
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "second").contains("▾"));
+    assert!(rows.iter().any(|row| row.contains("Git did not answer for this commit.")), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
 }
 
 #[test]

@@ -19,6 +19,7 @@ use super::{AGE_NOTE, Activity, CodexSessions, Limits, Usage, Window};
 const SIDE_BY_SIDE: usize = 64;
 // Two short names, two four-character figures and the rule.
 const ONE_LINE_SPLIT: usize = 15;
+const LARGE_ROWS: usize = 3;
 const TILE: &str = "██";
 
 #[derive(Clone, Copy)]
@@ -175,17 +176,22 @@ struct Hint {
 }
 
 impl Hint {
-    const NO_SOURCE: Self = Self { full: "no local source found", short: "no source" };
-    const NO_LIMITS: Self = Self { full: "no limits reported", short: "no limits" };
+    const NO_SESSIONS: Self = Self { full: "no sessions found", short: "no sessions" };
+    const NO_SAVED_LIMITS: Self = Self { full: "no saved limits found", short: "no saved limits" };
+    const NO_LIMITS: Self = Self { full: "no limits to show", short: "no limits" };
     const UNREADABLE: Self = Self { full: "could not read sessions", short: "could not read" };
 
     /// Draws the hint, with `also` after it on the same row when both fit.
-    fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<String>) {
-        match also {
-            Some(also) if self.full.len() + 3 + str_width(&also) <= area.w => {
-                area.note(screen, row, &format!("{} · {also}", self.full));
-            }
-            _ => area.note(screen, row, if self.full.len() <= area.w { self.full } else { self.short }),
+    fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<&str>) {
+        if let Some(also) = also
+            && self.full.len() + 3 + str_width(also) <= area.w
+        {
+            let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
+            writer.add(self.full, FAINT);
+            writer.add(" · ", FAINT);
+            writer.add(also, FAINT);
+        } else {
+            area.note(screen, row, if self.full.len() <= area.w { self.full } else { self.short });
         }
     }
 }
@@ -298,14 +304,12 @@ impl<'a> Report<'a> {
         // were that window's caption: it has a row of its own, or follows
         // the hint on the hint's row, or is left out.
         let spare = chart.note + 1 < area.h;
-        match &self.hint {
-            Some(hint) if spare => {
-                hint.draw(screen, figures, chart.note, None);
-                figures.note(screen, chart.note + 1, &activity_text(activity()).unwrap_or_default());
-            }
-            Some(hint) => hint.draw(screen, figures, chart.note, activity_text(activity())),
-            None if spare => figures.note(screen, chart.note + 1, &activity_text(activity()).unwrap_or_default()),
-            None => {}
+        let activity = (spare || self.hint.is_some()).then(|| activity_text(activity())).flatten();
+        if let Some(hint) = &self.hint {
+            hint.draw(screen, figures, chart.note, activity.as_deref().filter(|_| !spare));
+        }
+        if spare && let Some(activity) = activity {
+            figures.note(screen, chart.note + 1, &activity);
         }
     }
 
@@ -354,8 +358,8 @@ struct Chart {
 
 impl Chart {
     fn new(height: usize) -> Self {
-        let large = height >= 5;
-        let body = if large { 5 } else { 3 };
+        let large = height >= LARGE_ROWS + 2;
+        let body = if large { LARGE_ROWS + 2 } else { 3 };
         let label = height.saturating_sub(body + 1) / 2;
         Self { label, note: label + body - 1, large }
     }
@@ -462,15 +466,14 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     if w == 0 || h == 0 {
         return;
     }
-    let codex = usage.codex.latest();
     let missing = match usage.codex.sessions {
-        CodexSessions::Missing => Hint::NO_SOURCE,
+        CodexSessions::Missing => Hint::NO_SESSIONS,
         CodexSessions::Present => Hint::NO_LIMITS,
         CodexSessions::Unreadable => Hint::UNREADABLE,
     };
     let reports = [
-        Report::new(Tool::Codex, codex.as_ref().map(|reading| &reading.windows), missing, now),
-        Report::new(Tool::Claude, usage.claude.saved.as_ref(), Hint::NO_SOURCE, now),
+        Report::new(Tool::Codex, usage.codex.latest().map(|reading| &reading.windows), missing, now),
+        Report::new(Tool::Claude, usage.claude.latest().map(|reading| &reading.windows), Hint::NO_SAVED_LIMITS, now),
     ];
     let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
     // Leave the captions and activity their rows in a compact pane.
@@ -496,7 +499,7 @@ mod tests {
     use super::*;
 
     fn labels(limits: Option<&Limits>) -> Vec<String> {
-        let report = Report::new(Tool::Claude, limits, Hint::NO_SOURCE, 1000);
+        let report = Report::new(Tool::Claude, limits, Hint::NO_SAVED_LIMITS, 1000);
         std::iter::once(&report.first)
             .chain(report.extra.iter().flatten())
             .map(|metric| metric.label.to_string())

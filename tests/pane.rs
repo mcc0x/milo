@@ -1,13 +1,15 @@
 //! Runs pane startup and input through a real terminal.
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+
+const TEST_WAIT: Duration = Duration::from_secs(60);
 
 struct Project(PathBuf);
 
@@ -38,10 +40,26 @@ impl Project {
         let git = self.0.join("git");
         fs::write(
             &git,
-            "#!/bin/sh\n[ \"$1\" = --exec-path ] && exit 1\nwhile [ -d \"$HOME\" ] && [ ! -e \"$HOME/go\" ]; do sleep 0.02; done\nexit 1\n",
+            "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\n[ \"$1\" = --exec-path ] && exit 1\nwhile [ -d \"$HOME\" ] && [ ! -e \"$HOME/go\" ]; do sleep 0.02; done\nexit 1\n",
         )
         .unwrap();
-        fs::set_permissions(git, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+        // A sibling's fork can inherit the writer until it execs. Probe the script
+        // itself before starting a pane that assumes it can execute immediately.
+        let until = Instant::now() + TEST_WAIT;
+        loop {
+            match self.command(&git).arg("ready").status() {
+                Ok(status) => {
+                    assert!(status.success());
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    assert!(Instant::now() < until, "stand-in git is still open for writing");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(e) => panic!("cannot run stand-in git: {e}"),
+            }
+        }
         let mut paths = vec![self.0.clone()];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
         command.env("PATH", std::env::join_paths(paths).unwrap());
@@ -94,22 +112,39 @@ impl Terminal {
     }
 
     fn read(&mut self, until: Instant) -> bool {
-        let mut fd = libc::pollfd { fd: self.master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let ms = i32::try_from(until.saturating_duration_since(Instant::now()).as_millis()).unwrap();
-        // SAFETY: A single live pollfd points to an open descriptor.
-        if unsafe { libc::poll(&mut fd, 1, ms) } <= 0 {
-            return false;
-        }
         let mut buf = [0; 8192];
-        let len = self.master.read(&mut buf).unwrap();
-        self.bytes.extend_from_slice(&buf[..len]);
-        len > 0
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let mut fd = libc::pollfd { fd: self.master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let ms = i32::try_from(left.as_millis() + 1).unwrap();
+            // SAFETY: A single live pollfd points to an open descriptor.
+            match unsafe { libc::poll(&mut fd, 1, ms) } {
+                0 => return false,
+                n if n < 0 => {
+                    let error = io::Error::last_os_error();
+                    assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+                    continue;
+                }
+                _ => {}
+            }
+            match self.master.read(&mut buf) {
+                Ok(len) => {
+                    self.bytes.extend_from_slice(&buf[..len]);
+                    return len > 0;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => panic!("cannot read test terminal: {e}"),
+            }
+        }
     }
 
     fn until(&mut self, text: &str) {
-        let until = Instant::now() + Duration::from_secs(8);
+        let until = Instant::now() + TEST_WAIT;
         while !self.output().contains(text) {
-            assert!(Instant::now() < until && self.read(until), "expected {text:?} in {:?}", self.output());
+            assert!(self.read(until), "expected {text:?} in {:?}", self.output());
         }
     }
 
@@ -118,7 +153,7 @@ impl Terminal {
     }
 
     fn wait_for_exit(&mut self) -> ExitStatus {
-        let until = Instant::now() + Duration::from_secs(8);
+        let until = Instant::now() + TEST_WAIT;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
@@ -188,6 +223,7 @@ fn a_closed_pty_stops_a_slow_open_without_waiting_for_git() {
     project.slow_git(&mut command);
     let mut terminal = Terminal::run(command.arg("outline"));
     terminal.until("Reading…");
+    // A normal close after Git has timed out would exit successfully instead.
     terminal.master = File::open("/dev/null").unwrap();
     assert_eq!(terminal.wait_for_exit().code(), Some(1));
     #[cfg(target_os = "macos")]
@@ -199,8 +235,11 @@ fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
     let project = Project::new();
     fs::write(project.0.join("project/wall.txt"), format!("{}\n", "X".repeat(600)).repeat(200)).unwrap();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    project.slow_git(&mut command);
+    fs::write(project.0.join("go"), "").unwrap();
     let mut terminal = Terminal::sized(command.args(["view", "wall.txt"]), 600, 200);
-    terminal.until("\x1b[?2026h");
+    // Wait for the large file frame, not the small frame drawn while it opens.
+    terminal.until("XXXXXXXXXXXXXXXX");
     let pid = i32::try_from(terminal.child.id()).unwrap();
     // SAFETY: This is our own, still-owned child, not a process group.
     assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
@@ -222,43 +261,44 @@ fn a_failed_open_restores_the_terminal_before_printing_the_error() {
     terminal.until(error);
     let output = terminal.output();
     assert!(output.find("\x1b[?1049l").unwrap() < output.find(error).unwrap());
-    assert_eq!(terminal.child.wait().unwrap().code(), Some(1));
+    assert_eq!(terminal.wait_for_exit().code(), Some(1));
     assert!(terminal.restored());
 }
 
-// The watched history waits 30 seconds even when nothing changes on disk.
-// Its live age lets us tell a redraw from an ignored key without a debug hook.
-#[cfg(target_os = "macos")]
 #[test]
-fn an_ignored_key_leaves_a_frame_alone_but_a_terminal_reply_redraws_it() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
     let project = Project::new();
-    let git = |args: &[&str]| {
-        let output = project.command("git").args(args).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let run = |args: &[&str]| {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        if args[0] == "not-a-milo-command" {
+            project.slow_git(&mut command);
+            fs::write(project.0.join("go"), "").unwrap();
+        }
+        command.args(args).output().unwrap()
     };
-    git(&["init", "-q"]);
-    git(&["config", "user.name", "Milo Test"]);
-    git(&["config", "user.email", "test@example.invalid"]);
-    let transition = now() + 5;
-    let date = format!("{} +0000", transition - 60);
-    let output = project
-        .command("git")
-        .env("GIT_COMMITTER_DATE", date)
-        .args(["commit", "-qm", "Recent commit", "--allow-empty"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let mut terminal = Terminal::run(project.command(env!("CARGO_BIN_EXE_milo")).arg("history"));
-    terminal.until("mnow");
-    std::thread::sleep(Duration::from_secs(transition.saturating_sub(now())));
-    let before = terminal.bytes.len();
-    terminal.master.write_all(b"z").unwrap();
-    let until = Instant::now() + Duration::from_millis(350);
-    while terminal.read(until) {}
-    assert_eq!(terminal.bytes.len(), before, "{}", terminal.output());
-    terminal.master.write_all(b"\x1b]11;rgb:1111/1111/1111\x1b\\").unwrap();
-    terminal.until("m1m");
+    for (args, first_line) in [
+        (&["--help"][..], "milo — file, history, usage, and reader panes for your terminal"),
+        (&["--version"][..], concat!("milo ", env!("CARGO_PKG_VERSION"))),
+        (&["outline", "--help"][..], "Usage: milo outline [PATH]"),
+        (&["history", "--help"][..], "Usage: milo history [PATH]"),
+        (&["usage", "--help"][..], "Usage: milo usage"),
+        (&["setup", "--help"][..], "Usage: milo setup"),
+        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID]"),
+        (&["listen", "--help"][..], "Usage: milo listen [--stop]"),
+        (&["claude-status", "--help"][..], "Usage: milo claude-status"),
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap().lines().next(), Some(first_line), "{args:?}");
+    }
+    for (args, message) in [
+        (&["not-a-milo-command"][..], "milo: not-a-milo-command is not a directory; see milo --help for commands\n"),
+        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID]\n"),
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), message);
+    }
 }

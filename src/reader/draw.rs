@@ -141,7 +141,7 @@ impl Reader {
                     let longest = shown.iter().map(|line| line.width).max().unwrap_or(0);
                     self.pan = self.pan.min(longest.saturating_sub(width));
                 }
-                let mut painter = LinePainter { x, width, pan: self.pan, lang: self.lang, spans: &mut self.spans };
+                let mut painter = LinePainter { x, width, pan: self.pan, lang: text.lang, spans: &mut self.spans };
                 let first = text.starts.partition_point(|(at, _)| *at <= self.top).saturating_sub(1);
                 let mut starts = text.starts[first..].iter().peekable();
                 let mut state = &State::Code;

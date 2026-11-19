@@ -20,7 +20,7 @@ pub enum Delimiter {
     CppRaw(Rc<[u8]>),
     CsharpRaw(usize),
     Heredoc(Rc<[u8]>),
-    Template(Rc<Template>),
+    Template(Template),
 }
 
 impl Dialect {
@@ -47,7 +47,7 @@ impl Dialect {
             Self::Javascript if b[from] == b'`' => {
                 let mut template = Template::default();
                 let end = template.end(b, from + 1);
-                (end, end.is_none().then(|| Delimiter::Template(Rc::new(template))))
+                (end, end.is_none().then_some(Delimiter::Template(template)))
             }
             _ => return None,
         };
@@ -69,7 +69,7 @@ impl Delimiter {
                 }
                 Some(b.len() - after.len() + usize::from(after.starts_with(b";")))
             }
-            Self::Template(template) => Rc::make_mut(template).end(b, 0),
+            Self::Template(template) => template.end(b, 0),
         }
     }
 }
@@ -131,16 +131,10 @@ fn php_label(after: &[u8]) -> Option<&[u8]> {
 /// Inside `${…}` we only track what can hide a closing brace or backtick.
 #[derive(Clone, Debug, Default)]
 pub struct Template {
-    part: Part,
+    /// Brace depth inside `${…}`, or `None` while in the text of a template.
+    braces: Option<usize>,
     parent: Option<Rc<Parent>>,
     barrier: Option<Barrier>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-enum Part {
-    #[default]
-    Text,
-    Expr(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -164,7 +158,7 @@ impl Barrier {
 /// Share unchanged ancestors between line starts rather than copying the stack.
 #[derive(Debug)]
 struct Parent {
-    part: Part,
+    braces: usize,
     parent: Option<Rc<Self>>,
 }
 
@@ -180,7 +174,7 @@ impl Drop for Parent {
 
 impl PartialEq for Template {
     fn eq(&self, other: &Self) -> bool {
-        self.part == other.part
+        self.braces == other.braces
             && self.barrier == other.barrier
             && match (&self.parent, &other.parent) {
                 (None, None) => true,
@@ -191,18 +185,6 @@ impl PartialEq for Template {
 }
 
 impl Template {
-    fn push(&mut self, next: Part) {
-        let part = std::mem::replace(&mut self.part, next);
-        self.parent = Some(Rc::new(Parent { part, parent: self.parent.take() }));
-    }
-
-    fn pop(&mut self) -> bool {
-        let Some(parent) = self.parent.take() else { return false };
-        self.part = parent.part;
-        self.parent = parent.parent.clone();
-        true
-    }
-
     fn end(&mut self, b: &[u8], mut i: usize) -> Option<usize> {
         if let Some(barrier) = self.barrier {
             i = barrier.end(b, i)?;
@@ -210,38 +192,39 @@ impl Template {
         }
         while i < b.len() {
             let rest = &b[i..];
-            let barrier = match self.part {
-                Part::Text => {
-                    if rest.starts_with(b"`") {
-                        if !self.pop() {
-                            return Some(i + 1);
-                        }
-                    } else if rest.starts_with(b"${") {
-                        self.push(Part::Expr(0));
-                        i += 1;
-                    } else if rest.starts_with(b"\\") {
-                        i += 1;
-                    }
-                    None
-                }
-                Part::Expr(braces) => match rest {
+            let barrier = if let Some(braces) = self.braces {
+                match rest {
                     [b'/', b'/', ..] => return None,
                     [b'/', b'*', ..] => Some((Barrier::Comment, i + 2)),
                     [mark @ (b'\'' | b'"'), ..] => Some((Barrier::Quote(*mark), i + 1)),
-                    [c, ..] => {
-                        match c {
-                            b'{' => self.part = Part::Expr(braces + 1),
-                            b'}' if braces > 0 => self.part = Part::Expr(braces - 1),
-                            b'}' => {
-                                self.pop();
+                    _ => {
+                        match b[i] {
+                            b'{' => self.braces = Some(braces + 1),
+                            b'}' => self.braces = braces.checked_sub(1),
+                            b'`' => {
+                                self.parent = Some(Rc::new(Parent { braces, parent: self.parent.take() }));
+                                self.braces = None;
                             }
-                            b'`' => self.push(Part::Text),
                             _ => {}
                         }
                         None
                     }
-                    [] => unreachable!(),
-                },
+                }
+            } else {
+                match rest {
+                    [b'`', ..] => {
+                        let Some(parent) = self.parent.take() else { return Some(i + 1) };
+                        self.braces = Some(parent.braces);
+                        self.parent = parent.parent.clone();
+                    }
+                    [b'$', b'{', ..] => {
+                        self.braces = Some(0);
+                        i += 1;
+                    }
+                    [b'\\', ..] => i += 1,
+                    _ => {}
+                }
+                None
             };
             if let Some((barrier, from)) = barrier {
                 let Some(end) = barrier.end(b, from) else {

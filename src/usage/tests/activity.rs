@@ -42,7 +42,7 @@ fn claude_activity_only_shows_today_and_never_takes_the_place_of_limits() {
     .concat();
     write(&f, CLAUDE, &records, now);
     let rows = frame(&mut open(&f, now), 140, 4);
-    assert_eq!(rows[2].matches("no local source found").count(), 2);
+    assert!(rows[2].contains("no sessions found") && rows[2].contains("no saved limits found"));
     assert_eq!(rows[1].matches('—').count(), 2);
     assert!(!rows[1].contains('%'));
     assert!(rows[3].contains("48k tokens today"));

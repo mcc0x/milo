@@ -18,13 +18,13 @@ const DEADLINE: Duration = Duration::from_secs(15);
 
 /// Cache the executable so frequent commands can bypass the macOS git launcher.
 pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
-    let mut launcher = Command::new("git");
-    launcher.arg("--exec-path").stdin(Stdio::null()).stderr(Stdio::null());
-    let real = checked_output(launcher, OUTPUT_LIMIT)
+    let mut launcher = isolated(Command::new("git"));
+    launcher.arg("--exec-path");
+    let real = checked_output(launcher, 4096)
         .ok()
         .and_then(|raw| String::from_utf8(raw).ok())
         .map(|path| Path::new(path.trim()).join("git"));
-    real.filter(|path| path.is_file()).unwrap_or_else(|| PathBuf::from("git"))
+    real.filter(|path| path.is_absolute() && path.is_file()).unwrap_or_else(|| PathBuf::from("git"))
 });
 
 pub(crate) enum OutputError {
@@ -50,19 +50,14 @@ const WHOLE_FILE: [&str; 4] =
     ["--unified=8388608", "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "];
 
 /// Reads one commit against its first parent, or the empty tree for a root commit.
-pub(super) fn commit_diff(
-    root: &Path,
-    guard: &[String],
-    hash: &str,
-    diff: CommitDiff<'_>,
-) -> Result<Vec<u8>, OutputError> {
+pub(super) fn commit_diff(root: &Path, hash: &str, diff: CommitDiff<'_>) -> Result<Vec<u8>, OutputError> {
     let hash = super::CommitId::parse(hash).ok_or(OutputError::Failed)?.0;
     if let CommitDiff::File(file) = diff
         && let Some(from) = &file.from
     {
         // Compare these two paths exactly. A literal pathspec can also match
         // children if a path was a file on one side and a folder on the other.
-        let mut cmd = command(root, guard, &["diff", "--no-color", "--no-ext-diff", "--no-textconv"]);
+        let mut cmd = command(root, &[], &["diff"]);
         cmd.args(WHOLE_FILE).args([
             "--end-of-options",
             &format!("{hash}^:{from}"),
@@ -71,21 +66,7 @@ pub(super) fn commit_diff(
         ]);
         return checked_output(cmd, DIFF_LIMIT);
     }
-    let mut cmd = command(
-        root,
-        guard,
-        &[
-            "diff-tree",
-            "--root",
-            "--diff-merges=first-parent",
-            "--no-commit-id",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--submodule=short",
-            "-r",
-        ],
-    );
+    let mut cmd = command(root, &[], &["diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id", "-r"]);
     let limit = match diff {
         CommitDiff::Files => {
             cmd.args(["-M", "--raw", "--numstat", "-z", "--end-of-options", hash, "--"]);
@@ -108,7 +89,7 @@ pub(super) fn commit_diff(
 
 /// A missing ref or unrelated histories can give no object and exit with code 1.
 pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Option<Option<String>> {
-    let (status, raw) = capture(command(root, guard, args), OUTPUT_LIMIT).ok()?;
+    let (status, raw) = capture(command(root, guard, args), 128).ok()?;
     if status.success() {
         let mut oid = String::from_utf8(raw).ok()?;
         oid.truncate(oid.trim_end().len());
@@ -118,6 +99,7 @@ pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Opti
     }
 }
 
+#[derive(Default)]
 pub(super) struct Config {
     pub(super) guard: Vec<String>,
     pub(super) has_remote: bool,
@@ -125,7 +107,7 @@ pub(super) struct Config {
 
 /// Read remote names while listing the filters that must be disabled.
 pub(super) fn config(root: &Path) -> Option<Config> {
-    let names = output(root, &[], &["config", "--null", "--name-only", "--list"])?;
+    let names = limited_output(root, &[], &["config", "--null", "--name-only", "--list"], 1 << 20).ok()?;
     let names = std::str::from_utf8(&names).ok()?;
     let mut has_remote = false;
     let mut filters = Vec::new();
@@ -140,36 +122,93 @@ pub(super) fn config(root: &Path) -> Option<Config> {
     }
     filters.sort_unstable();
     filters.dedup();
-    let mut guard = Vec::new();
-    for name in filters {
-        for setting in ["clean=", "smudge=", "process=", "required=false"] {
-            guard.extend(["-c".to_string(), format!("filter.{name}.{setting}")]);
+    Some(Config { guard: filters.into_iter().map(str::to_owned).collect(), has_remote })
+}
+
+/// Read the user's Git settings, but always inspect the requested checkout
+/// with milo's own output options, even when launched by Git.
+fn isolated(mut c: Command) -> Command {
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_EXEC_PATH",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_DIFF_OPTS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+        "GIT_ICASE_PATHSPECS",
+        "GIT_TRACE",
+        "GIT_TRACE_PACK_ACCESS",
+        "GIT_TRACE_PACKET",
+        "GIT_TRACE_PACKFILE",
+        "GIT_TRACE_PERFORMANCE",
+        "GIT_TRACE_SETUP",
+        "GIT_TRACE_SHALLOW",
+        "GIT_TRACE2",
+        "GIT_TRACE2_EVENT",
+        "GIT_TRACE2_PERF",
+    ] {
+        if std::env::var_os(key).is_some() {
+            c.env_remove(key);
         }
     }
-    Some(Config { guard, has_remote })
+    c.env("LC_ALL", "C").stdin(Stdio::null()).stderr(Stdio::null());
+    c
 }
 
 /// Disable the repository's own programs and avoid writing to its index.
 fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
-    let mut c = Command::new(&*GIT);
-    c.arg("--no-optional-locks")
+    let mut c = isolated(Command::new(&*GIT));
+    c.args(["--no-pager", "--no-optional-locks"])
         .arg("-C")
         .arg(root)
         .args(["-c", "core.quotePath=false", "-c", "color.ui=false"])
         .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
         .args(["-c", "safe.bareRepository=explicit"])
         // Comparing the whole tree must not write a refreshed index.
-        .args(["-c", "diff.autoRefreshIndex=false"])
-        .args(guard)
-        .args(args)
-        // A path given to git is a name, never a pattern.
-        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["-c", "diff.autoRefreshIndex=false", "-c", "diff.suppressBlankEmpty=false"]);
+    // Filter names can contain '='. Unlike `-c`, the environment passes keys
+    // and values separately.
+    let settings = [("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")];
+    for (i, name) in guard.iter().enumerate() {
+        for (j, (setting, value)) in settings.iter().enumerate() {
+            let n = i * settings.len() + j;
+            c.env(format!("GIT_CONFIG_KEY_{n}"), format!("filter.{name}.{setting}"))
+                .env(format!("GIT_CONFIG_VALUE_{n}"), value);
+        }
+    }
+    if !guard.is_empty() {
+        c.env("GIT_CONFIG_COUNT", (guard.len() * settings.len()).to_string());
+    }
+    c.env("GIT_LITERAL_PATHSPECS", "1")
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(test)]
-    crate::fixture::isolate_git(&mut c);
+        // Older Git can try a lazy fetch despite GIT_NO_LAZY_FETCH.
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    match args {
+        [kind @ ("diff" | "diff-tree"), tail @ ..] => c
+            .args([*kind, "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "-O/dev/null"])
+            .args(["--ignore-submodules=dirty", "--submodule=short", "--src-prefix=a/", "--dst-prefix=b/"])
+            .args(tail),
+        _ => c.args(args),
+    };
     c
 }
 

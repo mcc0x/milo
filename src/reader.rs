@@ -5,17 +5,19 @@ mod draw;
 #[cfg(test)]
 mod tests;
 
+use std::fs::Metadata;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 
 use crate::diff::{Line, LineKind};
-use crate::git::{Commit, FileStamp, Kind, PendingFile, Repo};
+use crate::git::{Commit, Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::{Direction, Key};
 use crate::pane::{After, Pane};
 use crate::picture::Picture;
 use crate::rex;
 use crate::screen::{Screen, Style};
-use crate::syntax::{self, Lang, Span, State};
+use crate::syntax::{Lang, Span, State};
 use crate::ui::{ADD, DEL};
 use crate::watch::Scope;
 
@@ -30,7 +32,6 @@ pub struct Reader {
     /// What happened to the working file.
     kind: Kind,
     body: Body,
-    lang: Option<&'static Lang>,
     /// Scratch space reused when colouring code.
     spans: Vec<Span>,
     top: usize,
@@ -49,7 +50,20 @@ enum Source {
 struct WorkingFile {
     repo: Repo,
     absolute: PathBuf,
-    stamp: Option<FileStamp>,
+    stamp: Option<Stamp>,
+}
+
+/// Includes file identity and change time: saving by replacement can preserve length and mtime.
+#[derive(PartialEq)]
+struct Stamp {
+    identity: (u64, u64),
+    changed: (i64, i64),
+}
+
+impl Stamp {
+    fn of(metadata: &Metadata) -> Self {
+        Self { identity: (metadata.dev(), metadata.ino()), changed: (metadata.ctime(), metadata.ctime_nsec()) }
+    }
 }
 
 /// A file selected in a pane that can open the reader.
@@ -103,7 +117,7 @@ impl Body {
         }
     }
 
-    fn from_lines(lines: Result<Vec<Line>, &'static str>, lang: Option<&Lang>) -> Self {
+    fn from_lines(lines: Result<Vec<Line>, &'static str>, lang: Option<&'static Lang>) -> Self {
         match lines {
             Ok(lines) => Self::Text(Text::new(lines, lang)),
             Err(note) => Self::Note(note),
@@ -113,6 +127,7 @@ impl Body {
 
 struct Text {
     lines: Vec<Line>,
+    lang: Option<&'static Lang>,
     /// Start lines at which the open syntax differs from the preceding line.
     starts: Vec<(usize, State)>,
     /// Start of each block of changed lines, before adding viewing context.
@@ -123,7 +138,10 @@ struct Text {
 }
 
 impl Text {
-    fn new(lines: Vec<Line>, lang: Option<&Lang>) -> Self {
+    fn new(lines: Vec<Line>, lang: Option<&'static Lang>) -> Self {
+        let lang = lang.filter(|lang| {
+            lines.iter().find(|line| line.kind != LineKind::Del).is_none_or(|line| lang.agrees_with_shebang(&line.text))
+        });
         let mut starts = Vec::new();
         let mut changes = Vec::new();
         let mut state = State::default();
@@ -149,7 +167,7 @@ impl Text {
                 }
             }
         }
-        Self { lines, starts, changes, digits: last.ilog10() as usize + 1, added, removed }
+        Self { lines, lang, starts, changes, digits: last.ilog10() as usize + 1, added, removed }
     }
 
     /// Finds the next or previous block, wrapping and skipping duplicate viewport positions.
@@ -166,13 +184,11 @@ impl Text {
 
 impl Reader {
     fn new(path: String, source: Source) -> Self {
-        let lang = syntax::for_file(&path);
         Self {
             source,
             path,
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
-            lang,
             spans: Vec::new(),
             top: 0,
             pan: 0,
@@ -242,7 +258,7 @@ impl Pane for Reader {
         if work.repo.busy() {
             return false;
         }
-        if work.repo.poll(&[]) || (work.repo.ok() && FileStamp::at(&work.absolute) != work.stamp) {
+        if work.repo.poll(&[]) || work.absolute.symlink_metadata().ok().as_ref().map(Stamp::of) != work.stamp {
             self.load();
             self.top = self.top.min(self.last_top());
         }

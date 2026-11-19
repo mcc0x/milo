@@ -7,6 +7,7 @@ use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::Duration;
 
 /// Redraw at the current size after startup or a resize signal.
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
@@ -39,6 +40,10 @@ pub fn wait_ready(fds: &mut [libc::pollfd], timeout_ms: i32) -> i32 {
     let Ok(len) = libc::nfds_t::try_from(fds.len()) else { return -1 };
     // SAFETY: The slice is writable and holds exactly `len` descriptors.
     unsafe { libc::poll(fds.as_mut_ptr(), len, timeout_ms) }
+}
+
+pub fn milliseconds(wait: Duration) -> i32 {
+    i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX)
 }
 
 // These handlers only load and store atomics and call write, both async-signal-safe.
@@ -109,11 +114,11 @@ impl Session {
     }
 
     pub fn wait(&self, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
-        wait(&self.keyboard, Some(&self.signal), timeout_ms, extra)
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, extra, false)
     }
 
     pub fn wait_for_open(&self, timeout_ms: i32, done: RawFd) -> Wait {
-        wait_for(&self.keyboard, Some(&self.signal), timeout_ms, Some(done), true)
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, Some(done), true)
     }
 
     /// Make progress while the terminal is reading, but let a signal interrupt backpressure.
@@ -199,10 +204,21 @@ impl Drop for Session {
 /// Open a separate description so non-blocking writes don't change the shell's stdout flags.
 fn terminal_output(fd: RawFd) -> io::Result<File> {
     let mut path = [0; 4096];
-    // SAFETY: `path` provides writable storage for the tty name, including its trailing NUL.
-    let result = unsafe { libc::ttyname_r(fd, path.as_mut_ptr().cast(), path.len()) };
-    if result != 0 {
-        return Err(io::Error::from_raw_os_error(result));
+    #[cfg(target_os = "macos")]
+    {
+        // ttyname_r walks /dev and can miss the tty while other PTYs open or close.
+        // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes to this larger buffer.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: `path` provides writable storage for the tty name, including its trailing NUL.
+        let result = unsafe { libc::ttyname_r(fd, path.as_mut_ptr().cast(), path.len()) };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result));
+        }
     }
     let name = CStr::from_bytes_until_nul(&path).map_err(io::Error::other)?;
     let name = std::ffi::OsStr::from_bytes(name.to_bytes());
@@ -241,24 +257,14 @@ fn drain_signal(mut reader: &PipeReader) {
     while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
 }
 
-fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
-    wait_for(keyboard, signal, timeout_ms, extra, false)
-}
-
 /// Waits for input, a signal, the extra descriptor or a timeout.
 /// Signals always take priority; loading also prioritizes completion over keystrokes.
-fn wait_for(
-    keyboard: &File,
-    signal: Option<&PipeReader>,
-    timeout_ms: i32,
-    extra: Option<RawFd>,
-    opening: bool,
-) -> Wait {
+fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: Option<RawFd>, opening: bool) -> Wait {
     let mut fds = [
-        libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: keyboard, events: libc::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
         libc::pollfd { fd: extra.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: signal.map_or(-1, AsRawFd::as_raw_fd), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
     ];
     let ready = wait_ready(&mut fds, timeout_ms);
     if ready == 0 {
@@ -266,9 +272,7 @@ fn wait_for(
     } else if ready < 0 {
         if io::Error::last_os_error().kind() == ErrorKind::Interrupted { Wait::Interrupted } else { Wait::Closed }
     } else if fds[2].revents != 0 {
-        if let Some(reader) = signal {
-            drain_signal(reader);
-        }
+        drain_signal(signal);
         Wait::Interrupted
     } else if opening && fds[1].revents != 0 {
         Wait::Woken
@@ -301,21 +305,22 @@ fn test_pair() -> (File, File) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::OwnedFd;
 
     #[test]
     fn keyboard_readiness_takes_priority_over_an_extra_wakeup() {
         let (keyboard, input) = io::pipe().unwrap();
-        let keyboard = File::from(OwnedFd::from(keyboard));
         let (extra, writer) = io::pipe().unwrap();
         let extra = Some(extra.as_raw_fd());
-        assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Timeout));
+        let (signal, _signal_writer) = io::pipe().unwrap();
+        let wait = |opening| wait_for(keyboard.as_raw_fd(), &signal, 0, extra, opening);
+        assert!(matches!(wait(false), Wait::Timeout));
 
         wake(writer.as_raw_fd());
-        assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Woken));
+        assert!(matches!(wait(false), Wait::Woken));
 
         wake(input.as_raw_fd());
-        assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Input));
+        assert!(matches!(wait(false), Wait::Input));
+        assert!(matches!(wait(true), Wait::Woken));
     }
 
     fn modes(terminal: &File) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {

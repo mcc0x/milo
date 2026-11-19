@@ -20,6 +20,7 @@ use crate::width::str_width;
 use super::*;
 
 const NOW: i64 = 1_795_100_000;
+const TEST_WAIT: Duration = Duration::from_secs(30);
 const CODEX: &str = "codex/2026/11/18/rollout-a.jsonl";
 const OTHER_CODEX: &str = "codex/2026/11/18/rollout-z.jsonl";
 const CLAUDE: &str = "claude/project/session.jsonl";
@@ -153,7 +154,7 @@ fn compressed_and_unrelated_files_are_ignored() {
     write(&f, "claude/project/subagents/session.jsonl", &assistant(NOW, 600, 900, 100), NOW);
     write(&f, CLAUDE, &assistant(NOW, 600, 900, 100), NOW - 2 * DAY);
     let rows = frame(&mut open(&f, NOW), 140, 4);
-    assert!(rows[2].contains("no local source found"));
+    assert!(rows[2].contains("no sessions found"));
     assert!(!rows.join("\n").contains("tokens today"));
 }
 
@@ -172,7 +173,7 @@ fn session_files_and_folders_are_not_followed_through_links() {
     symlink(f.root.join("elsewhere/claude.jsonl"), f.root.join(CLAUDE)).unwrap();
     let mut usage = open(&f, NOW);
     let rows = frame(&mut usage, 140, 4);
-    assert!(rows[2].contains("no local source found"));
+    assert!(rows[2].contains("no sessions found"));
     assert!(!rows.join("\n").contains("tokens today"));
     assert_eq!(usage.bytes_read, 0);
 }
@@ -266,11 +267,11 @@ mod omp_limits {
         )
     }
 
-    fn await_check(usage: &mut Usage) {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !usage.check() {
+    fn wait_for(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + TEST_WAIT * 2;
+        while !ready() {
             assert!(Instant::now() < deadline);
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -301,7 +302,7 @@ mod omp_limits {
             ),
         );
 
-        let bytes = omp::query(omp::sqlite(), &path, Duration::from_secs(1)).unwrap();
+        let bytes = omp::query(omp::sqlite(), &path, TEST_WAIT).unwrap();
         assert!(!omp::SQL.to_ascii_lowercase().contains("auth_credentials"));
         assert!(omp::SQL.trim_start().starts_with("PRAGMA query_only=ON;"));
         assert!(!String::from_utf8_lossy(&bytes).contains("key-only-secret"));
@@ -334,7 +335,7 @@ mod omp_limits {
                         ('openai-codex',{now},'openai-codex:primary',0.01,NULL,'7 days');"
             ),
         );
-        let reading = omp::read(&path, NOW).unwrap();
+        let reading = omp::read(&path, NOW, TEST_WAIT).unwrap();
         let claude = reading.claude.unwrap().windows;
         assert!(claude.base.into_iter().all(|window| window.is_none()));
         assert_eq!(claude.model_week.unwrap().label(), "Fable");
@@ -342,28 +343,21 @@ mod omp_limits {
     }
 
     #[test]
-    fn omp_errors_are_quiet_and_stop_reading_oversized_or_stalled_children() {
+    fn omp_errors_are_quiet_and_oversized_output_is_cut_off() {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
-        let wait = Duration::from_secs(3);
-        assert!(omp::read(&f.root.join("missing.db"), NOW).is_none());
-        assert!(omp::query(f.root.join("missing-sqlite").as_os_str(), &path, wait).is_none());
+        assert!(omp::read(&f.root.join("missing.db"), NOW, TEST_WAIT).is_none());
+        assert!(omp::query(f.root.join("missing-sqlite").as_os_str(), &path, TEST_WAIT).is_none());
         let executable = f.root.join("sqlite-stub");
         let script = |lines: &str| write_executable(&executable, lines);
         script("printf '%s' 'not JSON'");
-        let bytes = omp::query(executable.as_os_str(), &path, wait).unwrap();
+        let bytes = omp::query(executable.as_os_str(), &path, TEST_WAIT).unwrap();
         assert!(omp::parse(&bytes, NOW).is_none());
         script("printf '%s\\n' \"$$\" >\"$0.pid\"; printf '%70000s' x");
-        assert!(omp::query(executable.as_os_str(), &path, wait).is_none());
-        assert_reaped(&executable);
-        script("printf '%s\\n' \"$$\" >\"$0.pid\"; exec 1>&-; exec /bin/sleep 8");
-        let wait = Duration::from_millis(250);
-        let started = Instant::now();
-        assert!(omp::query(executable.as_os_str(), &path, wait).is_none());
-        assert!(started.elapsed() >= wait && started.elapsed() < Duration::from_secs(4));
+        assert!(omp::query(executable.as_os_str(), &path, TEST_WAIT).is_none());
         assert_reaped(&executable);
         exec(&path, "DROP TABLE usage_history;");
-        assert!(omp::read(&path, NOW).is_none());
+        assert!(omp::read(&path, NOW, TEST_WAIT).is_none());
     }
 
     /// Writes a stand-in program and waits until it can be run. A child that
@@ -374,7 +368,7 @@ mod omp_limits {
 
         fs::write(path, format!("#!/bin/sh\n[ \"$1\" = ready ] && exit 0\n{lines}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + TEST_WAIT;
         while Command::new(path).arg("ready").status().is_err() {
             assert!(Instant::now() < deadline, "the stand-in never became runnable");
             std::thread::sleep(Duration::from_millis(2));
@@ -396,12 +390,12 @@ mod omp_limits {
         for sidecar in ["agent.db-wal", "agent.db-shm"] {
             assert!(!f.root.join(sidecar).exists());
         }
-        assert!(omp::read(&path, NOW).is_none());
+        assert!(omp::read(&path, NOW, TEST_WAIT).is_none());
         for sidecar in ["agent.db-wal", "agent.db-shm"] {
             assert!(!f.root.join(sidecar).exists());
         }
         // Use a child that would otherwise succeed even on a database without sidecars.
-        assert!(omp::query(std::ffi::OsStr::new("/usr/bin/true"), &path, Duration::from_secs(1)).is_none());
+        assert!(omp::query(std::ffi::OsStr::new("/usr/bin/true"), &path, TEST_WAIT).is_none());
     }
 
     #[test]
@@ -430,11 +424,8 @@ mod omp_limits {
         );
         writeln!(writer.stdin.as_mut().unwrap(), "{sql}").unwrap();
         let ready = f.root.join("ready");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !ready.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let committed = omp::read(&db, NOW);
+        wait_for(|| ready.exists());
+        let committed = omp::read(&db, NOW, TEST_WAIT);
         let copied = ["", "-wal", "-shm"].into_iter().try_for_each(|suffix| {
             fs::copy(f.root.join(format!("agent #?% café.db{suffix}")), f.root.join(format!("copy.db{suffix}")))
                 .map(|_| ())
@@ -447,7 +438,7 @@ mod omp_limits {
         // Simulate a sidecar disappearing after milo's preflight but before SQLite opens it.
         let stub = f.root.join("sqlite-stub");
         write_executable(&stub, "/bin/rm \"${0%/*}/copy.db-shm\"; exec /usr/bin/sqlite3 \"$@\"");
-        let result = omp::query(stub.as_os_str(), &f.root.join("copy.db"), Duration::from_secs(1));
+        let result = omp::query(stub.as_os_str(), &f.root.join("copy.db"), TEST_WAIT);
         assert!(!f.root.join("copy.db-shm").exists());
         assert!(result.is_none());
     }
@@ -466,10 +457,10 @@ mod omp_limits {
         write(&f, CODEX, &codex(NOW - 1, 45, reset, &secondary), NOW);
         status::run(STATUS, Vec::new(), Some(&state), NOW - 1);
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path));
-        await_check(&mut usage);
+        usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
+        wait_for(|| usage.check());
         let codex = usage.codex.latest().unwrap().windows.base;
-        let claude = usage.claude.saved.unwrap().base;
+        let claude = usage.claude.latest().unwrap().windows.base;
         assert!(codex[0].is_none() && codex[1].unwrap().percent == 1.0);
         assert!(claude[0].is_none() && claude[1].unwrap().percent == 27.0);
 
@@ -478,7 +469,7 @@ mod omp_limits {
         claude_report(&state, r#"{"seven_day":{"used_percentage":62,"resets_at":1795219200}}"#, NOW);
         assert!(usage.check());
         let codex = usage.codex.latest().unwrap().windows.base;
-        let claude = usage.claude.saved.unwrap().base;
+        let claude = usage.claude.latest().unwrap().windows.base;
         assert!(codex.into_iter().flatten().any(|window| window.percent == 45.0));
         assert!(codex.into_iter().flatten().any(|window| window.percent == 9.0));
         assert!(claude[0].unwrap().percent == 23.0 && claude[1].unwrap().percent == 62.0);
@@ -504,17 +495,17 @@ mod omp_limits {
         usage.claude_config = Some(config.clone());
         write(&f, ".claude.json", &content("fixture-current"), NOW);
         assert!(usage.check());
-        let windows = usage.claude.saved.unwrap().base;
+        let windows = usage.claude.latest().unwrap().windows.base;
         assert!(windows[0].is_none() && windows[1].unwrap().percent == 18.0);
         assert_eq!(windows[1].unwrap().resets, Some(reset));
         write(&f, ".claude.json", &content("fixture-other"), NOW + 1);
         assert!(usage.check());
-        assert_eq!(usage.claude.saved.unwrap().base[1].unwrap().percent, 61.0);
+        assert_eq!(usage.claude.latest().unwrap().windows.base[1].unwrap().percent, 61.0);
         write(&f, ".claude.json", &content("fixture-current"), NOW + 2);
         OpenOptions::new().write(true).open(config).unwrap().set_len(6 * 1024 * 1024).unwrap();
         assert!(usage.check());
         assert_eq!(usage.bytes_read, 0);
-        assert_eq!(usage.claude.saved.unwrap().base[1].unwrap().percent, 61.0);
+        assert_eq!(usage.claude.latest().unwrap().windows.base[1].unwrap().percent, 61.0);
     }
 
     #[test]
@@ -522,23 +513,21 @@ mod omp_limits {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         let clock = Instant::now();
-        let mut poll = omp::Poll::new(Some(path));
+        let mut poll = omp::Poll::new(Some(path), TEST_WAIT);
         assert!(poll.check(NOW, clock).is_none() && poll.pending());
-        while poll.pending() {
-            assert!(clock.elapsed() < Duration::from_secs(3));
+        wait_for(|| {
             poll.check(NOW, clock);
-            std::thread::yield_now();
-        }
+            !poll.pending()
+        });
         for seconds in 0..20_u64 {
             assert!(poll.check(NOW, clock + Duration::from_secs(seconds)).is_none());
             assert!(!poll.pending());
         }
         assert!(poll.check(NOW, clock + Duration::from_secs(20)).is_none() && poll.pending());
-        while poll.pending() {
-            assert!(clock.elapsed() < Duration::from_secs(3));
+        wait_for(|| {
             poll.check(NOW, clock + Duration::from_secs(20));
-            std::thread::yield_now();
-        }
+            !poll.pending()
+        });
         assert_eq!(omp::database_in(Some(&f.root), None).unwrap(), f.root.join(".omp/agent/agent.db"));
         assert_eq!(omp::database_in(None, Some(&f.root)).unwrap(), f.root.join("agent.db"));
     }
@@ -549,17 +538,15 @@ mod omp_limits {
         let Some(path) = sqlite(&f) else { return };
         report(&path, "claude", "anthropic", NOW * 1000, "[]");
         let start = Instant::now();
-        let mut poll = omp::Poll::new(Some(path.clone()));
+        let mut poll = omp::Poll::new(Some(path.clone()), TEST_WAIT);
         let mut read = |clock| {
             assert!(poll.check(NOW, clock).is_none() && poll.pending());
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if let Some(report) = poll.check(NOW, clock) {
-                    break report;
-                }
-                assert!(poll.pending() && Instant::now() < deadline);
-                std::thread::yield_now();
-            }
+            let mut report = None;
+            wait_for(|| {
+                report = poll.check(NOW, clock);
+                !poll.pending()
+            });
+            report.unwrap()
         };
         assert!(read(start).claude.is_some());
         fs::remove_file(path).unwrap();

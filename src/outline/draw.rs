@@ -67,9 +67,8 @@ pub(super) fn margin(rows: usize) -> usize {
 }
 
 impl Outline {
-    pub(super) fn draw_outline(&mut self, s: &mut Screen) {
+    pub(super) fn draw_outline(&mut self, s: &mut Screen, now: Instant) {
         s.clear();
-        let now = Instant::now();
         self.expire(now);
         let mut layout = arrange(s.w, s.h, self.repo.git);
         if layout.width == 0 {
@@ -248,9 +247,13 @@ impl Outline {
         };
         let room = right.saturating_sub(x);
         if node.dir {
-            x += s.put_fit(x, y, room, name, style);
-            if !open && node.pending > 0 {
-                s.put(x + 1, y, right.saturating_sub(x + 1), &node.pending.to_string(), FAINT);
+            let suffix = (!open && node.pending > 0)
+                .then(|| node.pending.ilog10() as usize + 2)
+                .filter(|&width| width < room)
+                .unwrap_or(0);
+            x += s.put_fit(x, y, room - suffix, name, style);
+            if suffix > 0 {
+                s.put_number(x + suffix, y, u64::from(node.pending), FAINT);
             }
         } else {
             s.put_middle(x, y, room, name, style);

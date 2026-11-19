@@ -12,8 +12,9 @@ use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 #[cfg(target_os = "macos")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use crate::fs_ops::{self, Temp};
@@ -27,7 +28,6 @@ pub const FILE_LIMIT: u64 = 64 << 20;
 /// The longest side kept, in pixels: more than any pane has to show it with.
 const LONGEST_SIDE: u32 = 1600;
 /// How long a conversion may take before it is given up on.
-#[cfg(target_os = "macos")]
 const DEADLINE: Duration = Duration::from_secs(5);
 /// Bytes of encoded picture sent to the terminal at a time, as it asks.
 const CHUNK: usize = 4096;
@@ -54,15 +54,22 @@ pub struct Picture {
 }
 
 impl Picture {
-    /// Prepares bytes read from a regular file for the terminal.
-    pub fn decode(bytes: Vec<u8>, path: &Path) -> Result<Self, &'static str> {
-        let png = match png_size(&bytes) {
-            Some((w, h)) if w.max(h) <= LONGEST_SIDE => Some(bytes),
-            _ => convert(bytes, path),
-        };
-        png.and_then(|png| Self::png(png.into()))
+    /// Prepares a picture, returning the original bytes if it cannot be shown.
+    pub fn decode(bytes: Vec<u8>, path: &Path) -> Result<Self, Vec<u8>> {
+        Self::decode_with(bytes, path, DEADLINE)
+    }
+
+    fn decode_with(bytes: Vec<u8>, path: &Path, deadline: Duration) -> Result<Self, Vec<u8>> {
+        let size = png_size(&bytes);
+        if let Some((width, height)) = size
+            && width.max(height) <= LONGEST_SIDE
+        {
+            return Ok(Self::with_size(bytes.into(), width, height));
+        }
+        convert(&bytes, path, size, deadline)
+            .and_then(|png| Self::png(png.into()))
             .filter(|picture| picture.width.max(picture.height) <= LONGEST_SIDE)
-            .ok_or("This picture cannot be shown.")
+            .ok_or(bytes)
     }
 
     /// Opens a PNG built into milo without copying its bytes.
@@ -73,7 +80,11 @@ impl Picture {
     /// Opens PNG bytes, which can be borrowed or already owned.
     pub fn png(png: Cow<'static, [u8]>) -> Option<Self> {
         let (width, height) = png_size(&png)?;
-        Some(Self { png, width, height, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) })
+        Some(Self::with_size(png, width, height))
+    }
+
+    fn with_size(png: Cow<'static, [u8]>, width: u32, height: u32) -> Self {
+        Self { png, width, height, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) }
     }
 
     /// The columns and rows the picture takes in a space of `cols` by `rows`
@@ -157,16 +168,15 @@ fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
 
 /// Convert a private copy: the original path may no longer name the file we opened.
 #[cfg(target_os = "macos")]
-fn convert(bytes: Vec<u8>, path: &Path) -> Option<Vec<u8>> {
-    let size = png_size(&bytes).or_else(|| jpeg_size(&bytes));
+fn convert(bytes: &[u8], path: &Path, size: Option<(u32, u32)>, deadline: Duration) -> Option<Vec<u8>> {
+    let size = size.or_else(|| jpeg_size(bytes));
     let dir = std::env::temp_dir();
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let prefix = format!("milo-{}-{id}", std::process::id());
     let source = dir.join(format!("{prefix}-in")).with_extension(path.extension().unwrap_or_default());
     let (input, mut file) = Temp::create(source).ok()?;
-    file.write_all(&bytes).ok()?;
+    file.write_all(bytes).ok()?;
     drop(file);
-    drop(bytes);
     let (output, _) = Temp::create(dir.join(format!("{prefix}-out.png"))).ok()?;
 
     let sips = |source: &Path, resize: bool| {
@@ -175,7 +185,7 @@ fn convert(bytes: Vec<u8>, path: &Path) -> Option<Vec<u8>> {
             command.args(["-Z", &LONGEST_SIDE.to_string()]);
         }
         command.args(["-s", "format", "png"]).arg(source).arg("--out").arg(output.path());
-        finishes(command)
+        finishes(command, deadline)
     };
     // `-Z` can enlarge a small picture. For unknown formats only resize
     // after the converted PNG tells us it is too large.
@@ -198,7 +208,7 @@ fn convert(bytes: Vec<u8>, path: &Path) -> Option<Vec<u8>> {
 
 /// Without a converter at hand, only what is already a PNG can be shown.
 #[cfg(not(target_os = "macos"))]
-fn convert(_: Vec<u8>, _: &Path) -> Option<Vec<u8>> {
+fn convert(_: &[u8], _: &Path, _: Option<(u32, u32)>, _: Duration) -> Option<Vec<u8>> {
     None
 }
 
@@ -206,7 +216,7 @@ fn convert(_: Vec<u8>, _: &Path) -> Option<Vec<u8>> {
 /// too long, or outlives a request to quit, is stopped: a file made to
 /// stall a converter must not stall milo.
 #[cfg(target_os = "macos")]
-fn finishes(mut command: Command) -> bool {
+fn finishes(mut command: Command, deadline: Duration) -> bool {
     let started = Instant::now();
     let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
         return false;
@@ -214,7 +224,7 @@ fn finishes(mut command: Command) -> bool {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
-            Ok(None) if started.elapsed() < DEADLINE && !term::TERMINATED.load(Ordering::Relaxed) => {
+            Ok(None) if started.elapsed() < deadline && !term::TERMINATED.load(Ordering::Relaxed) => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             _ => {
@@ -303,7 +313,7 @@ mod tests {
         jpeg.extend_from_slice(b"\xff\xda\0\x08\x01\x01\0\0\x3f\0\x3f\xff\xd9");
         let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
         for (data, name) in [(jpeg, "pixel.jpg"), (gif.to_vec(), "pixel.gif")] {
-            let p = Picture::decode(data, Path::new(name)).unwrap();
+            let p = Picture::decode_with(data, Path::new(name), Duration::from_secs(120)).unwrap();
             assert_eq!((p.width, p.height), (1, 1), "{name}");
         }
     }

@@ -117,8 +117,8 @@ impl Limits {
     }
 
     /// Include the model-specific week when scheduling the next reset.
-    fn windows(self) -> impl Iterator<Item = Window> {
-        self.base.into_iter().flatten().chain(self.model_week.map(|model| model.window))
+    fn windows(&self) -> impl Iterator<Item = &Window> {
+        self.base.iter().flatten().chain(self.model_week.as_ref().map(|model| &model.window))
     }
 }
 
@@ -173,7 +173,8 @@ impl Reading {
         (at.seconds <= now.saturating_add(CLOCK_SKEW)).then_some(())?;
         let [kind, limits] = payload?.fields(["type", "rate_limits"]);
         kind?.is("token_count").then_some(())?;
-        let [bucket, primary, secondary] = limits?.fields(["limit_id", "primary", "secondary"]);
+        let [bucket, primary, secondary] =
+            limits.filter(|value| value.object())?.fields(["limit_id", "primary", "secondary"]);
         if bucket.and_then(|v| v.string(32)).is_some_and(|id| id != "codex") {
             return None;
         }
@@ -273,8 +274,8 @@ impl Codex {
     }
 
     /// Different sources can describe the same account, not separate limits to add.
-    fn latest(&self) -> Option<Reading> {
-        self.files.values().filter_map(|file| file.reading).chain(self.omp).max_by_key(|reading| reading.at)
+    fn latest(&self) -> Option<&Reading> {
+        self.files.values().filter_map(|file| file.reading.as_ref()).chain(self.omp.as_ref()).max_by_key(|r| r.at)
     }
 }
 
@@ -471,7 +472,6 @@ struct Claude {
     native_version: Option<FileVersion>,
     native: Option<Reading>,
     omp: Option<Reading>,
-    saved: Option<Limits>,
 }
 
 /// A partial total is a lower bound, not an exact amount of today's activity.
@@ -482,6 +482,10 @@ struct Activity {
 }
 
 impl Claude {
+    fn latest(&self) -> Option<&Reading> {
+        [&self.status, &self.native, &self.omp].into_iter().flatten().max_by_key(|reading| reading.at)
+    }
+
     /// Merge duplicate IDs once per changed scan instead of on every redraw.
     fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
         let Some(mut sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
@@ -594,7 +598,7 @@ impl Usage {
         let state = paths::state_dir();
         let mut usage = Self::from_dirs(codex, claude, state, when::now());
         usage.claude_config = home.as_ref().map(|p| p.join(".claude.json"));
-        usage.omp = omp::Poll::new(omp::database(home.as_deref()));
+        usage.omp = omp::Poll::new(omp::database(home.as_deref()), omp::QUERY_WAIT);
         usage
     }
 
@@ -605,7 +609,7 @@ impl Usage {
             claude_dir,
             limits_file: state.map(|dir| dir.join(SAVED_LIMITS)),
             claude_config: None,
-            omp: omp::Poll::default(),
+            omp: omp::Poll::new(None, omp::QUERY_WAIT),
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
@@ -651,11 +655,6 @@ impl Usage {
                 |file, version, budget| status::native(file, version, budget, now),
             );
         }
-        self.claude.saved = [self.claude.status, self.claude.native, self.claude.omp]
-            .into_iter()
-            .flatten()
-            .max_by_key(|reading| reading.at)
-            .map(|reading| reading.windows);
         self.codex.check(self.codex_dir.as_deref(), now, &mut codex_budget);
         let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, &mut claude_budget);
         #[cfg(test)]
@@ -709,10 +708,9 @@ impl Pane for Usage {
         let earliest = self
             .codex
             .latest()
-            .map(|reading| reading.windows)
             .into_iter()
-            .chain(self.claude.saved)
-            .flat_map(|limits| limits.windows().filter_map(|window| window.resets))
+            .chain(self.claude.latest())
+            .flat_map(|reading| reading.windows.windows().filter_map(|window| window.resets))
             .filter(|&reset| reset > now)
             .min();
         let wait = earliest.map_or(MINUTE, |ts| ts.saturating_sub(now).min(MINUTE));
@@ -748,7 +746,7 @@ fn help_rows() -> Vec<help::HelpRow> {
 /// Claude Code must get a line and a successful exit even if it sent bad data.
 pub fn claude_status() -> i32 {
     let path = paths::state_dir().map(|dir| dir.join(SAVED_LIMITS));
-    status::run_fd(io::stdin(), io::stdout().lock(), path.as_deref(), when::now())
+    status::run_fd(io::stdin(), io::stdout().lock(), path.as_deref(), when::now(), status::INPUT_WAIT)
 }
 
 #[cfg(test)]

@@ -26,12 +26,18 @@ fn unavailable(error: io::Error) -> Content {
 }
 
 /// Reads a regular file up to `limit` bytes, or returns a link's destination.
-/// Opens the last path component without following links and without waiting
-/// on a pipe, then checks that it is a regular file before reading bytes.
+/// Rejects special files before opening and checks the descriptor again before
+/// reading, in case the name was replaced with a non-regular file.
 pub fn file(path: &Path, limit: u64) -> Content {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_symlink() => return fs::read_link(path).map_or_else(unavailable, Content::Link),
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Content::NotFile,
+        Err(e) => return unavailable(e),
+    }
     let file = match fs_ops::open_read(path) {
         Ok(file) => file,
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) && fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) => {
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
             return fs::read_link(path).map_or_else(unavailable, Content::Link);
         }
         Err(e) => return unavailable(e),

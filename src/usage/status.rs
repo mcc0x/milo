@@ -18,7 +18,8 @@ use super::{BaseWindows, Limits, Reading, Window};
 const MAX_INPUT: usize = 1024 * 1024;
 const MAX_SAVED: u64 = 4096;
 const MAX_CONFIG: u64 = 4 * 1024 * 1024;
-const INPUT_WAIT: Duration = Duration::from_millis(250);
+pub(super) const INPUT_WAIT: Duration = Duration::from_millis(250);
+const WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 
 /// A saved window can be older than the file if a later report omitted it.
 #[derive(Clone, Copy)]
@@ -27,9 +28,9 @@ enum Observed {
     Saved(i64),
 }
 
-fn windows(object: Value<'_>, observed: Observed) -> BaseWindows {
-    let [five_hour, seven_day] = object.fields(["five_hour", "seven_day"]);
-    [window(five_hour, 300, observed), window(seven_day, 10_080, observed)]
+fn windows<'a>(object: Value<'a>, mut read: impl FnMut(Option<Value<'a>>, u64) -> Option<Window>) -> BaseWindows {
+    let [five, week] = object.fields(WINDOWS);
+    [read(five, 300), read(week, 10_080)]
 }
 
 fn window(value: Option<Value<'_>>, minutes: u64, observed: Observed) -> Option<Window> {
@@ -51,7 +52,7 @@ pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Op
     let bytes = files::read_small(file, version, MAX_SAVED, budget)?;
     let [saved_at, rate_limits] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits"]);
     let at = saved_at?.integer()?;
-    let base = windows(rate_limits?, Observed::Saved(at));
+    let base = windows(rate_limits?, |value, minutes| window(value, minutes, Observed::Saved(at)));
     base.iter().any(Option::is_some).then_some(Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) })
 }
 
@@ -66,8 +67,8 @@ pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget, now:
     }
     let at = time::Timestamp::millis(at?)?;
     (at.seconds <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
-    let [five, week] = usage.filter(|value| value.object() || value.null())?.fields(["five_hour", "seven_day"]);
-    let window = |value: Option<Value<'_>>, minutes| {
+    let usage = usage.filter(|value| value.object() || value.null())?;
+    let base = windows(usage, |value, minutes| {
         let [percent, reset] = value?.fields(["utilization", "resets_at"]);
         Some(Window {
             minutes,
@@ -75,14 +76,13 @@ pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget, now:
             resets: reset.and_then(time::Timestamp::iso).and_then(|stamp| time::cache_reset(stamp, at.seconds)),
             observed: at.seconds,
         })
-    };
-    let base = [window(five, 300), window(week, 10_080)];
+    });
     Some(Reading { at, windows: Limits::new(base) })
 }
 
 /// A stalled stdin must not leave Claude waiting for its status line.
-pub(super) fn run_fd(input: impl AsFd, output: impl Write, path: Option<&Path>, now: i64) -> i32 {
-    let input = files::read_pipe(input, MAX_INPUT, Instant::now() + INPUT_WAIT);
+pub(super) fn run_fd(input: impl AsFd, output: impl Write, path: Option<&Path>, now: i64, wait: Duration) -> i32 {
+    let input = files::read_pipe(input, MAX_INPUT, Instant::now() + wait);
     run(input.as_deref().unwrap_or_default(), output, path, now)
 }
 
@@ -100,7 +100,7 @@ fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
     }
     let [limits, model] = Value::parse(input)?.fields(["rate_limits", "model"]);
     if let Some(limits) = limits.filter(|v| v.object()) {
-        let windows = windows(limits, Observed::Now(now));
+        let windows = windows(limits, |value, minutes| window(value, minutes, Observed::Now(now)));
         let [five, week] = windows;
         let label = |w: Window| if w.is_reset(now) { "reset" } else { w.number() };
         if (five.is_some() || week.is_some())
@@ -179,7 +179,7 @@ fn write_limits(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::
         dir.join(format!(".claude-limits-{}-{}", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)));
     let (temp, mut file) = Temp::create(temporary)?;
     write!(file, "{{\"saved_at\":{now},\"rate_limits\":{{")?;
-    for (i, (key, window)) in ["five_hour", "seven_day"].into_iter().zip(windows).enumerate() {
+    for (i, (key, window)) in WINDOWS.into_iter().zip(windows).enumerate() {
         if i > 0 {
             write!(file, ",")?;
         }

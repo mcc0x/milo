@@ -108,7 +108,7 @@ impl History {
             return s.put_right(right, 0, "no remote", FAINT);
         }
         let Some(ahead) = self.version.as_ref().and_then(|version| version.ahead) else {
-            let text = if right >= 14 { "not pushed yet" } else { "not pushed" };
+            let text = if name_width + 17 <= s.w { "no branch tracked" } else { "no tracking" };
             return s.put_right(right, 0, text, FAINT);
         };
         if ahead == 0 {

@@ -31,6 +31,32 @@ fn an_empty_file_uses_the_body_row_not_the_hint_row() {
 }
 
 #[test]
+fn text_with_a_picture_extension_still_shows_its_edits() {
+    let f = Fixture::new();
+    f.write("notes.png", "initial notes\n");
+    f.commit("first");
+    f.write("notes.png", "new notes\n");
+    let file = f.root.join("notes.png");
+    let mut working = Reader::open(&file).unwrap();
+    assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
+
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    let mut committed = Reader::at_commit(&file, id).unwrap();
+    assert_eq!(drawn(&mut committed, 60, 6)[1], " 1 + initial notes");
+}
+
+#[test]
+fn an_empty_picture_file_is_empty_not_a_broken_picture() {
+    let f = Fixture::folder();
+    f.write("empty.png", "");
+    let mut reader = Reader::open(&f.root.join("empty.png")).unwrap();
+    assert_eq!(drawn(&mut reader, 40, 3)[1], "  Empty.");
+}
+
+#[test]
 fn a_narrow_reader_keeps_a_file_name_and_shows_its_text_when_there_is_a_body_row() {
     let f = Fixture::folder();
     f.write("test.txt", "hi\n");
@@ -93,6 +119,18 @@ fn working_diffs_forced_to_text_do_not_show_binary_bytes() {
 }
 
 #[test]
+fn invalid_text_bytes_are_not_drawn_even_without_a_nul() {
+    let f = Fixture::new();
+    f.write("file.rs", "fn main() {}\n");
+    f.commit("text file");
+    for file in ["file.rs", "new.rs"] {
+        fs::write(f.root.join(file), b"fn \xff() {}\n").unwrap();
+        let mut reader = Reader::open(&f.root.join(file)).unwrap();
+        assert_eq!(drawn(&mut reader, 45, 8)[2].trim_start(), NOT_TEXT);
+    }
+}
+
+#[test]
 fn replacing_a_binary_file_with_text_does_not_look_like_an_unchanged_file() {
     let f = Fixture::new();
     f.write(".gitattributes", "data.bin diff\n");
@@ -123,6 +161,24 @@ fn scrolling_into_a_nested_comment_keeps_its_colour_until_the_outer_comment_ends
     let out = String::from_utf8(screen.emitted()).unwrap();
     assert!(out.contains("\x1b[0;3;2mlet inside = true;"), "{out:?}");
     assert!(out.contains("\x1b[0;35mlet"), "{out:?}");
+}
+
+#[test]
+fn unknown_extensions_and_conflicting_shebangs_do_not_colour_code() {
+    let f = Fixture::folder();
+    for (name, source, coloured) in [
+        ("page.unknown", "fn main() {}", false),
+        ("page.rs", "#!/usr/bin/env -S python3 -u\nreturn True", false),
+        ("other.rs", "#!/usr/bin/ruby\nreturn true", false),
+        ("page.py", "#!/usr/bin/env -S python3 -u\nreturn True", true),
+    ] {
+        f.write(name, source);
+        let mut reader = Reader::open(&f.root.join(name)).unwrap();
+        let mut screen = Screen::sized(60, 6);
+        reader.draw(&mut screen);
+        assert_eq!(screen.emitted().windows(7).any(|seq| seq == b"\x1b[0;35m"), coloured, "{name}");
+        assert!(screen.text().iter().any(|row| row.ends_with(source.lines().last().unwrap())));
+    }
 }
 
 #[test]
@@ -194,6 +250,77 @@ fn the_reader_opens_a_deleted_file_in_a_deleted_directory() {
     let rows = drawn(&mut reader, 60, 6);
     assert!(rows[0].contains("removed") && rows[0].ends_with("−1"), "{rows:?}");
     assert_eq!(rows[1], "   - removed content");
+}
+
+#[test]
+fn a_file_replaced_with_the_same_length_and_mtime_refreshes_then_can_disappear() {
+    let f = Fixture::folder();
+    f.write("file.txt", "before");
+    let path = f.root.join("file.txt");
+    let mut reader = Reader::open(&path).unwrap();
+    assert!(drawn(&mut reader, 60, 6)[1].ends_with("before"));
+
+    f.write("replacement", "edited");
+    let replacement = f.root.join("replacement");
+    let modified = path.metadata().unwrap().modified().unwrap();
+    fs::File::open(&replacement).unwrap().set_modified(modified).unwrap();
+    fs::rename(replacement, &path).unwrap();
+    assert!(reader.check());
+    assert!(drawn(&mut reader, 60, 6)[1].ends_with("edited"));
+
+    fs::remove_file(path).unwrap();
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file is gone.");
+}
+
+#[test]
+fn a_directory_replaced_by_a_link_while_open_does_not_show_its_target() {
+    let f = Fixture::folder();
+    let outside = Fixture::folder();
+    f.write("sub/file.txt", "before");
+    outside.write("file.txt", "outside content");
+    let dir = f.root.join("sub");
+    let mut reader = Reader::open(&dir.join("file.txt")).unwrap();
+    assert!(drawn(&mut reader, 60, 6)[1].ends_with("before"));
+
+    fs::rename(&dir, f.root.join("previous")).unwrap();
+    symlink(&outside.root, dir).unwrap();
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This path now leads outside the project.");
+}
+
+#[test]
+fn a_pipe_replacing_a_tracked_file_is_never_read_as_one() {
+    let f = Fixture::new();
+    f.write("file.txt", "before");
+    f.commit("text file");
+    let path = f.root.join("file.txt");
+    let mut reader = Reader::open(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `name` is a live, NUL-terminated path in the fixture.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+    assert!(reader.check());
+    let mut opened = Reader::open(&path).unwrap();
+    for pane in [&mut reader, &mut opened] {
+        assert_eq!(drawn(pane, 60, 6)[2].trim_start(), "Not a file, so there is nothing to show.");
+    }
+}
+
+#[test]
+fn an_unreadable_tracked_file_explains_why_it_cannot_be_read() {
+    let f = Fixture::new();
+    f.write("file.txt", "before");
+    f.commit("text file");
+    f.write("file.txt", "new bytes");
+    let path = f.root.join("file.txt");
+    fs::set_permissions(&path, Permissions::from_mode(0o0)).unwrap();
+    if fs::File::open(&path).is_ok() {
+        return;
+    }
+    let mut reader = Reader::open(&path).unwrap();
+    assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file cannot be read.");
 }
 
 #[test]

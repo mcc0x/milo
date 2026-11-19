@@ -248,6 +248,13 @@ mod tests {
         store.save(Some(&off()), None, &|_| true).unwrap();
         assert!(store.offer_once());
         assert!(!store.offer_once());
+        let linked = Fixture::folder();
+        let linked = store_at(&linked.root);
+        let elsewhere = fixture.root.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        symlink(&elsewhere, &linked.state).unwrap();
+        assert!(!linked.offer_once());
+        assert!(!elsewhere.join(OFFERED).exists());
     }
 
     #[test]
@@ -578,6 +585,24 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_pane_does_not_put_it_inside_a_comment() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let file = store.rex_file();
+        let note = "--[=[\n  history = true, -- Only an example\n  ]=]";
+        let edited = fs::read_to_string(&file).unwrap().replace("  history = true,", "");
+        fs::write(&file, edited.replace("local chosen = {", &format!("local chosen = {{ {note}"))).unwrap();
+
+        let (mut layout, _) = store.layout().unwrap();
+        assert!(!layout.chosen(TabPane::History));
+        layout.toggle(TabPane::History);
+        store.save(Some(&layout), None, &|_| true).unwrap();
+        assert!(store.layout().unwrap().0.chosen(TabPane::History));
+        assert!(fs::read_to_string(file).unwrap().contains(note));
+    }
+
+    #[test]
     fn setup_does_not_edit_ambiguous_or_quoted_layout_declarations() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
@@ -591,6 +616,7 @@ mod tests {
         for original in [
             shipped.replace("local column_width = 0.22", "local column_width = 0.20\nlocal column_width = 0.22"),
             shipped.replace("  usage = true,", "  usage = false,\n  usage = true,"),
+            shipped.replace("local column_width = 0.22", "local column_width = 0.22 --[[]] local column_width = 0.30"),
             format!("{GENERATED}local example = [=[\n{}]=]\n", &shipped[GENERATED.len()..]),
         ] {
             fs::write(&file, &original).unwrap();

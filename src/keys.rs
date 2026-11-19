@@ -5,7 +5,7 @@ use std::io::{ErrorKind, Read};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use crate::term::wait_ready;
+use crate::term::{milliseconds, wait_ready};
 
 /// Allow split terminal sequences and multibyte keys one short wait to finish.
 const SEQUENCE_WAIT: Duration = Duration::from_millis(25);
@@ -92,19 +92,14 @@ impl Input {
         for _ in 0..32 {
             let n = match keyboard.read(&mut buf) {
                 Ok(0) if read_input => break,
-                Ok(0) => {
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Ok(0) | Err(_) => {
                     self.finish(keys);
                     keys.push(Key::Eof);
                     return;
                 }
                 Ok(n) => n,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => {
-                    self.finish(keys);
-                    keys.push(Key::Eof);
-                    return;
-                }
             };
             read_input = true;
             self.feed(&buf[..n], keys);
@@ -116,7 +111,7 @@ impl Input {
             } else {
                 let now = Instant::now();
                 let until = *deadline.get_or_insert(now + SEQUENCE_WAIT);
-                let timeout = i32::try_from(until.saturating_duration_since(now).as_millis() + 1).unwrap_or(i32::MAX);
+                let timeout = milliseconds(until.saturating_duration_since(now));
                 let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
                 if now >= until || wait_ready(&mut fds, timeout) <= 0 {
                     break;
@@ -175,10 +170,7 @@ fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
     let mut used = 0;
     while used < bytes.len() {
         if matched == 0 {
-            let Some(i) = bytes[used..].iter().position(|&c| c == PASTE_END[0]) else {
-                *end = Some(0);
-                return bytes.len();
-            };
+            let Some(i) = bytes[used..].iter().position(|&c| c == PASTE_END[0]) else { break };
             used += i + 1;
             matched = 1;
         } else {
@@ -196,7 +188,7 @@ fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
         }
     }
     *end = Some(matched);
-    used
+    bytes.len()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -244,7 +236,13 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
         let (key, tail) = match c {
             0x1b => match rest {
                 [] | [b'O'] => return bytes,
-                [_, body @ ..] if let Some(sequence) = Sequence::of(rest) => {
+                [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
+                [_, body @ ..] => {
+                    let Some(sequence) = Sequence::of(rest) else {
+                        // Alt-modified key: drop it rather than act on the bare key.
+                        bytes = body;
+                        continue;
+                    };
                     let Some((end, resume)) = sequence.end(body) else { return bytes };
                     let (answer, tail) = (&body[..end], &body[resume..]);
                     let key = if end >= READ_SIZE {
@@ -266,9 +264,6 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
                     };
                     (key, tail)
                 }
-                [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
-                // Alt-modified key: drop it rather than act on the bare key.
-                [_, tail @ ..] => (None, tail),
             },
             b'\r' | b'\n' => (Some(Key::Enter), rest),
             1..=26 => (Some(Key::Ctrl(c + b'a' - 1)), rest),

@@ -17,7 +17,7 @@ impl History {
             Key::Click(x, y) => self.click(x, y, now),
             Key::Enter => self.enter(),
             Key::Left | Key::Char('h') => self.left(),
-            Key::Char('r') => self.reload(),
+            Key::Char('r') => self.load(),
             _ => {
                 if let Some(delta) = key.rows(self.shown) {
                     let before = (self.cursor, self.top);

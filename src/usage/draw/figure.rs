@@ -5,9 +5,8 @@ use std::cell::RefCell;
 use crate::picture::Picture;
 use crate::screen::{GREEN, RED, Screen, Style, YELLOW};
 
-use super::Area;
+use super::{Area, LARGE_ROWS};
 
-const ROWS: usize = 3;
 const HEIGHT: usize = 64;
 const PITCH: usize = 38;
 const PERCENT: usize = 25;
@@ -102,14 +101,14 @@ impl Figure {
     pub(super) fn draw(self, screen: &mut Screen, area: Area, y: usize, slot: usize) {
         let light = screen.light_background();
         let (cell_w, cell_h) = screen.cell_size();
-        let cols = (self.width() * usize::from(cell_h) * ROWS).div_ceil(HEIGHT * usize::from(cell_w)).min(area.w);
+        let cols = (self.width() * usize::from(cell_h) * LARGE_ROWS).div_ceil(HEIGHT * usize::from(cell_w)).min(area.w);
         IMAGES.with_borrow_mut(|images| {
             let cached = &mut images[slot];
             if cached.as_ref().is_none_or(|(figure, theme, _)| *figure != self || *theme != light) {
                 *cached = Some((self, light, self.picture(light)));
             }
             let (_, _, picture) = cached.as_ref().expect("the image is cached");
-            screen.show_picture(picture, area.x, y, cols, ROWS);
+            screen.show_picture(picture, area.x, y, cols, LARGE_ROWS);
         });
     }
 

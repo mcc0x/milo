@@ -41,13 +41,6 @@ const REVERSE: u16 = 1 << 13;
 const WASH_SHIFT: u16 = 14;
 const WASH: u16 = 3 << WASH_SHIFT;
 
-const _: () = assert!(
-    Wash::Bar as u16 == 1
-        && Wash::Added as u16 == 2
-        && Wash::Removed as u16 == 3
-        && Wash::Removed as u16 == WASH >> WASH_SHIFT
-);
-
 impl Style {
     pub const PLAIN: Style = Style(0);
 
@@ -476,11 +469,6 @@ impl Screen {
         }
     }
 
-    /// Writes only the cells that changed since the last flush.
-    pub fn flush(&mut self, send: impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<()> {
-        self.flush_to(|parts| parts.iter().copied().try_for_each(send)).unwrap_or(Ok(()))
-    }
-
     /// Release even the hidden uploads before giving the terminal back.
     pub fn release_pictures(&mut self, send: impl FnOnce(&[u8])) {
         self.out.truncate(SYNC_ON.len());
@@ -539,7 +527,8 @@ impl Screen {
         data_at
     }
 
-    fn flush_to<T>(&mut self, write_frame: impl FnOnce(&[&[u8]]) -> T) -> Option<T> {
+    /// Writes only the cells that changed since the last flush.
+    pub fn flush(&mut self, mut send: impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<()> {
         let washes = &self.washes;
         let prev_washes = &self.prev_washes;
         let palette_changed = washes != prev_washes;
@@ -599,17 +588,17 @@ impl Screen {
         if self.out.len() > SYNC_ON.len() {
             self.out.extend_from_slice(b"\x1b[0m\x1b[?2026l");
             let result = if self.pictures.data.is_empty() {
-                write_frame(&[&self.out])
+                send(&self.out)
             } else {
                 let (before, after) = self.out.split_at(data_at);
-                let result = write_frame(&[before, &self.pictures.data, after]);
+                let result = send(before).and_then(|()| send(&self.pictures.data)).and_then(|()| send(after));
                 self.pictures.data.clear();
                 result
             };
             self.out.truncate(SYNC_ON.len());
-            Some(result)
+            result
         } else {
-            None
+            Ok(())
         }
     }
 }
@@ -669,7 +658,11 @@ impl Screen {
     /// Captures exactly what a flush would send to the terminal.
     pub fn emitted(&mut self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        let _ = self.flush_to(|parts| bytes.extend(parts.iter().copied().flatten()));
+        self.flush(|part| {
+            bytes.extend_from_slice(part);
+            Ok(())
+        })
+        .unwrap();
         bytes
     }
 }
@@ -858,6 +851,6 @@ mod tests {
                 .as_bytes()
         );
         screen.set_background([0; 3]);
-        let _ = screen.flush_to(|_| panic!("the palette did not change"));
+        screen.flush(|_| panic!("the palette did not change")).unwrap();
     }
 }

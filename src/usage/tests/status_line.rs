@@ -165,10 +165,10 @@ fn claude_status_prints_a_plain_line_when_its_input_remains_open() {
     let (send, receive) = mpsc::channel();
     let thread = std::thread::spawn(move || {
         let mut output = Vec::new();
-        let code = status::run_fd(reader, &mut output, None, NOW);
+        let code = status::run_fd(reader, &mut output, None, NOW, status::INPUT_WAIT);
         let _ = send.send((code, output));
     });
-    assert_eq!(receive.recv_timeout(Duration::from_secs(5)).unwrap(), (0, b"\n".to_vec()));
+    assert_eq!(receive.recv_timeout(TEST_WAIT).unwrap(), (0, b"\n".to_vec()));
     drop(writer);
     thread.join().unwrap();
 
@@ -176,7 +176,7 @@ fn claude_status_prints_a_plain_line_when_its_input_remains_open() {
     writer.write_all(STATUS).unwrap();
     drop(writer);
     let mut output = Vec::new();
-    assert_eq!(status::run_fd(reader, &mut output, None, NOW), 0);
+    assert_eq!(status::run_fd(reader, &mut output, None, NOW, TEST_WAIT), 0);
     assert_eq!(String::from_utf8(output).unwrap(), "5h 23% · week 61%\n");
 }
 
@@ -195,7 +195,7 @@ fn a_newer_empty_claude_reading_explains_why_no_figures_are_shown() {
         let rows = frame(&mut usage, 140, 3);
         let claude = |row: usize| rows[row].split_once('│').unwrap().1;
         assert!(!claude(1).contains('%'));
-        assert_eq!(claude(2).trim(), "no limits reported");
+        assert_eq!(claude(2).trim(), "no limits to show");
     }
 }
 

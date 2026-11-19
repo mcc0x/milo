@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use super::time::{self, Timestamp};
 use super::{CLOCK_SKEW, Limits, ModelWeek, Reading, Window};
 
 const INTERVAL: Duration = Duration::from_secs(20);
-const QUERY_WAIT: Duration = Duration::from_secs(1);
+pub(super) const QUERY_WAIT: Duration = Duration::from_secs(1);
 const MAX_OUTPUT: usize = 64 * 1024;
 
 /// Project only usage fields. An older history row must not restore a window
@@ -81,16 +81,16 @@ pub(super) struct Reports {
 }
 
 /// A slow database read runs off the pane's event loop.
-#[derive(Default)]
 pub(super) struct Poll {
     path: Option<PathBuf>,
+    wait: Duration,
     last: Option<Instant>,
     job: Option<JoinHandle<Option<Reports>>>,
 }
 
 impl Poll {
-    pub(super) fn new(path: Option<PathBuf>) -> Self {
-        Self { path, last: None, job: None }
+    pub(super) fn new(path: Option<PathBuf>, wait: Duration) -> Self {
+        Self { path, wait, last: None, job: None }
     }
 
     /// Keep checking quickly enough to collect a worker that has not finished.
@@ -110,10 +110,11 @@ impl Poll {
             return None;
         }
         let path = self.path.clone()?;
+        let wait = self.wait;
         self.last = Some(clock);
         self.job = thread::Builder::new()
             .spawn(move || {
-                read(&path, now).or_else(|| {
+                read(&path, now, wait).or_else(|| {
                     let missing =
                         std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
                     missing.then(Reports::default)
@@ -137,8 +138,8 @@ pub(super) fn sqlite() -> &'static OsStr {
     OsStr::new("/usr/bin/sqlite3")
 }
 
-pub(super) fn read(path: &Path, now: i64) -> Option<Reports> {
-    let bytes = query(sqlite(), path, QUERY_WAIT)?;
+pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Option<Reports> {
+    let bytes = query(sqlite(), path, wait)?;
     parse(&bytes, now)
 }
 
@@ -195,7 +196,7 @@ pub(super) fn query(executable: &OsStr, path: &Path, wait: Duration) -> Option<V
         return None;
     }
     let deadline = Instant::now() + wait;
-    let mut child = Command::new(executable)
+    let child = Command::new(executable)
         .args(["-batch", "-safe", "-bail", "-nofollow", "-readonly", "-json", "-init", "/dev/null", "--"])
         .arg(read_only_uri(&path))
         .arg(SQL)
@@ -204,6 +205,10 @@ pub(super) fn query(executable: &OsStr, path: &Path, wait: Duration) -> Option<V
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    capture(child, deadline)
+}
+
+fn capture(mut child: Child, deadline: Instant) -> Option<Vec<u8>> {
     let captured = child.stdout.take().and_then(|pipe| files::read_pipe(pipe, MAX_OUTPUT, deadline));
     if let Some(bytes) = captured {
         loop {
@@ -308,6 +313,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sqlite_that_closes_stdout_without_exiting_is_killed_and_reaped() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exec 1>&-; read -r line"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = child.stdout.take().unwrap();
+        // EOF says the child has closed stdout. Its stdin stays open until we kill it.
+        assert_eq!(output.read(&mut [0]).unwrap(), 0);
+        child.stdout = Some(output);
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        assert!(capture(child, deadline).is_none());
+        assert!(Instant::now() >= deadline);
+        // SAFETY: WNOHANG does not block and a null status pointer is allowed.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
     fn closing_usage_waits_for_its_sqlite_worker_to_reap_the_child() {
         let (send, receive) = std::sync::mpsc::channel();
         let job = thread::spawn(move || {
@@ -316,7 +342,7 @@ mod tests {
             child.wait().unwrap();
             None
         });
-        let mut poll = Poll::default();
+        let mut poll = Poll::new(None, QUERY_WAIT);
         poll.job = Some(job);
         let pid = libc::pid_t::try_from(receive.recv().unwrap()).unwrap();
         drop(poll);

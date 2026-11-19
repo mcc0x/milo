@@ -118,12 +118,6 @@ impl History {
         }
     }
 
-    fn reload(&mut self) {
-        if self.repo.git && self.repo.refresh_config() {
-            self.load();
-        }
-    }
-
     /// Remembers the open commit and the cursor by hash when commits move.
     fn replace_commits(&mut self, commits: Vec<Commit>, selected: Option<TimelineRow>, uncommitted: usize) {
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
@@ -232,7 +226,7 @@ impl Pane for History {
         if self.repo.busy() {
             return false;
         }
-        if self.repo.refresh_config() && self.repo.poll(&[]) {
+        if self.repo.poll(&[]) {
             self.load();
         }
         true

@@ -60,32 +60,38 @@ fn kind(name: &str) -> (&'static str, u8) {
         _ => {}
     }
     let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
-    match ext.to_ascii_lowercase().as_str() {
-        "rs" => ("\u{e7a8}", 208),
-        "py" => ("\u{e606}", 74),
-        "js" | "mjs" | "cjs" => ("\u{e74e}", 220),
-        "ts" | "mts" | "cts" => ("\u{e628}", 39),
-        "jsx" | "tsx" => ("\u{e7ba}", 80),
-        "md" | "mdx" => ("\u{e73e}", 110),
-        "json" | "jsonc" => ("\u{e60b}", 185),
-        "toml" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "env" => ("\u{e615}", 103),
-        "html" | "htm" => ("\u{e736}", 202),
-        "css" | "scss" | "sass" => ("\u{e749}", 69),
-        "go" => ("\u{e627}", 80),
-        "lua" => ("\u{e620}", 63),
-        "sh" | "bash" | "zsh" | "fish" => ("\u{f489}", 113),
-        "lock" => ("\u{f023}", 245),
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "avif" => ("\u{f1c5}", 176),
-        "c" | "h" => ("\u{e61e}", 68),
-        "cpp" | "cc" | "cxx" | "hpp" => ("\u{e61d}", 68),
-        "java" => ("\u{e738}", 167),
-        "rb" => ("\u{e739}", 160),
-        "php" => ("\u{e73d}", 98),
-        "swift" => ("\u{e755}", 209),
-        "sql" | "db" | "sqlite" => ("\u{f1c0}", 180),
-        "pdf" => ("\u{f1c1}", 160),
-        "zip" | "gz" | "tar" | "tgz" | "xz" | "zst" => ("\u{f1c6}", 179),
-        "txt" | "log" => ("\u{f15c}", 250),
-        _ => ("\u{f15b}", 245),
+    const GENERIC: (&str, u8) = ("\u{f15b}", 245);
+    // The longest known extension is "sqlite". Keep folding on the stack.
+    let mut folded = [0; 6];
+    let Some(ext_bytes) = folded.get_mut(..ext.len()) else { return GENERIC };
+    ext_bytes.copy_from_slice(ext.as_bytes());
+    ext_bytes.make_ascii_lowercase();
+    match &*ext_bytes {
+        b"rs" => ("\u{e7a8}", 208),
+        b"py" => ("\u{e606}", 74),
+        b"js" | b"mjs" | b"cjs" => ("\u{e74e}", 220),
+        b"ts" | b"mts" | b"cts" => ("\u{e628}", 39),
+        b"jsx" | b"tsx" => ("\u{e7ba}", 80),
+        b"md" | b"mdx" => ("\u{e73e}", 110),
+        b"json" | b"jsonc" => ("\u{e60b}", 185),
+        b"toml" | b"yaml" | b"yml" | b"ini" | b"conf" | b"cfg" | b"env" => ("\u{e615}", 103),
+        b"html" | b"htm" => ("\u{e736}", 202),
+        b"css" | b"scss" | b"sass" => ("\u{e749}", 69),
+        b"go" => ("\u{e627}", 80),
+        b"lua" => ("\u{e620}", 63),
+        b"sh" | b"bash" | b"zsh" | b"fish" => ("\u{f489}", 113),
+        b"lock" => ("\u{f023}", 245),
+        b"png" | b"jpg" | b"jpeg" | b"gif" | b"svg" | b"webp" | b"ico" | b"avif" => ("\u{f1c5}", 176),
+        b"c" | b"h" => ("\u{e61e}", 68),
+        b"cpp" | b"cc" | b"cxx" | b"hpp" => ("\u{e61d}", 68),
+        b"java" => ("\u{e738}", 167),
+        b"rb" => ("\u{e739}", 160),
+        b"php" => ("\u{e73d}", 98),
+        b"swift" => ("\u{e755}", 209),
+        b"sql" | b"db" | b"sqlite" => ("\u{f1c0}", 180),
+        b"pdf" => ("\u{f1c1}", 160),
+        b"zip" | b"gz" | b"tar" | b"tgz" | b"xz" | b"zst" => ("\u{f1c6}", 179),
+        b"txt" | b"log" => ("\u{f15c}", 250),
+        _ => GENERIC,
     }
 }

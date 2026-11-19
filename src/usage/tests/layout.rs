@@ -112,10 +112,15 @@ fn frame_rows_are_the_same_in_all_data_states() {
         assert!(!rows[0].split_once('│').unwrap().0.trim().is_empty());
         assert!(!rows[0].split_once('│').unwrap().1.trim().is_empty());
         assert!(rows[2].contains("██ Codex") && rows[2].contains("██ Claude"));
+        let (left, right) = rows[4].split_once('│').unwrap();
+        assert_eq!(left.contains("no sessions found"), !codex);
+        assert_eq!(right.contains("no saved limits found"), !claude);
         let rows = frame(&mut usage, 36, 12);
         assert_eq!(rows[5], "─".repeat(36));
         assert!(!rows[0].is_empty() && !rows[6].is_empty());
         assert!(rows[2].contains("██ Codex") && rows[8].contains("██ Claude"));
+        assert_eq!(rows[4].contains("no sessions found"), !codex);
+        assert_eq!(rows[10].contains("no saved limits found"), !claude);
     }
 }
 
@@ -124,9 +129,12 @@ fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
     let f = Fixture::folder();
     let mut usage = open(&f, NOW);
     let window = |minutes, percent| Window { minutes, percent, resets: Some(NOW + HOUR), observed: NOW };
-    usage.claude.saved = Some(Limits {
-        base: [Some(window(300, 12.0)), Some(window(10_080, 34.0))],
-        model_week: ModelWeek::new("opus", window(10_080, 56.0)),
+    usage.claude.native = Some(Reading {
+        at: Timestamp::seconds(NOW),
+        windows: Limits {
+            base: [Some(window(300, 12.0)), Some(window(10_080, 34.0))],
+            model_week: ModelWeek::new("opus", window(10_080, 56.0)),
+        },
     });
     for (width, model) in [(80, false), (140, true)] {
         let rows = frame(&mut usage, width, 3);
@@ -188,11 +196,11 @@ fn activity_follows_the_hint_and_never_sits_under_a_window_like_its_caption() {
     // Five rows leave none to spare under the captions.
     let rows = frame(&mut open(&f, now), 140, 5);
     let claude = rows[4].split_once('│').unwrap().1.trim();
-    assert_eq!(claude, "no local source found · 13k tokens today");
+    assert_eq!(claude, "no saved limits found · 13k tokens today");
     // With a row to spare it has that row to itself.
     let rows = frame(&mut open(&f, now), 140, 6);
     let below: Vec<&str> = rows[4..].iter().map(|row| row.split_once('│').unwrap().1.trim()).collect();
-    assert_eq!(below, ["no local source found", "13k tokens today"]);
+    assert_eq!(below, ["no saved limits found", "13k tokens today"]);
 }
 
 #[test]

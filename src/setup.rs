@@ -235,32 +235,43 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     /// Scroll only the choices, leaving the instructions and footer in place when possible.
     fn draw_choices(&self, s: &mut Screen, end: usize) {
+        let (status, instructions): (&str, &[&str]) = if self.inside {
+            let status = match self.installed {
+                Installed::Active(_) => "Rex layout installed",
+                Installed::Absent => "Rex: not set up yet",
+                Installed::Unreadable => "Could not read Rex settings",
+            };
+            (status, &[])
+        } else {
+            const OUTSIDE: &str = "Open setup in Rex to arrange tabs.";
+            const PANES: &str = "Panes work anywhere: milo outline, milo history, milo usage.";
+            let instructions: &[&str] = if s.w > PANES.len() {
+                &[OUTSIDE, PANES]
+            } else {
+                &[OUTSIDE, "Panes work anywhere:", "milo outline", "milo history", "milo usage"]
+            };
+            (if self.claude == Claude::Off { "Not set up yet" } else { "" }, instructions)
+        };
         let mut top = 1;
         if end > 4 {
             if self.offered {
                 s.put_fit(1, top, s.w - 1, "Set up panes for Rex tabs.", FAINT);
                 top += 1;
             }
-            let status = if self.inside {
-                match self.installed {
-                    Installed::Active(_) => "Rex layout installed",
-                    Installed::Absent => "Rex: not set up yet",
-                    Installed::Unreadable => "Could not read Rex settings",
-                }
-            } else if self.claude == Claude::Off {
-                "Not set up yet"
-            } else {
-                ""
-            };
             if !status.is_empty() {
                 s.put_fit(1, top, s.w - 1, status, FAINT);
                 top += 1;
             }
-            if !self.inside && end > 6 {
-                s.put_fit(1, top, s.w - 1, "Open setup in Rex to arrange tabs.", FAINT);
-                s.put_fit(1, top + 1, s.w - 1, "Panes work anywhere: milo outline, milo history, milo usage.", FAINT);
-                top += 2;
+            let width = s.w - 1;
+            let lines = instructions.iter().flat_map(|text| wrap(text, width)).take(end - top - 1);
+            for text in lines {
+                s.put(1, top, width, text, FAINT);
+                top += 1;
             }
+        } else if s.w >= 49 {
+            let status = instructions.first().copied().unwrap_or(status);
+            s.put(11, 0, 3, " · ", FAINT);
+            s.put(14, 0, s.w - 14, status, FAINT);
         }
         let choices = self.choices();
         let shown = end.saturating_sub(top).min(choices.len());
@@ -565,6 +576,17 @@ mod tests {
     }
 
     #[test]
+    fn a_short_setup_screen_still_shows_whether_rex_is_set_up() {
+        let f = Fixture::folder();
+        let mut pane = Setup::new(Some(store(&f)), true, None, |_| true);
+        assert!(frame(&mut pane, 140, 5)[0].contains("Rex: not set up yet"));
+        pane.key(Key::Char('s'));
+        let rows = frame(&mut pane, 140, 5);
+        assert!(rows[0].contains("Rex layout installed"));
+        assert!(rows[3].contains("Saved Rex layout choices."));
+    }
+
+    #[test]
     fn outside_rex_only_claude_settings_can_be_changed() {
         let f = Fixture::folder();
         let store = store(&f);
@@ -575,6 +597,13 @@ mod tests {
         assert!(rows[3].contains("milo outline, milo history, milo usage"));
         assert!(rows[4].contains("Show Claude Code limits"));
         assert!(!rows.iter().any(|row| row.contains("Arrange new shell tabs")));
+        let compact = frame(&mut pane, 28, 20);
+        let words = compact.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ");
+        assert!(words.contains("Open setup in Rex to arrange tabs."));
+        for tool in ["milo outline", "milo history", "milo usage"] {
+            assert!(compact.iter().any(|row| row.trim() == tool));
+        }
+        assert!(words.contains("Claude limits Off"));
         pane.key(Key::Enter);
         pane.key(Key::Char('s'));
         assert!(fs::read_to_string(f.root.join("settings.json")).unwrap().contains("milo claude-status"));

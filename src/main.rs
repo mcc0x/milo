@@ -99,8 +99,8 @@ Reader (also opened by milo view):
   n N           next/previous block of changed lines
   q or Esc      close
 
-In every pane, ? opens help and Ctrl-C quits. The outline, history and
-reader support the mouse wheel, Page Up/Down and Home/End.
+Ctrl-C quits. Press ? for help when the pane has room. The outline,
+history and reader support the mouse wheel, Page Up/Down and Home/End.
 
 Changed files are those waiting to be committed or pushed. Yellow is edited,
 green new, red removed, cyan moved, and magenta in conflict. Uncommitted
@@ -116,6 +116,19 @@ symbols or MILO_ICONS=off to hide icons.
 
 https://usemilo.net
 ";
+
+fn command_help(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "outline" => "Usage: milo outline [PATH]\n\nBrowse files and changes. PATH defaults to the current directory.",
+        "history" => "Usage: milo history [PATH]\n\nBrowse recent commits. PATH defaults to the current directory.",
+        "usage" => "Usage: milo usage\n\nSee usage and limits for Claude and Codex.",
+        "view" => "Usage: milo view FILE [--commit ID]\n\nRead a file now or as it was at a Git commit.",
+        "setup" => "Usage: milo setup\n\nSet up or remove milo's Rex layout and Claude Code integration.",
+        "listen" => "Usage: milo listen [--stop]\n\nStart or stop applying the milo layout to new Rex tabs.",
+        "claude-status" => "Usage: milo claude-status\n\nRead usage from Claude Code's status line input.",
+        _ => return None,
+    })
+}
 
 /// Ends the program with a message. A path in it may hold anything, so
 /// control characters are left out.
@@ -154,7 +167,7 @@ enum Command<'a> {
     Setup { offered: bool },
     Listen(bool),
     ClaudeStatus,
-    Help,
+    Help(&'static str),
     Version,
 }
 
@@ -168,7 +181,14 @@ fn command<'a>(
     if !rest.is_empty() && first != Some(OsStr::new("view")) {
         return Err("too many arguments; see milo --help".to_string());
     }
-    Ok(match (first.and_then(OsStr::to_str), second) {
+    let name = first.and_then(OsStr::to_str);
+    if rest.is_empty()
+        && second.is_some_and(|arg| arg == "--help" || arg == "-h")
+        && let Some(help) = name.and_then(command_help)
+    {
+        return Ok(Command::Help(help));
+    }
+    Ok(match (name, second) {
         (Some("outline"), path) => Command::Outline(path),
         (Some("history"), path) => Command::History(path),
         (Some("view"), Some(file)) => {
@@ -181,7 +201,7 @@ fn command<'a>(
             };
             Command::View { file, commit }
         }
-        (Some("view"), None) => return Err("which file? milo view FILE [--commit ID]".to_string()),
+        (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID]".to_string()),
         (Some("setup"), None) => Command::Setup { offered: false },
         (Some("usage"), None) => Command::Usage,
         (Some("listen"), None) => Command::Listen(false),
@@ -191,7 +211,7 @@ fn command<'a>(
         (Some("setup" | "usage" | "claude-status"), Some(_)) => {
             return Err("unexpected argument; see milo --help".to_string());
         }
-        (Some("-h" | "--help"), None) => Command::Help,
+        (Some("-h" | "--help"), None) => Command::Help(USAGE),
         (Some("-V" | "--version"), None) => Command::Version,
         (Some(option), _) if option.starts_with('-') => return Err(format!("no option {option}; see milo --help")),
         (_, None) => match first {
@@ -208,7 +228,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
     match command {
         Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
-            open_outline(Some(path)).map_err(|why| format!("{why}; commands: outline, history, view, usage, setup"))
+            open_outline(Some(path)).map_err(|why| format!("{why}; see milo --help for commands"))
         }),
         Command::History(path) => {
             run(Start::Reading(project_path(path)), &|| Ok(Box::new(History::new(open_repo(path)?, rex::inside()))))
@@ -229,8 +249,8 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         }
         Command::Listen(stop) => exit(setup::listen(stop)),
         Command::ClaudeStatus => exit(usage::claude_status()),
-        Command::Help => {
-            print!("{USAGE}");
+        Command::Help(text) => {
+            println!("{}", text.trim_end());
             Ok(())
         }
         Command::Version => {
@@ -396,14 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_word_names_the_commands() {
+    fn an_unknown_word_points_to_the_commands() {
         let f = fixture::Fixture::folder();
         let missing = f.root.join("not-a-milo-command");
         let command = command(Some(missing.as_os_str()), None, &[], || false).unwrap();
         let Err(why) = open_pane(command) else {
             panic!("unknown word opened a pane");
         };
-        assert!(why.contains("not-a-milo-command") && why.contains("outline, history, view"), "{why}");
+        assert!(why.contains("not-a-milo-command") && why.contains("milo --help for commands"), "{why}");
         assert_eq!(why.lines().count(), 1);
     }
 }

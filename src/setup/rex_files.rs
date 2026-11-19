@@ -39,6 +39,7 @@ impl Store {
             return false;
         }
         fs::create_dir_all(&self.state).is_ok()
+            && crate::fs_ops::open_dir(&self.state).is_ok()
             && OpenOptions::new().write(true).create_new(true).mode(0o600).open(self.state.join(OFFERED)).is_ok()
     }
 
@@ -76,30 +77,23 @@ impl Store {
         run: &RunRex<'_>,
     ) -> Result<RexPlan, &'static str> {
         check_config_dir(&self.config)?;
-        let init_path = settings_path(&self.init)?;
-        let init = read(&init_path)?;
+        let enabled = layout.enabled();
         let rex_path = self.rex_file();
-        let init_after =
-            edit_init(init.as_ref(), &loader(&rex_path), layout.enabled(), matches!(init_path, Cow::Owned(_)))?;
+        let init = plan_init(settings_path(&self.init)?, &loader(&rex_path), enabled)?;
         let note = self.state.join("layout-disabled");
         let disabled = read(&note)?;
         if disabled.as_ref().is_some_and(|file| !file.bytes.is_empty()) {
             return Err("Milo's saved layout note was changed. It was left alone.");
         }
         // Record removal first so an interrupted removal does not look like first-time setup.
-        changes.extend(Change::new(note, disabled, (!layout.enabled()).then(Vec::new)));
+        changes.extend(Change::new(note, disabled, (!enabled).then(Vec::new)));
         let first_rex_change = changes.len();
-        if layout.enabled() {
+        if enabled {
             self.plan_actions(layout, &rex_path, changes, run)?;
         }
         let listener_changed = layout.new_tabs && self.plan_listener(&rex_path, changes, run)?;
-        let after = match init_after {
-            InitEdit::Keep => None,
-            InitEdit::Write(bytes) => Change::new(init_path.into_owned(), init, Some(bytes)),
-            InitEdit::Remove => Change::new(init_path.into_owned(), init, None),
-        };
-        changes.extend(after);
-        if !layout.enabled() {
+        changes.extend(init);
+        if !enabled {
             self.remove_shipped(&rex_path, changes)?;
         }
         Ok(RexPlan { reload: changes.len() != first_rex_change, listener_changed })
@@ -176,21 +170,19 @@ impl Store {
         if !layout.panes.contains(&true) {
             return Err("Choose at least one pane first.");
         }
-        let scope = [OsStr::new("-s"), target.session.as_os_str(), OsStr::new("-b"), target.block.as_os_str()];
-        let action = OsStr::new("milo_layout");
         let lua = rex_lua(layout, &executable()?);
         let temp = staged(&self.config, lua.as_bytes()).map_err(|_| "Could not prepare the Rex layout.")?;
         let done = run(&[
             OsStr::new("do"),
             temp.path().as_os_str(),
             OsStr::new("--action"),
-            action,
-            scope[0],
-            scope[1],
-            scope[2],
-            scope[3],
+            OsStr::new("milo_layout"),
+            OsStr::new("-s"),
+            &target.session,
+            OsStr::new("-b"),
+            &target.block,
         ]);
-        if done { Ok(()) } else { Err("Rex could not arrange this tab.") }
+        if done { Ok(()) } else { Err("Could not arrange this tab.") }
     }
 }
 
@@ -255,14 +247,9 @@ pub(super) fn managed(bytes: &[u8], load: &str) -> Option<(std::ops::Range<usize
     (matches!(comment, MANAGED | CREATED) && call == load.as_bytes()).then_some((start..end, comment == CREATED))
 }
 
-enum InitEdit {
-    Keep,
-    Write(Vec<u8>),
-    Remove,
-}
-
-fn edit_init(original: Option<&Image>, load: &str, enable: bool, linked: bool) -> Result<InitEdit, &'static str> {
-    let bytes = original.map_or(&[][..], |file| file.bytes.as_slice());
+fn plan_init(path: Cow<'_, Path>, load: &str, enable: bool) -> Result<Option<Change>, &'static str> {
+    let original = read(&path)?;
+    let bytes = original.as_ref().map_or(&[][..], |file| file.bytes.as_slice());
     let start = init_start(bytes);
     let block = managed(bytes, load);
     let other = &bytes[block.as_ref().map_or(start, |(range, _)| range.end)..];
@@ -282,18 +269,18 @@ fn edit_init(original: Option<&Image>, load: &str, enable: bool, linked: bool) -
     {
         return Err("Milo's lines in Rex settings were moved, copied or changed. Your file was left alone.");
     }
-    if let Some((range, created)) = block {
-        if enable {
-            return Ok(InitEdit::Keep);
+    let after = match (block, enable) {
+        (Some((range, created)), false) => {
+            let delete = created && matches!(path, Cow::Borrowed(_)) && range == (0..bytes.len());
+            (!delete).then(|| [&bytes[..range.start], &bytes[range.end..]].concat())
         }
-        if created && !linked && range == (0..bytes.len()) {
-            return Ok(InitEdit::Remove);
-        }
-        return Ok(InitEdit::Write([&bytes[..range.start], &bytes[range.end..]].concat()));
-    }
-    if !enable {
-        return Ok(InitEdit::Keep);
-    }
+        (None, true) => Some(insert_loader(bytes, start, load, original.is_none())?),
+        _ => return Ok(None),
+    };
+    Ok(Change::new(path.into_owned(), original, after))
+}
+
+fn insert_loader(bytes: &[u8], start: usize, load: &str, created: bool) -> Result<Vec<u8>, &'static str> {
     if start == bytes.len() && without_bom(bytes).starts_with(b"#!") && !bytes.ends_with(b"\n") {
         return Err("Rex's settings file has an unfinished first line.");
     }
@@ -301,6 +288,6 @@ fn edit_init(original: Option<&Image>, load: &str, enable: bool, linked: bool) -
         Some(end) if bytes[..end].ends_with(b"\r") => b"\r\n",
         _ => b"\n",
     };
-    let comment = if original.is_none() { CREATED } else { MANAGED };
-    Ok(InitEdit::Write([&bytes[..start], comment, newline, load.as_bytes(), newline, &bytes[start..]].concat()))
+    let comment = if created { CREATED } else { MANAGED };
+    Ok([&bytes[..start], comment, newline, load.as_bytes(), newline, &bytes[start..]].concat())
 }

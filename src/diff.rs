@@ -1,5 +1,6 @@
 //! Parses whole-file diffs and marks the bytes that differ in paired lines.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::git::Kind;
@@ -96,10 +97,11 @@ pub struct FileDiff {
 pub fn parse(raw: &[u8]) -> FileDiff {
     let mut lines = Vec::new();
     let mut kind = Kind::None;
-    let contains_nul = raw.contains(&0);
-    let mut binary = contains_nul;
+    let text = String::from_utf8_lossy(raw);
+    let nontext = raw.contains(&0) || matches!(text, Cow::Owned(_));
+    let mut binary = nontext;
     let (mut old, mut new, mut in_hunk, mut second) = (1, 1, false, false);
-    for line in String::from_utf8_lossy(raw).lines() {
+    for line in text.lines() {
         if line.starts_with("diff --git ") {
             // Git shows a change of file type as a deletion and an addition.
             (in_hunk, second) = (false, kind != Kind::None);
@@ -120,7 +122,7 @@ pub fn parse(raw: &[u8]) -> FileDiff {
             } else if line.starts_with("Binary files ") {
                 binary = true;
             }
-        } else if !contains_nul {
+        } else if !nontext {
             let (kind, number) = match line.as_bytes().first() {
                 Some(b'+') => (LineKind::Add, &mut new),
                 Some(b'-') => (LineKind::Del, &mut old),

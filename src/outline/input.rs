@@ -17,8 +17,7 @@ enum Pointed {
 }
 
 impl Outline {
-    pub(super) fn outline_key(&mut self, key: Key) -> After {
-        let now = Instant::now();
+    pub(super) fn outline_key(&mut self, key: Key, now: Instant) -> After {
         if let Key::Focus(here) = key {
             self.attention.focus(here, now);
             return After::Stay;
