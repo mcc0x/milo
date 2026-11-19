@@ -99,7 +99,7 @@ impl OpenReader {
                     ReadFile::Working(path) => (path, None),
                     ReadFile::Committed { commit, file } => (file.path.as_str(), Some(commit.hash.as_str())),
                 };
-                *layer = Some(rex::open(&repo.root, path, hash, layer.take().as_deref())?);
+                *layer = Some(rex::open(&repo.root, path, hash, layer.as_deref())?);
                 Ok(None)
             }
         }

@@ -187,6 +187,41 @@ fn modes(slave: &File) -> libc::termios {
 }
 
 #[test]
+fn retrying_a_failed_reader_replaces_the_still_open_layer() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "data").unwrap();
+    let rex = project.0.join("rex");
+    fs::write(
+        &rex,
+        r#"#!/bin/sh
+cat >/dev/null
+for last do :; done
+echo "$last" >> "$HOME/opens"
+case $(wc -l < "$HOME/opens" | tr -d ' ') in
+    1) echo layer:first ;;
+    2) exit 1 ;;
+    *) echo layer:next ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut paths = vec![project.0.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.env("PATH", std::env::join_paths(paths).unwrap()).env("REX_SESSION", "test").env("REX_BLOCK", "test");
+    let mut tty = Terminal::run(command.arg("outline"));
+    tty.until("page.txt");
+    tty.master.write_all(b"\r\r").unwrap();
+    tty.until("Rex did not open the file");
+    tty.master.write_all(b"\rq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    let requests = fs::read_to_string(project.0.join("opens")).unwrap();
+    let retry = requests.lines().nth(2).expect("the third open reached Rex");
+    assert!(retry.contains(r#""previous":"layer:first""#), "{retry}");
+}
+
+#[test]
 fn a_slow_open_draws_the_project_name_before_it_has_the_files() {
     let project = Project::new();
     fs::write(project.0.join("project/page.txt"), "data").unwrap();
