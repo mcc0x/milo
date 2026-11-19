@@ -73,13 +73,16 @@ pub fn duration(seconds: i64, detail: Detail) -> String {
                 format!("{} h {minutes} m", seconds / HOUR)
             }
         }
-        _ => format!("{} d", (seconds + if rounded { DAY / 2 } else { 0 }) / DAY),
+        _ => {
+            let days = seconds / DAY + i64::from(rounded && seconds % DAY >= DAY / 2);
+            format!("{days} d")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Age, short_age};
+    use super::{Age, Detail, duration, short_age};
 
     #[test]
     fn ages_use_the_largest_whole_unit() {
@@ -97,5 +100,10 @@ mod tests {
     #[test]
     fn a_commit_dated_in_the_future_is_now() {
         assert_eq!(short_age(-500), Age { count: None, suffix: "now" });
+    }
+
+    #[test]
+    fn rounded_duration_formats_a_saturated_age_without_overflow() {
+        assert_eq!(duration(i64::MAX, Detail::Rounded), "106751991167301 d");
     }
 }
