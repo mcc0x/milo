@@ -18,8 +18,6 @@ use crate::watch::Scope;
 use parse::{Status, parse_files, parse_history, parse_status};
 use run::OutputError;
 
-/// New files larger than this are listed without counting their lines.
-const NEW_FILE_LIMIT: u64 = 256 << 10;
 /// A diff of one file larger than this is not loaded.
 const DIFF_LIMIT: u64 = 8 << 20;
 /// Maximum number of uncommitted paths passed to `git diff` by name.
@@ -53,6 +51,10 @@ pub struct FileStamp {
 impl FileStamp {
     pub fn at(path: &Path) -> Option<Self> {
         let m = std::fs::symlink_metadata(path).ok()?;
+        Self::of(&m)
+    }
+
+    pub(crate) fn of(m: &std::fs::Metadata) -> Option<Self> {
         Some(Self { written: m.modified().ok()?, len: m.len() })
     }
 }
@@ -66,27 +68,24 @@ pub struct PendingFile {
     pub kind: Kind,
     pub add: u32,
     pub del: u32,
+    /// The outline has not yet tried to count the lines of this new file.
+    pub(crate) lines_pending: bool,
     pub unpushed: bool,
     pub stamp: Option<FileStamp>,
 }
 
 impl PendingFile {
     pub(crate) fn new(path: &str, kind: Kind) -> Self {
-        Self { path: path.to_string(), from: None, kind, add: 0, del: 0, unpushed: false, stamp: None }
-    }
-}
-
-/// Lines in a file git does not track yet; 0 if it is large or not text.
-/// A link counts as the one line it is, and is never followed.
-fn new_file_lines(path: &Path) -> u32 {
-    if path.is_symlink() {
-        return 1;
-    }
-    match read::file(path, NEW_FILE_LIMIT) {
-        Content::Bytes(bytes) if !bytes.contains(&0) => {
-            u32::try_from(bytes.split_inclusive(|&b| b == b'\n').count()).expect("256 KiB of lines fits in a u32")
+        Self {
+            path: path.to_string(),
+            from: None,
+            kind,
+            add: 0,
+            del: 0,
+            lines_pending: kind == Kind::Untracked,
+            unpushed: false,
+            stamp: None,
         }
-        _ => 0,
     }
 }
 
@@ -199,11 +198,6 @@ struct Tracked {
     paths: String,
 }
 
-struct Counted {
-    stamp: Option<FileStamp>,
-    lines: u32,
-}
-
 /// A rename's source and the state it was found in.
 struct RenameLookup {
     path: String,
@@ -233,8 +227,6 @@ pub struct Repo {
     status: Status,
     /// A status `poll` found to differ, kept for `read` to take in.
     polled: Option<Vec<u8>>,
-    /// Line counts of untracked files, kept while their stamp stays the same.
-    counted: HashMap<String, Counted>,
     unpushed: Unpushed,
     tracked: Tracked,
     moved: Option<RenameLookup>,
@@ -409,8 +401,8 @@ impl Repo {
         self.require(run::output(&self.root, self.guard(), args))
     }
 
-    /// Asks git whether the repository state has moved and checks pending file stamps.
-    /// Keeps a changed status for `read`, rather than asking git for it again.
+    /// Asks git whether the repository state has moved and checks tracked file stamps.
+    /// The outline samples untracked stamps separately. Keeps changed status for `read`.
     pub fn poll(&mut self, files: &[PendingFile]) -> bool {
         self.polled = None;
         if !self.git {
@@ -421,7 +413,10 @@ impl Repo {
         let changed = !self.ok()
             || had_remote != self.has_remote()
             || raw != self.raw
-            || files.iter().any(|f| FileStamp::at(&self.root.join(&f.path)) != f.stamp)
+            || files
+                .iter()
+                .filter(|f| f.kind != Kind::Untracked)
+                .any(|f| FileStamp::at(&self.root.join(&f.path)) != f.stamp)
             || self.stand_in_moved();
         self.polled = changed.then_some(raw);
         changed
@@ -482,7 +477,7 @@ impl Repo {
             return None;
         }
         let mut files = self.tracked_uncommitted()?;
-        self.add_untracked(&mut files);
+        files.extend(self.status.untracked.iter().map(|path| PendingFile::new(path, Kind::Untracked)));
         self.add_unpushed(&mut files)?;
         Some(files)
     }
@@ -540,23 +535,6 @@ impl Repo {
                 files.push(PendingFile::new(path, kind));
             }
         }
-    }
-
-    fn add_untracked(&mut self, files: &mut Vec<PendingFile>) {
-        let mut counted = HashMap::with_capacity(self.status.untracked.len());
-        for path in &self.status.untracked {
-            let full = self.root.join(path);
-            let stamp = FileStamp::at(&full);
-            let lines = match self.counted.get(path) {
-                Some(previous) if previous.stamp == stamp => previous.lines,
-                _ => new_file_lines(&full),
-            };
-            counted.insert(path.clone(), Counted { stamp, lines });
-            let mut file = PendingFile::new(path, Kind::Untracked);
-            (file.add, file.stamp) = (lines, stamp);
-            files.push(file);
-        }
-        self.counted = counted;
     }
 
     fn add_unpushed(&mut self, files: &mut Vec<PendingFile>) -> Option<()> {

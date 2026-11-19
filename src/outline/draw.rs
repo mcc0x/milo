@@ -70,6 +70,7 @@ impl Outline {
     pub(super) fn draw_outline(&mut self, s: &mut Screen, now: Instant) {
         s.clear();
         self.expire(now);
+        self.untracked.start_frame();
         let mut layout = arrange(s.w, s.h, self.repo.git);
         if layout.width == 0 {
             self.painted = layout;
@@ -79,12 +80,14 @@ impl Outline {
             self.draw_heading(s, layout.width);
         }
         if layout.strip {
+            self.discover_untracked();
             self.draw_strip(s, &layout);
         } else {
             if self.note.is_some() && !layout.hint {
                 layout.body_rows -= 1;
             }
             self.draw_tree(s, &layout, now);
+            self.discover_untracked();
             if let Some((note, _)) = &self.note {
                 s.put_fit(1, s.h - 1, s.w - 2, note, Style::fg(screen::YELLOW));
             } else if layout.hint && self.attention.show_controls() {
@@ -196,10 +199,12 @@ impl Outline {
             return;
         }
         self.keep_in_view(rows);
+        let end = len.min(self.top + rows);
+        self.count_shown_untracked(self.top..end, layout.wide);
         let details =
             layout.wide.then(|| *self.change_columns.get_or_insert_with(|| ChangeColumns::measure(&self.tree)));
         let columns = Columns { width: layout.width, details };
-        for (y, i) in (y0..).zip(self.top..len.min(self.top + rows)) {
+        for (y, i) in (y0..).zip(self.top..end) {
             self.draw_row(s, y, i, &columns, now);
         }
         ui::thumb(s, layout.width - 1, y0, rows, len, self.top);
@@ -294,6 +299,9 @@ impl Outline {
             }
             return;
         }
+        if std::mem::take(&mut self.recent_dirty) {
+            self.recent.sort_by_key(|&i| std::cmp::Reverse(self.pending[i].stamp.map(|s| s.written)));
+        }
         let first = self.strip_col.min(layout.last_column(self.recent.len()));
         let mut x = 0;
         let mut shown = first * rows;
@@ -304,6 +312,9 @@ impl Outline {
                 break;
             }
             for (row, &i) in column.iter().enumerate() {
+                if files[i].kind == Kind::Untracked {
+                    self.untracked.show(i);
+                }
                 ui::file_name(s, x + 1, y0 + row, width - 2, &files[i], self.icons, self.text_git_marks);
             }
             x += width;
@@ -380,9 +391,18 @@ impl ChangeColumns {
             if !node.dir {
                 widths.word = widths.word.max(ui::kind_word(node.kind).len());
             }
-            widths.size = widths.size.max(ui::size_width(node.add, node.del));
+            widths.include_size(node);
         }
         widths
+    }
+
+    pub(super) fn include_size(&mut self, node: &Node) {
+        let size = if node.uncounted == 0 {
+            ui::size_width(node.add, node.del)
+        } else {
+            ui::size_width(0, node.del) + 1 + usize::from(node.del > 0)
+        };
+        self.size = self.size.max(size);
     }
 }
 
@@ -394,7 +414,11 @@ impl Columns {
         if node.kind == Kind::None {
             return right;
         }
-        ui::size_right(s, right, y, node.add, node.del);
+        let add = if node.uncounted == 0 { node.add } else { 0 };
+        let used = ui::size_right(s, right, y, add, node.del);
+        if node.uncounted > 0 {
+            s.put(right - used - 1 - usize::from(used > 0), y, 1, "?", FAINT);
+        }
         let word_at = right - details.size - usize::from(details.size > 0) - details.word;
         if !node.dir {
             s.put(word_at, y, details.word, ui::kind_word(node.kind), ui::kind_colour(node.kind));

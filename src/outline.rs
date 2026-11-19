@@ -3,6 +3,7 @@
 mod attention;
 mod draw;
 mod input;
+mod untracked;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -31,6 +32,7 @@ pub struct Outline {
     /// Pending files, with all uncommitted entries before the unpushed entries.
     /// A path can occur once in each group.
     pending: Vec<PendingFile>,
+    untracked: untracked::Untracked,
     /// Without git, the listing the tree was built from, to notice changes.
     listing: walk::Listing,
     tree: Tree,
@@ -46,6 +48,7 @@ pub struct Outline {
     peek: bool,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
+    recent_dirty: bool,
     attention: Attention,
     pending_only: bool,
     sel: usize,
@@ -90,6 +93,7 @@ impl Outline {
         let mut outline = Outline {
             repo,
             pending: Vec::new(),
+            untracked: untracked::Untracked::default(),
             listing: walk::Listing::default(),
             tree: Tree::default(),
             change_columns: None,
@@ -102,6 +106,7 @@ impl Outline {
             remember,
             peek: false,
             recent: Vec::new(),
+            recent_dirty: false,
             attention: Attention::new(Instant::now()),
             pending_only,
             sel: 0,
@@ -141,8 +146,9 @@ impl Outline {
     fn load(&mut self) -> Option<Vec<PendingFile>> {
         let selected = self.selected_path();
         self.repo.read();
-        let files = self.repo.pending()?;
+        let mut files = self.repo.pending()?;
         let tracked = self.repo.tracked()?;
+        self.untracked.retain_details(&self.pending, &mut files);
         let files = std::mem::replace(&mut self.pending, files);
         self.tree.rebuild(tracked, &self.pending);
         let exists = |path: &str| self.tree.has_folder(path);
@@ -169,8 +175,7 @@ impl Outline {
                 self.folds.suggest(dir);
             }
         }
-        let files = &self.pending;
-        self.recent.sort_by_key(|&i| std::cmp::Reverse(files[i].stamp.map(|s| s.written)));
+        self.recent_dirty = true;
     }
 
     /// Rebuilds the outline and marks changed pending files.
@@ -290,6 +295,7 @@ impl Pane for Outline {
             return false;
         }
         if self.repo.git {
+            self.check_untracked(Instant::now());
             if self.repo.poll(&self.pending) {
                 self.reload();
             }
@@ -306,7 +312,8 @@ impl Pane for Outline {
         let now = Instant::now();
         let mark = self.attention.next_mark_frame(now, self.static_marks);
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
-        [mark, note].into_iter().flatten().min()
+        let counts = (self.painted.body_rows > 0).then(|| self.untracked.next_frame()).flatten();
+        [mark, note, counts].into_iter().flatten().min()
     }
 
     fn help(&self) -> Page {
@@ -329,6 +336,7 @@ impl Pane for Outline {
                 sample("regular ", Style::PLAIN, "to push"),
                 sample("docs 3  ", Style::PLAIN, "3 changed"),
                 sample("+2      ", ADD, "lines added"),
+                sample("?       ", ui::FAINT, "lines not counted yet"),
                 sample("−1      ", DEL, "lines removed"),
                 sample(if self.static_marks { "•       " } else { "● ○     " }, Style::PLAIN.bold(), "being written"),
                 sample("•       ", Style::PLAIN, "just changed"),
@@ -486,6 +494,85 @@ mod tests {
         reader.draw(&mut screen);
         let counts = |row: &str| row.split_whitespace().rev().take(2).collect::<Vec<_>>().join(" ");
         assert_eq!(counts(file_row(&rows, "edit.txt")), counts(&screen.text()[0]));
+    }
+
+    #[test]
+    fn untracked_line_counts_share_one_byte_budget_and_resume_on_the_next_frame() {
+        let f = Fixture::new();
+        let body = "x\n".repeat(128 << 10);
+        for i in 0..6 {
+            f.write(&format!("file{i}.txt"), &body);
+        }
+        f.write("zero.txt", "");
+
+        let mut o = open(&f);
+        assert!(o.pending.iter().all(|file| file.lines_pending && file.stamp.is_none()));
+        let first = draw(&mut o, 80, 12).text();
+        assert!(file_row(&first, "file0.txt").ends_with("+131072"));
+        assert!(file_row(&first, "file3.txt").ends_with('?'));
+        assert!(file_row(&first, "zero.txt").ends_with('?'));
+        assert!(o.next_frame().is_some());
+
+        let second = draw(&mut o, 80, 12).text();
+        assert!(file_row(&second, "file5.txt").ends_with("+131072"));
+        assert!(file_row(&second, "zero.txt").ends_with("new"));
+        assert!(o.pending.iter().all(|file| !file.lines_pending));
+    }
+
+    #[test]
+    fn untracked_counts_prioritize_the_scrolled_viewport() {
+        let f = Fixture::new();
+        for i in 0..96 {
+            f.write(&format!("file{i:02}.txt"), "a line\nanother");
+        }
+        let mut o = open(&f);
+        draw(&mut o, 40, 9);
+        assert!(o.pending.iter().all(|file| file.lines_pending), "narrow trees have no count column");
+
+        o.key(Key::End);
+        let rows = draw(&mut o, 80, 9).text();
+        let last = file_row(&rows, "file95.txt");
+        assert!(last.trim_end_matches('▐').ends_with("+2"), "{last}");
+        assert!(o.pending.iter().find(|f| f.path == "file00.txt").unwrap().lines_pending);
+        assert_eq!(o.pending.iter().filter(|f| !f.lines_pending).count(), 8);
+    }
+
+    #[test]
+    fn untracked_counts_survive_reload_and_are_invalidated_for_an_edited_path() {
+        let f = Fixture::new();
+        f.write("a.txt", "one\n");
+        f.write("b.txt", "one\n");
+        let mut o = open(&f);
+        draw(&mut o, 80, 12);
+
+        f.write("c.txt", "one\n");
+        assert!(o.check());
+        assert_eq!(o.pending.iter().map(|f| f.lines_pending).collect::<Vec<_>>(), [false, false, true]);
+        let rows = draw(&mut o, 80, 12).text();
+        assert!(file_row(&rows, "c.txt").ends_with("+1"));
+
+        f.write("b.txt", "one\ntwo\n");
+        assert!(!o.repo.poll(&o.pending), "Git does not report untracked content edits");
+        assert!(o.check());
+        assert_eq!(o.pending.iter().map(|f| f.lines_pending).collect::<Vec<_>>(), [false, true, false]);
+        let rows = draw(&mut o, 80, 12).text();
+        assert!(file_row(&rows, "a.txt").ends_with("+1"));
+        assert!(file_row(&rows, "b.txt").ends_with("+2"));
+        assert!(o.attention.marked_at("b.txt", false).is_some());
+    }
+
+    #[test]
+    fn binary_and_large_files_are_not_retried_and_links_are_not_followed() {
+        let f = Fixture::new();
+        f.write("binary.txt", "a\0b");
+        f.write("large.txt", &"x".repeat((256 << 10) + 1));
+        std::os::unix::fs::symlink("missing.txt", f.root.join("link.txt")).unwrap();
+        let mut o = open(&f);
+        let rows = draw(&mut o, 80, 12).text();
+        assert!(file_row(&rows, "link.txt").ends_with("+1"));
+        assert!(file_row(&rows, "binary.txt").ends_with("new"));
+        assert!(file_row(&rows, "large.txt").ends_with("new"));
+        assert!(o.pending.iter().all(|f| !f.lines_pending));
     }
 
     #[test]

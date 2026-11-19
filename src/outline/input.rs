@@ -41,6 +41,7 @@ impl Outline {
         let changed = match key {
             Key::Char('r') => {
                 if self.repo.git {
+                    self.check_untracked(now);
                     self.reload();
                 } else {
                     self.refresh_folder(self.selected_path());

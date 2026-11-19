@@ -1,0 +1,221 @@
+//! Fills in details without making the first frame depend on every new file.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::Read as _;
+use std::ops::Range;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use crate::fs_ops;
+use crate::git::{FileStamp, Kind, PendingFile};
+
+use super::Outline;
+
+const FILE_LIMIT: u64 = 256 << 10;
+const BYTES_PER_FRAME: u64 = 1 << 20;
+const FILES_PER_FRAME: usize = 24;
+const STAMPS_PER_FRAME: usize = 64;
+const SHOWN_STAMPS_PER_CHECK: usize = 96;
+const OTHER_STAMPS_PER_CHECK: usize = 48;
+const NEXT_BATCH: Duration = Duration::from_millis(40);
+
+#[derive(Default)]
+pub(super) struct Untracked {
+    files: Range<usize>,
+    scan: usize,
+    /// New paths awaiting a timestamp for recency and edit detection.
+    unstamped: Vec<usize>,
+    /// Pending indices for files actually painted, not all unfolded rows.
+    shown: Vec<usize>,
+    count_more: bool,
+}
+
+impl Untracked {
+    /// Retain measured details by path without asking the filesystem again.
+    pub(super) fn retain_details(&mut self, old: &[PendingFile], files: &mut [PendingFile]) {
+        let start = files.partition_point(|f| f.kind != Kind::Untracked && !f.unpushed);
+        let end = start + files[start..].partition_point(|f| f.kind == Kind::Untracked);
+        let cached: HashMap<_, _> = old[self.files.clone()]
+            .iter()
+            .filter(|f| f.stamp.is_some() || !f.lines_pending)
+            .map(|f| (f.path.as_str(), f))
+            .collect();
+        self.files = start..end;
+        self.shown.clear();
+        self.unstamped.clear();
+        for i in self.files.clone().rev() {
+            let file = &mut files[i];
+            if let Some(before) = cached.get(file.path.as_str()) {
+                (file.add, file.lines_pending, file.stamp) = (before.add, before.lines_pending, before.stamp);
+            }
+            if file.stamp.is_none() {
+                self.unstamped.push(i);
+            }
+        }
+    }
+
+    pub(super) fn start_frame(&mut self) {
+        self.shown.clear();
+        self.count_more = false;
+    }
+
+    pub(super) fn show(&mut self, i: usize) {
+        self.shown.push(i);
+    }
+
+    pub(super) fn next_frame(&self) -> Option<Duration> {
+        (self.count_more || !self.unstamped.is_empty()).then_some(NEXT_BATCH)
+    }
+}
+
+impl Outline {
+    pub(super) fn count_shown_untracked(&mut self, rows: Range<usize>, wide: bool) {
+        if self.untracked.files.is_empty() {
+            return;
+        }
+        let (mut attempts, mut bytes) = (FILES_PER_FRAME, BYTES_PER_FRAME);
+        for row in rows {
+            let Some(i) = self.tree.row(row).and_then(|node| node.untracked_index()) else { continue };
+            self.untracked.show(i);
+            if wide && !self.untracked.count_more && self.pending[i].lines_pending {
+                self.untracked.count_more = !self.count_untracked(i, &mut attempts, &mut bytes);
+            }
+        }
+    }
+
+    fn count_untracked(&mut self, i: usize, attempts: &mut usize, bytes: &mut u64) -> bool {
+        if *attempts == 0 {
+            return false;
+        }
+        *attempts -= 1;
+        let file = &mut self.pending[i];
+        let path = self.repo.root.join(&file.path);
+        let meta = fs::symlink_metadata(&path).ok();
+        if file.stamp.is_none() {
+            file.stamp = meta.as_ref().and_then(FileStamp::of);
+            self.recent_dirty |= file.stamp.is_some();
+        }
+        let lines = match meta {
+            Some(m) if m.is_symlink() => 1,
+            Some(m) if m.is_file() && m.len() <= FILE_LIMIT => {
+                let cost = m.len() + 1;
+                if *bytes < cost {
+                    return false;
+                }
+                // Reserve one extra byte so growth during the read cannot go over budget.
+                *bytes -= cost;
+                count_lines(&path, cost).unwrap_or(0)
+            }
+            _ => 0,
+        };
+        let before = (file.add, file.lines_pending);
+        (file.add, file.lines_pending) = (lines, false);
+        self.update_untracked_size(i, before);
+        true
+    }
+
+    /// Discover the remaining timestamps in small batches; don't read offscreen files.
+    pub(super) fn discover_untracked(&mut self) {
+        for _ in 0..STAMPS_PER_FRAME {
+            let Some(i) = self.untracked.unstamped.pop() else { break };
+            let file = &mut self.pending[i];
+            if file.stamp.is_none() {
+                file.stamp = FileStamp::at(&self.repo.root.join(&file.path));
+                self.recent_dirty |= file.stamp.is_some();
+            }
+        }
+    }
+
+    /// Git reports path membership, not edits to untracked file contents. Recheck
+    /// the viewport first, then a rotating slice rather than stat every path.
+    pub(super) fn check_untracked(&mut self, now: Instant) {
+        let len = self.untracked.files.len();
+        if len == 0 {
+            return;
+        }
+        let shown = self.untracked.shown.len().min(SHOWN_STAMPS_PER_CHECK);
+        let mut newest = None;
+        for pos in 0..shown {
+            self.review_untracked(self.untracked.shown[pos], now, &mut newest);
+        }
+        for _ in 0..len.min(OTHER_STAMPS_PER_CHECK) {
+            let i = self.untracked.files.start + self.untracked.scan % len;
+            self.untracked.scan = (self.untracked.scan + 1) % len;
+            if !self.untracked.shown[..shown].contains(&i) {
+                self.review_untracked(i, now, &mut newest);
+            }
+        }
+        if let Some(i) = newest
+            && self.follow_activity
+            && self.attention.following(now)
+        {
+            let path = self.pending[i].path.clone();
+            self.follow(&path);
+        }
+    }
+
+    fn review_untracked(&mut self, i: usize, now: Instant, newest: &mut Option<usize>) {
+        let file = &mut self.pending[i];
+        let stamp = FileStamp::at(&self.repo.root.join(&file.path));
+        if stamp == file.stamp {
+            return;
+        }
+        let changed = std::mem::replace(&mut file.stamp, stamp).is_some() && stamp.is_some();
+        self.recent_dirty = true;
+        if changed {
+            self.attention.mark(&file.path, now);
+            let written = stamp.map(|s| s.written);
+            if newest.is_none_or(|prev| self.pending[prev].stamp.map(|s| s.written) <= written) {
+                *newest = Some(i);
+            }
+        }
+        let file = &mut self.pending[i];
+        if !file.lines_pending {
+            let before = (file.add, false);
+            (file.add, file.lines_pending) = (0, true);
+            self.update_untracked_size(i, before);
+        }
+    }
+
+    fn update_untracked_size(&mut self, i: usize, before: (u32, bool)) {
+        self.tree.update_untracked(&self.pending[i], before, |node| {
+            if let Some(columns) = &mut self.change_columns {
+                columns.include_size(node);
+            }
+        });
+    }
+}
+
+/// Counts a regular file without allocating its contents or following a link.
+fn count_lines(path: &Path, limit: u64) -> Option<u32> {
+    let file = fs_ops::open_read(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() >= limit {
+        return None;
+    }
+    let mut file = file.take(limit);
+    let mut chunk = [0; 8192];
+    let mut lines = 0;
+    let mut unfinished = false;
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => return Some(lines + u32::from(unfinished)),
+            Ok(n) => {
+                if file.limit() == 0 {
+                    return None;
+                }
+                for &byte in &chunk[..n] {
+                    match byte {
+                        0 => return None,
+                        b'\n' => lines += 1,
+                        _ => {}
+                    }
+                }
+                unfinished = chunk[n - 1] != b'\n';
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+}
