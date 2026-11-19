@@ -65,19 +65,16 @@ else
     printf 'Installed milo at %s.\n' "$binary"
 fi
 
-on_path() {
-    remaining=${PATH-}:
-    while [ -n "$remaining" ]; do
-        entry=${remaining%%:*}
-        if [ "${entry:-.}" -ef "$bin_dir" ]; then
-            return 0
-        fi
-        remaining=${remaining#*:}
-    done
-    return 1
-}
-
-if ! on_path; then
-    printf '%s is not on PATH. Add it to PATH before running milo.\n' "$bin_dir"
+active=$(command -v milo || :)
+if [ -n "$active" ] && [ "$active" -ef "$binary" ]; then
+    printf '%s\n' 'Run milo to get started, or milo setup --skip-onboarding for an unattended install.'
+else
+    if [ -n "$active" ]; then
+        printf 'Your PATH selects %s instead of %s.\n' "$active" "$binary"
+    else
+        printf '%s is not on PATH.\n' "$bin_dir"
+    fi
+    printf "Run this copy: '"
+    printf '%s' "$binary" | sed "s/'/'\\\\''/g"
+    printf "'\n"
 fi
-printf '%s\n' 'Run milo to get started, or milo setup --skip-onboarding for an unattended install.'
