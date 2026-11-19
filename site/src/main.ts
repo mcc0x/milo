@@ -74,7 +74,10 @@ function scheduleCue() {
 }
 
 function syncPlayback() {
-  playback.hidden = reduceMotion.matches;
+  playback.disabled = reduceMotion.matches;
+  playback.setAttribute('aria-label', reduceMotion.matches ? 'Demo paused for reduced motion' : userPaused ? 'Resume demo' : 'Pause demo');
+  playback.title = playback.getAttribute('aria-label')!;
+  playback.setAttribute('aria-pressed', String(userPaused || reduceMotion.matches));
   if (userPaused || document.hidden || reduceMotion.matches) {
     if (startedAt !== undefined) {
       elapsed = performance.now() - startedAt;
@@ -109,7 +112,6 @@ function syncPlayback() {
 
 playback.addEventListener('click', () => {
   userPaused = !userPaused;
-  playback.textContent = userPaused ? 'Resume demo' : 'Pause demo';
   syncPlayback();
 });
 reduceMotion.addEventListener('change', syncPlayback);

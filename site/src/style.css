@@ -181,3 +181,16 @@ h1 {
 @media (prefers-reduced-motion: reduce) {
   .install button, .source { transition: none; }
 }
+
+/* Center the visible lockup, not its transparent canvas, on the icon row. */
+.brand-lockup { transform: translateY(0.2375%); }
+.social-links { display: flex; align-items: center; gap: .35rem; }
+.social-link { display: grid; place-items: center; width: 44px; height: 44px; color: var(--ink); border-radius: .65rem; }
+.social-link svg { display: block; width: 22px; height: 22px; fill: currentColor; }
+.social-link:hover { background: #ffffff55; }
+.demo-footer { display: flex; justify-content: center; margin-block: .35rem auto; }
+.caption-toggle { appearance: none; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; border-radius: .25rem; }
+.caption-toggle .caption { display: block; text-align: center; }
+.caption-toggle:disabled { cursor: default; opacity: 1; }
+.site-footer { display: flex; justify-content: center; padding-top: .6rem; }
+.site-footer .source { font-size: .875rem; }
