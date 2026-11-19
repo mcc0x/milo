@@ -72,7 +72,7 @@ impl Home {
         let key = match (&self.view, index) {
             (View::Menu | View::Confirm { .. }, 2) | (View::Report(_), 1) => Key::Esc,
             // A pending keyboard move must not activate a different option than the one shown.
-            (View::Menu, 1) if self.selected == self.picker.selected => Key::Enter,
+            (View::Menu, 0) if self.selected == self.picker.selected => Key::Enter,
             (View::Confirm { selected }, 1) if *selected == self.picker.selected => Key::Enter,
             _ => return None,
         };
@@ -146,7 +146,7 @@ impl Pane for Home {
             View::Menu => {
                 self.draw_menu(s, body);
                 if footer {
-                    self.footer = help::draw_hint(s, "↑↓ move", &["Enter open"], "q quit");
+                    self.footer = help::draw_hint(s, "Enter open", &["↑↓ move"], "q quit");
                 }
             }
             View::Report(report) => self.footer = report.draw(s),
@@ -454,6 +454,11 @@ mod tests {
             assert_eq!(home.hover_span(x, y), None);
         }
         assert_eq!(home.selected, 0);
+        let mut rail = Screen::sized(28, 12);
+        home.draw(&mut rail);
+        assert_eq!(rail.text()[11], " Enter open · q quit");
+        let Key::Click(x, y) = click_on(&rail, "Enter open") else { unreachable!() };
+        assert_eq!(home.click(x, y), Some(Key::Enter));
 
         let mut narrow = Screen::sized(4, 1);
         home.draw(&mut narrow);
