@@ -29,6 +29,7 @@ pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
 
 pub(crate) enum OutputError {
     TooLarge,
+    Unavailable,
     Failed,
 }
 
@@ -256,7 +257,7 @@ fn checked_output(command: Command, limit: u64) -> Result<Vec<u8>, OutputError> 
 /// Kills and reaps a command that cannot finish within the time or output limit.
 fn capture(mut command: Command, limit: u64) -> Result<(ExitStatus, Vec<u8>), OutputError> {
     let started = Instant::now();
-    let mut child = command.stdout(Stdio::piped()).spawn().map_err(|_| OutputError::Failed)?;
+    let mut child = command.stdout(Stdio::piped()).spawn().map_err(|_| OutputError::Unavailable)?;
     let pipe = child.stdout.take().expect("git stdout was piped");
     let result = collect(pipe, limit, started).and_then(|out| wait(&mut child, started).map(|status| (status, out)));
     if result.is_err() {

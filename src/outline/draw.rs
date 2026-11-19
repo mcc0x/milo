@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use crate::git::{Kind, PendingFile};
+use crate::git::{GIT_UNAVAILABLE, Kind, PendingFile};
 use crate::help;
 use crate::icons;
 use crate::screen::{self, Screen, Style, Wash};
@@ -83,13 +83,16 @@ impl Outline {
             self.discover_untracked();
             self.draw_strip(s, &layout);
         } else {
-            if self.note.is_some() && !layout.hint {
+            let git_unavailable = self.repo.git_unavailable();
+            if (self.note.is_some() || git_unavailable) && !layout.hint {
                 layout.body_rows -= 1;
             }
             self.draw_tree(s, &mut layout, now);
             self.discover_untracked();
             if let Some((note, _)) = &self.note {
                 s.put_fit(1, s.h - 1, s.w - 2, note, Style::fg(screen::YELLOW));
+            } else if git_unavailable {
+                s.put_fit(1, s.h - 1, s.w - 2, GIT_UNAVAILABLE, ui::DEL);
             } else if layout.hint && self.attention.show_controls() {
                 self.draw_hint(s);
             }

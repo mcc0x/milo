@@ -14,7 +14,8 @@ use super::install::{RunRex, Saved, Store, read};
 use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
 use super::profiles::Scope;
 use super::{lock, rex_files};
-use crate::preferences::{IconMode, Preferences, Source, worktree};
+use crate::git::discover_worktree;
+use crate::preferences::{IconMode, Preferences, Source};
 use crate::{rex, usage};
 
 pub(crate) const TITLE: &str = "Milo doctor";
@@ -102,18 +103,25 @@ fn store() -> Result<Store, String> {
 
 pub(crate) fn report() -> Result<String, String> {
     let store = store()?;
-    let root = worktree(Path::new("."));
-    report_for(&store, root.as_deref())
+    match discover_worktree(Path::new(".")) {
+        Ok(root) => report_for(&store, root.as_deref()),
+        Err(note) => report_with_worktree(&store, Err(note)),
+    }
 }
 
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {
+    report_with_worktree(store, Ok(root))
+}
+
+fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static str>) -> Result<String, String> {
     let mut out = String::from(TITLE);
     out.push('\n');
-    if let Some(path) = root {
-        writeln!(out, "Worktree: {path:?}").unwrap();
-    } else {
-        out.push_str("Worktree: none detected\n");
+    match worktree {
+        Ok(Some(path)) => writeln!(out, "Worktree: {path:?}").unwrap(),
+        Ok(None) => out.push_str("Worktree: none detected\n"),
+        Err(note) => writeln!(out, "Worktree: {note}").unwrap(),
     }
+    let root = worktree.ok().flatten();
     match Preferences::resolve(root) {
         Ok((p, source)) => {
             let scope = match source {

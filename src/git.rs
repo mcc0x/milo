@@ -22,6 +22,7 @@ use run::OutputError;
 
 /// A diff of one file larger than this is not loaded.
 const DIFF_LIMIT: u64 = 8 << 20;
+pub(crate) const GIT_UNAVAILABLE: &str = "Git could not be run.";
 /// Maximum number of uncommitted paths passed to `git diff` by name.
 /// For more paths, compare the whole tree to the last commit.
 const PATHS_LIMIT: usize = 300;
@@ -214,8 +215,9 @@ struct RenameLookup {
 pub struct Repo {
     pub root: PathBuf,
     pub name: String,
-    /// A plain folder has no git state.
+    /// Whether Git identified a worktree.
     pub git: bool,
+    git_unavailable: bool,
     ok: Cell<bool>,
     /// Where this checkout keeps its index, and where the repository keeps
     /// its branches. They differ in a linked worktree.
@@ -248,43 +250,83 @@ struct GitDirs {
 
 /// Find just the worktree identity, without loading project state.
 pub fn worktree(dir: &Path) -> Option<PathBuf> {
-    let output = run::limited_output(dir, &[], &["rev-parse", "--show-toplevel"], 1 << 16).ok()?;
-    let root = PathBuf::from(OsStr::from_bytes(output.strip_suffix(b"\n")?));
-    root.is_absolute().then_some(root)
+    discover_worktree(dir).ok().flatten()
 }
 
-fn git_dirs(dir: &Path) -> Option<GitDirs> {
-    let ask = |args: &[&str]| run::output(dir, &[], args);
+/// Distinguish a missing executable from an ordinary directory.
+pub(crate) fn discover_worktree(dir: &Path) -> Result<Option<PathBuf>, &'static str> {
+    let raw = discovery_output(dir, &["rev-parse", "--show-toplevel"])?;
+    Ok(raw.map(|raw| PathBuf::from(OsStr::from_bytes(&raw))).filter(|root| root.is_absolute()))
+}
+
+fn discovery_output(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, &'static str> {
+    match run::limited_output(dir, &[], args, 1 << 16) {
+        Ok(mut raw) if raw.last() == Some(&b'\n') => {
+            raw.pop();
+            Ok(Some(raw))
+        }
+        Err(OutputError::Unavailable) => Err(GIT_UNAVAILABLE),
+        _ => Ok(None),
+    }
+}
+
+fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
+    let ask = |args: &[&str]| discovery_output(dir, args);
     let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
-    let one = |args: &[&str]| Some(path(ask(args)?.strip_suffix(b"\n")?));
+    let one = |args: &[&str]| ask(args).map(|raw| raw.as_deref().map(path));
     let raw =
-        ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"]);
+        ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])?;
     let Some(raw) = raw else {
         // Older Git can still give the project root.
-        return Some(GitDirs { root: one(&["rev-parse", "--show-toplevel"])?, git: None, common: None });
+        return Ok(discover_worktree(dir)?.map(|root| GitDirs { root, git: None, common: None }));
     };
-    let mut paths = raw.strip_suffix(b"\n")?.split(|&b| b == b'\n');
+    let mut paths = raw.split(|&b| b == b'\n');
     if let (Some(root), Some(git), Some(common), None) = (paths.next(), paths.next(), paths.next(), paths.next()) {
-        return Some(GitDirs { root: path(root), git: Some(path(git)), common: Some(path(common)) });
+        return Ok(Some(GitDirs { root: path(root), git: Some(path(git)), common: Some(path(common)) }));
     }
     // A newline can be part of a path. Separate answers have no ambiguous delimiters.
-    Some(GitDirs {
-        root: one(&["rev-parse", "--show-toplevel"])?,
-        git: one(&["rev-parse", "--absolute-git-dir"]),
-        common: one(&["rev-parse", "--path-format=absolute", "--git-common-dir"]),
-    })
+    let Some(root) = discover_worktree(dir)? else { return Ok(None) };
+    Ok(Some(GitDirs {
+        root,
+        git: one(&["rev-parse", "--absolute-git-dir"])?,
+        common: one(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?,
+    }))
 }
 
 impl Repo {
     /// Opens the repository containing `dir`, or the directory as a plain folder.
     pub fn open(dir: &Path) -> Option<Self> {
-        let (root, git, git_dir, common_dir) = match git_dirs(dir) {
+        let discovered = git_dirs(dir);
+        let git_unavailable = discovered.is_err();
+        let (root, git, git_dir, common_dir) = match discovered.ok().flatten() {
             Some(found) => (found.root, true, found.git, found.common),
             None => (dir.canonicalize().ok().filter(|d| d.is_dir())?, false, None, None),
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let index_lock = git_dir.as_ref().map(|dir| dir.join("index.lock"));
-        Some(Self { root, name, git, ok: Cell::new(true), git_dir, common_dir, index_lock, ..Self::default() })
+        Some(Self {
+            root,
+            name,
+            git,
+            git_unavailable,
+            ok: Cell::new(true),
+            git_dir,
+            common_dir,
+            index_lock,
+            ..Self::default()
+        })
+    }
+
+    pub(crate) fn git_unavailable(&self) -> bool {
+        self.git_unavailable
+    }
+
+    /// Rediscover a plain folder when Git's directory or gitfile appears.
+    pub(crate) fn discover_git(&self) -> Option<Self> {
+        if self.git || !self.root.join(".git").exists() {
+            return None;
+        }
+        Self::open(&self.root).filter(|repo| repo.git)
     }
 
     /// History compares commits directly. Only pending file diffs need a merge base.
@@ -594,7 +636,7 @@ impl Repo {
             Ok(diff) => Some(diff),
             // An oversized diff is not a git failure.
             Err(OutputError::TooLarge) => None,
-            Err(OutputError::Failed) => self.require(None),
+            Err(OutputError::Failed | OutputError::Unavailable) => self.require(None),
         }
     }
 

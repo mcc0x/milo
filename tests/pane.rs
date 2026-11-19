@@ -241,6 +241,46 @@ fn a_slow_open_draws_the_project_name_before_it_has_the_files() {
 }
 
 #[test]
+fn unavailable_git_is_distinguished_from_a_plain_folder() {
+    let project = Project::new();
+    let init = project
+        .command("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .args(["init", "-q", "--template="])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    fs::write(project.0.join("project/page.txt"), "local-file-contents\n").unwrap();
+
+    let empty_path = project.0.join("bin");
+    fs::create_dir(&empty_path).unwrap();
+    let milo = |args: &[&str]| {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        command.env("PATH", &empty_path).args(args);
+        command
+    };
+    let note = "Git could not be run.";
+    let report = milo(&["doctor"]).output().unwrap();
+    assert!(report.status.success(), "{}", String::from_utf8_lossy(&report.stderr));
+    let worktree_note = format!("Worktree: {note}");
+    assert!(String::from_utf8_lossy(&report.stdout).lines().any(|line| line == worktree_note));
+
+    let at_commit = milo(&["view", "page.txt", "--commit", "abcd"]).output().unwrap();
+    assert!(!at_commit.status.success());
+    assert!(String::from_utf8_lossy(&at_commit.stderr).contains(note));
+
+    Terminal::run(&mut milo(&["history"])).until(note);
+    let mut outline = Terminal::run(&mut milo(&["outline"]));
+    outline.until(note);
+    outline.until("page.txt");
+    let mut reader = Terminal::run(&mut milo(&["view", "page.txt"]));
+    reader.until(note);
+    reader.until("local-file-contents");
+}
+
+#[test]
 fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
     let project = Project::new();
     let git = |args: &[&str]| {

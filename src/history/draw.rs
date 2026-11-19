@@ -1,4 +1,4 @@
-use crate::git::{Commit, PendingFile};
+use crate::git::{Commit, GIT_UNAVAILABLE, PendingFile};
 use crate::help::{self, Page};
 use crate::pane::Pane;
 use crate::preferences::IconMode;
@@ -63,7 +63,9 @@ impl History {
             return;
         }
         if !self.repo.git {
-            s.put_fit(1, 0, s.w - 2, "Not a Git project.", FAINT);
+            let (note, style) =
+                if self.repo.git_unavailable() { (GIT_UNAVAILABLE, ui::DEL) } else { ("Not a Git project.", FAINT) };
+            s.put_fit(1, 0, s.w - 2, note, style);
             return;
         }
         let compact = s.h < HEADING_ROWS || s.w < 12;

@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use super::{Body, Reader, Source, Stamp, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
-use crate::git::{CommitId, Kind, PendingFile, Repo};
+use crate::git::{CommitId, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
 use crate::picture::{self, Picture};
 use crate::read::{self, Content};
 use crate::syntax;
@@ -60,6 +60,7 @@ impl Reader {
         let Location { mut repo, absolute, path } = Location::find(file)?;
         repo.only(&path);
         let (icons, note) = Self::appearance_for(&repo);
+        let note = if repo.git_unavailable() { Some(GIT_UNAVAILABLE) } else { note };
         let source = Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None }));
         let mut reader = Self::new(path, source, icons, note);
         reader.refresh(true);
@@ -83,13 +84,23 @@ impl Reader {
                 _ => absolute.push(part),
             }
         }
-        let (repo, path) = if let Some(repo) = Repo::open(cwd).filter(|r| r.git)
+        let cwd_repo = Repo::open(cwd);
+        if cwd_repo.as_ref().is_some_and(Repo::git_unavailable) {
+            return Err(GIT_UNAVAILABLE);
+        }
+        let (repo, path) = if let Some(repo) = cwd_repo.filter(|r| r.git)
             && let Ok(tail) = absolute.strip_prefix(&repo.root)
         {
             (repo, tail.to_string_lossy().into_owned())
         } else {
-            let location =
-                Location::find(&absolute).filter(|l| l.repo.git).ok_or("This file is not in a git repository.")?;
+            const NOT_REPO: &str = "This file is not in a git repository.";
+            let location = Location::find(&absolute).ok_or(NOT_REPO)?;
+            if location.repo.git_unavailable() {
+                return Err(GIT_UNAVAILABLE);
+            }
+            if !location.repo.git {
+                return Err(NOT_REPO);
+            }
             (location.repo, location.path)
         };
         let commit = repo.resolve_commit(id).ok_or("No commit with that ID.")?;
@@ -239,6 +250,7 @@ fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFil
     if let Some(file) = file {
         let raw = repo.file_diff_at(hash, file).map_err(|err| match err {
             OutputError::TooLarge => "Too large to show.",
+            OutputError::Unavailable => GIT_UNAVAILABLE,
             OutputError::Failed => "Git did not answer for this file.",
         })?;
         let patch = diff::parse(&raw);
@@ -254,6 +266,7 @@ fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFil
     }
     let raw = repo.blob_at(hash, path).map_err(|err| match err {
         OutputError::TooLarge => "Too large to show.",
+        OutputError::Unavailable => GIT_UNAVAILABLE,
         OutputError::Failed => "There is no file here in this commit.",
     })?;
     byte_lines(&raw, LineKind::Same)
