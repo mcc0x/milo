@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
-use super::claude::Claude;
+use super::claude::{Claude, OWN_CLAUDE};
 use super::install::{RunRex, Saved, Store, read};
 use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
 use super::profiles::Scope;
@@ -423,7 +423,21 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
         || store.listener_file().try_exists().map_err(|e| e.to_string())?
         || store.rex_reload_pending()
         || lock::running(&store.state).map_err(|e| e.to_string())?;
-    let claude = (store.claude() == Claude::On).then_some(false);
+    let claude = match store.claude() {
+        Claude::On => Some(false),
+        Claude::Invalid => {
+            let note = read(&store.state.join(OWN_CLAUDE))
+                .map_err(|_| "Could not verify Claude Code ownership. Check access to Milo's state directory.")?;
+            if note.is_some() {
+                return Err(format!(
+                    "Could not remove Milo's Claude Code status line. Make sure {:?} is readable and contains valid JSON, then try again.",
+                    store.claude
+                ));
+            }
+            None
+        }
+        Claude::Off | Claude::Foreign | Claude::NotOwned => None,
+    };
     if !rex && claude.is_none() {
         return Ok("No managed integration to remove. Preferences and user settings were left alone.".into());
     }
@@ -477,6 +491,27 @@ mod tests {
         assert!(message.contains("Removed managed integrations"));
         assert!(message.contains("Rex was not reloaded"));
         assert!(!store.init.exists());
+    }
+
+    #[test]
+    fn invalid_claude_settings_block_removal_only_if_milo_might_own_the_status_line() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        let run = |_: &[&OsStr]| panic!("Claude settings do not need Rex");
+        store.save(None, Some(true), &run).unwrap();
+        let valid = std::fs::read_to_string(&store.claude).unwrap();
+        let invalid = format!("{valid}{{");
+        std::fs::write(&store.claude, &invalid).unwrap();
+        let note = store.state.join(OWN_CLAUDE);
+
+        let error = remove_from(&store, &run).unwrap_err();
+        assert!(error.contains("Could not remove Milo's Claude Code status line"));
+        assert_eq!(std::fs::read_to_string(&store.claude).unwrap(), invalid);
+        assert!(note.exists());
+
+        std::fs::remove_file(&note).unwrap();
+        assert!(remove_from(&store, &run).unwrap().contains("No managed integration"));
+        assert_eq!(std::fs::read_to_string(&store.claude).unwrap(), invalid);
     }
 
     #[test]

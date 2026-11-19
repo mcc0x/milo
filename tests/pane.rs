@@ -414,6 +414,43 @@ fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
 }
 
 #[test]
+fn uninstall_keeps_the_executable_when_the_owned_claude_status_line_cannot_be_removed() {
+    let project = Project::new();
+    let bin = project.0.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let milo = bin.join("milo");
+    fs::copy(env!("CARGO_BIN_EXE_milo"), &milo).unwrap();
+    let command = || {
+        let mut command = project.command(&milo);
+        command.env_remove("REX_CONFIG");
+        command
+    };
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    let settings = project.0.join(".claude/settings.json");
+    fs::create_dir(settings.parent().unwrap()).unwrap();
+    let invalid = br#"{"statusLine":{"type":"command","command":"milo claude-status"}"#;
+    fs::write(&settings, invalid).unwrap();
+    let note = project.0.join("state/milo/claude-status-added");
+    fs::write(&note, "created\n").unwrap();
+
+    let result = command().args(["setup", "--remove"]).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Could not remove Milo's Claude Code status line"));
+
+    let mut home = Terminal::run(&mut command());
+    home.until("Uninstall");
+    home.master.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    home.until("Cancel");
+    home.master.write_all(b"\x1b[B\r").unwrap();
+    // The incremental renderer may put cursor moves between words in the report.
+    home.until("executable");
+    home.until("removed.");
+    assert!(milo.is_file());
+    assert!(note.is_file());
+    assert_eq!(fs::read(&settings).unwrap(), invalid);
+}
+
+#[test]
 fn panes_keep_global_preferences_when_a_worktree_override_is_invalid() {
     let project = Project::new();
     let initialized = project
