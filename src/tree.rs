@@ -13,6 +13,8 @@ pub struct Node {
     /// A folder ends in `/`, so it can coexist with a file of the same name.
     pub path: Rc<str>,
     parent: u32,
+    /// Last row assigned here; it can go stale when a fold or filter hides this node.
+    visible_at: usize,
     /// Number of pending files before this node in tree order.
     pending_before: u32,
     children: Vec<u32>,
@@ -39,6 +41,7 @@ impl Node {
             name_at,
             path,
             parent,
+            visible_at: 0,
             pending_before: 0,
             children: Vec::new(),
             dir,
@@ -312,13 +315,14 @@ impl Tree {
         let Some(root) = self.nodes.first() else { return };
         let mut stack: Vec<_> = root.children.iter().rev().map(|&node| TreeRow { node, depth: 0 }).collect();
         while let Some(row) = stack.pop() {
-            let n = self.node(row.node);
+            let n = &mut self.nodes[row.node as usize];
             if pending_only && n.kind == Kind::None {
                 continue;
             }
             if n.dir && open(&n.path) {
                 stack.extend(n.children.iter().rev().map(|&node| TreeRow { node, depth: row.depth + 1 }));
             }
+            n.visible_at = self.rows.len();
             self.rows.push(row);
         }
     }
@@ -336,8 +340,12 @@ impl Tree {
     }
 
     pub fn row_of(&self, path: &str) -> Option<usize> {
-        let node = *self.index.get(path)?;
-        self.rows.iter().position(|r| r.node == node)
+        self.row_of_node(*self.index.get(path)?)
+    }
+
+    fn row_of_node(&self, id: u32) -> Option<usize> {
+        let at = self.node(id).visible_at;
+        self.rows.get(at).filter(|row| row.node == id).map(|_| at)
     }
 
     /// The index contains folders even when hidden by a fold or change filter.
@@ -347,8 +355,7 @@ impl Tree {
 
     /// The row of the folder that row `i` is in, if it is in one.
     pub fn parent_row(&self, i: usize) -> Option<usize> {
-        let parent = self.row(i)?.parent;
-        (parent != 0).then(|| self.rows.iter().position(|r| r.node == parent)).flatten()
+        self.row_of_node(self.row(i)?.parent)
     }
 
     /// The next or previous folder among the visible rows.
@@ -500,6 +507,27 @@ mod tests {
         assert_eq!(tree.parent_row(0), None);
         // The pending file sits in a closed folder, and is still found.
         assert_eq!(tree.next_pending(0, Direction::Next).map(Rc::as_ref), Some("b/y.rs"));
+    }
+
+    #[test]
+    fn row_lookups_follow_folds_and_change_filters() {
+        let files = [file("src/z.rs", Kind::Modified, 1, false)];
+        let mut tree = Tree::build(["src/nested/b.rs", "src/a.rs", "src/z.rs"].into_iter(), &files);
+        tree.layout(|_| true, false);
+        assert_eq!(tree.row_of("src/nested/b.rs"), Some(2));
+        assert_eq!(tree.parent_row(2), Some(1));
+        assert_eq!(tree.row_of("src/z.rs"), Some(4));
+
+        tree.layout(|dir| dir == "src/", false);
+        assert_eq!(tree.row_of("src/a.rs"), Some(2));
+        assert_eq!(tree.row_of("src/nested/b.rs"), None);
+        assert_eq!(tree.parent_row(2), Some(0));
+
+        tree.layout(|_| true, true);
+        assert_eq!(tree.row_of("src/z.rs"), Some(1));
+        assert_eq!(tree.row_of("src/nested/"), None);
+        assert_eq!(tree.parent_row(1), Some(0));
+        assert_eq!(tree.parent_row(0), None);
     }
 
     #[test]
