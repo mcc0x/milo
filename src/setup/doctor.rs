@@ -180,30 +180,34 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
     if store.rex_reload_pending() {
         out.push_str("Rex reload: pending; run milo setup --repair.\n");
     }
-    let expected = layout.is_ok_and(|(_, active, _)| active);
+    let expected = layout.map(|(_, active, _)| active).ok();
     writeln!(
         out,
         "Layout listener: {}",
         match (lock::running(&store.state), expected) {
-            (Ok(true), true) => "running",
-            (Ok(false), false) => "off",
-            (Ok(false), true) => "not running; run milo setup --repair",
-            (Ok(true), false) => "running unexpectedly; run milo listen --stop",
+            (Ok(true), Some(true)) => "running",
+            (Ok(false), Some(false)) => "off",
+            (Ok(false), Some(true)) => "not running; run milo setup --repair",
+            (Ok(true), Some(false)) => "running unexpectedly; run milo listen --stop",
+            (Ok(true), None) => "running; expected state unknown because the Rex layout could not be read",
+            (Ok(false), None) => "not running; expected state unknown because the Rex layout could not be read",
             (Err(_), _) => "unknown; check access to Milo's state directory",
         }
     )
     .unwrap();
-    writeln!(
-        out,
-        "Claude status line: {}",
-        match store.claude() {
-            Claude::Off => "not installed",
-            Claude::On => "managed by Milo",
-            Claude::Foreign | Claude::NotOwned => "user-managed; left alone",
-            Claude::Invalid => "unreadable; check Claude settings",
-        }
-    )
-    .unwrap();
+    out.push_str("Claude status line: ");
+    match store.claude() {
+        Claude::Off => out.push_str("not installed\n"),
+        Claude::On => out.push_str("managed by Milo\n"),
+        Claude::Foreign | Claude::NotOwned => out.push_str("user-managed; left alone\n"),
+        Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => writeln!(
+            out,
+            "unknown; check the Claude Code ownership note in Milo's state directory ({:?})",
+            store.state
+        )
+        .unwrap(),
+        Claude::Invalid => writeln!(out, "unreadable; check Claude settings ({:?})", store.claude).unwrap(),
+    }
     for (provider, source) in usage::sources() {
         writeln!(out, "{provider} limits: {}", source.unwrap_or("no local report; see the usage pane for setup hints"))
             .unwrap();
@@ -512,6 +516,21 @@ mod tests {
         std::fs::remove_file(&note).unwrap();
         assert!(remove_from(&store, &run).unwrap().contains("No managed integration"));
         assert_eq!(std::fs::read_to_string(&store.claude).unwrap(), invalid);
+    }
+
+    #[test]
+    fn doctor_names_the_state_directory_when_claude_ownership_cannot_be_read() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        std::fs::write(&store.claude, b"{}").unwrap();
+        std::fs::create_dir_all(store.state.join(OWN_CLAUDE)).unwrap(); // Not a readable note, even when run as root.
+
+        let report = report_for(&store, None).unwrap();
+        assert!(report.contains(&format!(
+            "Claude status line: unknown; check the Claude Code ownership note in Milo's state directory ({:?})",
+            store.state
+        )));
+        assert!(!report.contains("unreadable; check Claude settings"));
     }
 
     #[test]

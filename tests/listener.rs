@@ -141,6 +141,33 @@ fn stopping_with_no_listener_does_nothing() {
 }
 
 #[test]
+fn doctor_does_not_suggest_stopping_a_listener_when_the_rex_layout_is_unknown() {
+    let home = Home::new(STAYS);
+    let mut listener = home.milo(&["listen"]).spawn().unwrap();
+    let started = soon(|| home.started());
+    let output = home
+        .milo(&["doctor"])
+        .current_dir(&home.root)
+        .env("REX_CONFIG", &home.root) // A directory cannot be read as Rex's init.lua.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let running = listener.try_wait().unwrap().is_none();
+    let stopped = home.milo(&["listen", "--stop"]).status().unwrap().success();
+    if !stopped {
+        let _ = listener.kill();
+    }
+    listener.wait().unwrap();
+
+    assert!(started && running && stopped);
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("Layout listener: running; expected state unknown"), "{report}");
+    assert!(!report.contains("listen --stop"), "{report}");
+}
+
+#[test]
 fn starting_without_a_saved_listener_fails_without_launching_rex() {
     let home = Home::new("echo started > \"$HOME/started\"\n");
     fs::remove_file(home.root.join(".config/milo/listener.lua")).unwrap();
