@@ -61,9 +61,13 @@ impl Location {
 
     fn plan(self, layout: Option<&Layout>, changes: &mut Vec<Change>) -> Result<(), &'static str> {
         let before = self.load()?.map(|(_, image)| image);
-        let bytes = layout.map(|rail| format!("milo-layout-v1 {}\n{}\n", self.owner, rail.rail_code()).into_bytes());
-        changes.extend(Change::new(self.path, before, bytes));
+        changes.extend(self.change(before, layout));
         Ok(())
+    }
+
+    fn change(self, before: Option<Image>, layout: Option<&Layout>) -> Option<Change> {
+        let bytes = layout.map(|rail| format!("milo-layout-v1 {}\n{}\n", self.owner, rail.rail_code()).into_bytes());
+        Change::new(self.path, before, bytes)
     }
 }
 
@@ -192,6 +196,14 @@ impl Trial {
     }
 
     pub fn undo(&self) -> Result<(), &'static str> {
+        self.apply("milo_operation=undo", "Could not undo every pane from this trial.")
+    }
+
+    pub fn keep(&self) -> Result<(), &'static str> {
+        self.apply("milo_operation=keep", "Saved, but could not finish every pane from the trial.")
+    }
+
+    fn apply(&self, operation: &str, failure: &'static str) -> Result<(), &'static str> {
         let mut args = Vec::with_capacity(4);
         args.push(format!("window={}", self.window));
         for (pane, block) in TabPane::ALL.into_iter().zip(&self.blocks) {
@@ -202,8 +214,8 @@ impl Trial {
         if args.len() == 1 {
             return Ok(());
         }
-        let result = probe(None, &self.session, &Layout::default(), "milo_operation=undo", &args)?;
-        if result == "ok" { Ok(()) } else { Err("Could not undo every pane from this trial.") }
+        let result = probe(None, &self.session, &Layout::default(), operation, &args)?;
+        if result == "ok" { Ok(()) } else { Err(failure) }
     }
 }
 
@@ -215,6 +227,7 @@ fn failure(reply: &str) -> &'static str {
         "no_panes" => "Choose at least one pane before trying a layout.",
         "no_replay" => "Rex could not add the trial panes.",
         "zoomed" => "Unzoom this tab before trying a layout.",
+        "trial" => "Finish or undo the Milo setup trial in this tab first.",
         _ => NO_TAB,
     }
 }
@@ -275,6 +288,47 @@ fn update(config: &Path, scope: Scope, root: Option<&Path>, layout: Option<&Layo
     files::install(&changes, || true)
 }
 
+/// A divider drag changes proportions, not the pane choices, side, or policy
+/// for the other axis. An older tab must not put those defaults back.
+fn remember_resize(config: &Path, root: &Path, before: &Layout, after: &Layout) -> Result<(), &'static str> {
+    if before.panes != after.panes
+        || before.geometry.order != after.geometry.order
+        || before.geometry.side != after.geometry.side
+    {
+        return Err("The Milo rail changed.");
+    }
+    let width_changed = before.width != after.width;
+    let shares_changed = before.geometry.shares != after.geometry.shares;
+    if !width_changed && !shares_changed {
+        return Ok(());
+    }
+
+    let location = Location::new(config, Some(root))?;
+    let _profiles = location.lock()?;
+    let (mut layout, image) = if let Some((layout, image)) = location.load()? {
+        (layout, Some(image))
+    } else if let Some((layout, _)) = Location::new(config, None)?.load()? {
+        (layout, None)
+    } else {
+        let image = read(&config.join("rex.lua"))?.ok_or(BAD_PROFILE)?;
+        let layout = std::str::from_utf8(&image.bytes).ok().and_then(Layout::parse).ok_or(BAD_PROFILE)?;
+        (layout, None)
+    };
+    let write_width = width_changed && layout.width != after.width;
+    let write_shares = shares_changed && layout.panes == after.panes && layout.geometry.shares != after.geometry.shares;
+    if !write_width && !write_shares {
+        return Ok(());
+    }
+    if write_width {
+        layout.width.clone_from(&after.width);
+    }
+    if write_shares {
+        layout.geometry.shares = after.geometry.shares;
+    }
+    let change = location.change(image, Some(&layout));
+    files::install(change.as_slice(), || true)
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut result = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -307,6 +361,16 @@ pub fn layout_profile(args: &[OsString]) -> i32 {
                 if let Some((layout, _)) = selected(&config, worktree(Path::new(cwd)).as_deref())? {
                     println!("{}", layout.rail_code());
                 }
+            }
+            (Some("resize"), [before, after, cwd, other_dirs @ ..]) => {
+                let root = worktree(Path::new(cwd)).ok_or(NO_WORKTREE)?;
+                if other_dirs.iter().any(|dir| worktree(Path::new(dir)).as_deref() != Some(root.as_path())) {
+                    return Err("Milo panes belong to different Git worktrees.");
+                }
+                let config = crate::paths::config_dir().ok_or(BAD_PROFILE)?;
+                let parse =
+                    |value: &OsString| value.to_str().and_then(Layout::parse_rail).ok_or("Invalid Milo rail layout.");
+                remember_resize(&config, &root, &parse(before)?, &parse(after)?)?;
             }
             (Some("save"), [scope, cwd, _]) | (Some("reset"), [scope, cwd]) => {
                 let scope = match scope.to_str() {
@@ -367,6 +431,56 @@ mod tests {
         assert_eq!(selected(&store.config, Some(&b)).unwrap().unwrap().1, Scope::Global);
         store.use_global(&a).unwrap();
         assert_eq!(selected(&store.config, Some(&a)).unwrap().unwrap().1, Scope::Global);
+    }
+
+    #[test]
+    fn divider_changes_only_its_axis_and_worktree() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let a = fixture.root.join("a");
+        let b = fixture.root.join("b");
+        let global = Layout::parse_rail("v1 r .321 .7 10 uho 111").unwrap();
+        update(&store.config, Scope::Global, None, Some(&global)).unwrap();
+        let before = Layout::parse_rail("v1 l .2 .7 10 ohu 111 540000 260000 200000").unwrap();
+        let height = Layout::parse_rail("v1 l .2 .7 10 ohu 111 660000 320000 20000").unwrap();
+        let width = Layout::parse_rail("v1 l .45 .7 10 ohu 111 540000 260000 200000").unwrap();
+
+        remember_resize(&store.config, &a, &before, &before).unwrap();
+        assert_eq!(selected(&store.config, Some(&a)).unwrap().unwrap().1, Scope::Global);
+        remember_resize(&store.config, &a, &before, &height).unwrap();
+        let (first, scope) = selected(&store.config, Some(&a)).unwrap().unwrap();
+        assert_eq!(scope, Scope::Worktree);
+        assert_eq!(first.width, global.width);
+        assert_eq!(first.geometry.side, global.geometry.side);
+        assert_eq!(first.geometry.order, global.geometry.order);
+        assert_eq!(first.geometry.shares, height.geometry.shares);
+
+        remember_resize(&store.config, &a, &before, &width).unwrap();
+        let resized = selected(&store.config, Some(&a)).unwrap().unwrap().0;
+        assert_eq!(resized.width, width.width);
+        assert_eq!(resized.geometry.shares, height.geometry.shares);
+        assert!(selected(&store.config, Some(&b)).unwrap().unwrap().0 == global);
+        store.use_global(&a).unwrap();
+        assert!(selected(&store.config, Some(&a)).unwrap().unwrap().0 == global);
+    }
+
+    #[test]
+    fn a_partial_rail_resize_does_not_replace_configured_panes_or_height_policy() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let root = fixture.root.join("project");
+        let default = Layout::default();
+        std::fs::create_dir(&store.config).unwrap();
+        std::fs::write(store.rex_file(), super::super::layout::rex_lua(&default, Path::new("/bin/milo"))).unwrap();
+        let before = Layout::parse_rail("v1 l .2 .7 10 uho 101 800000 0 200000").unwrap();
+        let after = Layout::parse_rail("v1 l .33 .7 10 uho 101 900000 0 100000").unwrap();
+
+        remember_resize(&store.config, &root, &before, &after).unwrap();
+        let (resized, scope) = selected(&store.config, Some(&root)).unwrap().unwrap();
+        assert_eq!(scope, Scope::Worktree);
+        assert_eq!(resized.width, after.width);
+        assert_eq!(resized.panes, default.panes);
+        assert_eq!(resized.geometry, default.geometry);
     }
 
     #[test]

@@ -4,7 +4,9 @@ use crate::screen::Screen;
 use crate::ui::{FAINT, HEADING};
 use crate::width::str_width;
 
-use super::layout::{Layout, Side, TabPane};
+use super::layout::{DEFAULT_USAGE_ROWS, Layout, Side, TabPane};
+
+const ASSUMED_TAB_ROWS: usize = 35;
 
 pub(super) const fn pane_label(pane: TabPane) -> &'static str {
     match pane {
@@ -28,7 +30,8 @@ impl<'a> Preview<'a> {
         let [outline, history, usage] = layout.panes;
         let count = layout.panes.into_iter().filter(|&on| on).count();
         let usage_part = if usage && count > 1 {
-            size.map_or(0.15, |(_, rows)| (number(&layout.usage_rows, 10.0) / rows as f64).min(0.4))
+            let rows = size.map_or(ASSUMED_TAB_ROWS, |(_, rows)| rows);
+            (number(&layout.usage_rows, f64::from(DEFAULT_USAGE_ROWS)) / rows as f64).min(0.4)
         } else {
             if usage { 1.0 } else { 0.0 }
         };
@@ -67,7 +70,7 @@ impl<'a> Preview<'a> {
     }
 
     pub(super) fn height(&self, width: usize, max: usize) -> usize {
-        let (cols, rows) = self.size.unwrap_or((100, 35));
+        let (cols, rows) = self.size.unwrap_or((100, ASSUMED_TAB_ROWS));
         let scaled = width.saturating_mul(rows).div_ceil(cols);
         // Border and legible labels need at least this many rows. Above that
         // minimum, space is apportioned from the tab's real dimensions.
@@ -237,10 +240,20 @@ mod tests {
     #[test]
     fn usage_rows_scale_against_the_tab_not_the_setup_pane() {
         let layout = Layout::default();
-        for (rows, pct) in [(20, 40), (40, 25), (100, 10)] {
+        for (rows, pct) in [(20, 10), (40, 5), (100, 2)] {
             assert_eq!(percent(Preview::new(&layout, Some((100, rows))).shares[TabPane::Usage as usize]), pct);
         }
-        assert_eq!(percent(Preview::new(&layout, None).shares[TabPane::Usage as usize]), 15);
+        assert_eq!(percent(Preview::new(&layout, None).shares[TabPane::Usage as usize]), 6);
         assert!(Preview::new(&layout, Some((80, 40))).height(40, 24) > 7);
+    }
+
+    #[test]
+    fn an_explicit_usage_size_and_captured_geometry_override_the_default() {
+        let mut layout = Layout { usage_rows: "10".into(), ..Layout::default() };
+        let usage_share =
+            |layout: &Layout| percent(Preview::new(layout, Some((100, 50))).shares[TabPane::Usage as usize]);
+        assert_eq!(usage_share(&layout), 20);
+        layout.geometry.shares = Some([400_000, 250_000, 350_000]);
+        assert_eq!(usage_share(&layout), 35);
     }
 }

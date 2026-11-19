@@ -6,7 +6,7 @@ use crate::git::Kind;
 use crate::help;
 use crate::icons;
 use crate::preferences::Source;
-use crate::screen::{self, Screen, Style, Wash};
+use crate::screen::{self, Screen, Style};
 use crate::ui::{self, ADD, FAINT, HEADING};
 use crate::width::char_width;
 
@@ -38,20 +38,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             return;
         }
         ui::section_heading(s, 0, s.w - 1, "Milo setup");
-        if s.w >= 34 {
-            let status = if self.trial.is_some() {
-                "Trial active"
-            } else if self.inside && self.saved.is_none() {
-                "Rex settings unreadable"
-            } else if self.installed {
-                "Rex integration installed"
-            } else if self.inside {
-                "Rex not set up yet"
-            } else {
-                "Outside Rex"
-            };
-            s.put_fit(14, 0, s.w - 15, status, if self.trial.is_some() { ACCENT } else { FAINT });
-        }
         if s.h == 1 {
             return;
         }
@@ -59,15 +45,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let end = self.notice(s);
         let tab = self.panel.tab();
         let mut y = 1;
-        if end >= 5
-            && let Some(active) = tab
-        {
-            tabs(s, y, active);
-            y += 1;
+        if let Some(active) = tab {
+            if s.w >= 60 {
+                tabs(s, 15, 0, active);
+            } else if end >= 5 {
+                tabs(s, 1, y, active);
+                y += 1;
+            }
         }
         if end >= y + 2 {
+            y += usize::from(end >= 12);
             self.title(s, y);
-            y += 1;
+            y += 1 + usize::from(end >= 12);
         }
         if self.panel == Panel::Diagnostics {
             self.draw_diagnostics(s, y, end);
@@ -86,21 +75,21 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let preview = (self.inside && matches!(self.panel, Panel::Layout | Panel::Tune))
             .then(|| Preview::new(&self.layout, self.tab_size));
         let side_by_side = preview.is_some() && s.w >= 76;
-        let form_width = if side_by_side { (s.w * 43 / 100).clamp(34, 60) } else { s.w };
+        let form_width = if side_by_side { 32 } else { s.w.min(54) };
         let mut form_end = end;
         let mut diagram = None;
         let mut sample = None;
         if let Some(preview) = &preview {
             if side_by_side {
-                let preview_width = s.w - form_width - 3;
+                let preview_width = (s.w - form_width - 5).min(48);
                 diagram = Some(Rect {
-                    x: form_width + 2,
+                    x: form_width + 4,
                     y,
                     width: preview_width,
-                    height: preview.height(preview_width, end.saturating_sub(y + 1)),
+                    height: preview.height(preview_width, end.saturating_sub(y + 1).min(10)),
                 });
             } else if s.w >= 16 && end.saturating_sub(y) >= 6 + preview.minimum_height() {
-                let height = preview.height(width, end - y - 6);
+                let height = preview.height(width, (end - y - 6).min(10));
                 let top = end - height - 1;
                 form_end = top - 1;
                 diagram = Some(Rect { x: 1, y: top, width, height });
@@ -156,9 +145,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn title(&self, s: &mut Screen, y: usize) {
-        let heading = self.panel.title();
-        ui::section_heading(s, y, s.w - 2, heading);
-        let at = heading.len() + 3;
+        let show_heading = !matches!(self.panel, Panel::Layout | Panel::Appearance | Panel::Workflow) || !self.inside;
+        let at = if show_heading {
+            let heading = self.panel.title();
+            ui::section_heading(s, y, s.w - 2, heading);
+            heading.len() + 3
+        } else {
+            1
+        };
         let scope = match self.panel {
             Panel::Layout | Panel::Tune if self.inside => {
                 if self.scope == Scope::Worktree {
@@ -173,10 +167,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Source::Global => "Global preferences",
                 Source::Worktree => "Worktree preferences",
             },
+            Panel::Health if !self.inside => "Outside Rex",
+            Panel::Health if self.saved.is_none() => "Rex settings unreadable",
+            Panel::Health if self.installed => "Rex integration installed",
+            Panel::Health => "Rex not set up yet",
             _ => return,
         };
         if at + scope.len() < s.w {
-            let used = s.put(at, y, scope.len(), scope, ACCENT);
+            let used = s.put(at, y, scope.len(), scope, FAINT);
             let at = at + used + 2;
             let scoped_to_worktree = matches!(self.panel, Panel::Layout | Panel::Tune) && self.scope == Scope::Worktree
                 || matches!(self.panel, Panel::Appearance | Panel::Workflow) && self.prefs_scope == Source::Worktree;
@@ -197,7 +195,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 "Temporary preview only. Undo it now, or save the draft for future tabs."
             }
             Panel::Layout if self.trial.is_some() => "Undo this trial, or save the layout you tried to keep its panes.",
-            Panel::Layout if !self.installed => "Choose a preset, then try it in this tab before saving.",
             Panel::Layout => return None,
             Panel::Tune => return None,
             Panel::Appearance => return None,
@@ -236,6 +233,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             s.put_fit(1, s.h - 1, s.w - 1, exit, FAINT);
             return;
         }
+        if self.panel == Panel::Layout && self.inside && self.saved.is_some() && (24..36).contains(&s.w) {
+            let trial = if self.trial.is_some() { "u undo" } else { "a try" };
+            let x = 1 + s.put(1, s.h - 1, 6, trial, FAINT);
+            let x = x + s.put(x, s.h - 1, 10, "  s save  ", FAINT);
+            s.put_fit(x, s.h - 1, s.w - x, exit, FAINT);
+            return;
+        }
         let last = if back {
             "Esc back · ? help"
         } else if self.offered {
@@ -246,14 +250,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let (first, middle): (&str, &[&str]) = match self.panel {
             Panel::Diagnostics => ("↑↓ scroll", &["r refresh"]),
             Panel::Save(_) | Panel::Confirm(_) => ("Enter choose", &[]),
-            Panel::Layout | Panel::Tune if self.inside && self.saved.is_some() => (
-                "s save…",
-                if self.trial.is_some() {
-                    &["Enter", "Tab section", "u undo"]
-                } else {
-                    &["Enter", "Tab section", "a try"]
-                },
-            ),
+            Panel::Layout | Panel::Tune if self.inside && self.saved.is_some() => {
+                ("s save…", if self.trial.is_some() { &["u undo", "Tab sections"] } else { &["a try", "Tab sections"] })
+            }
             Panel::Appearance | Panel::Workflow if self.saved_prefs.is_some() => ("s save…", &["Enter", "Tab section"]),
             _ => ("Enter", &["Tab section"]),
         };
@@ -290,9 +289,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 s.put_fit(start, row_y, room, value, if disabled { FAINT } else { style });
             } else {
                 s.put_fit(2, row_y, draw_width.saturating_sub(2), label, name_style);
-            }
-            if selected {
-                s.wash(0, row_y, draw_width, Wash::Bar);
             }
         }
         ui::thumb(s, draw_width, y, len, rows.len(), first);
@@ -353,8 +349,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn detail<'a>(&'a self, row: Row, cell: Cell<'a>) -> &'a str {
         match row {
-            Row::Capture | Row::Try if self.trial.is_some() => "Undo the current trial first.",
-            Row::Capture | Row::Try if self.target.is_none() => "Open setup from a tiled Rex shell to use this action.",
+            Row::Capture if self.trial.is_some() => "Undo the current trial first.",
+            Row::Capture if self.target.is_none() => "Open setup from a tiled Rex shell to use this action.",
             Row::SaveWorktree => self.root.as_deref().and_then(|root| root.to_str()).unwrap_or(cell.detail),
             Row::ClaudeLimits | Row::SaveClaude => match self.claude {
                 Claude::Foreign => "Milo will leave your Claude Code status line alone.",
@@ -380,25 +376,16 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let layout = &self.layout;
         let prefs = &self.prefs;
         match row {
-            Row::Tree => {
-                Cell::action("Just the tree", "Just the tree", "Use only Outline. This changes the draft, not the tab.")
+            Row::Tree => Cell::action("Just the tree", "Just the tree", "Browse files beside your shell."),
+            Row::Sidebar => {
+                Cell::action("Project sidebar", "Project sidebar", "Files, commits and usage beside your shell.")
             }
-            Row::Sidebar => Cell::action(
-                "Project sidebar",
-                "Project sidebar",
-                "Use Outline, History and Usage. This changes only the draft.",
-            ),
             Row::Capture => Cell::action(
                 "Use this tab’s layout",
                 "Use this tab’s layout",
                 "Read Milo's side, order and split sizes without moving anything.",
             ),
             Row::Tune => Cell::action("Customize panes", "Customize panes", "Choose the panes, side, order and size."),
-            Row::Try => Cell::action(
-                "Try in this tab",
-                "Try in this tab",
-                "Only adds Milo panes where they fit safely. Nothing is saved.",
-            ),
             Row::Undo => Cell::action("Undo trial", "Undo trial", "Close only the panes created by this trial."),
             Row::SaveLayout => Cell::action(
                 "Save layout for…",
@@ -625,14 +612,13 @@ impl<'a> Cell<'a> {
     }
 }
 
-fn tabs(s: &mut Screen, y: usize, active: usize) {
-    let labels = match s.w {
-        50.. => ["1 Layout", "2 Appearance", "3 Workflow", "4 Health"],
-        32.. => ["1 Layout", "2 Look", "3 Flow", "4 Health"],
-        _ => ["1", "2", "3", "4"],
-    };
-    let spacing = if s.w >= 50 { 3 } else { 1 };
-    let mut x = 1;
+fn tabs(s: &mut Screen, mut x: usize, y: usize, active: usize) {
+    let labels = ["Layout", "Appearance", "Workflow", "Health"];
+    if s.w < 37 {
+        s.put_fit(x, y, s.w.saturating_sub(x), labels[active], HEADING);
+        return;
+    }
+    let spacing = 2;
     for (index, text) in labels.into_iter().enumerate() {
         let style = if index == active { ACCENT.bold() } else { FAINT };
         x += s.put(x, y, text.len(), text, style) + spacing;

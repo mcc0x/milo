@@ -3,7 +3,7 @@ local file = assert(io.open(assert(arg[1]), "r"))
 local code = file:read("*a")
 file:close()
 local prefix = [[
-local milo, column_width, outline_share, usage_rows = "milo", 0.2, 0.7, 10
+local milo, column_width, outline_share, usage_rows = "milo", 0.2, 0.7, 2
 local chosen = { outline = true, history = true, usage = true }
 local trial_profile = "v1 l 0.37 0.7 10 huo 110 230000 770000 0"
 ]]
@@ -13,8 +13,8 @@ local editor = { block_id = "block:editor", creator_name = "editor" }
 local outline = { block_id = "block:outline", label = "milo:outline", creator_name = terminal }
 local usage = { block_id = "block:usage", label = "milo:usage", creator_name = terminal }
 local history = { block_id = "block:history", label = "milo:history", creator_name = terminal }
-local function leaf(block)
-  return { block_id = block.block_id, rect = {0, 0, 1, 1} }
+local function leaf(block, rect)
+  return { block_id = block.block_id, rect = rect or {0, 0, 1, 1} }
 end
 local function tree(direction, ratio, before, after)
   return { split = { split_id = "split:root", direction = direction, ratio = ratio, before = before, after = after } }
@@ -26,17 +26,21 @@ local window = { window_id = "window:work", focused_block_id = shell.block_id, l
 local session = { active_window_id = window.window_id, windows = { window } }
 local ctx = { session_id = "session:1", block_id = shell.block_id }
 local actions, commands, closed, focus, floats, splits = {}, {}, {}, {}, {}, {}
+local sizes, profile_reply = {}, { stdout = "", ok = true }
+local relabeled = {}
 rex = {
   action = function(action) actions[action.name] = action.run end,
   exec = function(argv)
     commands[#commands + 1] = argv
-    return { ok = true, stdout = "" }
+    return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
     if name == terminal .. ".process" then
       assert(args.block_id == shell.block_id)
       return { foreground = { argv0 = "editor", cwd = "/unrelated" },
         ancestors = { { argv0 = "-zsh", cwd = "/my project" } } }
+    elseif name == terminal .. ".size" then
+      return sizes[args.block_id]
     elseif name == "block.close" then
       assert(args.keep_last)
       closed[#closed + 1] = args.block_id
@@ -62,6 +66,7 @@ rex = {
     end,
     raise_layer = function() return {} end,
     focus_block = function(args) focus[#focus + 1] = args.block_id; return {} end,
+    set_block_label = function(args) relabeled[#relabeled + 1] = args; return {} end,
   },
   layout = {
     block = function(block) return block end,
@@ -74,7 +79,7 @@ assert(loadstring(prefix .. code))()
 actions.milo_remember_layout(ctx, { scope = "worktree" })
 local argv = commands[1]
 assert(argv[2] == "layout-profile" and argv[3] == "save" and argv[4] == "worktree" and argv[5] == "/my project")
-assert(argv[6] == "v1 r 0.320000 0.7 10 uho 111 438000 292000 270000")
+assert(argv[6] == "v1 r 0.320000 0.7 2 uho 111 438000 292000 270000")
 actions.milo_reset_layout(ctx, { scope = "worktree" })
 assert(commands[2][3] == "reset" and commands[2][4] == "worktree")
 
@@ -107,16 +112,16 @@ end
 assert(probe{ milo_operation = "trial" } == "ok window:work floating history=block:trial-history outline=block:trial-outline")
 assert(#floats == 2 and #splits == 0 and not floats[2].focus)
 assert(floats[2].bounds[1] == 0 and floats[2].bounds[3] == 0.37)
-assert(floats[2].layout.before.label == "milo:history" and math.abs(floats[2].layout.ratio - 0.77) < 0.000001)
+assert(floats[2].layout.before.label == "milo:trial:history" and math.abs(floats[2].layout.ratio - 0.77) < 0.000001)
 
 -- Undo honors the original window and exact IDs: it never closes the actual outline,
 -- a user shell added to the preview, or a trial block the user moved to another tab.
 window.layers[2] = { kind = "floating", blocks = {
-  { block_id = "block:trial-history", creator_name = terminal, label = "milo:history" },
+  { block_id = "block:trial-history", creator_name = terminal, label = "milo:trial:history" },
   { block_id = "block:new-shell", creator_name = terminal },
 } }
 session.windows[2] = { window_id = "window:elsewhere", layers = {{ kind = "tiled", blocks = {
-  { block_id = "block:trial-outline", creator_name = terminal, label = "milo:outline" },
+  { block_id = "block:trial-outline", creator_name = terminal, label = "milo:trial:outline" },
 } }} }
 assert(probe{ milo_operation = "undo", window = "window:work", history = "block:trial-history", outline = "block:trial-outline" } == "ok")
 assert(#closed == 2 and closed[2] == "block:trial-history")
@@ -126,3 +131,71 @@ window.layers[2] = nil
 tiled.layout, tiled.blocks = leaf(shell), { shell }
 assert(probe{ milo_operation = "trial" } == "ok window:work tiled history=block:trial-history outline=block:trial-outline")
 assert(#splits == 1 and splits[1].anchor_id == shell.block_id and not splits[1].focus)
+
+-- Saving promotes only trial panes still in their original tab.
+assert(splits[1].layout.before.label == "milo:trial:history")
+tiled.blocks[2] = { block_id = "block:trial-history", creator_name = terminal, label = "milo:trial:history" }
+assert(probe{ milo_operation = "keep", window = "window:work", history = "block:trial-history", outline = "block:trial-outline" } == "ok")
+assert(#relabeled == 1 and relabeled[1].block_id == "block:trial-history" and relabeled[1].label == "milo:history")
+
+local function near(a, b)
+  assert(math.abs(a - b) < 0.000001, a .. " should be near " .. b)
+end
+
+-- The shell fills only 60% of the tab. Its 48 rows imply an 80-row tab.
+tiled.layout = tree("vertical", 0.6, leaf(shell, {0, 0, 1, 0.6}), leaf(editor))
+tiled.blocks = { shell, editor }
+sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 48 }
+actions.milo_layout(ctx)
+local made = splits[#splits]
+assert(made.direction == "horizontal" and made.layout.after.label == usage.label)
+near(1 - made.layout.ratio, 2 / 80)
+
+-- Configured rows and captured resize proportions are intentional overrides.
+profile_reply.stdout = "v1 l 0.20 0.70 10 ohu 111"
+actions.milo_layout(ctx)
+near(1 - splits[#splits].layout.ratio, 10 / 80)
+profile_reply.stdout = "v1 l 0.20 0.70 10 ohu 111 400000 250000 350000"
+actions.milo_layout(ctx)
+near(1 - splits[#splits].layout.ratio, 0.35)
+profile_reply.stdout = ""
+
+-- An unsized tab uses the compact nominal estimate, not a 15% strip.
+sizes[shell.block_id] = nil
+actions.milo_layout(ctx)
+near(1 - splits[#splits].layout.ratio, 2 / 35)
+
+-- Add Usage splits the real adjacent pane, even if it was resized.
+local resized = tree("vertical", 0.8, leaf(outline), leaf(history))
+tiled.layout = tree("horizontal", 0.8, leaf(shell), resized)
+tiled.blocks = { shell, outline, history }
+sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 80 }
+actions.milo_usage(ctx)
+made = splits[#splits]
+assert(made.direction == "vertical" and made.anchor_id == history.block_id and made.layout.label == usage.label)
+near((1 - made.ratio) * 0.2, 2 / 80)
+
+-- A headless tab can still have an explicit terminal size without a client owner.
+tiled.layout, tiled.blocks = leaf(shell), { shell }
+sizes[shell.block_id] = { columns = 80, rows = 12 }
+actions.milo_layout(ctx)
+near(1 - splits[#splits].layout.ratio, 2 / 12)
+
+-- On a tab without a rail, Add Usage creates the sole pane in a side rail.
+actions.milo_usage(ctx)
+made = splits[#splits]
+assert(made.direction == "horizontal" and made.layout.label == usage.label)
+near(made.ratio, 0.2)
+
+-- New tabs wait for client measurement and recheck the shell before arranging.
+local pending
+rex.after = function(_, callback) pending = callback end
+local listener = assert(loadstring("local arrange_new_tabs = true\n" .. prefix .. code))("listener")
+local process = rex.call(terminal .. ".process", ctx)
+local split_count = #splits
+listener.arrange(ctx, process, function(cwd) return cwd == "/my project" end)
+assert(#splits == split_count and pending)
+sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50 }
+pending()
+assert(#splits == split_count + 1)
+near(1 - splits[#splits].layout.ratio, 2 / 50)

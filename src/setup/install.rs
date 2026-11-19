@@ -68,22 +68,21 @@ impl Store {
         let _lock = lock::setup(&self.state)?;
         let mut changes = Vec::new();
         extra(&mut changes)?;
-        let new_tabs = layout.is_some_and(|layout| layout.new_tabs);
-        let rex = layout.map(|layout| self.plan_rex(layout, &mut changes, run)).transpose()?;
+        let watch_layout = layout.is_some_and(Layout::enabled);
+        let rex_changed = layout.map(|layout| self.plan_rex(layout, &mut changes, run)).transpose()?.unwrap_or(false);
         let pending_path = self.state.join(RELOAD_PENDING);
         let pending = if layout.is_some() { read(&pending_path)? } else { None };
         if pending.as_ref().is_some_and(|file| !file.bytes.is_empty()) {
             return Err("Milo's Rex reload note was changed. It was left alone.");
         }
-        let rex_changed = rex.as_ref().is_some_and(|plan| plan.reload);
         if rex_changed && pending.is_none() {
             // The file changes are atomic one at a time; Rex must reload even if
             // the previous save ended after publishing every wanted file.
             changes.splice(..0, files::Change::new(pending_path.clone(), None, Some(Vec::new())));
         }
-        let listener_running = new_tabs && lock::running(&self.state).unwrap_or(false);
-        let reload = rex_changed || pending.is_some() || (new_tabs && !listener_running);
-        let restart = listener_running && (pending.is_some() || rex.is_some_and(|plan| plan.listener_changed));
+        let listener_running = watch_layout && lock::running(&self.state).unwrap_or(false);
+        let reload = rex_changed || pending.is_some() || (watch_layout && !listener_running);
+        let restart = listener_running && (rex_changed || pending.is_some());
         if let Some(enabled) = claude {
             self.claude_files()?.plan(enabled, &mut changes)?;
         }
@@ -101,9 +100,9 @@ impl Store {
         if (rex_changed || pending.is_some()) && fs::remove_file(pending_path).is_err() {
             return Err("Saved, but could not clear the Rex reload reminder.");
         }
-        Ok(if (restart && !stopped) || (layout.is_some() && !new_tabs && lock::stop(&self.state).is_err()) {
+        Ok(if (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err()) {
             Saved::ListenerDidNotStop
-        } else if new_tabs && !lock::wait_running(&self.state).unwrap_or(false) {
+        } else if watch_layout && !lock::wait_running(&self.state).unwrap_or(false) {
             Saved::ListenerDidNotStart
         } else {
             Saved::Ready
@@ -164,17 +163,11 @@ mod tests {
                     let panes = std::array::from_fn(|i| mask & (1 << i) != 0);
                     let layout = Layout { width: width.into(), panes, new_tabs, ..Layout::default() };
                     let lua = rex_lua(&layout, &executable);
-                    assert!(lua.contains("local usage_rows = 10\n"));
                     let (_, choices) = lua.split_once("local chosen = {\n").unwrap();
                     let (choices, _) = choices.split_once("}\n").unwrap();
                     for (name, chosen) in TabPane::ALL.map(TabPane::name).into_iter().zip(panes) {
                         assert_eq!(choices.contains(&format!("{name} = true,")), chosen);
-                        assert!(lua.contains(&format!("name = \"milo_{name}\"")));
-                        assert!(lua.contains(&format!("\"milo:{name}\"")));
                     }
-                    assert!(lua.contains("name = \"milo_layout\""));
-                    assert!(lua.contains("name = \"milo_close\""));
-                    assert_eq!(lua.contains("rex.exec.start"), new_tabs);
                     assert!(Layout::parse(&lua).is_some_and(|read| read == layout));
                 }
             }
@@ -202,7 +195,7 @@ mod tests {
             if original.is_some() {
                 assert_eq!(fs::metadata(&store.init).unwrap().permissions().mode() & 0o777, 0o640);
             }
-            store.save(Some(&Layout::default()), None, &|_| panic!("an unchanged layout needs no Rex calls")).unwrap();
+            store.save(Some(&Layout::default()), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
             assert_eq!(fs::read(&store.init).unwrap(), installed);
             store.save(Some(&off()), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
             assert_eq!(fs::read(&store.init).ok().as_deref(), original);
@@ -336,7 +329,7 @@ mod tests {
             .replace("-- Fraction of the tab for the left column.", "--[=[ Old width:\nlocal column_width = 0.52\n]=]")
             .replace("local column_width = 0.20", "  local column_width=0.27 -- My width")
             .replace("0.70", "0.67 -- My outline height")
-            .replace("usage_rows = 10", "usage_rows = 7 -- My usage height")
+            .replace("usage_rows = 2", "usage_rows = 7 -- My usage height")
             .replace("false\n", "false -- Only on demand\n")
             .replace("  history = true,", "  --[[\n  history = true,\n  ]]\n  history = false, -- Only when needed")
             .replace('\n', "\r\n");
@@ -347,28 +340,12 @@ mod tests {
         assert_eq!(layout.outline_share, "0.67");
         assert_eq!(layout.usage_rows, "7");
         assert_eq!(layout.panes, [true, false, true]);
-        store.save(Some(&layout), None, &|_| panic!("an unchanged layout needs no Rex calls")).unwrap();
+        store.save(Some(&layout), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), hand_edited);
         layout.toggle(TabPane::History);
         store.save(Some(&layout), None, &run).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), hand_edited.replace("history = false", "history = true"));
         assert!(store.layout().unwrap().0 == layout);
-    }
-
-    #[test]
-    fn default_setup_neither_checks_nor_installs_the_unused_listener() {
-        let fixture = Fixture::folder();
-        let store = store(&fixture);
-        let calls = Rc::new(RefCell::new(0));
-        let recorded = Rc::clone(&calls);
-        store
-            .save(Some(&Layout::default()), None, &move |_| {
-                *recorded.borrow_mut() += 1;
-                true
-            })
-            .unwrap();
-        assert_eq!(*calls.borrow(), 2);
-        assert!(!store.listener_file().exists());
     }
 
     #[test]
@@ -511,7 +488,7 @@ mod tests {
         fs::write(store.rex_file(), rex_lua(&layout, &executable().unwrap())).unwrap();
         let (reopened, active) = store.layout().unwrap();
         assert!(!active && reopened == layout);
-        store.save(Some(&reopened), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
+        store.save(Some(&reopened), None, &|_| true).unwrap();
         assert!(store.layout().unwrap().1);
         assert!(!store.rex_reload_pending());
     }

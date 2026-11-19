@@ -1,7 +1,11 @@
 local terminal = "com.superlogical.terminal"
 local roles = { "outline", "history", "usage" }
-local labels = { outline = "milo:outline", history = "milo:history", usage = "milo:usage" }
-local role_by_label = { [labels.outline] = "outline", [labels.history] = "history", [labels.usage] = "usage" }
+local labels, trial_labels, role_by_label = {}, {}, {}
+for _, role in ipairs(roles) do
+  local label, trial_label = "milo:" .. role, "milo:trial:" .. role
+  labels[role], trial_labels[role] = label, trial_label
+  role_by_label[label], role_by_label[trial_label] = role, role
+end
 local role_by_letter = { o = "outline", h = "history", u = "usage" }
 local peek_label = "milo:peek:outline"
 -- The server may not have inherited the XDG settings of the shell that
@@ -21,6 +25,7 @@ local errors = {
   no_shell = "Focus the shell Milo should use, then try again.",
   no_tab = "Could not find this Rex tab.",
   zoomed = "Unzoom the tab first.",
+  trial = "Finish or undo the Milo setup trial in this tab first.",
 }
 
 local function raise(why)
@@ -122,6 +127,7 @@ local function inspect_rail(layer)
   for _, block in ipairs(layer.blocks or {}) do
     local role = role_by_label[block.label]
     if role then
+      if block.label == trial_labels[role] then return nil, "trial" end
       if block.creator_name ~= terminal or found[role] then return nil, "mixed" end
       found[role], total = block.block_id, total + 1
     end
@@ -203,7 +209,7 @@ local function effective(cwd)
   return { side = "l", width = column_width, outline = outline_share, rows = usage_rows, order = roles, wanted = chosen }
 end
 
-local function pane(role, cwd, shell, origin)
+local function pane(role, cwd, shell, origin, trial)
   local command = { milo, role }
   if origin then
     command = { milo, role, "--peek-origin", origin }
@@ -211,7 +217,7 @@ local function pane(role, cwd, shell, origin)
     command = { milo, role, "--shell", shell }
   end
   return rex.layout.block{
-    flavor = terminal .. ".shell", label = origin and peek_label or labels[role],
+    flavor = terminal .. ".shell", label = origin and peek_label or trial and trial_labels[role] or labels[role],
     options = { command = command, cwd = cwd },
   }
 end
@@ -221,7 +227,9 @@ local function weights(selected, rows)
   local paired = wanted.outline and wanted.history
   local policy = selected.shares
   if wanted.usage then
-    shares.usage = (wanted.outline or wanted.history) and (rows > 0 and math.min(selected.rows / rows, 0.4) or 0.15) or 1
+    -- A lone pane is the whole rail; in a stack Usage is a strip sized in terminal rows.
+    -- Match setup's 35-row estimate if no terminal height is reported.
+    shares.usage = (wanted.outline or wanted.history) and math.min(selected.rows / (rows or 35), 0.4) or 1
   end
   local rest = 1 - (shares.usage or 0)
   if wanted.outline then shares.outline = rest * (paired and selected.outline or 1) end
@@ -234,14 +242,14 @@ local function weights(selected, rows)
   return shares
 end
 
-local function column(selected, cwd, shell, rows)
+local function column(selected, cwd, shell, rows, trial)
   local ordered, shares, remaining = {}, weights(selected, rows), 0
   for _, role in ipairs(selected.order) do
     if shares[role] then ordered[#ordered + 1], remaining = role, remaining + shares[role] end
   end
   local function build(i, total)
     local role = ordered[i]
-    local block = pane(role, cwd, shell)
+    local block = pane(role, cwd, shell, nil, trial)
     if i == 1 then return block end
     local rest = total - shares[role]
     return rex.layout.vertical(rest / total, build(i - 1, rest), block)
@@ -251,12 +259,12 @@ end
 
 local function cells(ctx, block, rect)
   local size = terminal_call(ctx, block, "size")
-  if size and size.owner and size.rows and size.rows > 0 then
+  if size and size.rows and size.rows > 0 then
     local cols, rows = size.columns or size.cols, size.rows
     if rect and rect[3] > 0 and rect[4] > 0 then
       cols, rows = cols and math.floor(cols / rect[3] + 0.5), math.floor(rows / rect[4] + 0.5)
     end
-    return cols, rows
+    return cols, rows, size.owner
   end
 end
 
@@ -275,8 +283,11 @@ local function tab_cells(ctx, layer, source)
   end
   for _, block in ipairs(layer.blocks or {}) do
     if block.block_id ~= source and block.creator_name == terminal then
-      local cols, rows = cells(ctx, block.block_id, rect_for(layer.layout, block.block_id))
-      if rows then return cols, rows end
+      local rect = rect_for(layer.layout, block.block_id)
+      if rect then
+        local cols, rows = cells(ctx, block.block_id, rect)
+        if rows then return cols, rows end
+      end
     end
   end
 end
@@ -292,8 +303,8 @@ local function close_block(ctx, block)
   return rex.call("block.close", { session_id = ctx.session_id, block_id = block, keep_last = true })
 end
 
-local function make_rail(ctx, selected, cwd, shell, root, rows)
-  local rail, ordered = column(selected, cwd, shell, rows)
+local function make_rail(ctx, selected, cwd, shell, root, rows, trial)
+  local rail, ordered = column(selected, cwd, shell, rows, trial)
   if not rail then return {}, {} end
   local made, err = split(ctx, root, "horizontal", selected.side == "l", selected.width, rail)
   return made, ordered, err
@@ -314,9 +325,16 @@ local function fill_rail(ctx, selected, live, cwd, shell, rows)
       local neighbour = successor or predecessor
       local before = successor ~= nil
       local share = desired[role] / (desired[role] + (desired[neighbour] or live.shares[neighbour]))
+      local height = live.shares[neighbour]
+      if role == "usage" and not (selected.shares and selected.shares.usage > 0) then
+        -- Convert the whole-tab height to a share of the actual adjacent pane.
+        -- A very short neighbour keeps at least half of its existing space.
+        share = math.min(desired[role] / height, 0.5)
+      end
       local made, err = split(ctx, live.present[neighbour], "vertical", before, share, pane(role, cwd, shell))
       if not made or not made.block_ids or not made.block_ids[1] then raise(err or "Rex could not add the pane.") end
-      live.present[role], live.shares[role] = made.block_ids[1], desired[role]
+      live.present[role], live.shares[role] = made.block_ids[1], height * share
+      live.shares[neighbour] = height * (1 - share)
       for i, existing in ipairs(live.order) do
         if existing == neighbour then table.insert(live.order, before and i or i + 1, role); break end
       end
@@ -349,27 +367,84 @@ local function arrange(ctx, one)
         if live.present[role] then selected.wanted[role] = true end
       end
     end
-    fill_rail(ctx, selected, live, cwd, shell, rows or 0)
+    fill_rail(ctx, selected, live, cwd, shell, rows)
   else
     if one then selected.wanted = { [one] = true } end
     local root = node_id(layer.layout)
     if not root then raise("no_tab") end
-    local made, _, err = make_rail(ctx, selected, cwd, shell, root, rows or 0)
+    local made, _, err = make_rail(ctx, selected, cwd, shell, root, rows)
     if not made then raise(err or "Rex could not add the rail.") end
   end
 end
 
 if ... == "listener" then
+  local function topology(node)
+    if not node then return end
+    if node.block_id then return node.block_id end
+    local split = node.split
+    if not split or not split.split_id then return end
+    local before, after = topology(split.before), topology(split.after)
+    if before and after then return table.concat({ split.split_id, split.direction, before, after }, " ") end
+  end
+
+  local function snapshot(window)
+    if window.zoomed_block_id then return end
+    local layer = tiled(window)
+    local rail = inspect_rail(layer)
+    if not rail then return end
+    local tree = topology(layer.layout)
+    if not tree or not layer.layer_id then return end
+    local key = { layer.layer_id, tree }
+    for _, role in ipairs(rail.order) do key[#key + 1] = role .. "=" .. rail.present[role] end
+    return { key = table.concat(key, " "), code = rail_code(rail), rail = rail }
+  end
+
+  local function directories(session_id, rail)
+    local ctx, dirs, seen = { session_id = session_id }, {}, {}
+    for _, block in pairs(rail.present) do
+      local process = terminal_call(ctx, block, "process")
+      local child = process and process.child
+      -- A renamed shell or a rail from another installation is not ours.
+      if not child or (child.path ~= milo and child.invoked_path ~= milo and child.argv0 ~= milo)
+        or not child.cwd then return end
+      if not seen[child.cwd] then
+        dirs[#dirs + 1], seen[child.cwd] = child.cwd, true
+      end
+    end
+    -- Use the panes' launch worktree, not whichever directory a shell now has open.
+    return dirs
+  end
+
+  local function save(dirs, before, after)
+    if before == after then return end
+    local argv = { milo, "layout-profile", "resize", before, after }
+    for _, cwd in ipairs(dirs) do argv[#argv + 1] = cwd end
+    profile_exec(argv, 3)
+  end
+
+  local memory = { snapshot = snapshot, directories = directories, save = save }
   if arrange_new_tabs then
-    return function(ctx, process, still_single)
+    memory.arrange = function(ctx, process, still_single)
       local cwd = shell_cwd(process)
       if not cwd then return end
       local selected = effective(cwd)
-      local _, rows = cells(ctx, ctx.block_id)
-      if still_single(cwd) then make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows or 0) end
+      local wanted = selected.wanted
+      local needs_rows = wanted.usage and (wanted.outline or wanted.history)
+        and not (selected.shares and selected.shares.usage > 0)
+      local function arrange_sized(retries)
+        local _, rows, owner = cells(ctx, ctx.block_id)
+        if not still_single(cwd) then return end
+        if needs_rows and type(owner) ~= "string" and retries > 0 then
+          -- The login shell can become ready before its client measures the tab.
+          rex.after(0.05, function() arrange_sized(retries - 1) end)
+        else
+          make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows)
+        end
+      end
+      arrange_sized(9)
     end
   end
-  return nil
+  return memory
 end
 
 local function scope_for(args, cwd, resetting)
@@ -477,7 +552,7 @@ local operation = rex.args and rex.args.milo_operation
 if operation then
   local ctx = { session_id = rex.session_id, block_id = rex.block_id }
   local function probe()
-    if operation == "undo" then
+    if operation == "undo" or operation == "keep" then
       local session = view(ctx)
       for _, window in ipairs(session and session.windows or {}) do
         if window.window_id == rex.args.window then
@@ -485,8 +560,15 @@ if operation then
           for _, role in ipairs(roles) do
             if rex.args[role] then
               local block = find_block(window, rex.args[role])
-              if block and block.label == labels[role] and block.creator_name == terminal then
-                local done = close_block(ctx, block.block_id)
+              if block and block.label == trial_labels[role] and block.creator_name == terminal then
+                local done
+                if operation == "undo" then
+                  done = close_block(ctx, block.block_id)
+                else
+                  done = rex.session.set_block_label{
+                    session_id = ctx.session_id, block_id = block.block_id, label = labels[role],
+                  }
+                end
                 failed = failed or not done
               end
             end
@@ -523,14 +605,13 @@ if operation then
       local selected = profile(trial_profile)
       if not selected then return "no_replay" end
       local live, why = inspect_rail(layer)
-      local _, measured = tab_cells(ctx, layer, source)
-      local rows = measured or 0
+      local _, rows = tab_cells(ctx, layer, source)
       local made, ordered, mode
-      if live or why == "mixed" then
+      if live or why == "mixed" or why == "trial" then
         -- Preview over the chosen edge when another rail already exists.
         -- Never move or close existing panes just to show the draft.
         local layout
-        layout, ordered = column(selected, cwd, shell, rows)
+        layout, ordered = column(selected, cwd, shell, rows, true)
         if not layout then return "no_panes" end
         mode = "floating"
         made = rex.session.new_layer{
@@ -541,7 +622,7 @@ if operation then
         local root = node_id(layer.layout)
         if not root then return "no_tab" end
         mode = "tiled"
-        made, ordered = make_rail(ctx, selected, cwd, shell, root, rows)
+        made, ordered = make_rail(ctx, selected, cwd, shell, root, rows, true)
         if ordered and #ordered == 0 then return "no_panes" end
       end
       if not made or not made.block_ids or #made.block_ids ~= #ordered then return "no_replay" end

@@ -29,7 +29,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo usage` | Shows available local usage limits and, when there is room, Claude Code activity. |
 | `milo view FILE [--commit ID]` | Opens the read-only reader. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
-| `milo listen [--stop]` | Starts or stops Rex's new-tab listener; normally managed by setup. |
+| `milo listen [--stop]` | Starts or stops layout memory and automatic new-tab arrangement; normally managed by setup. |
 | `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
 
 `PATH` defaults to the current directory. Use `milo outline` to avoid the

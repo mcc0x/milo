@@ -33,7 +33,7 @@ The script verifies the release binary against its SHA-256 checksum and installs
 
 The install commands above install **v0.1.0**. To try the workspace preferences described here before the next release, build this checkout with `cargo build` and run `./target/debug/milo setup` inside Rex.
 
-Choose a tree or a project sidebar, try it in this tab, then save it as your default or just for this Git worktree. If the tab is already arranged the way you like, use **Milo: Remember This Layout…**. New shell tabs use saved layouts when **Arrange new shell tabs** is enabled. Command tabs and tabs with their own layouts are left alone.
+Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone.
 
 You can also run each pane on its own.
 

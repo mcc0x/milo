@@ -1,22 +1,40 @@
 -- Run with Lua 5.1 against listener.lua from a saved layout with new shell tabs on.
 local handlers, timers, splits, windows, processes = {}
+local saves, revision = {}, 1
 local function terminal(method, args)
   assert(args.session_id == "project")
   if method == "size" then return { rows = 50, owner = "app" } end
   assert(method == "process")
   return processes[args.block_id]
 end
-local remembered, on_profile
+local remembered, on_profile, executable
 rex = {
   on = function(event, fn) handlers[event] = fn end,
   sleep = function() error("a starting shell held up the listener") end,
-  after = function(wait, fn) assert(wait == 0.05); table.insert(timers, fn) end,
+  after = function(wait, fn)
+    assert(wait == 0.05 or wait == 0.2)
+    local cancelled
+    timers[#timers + 1] = function() if not cancelled then fn() end end
+    return { cancel = function() cancelled = true end }
+  end,
   session = {
-    view = function(args) assert(args.session_id == "project"); return { windows = windows } end,
+    view = function(args)
+      assert(args.session_id == "project")
+      return { windows = windows, revision = revision }
+    end,
     new_split = function(args) table.insert(splits, args); return {} end,
   },
-  call = function(method, args) return terminal(method:match("%.([^.]*)$"), args) end,
+  call = function(method, args)
+    if method == "session.list" then return { sessions = {{ session_id = "project" }} } end
+    return terminal(method:match("%.([^.]*)$"), args)
+  end,
   exec = function(argv)
+    executable = argv[1]
+    if argv[3] == "resize" then
+      assert(argv[2] == "layout-profile" and argv[6] == "/my project" and #argv == 6)
+      saves[#saves + 1], remembered = argv, argv[5]
+      return { ok = true }
+    end
     assert(argv[2] == "layout-profile" and argv[3] == "read" and argv[4] == "/my project")
     if on_profile then on_profile() end
     return { ok = true, stdout = remembered or "" }
@@ -30,8 +48,9 @@ rex = {
 assert(loadfile(assert(arg[1])))()
 local function tab(id, ...)
   local blocks = {}
-  for _, block in ipairs({...}) do blocks[#blocks + 1] = { block_id = block } end
-  return { window_id = id, layers = {{ kind = "tiled", blocks = blocks }} }
+  for _, block in ipairs({...}) do blocks[#blocks + 1] = { block_id = block, creator_name = "com.superlogical.terminal" } end
+  local layout = #blocks == 1 and { block_id = blocks[1].block_id, rect = {0, 0, 1, 1} } or nil
+  return { window_id = id, layers = {{ kind = "tiled", layer_id = "layer:" .. id, layout = layout, blocks = blocks }} }
 end
 local function created(id) handlers.window_created({ session_id = "project" }, { window_id = id }) end
 local project = { foreground = { argv0 = "-zsh", cwd = "/my project" } }
@@ -39,7 +58,11 @@ local project = { foreground = { argv0 = "-zsh", cwd = "/my project" } }
 -- One slow shell must not delay another tab's layout or turn command tabs into shell tabs.
 timers, splits = {}, {}
 windows = { tab("slow", "slow"), tab("quick", "quick"), tab("command", "command") }
-processes = { quick = project, command = { foreground = { argv0 = "build" } } }
+processes = {
+  slow = { child = { path = "/usr/bin/login" }, foreground = { argv0 = "login" } },
+  quick = project,
+  command = { foreground = { argv0 = "build" } },
+}
 created("slow")
 assert(#timers == 1 and #splits == 0)
 created("command")
@@ -49,7 +72,7 @@ assert(#splits == 1 and splits[1].anchor_id == "quick" and splits[1].side == "be
 -- The usage takes its rows from the foot of the column, below the outline and history.
 local column = splits[1].layout
 assert(column[1][1].options.cwd == "/my project" and column[1][2].label == "milo:history")
-assert(column[2].label == "milo:usage" and math.abs(column.ratio - 0.8) < 0.000001 and splits[1].ratio == 0.20)
+assert(column[2].label == "milo:usage" and math.abs(column.ratio - 0.96) < 0.000001 and splits[1].ratio == 0.20)
 assert(not splits[1].focus)
 assert(column[1][1].options.command[3] == "--shell" and column[1][1].options.command[4] == "quick")
 assert(column[2].options.command[3] == nil)
@@ -98,12 +121,90 @@ created("slow")
 for _ = 1, 9 do table.remove(timers, 1)() end
 assert(#timers == 0 and #splits == 0)
 
--- A note below the launcher must not keep a disabled listener running.
--- The optional second argument comes from turning off new tabs after adding such a note.
+local function rail(id, width, height, exe)
+  local window = tab(id, id .. "-shell", id .. "-outline", id .. "-usage")
+  local layer = window.layers[1]
+  local shell, outline, usage = layer.blocks[1], layer.blocks[2], layer.blocks[3]
+  outline.label, usage.label = "milo:outline", "milo:usage"
+  local function leaf(block) return { block_id = block.block_id } end
+  local stack = { split = { split_id = id .. "-height", direction = "vertical",
+    ratio = height, before = leaf(outline), after = leaf(usage) } }
+  layer.layout = { split = { split_id = id .. "-width", direction = "horizontal",
+    ratio = width, before = stack, after = leaf(shell) } }
+  local pane = { child = { path = exe, cwd = "/my project" } }
+  processes[shell.block_id] = { foreground = { argv0 = "-zsh", cwd = "/different worktree" } }
+  processes[outline.block_id], processes[usage.block_id] = pane, pane
+  return window
+end
+
+local function changed()
+  revision = revision + 1
+  handlers.session_view_changed({ session_id = "project" }, { revision = revision })
+end
+
+-- Startup, focus, other tabs' initial rails, and replacing or moving split trees
+-- establish baselines but never save. A foreign process cannot pose as a Milo pane.
+processes = {}
+windows = { rail("live", .2, .8, executable), rail("foreign", .2, .8, "/bin/zsh") }
+assert(loadfile(arg[1]))()
+changed()
+windows[3] = rail("another", .3, .9, executable)
+windows[4] = rail("trial", .2, .8, executable)
+windows[4].layers[1].blocks[2].label = "milo:trial:outline"
+windows[4].layers[1].blocks[3].label = "milo:trial:usage"
+changed()
+windows[3].layers[1].layout.split.split_id = "replacement"
+windows[3].layers[1].layout.split.ratio = .4
+windows[2].layers[1].layout.split.ratio = .35
+windows[4].layers[1].layout.split.ratio = .35
+changed()
+assert(#timers == 0 and #saves == 0)
+
+-- Coalesce repeated updates during the drag; closing immediately flushes
+-- the last geometry even though the rail's processes are already gone.
+windows[1].layers[1].layout.split.before.split.ratio = .7
+changed()
+windows[1].layers[1].layout.split.before.split.ratio = .6
+changed()
+table.remove(windows, 1)
+processes["live-outline"], processes["live-usage"] = nil, nil
+handlers.window_closed({}, { window_id = "live" })
+for _, timer in ipairs(timers) do timer() end
+assert(#saves == 1 and saves[1][4]:match("800000 0 200000$") and saves[1][5]:match("600000 0 400000$"))
+
+-- Reopening the same project replays the geometry without another save.
+splits, timers = {}, {}
+windows[1] = tab("reopened", "reopened")
+processes.reopened = project
+created("reopened")
+assert(#splits == 1 and math.abs(splits[1].layout.ratio - .6) < .000001 and #saves == 1)
+
+-- With auto-arrange off, the listener keeps tracking manually arranged rails.
+-- The optional second argument is the generated actions file after disabling it.
 if arg[2] then
-  local launches = 0
-  rex.action = function() end
-  rex.exec = { start = function() launches = launches + 1 end }
-  assert(loadfile(arg[2]))()
-  assert(launches == 0, "turning off new shell tabs must stop launching the listener")
+  local original_loadfile = loadfile
+  loadfile = function() return original_loadfile(arg[2]) end
+  assert(original_loadfile(arg[1]))()
+  local actions, launches, exec = {}, 0, rex.exec
+  rex.action = function(action) actions[action.name] = action.run end
+  rex.exec = setmetatable({ start = function() launches = launches + 1 end }, {
+    __call = function(_, ...) return exec(...) end,
+  })
+  assert(original_loadfile(arg[2]))()
+  assert(launches == 1, "the listener must still launch when auto-arrange is off")
+
+  splits = {}
+  windows[1] = tab("manual", "manual")
+  processes.manual = project
+  created("manual")
+  assert(#splits == 0)
+  actions.milo_layout({ session_id = "project", block_id = "manual" })
+  assert(#splits == 1 and math.abs(splits[1].layout.ratio - .6) < .000001)
+  windows[1] = rail("manual", .2, .6, executable)
+  changed()
+  windows[1].layers[1].layout.split.ratio = .36
+  changed()
+  for _, timer in ipairs(timers) do timer() end
+  assert(#saves == 2 and saves[2][5]:match("^v1 l 0%.360000 "))
+  loadfile = original_loadfile
 end

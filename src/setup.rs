@@ -74,7 +74,6 @@ enum Row {
     Sidebar,
     Capture,
     Tune,
-    Try,
     Undo,
     SaveLayout,
     UseGlobal,
@@ -107,8 +106,7 @@ enum Row {
     Continue,
 }
 
-const LAYOUT: &[Row] =
-    &[Row::Tree, Row::Sidebar, Row::Capture, Row::Tune, Row::Try, Row::Undo, Row::SaveLayout, Row::UseGlobal];
+const LAYOUT: &[Row] = &[Row::Tree, Row::Sidebar, Row::Capture, Row::Tune, Row::UseGlobal];
 const TUNE: &[Row] = &[
     Row::Pane(TabPane::Outline),
     Row::Pane(TabPane::History),
@@ -260,6 +258,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn rows(&self) -> &'static [Row] {
         match self.panel {
             Panel::Layout if !self.inside => &[],
+            Panel::Layout if self.scope == Scope::Global => &LAYOUT[..4],
             Panel::Layout => LAYOUT,
             Panel::Tune => TUNE,
             Panel::Appearance => {
@@ -314,7 +313,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let draft_auto = self.layout.new_tabs;
         let saved = self.store()?.save_for(&self.layout, scope, self.root.as_deref(), None, &self.run)?;
         self.reload_layout()?;
-        if self.trial.as_ref().is_some_and(|(_, tried)| same_geometry(tried, &self.layout)) {
+        if let Some((trial, tried)) = &self.trial
+            && same_geometry(tried, &self.layout)
+        {
+            trial.keep()?;
             self.trial = None;
         }
         if scope == Scope::Worktree && auto_changed {
@@ -322,8 +324,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
         self.back();
         match saved {
-            Saved::ListenerDidNotStart => Err("Saved, but auto-arrange did not start. Open Health to repair it."),
-            Saved::ListenerDidNotStop => Err("Saved, but auto-arrange did not stop. Open Health to repair it."),
+            Saved::ListenerDidNotStart => {
+                Err("Saved, but the layout listener did not start. Open Health to repair it.")
+            }
+            Saved::ListenerDidNotStop => Err("Saved, but the layout listener did not stop. Open Health to repair it."),
             Saved::Ready if scope == Scope::Worktree && auto_changed => {
                 Ok("Saved this worktree's layout. Save globally to change auto-arrange.")
             }
@@ -496,7 +500,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn disabled(&self, row: Row) -> bool {
         match row {
             Row::Capture => self.target.is_none() || self.trial.is_some(),
-            Row::Try => self.target.is_none() || self.trial.is_some() || !self.layout.panes.contains(&true),
             Row::Undo => self.trial.is_none(),
             Row::UseGlobal => self.scope != Scope::Worktree,
             Row::UseGlobalPrefs => self.prefs_scope != Source::Worktree,
@@ -514,7 +517,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
         let result = match row {
             Row::Capture => self.capture(),
-            Row::Try => self.try_layout(),
             Row::Undo => self.undo(),
             Row::SaveClaude => self.save_claude(),
             Row::SaveGlobal | Row::SaveWorktree => {
@@ -571,7 +573,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                         self.layout.geometry.shares = None;
                     }
                     Row::UsageRows => {
-                        cycle(&mut self.layout.usage_rows, &["6", "10", "14", "18"]);
+                        cycle(&mut self.layout.usage_rows, &["2", "6", "10", "14", "18"]);
                         self.layout.geometry.shares = None;
                     }
                     Row::AutoArrange => self.layout.new_tabs = !self.layout.new_tabs,
@@ -769,9 +771,7 @@ pub fn listen(stop: bool) -> i32 {
     if stop {
         eprintln!("milo: could not stop the Rex listener: {error}");
     } else if error.kind() == io::ErrorKind::NotFound {
-        eprintln!(
-            "milo: could not start the Rex listener. Check that Rex is installed and new shell tabs are on in milo setup."
-        );
+        eprintln!("milo: could not start the layout listener. Check the managed Rex integration with milo doctor.");
     } else {
         eprintln!("milo: could not start the Rex listener: {error}");
     }

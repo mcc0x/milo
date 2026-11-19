@@ -33,9 +33,6 @@ fn assert_figures(rows: &[String], width: usize, codex: (&str, &str), claude: (&
             assert!(contents(false).contains(codex));
             assert!(contents(true).contains(claude));
         }
-        2 => {
-            assert!(rows[0].contains(codex) && rows[1].contains(claude));
-        }
         height => {
             let rule = (height - 1) / 2;
             assert_eq!(rows[rule], "─".repeat(width));
@@ -66,7 +63,7 @@ fn size_classes_keep_the_primary_figures_in_both_panels() {
             write(&f, CLAUDE, &assistant(now - MINUTE, 12_000, 900, 100), now);
         }
         let mut usage = open(&f, now).with_large_figures(true);
-        for (w, h) in [(140, 5), (100, 2), (100, 1), (36, 12)] {
+        for (w, h) in [(140, 5), (100, 1), (36, 12)] {
             let rows = frame(&mut usage, w, h);
             assert_figures(&rows, w, left, right);
         }
@@ -280,7 +277,24 @@ fn the_key_hints_fit_below_the_figures_where_there_is_room() {
 }
 
 #[test]
-fn the_default_rail_uses_only_text_and_surfaces_the_tightest_window_for_each_tool() {
+fn a_two_row_pane_shows_both_providers_and_their_tightest_remaining_capacity() {
+    let f = Fixture::folder();
+    example_limits(&f, Some(NOW), Some(NOW), NOW + 38 * MINUTE, NOW);
+    let mut usage = open(&f, NOW).with_large_figures(true);
+    for width in [22, 100] {
+        let mut screen = Screen::sized(width, 2);
+        screen.set_pictures(true);
+        usage.draw(&mut screen);
+        assert!(screen.picture_at().is_none());
+        assert_eq!(
+            screen.text().iter().map(|row| row.trim()).collect::<Vec<_>>(),
+            ["Codex week · 26% left", "Claude week · 8% left"],
+        );
+    }
+}
+
+#[test]
+fn a_taller_rail_adds_reset_times_and_keeps_the_tightest_window_for_each_tool() {
     let f = Fixture::folder();
     example_limits(&f, Some(NOW), Some(NOW), NOW + 38 * MINUTE, NOW);
     let mut usage = open(&f, NOW);

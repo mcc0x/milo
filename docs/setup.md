@@ -1,6 +1,6 @@
 # Set up milo
 
-![Milo setup showing the available panes, the layout sketch and what saving will change](img/setup.png)
+![Milo’s layout picker with the project sidebar selected beside its split preview](img/setup.png)
 
 ## Install
 
@@ -35,7 +35,7 @@ In a Rex shell run `milo setup`. Pick **Just the tree**, **Project sidebar**, or
 
 Save for **this worktree** to keep a project-specific setup, or save a **global default** for projects without an override. Worktrees of the same repository can have different choices. Preferences live on the machine running Milo, outside the repository. A project cannot install actions or supply a command for Milo to execute.
 
-To remember a hand-arranged sidebar, drag the split borders in Rex and invoke **Milo: Remember This Layout…** from the command palette. Milo remembers its pane roles, order, side and proportions, not processes or live pane IDs. Keep the Milo panes together: a rail mixed with an editor or shell cannot safely be replayed. Removing a worktree override makes the global default effective again.
+Usage starts as a two-row strip in the shared sidebar. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that Git worktree automatically. To save a layout explicitly or make it the global default, use **Milo: Remember This Layout…**. Milo stores pane roles and proportions, not processes or live pane IDs. Mixed rails containing another app are left alone.
 
 ![A Rex tab with Outline, History and the compact Usage readout in one rail beside the shell](img/tab.png)
 
@@ -65,7 +65,7 @@ Milo does not install key bindings. For an optional shortcut, check Rex's shortc
 
 Peek opens a floating outline and takes focus. Invoking it again raises the same peek. Dismiss it to return to the originating pane. Adding the docked Outline instead keeps the shell focused. Your existing custom actions remain yours.
 
-Setup adds two marked lines at the top of `~/.config/rex/init.lua` (after the interpreter line, if it has one) and asks Rex to reload. The actions live in `~/.config/milo/rex.lua`; setup writes `~/.config/milo/listener.lua` when you turn on **Arrange new shell tabs**. If `$XDG_CONFIG_HOME` is an absolute path, both folders live there instead. `$REX_CONFIG` can point directly to a different settings file. Milo keeps its saved state in `~/.local/state/milo` or under an absolute `$XDG_STATE_HOME`.
+Setup adds two marked lines at the top of `~/.config/rex/init.lua` (after the interpreter line, if it has one) and asks Rex to reload. The actions live in `~/.config/milo/rex.lua`. `~/.config/milo/listener.lua` watches for divider changes even when arranging new shell tabs is off. If `$XDG_CONFIG_HOME` is an absolute path, both folders live there instead. `$REX_CONFIG` can point directly to a different settings file. Milo keeps its saved state in `~/.local/state/milo` or under an absolute `$XDG_STATE_HOME`.
 
 Setup does not rewrite your actions or key bindings. It refuses to change read-only settings files or use a linked milo configuration folder. The settings file itself may be a symbolic link: setup edits the target and keeps the link.
 

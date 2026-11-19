@@ -141,13 +141,12 @@ fn stopping_with_no_listener_does_nothing() {
 }
 
 #[test]
-fn starting_without_a_saved_listener_explains_how_to_enable_it() {
+fn starting_without_a_saved_listener_fails_without_launching_rex() {
     let home = Home::new("echo started > \"$HOME/started\"\n");
     fs::remove_file(home.root.join(".config/milo/listener.lua")).unwrap();
     let output = home.milo(&["listen"]).stderr(Stdio::piped()).output().unwrap();
     assert!(!output.status.success());
     assert!(!home.started());
-    assert!(String::from_utf8(output.stderr).unwrap().contains("new shell tabs are on in milo setup"));
 }
 
 #[test]

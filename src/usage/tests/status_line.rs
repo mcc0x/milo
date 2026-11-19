@@ -122,7 +122,8 @@ fn a_claude_save_replaces_the_whole_private_file_at_once() {
     let mut still_old = Vec::new();
     before.read_to_end(&mut still_old).unwrap();
     assert_eq!(still_old, old_bytes);
-    assert!(frame(&mut open(&f, NOW + 1), 100, 2)[1].contains("47%"));
+    let rows = frame(&mut open(&f, NOW + 1), 140, 3);
+    assert!(rows[1].split_once('│').unwrap().1.contains("47%"));
 }
 
 #[test]

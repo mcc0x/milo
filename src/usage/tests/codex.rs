@@ -26,8 +26,8 @@ fn codex_clamps_overfull_windows_and_accepts_whole_minutes_written_as_floats() {
     for (percent, minutes) in [("100.5", "300.0"), ("150", "3e2")] {
         let window = format!(r#"{{"used_percent":{percent},"window_minutes":{minutes}}}"#);
         write(&f, CODEX, &codex_snapshot(&format!("{}Z", iso(NOW)), &window, "null"), NOW);
-        let rows = frame(&mut open(&f, NOW), 100, 2);
-        assert!(rows[0].contains("5h 0%"));
+        let rows = frame(&mut open(&f, NOW), 140, 3);
+        assert!(rows[0].contains("5h") && rows[1].split_whitespace().any(|word| word == "0%"));
     }
 }
 
@@ -117,11 +117,13 @@ fn an_old_codex_snapshot_says_how_old_it_is() {
 fn codex_ignores_null_secondary_and_shows_a_present_one() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 23, NOW + DAY, "null"), NOW);
-    assert_eq!(frame(&mut open(&f, NOW), 100, 2)[0].matches('%').count(), 1);
+    let rows = frame(&mut open(&f, NOW), 140, 3);
+    assert_eq!(rows[1].split_once('│').unwrap().0.matches('%').count(), 1);
     let secondary = codex_window(89, 300, NOW + HOUR);
     write(&f, CODEX, &codex(NOW, 23, NOW + DAY, &secondary), NOW);
-    let rows = frame(&mut open(&f, NOW), 100, 2);
-    assert!(rows[0].contains("5h") && rows[0].contains("11%") && rows[0].contains("77%"));
+    let rows = frame(&mut open(&f, NOW), 140, 3);
+    let figures = rows[1].split_once('│').unwrap().0;
+    assert!(rows[0].contains("5h") && figures.contains("11%") && figures.contains("77%"));
 }
 
 #[test]

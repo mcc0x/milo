@@ -97,10 +97,10 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
     if store.rex_reload_pending() {
         out.push_str("Rex reload: pending; run milo setup --repair.\n");
     }
-    let expected = layout.is_ok_and(|(l, active, _)| active && l.new_tabs);
+    let expected = layout.is_ok_and(|(_, active, _)| active);
     writeln!(
         out,
-        "New-tab listener: {}",
+        "Layout listener: {}",
         match (lock::running(&store.state), expected) {
             (Ok(true), true) => "running",
             (Ok(false), false) => "off",

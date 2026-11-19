@@ -789,8 +789,9 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         Report::new(Tool::Claude, usage.claude.latest().map(|reading| &reading.windows), Hint::NO_SAVED_LIMITS, now),
     ];
     let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
-    // Leave the captions and activity their rows in a compact pane.
-    let text = w < SIDE_BY_SIDE && (!usage.large_figures || w < 19 || h < 9);
+    // At two rows, give each provider a full line for its tightest limit.
+    // Leave the captions and activity their rows in a taller compact pane.
+    let text = h == 2 || w < SIDE_BY_SIDE && (!usage.large_figures || w < 19 || h < 9);
     let footer = w >= 8 && h >= if split { 7 } else { 14 };
     let area = Area { x: 0, y: 0, w, h: h - usize::from(footer) };
     let activity = || usage.claude.activity(today, now);

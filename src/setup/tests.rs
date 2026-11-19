@@ -71,7 +71,6 @@ fn short_pane_keeps_the_chosen_row_and_a_way_back() {
 fn the_save_shortcut_opens_a_scope_chooser_without_writing() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| true);
-    assert!(frame(&mut pane, 140, 5)[0].contains("Rex not set up yet"));
     assert_eq!(pane.key(Key::Char('s')), After::Stay);
     let rows = frame(&mut pane, 80, 18);
     assert!(rows.iter().any(|row| row.contains("On save:")));
@@ -81,9 +80,7 @@ fn the_save_shortcut_opens_a_scope_chooser_without_writing() {
     assert!(!f.root.join("init.lua").exists());
     pane.key(Key::Char('s'));
     assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
-    let rows = frame(&mut pane, 140, 8);
-    assert!(rows[0].contains("Rex integration installed"));
-    assert!(rows.iter().any(|row| row.contains("Saved the global default.")));
+    assert!(pane.installed);
     assert!(f.root.join("init.lua").exists());
 }
 

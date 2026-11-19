@@ -15,11 +15,6 @@ const CREATED: &[u8] = b"-- Managed by milo setup. Milo created this file.";
 pub(super) const MANAGED: &[u8] = b"-- Managed by milo setup.";
 pub(super) const OFFERED: &str = "setup-offered";
 
-pub(super) struct RexPlan {
-    pub reload: bool,
-    pub listener_changed: bool,
-}
-
 impl Store {
     pub(super) fn rex_file(&self) -> PathBuf {
         self.config.join("rex.lua")
@@ -74,7 +69,7 @@ impl Store {
         layout: &Layout,
         changes: &mut Vec<Change>,
         run: &RunRex<'_>,
-    ) -> Result<RexPlan, &'static str> {
+    ) -> Result<bool, &'static str> {
         check_config_dir(&self.config)?;
         let enabled = layout.enabled();
         let rex_path = self.rex_file();
@@ -89,13 +84,13 @@ impl Store {
         let first_rex_change = changes.len();
         if enabled {
             self.plan_actions(layout, &rex_path, changes, run)?;
+            self.plan_listener(&rex_path, changes, run)?;
         }
-        let listener_changed = layout.new_tabs && self.plan_listener(&rex_path, changes, run)?;
         changes.extend(init);
         if !enabled {
             self.remove_shipped(&rex_path, changes)?;
         }
-        Ok(RexPlan { reload: changes.len() != first_rex_change, listener_changed })
+        Ok(changes.len() != first_rex_change)
     }
 
     fn plan_actions(
@@ -120,25 +115,20 @@ impl Store {
         Ok(())
     }
 
-    fn plan_listener(
-        &self,
-        rex_path: &Path,
-        changes: &mut Vec<Change>,
-        run: &RunRex<'_>,
-    ) -> Result<bool, &'static str> {
+    fn plan_listener(&self, rex_path: &Path, changes: &mut Vec<Change>, run: &RunRex<'_>) -> Result<(), &'static str> {
         let path = self.listener_file();
         let before = read(&path)?;
         let lua = listener_lua(rex_path);
         if let Some(file) = &before {
             if file.bytes == lua.as_bytes() {
-                return Ok(false);
+                return Ok(());
             }
             if !text_is(file, |text| owns_listener(text, rex_path)) {
                 return Err("Could not update milo's listener file (listener.lua). Your file was left alone.");
             }
         }
         changes.extend(Change::new(path, before, Some(self.checked(lua, run)?)));
-        Ok(true)
+        Ok(())
     }
 
     fn remove_shipped(&self, rex_path: &Path, changes: &mut Vec<Change>) -> Result<(), &'static str> {
