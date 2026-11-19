@@ -448,7 +448,7 @@ mod tests {
         let root = f.root.join("checkout");
         let file = config_file(&f.root, Some(&root));
         let line = "icons = off\n";
-        let comment = "#".repeat(PREFERENCES_LIMIT as usize - line.len() - 1);
+        let comment = "#".repeat(usize::try_from(PREFERENCES_LIMIT).unwrap() - line.len() - 1);
         let original = format!("{line}{comment}\n");
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, &original).unwrap();
