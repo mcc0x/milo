@@ -19,13 +19,13 @@
 The v0.1.0 release is available for Apple Silicon Macs. Install it with Homebrew:
 
 ```sh
-brew install mcc0x/tap/milo
+brew install mcc0x/milo/milo
 ```
 
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://raw.githubusercontent.com/mcc0x/milo/v0.1.0/site/public/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh &&
   sh milo-install.sh
 ```
 

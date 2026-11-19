@@ -67,7 +67,7 @@ if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$scratch/$asset" "$binary"; t
     printf 'milo is already installed at %s. Nothing to do.\n' "$binary"
 else
     chmod 755 "$scratch/$asset"
-    mv -fh "$scratch/$asset" "$binary"
+    /bin/mv -fh "$scratch/$asset" "$binary"
     printf 'Installed milo %s at %s.\n' "$version" "$binary"
 fi
 

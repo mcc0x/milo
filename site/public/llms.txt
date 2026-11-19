@@ -2,12 +2,12 @@
 
 > milo provides small terminal panes for a live file tree, Git history, usage, and a read-only file reader. The panes work on their own or alongside your shell in Rex.
 
-milo does not write to the project it displays. The v0.1.0 prebuilt release is for Apple Silicon macOS. Use `brew install mcc0x/tap/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+milo does not write to the project it displays. The v0.1.0 prebuilt release is for Apple Silicon macOS. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
 ## Using milo
 
 - [README](https://github.com/mcc0x/milo#readme): Installation, a picture of each pane and the main commands.
-- [Release installer](https://raw.githubusercontent.com/mcc0x/milo/v0.1.0/site/public/install.sh): Downloads the v0.1.0 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain. Use this GitHub URL while the website's DNS is being set up.
+- [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh): Downloads the v0.1.0 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain. Use this GitHub URL while the website's DNS is being set up.
 - [Source installer](https://github.com/mcc0x/milo/blob/main/install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
 - [Agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md): How to check milo and open a reader in the user's terminal, including at a Git commit.
 - [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Rex actions, new shell tabs and the Claude Code status line.

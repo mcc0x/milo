@@ -7,13 +7,13 @@
 The v0.1.0 prebuilt release is for Apple Silicon macOS. Use Homebrew:
 
 ```sh
-brew install mcc0x/tap/milo
+brew install mcc0x/milo/milo
 ```
 
 Or download the release installer from GitHub while the website's DNS is being set up:
 
 ```sh
-curl -fsSLo milo-install.sh https://raw.githubusercontent.com/mcc0x/milo/v0.1.0/site/public/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh &&
   sh milo-install.sh
 ```
 
