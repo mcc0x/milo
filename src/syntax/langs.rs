@@ -458,7 +458,7 @@ mod tests {
             pieces(&PHP, quote, &mut state);
             assert_eq!(state, State::Code);
         }
-        for opener in ["<<<TEXT", "<<<'TEXT'"] {
+        for opener in ["<<<TEXT", "<<<'TEXT'", "<<< \t\"TEXT\" \t"] {
             let mut state = State::Code;
             assert_eq!(pieces(&PHP, opener, &mut state), [(opener, Class::Str)]);
             assert_eq!(pieces(&PHP, "/* plain text", &mut state), [("/* plain text", Class::Str)]);
@@ -478,6 +478,19 @@ mod tests {
             assert_eq!(pieces(&PHP, line, &mut state), [(line, Class::Str)]);
         }
         assert_eq!(pieces(&PHP, "  END, 42);", &mut state), [("  END", Class::Str), ("42", Class::Number)]);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn malformed_php_heredoc_candidates_leave_long_lines_in_code_state() {
+        // Overlapping openers used to scan the same whitespace suffix for every '<'.
+        const N: usize = 32_768;
+        let mut text = String::with_capacity(2 * N + 3);
+        text.extend(std::iter::repeat_n('<', N + 3));
+        text.extend(std::iter::repeat_n(' ', N));
+
+        let mut state = State::Code;
+        assert!(pieces(&PHP, &text, &mut state).is_empty());
         assert_eq!(state, State::Code);
     }
 

@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::{Escape, Quote, find_end, is_word, string_end};
+use super::{Escape, Quote, find_end, is_word, string_end, word_end};
 
 #[derive(Clone, Copy)]
 pub(super) enum Dialect {
@@ -120,12 +120,21 @@ fn cpp_end(b: &[u8], from: usize, marks: &[u8]) -> Option<usize> {
 }
 
 fn php_label(after: &[u8]) -> Option<&[u8]> {
-    let after = after.trim_ascii();
-    let label = if let [quote @ (b'\'' | b'"'), inner @ ..] = after { inner.strip_suffix(&[*quote])? } else { after };
-    if label.first().is_none_or(|c| c.is_ascii_digit()) || !label.iter().all(|&c| is_word(c)) {
+    // Check the label first so overlapping `<<<` candidates cannot all scan the line's trailing whitespace.
+    let after = after.trim_ascii_start();
+    let (label, quote) = match after {
+        [quote @ (b'\'' | b'"'), inner @ ..] => (inner, Some(quote)),
+        _ => (after, None),
+    };
+    if !label.first().is_some_and(|&c| is_word(c) && !c.is_ascii_digit()) {
         return None;
     }
-    Some(label)
+    let (label, tail) = label.split_at(word_end(label, 1));
+    let tail = match quote {
+        Some(quote) => tail.strip_prefix(&[*quote])?,
+        None => tail,
+    };
+    tail.trim_ascii_start().is_empty().then_some(label)
 }
 
 /// Inside `${…}` we only track what can hide a closing brace or backtick.
