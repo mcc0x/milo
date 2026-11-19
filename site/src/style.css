@@ -32,6 +32,20 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* A meadow far out of focus behind the page. It reaches past the window so
+   the blur has no pale rim, and a wash of the page's colour keeps the text
+   readable over it. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -80px;
+  z-index: -1;
+  background:
+    linear-gradient(rgb(236 234 251 / 30%), rgb(236 234 251 / 30%)),
+    url('./images/meadow.webp') center / cover;
+  filter: blur(40px);
+}
+
 /* The whole page is one screen: it sits in the middle of the window. */
 main {
   display: grid;
