@@ -8,11 +8,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-fn rex(args: &[&str]) -> Option<String> {
-    let out = Command::new("rex").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Inspect the server catalog, not the foreground app. Doctor must not start a server.
 pub(crate) fn layout_available() -> Option<bool> {
     let result = Command::new("rex")
@@ -134,13 +129,6 @@ fn json(s: &str) -> String {
     out
 }
 
-/// Extracts a simple ID such as `layer:1` from a Rex reply.
-fn field(reply: &str, name: &str) -> Option<String> {
-    let (_, rest) = reply.split_once(&format!("\"{name}\""))?;
-    let value = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
-    Some(value.split_once('"')?.0.to_string())
-}
-
 /// Whether this is running in a Rex pane, where a file can be opened in a
 /// floating window.
 pub fn inside() -> bool {
@@ -148,40 +136,21 @@ pub fn inside() -> bool {
 }
 
 /// Opens a floating reader in the caller's tab and returns its layer ID.
-/// If a previous layer is known, try to close it first.
+/// The old reader stays in place if the replacement cannot be created.
 pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str>) -> Result<String, &'static str> {
-    let session = std::env::var("REX_SESSION").map_err(|_| "Reading a file needs Rex.")?;
+    let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
-    if let Some(layer) = previous {
-        // The user may already have closed the layer; still try to open the file.
-        let request = format!(r#"{{"session_id":{},"layer_id":{}}}"#, json(&session), json(layer));
-        rex(&["api", "call", "-s", &session, "session.close_layer", &request]);
-    }
-    // Over the tab the caller is in, even if the user's focus is elsewhere;
-    // failing that, over the active one.
-    let window = std::env::var("REX_BLOCK")
-        .ok()
-        .and_then(|block| rex(&["block", "inspect", "-s", &session, &block, "--json"]))
-        .and_then(|reply| field(&reply, "window_id"))
-        .map(|id| format!(r#""window_id":{},"#, json(&id)))
-        .unwrap_or_default();
     let (_, name) = file.rsplit_once('/').unwrap_or(("", file));
     let path = if commit.is_some() { file.into() } else { root.join(file) };
     let command = reader_command(&exe, &path, commit);
-    let request = format!(
-        concat!(
-            r#"{{"session_id":{},{}"bounds":[0.12,0.08,0.76,0.84],"focus":true,"layout":{{"block":{{"#,
-            r#""flavor":"com.superlogical.terminal.shell","label":{},"#,
-            r#""options":{{"command":{},"shell":"none","cwd":{}}}}}}}}}"#,
-        ),
-        json(&session),
-        window,
+    let previous = previous.map(json).unwrap_or_else(|| "null".into());
+    let args = format!(
+        r#"{{"label":{},"cwd":{},"command":{command},"previous":{previous}}}"#,
         json(name),
-        command,
         json(&root.to_string_lossy()),
     );
-    rex(&["api", "call", "-s", &session, "session.new_layer", &request])
-        .and_then(|reply| field(&reply, "layer_id"))
+    script(Some(&target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
+        .filter(|reply| reply.starts_with("layer:") && !reply.contains(char::is_whitespace))
         .ok_or("Rex did not open the file.")
 }
 
@@ -314,7 +283,7 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, ShellChange, field, json, reader_command};
+    use super::{Frame, ShellChange, json, reader_command};
     use std::path::Path;
 
     #[test]
@@ -342,13 +311,6 @@ mod tests {
             assert!(matches!(decoder.read(&data), ShellChange::Unchanged));
         }
         assert!(matches!(decoder.read(b"\nmilo-cwd -\n"), ShellChange::Unreported));
-    }
-
-    #[test]
-    fn a_field_is_found_compact_or_spaced() {
-        assert_eq!(field(r#"{"layer_id":"layer:1","n":2}"#, "layer_id").as_deref(), Some("layer:1"));
-        assert_eq!(field("{\n  \"window_id\": \"window:9\"\n}", "window_id").as_deref(), Some("window:9"));
-        assert_eq!(field(r#"{"other":"x"}"#, "layer_id"), None);
     }
 
     #[test]
