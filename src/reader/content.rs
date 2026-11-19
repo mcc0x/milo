@@ -62,7 +62,7 @@ impl Reader {
         let (icons, note) = Self::appearance_for(&repo);
         let source = Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None }));
         let mut reader = Self::new(path, source, icons, note);
-        reader.load();
+        reader.refresh(true);
         reader.reveal_first_change();
         Some(reader)
     }
@@ -107,11 +107,17 @@ impl Reader {
         reader
     }
 
-    /// Rebuilds the working file on screen, keeping the last good result if git fails.
-    pub(super) fn load(&mut self) {
+    /// Rebuilds the working file when it or Git has changed, keeping the last good result if git fails.
+    pub(super) fn refresh(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
         let metadata = work.absolute.symlink_metadata().ok();
         let stamp = metadata.as_ref().map(Stamp::of);
+        // A changed file already needs a fresh status read, even if Git's
+        // porcelain entry for it is unchanged. Otherwise use the current poll.
+        let read_status = force || stamp != work.stamp;
+        if !read_status && !work.repo.read_if_changed() {
+            return;
+        }
         let outside = work
             .absolute
             .parent()
@@ -124,7 +130,9 @@ impl Reader {
             work.stamp = stamp;
             return;
         }
-        work.repo.read();
+        if read_status {
+            work.repo.read();
+        }
         let Some(patch) = work.repo.ok().then(|| work.file_diff(&self.path)).flatten() else {
             let note = match read::file(&work.absolute, 0) {
                 Content::Unreadable => "This file cannot be read.",

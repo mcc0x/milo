@@ -282,11 +282,8 @@ impl Pane for Reader {
     }
 
     fn check(&mut self) -> bool {
-        let Source::Working(work) = &mut self.source else { return true };
-        if work.repo.poll(&[]) || work.absolute.symlink_metadata().ok().as_ref().map(Stamp::of) != work.stamp {
-            self.load();
-            self.top = self.top.min(self.last_top());
-        }
+        self.refresh(false);
+        self.top = self.top.min(self.last_top());
         true
     }
 

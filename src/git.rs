@@ -437,6 +437,15 @@ impl Repo {
         changed
     }
 
+    /// Polls and takes in changed status, leaving nothing for a later read.
+    pub(crate) fn read_if_changed(&mut self) -> bool {
+        let changed = self.poll(&[]);
+        if changed {
+            self.read();
+        }
+        changed
+    }
+
     fn stand_in_moved(&self) -> bool {
         // A push or fetch moves the remote's branch without touching this one.
         self.stand_in.as_ref().is_some_and(|r| {

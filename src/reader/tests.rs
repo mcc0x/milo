@@ -298,6 +298,62 @@ fn the_reader_opens_a_deleted_file_in_a_deleted_directory() {
 }
 
 #[test]
+fn repeated_edits_to_a_tracked_file_use_one_fresh_git_status_each() {
+    const PROJECT: &str = "MILO_TEST_READER_STATUS_PROJECT";
+    if let Some(root) = std::env::var_os(PROJECT) {
+        let root = PathBuf::from(root);
+        let path = root.join("page.txt");
+        let trace = root.join(".git/reader-trace");
+        let mut reader = Reader::open(&path).unwrap();
+        for text in ["first edit", "second edit"] {
+            // Replacing the file distinguishes its stamp even on a coarse clock.
+            let replacement = root.join(".git/replacement");
+            fs::write(&replacement, format!("{text}\n")).unwrap();
+            fs::rename(replacement, &path).unwrap();
+            fs::write(&trace, "").unwrap();
+            assert!(reader.check());
+            assert!(drawn(&mut reader, 60, 6).iter().any(|row| row.contains(text)));
+            assert_git_calls(&trace, [1, 1, 1]);
+        }
+
+        fs::write(&trace, "").unwrap();
+        assert!(reader.check());
+        assert_git_calls(&trace, [1, 1, 0]);
+        fs::write(&trace, "").unwrap();
+        reader.refresh(true);
+        assert_git_calls(&trace, [1, 1, 1]);
+        return;
+    }
+
+    let f = Fixture::new();
+    f.write("page.txt", "base\n");
+    f.commit("base");
+    let trace = f.root.join(".git/reader-trace");
+    let config = f.root.join(".git/.gitconfig");
+    f.git(&["config", "--file", config.to_str().unwrap(), "trace2.eventTarget", trace.to_str().unwrap()]);
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "reader::tests::repeated_edits_to_a_tracked_file_use_one_fresh_git_status_each"])
+        .env(PROJECT, &f.root)
+        .env("HOME", config.parent().unwrap())
+        .env("XDG_CONFIG_HOME", f.root.join(".git/test-xdg"))
+        .env("GIT_CONFIG_GLOBAL", config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}");
+}
+
+fn assert_git_calls(trace: &Path, expected: [usize; 3]) {
+    let trace = fs::read_to_string(trace).unwrap();
+    let calls = ["config", "status", "diff"].map(|name| {
+        let name = format!("\"name\":\"{name}\"");
+        trace.lines().filter(|line| line.contains("\"event\":\"cmd_name\"") && line.contains(&name)).count()
+    });
+    assert_eq!(calls, expected, "counts for config, status and diff");
+}
+
+#[test]
 fn a_file_replaced_with_the_same_length_and_mtime_refreshes_then_can_disappear() {
     let f = Fixture::folder();
     f.write("file.txt", "before");
@@ -457,6 +513,29 @@ fn a_failed_git_read_does_not_replace_the_file_on_screen() {
     let Source::Working(work) = &reader.source else { unreachable!() };
     assert!(work.repo.ok());
     assert!(drawn(&mut reader, 60, 6).iter().any(|row| row.contains("edited while git is not answering")));
+}
+
+#[test]
+fn a_working_reader_refreshes_after_the_index_lock_clears() {
+    use crate::pane::{check_watched_pane, watch_pane};
+
+    let f = Fixture::new();
+    f.write("page.txt", "base\n");
+    f.commit("base");
+    f.write("page.txt", "first edit\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    let before = drawn(&mut reader, 60, 6);
+    let (mut watcher, mut pace) = watch_pane(&mut reader, false);
+
+    f.write(".git/index.lock", "");
+    f.write(".git/replacement", "latest edit\n");
+    fs::rename(f.root.join(".git/replacement"), f.root.join("page.txt")).unwrap();
+    check_watched_pane(&mut reader, &mut watcher, &mut pace, false);
+    assert_eq!(drawn(&mut reader, 60, 6), before);
+
+    fs::remove_file(f.root.join(".git/index.lock")).unwrap();
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    assert!(drawn(&mut reader, 60, 6).iter().any(|row| row.contains("latest edit")));
 }
 
 #[test]
