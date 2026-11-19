@@ -256,6 +256,9 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
         let (key, tail) = match c {
             0x1b => match rest {
                 [] | [b'O'] => return bytes,
+                // A new ESC can start a terminal report or bracketed paste.
+                [0x1b, ..] => (None, rest),
+                [b'O', 0x1b, ..] => (None, &rest[1..]),
                 [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
                 [_, body @ ..] => {
                     let Some(sequence) = Sequence::of(rest) else {
@@ -474,6 +477,12 @@ mod tests {
             input.feed(part, &mut keys);
         }
         assert_eq!(keys, [Key::Char('j'), Key::Char('k')]);
+    }
+
+    #[test]
+    fn a_paste_after_an_escape_prefix_cannot_act_on_the_pane() {
+        assert_eq!(keys(b"\x1b\x1b[200~q\x03\x1b[201~k"), [Key::Char('k')]);
+        assert_eq!(keys(b"\x1bO\x1b[200~q\x03\x1b[201~k"), [Key::Char('k')]);
     }
 
     #[test]
