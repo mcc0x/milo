@@ -251,7 +251,7 @@ fn codex_large_growth_uses_a_bounded_tail_and_resumes_at_its_new_end() {
     write(&f, CODEX, &first, NOW - 1);
     let mut usage = open(&f, NOW);
 
-    let large = "x".repeat(TAIL_BYTES as usize);
+    let large = "x".repeat(usize::try_from(TAIL_BYTES).unwrap());
     append(&f, &large, NOW);
     assert!(usage.check());
     assert_eq!(usage.bytes_read, TAIL_BYTES);
