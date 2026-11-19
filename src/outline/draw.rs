@@ -29,6 +29,8 @@ pub(super) struct Layout {
     width: usize,
     body_top: usize,
     pub(super) body_rows: usize,
+    /// Actual rows shown, empty when a layout change invalidates the click targets.
+    pub(super) tree_rows: std::ops::Range<usize>,
     heading: bool,
     hint: bool,
     wide: bool,
@@ -42,10 +44,8 @@ impl Layout {
 
     /// Which row of the visible tree, if any, is under this screen cell.
     pub(super) fn row_at(&self, x: usize, y: usize) -> Option<usize> {
-        if x >= self.width || y >= self.body_top + self.body_rows {
-            return None;
-        }
-        y.checked_sub(self.body_top)
+        let offset = y.checked_sub(self.body_top)?;
+        (x < self.width && offset < self.tree_rows.len()).then(|| self.tree_rows.start + offset)
     }
 }
 
@@ -58,7 +58,7 @@ fn arrange(w: usize, h: usize, git: bool) -> Layout {
     let hint = h >= HINT_ROWS;
     let body_top = usize::from(heading);
     let body_rows = h - body_top - usize::from(hint);
-    Layout { strip, width: w, body_top, body_rows, heading, hint, wide: w >= WIDE_COLS }
+    Layout { strip, width: w, body_top, body_rows, heading, hint, wide: w >= WIDE_COLS, ..Layout::default() }
 }
 
 /// Rows to keep between the cursor and the edge of the tree, when possible.
@@ -86,7 +86,7 @@ impl Outline {
             if self.note.is_some() && !layout.hint {
                 layout.body_rows -= 1;
             }
-            self.draw_tree(s, &layout, now);
+            self.draw_tree(s, &mut layout, now);
             self.discover_untracked();
             if let Some((note, _)) = &self.note {
                 s.put_fit(1, s.h - 1, s.w - 2, note, Style::fg(screen::YELLOW));
@@ -174,7 +174,7 @@ impl Outline {
         }
     }
 
-    fn draw_tree(&mut self, s: &mut Screen, layout: &Layout, now: Instant) {
+    fn draw_tree(&mut self, s: &mut Screen, layout: &mut Layout, now: Instant) {
         let (y0, rows) = (layout.body_top, layout.body_rows);
         if rows == 0 {
             return;
@@ -200,6 +200,7 @@ impl Outline {
         }
         self.keep_in_view(rows);
         let end = len.min(self.top + rows);
+        layout.tree_rows = self.top..end;
         self.count_shown_untracked(self.top..end, layout.wide);
         let details =
             layout.wide.then(|| *self.change_columns.get_or_insert_with(|| ChangeColumns::measure(&self.tree)));

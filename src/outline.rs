@@ -218,12 +218,24 @@ impl Outline {
         self.tree.row(self.sel).map(|n| n.path.clone())
     }
 
-    /// Recomputes the visible rows, keeping the cursor on `selected`.
+    /// Recomputes rows, keeping the cursor on the selected path or its visible folder.
     fn relayout(&mut self, selected: Option<Rc<str>>) {
         self.tree.layout(|p| self.folds.is_open(p), self.pending_only);
+        self.painted.tree_rows = 0..0;
         self.change_columns = None;
-        let at = selected.as_deref().and_then(|path| self.tree.row_of(path)).unwrap_or(self.sel);
+        let at = selected.as_deref().and_then(|path| self.visible_row(path)).unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
+    }
+
+    fn visible_row(&self, path: &str) -> Option<usize> {
+        self.tree.row_of(path).or_else(|| {
+            let parent = folders_above(path).next()?;
+            // Parents precede their descendants, so scan back to the closest one.
+            self.tree.rows.iter().rposition(|row| {
+                let node = self.tree.node(row.node);
+                node.dir && parent.starts_with(node.path.as_ref())
+            })
+        })
     }
 
     /// Applies the folder choices. A plain tree must list its open folders again
@@ -238,17 +250,17 @@ impl Outline {
 
     /// Opens whatever folders hide `path` and puts the cursor on it.
     fn reveal(&mut self, path: Rc<str>) {
-        if self.folds.open_above(&path) {
-            self.relayout(Some(path));
-        } else if let Some(row) = self.tree.row_of(&path) {
+        if let Some(row) = self.tree.row_of(&path) {
             self.sel = row;
+        } else if self.folds.open_above(&path) {
+            self.relayout(Some(path));
         }
     }
 
     /// Brings the latest marked file into view and says why the cursor moved.
     /// If the user closed a folder, stop at the nearest visible ancestor.
     fn follow(&mut self, path: &str) {
-        let Some(row) = std::iter::once(path).chain(folders_above(path)).find_map(|p| self.tree.row_of(p)) else {
+        let Some(row) = self.visible_row(path) else {
             return;
         };
         self.sel = row;
@@ -580,6 +592,30 @@ mod tests {
     }
 
     #[test]
+    fn manual_reload_refreshes_an_offscreen_untracked_count_without_a_notification() {
+        let f = Fixture::new();
+        for i in 0..60 {
+            f.write(&format!("file{i:02}.txt"), "one\n");
+        }
+        let mut o = open(&f);
+        let tail = "file59.txt";
+        o.key(Key::Focus(true));
+        o.key(Key::End);
+        assert!(file_row(&draw(&mut o, 80, 9).text(), tail).trim_end_matches('▐').ends_with("+1"));
+        o.key(Key::Home);
+        draw(&mut o, 80, 9);
+
+        f.write(tail, "one\ntwo\n");
+        let at = Instant::now();
+        o.outline_key(Key::Char('r'), at);
+        let wait = o.untracked.next_sweep(at).expect("reload should schedule an offscreen sweep");
+        draw_at(&mut o, 80, 9, at + wait);
+        o.outline_key(Key::End, at + wait);
+        let rows = draw_at(&mut o, 80, 9, at + wait).text();
+        assert!(file_row(&rows, tail).trim_end_matches('▐').ends_with("+2"));
+    }
+
+    #[test]
     fn one_notification_refreshes_a_large_offscreen_set_without_continued_checks() {
         const FILES: usize = 2_049;
         let f = Fixture::new();
@@ -698,6 +734,34 @@ mod tests {
     }
 
     #[test]
+    fn filtering_the_selected_file_keeps_the_cursor_in_its_nearest_visible_folder() {
+        let f = project();
+        let mut o = open(&f);
+        o.key(Key::Char('e'));
+        o.key(Key::Up);
+        assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
+
+        o.key(Key::Char('c'));
+        assert_eq!(o.selected_path().as_deref(), Some("src/"));
+    }
+
+    #[test]
+    fn restoring_closed_folders_keeps_the_cursor_on_the_folder_that_hides_it() {
+        let f = Fixture::folder();
+        f.write("a/b/c.txt", "a file\n");
+        f.write("other.txt", "another file\n");
+        let mut o = open(&f);
+        o.key(Key::Enter);
+        o.key(Key::Char('e'));
+        o.key(Key::Down);
+        o.key(Key::Down);
+        assert_eq!(o.selected_path().as_deref(), Some("a/b/c.txt"));
+
+        o.key(Key::Char('e'));
+        assert_eq!(o.selected_path().as_deref(), Some("a/b/"));
+    }
+
+    #[test]
     fn the_outline_follows_writes_only_when_the_keyboard_is_elsewhere() {
         let f = project();
         let mut o = open(&f);
@@ -801,6 +865,41 @@ mod tests {
         o.draw(&mut screen);
         o.key(Key::Click(65, y));
         assert_eq!(o.selected_path().as_deref(), Some("README.md"));
+    }
+
+    #[test]
+    fn clicking_after_batched_scroll_still_selects_the_file_under_the_pointer() {
+        let f = Fixture::folder();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt"] {
+            f.write(name, name);
+        }
+        let mut o = open(&f);
+        let at = Instant::now();
+        assert!(draw_at(&mut o, 40, 4, at).text()[3].contains("c.txt"));
+
+        o.outline_key(Key::WheelDown, at);
+        o.outline_key(Key::Click(4, 3), at);
+        assert_eq!(o.selected_path().as_deref(), Some("c.txt"));
+        assert!(draw_at(&mut o, 40, 4, at).text()[3].contains("c.txt"));
+        o.outline_key(Key::Click(4, 3), at);
+        assert!(o.reading.is_some());
+    }
+
+    #[test]
+    fn clicks_after_a_fold_wait_until_new_rows_are_painted() {
+        let f = Fixture::folder();
+        f.write("a/nested.txt", "nested\n");
+        f.write("b.txt", "root\n");
+        let mut o = open(&f);
+        let at = Instant::now();
+        assert!(draw_at(&mut o, 40, 8, at).text()[2].contains("b.txt"));
+        o.outline_key(Key::Click(4, 1), at);
+        o.outline_key(Key::Click(4, 2), at);
+        assert_eq!(o.selected_path().as_deref(), Some("a/"));
+
+        assert!(draw_at(&mut o, 40, 8, at).text()[2].contains("nested.txt"));
+        o.outline_key(Key::Click(4, 2), at);
+        assert_eq!(o.selected_path().as_deref(), Some("a/nested.txt"));
     }
 
     #[test]

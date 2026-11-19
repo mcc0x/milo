@@ -41,6 +41,7 @@ impl Outline {
         let changed = match key {
             Key::Char('r') => {
                 if self.repo.git {
+                    self.untracked.request_sweep();
                     self.check_untracked(now);
                     self.repo.invalidate_tracked_diff();
                     self.reload();
@@ -99,9 +100,9 @@ impl Outline {
             Key::Char('K') => self.sel = self.tree.sibling_row(sel, Previous).unwrap_or(sel),
             Key::Char('p') => self.sel = self.tree.parent_row(sel).unwrap_or(sel),
             Key::Click(x, y) => {
-                if let Some(row) = self.painted.row_at(x, y) {
-                    self.click(self.top + row, now);
-                }
+                let Some(row) = self.painted.row_at(x, y) else { return false };
+                self.top = self.painted.tree_rows.start;
+                self.click(row, now);
             }
             Key::Enter | Key::Char(' ' | 'h' | 'l') | Key::Left | Key::Right => self.open_or_close(key),
             _ => return self.tree_scroll(key, self.painted.body_rows),
