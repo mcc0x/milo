@@ -219,6 +219,8 @@ end)
 
 -- `rex do --all` attaches after top-level Lua returns, so block queries
 -- used by snapshot cannot establish a baseline until the listener runs.
+-- `rex config check` validates handlers but has no timer scheduler.
+if not rex.after then return end
 rex.after(0, function()
   local listed = rex.call("session.list")
   for _, session in ipairs(listed and listed.sessions or {}) do

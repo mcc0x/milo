@@ -64,6 +64,11 @@ local function boot(listener, before_baseline)
   if before_baseline then before_baseline() end
   table.remove(timers, first)()
 end
+-- Setup must be able to validate the generated listener outside a live session.
+local scheduler = rex.after
+rex.after = nil
+assert(loadfile(arg[1]))()
+rex.after = scheduler
 boot(loadfile(assert(arg[1])))
 local function tab(id, ...)
   local blocks = {}
