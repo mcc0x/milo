@@ -45,6 +45,13 @@ enum Panel {
     Diagnostics,
     Save(SaveKind),
     Confirm(Confirm),
+    Exit,
+}
+
+impl Panel {
+    fn modal(self) -> bool {
+        matches!(self, Self::Save(_) | Self::Confirm(_) | Self::Exit)
+    }
 }
 
 const SECTIONS: [Panel; 4] = [Panel::Layout, Panel::Appearance, Panel::Workflow, Panel::Health];
@@ -110,6 +117,8 @@ enum Row {
     SaveWorktree,
     Cancel,
     Continue,
+    SaveAndExit,
+    Discard,
 }
 
 const LAYOUT: &[Row] = &[Row::Tree, Row::Sidebar, Row::Capture, Row::Tune, Row::UseGlobal];
@@ -158,6 +167,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     show_limits: bool,
     panel: Panel,
     selected: usize,
+    exit_from: Option<(Panel, usize)>,
     visible: draw::Visible,
     modal_click: ConfirmClick,
     health: String,
@@ -183,6 +193,7 @@ impl Setup {
         setup.tab_size = tab_size;
         setup.icon_override = IconMode::environment();
         if let Err(why) = setup.reload_prefs() {
+            setup.saved_prefs = None;
             setup.report(Err(why));
         }
         setup.real = true;
@@ -209,12 +220,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             trial: None,
             tab_size: None,
             prefs: Preferences::default(),
-            saved_prefs: None,
+            saved_prefs: Some(Preferences::default()),
             prefs_scope: Source::Default,
             claude,
             show_limits: claude == Claude::On,
             panel: if inside { Panel::Layout } else { Panel::Workflow },
             selected: 0,
+            exit_from: None,
             visible: draw::Visible::default(),
             modal_click: ConfirmClick::default(),
             health: String::new(),
@@ -272,9 +284,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Workflow => WORKFLOW,
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
             Panel::Diagnostics => &[],
-            Panel::Save(_) if self.root.is_some() => &[Row::Cancel, Row::SaveGlobal, Row::SaveWorktree],
+            Panel::Save(kind)
+                if self.root.is_some() && !(kind == SaveKind::Layout && self.exiting_with_only_auto_arrange()) =>
+            {
+                &[Row::Cancel, Row::SaveGlobal, Row::SaveWorktree]
+            }
             Panel::Save(_) => &[Row::Cancel, Row::SaveGlobal],
             Panel::Confirm(_) => &[Row::Cancel, Row::Continue],
+            Panel::Exit => &[Row::Cancel, Row::SaveAndExit, Row::Discard],
         }
     }
 
@@ -289,6 +306,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn back(&mut self) {
         let (panel, selected) = match self.panel {
             Panel::Tune => (Panel::Layout, 3),
+            Panel::Exit => self.exit_from.take().expect("exit prompt has an editor to return to"),
+            Panel::Save(_) if self.exit_from.is_some() => (Panel::Exit, 0),
             Panel::Save(kind) => (kind.panel(), if kind == SaveKind::Layout { 6 } else { 4 }),
             Panel::Confirm(Confirm::UseGlobal) => (Panel::Layout, 7),
             Panel::Confirm(Confirm::UseGlobalPrefs(kind)) => (kind.panel(), 5),
@@ -306,29 +325,131 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Appearance => Panel::Workflow,
             Panel::Workflow => Panel::Health,
             Panel::Health | Panel::Diagnostics => Panel::Layout,
-            Panel::Save(_) | Panel::Confirm(_) => return,
+            Panel::Save(_) | Panel::Confirm(_) | Panel::Exit => return,
         };
         self.select_panel(next, 0);
+    }
+
+    fn layout_dirty(&self) -> bool {
+        self.saved.as_ref().is_some_and(|saved| *saved != self.layout)
+    }
+
+    fn auto_arrange_dirty(&self) -> bool {
+        self.saved.as_ref().is_some_and(|saved| saved.new_tabs != self.layout.new_tabs)
+    }
+
+    fn exiting_with_only_auto_arrange(&self) -> bool {
+        self.exit_from.is_some()
+            && self.auto_arrange_dirty()
+            && self.saved.as_ref().is_some_and(|saved| same_geometry(saved, &self.layout))
+    }
+
+    fn prefs_dirty(&self) -> bool {
+        self.saved_prefs.is_some_and(|saved| saved != self.prefs)
+    }
+
+    fn claude_dirty(&self) -> bool {
+        self.claude.editable() && self.show_limits != (self.claude == Claude::On)
+    }
+
+    fn dirty(&self) -> bool {
+        self.layout_dirty() || self.prefs_dirty() || self.claude_dirty()
+    }
+
+    fn request_exit(&mut self) -> After {
+        if !self.dirty() {
+            return self.leave();
+        }
+        self.exit_from = Some((self.panel, self.selected));
+        self.select_panel(Panel::Exit, 0);
+        After::Stay
+    }
+
+    fn leave(&mut self) -> After {
+        if self.trial.is_some()
+            && let Err(why) = self.undo()
+        {
+            if let Some((panel, selected)) = self.exit_from.take() {
+                self.select_panel(panel, selected);
+            }
+            self.report(Err(why));
+            return After::Stay;
+        }
+        self.clear_notice();
+        After::Leave
+    }
+
+    fn save_and_exit(&mut self) -> After {
+        let kind = if self.layout_dirty() {
+            SaveKind::Layout
+        } else if self.prefs_dirty() {
+            // Appearance and Workflow share one file and one scope choice.
+            SaveKind::Workflow
+        } else {
+            if self.claude_dirty()
+                && let Err(why) = self.save_claude()
+            {
+                self.select_panel(Panel::Exit, 0);
+                self.report(Err(why));
+                return After::Stay;
+            }
+            return self.leave();
+        };
+        self.select_panel(Panel::Save(kind), 0);
+        After::Stay
+    }
+
+    fn save_scope(&mut self, kind: SaveKind, scope: Scope) -> After {
+        let result = if kind == SaveKind::Layout { self.save_layout(scope) } else { self.save_prefs(scope) };
+        if self.exit_from.is_some() {
+            if result.is_ok() {
+                return self.save_and_exit();
+            }
+            // Some integration errors are reported after the file was saved.
+            // Don't offer that scope again if its draft is already saved.
+            let still_dirty = if kind == SaveKind::Layout { self.layout_dirty() } else { self.prefs_dirty() };
+            let layout_saved =
+                kind == SaveKind::Layout && scope == Scope::Worktree && self.exiting_with_only_auto_arrange();
+            if !still_dirty || layout_saved {
+                self.back();
+            }
+        }
+        self.report(result);
+        After::Stay
     }
 
     fn save_layout(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
         if self.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
             self.undo()?;
         }
-        let auto_changed = self.saved.as_ref().is_some_and(|saved| saved.new_tabs != self.layout.new_tabs);
+        let auto_changed = self.auto_arrange_dirty();
         let draft_auto = self.layout.new_tabs;
-        let saved = self.store()?.save_for(&self.layout, scope, self.root.as_deref(), None, &self.run)?;
+        let global;
+        let layout = if scope == Scope::Global && self.exiting_with_only_auto_arrange() && self.scope == Scope::Worktree
+        {
+            // A worktree layout must not become the global layout just because
+            // the remaining draft is the global auto-arrange switch.
+            let (mut saved, _, _) = self.store()?.layout_for(None)?;
+            saved.new_tabs = draft_auto;
+            global = saved;
+            &global
+        } else {
+            &self.layout
+        };
+        let saved = self.store()?.save_for(layout, scope, self.root.as_deref(), None, &self.run)?;
         self.reload_layout()?;
+        if scope == Scope::Worktree && auto_changed {
+            self.layout.new_tabs = draft_auto;
+        }
         if let Some((trial, tried)) = &self.trial
             && same_geometry(tried, &self.layout)
         {
             trial.keep()?;
             self.trial = None;
         }
-        if scope == Scope::Worktree && auto_changed {
-            self.layout.new_tabs = draft_auto;
+        if self.exit_from.is_none() {
+            self.back();
         }
-        self.back();
         match saved {
             Saved::ListenerDidNotStart => {
                 Err("Saved, but the layout listener did not start. Open Health to repair it.")
@@ -361,7 +482,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         };
         self.prefs.save(root).map_err(|_| "Could not save Milo's pane preferences.")?;
         self.reload_prefs()?;
-        self.back();
+        if self.exit_from.is_none() {
+            self.back();
+        }
         Ok(match (scope, &self.prefs_scope) {
             (Scope::Worktree, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
             (Scope::Global, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
@@ -410,28 +533,29 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.health_top = 0;
     }
 
-    fn maintain(&mut self, remove: bool) -> bool {
+    fn maintain(&mut self, remove: bool) {
         let result = if remove { doctor::remove() } else { doctor::repair() };
         if result.is_ok() {
             if self.inside {
                 self.saved = None;
                 if let Err(why) = self.reload_layout() {
                     self.back();
-                    return self.report(Err(why));
+                    self.report(Err(why));
+                    return;
                 }
             }
             self.claude = self.store.as_ref().map_or(Claude::Invalid, Store::claude);
             self.show_limits = self.claude == Claude::On;
             self.back();
         }
-        self.report_text(result.map(Cow::Owned).map_err(Cow::Owned))
+        self.report_text(result.map(Cow::Owned).map_err(Cow::Owned));
     }
 
     fn save_claude(&mut self) -> Result<&'static str, &'static str> {
         if !self.claude.editable() {
             return Err("Milo will leave this Claude Code status line alone.");
         }
-        if self.show_limits == (self.claude == Claude::On) {
+        if !self.claude_dirty() {
             return Ok("No Claude Code changes to save.");
         }
         self.store()?.save(None, Some(self.show_limits), &self.run)?;
@@ -501,37 +625,58 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn disabled(&self, row: Row) -> bool {
         match row {
-            Row::Capture => self.target.is_none() || self.trial.is_some(),
+            Row::Capture => self.saved.is_none() || self.target.is_none() || self.trial.is_some(),
             Row::Undo => self.trial.is_none(),
             Row::UseGlobal => self.scope != Scope::Worktree,
             Row::UseGlobalPrefs => self.prefs_scope != Source::Worktree,
-            Row::SaveLayout => self.saved.is_none(),
-            Row::SavePrefs => self.saved_prefs.is_none(),
+            Row::SaveLayout
+            | Row::Tree
+            | Row::Sidebar
+            | Row::Pane(_)
+            | Row::Side
+            | Row::Width
+            | Row::Order(_)
+            | Row::OutlineShare
+            | Row::UsageRows
+            | Row::AutoArrange => self.saved.is_none(),
+            Row::SavePrefs
+            | Row::Icons
+            | Row::Activity
+            | Row::GitMarks
+            | Row::UsageStyle
+            | Row::FollowProject
+            | Row::FollowActivity
+            | Row::ChangesOnly
+            | Row::HistoryFollow => self.saved_prefs.is_none(),
             Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
             Row::Repair | Row::Remove => self.trial.is_some(),
             _ => false,
         }
     }
 
-    fn activate(&mut self, row: Row) -> bool {
+    fn activate(&mut self, row: Row) -> After {
         if self.disabled(row) {
-            return false;
+            return After::Ignored;
         }
         let result = match row {
             Row::Capture => self.capture(),
             Row::Undo => self.undo(),
             Row::SaveClaude => self.save_claude(),
+            Row::SaveAndExit => return self.save_and_exit(),
+            Row::Discard => return self.leave(),
             Row::SaveGlobal | Row::SaveWorktree => {
-                let Panel::Save(kind) = self.panel else { return false };
+                let Panel::Save(kind) = self.panel else { return After::Ignored };
                 let scope = if row == Row::SaveGlobal { Scope::Global } else { Scope::Worktree };
-                if kind == SaveKind::Layout { self.save_layout(scope) } else { self.save_prefs(scope) }
+                return self.save_scope(kind, scope);
             }
             Row::Continue => match self.panel {
                 Panel::Confirm(Confirm::UseGlobal) => self.use_global(),
                 Panel::Confirm(Confirm::UseGlobalPrefs(_)) => self.use_global_prefs(),
-                Panel::Confirm(Confirm::Repair) => return self.maintain(false),
-                Panel::Confirm(Confirm::Remove) => return self.maintain(true),
-                _ => return false,
+                Panel::Confirm(Confirm::Repair | Confirm::Remove) => {
+                    self.maintain(self.panel == Panel::Confirm(Confirm::Remove));
+                    return After::Stay;
+                }
+                _ => return After::Ignored,
             },
             _ => {
                 self.message = None;
@@ -599,10 +744,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Row::Remove => self.select_panel(Panel::Confirm(Confirm::Remove), 0),
                     _ => self.change_pref(row),
                 }
-                return true;
+                return After::Stay;
             }
         };
-        self.report(result)
+        self.report(result);
+        After::Stay
     }
 }
 
@@ -660,8 +806,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
         rows.extend([
             key("s     ", "choose where to save"),
             key("r     ", "refresh preview/report"),
-            key("Esc   ", "back"),
-            key("q     ", "quit"),
+            key("Esc   ", "back or leave settings"),
+            key("q     ", "leave settings"),
         ]);
         Page::new(rows)
     }
@@ -690,22 +836,22 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             let Some((index, _)) = self.visible.row_at(x, y) else { return After::Ignored };
             let Some(&row) = self.rows().get(index) else { return After::Ignored };
             if self.disabled(row)
-                || matches!(row, Row::Continue | Row::SaveGlobal | Row::SaveWorktree)
+                || matches!(row, Row::Continue | Row::SaveGlobal | Row::SaveWorktree | Row::SaveAndExit | Row::Discard)
                     && self.modal_click.is_repeat(x, y)
             {
                 return After::Ignored;
             }
             self.selected = index;
-            if self.activate(row) { After::Stay } else { After::Ignored }
+            self.activate(row)
         };
-        if self.panel != panel && matches!(self.panel, Panel::Save(_) | Panel::Confirm(_)) {
+        if self.panel != panel && self.panel.modal() {
             self.modal_click.opened(x, y);
         }
         after
     }
 
     fn input(&mut self, key: Key) -> After {
-        let modal = matches!(self.panel, Panel::Save(_) | Panel::Confirm(_));
+        let modal = self.panel.modal();
         if let Some(rows) = key.rows(self.visible.len) {
             let rows = if matches!(key, Key::WheelUp | Key::WheelDown) {
                 let page = self.visible.len.clamp(1, 3).cast_signed();
@@ -752,23 +898,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Panel::Appearance | Panel::Workflow => Some(Row::SavePrefs),
                 _ => None,
             },
-            Key::Esc if modal || matches!(self.panel, Panel::Tune | Panel::Diagnostics) => {
+            Key::Esc | Key::Char('q') if modal => {
                 self.back();
                 return After::Stay;
             }
-            Key::Char('q') | Key::Esc => {
-                if self.trial.is_some()
-                    && let Err(why) = self.undo()
-                {
-                    self.report(Err(why));
-                    return After::Stay;
-                }
-                self.clear_notice();
-                return After::Leave;
+            Key::Esc if matches!(self.panel, Panel::Tune | Panel::Diagnostics) => {
+                self.back();
+                return After::Stay;
             }
+            Key::Char('q') | Key::Esc => return self.request_exit(),
             _ => None,
         };
-        if action.is_some_and(|row| self.activate(row)) { After::Stay } else { After::Ignored }
+        action.map_or(After::Ignored, |row| self.activate(row))
     }
 }
 
@@ -785,17 +926,16 @@ impl<R> Setup<R> {
         self.failure_status(false);
     }
 
-    fn report(&mut self, result: Result<&'static str, &'static str>) -> bool {
-        self.report_text(result.map(Cow::Borrowed).map_err(Cow::Borrowed))
+    fn report(&mut self, result: Result<&'static str, &'static str>) {
+        self.report_text(result.map(Cow::Borrowed).map_err(Cow::Borrowed));
     }
 
-    fn report_text(&mut self, result: Result<Cow<'static, str>, Cow<'static, str>>) -> bool {
+    fn report_text(&mut self, result: Result<Cow<'static, str>, Cow<'static, str>>) {
         self.failure_status(result.is_err());
         self.message = Some(match result {
             Ok(message) => (message, FAINT),
             Err(why) => (why, DEL.bold()),
         });
-        true
     }
 }
 

@@ -1,6 +1,8 @@
 use super::*;
 use crate::fixture::Fixture;
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
+use std::process::Command;
 
 fn store(fixture: &Fixture) -> Store {
     Store {
@@ -30,6 +32,217 @@ fn click_label(rows: &[String], label: &str) -> Key {
 fn choose<R: Fn(&[&OsStr]) -> bool>(pane: &mut Setup<R>, row: Row) -> After {
     pane.selected = pane.rows().iter().position(|&it| it == row).expect("visible setup choice");
     pane.key(Key::Enter)
+}
+
+// Exercise real config paths and the Rex CLI transport without changing the
+// environment of other tests, or touching the user's config or sessions.
+fn isolated_settings(name: &str) -> Option<PathBuf> {
+    const ROOT: &str = "MILO_TEST_SETTINGS_ROOT";
+    if let Some(root) = std::env::var_os(ROOT) {
+        return Some(root.into());
+    }
+    let f = Fixture::folder();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(ROOT, &f.root)
+        .env("HOME", &f.root)
+        .env("XDG_STATE_HOME", f.root.join("state"))
+        .env_remove("REX_SESSION")
+        .env_remove("REX_BLOCK")
+        .env("XDG_CONFIG_HOME", &f.root)
+        .env("PATH", &f.root)
+        .current_dir(&f.root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    None
+}
+
+#[test]
+fn dirty_exit_keeps_the_editor_by_default_and_can_discard_by_click() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("outside Rex"));
+    assert_eq!(pane.key(Key::Esc), After::Leave, "a clean exit does not prompt");
+    assert_eq!(pane.key(Key::Char('2')), After::Stay);
+    let clean = frame(&mut pane, 80, 18);
+    assert!(!clean[0].contains("Unsaved changes"));
+    assert_eq!(pane.key(click_label(&clean, "Activity marks")), After::Stay);
+    let edited = frame(&mut pane, 80, 18);
+    assert!(edited[0].contains("Unsaved changes"));
+    let quit = click_at(&edited, 17, "q quit");
+    assert_eq!(pane.key(quit), After::Stay);
+    assert_eq!(pane.panel, Panel::Exit);
+    assert_eq!(pane.key(quit), After::Ignored, "the previous frame can't activate the prompt");
+
+    let prompt = frame(&mut pane, 18, 8);
+    assert!(prompt[0].contains("Unsaved changes"));
+    assert!(prompt.iter().any(|row| row.starts_with('›') && row.contains("Keep editing")));
+    assert!(prompt.iter().any(|row| row.trim() == "Save"));
+    assert!(prompt.iter().any(|row| row.trim() == "Discard"));
+    assert_eq!(pane.key(Key::Enter), After::Stay);
+    assert_eq!(pane.panel, Panel::Appearance);
+    assert!(pane.rows()[pane.selected] == Row::Activity);
+    assert!(pane.prefs.static_marks);
+
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    let prompt = frame(&mut pane, 18, 8);
+    let discard = click_label(&prompt, "Discard");
+    let Key::Click(x, y) = discard else { unreachable!() };
+    assert!(pane.hover_span(x, y).is_some());
+    pane.modal_click.opened(x, y);
+    assert_eq!(pane.key(discard), After::Ignored);
+    pane.modal_click.clear();
+    assert_eq!(pane.key(discard), After::Leave);
+    assert!(!f.root.join("settings.json").exists());
+}
+
+#[test]
+fn dirty_settings_from_home_asks_before_returning() {
+    let Some(_) = isolated_settings("setup::tests::dirty_settings_from_home_asks_before_returning") else { return };
+    let mut home = crate::home::Home::new();
+    assert_eq!(home.key(Key::Enter), After::Stay);
+    home.key(Key::Char('2'));
+    let rows = frame(&mut home, 80, 18);
+    assert_eq!(home.key(click_label(&rows, "Activity marks")), After::Stay);
+    assert_eq!(home.key(Key::Char('q')), After::Stay);
+    assert!(frame(&mut home, 80, 18)[0].contains("Unsaved changes"));
+    assert_eq!(home.key(Key::Enter), After::Stay);
+    assert!(frame(&mut home, 80, 18)[0].contains("Appearance"));
+    home.key(Key::Esc);
+    let prompt = frame(&mut home, 80, 18);
+    assert_eq!(home.key(click_label(&prompt, "Discard")), After::Stay);
+    let menu = frame(&mut home, 80, 18);
+    assert!(menu.iter().any(|row| row.contains("Settings")));
+    assert!(menu.iter().any(|row| row.contains("Uninstall")));
+    assert_eq!(Preferences::resolve(None).unwrap().1, Source::Default);
+}
+
+#[test]
+fn toggling_back_and_saving_claude_directly_clear_the_dirty_indicator() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("outside Rex"));
+    choose(&mut pane, Row::FollowActivity);
+    assert!(frame(&mut pane, 18, 8)[0].contains("Unsaved changes"));
+    choose(&mut pane, Row::FollowActivity);
+    assert!(!frame(&mut pane, 18, 8)[0].contains("Unsaved changes"));
+    choose(&mut pane, Row::ClaudeLimits);
+    assert!(frame(&mut pane, 18, 8)[0].contains("Unsaved changes"));
+    choose(&mut pane, Row::SaveClaude);
+    assert!(!frame(&mut pane, 18, 8)[0].contains("Unsaved changes"));
+    assert_eq!(pane.key(Key::Char('q')), After::Leave);
+}
+
+#[test]
+fn exit_save_scopes_preferences_then_saves_claude() {
+    let Some(root) = isolated_settings("setup::tests::exit_save_scopes_preferences_then_saves_claude") else {
+        return;
+    };
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, Some(root.join("worktree")), |_| panic!("outside Rex"));
+    pane.reload_prefs().unwrap();
+    pane.key(Key::Char('2'));
+    choose(&mut pane, Row::Activity);
+    pane.key(Key::Char('3'));
+    choose(&mut pane, Row::ChangesOnly);
+    choose(&mut pane, Row::ClaudeLimits);
+    pane.key(Key::Char('q'));
+    assert_eq!(choose(&mut pane, Row::SaveAndExit), After::Stay);
+    let rows = frame(&mut pane, 80, 18);
+    assert!(rows.iter().any(|row| row.contains("Save preferences for…")));
+    assert_eq!(pane.key(Key::Enter), After::Stay, "the default scope choice goes back");
+    assert_eq!(pane.panel, Panel::Exit);
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow);
+    assert_eq!(Preferences::resolve(pane.root.as_deref()).unwrap().1, Source::Default);
+    assert!(!f.root.join("settings.json").exists());
+
+    pane.key(Key::Esc);
+    choose(&mut pane, Row::SaveAndExit);
+    let rows = frame(&mut pane, 80, 18);
+    assert_eq!(pane.key(click_label(&rows, "For this worktree")), After::Leave);
+    let (saved, source) = Preferences::resolve(pane.root.as_deref()).unwrap();
+    assert_eq!(source, Source::Worktree);
+    assert!(saved.static_marks && saved.changes_only);
+    assert_eq!(Preferences::resolve(None).unwrap().1, Source::Default);
+    assert!(matches!(pane.store().unwrap().claude(), Claude::On));
+}
+
+#[test]
+fn exit_layout_save_reports_failure_and_requires_global_scope_for_auto_arrange() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, Some(f.root.clone()), |_| false);
+    choose(&mut pane, Row::Tune);
+    choose(&mut pane, Row::Side);
+    pane.key(Key::Char('q'));
+    assert_eq!(choose(&mut pane, Row::SaveAndExit), After::Stay);
+    assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    assert!(pane.layout_dirty());
+    let failed = frame(&mut pane, 80, 18);
+    assert!(failed.iter().any(|row| row.contains("could not check")));
+    assert!(!f.root.join("init.lua").exists());
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert_eq!(pane.panel, Panel::Tune);
+    assert!(pane.rows()[pane.selected] == Row::Side);
+
+    choose(&mut pane, Row::Side);
+    choose(&mut pane, Row::AutoArrange);
+    pane.key(Key::Char('q'));
+    choose(&mut pane, Row::SaveAndExit);
+    let scope = frame(&mut pane, 80, 18);
+    assert!(scope.iter().any(|row| row.contains("Auto-arrange needs a global save")));
+    assert!(!pane.rows().contains(&Row::SaveWorktree));
+    assert!(pane.rows().contains(&Row::SaveGlobal));
+}
+
+#[test]
+fn leaving_only_undoes_the_trial_after_an_exit_choice_and_stays_on_undo_failure() {
+    let Some(root) =
+        isolated_settings("setup::tests::leaving_only_undoes_the_trial_after_an_exit_choice_and_stays_on_undo_failure")
+    else {
+        return;
+    };
+    let rex = root.join("rex");
+    fs::write(
+        &rex,
+        concat!(
+            "#!/bin/sh\n/bin/cat >/dev/null\n",
+            "for arg do case \"$arg\" in\n",
+            "milo_operation=trial) echo 'ok window:test tiled outline=block:test'; exit;;\n",
+            "milo_operation=undo) echo undo >> trial.log; if [ -f allow-undo ]; then echo ok; else echo blocked; fi; exit;;\n",
+            "esac; done\nexit 1\n",
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let f = Fixture::folder();
+    let target = rex::Target { session: "session:test".into(), block: "block:shell".into() };
+    let mut pane = Setup::new(Some(store(&f)), true, Some(target), None, |_| panic!("discard never saves"));
+    choose(&mut pane, Row::Tree);
+    pane.key(Key::Char('a'));
+    assert!(pane.trial.is_some());
+    pane.key(Key::Char('q'));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert!(!root.join("trial.log").exists());
+
+    pane.key(Key::Char('q'));
+    assert_eq!(choose(&mut pane, Row::Discard), After::Stay);
+    assert_eq!(pane.panel, Panel::Layout);
+    assert!(pane.layout_dirty() && pane.trial.is_some());
+    assert!(pane.message.as_ref().unwrap().0.contains("Could not undo"));
+
+    fs::write(root.join("allow-undo"), "").unwrap();
+    pane.key(Key::Esc);
+    assert_eq!(choose(&mut pane, Row::Discard), After::Leave);
+    assert!(pane.trial.is_none());
+    assert_eq!(fs::read_to_string(root.join("trial.log")).unwrap(), "undo\nundo\n");
+    assert!(!f.root.join("init.lua").exists());
 }
 
 #[test]

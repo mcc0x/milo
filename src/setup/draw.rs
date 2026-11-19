@@ -16,6 +16,7 @@ use super::preview::{Preview, Rect, pane_label};
 use super::{Claude, Confirm, Panel, Row, SECTIONS, SaveKind, Scope, Setup, Side, TUNE};
 
 const ACCENT: Style = Style::fg(screen::CYAN);
+const UNSAVED: Style = Style::fg(screen::YELLOW).bold();
 
 #[derive(Default)]
 struct RowHit {
@@ -103,8 +104,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if s.w < 4 || s.h == 0 {
             return;
         }
+        let dirty = self.dirty();
         if s.h == 1 {
-            ui::section_heading(s, 0, s.w - 1, "Milo setup");
+            self.heading(s, dirty);
             return;
         }
         self.visible.current = true;
@@ -115,22 +117,27 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         // Keep a content row in short rails by using the heading for tabs.
         let tabs_in_heading = tab.is_some() && s.w < 60 && end < 3;
         if !tabs_in_heading {
-            ui::section_heading(s, 0, s.w - 1, "Milo setup");
+            self.heading(s, dirty);
         }
         if let Some(active) = tab {
+            let marker = tabs_in_heading && dirty && s.w > SECTIONS.len();
+            let end = s.w - usize::from(marker);
             let (x, tab_y) = if s.w >= 60 {
-                (15, 0)
+                (if dirty { 19 } else { 15 }, 0)
             } else if tabs_in_heading {
-                (usize::from(s.w >= 8), 0)
+                (usize::from(end >= 8), 0)
             } else {
                 y += 1;
-                (usize::from(s.w >= 8), 1)
+                (usize::from(end >= 8), 1)
             };
-            self.visible.tabs = tabs(s, x, tab_y, active);
+            self.visible.tabs = tabs(s, x..end, tab_y, active);
+            if marker {
+                s.put(end, 0, 1, "*", UNSAVED);
+            }
             self.visible.tab_y = tab_y;
         }
         let rows = self.rows();
-        if end.saturating_sub(y) > rows.len().clamp(1, 3) {
+        if self.panel != Panel::Exit && end.saturating_sub(y) > rows.len().clamp(1, 3) {
             y += usize::from(end >= 12);
             self.title(s, y);
             y += 1 + usize::from(end >= 12);
@@ -178,7 +185,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if let (Some(Rect { x, y, width, height }), Some(preview)) = (diagram, preview)
             && y < end
         {
-            preview.caption(s, x, y, width, !self.installed || self.saved.as_ref() != Some(&self.layout));
+            preview.caption(s, x, y, width, !self.installed || self.layout_dirty());
             let highlight = match rows.get(self.selected) {
                 Some(Row::Pane(pane)) => Some(*pane),
                 Some(Row::Order(at)) => Some(self.layout.geometry.order[*at]),
@@ -204,6 +211,15 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             } else {
                 self.workflow_sample(s, top);
             }
+        }
+    }
+
+    fn heading(&self, s: &mut Screen, dirty: bool) {
+        if dirty || self.panel == Panel::Exit {
+            let label = if s.w >= 16 { Panel::Exit.title() } else { "Unsaved" };
+            s.put_fit(1, 0, s.w - 1, label, UNSAVED);
+        } else {
+            ui::section_heading(s, 0, s.w - 1, "Milo setup");
         }
     }
 
@@ -276,6 +292,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Workflow => return None,
             Panel::Health => "Inspect settings without changing them. Repair or remove only Milo's integration.",
             Panel::Diagnostics => return None,
+            Panel::Exit => "Save before leaving?",
+            Panel::Save(SaveKind::Layout) if self.exiting_with_only_auto_arrange() => {
+                "Auto-arrange needs a global save."
+            }
             Panel::Save(SaveKind::Layout) => {
                 "On save: install or update Milo's Rex actions. Auto-arrange changes only with a global save."
             }
@@ -296,7 +316,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn footer(&self, s: &mut Screen) -> help::HintHits<'static> {
-        let back = matches!(self.panel, Panel::Tune | Panel::Save(_) | Panel::Confirm(_) | Panel::Diagnostics);
+        let back = self.panel.modal() || matches!(self.panel, Panel::Tune | Panel::Diagnostics);
         let exit = match (back, s.w) {
             (true, 26..) => "Esc back",
             (true, 12..) => "Esc",
@@ -534,6 +554,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 layout.new_tabs,
                 "Global only. New command tabs and tabs with a layout are skipped.",
             ),
+            Row::Cancel if self.panel == Panel::Exit => {
+                Cell::action("Keep editing", "Keep editing", "Return to Settings without saving.")
+            }
+            Row::SaveAndExit => Cell::action("Save", "Save", "Save changes and leave Settings."),
+            Row::Discard => Cell::action("Discard", "Discard", "Leave Settings without saving these changes."),
             Row::Back | Row::Cancel => Cell::action("Back", "Back", "Return without writing settings."),
             Row::Icons => Cell::choice(
                 "Icons",
@@ -656,7 +681,7 @@ impl Panel {
             Self::Appearance => Some(1),
             Self::Workflow => Some(2),
             Self::Health | Self::Diagnostics => Some(3),
-            Self::Save(_) | Self::Confirm(_) => None,
+            Self::Save(_) | Self::Confirm(_) | Self::Exit => None,
         }
     }
 
@@ -673,6 +698,7 @@ impl Panel {
             Self::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global default?",
             Self::Confirm(Confirm::Repair) => "Repair integration?",
             Self::Confirm(Confirm::Remove) => "Remove integration?",
+            Self::Exit => "Unsaved changes",
         }
     }
 }
@@ -699,8 +725,9 @@ impl<'a> Cell<'a> {
     }
 }
 
-fn tabs(s: &mut Screen, mut x: usize, y: usize, active: usize) -> [Range<usize>; SECTIONS.len()] {
-    let (labels, gap) = match s.w - x {
+fn tabs(s: &mut Screen, columns: Range<usize>, y: usize, active: usize) -> [Range<usize>; SECTIONS.len()] {
+    let mut x = columns.start;
+    let (labels, gap) = match columns.len() {
         36.. => (["Layout", "Appearance", "Workflow", "Health"], 2),
         24.. => (["Layout", "Looks", "Flow", "Health"], 1),
         17.. => (["Lay", "App", "Flow", "Hlth"], 1),
