@@ -828,8 +828,8 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     if w == 0 || h == 0 {
         return;
     }
-    let pending = usage.omp.pending();
-    let missing = if pending {
+    let checking = usage.omp.checking();
+    let missing = if checking {
         Hint::CHECKING
     } else {
         match usage.codex.sessions {
@@ -843,7 +843,7 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         Report::new(
             Tool::Claude,
             usage.claude.reported().map(|(r, source)| (&r.windows, source)),
-            if pending { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
+            if checking { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
             now,
         ),
     ];

@@ -557,20 +557,47 @@ mod omp_limits {
     }
 
     #[test]
+    fn background_omp_polling_does_not_replace_settled_hints_with_checking() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        report(&path, "claude", "anthropic", NOW * 1000, "[]");
+        let mut usage = unopened(&f, NOW);
+        usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
+
+        let checking = ["Codex · checking", "Claude · checking"];
+        let settled = ["Codex · no source", "Claude · no limits"];
+        assert!(usage.check());
+        let next_poll = Instant::now() + Duration::from_secs(20);
+        assert_eq!(frame(&mut usage, 22, 2), checking);
+        finish_omp(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), settled);
+
+        usage.omp.start(NOW, next_poll);
+        assert_eq!(frame(&mut usage, 22, 2), settled);
+        finish_omp(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), settled);
+
+        assert_eq!(usage.key(Key::Char('r')), After::Stay);
+        assert_eq!(frame(&mut usage, 22, 2), checking);
+        finish_omp(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), settled);
+    }
+
+    #[test]
     fn omp_poll_does_not_start_another_query_before_twenty_seconds() {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         let clock = Instant::now();
         let mut poll = omp::Poll::new(Some(path), TEST_WAIT);
         poll.start(NOW, clock);
-        assert!(poll.pending());
+        assert!(poll.fd().is_some());
         wait_for(|| poll.collect().is_some());
         for seconds in 0..20_u64 {
             poll.start(NOW, clock + Duration::from_secs(seconds));
-            assert!(!poll.pending());
+            assert!(poll.fd().is_none());
         }
         poll.start(NOW, clock + Duration::from_secs(20));
-        assert!(poll.pending());
+        assert!(poll.fd().is_some());
         wait_for(|| poll.collect().is_some());
         assert_eq!(omp::database_in(Some(&f.root), None).unwrap(), f.root.join(".omp/agent/agent.db"));
         assert_eq!(omp::database_in(None, Some(&f.root)).unwrap(), f.root.join("agent.db"));
@@ -585,7 +612,7 @@ mod omp_limits {
         let mut poll = omp::Poll::new(Some(path.clone()), TEST_WAIT);
         let mut read = |clock| {
             poll.start(NOW, clock);
-            assert!(poll.pending());
+            assert!(poll.fd().is_some());
             let mut report = None;
             wait_for(|| {
                 report = poll.collect();

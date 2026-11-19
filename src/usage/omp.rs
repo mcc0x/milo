@@ -94,10 +94,11 @@ struct Job {
     ready: PipeReader,
     result: Receiver<Option<Reports>>,
     thread: JoinHandle<()>,
+    checking: bool,
 }
 
 impl Job {
-    fn start(read: impl FnOnce() -> Option<Reports> + Send + 'static) -> io::Result<Self> {
+    fn start(checking: bool, read: impl FnOnce() -> Option<Reports> + Send + 'static) -> io::Result<Self> {
         let (ready, done) = io::pipe()?;
         let (send, result) = mpsc::sync_channel(1);
         let thread = thread::Builder::new().spawn(move || {
@@ -105,7 +106,7 @@ impl Job {
             // Closing the write end wakes the terminal after the result is ready.
             drop(done);
         })?;
-        Ok(Self { ready, result, thread })
+        Ok(Self { ready, result, thread, checking })
     }
 }
 
@@ -114,9 +115,9 @@ impl Poll {
         Self { path, wait, last: None, job: None }
     }
 
-    /// An existing reading stays visible; only an empty pane needs a pending hint.
-    pub(super) fn pending(&self) -> bool {
-        self.job.is_some()
+    /// Only the initial read and deliberate reloads announce themselves.
+    pub(super) fn checking(&self) -> bool {
+        self.job.as_ref().is_some_and(|job| job.checking)
     }
 
     pub(super) fn fd(&self) -> Option<RawFd> {
@@ -139,18 +140,23 @@ impl Poll {
         if self.last.is_some_and(|last| clock.saturating_duration_since(last) < INTERVAL) {
             return;
         }
-        self.reload(now, clock);
+        self.launch(now, clock, self.last.is_none());
     }
 
     /// Reuse an in-flight read instead of making the database serve both.
     pub(super) fn reload(&mut self, now: i64, clock: Instant) {
-        if self.job.is_some() {
+        self.launch(now, clock, true);
+    }
+
+    fn launch(&mut self, now: i64, clock: Instant, checking: bool) {
+        if let Some(job) = &mut self.job {
+            job.checking |= checking;
             return;
         }
         let Some(path) = self.path.clone() else { return };
         let wait = self.wait;
         self.last = Some(clock);
-        self.job = Job::start(move || {
+        self.job = Job::start(checking, move || {
             read(&path, now, wait).or_else(|| {
                 let missing = std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
                 missing.then(Reports::default)
@@ -373,7 +379,7 @@ mod tests {
         let (finish, gate) = mpsc::channel();
         let mut poll = Poll::new(Some(PathBuf::from("/unused.db")), QUERY_WAIT);
         poll.job = Some(
-            Job::start(move || {
+            Job::start(false, move || {
                 gate.recv_timeout(Duration::from_secs(5)).ok()?;
                 Some(Reports::default())
             })
@@ -381,15 +387,17 @@ mod tests {
         );
         let fd = poll.fd().unwrap();
         assert!(poll.collect().is_none());
+        assert!(!poll.checking());
         poll.reload(0, Instant::now());
         assert_eq!(poll.fd(), Some(fd));
+        assert!(poll.checking());
         finish.send(()).unwrap();
     }
 
     #[test]
     fn closing_usage_waits_for_its_sqlite_worker_to_reap_the_child() {
         let (send, receive) = std::sync::mpsc::channel();
-        let job = Job::start(move || {
+        let job = Job::start(false, move || {
             let mut child = Command::new("/bin/sleep").arg("0.1").spawn().unwrap();
             send.send(child.id()).unwrap();
             child.wait().unwrap();
