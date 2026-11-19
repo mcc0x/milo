@@ -229,7 +229,7 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | Usage | Narrow | The limiting window takes priority; if its status does not fit, the provider name stays visible |
 | Reader | 2 rows | The filename and one line of content; `n` and `N` show the changed line itself |
 
-In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer.
+In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer. In a two-row pane, expanding a commit uses the second row for its first file or an empty-commit note. Collapse it to see the subject again.
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
 
