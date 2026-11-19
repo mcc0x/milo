@@ -104,7 +104,8 @@ impl LinePainter<'_> {
 impl Reader {
     pub(super) fn draw_file(&mut self, s: &mut Screen) {
         s.clear();
-        self.rows = s.h.saturating_sub(2);
+        let hint = s.h >= 3;
+        self.rows = s.h.saturating_sub(1 + usize::from(hint));
         if s.w == 0 || s.h == 0 {
             return;
         }
@@ -112,7 +113,7 @@ impl Reader {
         if self.rows > 0 {
             self.draw_body(s);
         }
-        if s.h > 1 {
+        if hint {
             self.draw_hint(s);
         }
     }

@@ -62,6 +62,7 @@ fn a_narrow_reader_keeps_a_file_name_and_shows_its_text_when_there_is_a_body_row
     f.write("test.txt", "hi\n");
     let mut reader = Reader::open(&f.root.join("test.txt")).unwrap();
     assert!(drawn(&mut reader, 40, 1)[0].ends_with("test.txt"));
+    assert!(drawn(&mut reader, 40, 2)[1].ends_with("hi"));
     let narrow = drawn(&mut reader, 10, 20);
     assert!(narrow[0].ends_with("test.txt") && narrow[1].ends_with("hi"), "{narrow:?}");
 }

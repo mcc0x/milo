@@ -14,6 +14,7 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | History | Narrow | A shorter summary, such as `↑2` for two commits to push or `no tracking` for a branch that does not track a remote branch |
 | History | Narrow and focused | The selected commit's subject wraps so you can read it without widening the rail |
 | Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
+| Reader | 2 rows | The filename and one line of content; keyboard hints return at 3 rows |
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
