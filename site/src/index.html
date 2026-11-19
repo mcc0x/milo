@@ -24,14 +24,13 @@
     <meta name="twitter:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Bring the IDE feel to Rex, natively.’">
     <link rel="preload" href="./fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="./fonts/terminal-symbols.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="./fonts/terminal-figures.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="./style.css">
     <script type="module" src="./main.ts"></script>
   </head>
   <body>
     <main>
       <section class="hero" aria-labelledby="title">
-        <div class="intro">
+        <header class="masthead">
           <div class="lockup">
             <picture class="mascot">
               <source srcset="./images/milo.webp" type="image/webp">
@@ -39,8 +38,16 @@
             </picture>
             <h1 id="title">milo</h1>
           </div>
-          <p class="description">Bring the IDE feel to <a class="rex" href="https://www.superlogical.com/rex"><img src="./images/rex.png" width="72" height="72" alt="">Rex</a>, natively.</p>
-          <p class="subtext">Your files, commits and usage limits beside Claude Code, Codex, omp or whichever agent you run. No key binds to learn.</p>
+        <a class="source" href="https://github.com/mcc0x/milo">
+          <svg class="source-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+          <b>milo is open source</b>
+        </a>
+        </header>
+        <div class="intro">
+          <div class="intro-copy">
+            <p class="description">Bring the IDE feel to <a class="rex" href="https://www.superlogical.com/rex"><img src="./images/rex.png" width="72" height="72" alt="">Rex</a>, natively.</p>
+            <p class="subtext">Your files, commits and usage limits beside your coding agent.</p>
+          </div>
           <div class="install">
             <span class="install-prompt" aria-hidden="true">$</span>
             <code id="install-command">curl -fsSL https://usemilo.net/install.sh | sh</code>
@@ -51,63 +58,38 @@
 
         <!-- A demo that plays by itself; its label says what it shows. -->
         <div class="terminal" id="demo" data-view="whole" role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work">
-          <aside class="rex-side">
-            <div class="rex-top"><div class="window-lights"><i></i><i></i><i></i></div></div>
-            <p class="rex-group">tidebook</p>
-            <p class="rex-item" data-harness="claude"><img class="rex-tile" src="./images/claude.png" width="192" height="192" alt=""><span>claude</span> ~/tidebook</p>
-            <p class="rex-item" data-harness="codex"><img class="rex-tile" src="./images/codex.png" width="192" height="192" alt=""><span>codex</span> ~/tidebook</p>
-            <p class="rex-item" data-harness="omp"><b class="rex-tile tile-omp">π</b><span>omp</span> ~/tidebook</p>
-            <p class="rex-group">notes</p>
-            <p class="rex-item"><b class="rex-tile tile-shell">›_</b><span>zsh</span> ~/notes</p>
-          </aside>
+          <div class="rex-titlebar">
+            <span class="window-lights"><i></i><i></i><i></i></span>
+            <span class="rex-tab">tidebook</span><span>Rex</span>
+          </div>
           <div class="terminal-panes">
             <section class="term-pane outline">
-              <header class="pane-head"><span>›_ milo ~/tidebook</span><i class="pane-tools"></i></header>
               <div class="pane-body" id="outline-pane"></div>
             </section>
             <section class="term-pane history">
-              <header class="pane-head"><span>›_ milo ~/tidebook</span><i class="pane-tools"></i></header>
               <div class="pane-body" id="history-pane"></div>
             </section>
             <section class="term-pane usage">
-              <header class="pane-head"><span>›_ milo ~/tidebook</span><i class="pane-tools"></i></header>
-              <div class="usage-strip" id="usage-pane">
-                <div class="usage-tool">
-                  <div class="usage-mark"><img src="./images/codex.png" width="192" height="192" alt="Codex"><span id="codex-age"></span></div>
-                  <div class="usage-limit"><span>5h</span><strong id="codex-five"></strong><span>in 2 h 38 m</span></div>
-                  <div class="usage-limit"><span>week</span><strong id="codex-week"></strong><span>resets in 2 d</span></div>
-                </div>
-                <div class="usage-tool">
-                  <div class="usage-mark"><img src="./images/claude.png" width="192" height="192" alt="Claude Code"><span id="claude-age"></span></div>
-                  <div class="usage-limit"><span>5h</span><strong id="claude-five"></strong><span>in 1 h 58 m</span></div>
-                  <div class="usage-limit"><span>week</span><strong id="claude-week"></strong><span>resets in 2 d</span></div>
-                </div>
+              <div class="usage-strip">
+                <span><img src="./images/codex.png" width="20" height="20" alt="Codex"><strong id="codex-usage"></strong></span>
+                <span><img src="./images/claude.png" width="20" height="20" alt="Claude"><strong id="claude-usage"></strong></span>
               </div>
             </section>
             <section class="term-pane agent" id="agent-pane">
-              <header class="pane-head"><span id="agent-title"></span><i class="pane-tools"></i></header>
-              <div class="agent-session">
-                <p class="agent-step agent-request" data-step="prompt"><b>You</b><br><span id="agent-request-text"></span></p>
-                <div class="agent-step" data-step="plan">
-                  <p><b id="agent-name"></b><br>I’ll add wind speed in km/h and check the forecast output.</p>
-                </div>
-                <div class="agent-step" data-step="editing">
-                  <p class="agent-tool">┌ <b>Edit</b> <span>src/weather.ts</span> <span id="agent-tally"></span></p>
-                  <div class="agent-diff" id="agent-diff"></div>
-                </div>
-                <div class="agent-step" data-step="test">
-                  <p class="agent-tool">┌ <b>Run</b> <span>bun test tests/weather.test.ts</span></p>
-                  <p class="agent-result">└ <span class="term-green">✓</span> 1 passed · 0 failed</p>
-                </div>
-                <div class="agent-step" data-step="committing">
-                  <p class="agent-tool">┌ <b>Commit</b> <span>src/weather.ts</span></p>
-                  <p class="agent-result">└ <span class="term-green" id="agent-commit-id"></span> <span id="agent-commit-title"></span></p>
-                </div>
+              <div class="agent-session" id="agent-session">
+                <header class="agent-banner" id="agent-banner"></header>
+                <div id="agent-transcript"></div>
               </div>
-              <div class="agent-composer">
-                <span class="composer-prompt">›</span>
-                <span class="composer-text" id="composer-text"></span><i class="composer-caret"></i>
-                <span class="agent-status" id="agent-status" data-state="idle"></span>
+              <div class="agent-chrome">
+                <div class="agent-activity" id="agent-activity" hidden></div>
+                <div class="agent-composer">
+                  <div class="composer-model" id="composer-model"></div>
+                  <div class="composer-line">
+                    <span class="composer-prompt" id="composer-prompt"></span>
+                    <span><span class="composer-text" id="composer-text"></span><i class="composer-caret"></i><span class="composer-placeholder" id="composer-placeholder"></span></span>
+                  </div>
+                </div>
+                <div class="composer-hint" id="composer-hint"></div>
               </div>
             </section>
             <section class="reader" id="reader-pane" hidden>
@@ -117,10 +99,6 @@
           </div>
         </div>
         <p class="caption" id="caption" aria-hidden="true"></p>
-        <a class="source" href="https://github.com/mcc0x/milo">
-          <svg class="source-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
-          <b>milo is open source</b>
-        </a>
       </section>
     </main>
   </body>

@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="docs/img/tab.png" width="860" alt="A Rex tab layout with the outline, history and usage on the left of the shell">
-  <br><sub>A sample Rex tab with made-up usage figures.</sub>
+  <br><sub>A sample Rex tab with made-up usage figures. The <a href="https://usemilo.net">web demo</a> plays the same edit in Claude Code, Codex and omp.</sub>
 </p>
 
 ## Install

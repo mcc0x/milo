@@ -1,0 +1,10 @@
+.usage-strip {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  height: var(--usage-height);
+  padding-inline: var(--pane-x);
+}
+.usage-strip span { display: inline-flex; align-items: center; gap: .45rem; }
+.usage-strip img { width: 1.15rem; height: 1.15rem; }
+.usage-strip strong { font-variant-numeric: tabular-nums; }

@@ -1,18 +1,15 @@
 import { frameAt, harnesses, loopLength, request, scene, typing } from './scene';
-import { element, renderFrame } from './terminal';
+import { element, renderFrame, renderHarness } from './terminal';
 
 const demo = element('demo');
 const reader = element('reader-pane');
 const caption = element('caption');
 const composer = element('composer-text');
-const tabs = demo.querySelectorAll<HTMLElement>('.rex-item');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 // How long the agent's side fades before the scene starts again; matches the CSS transition.
 const fade = 320;
 let timers: number[] = [];
-// Which harness's tab the scene is in, and how many passes have started.
-let agent = '';
-let pass = 0;
+let activeHarness = 0;
 
 function later(ms: number, run: () => void) {
   timers.push(window.setTimeout(run, ms));
@@ -24,16 +21,19 @@ function stopScene() {
 }
 
 /** Draws one step: its panes, the pane it draws the eye to, and the line that says why. */
-function show({ phase, focus, say: [name, said] }: typeof scene[number]) {
-  renderFrame(frameAt(phase));
+function show({ phase, focus, say }: typeof scene[number]) {
+  const harness = harnesses[activeHarness];
   demo.dataset.view = focus ?? 'whole';
   reader.hidden = focus !== 'reader';
-  const words = said.replace('{agent}', agent);
+  renderFrame(frameAt(phase, harness.id));
+  const words = say.replace('{agent}', harness.name);
   if (caption.dataset.says !== words) {
     caption.dataset.says = words;
-    const pane = document.createElement('b');
-    pane.textContent = name;
-    caption.replaceChildren(pane, name ? ' ' : '', words);
+    const [before, emphasis, after] = words.split('**');
+    const strong = document.createElement('strong');
+    strong.textContent = emphasis;
+    caption.dataset.tone = focus === 'agent' ? harness.id : focus ?? 'whole';
+    caption.replaceChildren(before, strong, after);
     if (!reduceMotion.matches) {
       caption.animate([{ opacity: 0, translate: '0 .35em' }, { opacity: 1, translate: '0 0' }], { duration: 340, easing: 'ease-out' });
     }
@@ -48,15 +48,6 @@ function show({ phase, focus, say: [name, said] }: typeof scene[number]) {
   }
 }
 
-/** Moves the window to a harness's tab: the sidebar, the pane's title and the name in the talk. */
-function enter({ tab, name }: typeof harnesses[number]) {
-  agent = name;
-  for (const item of tabs) item.classList.toggle('is-current', item.dataset.harness === tab);
-  const tile = demo.querySelector(`[data-harness="${tab}"] .rex-tile`)!.cloneNode(true);
-  element('agent-title').replaceChildren(tile, ` ${tab} ~/tidebook`);
-  element('agent-name').textContent = name;
-}
-
 /**
  * Plays the scene over and over, each pass in the next harness's tab.
  * People who ask for less motion get its last frame, still.
@@ -64,17 +55,19 @@ function enter({ tab, name }: typeof harnesses[number]) {
 function play() {
   stopScene();
   demo.classList.remove('scene-out');
+  renderHarness(harnesses[activeHarness]);
   const [first, ...rest] = scene;
   if (reduceMotion.matches) {
-    enter(harnesses[0]);
     show(scene[scene.length - 1]);
     return;
   }
-  enter(harnesses[pass++ % harnesses.length]);
   show(first);
   for (const step of rest) later(step.at, () => show(step));
   later(loopLength - fade, () => demo.classList.add('scene-out'));
-  later(loopLength, play);
+  later(loopLength, () => {
+    activeHarness = (activeHarness + 1) % harnesses.length;
+    play();
+  });
 }
 
 reduceMotion.addEventListener('change', play);

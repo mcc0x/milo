@@ -1,11 +1,22 @@
-import { edit, newCommit, pushed, request, scene, weatherDiff, type Change, type Commit, type DiffLine, type Frame, type Phase } from './scene';
+import { edit, newCommit, pushed, request, scene, weatherDiff, type harnesses, type Change, type Commit, type DiffLine, type Frame, type Phase } from './scene';
+import './agent.css';
+import './usage.css';
 
 export const element = (id: string) => document.getElementById(id)!;
 const outline = element('outline-pane');
 const history = element('history-pane');
 const reader = element('reader-content');
-const agentSteps = [...document.querySelectorAll<HTMLElement>('.agent-step')];
-const status = element('agent-status');
+const agentPane = element('agent-pane');
+const agentSession = element('agent-session');
+const agentBanner = element('agent-banner');
+const transcript = element('agent-transcript');
+const activity = element('agent-activity');
+const composerModel = element('composer-model');
+const composerPrompt = element('composer-prompt');
+const composerPlaceholder = element('composer-placeholder');
+const composerHint = element('composer-hint');
+let agentSteps: { at: number; node: HTMLElement }[] = [];
+let followTranscript = false;
 
 function span(text: string, className = '') {
   const node = document.createElement('span');
@@ -121,27 +132,12 @@ function renderHistory(frame: Frame) {
   history.replaceChildren(...items);
 }
 
-function renderUsage(frame: Frame) {
-  for (const name of ['codex', 'claude'] as const) {
-    element(`${name}-age`).textContent = frame.usage[name].age;
-    for (const slot of ['five', 'week'] as const) {
-      const value = frame.usage[name][slot];
-      const figure = element(`${name}-${slot}`);
-      const percent = document.createElement('small');
-      percent.textContent = '%';
-      figure.className = value >= 90 ? 'level-red' : value >= 70 ? 'level-amber' : 'level-green';
-      // A figure that has just risen counts up to its new value; the
-      // stylesheet draws the number from these two properties.
-      const from = slot === 'five' ? frame.usage[name].from : undefined;
-      if (from === undefined) {
-        figure.replaceChildren(String(value), percent);
-        continue;
-      }
-      const count = span('', 'count');
-      count.style.setProperty('--from', String(from));
-      count.style.setProperty('--n', String(value));
-      figure.replaceChildren(count, percent);
-    }
+function renderUsage({ usage }: Frame) {
+  for (const provider of ['codex', 'claude'] as const) {
+    const left = usage[provider];
+    const figure = element(`${provider}-usage`);
+    figure.textContent = `${left}%`;
+    figure.className = left <= 10 ? 'term-red' : left <= 30 ? 'term-amber' : 'term-green';
   }
 }
 
@@ -163,23 +159,109 @@ function renderReader(edited: boolean) {
 }
 
 const order = scene.map(step => step.phase);
+const finish = order.indexOf('commit');
+
+function agentLine(kind: string, glyph: string, ...contents: (string | Node)[]) {
+  const body = span('');
+  body.append(...contents);
+  return glyph ? row(`agent-${kind} agent-gutter`, span(glyph, 'agent-glyph'), body) : row(`agent-${kind}`, body);
+}
+
+export function renderHarness({ id, name, version, model }: typeof harnesses[number]) {
+  const claude = id === 'claude';
+  const codex = id === 'codex';
+  const omp = id === 'omp';
+  const directory = '~/dev/tidebook';
+  const prompt = claude ? '❯' : codex ? '›' : '';
+  const assistant = claude ? '⏺' : codex ? '•' : '';
+  agentPane.dataset.harness = id;
+  const title = row('agent-product',
+    span(codex ? 'OpenAI Codex' : name, 'term-bold'),
+    span(codex ? ` (v${version})` : ` v${version}`, 'agent-version'),
+  );
+  agentBanner.replaceChildren(title, ...(claude ? [
+    row('agent-model', `${model} · Claude Max`),
+    row('agent-directory', directory),
+  ] : codex ? [
+    row('agent-model', span('model:     ', 'agent-label'), model),
+    row('agent-directory', span('directory: ', 'agent-label'), directory),
+  ] : []));
+  composerPrompt.textContent = prompt;
+  composerPlaceholder.textContent = codex ? 'Ask Codex to do anything' : '';
+  composerModel.replaceChildren(...(claude ? [] : codex ? [
+    `${model} · ${directory}`,
+  ] : [
+    span('π', 'omp-model-mark'), span(model, 'omp-model-name'), span('tidebook'), span('main', 'omp-model-branch'),
+  ]));
+  composerHint.textContent = omp ? '' : '? for shortcuts';
+  activity.replaceChildren(
+    span(claude ? '✻' : codex ? '•' : '⠿', 'activity-glyph'),
+    claude ? 'Thinking…' : 'Working', span('esc to interrupt', 'activity-hint'),
+  );
+
+  const path = edit.path;
+  const { added, removed } = edit.change;
+  const summary = `(+${added} -${removed})`;
+  const tool = (name: string, detail: string) => agentLine('tool', assistant || '✓',
+    span(name, 'agent-tool-name'),
+    claude ? `(${detail})` : codex ? ` ${detail}` : `: ${detail}`,
+  );
+  const shell = (description: string, command: string, ...output: (string | Node)[]) => omp ? [
+    agentLine('tool agent-shell-title', '›_', span('Bash', 'agent-tool-name'), ' · ', description),
+    agentLine('shell-command', '$', command),
+    agentLine('result', '└', ...output),
+  ] : [
+    tool(codex ? 'Ran' : 'Bash', command),
+    agentLine('result', claude ? '⎿' : '└', ...output),
+  ];
+  const step = (phase: Phase, ...children: Node[]) => {
+    const node = document.createElement('div');
+    node.className = 'agent-step';
+    node.dataset.step = phase;
+    node.hidden = true;
+    node.append(...children);
+    return { at: order.indexOf(phase), node };
+  };
+  const diff = row('agent-diff', ...weatherDiff.map(line => diffRow(line.number ? line : { ...line, number: 1 }, true)));
+  agentSteps = [
+    step('prompt', agentLine('request', prompt, request)),
+    step('plan', agentLine('response', assistant, 'I’ll add wind speed in km/h and check the forecast output.')),
+    step('editing',
+      tool(claude ? 'Update' : codex ? 'Edited' : 'Edit', claude ? path : `${path} ${summary}`),
+      ...(claude ? [agentLine('result', '⎿', `Added ${added} lines, removed ${removed} line`)] : []),
+      diff,
+    ),
+    step('test', ...shell('Check forecast output', 'bun test tests/weather.test.ts', span('1 pass', 'term-green'), '  ', '0 fail')),
+    step('committing', ...shell('Commit forecast change', `git add ${path} && git commit -m "${newCommit.title}"`,
+      span(`[main ${newCommit.id}]`, 'agent-commit-id'), ' ', newCommit.title)),
+    step('commit',
+      agentLine('response', assistant, 'The weekend forecast now includes wind speed in km/h. The test passed.'),
+      ...(claude ? [row('agent-turn-time', '✻ Cooked for 12s')] : codex ? [row('agent-turn-time', 'Worked for 12s')] : []),
+    ),
+  ];
+  transcript.replaceChildren(...agentSteps.map(step => step.node));
+  agentSession.scrollTop = 0;
+  followTranscript = false;
+}
+
 export function renderFrame(frame: Frame) {
   renderOutline(frame);
   renderHistory(frame);
   renderUsage(frame);
   const stage = order.indexOf(frame.phase);
-  for (const step of agentSteps) step.hidden = stage < order.indexOf(step.dataset.step as Phase);
   renderReader(stage >= order.indexOf('edit'));
-  // Beside the composer: nothing while the request is typed, then working, then done.
-  const state = frame.phase === 'compose' ? 'idle' : stage >= order.indexOf('usage') ? 'done' : 'working';
-  status.dataset.state = state;
-  status.textContent = state === 'idle' ? '' : state === 'done' ? '✓ done' : 'working';
+  for (const { at, node } of agentSteps) {
+    const hidden = stage < at;
+    if (node.hidden !== hidden) {
+      node.hidden = hidden;
+      followTranscript = true;
+    }
+  }
+  activity.hidden = stage === 0 || stage >= finish;
+  // A phone may hide the agent while another pane is in focus. Follow the
+  // newly printed output when it becomes visible again, not the page itself.
+  if (followTranscript && agentSession.clientHeight) {
+    agentSession.scrollTop = agentSession.scrollHeight;
+    followTranscript = false;
+  }
 }
-
-// The agent's short excerpt highlights the change introduced by the edit.
-element('agent-diff').replaceChildren(...[weatherDiff[0], weatherDiff[1], ...weatherDiff.slice(3)].map(line => diffRow(line, false)));
-const [, added, removed] = tallies(edit.change);
-element('agent-tally').append(added, ' ', removed);
-element('agent-commit-id').textContent = `[main ${newCommit.id}]`;
-element('agent-commit-title').textContent = newCommit.title;
-element('agent-request-text').textContent = request;

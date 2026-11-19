@@ -46,13 +46,6 @@ body::before {
   filter: blur(40px);
 }
 
-/* The whole page is one screen: it sits in the middle of the window. */
-main {
-  display: grid;
-  align-content: center;
-  min-height: 100vh;
-  min-height: 100svh;
-}
 
 h1, p { margin: 0; }
 
@@ -73,14 +66,14 @@ h1, p { margin: 0; }
 }
 
 h1 {
-  font-size: clamp(3.75rem, 7vw, 5.25rem);
+  font-size: inherit;
   line-height: .85;
   font-weight: 780;
   letter-spacing: -.022em;
 }
 
 .description {
-  margin-top: .85rem;
+  margin: 0;
   font-weight: 620;
   font-size: clamp(1.4rem, 2.6vw, 1.9rem);
   line-height: 1.18;
@@ -90,7 +83,7 @@ h1 {
 
 .subtext {
   max-width: 62ch;
-  margin-top: .55rem;
+  margin-top: .25rem;
   color: var(--secondary);
   font-size: 1rem;
   line-height: 1.45;
@@ -119,11 +112,11 @@ h1 {
   align-items: center;
   gap: .7rem;
   max-width: 100%;
-  margin-top: 1.15rem;
+  min-width: 0;
   padding: .3rem .3rem .3rem .95rem;
   border: 1px solid var(--edge);
   border-radius: .7rem;
-  background: var(--surface);
+  background: #f9f8ffdd;
   box-shadow: 0 1px 2px #1b24660f;
   text-align: left;
 }
@@ -140,8 +133,8 @@ h1 {
 
 .install button {
   flex: none;
-  min-width: 4.9rem;
-  height: 2.5rem;
+  min-width: 4rem;
+  height: 2.1rem;
   padding: 0 .9rem;
   border: 0;
   border-radius: .45rem;
@@ -161,24 +154,18 @@ h1 {
   align-items: center;
   gap: .55rem;
   width: fit-content;
-  margin: .5rem auto 0;
-  padding: .45rem .95rem .45rem .8rem;
-  border: 1px solid var(--edge);
-  border-radius: 999px;
-  background: var(--surface);
-  box-shadow: 0 1px 2px #1b24660f;
+  padding: .6rem .25rem;
   color: var(--ink);
-  font-size: .9375rem;
+  font-size: inherit;
   line-height: 1.2;
   text-decoration: none;
-  transition: border-color .2s ease, box-shadow .2s ease;
+  text-underline-offset: .2em;
 }
 .source b { font-weight: 650; }
 .source-mark { flex: none; width: 1.2rem; height: 1.2rem; fill: currentColor; }
-.source:hover { border-color: var(--blue); box-shadow: 0 1px 2px #1b24660f, 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+.source:hover { text-decoration: underline; }
 
 @media (max-width: 45rem) {
-  h1 { font-size: 4rem; }
   .install { width: 100%; }
   .install code { flex: 1; }
 }

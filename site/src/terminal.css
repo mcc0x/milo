@@ -4,34 +4,35 @@
   font-display: block;
 }
 
-@font-face {
-  font-family: 'Terminal Figures';
-  src: url('./fonts/terminal-figures.woff2') format('woff2');
-  font-display: block;
-}
-
 .hero {
+  display: flex;
+  flex-direction: column;
+  min-height: 100svh;
   width: min(calc(100% - 3rem), 78rem);
   margin-inline: auto;
   padding-block: clamp(1rem, 3vh, 2.5rem);
 }
 
-/* The cat and the name, what milo is, and how to get it: one centred stack. */
-.intro {
+.masthead {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  padding-bottom: 1.4rem;
+  justify-content: space-between;
+  font-size: 1.1rem;
+}
+.intro {
+  display: grid;
+  justify-items: center;
+  margin-top: auto;
+  gap: .85rem;
+  padding: clamp(.8rem, 2vw, 1.6rem) 0 1.35rem;
   text-align: center;
 }
 .lockup {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  /* The cat is lighter than the word; nudged so the pair looks centred. */
-  margin-inline-start: -.9rem;
+  gap: .4rem;
 }
-.mascot { flex: none; width: clamp(4.5rem, 7vw, 5.75rem); }
+.mascot { flex: none; width: 2rem; }
 .mascot img {
   display: block;
   width: 100%;
@@ -43,24 +44,29 @@
 .caption {
   min-height: 1.6rem;
   margin-top: .8rem;
-  color: var(--secondary);
+  margin-bottom: auto;
+  color: var(--ink);
   font-weight: 500;
   font-size: 1.05rem;
   text-align: center;
 }
-.caption b { color: var(--blue); font-weight: 700; }
+.caption strong { color: #29397c; font-weight: 780; }
+.caption[data-tone='claude'] strong { color: #74361e; }
+.caption[data-tone='omp'] strong, .caption[data-tone='history'] strong { color: #563775; }
+.caption[data-tone='usage'] strong, .caption[data-tone='reader'] strong { color: #215344; }
 
-/* The window is drawn as Rex draws it: a sidebar of sessions and their
-   tabs, then flat panes on a dark canvas, each under a slim header, with
-   hairlines between. The colours are Rex's default dark theme. */
+/* Geometry and chrome follow the tidebook window in docs/img/tab.png. */
 .terminal {
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
   --canvas: #0c0e11;
   --term-bg: #0e1117;
-  --term-line: #ffffff14;
+  --term-line: #30353d;
   --term-text: #e7edf3;
   --term-muted: #8b9198;
   --term-dim: #6c7178;
-  --term-select: #1a2233;
+  --term-select: #2d3137;
   --accent: #4582f9;
   --term-green: #3fb950;
   --term-amber: #d29922;
@@ -71,76 +77,54 @@
   --pane-x: clamp(.65rem, 1.2vw, 1.05rem);
   --pane-y: .6rem;
   --head: 1.9rem;
-  display: grid;
-  grid-template-columns: 9.75rem minmax(0, 1fr);
   border: 1px solid #ffffff1f;
   border-radius: .8rem;
   overflow: hidden;
   background: var(--canvas);
   color: var(--term-text);
-  box-shadow: 0 0 0 1px #00000026, 0 2px 4px #1b246622, 0 32px 56px -26px #1b246680;
-  /* Sized by the window's height as well as its width: 39.7 lines of text
-     and 37rem of everything else, between a smallest and a largest size. */
-  font: 400 clamp(.78rem, min(1.2vw, calc((100vh - 37rem) / 39.7)), .9rem)/1.28 var(--mono);
-  font: 400 clamp(.78rem, min(1.2vw, calc((100svh - 37rem) / 39.7)), .9rem)/1.28 var(--mono);
+  box-shadow: 0 0 0 1px #10152466, 0 2px 5px #10152438, 0 22px 48px -22px #1b24666b;
+  font: 400 clamp(.78rem, 1.08vw, .94rem)/1.28 var(--mono);
   font-variant-ligatures: none;
   font-variant-numeric: tabular-nums;
 }
 
-/* Rex's sidebar: each session, and under it the tabs open in it. */
-.rex-side {
+.rex-titlebar {
   display: flex;
-  flex-direction: column;
-  gap: .12rem;
-  min-width: 0;
-  padding: .75rem .5rem;
-  border-inline-end: 1px solid var(--term-line);
-  color: var(--term-dim);
-  font: 500 .78rem/1.2 system-ui, sans-serif;
+  align-items: center;
+  gap: 1.5rem;
+  height: 2.4rem;
+  padding-inline: .85rem;
+  border-bottom: 1px solid var(--term-line);
+  background: #171c23;
+  color: var(--term-muted);
+  font: 500 .85rem/1 system-ui, sans-serif;
 }
-.rex-side p { margin: 0; }
-.rex-top { padding: .15rem .35rem .55rem; }
+.rex-tab {
+  align-self: end;
+  margin: 0 auto -1px 0;
+  padding: .57rem 1.8rem;
+  border: 1px solid var(--term-line);
+  border-bottom-color: var(--canvas);
+  border-radius: .45rem .45rem 0 0;
+  background: var(--canvas);
+  color: var(--term-text);
+  font-weight: 600;
+}
 .window-lights { display: flex; gap: .5rem; }
 .window-lights i { width: .75rem; height: .75rem; border-radius: 50%; background: #ff5f57; }
 .window-lights i:nth-child(2) { background: #febc2e; }
 .window-lights i:nth-child(3) { background: #28c840; }
-.rex-side .rex-group { margin-top: .55rem; padding: 0 .45rem .2rem; font-size: .68rem; font-weight: 600; }
-.rex-item {
-  display: flex;
-  align-items: center;
-  gap: .45rem;
-  padding: .34rem .45rem;
-  border-radius: .55rem;
-  overflow: hidden;
-  white-space: nowrap;
-  transition: background-color .35s ease;
-}
-.rex-item span { margin-inline-end: -.15rem; color: var(--term-text); font-weight: 600; }
-/* The tab the scene is in. */
-.rex-item.is-current { background: #ffffff1c; }
-.rex-tile {
-  display: inline-grid;
-  flex: none;
-  place-items: center;
-  width: 1.15rem;
-  height: 1.15rem;
-  border-radius: .3rem;
-  color: #fff;
-  font: 700 .62rem/1 system-ui, sans-serif;
-}
-.tile-omp { background: #a45cf6; }
-.tile-shell { background: #3a3d42; font-size: .5rem; }
 
 .terminal-panes {
+  --usage-height: 2rem;
   position: relative;
   display: grid;
   isolation: isolate;
-  grid-template-columns: 44% minmax(0, 1fr);
-  grid-template-rows: calc(var(--head) + var(--line) * 5 + .5rem) auto calc(var(--head) + var(--line) * 13 + var(--pane-y));
+  grid-template-columns: max(38%, calc(41ch + 2 * var(--pane-x))) minmax(0, 1fr);
+  grid-template-rows: var(--usage-height) auto calc(var(--line) * 13 + 2 * var(--pane-y));
   grid-template-areas: 'outline usage' 'outline agent' 'history agent';
 }
 
-/* Each pane: a slim header naming what runs in it, then its screen. */
 .term-pane {
   display: flex;
   flex-direction: column;
@@ -163,7 +147,6 @@
   font: 500 .74rem/1 system-ui, sans-serif;
   white-space: nowrap;
 }
-.pane-head .rex-tile { width: 1rem; height: 1rem; margin-inline-end: .15rem; vertical-align: -.22em; font-size: .56rem; }
 /* Rex's pane controls: split, stack, float, grow, close. */
 .pane-tools {
   flex: none;
@@ -177,20 +160,18 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  padding: 0 var(--pane-x) var(--pane-y);
+  padding: var(--pane-y) var(--pane-x);
 }
 .pane-body > .term-hint { margin-top: auto; }
 
-/* The scene draws the eye to one pane at a time: the rest step back a little. */
-:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.7) saturate(.85); }
-.terminal[data-view='reader'] .term-pane { filter: brightness(.48) saturate(.8); }
+/* Focus belongs to the hairline; inactive terminal text stays legible. */
+.terminal[data-view='reader'] .term-pane { filter: brightness(.82); }
 .terminal[data-view='outline'] .outline,
 .terminal[data-view='history'] .history,
 .terminal[data-view='usage'] .usage,
 .terminal[data-view='agent'] .agent {
   filter: none;
-  background-color: #4582f90f;
-  box-shadow: inset 0 0 0 1.5px var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
   z-index: 1;
 }
 
@@ -214,9 +195,9 @@
 .term-file { display: flex; align-items: baseline; min-width: 0; white-space: nowrap; }
 .tree-branch { white-space: pre; }
 .term-icon { display: inline-block; flex: 0 0 1.25em; margin-inline-end: .35ch; font: 1.02em/1 'Terminal Symbols'; }
-.history-dir { margin-inline-start: 1ch; }
-.commit-title { white-space: nowrap; }
-.term-hint { white-space: nowrap; padding-top: .1em; }
+.history-dir { margin-inline-start: 1ch; overflow: hidden; text-overflow: ellipsis; }
+.commit-title, .term-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-hint { padding-top: .1em; }
 .term-selected { background: var(--term-select); box-shadow: -.4rem 0 var(--term-select), .4rem 0 var(--term-select); }
 /* A row that has just changed: the edited file, the new commit. */
 .term-lit { animation: row-lit 1.8s ease-out; }
@@ -229,120 +210,12 @@
   100% { background: var(--term-select); box-shadow: -.4rem 0 var(--term-select), .4rem 0 var(--term-select); }
 }
 
-/* The figures and marks take their size from the strip's own width, so
-   they never collide in a narrow one. */
-.usage-strip {
-  container-type: inline-size;
-  display: grid;
-  flex: 1;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: center;
-  padding-bottom: .35rem;
-}
-.usage-tool {
-  display: grid;
-  grid-template-columns: auto minmax(0, .9fr) minmax(0, 1.1fr);
-  grid-template-rows: auto 1lh;
-  column-gap: clamp(.375rem, 1vw, 1.05rem);
-  align-items: start;
-  padding-inline: var(--pane-x);
-  /* In ems, so the strip shrinks with the rest of the window. */
-  font-size: .92em;
-  color: var(--term-muted);
-}
-.usage-tool + .usage-tool { border-inline-start: 1px solid var(--term-line); }
-.usage-mark { grid-row: span 2; display: grid; justify-items: center; gap: .3rem; }
-.usage-mark img { display: block; width: min(4.1em, 8.6cqi); height: auto; }
-.usage-mark span, .usage-limit span { white-space: nowrap; }
-.usage-limit { display: grid; }
-.usage-limit strong { font: min(3.1em, 6.4cqi)/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
-.usage-limit small { margin-left: .11em; font-size: .5em; letter-spacing: 0; }
-.level-green { color: var(--term-green); }
-.level-amber { color: var(--term-amber); }
-.level-red { color: var(--term-red); }
-
-/* A figure that has just risen counts up: the number is drawn from --n,
-   which runs from --from to its value. Where a browser cannot animate a
-   number, it simply shows the value. */
-@property --n {
-  syntax: '<integer>';
-  inherits: false;
-  initial-value: 0;
-}
-.count { counter-reset: n var(--n); animation: count-up 1.2s ease-out both; }
-.count::before { content: counter(n); }
-@keyframes count-up {
-  from { --n: var(--from); }
-}
-
-.agent-session {
-  flex: 1;
-  min-height: 0;
-  padding: clamp(.75rem, 1.5vw, 1.25rem) var(--pane-x) 0;
-  transition: opacity .32s ease;
-}
-/* The scene is about to start again. */
-.scene-out .agent-session { opacity: 0; }
-.agent-request { padding: .46rem .7rem .53rem; border-inline-start: 2px solid var(--accent); border-radius: 0 .3rem .3rem 0; background: #161b22; }
-.agent-request b, .agent-step > p:first-child b { color: var(--term-blue); }
-.agent-step { margin-top: clamp(.5rem, 1.1vw, .85rem); }
-.agent-step:first-child { margin-top: 0; }
-.agent-step:not([hidden]) { animation: step-in .3s ease-out both; }
-@keyframes step-in {
-  from { opacity: 0; translate: 0 .4em; }
-}
-.agent-tool, .agent-result { color: var(--term-muted); }
-.agent-tool > span:first-of-type, #agent-commit-title { color: var(--term-text); }
-/* What the agent has just done glows for a moment, before a pane answers it. */
-.agent-step:not([hidden]) > .agent-tool { animation: tool-in 1.3s ease-out; }
-@keyframes tool-in {
-  0%, 30% { background: #4582f92e; box-shadow: -.4rem 0 #4582f92e, .4rem 0 #4582f92e; }
-}
-#agent-tally { margin-inline-start: .75ch; }
-.agent-diff { margin: .22rem 0 0 1.5ch; }
 .diff-line { display: grid; grid-template-columns: 1.1ch minmax(0, 1fr); column-gap: 1ch; padding-inline: .5ch; }
 .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff-added { background: #3fb95026; }
 .diff-removed { background: #f8514926; color: var(--term-red); }
 .diff-added .diff-marker, .diff-added .diff-number { color: var(--term-green); }
 .diff-removed .diff-marker { color: var(--term-red); }
-
-/* Where the person types to the agent. */
-.agent-composer {
-  display: flex;
-  align-items: center;
-  gap: 1ch;
-  min-height: calc(var(--line) + 1.1rem);
-  margin: .6rem var(--pane-x) clamp(.6rem, 1.1vw, .9rem);
-  padding: .5rem .8rem;
-  border: 1px solid var(--term-line);
-  border-radius: .4rem;
-  background: #161b22;
-}
-.composer-prompt { color: var(--term-blue); }
-.composer-text { min-width: 0; overflow: hidden; white-space: nowrap; }
-.composer-caret {
-  flex: none;
-  width: .55em;
-  height: 1.15em;
-  margin-inline-start: -.6ch;
-  background: var(--accent);
-  animation: caret 1.1s steps(1) infinite;
-}
-@keyframes caret {
-  50% { opacity: 0; }
-}
-.agent-status { margin-inline-start: auto; padding-inline-start: 1ch; color: var(--term-muted); white-space: nowrap; }
-.agent-status[data-state='working']::before {
-  content: '●';
-  margin-inline-end: .8ch;
-  color: var(--term-amber);
-  animation: working 1s ease-in-out infinite;
-}
-.agent-status[data-state='done'] { color: var(--term-green); }
-@keyframes working {
-  50% { opacity: .25; }
-}
 
 /* The reader floats over the tab, as it does in Rex. */
 .reader {
@@ -368,20 +241,12 @@
 .reader-content .term-hint { margin-top: .5em; }
 
 @media (prefers-reduced-motion: reduce) {
-  .term-lit, .count, .agent-step:not([hidden]), .agent-step:not([hidden]) > .agent-tool,
-  .composer-caret, .agent-status[data-state='working']::before, .reader:not([hidden]) { animation: none; }
-  .term-pane, .agent-session { transition: none; }
+  .term-lit, .reader:not([hidden]) { animation: none; }
+  .term-pane { transition: none; }
 }
 
 @media (min-width: 45.001rem) and (max-width: 62rem) {
-  .terminal { grid-template-columns: 8.25rem minmax(0, 1fr); }
   .term-hint { font-size: .84em; }
-  .usage-tool { column-gap: .5rem; padding-inline: .55rem; }
-}
-
-@media (min-width: 45.001rem) and (max-width: 53rem) {
-  .usage-tool { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.12fr); column-gap: .31rem; padding-inline: .35rem; }
-  .usage-limit span:last-child { letter-spacing: -.05em; }
 }
 
 /* A phone shows one pane at a time: the one the scene is on. */
@@ -389,25 +254,22 @@
   .hero { width: calc(100% - 1.5rem); padding-block: .9rem; }
   /* Room for two lines, so a longer caption moves nothing below it. */
   .caption { min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
-  /* No room for the sidebar: the window is its panes. */
   .terminal { --pane-x: .65rem; --line: 1.45em; display: block; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
-  .rex-side { display: none; }
-  .terminal-panes { display: block; min-height: max(22rem, calc(var(--head) + var(--line) * 18 + var(--pane-y))); }
+  .terminal-panes {
+    --phone-pane-height: max(22rem, calc(var(--head) + var(--line) * 18 + var(--pane-y)));
+    display: flex;
+    flex-direction: column;
+    min-height: var(--phone-pane-height);
+  }
   .term-pane { display: none; min-height: inherit; border: 0; }
-  .terminal[data-view='whole'] .outline, .terminal[data-view='reader'] .outline,
-  .terminal[data-view='outline'] .outline, .terminal[data-view='history'] .history,
-  .terminal[data-view='agent'] .agent, .terminal[data-view='usage'] .usage { display: flex; }
+  .terminal .usage { display: flex; order: -1; min-height: 0; border-bottom: 1px solid var(--term-line); }
+  .terminal[data-view='reader'] .outline, .terminal[data-view='outline'] .outline,
+  .terminal[data-view='history'] .history, .terminal[data-view='usage'] .agent,
+  .terminal[data-view='whole'] .agent, .terminal[data-view='agent'] .agent { display: flex; }
   .term-project { gap: 1.2ch; }
   .term-hint { font-size: .9em; }
   .history { --line: 1.58rem; }
   .reader { width: calc(100% - 1rem); }
   .reader-content { padding-inline: .45rem; }
   .reader-content .diff-line { grid-template-columns: 1.6ch 1ch minmax(0, 1fr); column-gap: .65ch; }
-  .usage-strip { grid-template-columns: 1fr; align-content: center; padding: .4rem 1rem .7rem; }
-  .usage-tool { grid-template-columns: 4.6rem 1fr 1fr; gap: 0 .9rem; font-size: .6875rem; padding: .75rem 0; }
-  .usage-tool + .usage-tool { border-inline: 0; border-top: 1px solid var(--term-line); }
-  .usage-limit strong { font-size: 2.4rem; }
-  .usage-mark img { width: 3.2rem; }
-  .agent-session { padding-inline: .65rem; }
-  .agent-step { margin-top: .6rem; }
 }

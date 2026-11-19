@@ -11,33 +11,31 @@ export const request = 'Add wind speed to the weekend forecast.';
 
 export type Pane = 'outline' | 'history' | 'usage' | 'reader' | 'agent';
 
-// milo sits beside whichever coding agent runs in the shell. Each pass of
-// the demo plays in the next one's tab: `tab` is its name in Rex's sidebar,
-// `name` is what the caption calls it.
+// Each pass shows a different coding agent in the same Rex layout.
 export const harnesses = [
-  { tab: 'claude', name: 'Claude Code' },
-  { tab: 'codex', name: 'Codex' },
-  { tab: 'omp', name: 'omp' },
+  { id: 'claude', name: 'Claude Code', version: '2.1.309', model: 'Opus 4.7' },
+  { id: 'codex', name: 'Codex', version: '0.170.0', model: 'GPT-5.6 Sol high' },
+  { id: 'omp', name: 'omp', version: '19.0.0', model: 'GPT-5.6 Sol high' },
 ] as const;
 
 // One pass of the demo, in milliseconds from its start. Each effect follows
 // its cause by a beat: the agent's edit appears, then the outline marks the
 // file; the agent commits, then the history gains the commit. `focus` is the
-// pane the window draws the eye to; `say` is the caption, a pane's name and
-// what it is doing, with {agent} standing for the harness in this pass.
+// pane the window draws the eye to. Each caption emphasizes one phrase;
+// {agent} stands for the harness in this pass.
 export const scene = [
-  { at: 0, phase: 'compose', focus: 'agent', say: ['', 'You ask {agent}, as usual.'] },
-  { at: 2000, phase: 'prompt', focus: 'agent', say: ['', 'You ask {agent}, as usual.'] },
-  { at: 3100, phase: 'plan', focus: 'agent', say: ['', 'You ask {agent}, as usual.'] },
-  { at: 4700, phase: 'editing', focus: 'agent', say: ['', 'It edits a file.'] },
-  { at: 5500, phase: 'edit', focus: 'outline', say: ['Outline', 'marks the file the moment it changes.'] },
-  { at: 8600, phase: 'read', focus: 'reader', say: ['Reader', 'shows what was added and removed.'] },
-  { at: 12000, phase: 'test', focus: 'agent', say: ['', '{agent} carries on.'] },
-  { at: 13500, phase: 'committing', focus: 'agent', say: ['', 'It commits the change.'] },
-  { at: 14300, phase: 'commit', focus: 'history', say: ['History', 'gains the new commit.'] },
-  { at: 17300, phase: 'usage', focus: 'usage', say: ['Usage', 'shows what that used of your limits.'] },
-  { at: 20300, phase: 'rest', focus: null, say: ['', 'All of it stays in view, beside your work.'] },
-] as const satisfies readonly { at: number; phase: string; focus: Pane | null; say: readonly [string, string] }[];
+  { at: 0, phase: 'compose', focus: 'agent', say: 'You ask **{agent}**, as usual.' },
+  { at: 2000, phase: 'prompt', focus: 'agent', say: 'You ask **{agent}**, as usual.' },
+  { at: 3100, phase: 'plan', focus: 'agent', say: 'You ask **{agent}**, as usual.' },
+  { at: 4700, phase: 'editing', focus: 'agent', say: 'It edits **weather.ts**.' },
+  { at: 5500, phase: 'edit', focus: 'outline', say: '**Outline** marks the file the moment it changes.' },
+  { at: 8600, phase: 'read', focus: 'reader', say: 'Reader shows **what changed**, line by line.' },
+  { at: 12000, phase: 'test', focus: 'agent', say: '**{agent}** runs the forecast test.' },
+  { at: 13500, phase: 'committing', focus: 'agent', say: 'It **commits the change**.' },
+  { at: 14300, phase: 'commit', focus: 'history', say: 'History gains **the new commit**.' },
+  { at: 17300, phase: 'usage', focus: 'usage', say: 'Usage shows **how much is left** for the five-hour window.' },
+  { at: 20300, phase: 'rest', focus: null, say: 'All of it stays in view, **beside your work**.' },
+] as const satisfies readonly { at: number; phase: string; focus: Pane | null; say: `${string}**${string}**${string}` }[];
 
 // When typing starts and how long it takes, inside the compose step.
 export const typing = { start: 400, length: 1300 };
@@ -45,15 +43,13 @@ export const typing = { start: 400, length: 1300 };
 export const loopLength = 24200;
 
 export type Phase = typeof scene[number]['phase'];
-// `from` is set on the step where the five-hour figure has just risen.
-type Usage = { five: number; from?: number; week: number; age: string };
 export type Frame = {
   phase: Phase;
   files: readonly DemoFile[];
   toCommit: number;
   toPush: number;
   ahead: readonly Commit[];
-  usage: Record<'codex' | 'claude', Usage>;
+  usage: Record<'codex' | 'claude', number>;
 };
 
 // Tokens and line numbers reproduce the captured reader; the agent's excerpt
@@ -109,10 +105,19 @@ export const pushed: readonly Commit[] = [
 
 const order = scene.map(step => step.phase);
 
-export function frameAt(phase: Phase): Frame {
+// These are the latest local reports for each provider, not totals for the edit.
+const usageReports = { codex: 17, claude: 31 };
+
+function usageAt(phase: Phase, harness: typeof harnesses[number]['id']): Frame['usage'] {
+  if (phase !== 'usage' && phase !== 'rest') return usageReports;
+  // omp is running a Codex model in this scene, so its report goes under Codex.
+  const provider = harness === 'claude' ? 'claude' : 'codex';
+  return { ...usageReports, [provider]: usageReports[provider] - 2 };
+}
+
+export function frameAt(phase: Phase, harness: typeof harnesses[number]['id']): Frame {
   const reached = (step: Phase) => order.indexOf(phase) >= order.indexOf(step);
   const committed = reached('commit');
-  const risen = reached('usage');
   const files = tree.map((file): DemoFile => file.path === edit.path && reached('edit')
     ? { ...edit, pending: committed ? 'push' : 'commit' }
     : file);
@@ -122,9 +127,6 @@ export function frameAt(phase: Phase): Frame {
     toCommit: files.filter(file => file.pending === 'commit').length,
     toPush: files.filter(file => file.pending === 'push').length,
     ahead: committed ? [newCommit, ...ahead] : ahead,
-    usage: {
-      codex: { five: risen ? 19 : 17, from: phase === 'usage' ? 17 : undefined, week: 69, age: risen ? 'just now' : '4 m ago' },
-      claude: { five: 31, week: 58, age: '6 m ago' },
-    },
+    usage: usageAt(phase, harness),
   };
 }
