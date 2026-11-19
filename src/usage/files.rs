@@ -644,9 +644,11 @@ mod tests {
 
     #[test]
     fn the_cache_reloads_a_same_size_rewrite_with_a_restored_mtime() {
+        use std::time::{Duration, UNIX_EPOCH};
+
         let f = Fixture::folder();
         let path = f.root.join("limits.json");
-        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let modified = UNIX_EPOCH + Duration::from_secs(1);
         f.write("limits.json", "false");
         File::open(&path).unwrap().set_modified(modified).unwrap();
         let (mut previous, mut snapshot) = (None, None);
@@ -655,10 +657,22 @@ mod tests {
         read_cached(&path, &mut previous, &mut snapshot, &mut budget, parse);
         assert_eq!(snapshot.as_deref(), Some(b"false".as_slice()));
 
-        // Allow the inode change time to advance on filesystems with coarse clocks.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let changed = || {
+            let metadata = path.metadata().unwrap();
+            (metadata.ctime(), metadata.ctime_nsec())
+        };
+        let before = changed();
         f.write("limits.json", "true ");
-        File::open(&path).unwrap().set_modified(modified).unwrap();
+        let file = File::open(&path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            file.set_modified(modified).unwrap();
+            if changed() != before {
+                break;
+            }
+            assert!(Instant::now() < deadline, "inode change time did not advance");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         read_cached(&path, &mut previous, &mut snapshot, &mut budget, parse);
         assert_eq!(snapshot.as_deref(), Some(b"true ".as_slice()));
     }
