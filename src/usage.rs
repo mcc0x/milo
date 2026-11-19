@@ -9,13 +9,14 @@ mod time;
 use std::collections::HashMap;
 use std::io;
 use std::ops::ControlFlow;
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::help::{self, Page};
 use crate::json::Value;
 use crate::keys::Key;
-use crate::pane::{After, Pane};
+use crate::pane::{After, External, Pane};
 use crate::screen::Screen;
 use crate::watch::Scope;
 use crate::when::{DAY, MINUTE};
@@ -679,10 +680,13 @@ impl Usage {
     }
 
     /// Give each provider its own I/O allowance so one busy log cannot starve the other.
-    fn refresh(&mut self, now: i64) -> bool {
-        if let Some(reports) = self.omp.check(now, Instant::now()) {
-            self.codex.omp = reports.codex;
-            self.claude.omp = reports.claude;
+    fn refresh(&mut self, now: i64, manual: bool) -> bool {
+        self.collect_omp();
+        let clock = Instant::now();
+        if manual {
+            self.omp.reload(now, clock);
+        } else {
+            self.omp.start(now, clock);
         }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
@@ -693,7 +697,16 @@ impl Usage {
         {
             self.bytes_read = codex_budget.read + claude_budget.read;
         }
-        claude && !self.omp.pending()
+        claude
+    }
+
+    fn collect_omp(&mut self) -> bool {
+        let Some(result) = self.omp.collect() else { return false };
+        if let Some(reports) = result {
+            self.codex.omp = reports.codex;
+            self.claude.omp = reports.claude;
+        }
+        true
     }
 
     fn check_limits(&mut self, now: i64, codex_budget: &mut Budget, claude_budget: &mut Budget) {
@@ -737,7 +750,15 @@ pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
 
 impl Pane for Usage {
     fn check(&mut self) -> bool {
-        self.refresh(self.now())
+        self.refresh(self.now(), false)
+    }
+
+    fn external_fd(&self) -> Option<RawFd> {
+        self.omp.fd()
+    }
+
+    fn check_external(&mut self) -> External {
+        if self.collect_omp() { External::Redraw } else { External::Unchanged }
     }
 
     fn draw(&mut self, screen: &mut Screen) {
@@ -765,7 +786,7 @@ impl Pane for Usage {
         match key {
             Key::Char('q') => return After::Leave,
             Key::Char('r') => {
-                self.check();
+                self.refresh(self.now(), true);
             }
             _ => return After::Ignored,
         }

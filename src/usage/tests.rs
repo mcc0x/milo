@@ -275,6 +275,24 @@ mod omp_limits {
         }
     }
 
+    /// The pane's external fd must wake without a filesystem event or another scheduled check.
+    fn finish_omp(usage: &mut Usage) {
+        let mut ready = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
+        let timeout = i32::try_from(TEST_WAIT.as_millis()).unwrap();
+        loop {
+            // SAFETY: The single pollfd is live, and usage still owns its descriptor.
+            let result = unsafe { libc::poll(&raw mut ready, 1, timeout) };
+            if result == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            assert_eq!(result, 1, "OMP query did not wake the pane");
+            break;
+        }
+        assert!(matches!(usage.check_external(), External::Redraw));
+        assert!(usage.external_fd().is_none());
+        assert!(matches!(usage.check_external(), External::Unchanged));
+    }
+
     #[test]
     fn omp_prefers_the_newest_report_per_provider_and_newer_history_per_limit() {
         let f = Fixture::folder();
@@ -458,7 +476,8 @@ mod omp_limits {
         status::run(STATUS, Vec::new(), Some(&state), NOW - 1);
         let mut usage = unopened(&f, NOW);
         usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
-        wait_for(|| usage.check());
+        assert!(usage.check());
+        finish_omp(&mut usage);
         assert_eq!(usage.codex.reported().unwrap().1.label(), "OMP usage database");
         assert_eq!(usage.claude.reported().unwrap().1.label(), "OMP usage database");
         let codex = usage.codex.reported().unwrap().0.windows.base;
@@ -514,25 +533,45 @@ mod omp_limits {
     }
 
     #[test]
+    fn omp_pending_is_distinct_from_no_source_and_manual_reload_wakes_the_pane() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let reset = (NOW + DAY) * 1000;
+        let week = |fraction| window("openai-codex:primary", fraction, reset, 10_080, "null");
+        report(&path, "codex", "openai-codex", NOW * 1000, &format!("[{}]", week("0.25")));
+        let mut usage = unopened(&f, NOW);
+        usage.omp = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+
+        assert!(usage.check());
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · checking"]);
+        finish_omp(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude · no source"]);
+
+        report(&path, "codex", "openai-codex", NOW * 1000, &format!("[{}]", week("0.65")));
+        assert!(usage.check());
+        assert!(usage.external_fd().is_none(), "automatic checks still respect the cooldown");
+        assert_eq!(usage.key(Key::Char('r')), After::Stay);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude · checking"]);
+        finish_omp(&mut usage);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude · no source"]);
+    }
+
+    #[test]
     fn omp_poll_does_not_start_another_query_before_twenty_seconds() {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         let clock = Instant::now();
         let mut poll = omp::Poll::new(Some(path), TEST_WAIT);
-        assert!(poll.check(NOW, clock).is_none() && poll.pending());
-        wait_for(|| {
-            poll.check(NOW, clock);
-            !poll.pending()
-        });
+        poll.start(NOW, clock);
+        assert!(poll.pending());
+        wait_for(|| poll.collect().is_some());
         for seconds in 0..20_u64 {
-            assert!(poll.check(NOW, clock + Duration::from_secs(seconds)).is_none());
+            poll.start(NOW, clock + Duration::from_secs(seconds));
             assert!(!poll.pending());
         }
-        assert!(poll.check(NOW, clock + Duration::from_secs(20)).is_none() && poll.pending());
-        wait_for(|| {
-            poll.check(NOW, clock + Duration::from_secs(20));
-            !poll.pending()
-        });
+        poll.start(NOW, clock + Duration::from_secs(20));
+        assert!(poll.pending());
+        wait_for(|| poll.collect().is_some());
         assert_eq!(omp::database_in(Some(&f.root), None).unwrap(), f.root.join(".omp/agent/agent.db"));
         assert_eq!(omp::database_in(None, Some(&f.root)).unwrap(), f.root.join("agent.db"));
     }
@@ -545,13 +584,14 @@ mod omp_limits {
         let start = Instant::now();
         let mut poll = omp::Poll::new(Some(path.clone()), TEST_WAIT);
         let mut read = |clock| {
-            assert!(poll.check(NOW, clock).is_none() && poll.pending());
+            poll.start(NOW, clock);
+            assert!(poll.pending());
             let mut report = None;
             wait_for(|| {
-                report = poll.check(NOW, clock);
-                !poll.pending()
+                report = poll.collect();
+                report.is_some()
             });
-            report.unwrap()
+            report.unwrap().unwrap()
         };
         assert!(read(start).claude.is_some());
         fs::remove_file(path).unwrap();

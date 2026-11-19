@@ -1,10 +1,12 @@
 //! Reads OMP's saved account limits without invoking the harness or its login.
 
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{self, PipeReader, Read};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -85,7 +87,26 @@ pub(super) struct Poll {
     path: Option<PathBuf>,
     wait: Duration,
     last: Option<Instant>,
-    job: Option<JoinHandle<Option<Reports>>>,
+    job: Option<Job>,
+}
+
+struct Job {
+    ready: PipeReader,
+    result: Receiver<Option<Reports>>,
+    thread: JoinHandle<()>,
+}
+
+impl Job {
+    fn start(read: impl FnOnce() -> Option<Reports> + Send + 'static) -> io::Result<Self> {
+        let (ready, done) = io::pipe()?;
+        let (send, result) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new().spawn(move || {
+            let _ = send.send(read());
+            // Closing the write end wakes the terminal after the result is ready.
+            drop(done);
+        })?;
+        Ok(Self { ready, result, thread })
+    }
 }
 
 impl Poll {
@@ -93,35 +114,49 @@ impl Poll {
         Self { path, wait, last: None, job: None }
     }
 
-    /// Keep checking quickly enough to collect a worker that has not finished.
+    /// An existing reading stays visible; only an empty pane needs a pending hint.
     pub(super) fn pending(&self) -> bool {
         self.job.is_some()
     }
 
-    /// At most one worker; even a busy database does not hold up a frame.
-    pub(super) fn check(&mut self, now: i64, clock: Instant) -> Option<Reports> {
-        if let Some(job) = &self.job {
-            if !job.is_finished() {
-                return None;
-            }
-            return self.job.take()?.join().ok().flatten();
-        }
+    pub(super) fn fd(&self) -> Option<RawFd> {
+        self.job.as_ref().map(|job| job.ready.as_raw_fd())
+    }
+
+    /// None means there is no completed query; a completed query can also fail.
+    pub(super) fn collect(&mut self) -> Option<Option<Reports>> {
+        let result = match self.job.as_ref()?.result.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => return None,
+        };
+        self.job = None;
+        Some(result)
+    }
+
+    /// Limit background reads; a deliberate reload is not held by the cooldown.
+    pub(super) fn start(&mut self, now: i64, clock: Instant) {
         if self.last.is_some_and(|last| clock.saturating_duration_since(last) < INTERVAL) {
-            return None;
+            return;
         }
-        let path = self.path.clone()?;
+        self.reload(now, clock);
+    }
+
+    /// Reuse an in-flight read instead of making the database serve both.
+    pub(super) fn reload(&mut self, now: i64, clock: Instant) {
+        if self.job.is_some() {
+            return;
+        }
+        let Some(path) = self.path.clone() else { return };
         let wait = self.wait;
         self.last = Some(clock);
-        self.job = thread::Builder::new()
-            .spawn(move || {
-                read(&path, now, wait).or_else(|| {
-                    let missing =
-                        std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-                    missing.then(Reports::default)
-                })
+        self.job = Job::start(move || {
+            read(&path, now, wait).or_else(|| {
+                let missing = std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+                missing.then(Reports::default)
             })
-            .ok();
-        None
+        })
+        .ok();
     }
 }
 
@@ -129,7 +164,7 @@ impl Drop for Poll {
     fn drop(&mut self) {
         // Let the worker reap SQLite before this process goes away.
         if let Some(job) = self.job.take() {
-            let _ = job.join();
+            let _ = job.thread.join();
         }
     }
 }
@@ -334,14 +369,33 @@ mod tests {
     }
 
     #[test]
+    fn an_in_flight_query_can_be_checked_and_reloaded_without_waiting_or_spawning_another() {
+        let (finish, gate) = mpsc::channel();
+        let mut poll = Poll::new(Some(PathBuf::from("/unused.db")), QUERY_WAIT);
+        poll.job = Some(
+            Job::start(move || {
+                gate.recv_timeout(Duration::from_secs(5)).ok()?;
+                Some(Reports::default())
+            })
+            .unwrap(),
+        );
+        let fd = poll.fd().unwrap();
+        assert!(poll.collect().is_none());
+        poll.reload(0, Instant::now());
+        assert_eq!(poll.fd(), Some(fd));
+        finish.send(()).unwrap();
+    }
+
+    #[test]
     fn closing_usage_waits_for_its_sqlite_worker_to_reap_the_child() {
         let (send, receive) = std::sync::mpsc::channel();
-        let job = thread::spawn(move || {
+        let job = Job::start(move || {
             let mut child = Command::new("/bin/sleep").arg("0.1").spawn().unwrap();
             send.send(child.id()).unwrap();
             child.wait().unwrap();
             None
-        });
+        })
+        .unwrap();
         let mut poll = Poll::new(None, QUERY_WAIT);
         poll.job = Some(job);
         let pid = libc::pid_t::try_from(receive.recv().unwrap()).unwrap();

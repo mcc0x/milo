@@ -183,7 +183,7 @@ mod tests {
     fn short_panels_keep_plain_text_even_when_pictures_are_supported() {
         let mut screen = Screen::sized(32, 2);
         screen.set_pictures(true);
-        let mut report = Report::new(Tool::Codex, None, Hint::NO_LIMITS, 0);
+        let mut report = Report::new(Tool::Codex, None, Hint::no_limits(Tool::Codex), 0);
         report.first = metric(73.0);
         report.panel(&mut screen, Area { x: 0, y: 0, w: 32, h: 2 }, 2, Activity::default);
         assert_eq!(screen.text(), ["██ Codex 5h 27% left", ""]);

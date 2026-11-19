@@ -39,7 +39,7 @@ impl Tool {
         }
     }
 
-    fn open(self) -> &'static str {
+    const fn open(self) -> &'static str {
         match self {
             Self::Codex => "Open Codex",
             Self::Claude => "Open Claude Code",
@@ -266,6 +266,7 @@ impl Metric<'_> {
 }
 
 /// Long and short explanations let missing figures fit either layout.
+#[derive(PartialEq, Eq)]
 struct Hint {
     full: &'static str,
     short: &'static str,
@@ -274,6 +275,7 @@ struct Hint {
 }
 
 impl Hint {
+    const CHECKING: Self = Self { full: "checking local limits", short: "checking", state: "checking", next: None };
     const NO_SESSIONS: Self =
         Self { full: "no sessions found", short: "no sessions", state: "no source", next: Some("Run Codex") };
     const NO_SAVED_LIMITS: Self = Self {
@@ -282,13 +284,16 @@ impl Hint {
         state: "no source",
         next: Some("Run milo setup"),
     };
-    const NO_LIMITS: Self = Self { full: "no limits to show", short: "no limits", state: "no limits", next: None };
     const UNREADABLE: Self = Self {
         full: "could not read sessions",
         short: "could not read",
         state: "cannot read",
         next: Some("Check session access"),
     };
+
+    const fn no_limits(tool: Tool) -> Self {
+        Self { full: "no limits to show", short: "no limits", state: "no limits", next: Some(tool.open()) }
+    }
 
     /// Draws the hint, with `also` after it on the same row when both fit.
     fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<&str>) {
@@ -334,7 +339,10 @@ impl<'a> Report<'a> {
         let mut figures = base.chain(model);
         let (first, hint) = match figures.next() {
             Some(first) => (first, None),
-            None => (Metric::missing("limits"), Some(Hint::NO_LIMITS)),
+            None => {
+                let hint = if missing == Hint::CHECKING { missing } else { Hint::no_limits(tool) };
+                (Metric::missing("limits"), Some(hint))
+            }
         };
         Self { tool, first, extra: [figures.next(), figures.next()], hint }
     }
@@ -353,8 +361,10 @@ impl<'a> Report<'a> {
         let mut line = 1;
         if let Some(hint) = &self.hint {
             self.summary_line(screen, area, "", hint.state, SummaryEnd::Plain, FAINT);
-            area.note(screen, line, hint.next.unwrap_or_else(|| self.tool.open()));
-            line += 1;
+            if let Some(next) = hint.next {
+                area.note(screen, line, next);
+                line += 1;
+            }
         } else if matches!(metric.when, When::Elapsed) {
             let value = if area.w >= 17 { "reset elapsed" } else { "elapsed" };
             self.summary_line(screen, area, &metric.label, value, SummaryEnd::Plain, FAINT);
@@ -456,6 +466,9 @@ impl<'a> Report<'a> {
 
     /// Shorten the name and labels before giving up a reported figure.
     fn inline(&self, screen: &mut Screen, area: Area) {
+        if matches!(self.hint, Some(Hint::CHECKING)) {
+            return self.summary_line(screen, area, "", Hint::CHECKING.state, SummaryEnd::Plain, FAINT);
+        }
         let first = &self.first;
         let name = self
             .tool
@@ -566,8 +579,7 @@ impl<'a> Report<'a> {
         let spare = row < area.h;
         let activity = (spare || self.hint.is_some()).then(|| activity_text(activity())).flatten();
         if let Some(hint) = &self.hint {
-            let next = hint.next.unwrap_or_else(|| self.tool.open());
-            hint.draw(screen, figures, chart.note, activity.as_deref().filter(|_| !spare).or(Some(next)));
+            hint.draw(screen, figures, chart.note, activity.as_deref().filter(|_| !spare).or(hint.next));
         }
         if spare {
             if let Some(activity) = activity {
@@ -615,7 +627,7 @@ impl<'a> Report<'a> {
         let mut row = LARGE_ROWS;
         if row < area.h {
             match &self.hint {
-                Some(hint) => hint.draw(screen, area, row, hint.next.or(Some(self.tool.open()))),
+                Some(hint) => hint.draw(screen, area, row, hint.next),
                 None => self.first.caption(screen, area, row),
             }
             row += 1;
@@ -816,17 +828,22 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     if w == 0 || h == 0 {
         return;
     }
-    let missing = match usage.codex.sessions {
-        CodexSessions::Missing => Hint::NO_SESSIONS,
-        CodexSessions::Present => Hint::NO_LIMITS,
-        CodexSessions::Unreadable => Hint::UNREADABLE,
+    let pending = usage.omp.pending();
+    let missing = if pending {
+        Hint::CHECKING
+    } else {
+        match usage.codex.sessions {
+            CodexSessions::Missing => Hint::NO_SESSIONS,
+            CodexSessions::Present => Hint::no_limits(Tool::Codex),
+            CodexSessions::Unreadable => Hint::UNREADABLE,
+        }
     };
     let reports = [
         Report::new(Tool::Codex, usage.codex.reported().map(|(r, source)| (&r.windows, source)), missing, now),
         Report::new(
             Tool::Claude,
             usage.claude.reported().map(|(r, source)| (&r.windows, source)),
-            Hint::NO_SAVED_LIMITS,
+            if pending { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
             now,
         ),
     ];
