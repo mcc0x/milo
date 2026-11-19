@@ -50,10 +50,10 @@
   font-size: 1.05rem;
   text-align: center;
 }
-.caption strong { color: #29397c; font-weight: 780; }
-.caption[data-tone='claude'] strong { color: #74361e; }
-.caption[data-tone='omp'] strong, .caption[data-tone='history'] strong { color: #563775; }
-.caption[data-tone='usage'] strong, .caption[data-tone='reader'] strong { color: #215344; }
+.caption strong { color: var(--blue); font-weight: 780; }
+.caption[data-tone='claude'] strong { color: #703a24; }
+.caption[data-tone='omp'] strong, .caption[data-tone='history'] strong { color: #594276; }
+.caption[data-tone='usage'] strong, .caption[data-tone='reader'] strong { color: #20584e; }
 
 /* Geometry and chrome follow the tidebook window in docs/img/tab.png. */
 .terminal {
