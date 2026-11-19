@@ -527,7 +527,7 @@ impl Repo {
         if *ends != self.unpushed.ends {
             let parsed = match &ends.base {
                 Some(base) => {
-                    let args = ["diff", base, "HEAD", "-M", "--raw", "--numstat", "-z"];
+                    let args = ["diff", base, &ends.tip, "-M", "--raw", "--numstat", "-z", "--"];
                     parse_files(&self.git(&args)?)
                 }
                 None => Vec::new(),
@@ -578,7 +578,7 @@ impl Repo {
                 .as_ref()
                 .is_some_and(|known| known.path == path && &known.ends == self.ends() && known.index == index);
         if !fresh {
-            let raw = self.git(&["diff", self.against(), "-M", "--raw", "-z"])?;
+            let raw = self.git(&["diff", self.against(), "-M", "--raw", "-z", "--"])?;
             let from = parse_files(&raw).into_iter().find(|f| f.path == path).and_then(|f| f.from);
             self.moved = Some(RenameLookup { path: path.to_string(), ends: self.ends().clone(), index, from });
         }
@@ -753,6 +753,36 @@ mod tests {
         assert_eq!(repo.remote(), Some("origin/main"));
         assert!(repo.pending().unwrap().is_empty());
         assert!(!repo.history(1).unwrap()[0].unpushed);
+    }
+
+    #[test]
+    fn a_worktree_path_named_head_does_not_hide_unpushed_files() {
+        let f = Fixture::new();
+        f.write("page.txt", "first\n");
+        f.commit("first");
+        f.push();
+        f.write("page.txt", "second\n");
+        f.commit("second");
+        f.write("HEAD", "not a ref\n");
+
+        let mut repo = read_repo(&f);
+        let pending = repo.pending().unwrap();
+        let (local, unpushed) = pending.split_at(1);
+        assert_eq!((local[0].path.as_str(), local[0].kind), ("HEAD", Kind::Untracked));
+        assert_only_unpushed_page(unpushed);
+    }
+
+    #[test]
+    fn a_worktree_path_named_head_does_not_hide_rename_sources() {
+        let f = Fixture::new();
+        f.write("old.txt", "page\n");
+        f.commit("first");
+        f.git(&["mv", "old.txt", "new.txt"]);
+        f.write("HEAD", "not a ref\n");
+
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.moved_from("new.txt").as_deref(), Some("old.txt"));
+        assert!(repo.ok());
     }
 
     #[test]
