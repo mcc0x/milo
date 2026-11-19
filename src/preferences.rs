@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{fs_ops, paths};
 
+const PREFERENCES_LIMIT: u64 = 1 << 16;
+
 pub use crate::git::worktree;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +147,7 @@ impl Preferences {
 
     /// Parse into a copy so a broken layer cannot leak any partial edits.
     fn read_layer(mut self, file: &Path) -> io::Result<Option<Self>> {
-        let Some(text) = read(file, 1 << 16)? else { return Ok(None) };
+        let Some(text) = read(file, PREFERENCES_LIMIT)? else { return Ok(None) };
         self.apply(&text)?;
         Ok(Some(self))
     }
@@ -242,7 +244,7 @@ fn update(path: &Path, edits: &[(&str, Option<&str>)]) -> io::Result<()> {
         return Ok(());
     }
     locked(path, |dir| {
-        let old = read(path, 1 << 16)?.unwrap_or_default();
+        let old = read(path, PREFERENCES_LIMIT)?.unwrap_or_default();
         // Validate the destination without filling in its missing (inherited) settings.
         Preferences::default().apply(&old)?;
         let mut text = String::with_capacity(old.len() + extra + 1);
@@ -262,6 +264,9 @@ fn update(path: &Path, edits: &[(&str, Option<&str>)]) -> io::Result<()> {
             if let Some(value) = value {
                 let _ = writeln!(text, "{key} = {value}");
             }
+        }
+        if text.len() as u64 > PREFERENCES_LIMIT {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "preferences file would exceed its size limit"));
         }
         replace(dir, path, &text)
     })
@@ -435,6 +440,25 @@ mod tests {
         assert!(err.to_string().contains("history_follow_new"));
         assert!(Preferences::set_changes_only_in(&config, &root, true).is_err());
         assert_eq!(fs::read_to_string(&file).unwrap(), invalid);
+    }
+
+    #[test]
+    fn a_save_beyond_the_read_limit_preserves_the_valid_preferences() {
+        let f = Fixture::folder();
+        let root = f.root.join("checkout");
+        let file = config_file(&f.root, Some(&root));
+        let line = "icons = off\n";
+        let comment = "#".repeat(PREFERENCES_LIMIT as usize - line.len() - 1);
+        let original = format!("{line}{comment}\n");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, &original).unwrap();
+        let expected = (Preferences { icons: IconMode::Off, ..Preferences::default() }, Source::Worktree);
+        assert_eq!(Preferences::resolve_in(&f.root, Some(&root)).unwrap(), expected);
+
+        let err = Preferences::set_changes_only_in(&f.root, &root, true).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+        assert_eq!(Preferences::resolve_in(&f.root, Some(&root)).unwrap(), expected);
     }
 
     #[test]
