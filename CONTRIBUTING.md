@@ -87,7 +87,10 @@ over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
 explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
 
 Run `cargo test setup::` for generation, screen and installation tests. The
-tests use throwaway settings and a stand-in for Rex. To check a generated
+tests use throwaway settings and a stand-in for Rex. With Lua 5.1 installed,
+run `cargo test --locked --bin milo rex_lua_fixtures -- --ignored` for the
+action and listener scenarios. Set `LUA51` if the executable is not `lua5.1`.
+No running Rex session is needed. To check a generated
 file with Rex itself, run `MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`
 on a scratch copy. The flag prevents the actions file starting a listener
 during the check. Check both files and try the pane choices. Only try a

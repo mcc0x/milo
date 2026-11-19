@@ -558,6 +558,33 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires Lua 5.1; run by the Rex fixtures CI job"]
+    fn rex_lua_fixtures() {
+        let f = crate::fixture::Fixture::folder();
+        let executable = Path::new("/fixture/bin/milo");
+        let actions = f.root.join("enabled.lua");
+        let disabled = f.root.join("disabled.lua");
+        let listener = f.root.join("listener.lua");
+        let layout = Layout::default();
+        std::fs::write(&disabled, rex_lua(&layout, executable)).unwrap();
+        std::fs::write(&actions, rex_lua(&Layout { new_tabs: true, ..layout }, executable)).unwrap();
+        std::fs::write(&listener, listener_lua(&actions)).unwrap();
+        let lua = std::env::var_os("LUA51").unwrap_or_else(|| "lua5.1".into());
+        let run = |script: &str, files: &[&Path]| {
+            let status = std::process::Command::new(&lua)
+                .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/setup"))
+                .env_remove("MILO_CHECKING_REX")
+                .arg(script)
+                .args(files)
+                .status()
+                .expect("install Lua 5.1 or set LUA51 to its executable");
+            assert!(status.success(), "{script}: {status}");
+        };
+        run("actions_test.lua", &[Path::new("actions.lua")]);
+        run("listener_test.lua", &[&listener, &disabled]);
+    }
+
+    #[test]
     fn explicit_ten_row_settings_are_not_legacy_defaults() {
         let layout = Layout { usage_rows: "10".into(), ..Layout::default() };
         let current = rex_lua(&layout, Path::new("/milo"));
