@@ -14,8 +14,8 @@ use std::io;
 use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
-use crate::screen::{Screen, Style};
-use crate::ui::{self, FAINT, HEADING};
+use crate::screen::{self, Screen, Style, Wash};
+use crate::ui::{self, ADD, DEL, FAINT, HEADING};
 use crate::width::char_width;
 use crate::{paths, rex};
 use claude::Claude;
@@ -48,7 +48,7 @@ impl Choice {
             (Self::Pane(TabPane::History), false) => ("History", "Commits on the left"),
             (Self::Pane(TabPane::Usage), false) => ("Usage", "Limits on the left"),
             (Self::Width, false) => ("Column width", "Left side of the tab"),
-            (Self::NewTabs, false) => ("Arrange new shell tabs", "Skip tabs that run a command"),
+            (Self::NewTabs, false) => ("Arrange new shell tabs", "New sessions too; skips commands"),
             (Self::ClaudeLimits, false) => ("Show Claude Code limits", "For the usage pane"),
             (Self::Pane(TabPane::Outline), true) => ("Outline", "Files"),
             (Self::Pane(TabPane::History), true) => ("History", "Git"),
@@ -188,29 +188,43 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.message = None;
     }
 
-    /// Keep the label, value and explanation aligned even on the narrow layout.
+    /// Keep the mark, label, value and explanation aligned even on the narrow layout.
     fn choice(&self, s: &mut Screen, choice: Choice, y: usize, width: usize) {
-        let on = |enabled| if enabled { "On" } else { "Off" };
-        let status = match choice {
-            Choice::Pane(pane) => on(self.layout.chosen(pane)),
-            Choice::Width => self.layout.width_name(),
-            Choice::NewTabs => on(self.layout.new_tabs),
-            Choice::ClaudeLimits if self.claude == Claude::NotOwned => "On",
-            Choice::ClaudeLimits if !self.claude.editable() => "—",
-            Choice::ClaudeLimits => on(self.show_limits),
+        let toggle = |enabled| (if enabled { "On" } else { "Off" }, Some(enabled));
+        let (status, enabled) = match choice {
+            Choice::Pane(pane) => toggle(self.layout.chosen(pane)),
+            Choice::Width => (self.layout.width_name(), None),
+            Choice::NewTabs => toggle(self.layout.new_tabs),
+            Choice::ClaudeLimits if self.claude == Claude::NotOwned => toggle(true),
+            Choice::ClaudeLimits if !self.claude.editable() => ("—", None),
+            Choice::ClaudeLimits => toggle(self.show_limits),
+        };
+        // A filled or hollow mark and a word say the same as the colour.
+        let colour = match enabled {
+            Some(true) => ADD,
+            Some(false) => FAINT,
+            None if choice == Choice::Width => Style::fg(screen::CYAN),
+            None => FAINT,
         };
         let selected = choice == self.selected;
-        let style = if selected { Style::PLAIN.bold() } else { Style::PLAIN };
+        let weight = |style: Style| if selected { style.bold() } else { style };
         let compact = width < 49;
         let (value, explanation) =
             if compact { (16.min(width.saturating_sub(status.len().min(6))), 23) } else { (28, 36) };
         let (name, detail) = choice.labels(compact);
         if selected {
-            s.put(0, y, 1, "›", style);
+            s.put(0, y, 1, "›", Style::fg(screen::CYAN).bold());
         }
-        s.put_fit(2, y, value.min(width).saturating_sub(3), name, style);
-        s.put_fit(value, y, width.saturating_sub(value).min(6), status, style);
+        let name_at = if compact { 2 } else { 4 };
+        if let Some(enabled) = enabled.filter(|_| !compact) {
+            s.put(2, y, 1, if enabled { "●" } else { "○" }, colour);
+        }
+        s.put_fit(name_at, y, value.min(width).saturating_sub(name_at + 1), name, weight(Style::PLAIN));
+        s.put_fit(value, y, width.saturating_sub(value).min(6), status, weight(colour));
         s.put_fit(explanation, y, width.saturating_sub(explanation), detail, FAINT);
+        if selected && !compact {
+            s.wash(0, y, width, Wash::Bar);
+        }
     }
 
     fn footer(&self, s: &mut Screen) {
@@ -252,13 +266,25 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             };
             (if self.claude == Claude::Off { "Not set up yet" } else { "" }, instructions)
         };
+        // A wide pane says whether Rex is set up beside the title.
+        let beside_title = self.inside && s.w >= 49;
+        if beside_title {
+            let (mark, colour) = match self.installed {
+                Installed::Active(_) => ("●", ADD),
+                Installed::Absent => ("○", Style::fg(screen::YELLOW)),
+                Installed::Unreadable => ("●", DEL),
+            };
+            s.put(11, 0, 3, " · ", FAINT);
+            s.put(14, 0, 1, mark, colour);
+            s.put(16, 0, s.w - 16, status, FAINT);
+        }
         let mut top = 1;
         if end > 4 {
             if self.offered {
                 s.put_fit(1, top, s.w - 1, "Set up panes for Rex tabs.", FAINT);
                 top += 1;
             }
-            if !status.is_empty() {
+            if !beside_title && !status.is_empty() {
                 s.put_fit(1, top, s.w - 1, status, FAINT);
                 top += 1;
             }
@@ -268,20 +294,40 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 s.put(1, top, width, text, FAINT);
                 top += 1;
             }
-        } else if s.w >= 49 {
+        } else if !beside_title && s.w >= 49 {
             let status = instructions.first().copied().unwrap_or(status);
             s.put(11, 0, 3, " · ", FAINT);
             s.put(14, 0, s.w - 14, status, FAINT);
         }
         let choices = self.choices();
-        let shown = end.saturating_sub(top).min(choices.len());
-        let skip = self.selection().saturating_sub(shown.saturating_sub(1));
-        let mut next = top + shown;
-        for (row, &choice) in choices[skip..skip + shown].iter().enumerate() {
-            self.choice(s, choice, top + row, s.w);
+        let plan = self.save_plan();
+        let steps = plan.iter().flatten().count();
+        // With room for everything, the choices stand in two headed groups
+        // and each part of the screen has a blank row above it.
+        let (panes, options) = choices.split_at(choices.len().min(4));
+        let roomy = beside_title && !options.is_empty() && end >= top + 18 + if steps > 0 { steps + 2 } else { 0 };
+        let mut next;
+        if roomy {
+            next = top;
+            for (heading, group) in [("Panes", panes), ("Options", options)] {
+                ui::section_heading(s, next + 1, s.w - 1, heading);
+                next += 2;
+                for &choice in group {
+                    self.choice(s, choice, next, s.w);
+                    next += 1;
+                }
+            }
+            next += usize::from(steps > 0);
+        } else {
+            let shown = end.saturating_sub(top).min(choices.len());
+            let skip = self.selection().saturating_sub(shown.saturating_sub(1));
+            next = top + shown;
+            for (row, &choice) in choices[skip..skip + shown].iter().enumerate() {
+                self.choice(s, choice, top + row, s.w);
+            }
         }
-        if next < end {
-            next = self.draw_save_plan(s, next, end);
+        if next < end && steps > 0 {
+            next = Self::draw_save_plan(s, &plan, next, end);
         }
         let issue = match self.claude {
             Claude::Foreign => "Milo will leave your Claude Code status line alone.",
@@ -297,48 +343,61 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             next += 1;
         }
         if self.inside && s.w >= 36 && end >= next + 8 {
-            sketch(s, 2, next + 1, &self.layout);
+            let selected = if let Choice::Pane(pane) = self.selected { Some(pane) } else { None };
+            sketch(s, 2, next + 1, &self.layout, selected);
         }
     }
 
-    /// Explain actual file changes before saving, not just which toggles are on.
-    fn draw_save_plan(&self, s: &mut Screen, mut y: usize, end: usize) -> usize {
+    /// What saving would change in Rex, in its new tabs and in Claude Code:
+    /// actual file changes, not just which toggles are on.
+    fn save_plan(&self) -> [Option<Step>; 3] {
+        let add = |text| Some(("+", ADD, text));
+        let remove = |text| Some(("−", DEL, text));
         let saved = if let Installed::Active(layout) = &self.installed { Some(layout) } else { None };
         let rex = if !self.inside {
-            ""
+            None
         } else if self.layout.enabled() {
             match saved {
-                None => "Add Milo actions to Rex.",
-                Some(layout) if layout != &self.layout => "Update the Rex layout.",
-                Some(_) => "",
+                None => add("Add Milo actions to Rex."),
+                Some(layout) if layout != &self.layout => {
+                    Some(("~", Style::fg(screen::YELLOW), "Update the Rex layout."))
+                }
+                Some(_) => None,
             }
         } else if saved.is_some() {
-            "Remove Milo actions from Rex."
+            remove("Remove Milo actions from Rex.")
         } else {
-            ""
+            None
         };
         let listener = match (saved.is_some_and(|layout| layout.new_tabs), self.layout.new_tabs) {
-            (false, true) => "Arrange new shell tabs.",
-            (true, false) => "Stop arranging new shell tabs.",
-            _ => "",
+            (false, true) => add("Arrange new shell tabs."),
+            (true, false) => remove("Stop arranging new shell tabs."),
+            _ => None,
         };
         let claude = match self.limit_change() {
-            Some(true) => "Add milo to Claude Code's status line.",
-            Some(false) => "Take milo off Claude Code's status line.",
-            None => "",
+            Some(true) => add("Add milo to Claude Code's status line."),
+            Some(false) => remove("Take milo off Claude Code's status line."),
+            None => None,
         };
-        if [rex, listener, claude].iter().all(|text| text.is_empty()) {
-            return y;
-        }
+        [rex, listener, claude]
+    }
+
+    /// Each step has its sign in the margin; a long one wraps under its own words.
+    fn draw_save_plan(s: &mut Screen, plan: &[Option<Step>; 3], mut y: usize, end: usize) -> usize {
         s.put(1, y, s.w - 1, "On save:", HEADING);
         y += 1;
-        let width = s.w - 1;
-        for text in [rex, listener, claude].into_iter().flat_map(|text| wrap(text, width)) {
-            if y == end {
-                break;
+        let width = s.w.saturating_sub(3);
+        for (sign, colour, text) in plan.iter().flatten() {
+            for (row, line) in wrap(text, width).enumerate() {
+                if y == end {
+                    return y;
+                }
+                if row == 0 {
+                    s.put(1, y, 1, sign, *colour);
+                }
+                s.put(3, y, width, line, FAINT);
+                y += 1;
             }
-            s.put(1, y, s.w - 1, text, FAINT);
-            y += 1;
         }
         y
     }
@@ -369,8 +428,12 @@ fn wrap(mut text: &str, width: usize) -> impl Iterator<Item = &str> + Clone {
     })
 }
 
-/// A seven-row sketch. Each room can be read without the explanations beside it.
-fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout) {
+/// One thing saving would do: its sign, the sign's colour, and the words.
+type Step = (&'static str, Style, &'static str);
+
+/// A seven-row sketch. Each room can be read without the explanations beside
+/// it, and the pane the cursor is on stands out in its room.
+fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout, selected: Option<TabPane>) {
     const LINE: &str = "───────────────────────────────";
     const INTERIOR: usize = 31;
     let chosen = TabPane::ALL.map(|pane| layout.chosen(pane));
@@ -403,10 +466,14 @@ fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout) {
         2 => (2, 3),
         _ => (1, 2),
     };
-    let names = ["Outline", "History", "Usage"].into_iter().zip(chosen).filter_map(|(name, on)| on.then_some(name));
-    for (i, name) in names.enumerate() {
+    let names = ["Outline", "History", "Usage"].into_iter().zip(TabPane::ALL).zip(chosen);
+    let mut standing_out = None;
+    for (i, (name, pane)) in names.filter_map(|(room, on)| on.then_some(room)).enumerate() {
         let row = first + i * step;
         draw(2, row, name);
+        if selected == Some(pane) {
+            standing_out = Some((row, name));
+        }
         if i + 1 < count {
             // Two panes leave a blank row above the rule so the first stays centred.
             let rule = if count == 2 { 4 } else { row + 1 };
@@ -416,6 +483,9 @@ fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout) {
         }
     }
     draw(joint + 2, 3, "Your work");
+    if let Some((row, name)) = standing_out {
+        s.put(x + 2, y + row, name.len(), name, HEADING);
+    }
 }
 
 impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
@@ -548,7 +618,7 @@ mod tests {
         let mut pane = Setup::new(Some(store(&f)), true, None, |_| panic!("drawing needs no Rex"));
         let before = frame(&mut pane, 64, 24);
         for (label, _) in Choice::ALL.map(|choice| choice.labels(false)) {
-            assert!(before[..8].iter().any(|row| row.contains(label)));
+            assert!(before[..11].iter().any(|row| row.contains(label)));
         }
         for label in ["Outline", "History", "Usage", "Your work"] {
             assert!(before[12..].iter().any(|row| row.contains(label)));
@@ -562,8 +632,8 @@ mod tests {
         }
         pane.key(Key::Enter);
         let wider = frame(&mut pane, 64, 24);
-        assert!(wider[5].contains("Medium"));
-        assert_ne!(after[14], wider[14]);
+        assert!(wider[6].contains("Medium"));
+        assert_ne!(after[16], wider[16]);
     }
 
     #[test]
@@ -667,8 +737,8 @@ mod tests {
         let rows = frame(&mut pane, 80, 24);
         assert_eq!(rows[22].trim(), "Saved Rex layout choices.");
         assert!(rows[23].ends_with("q quit · ? help"));
-        assert_eq!(rows[2].chars().nth(28), Some('O'));
-        assert_eq!(rows[5].chars().nth(28), Some('T'));
+        assert_eq!(rows[3].chars().nth(28), Some('O'));
+        assert_eq!(rows[6].chars().nth(28), Some('T'));
         for _ in 0..3 {
             pane.key(Key::Enter);
             pane.key(Key::Down);
