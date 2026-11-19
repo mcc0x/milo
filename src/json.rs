@@ -17,6 +17,7 @@ pub struct Member<'a> {
 /// Visit only the top-level members, returning the offset just after the opening brace.
 pub fn settings_object<'a>(text: &'a str, mut visit: impl FnMut(Member<'a>)) -> Option<usize> {
     let mut input = Input::<true>(text);
+    input.space();
     let open = text.len() - input.0.len() + 1;
     input.0.starts_with('{').then_some(())?;
     input.collection(1, |key, value, key_tail, value_tail| {
@@ -280,6 +281,20 @@ impl<'a, const SETTINGS: bool> Input<'a, SETTINGS> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_accept_leading_json_whitespace_and_keep_edit_offsets() {
+        let text = " \t\r\n{ \"other\" : [null] }\r\n";
+        let mut members = 0;
+        let open = settings_object(text, |member| {
+            members += 1;
+            assert_eq!(&text[member.key_range], "\"other\"");
+            assert_eq!(&text[member.value_range], "[null]");
+        });
+        assert_eq!(open, Some(5));
+        assert_eq!(members, 1);
+        assert!(settings_object("\u{a0}{}", |_| {}).is_none());
+    }
 
     #[test]
     fn settings_and_reports_keep_their_own_nesting_bounds() {
