@@ -336,7 +336,7 @@ impl Pane for Outline {
                 sample("regular ", Style::PLAIN, "to push"),
                 sample("docs 3  ", Style::PLAIN, "3 changed"),
                 sample("+2      ", ADD, "lines added"),
-                sample("?       ", ui::FAINT, "lines not counted yet"),
+                sample("?       ", ui::FAINT, "not counted"),
                 sample("−1      ", DEL, "lines removed"),
                 sample(if self.static_marks { "•       " } else { "● ○     " }, Style::PLAIN.bold(), "being written"),
                 sample("•       ", Style::PLAIN, "just changed"),
