@@ -18,9 +18,13 @@ case "$bin_dir" in
 esac
 binary=${bin_dir%/}/milo
 
-if [ -L "$binary" ] || { [ -e "$binary" ] && [ ! -f "$binary" ]; }; then
-    fail "Not changing $binary: it is not a regular file."
-fi
+check_destination() {
+    if [ -L "$binary" ] || { [ -e "$binary" ] && [ ! -f "$binary" ]; }; then
+        fail "Not changing $binary: it is not a regular file."
+    fi
+}
+
+check_destination
 
 if [ "${1-}" = --uninstall ]; then
     if [ -f "$binary" ]; then
@@ -36,35 +40,35 @@ if [ "${1-}" = --uninstall ]; then
     exit 0
 fi
 
-command -v cargo >/dev/null 2>&1 || fail 'Cargo is required. Get Rust 1.91 or later at https://rustup.rs/ and run this installer again.'
-command -v git >/dev/null 2>&1 || fail 'Git is required. Install Git and run this installer again.'
-
-if ! repo=$(git rev-parse --show-toplevel 2>/dev/null) ||
-    [ ! -f "$repo/src/main.rs" ] ||
-    ! grep -q '^name = "milo"$' "$repo/Cargo.toml" 2>/dev/null; then
-    tmp_base=${TMPDIR:-/tmp}
-    case "$tmp_base" in
-        /*) ;;
-        *) tmp_base=$PWD/$tmp_base ;;
-    esac
-    scratch=$(mktemp -d "${tmp_base%/}/milo.XXXXXXXX")
-    trap 'rm -rf "$scratch"' 0
-    trap 'exit 1' HUP INT TERM
-    repo=$scratch/source
-    if ! git clone --depth 1 https://github.com/mcc0x/milo "$repo"; then
-        fail 'Could not clone milo. The repository is private and you need access.' \
-            'If you already have a clone, change to its directory and run: sh install.sh'
-    fi
+if [ "$(uname -s)" != Darwin ] ||
+    { [ "$(uname -m)" != arm64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" != 1 ]; }; then
+    fail 'This release requires an Apple Silicon Mac. See https://github.com/mcc0x/milo for source installation.'
 fi
 
-(cd "$repo" && cargo build --release --locked --target-dir target)
-built=$repo/target/release/milo
-if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$built" "$binary"; then
+version=v0.1.0
+asset=milo-aarch64-apple-darwin
+expected=e469ed3d206a8d24d458c2cbbdadf4338ec0277e0b37a18e1906cf14413b7d04
+release=https://github.com/mcc0x/milo/releases/download/$version
+
+# Stage on the same filesystem so a verified download can replace milo by rename.
+mkdir -p "$bin_dir"
+scratch=$(mktemp -d "${bin_dir%/}/.milo.XXXXXXXX")
+trap 'rm -rf "$scratch"' 0
+trap 'exit 1' HUP INT TERM
+
+curl --disable --proto '=https' --proto-redir '=https' -fsSL \
+    -o "$scratch/$asset" "$release/$asset" ||
+    fail "Could not download $asset for Milo $version."
+actual=$(shasum -a 256 < "$scratch/$asset")
+[ "${actual%% *}" = "$expected" ] || fail "SHA-256 checksum mismatch for $asset. Milo was not installed."
+
+check_destination
+if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$scratch/$asset" "$binary"; then
     printf 'milo is already installed at %s. Nothing to do.\n' "$binary"
 else
-    mkdir -p "$bin_dir"
-    install -m 755 "$built" "$binary"
-    printf 'Installed milo at %s.\n' "$binary"
+    chmod 755 "$scratch/$asset"
+    mv -fh "$scratch/$asset" "$binary"
+    printf 'Installed milo %s at %s.\n' "$version" "$binary"
 fi
 
 on_path() {

@@ -2,6 +2,33 @@
 
 ![Milo setup showing the available panes, the layout sketch and what saving will change](img/setup.png)
 
+## Install
+
+The v0.1.0 prebuilt release is for Apple Silicon macOS. Use Homebrew:
+
+```sh
+brew install mcc0x/tap/milo
+```
+
+Or download the release installer from GitHub while the website's DNS is being set up:
+
+```sh
+curl -fsSLo milo-install.sh https://raw.githubusercontent.com/mcc0x/milo/v0.1.0/site/public/install.sh &&
+  sh milo-install.sh
+```
+
+The installer checks the binary against a pinned SHA-256 checksum before placing it in `~/.local/bin`. Set `MILO_BIN_DIR` to choose a different directory. The prebuilt installer does not need a compiler, Cargo or Git.
+
+To build from source instead, install Git and Rust 1.91 or later, then run:
+
+```sh
+git clone https://github.com/mcc0x/milo.git
+cd milo
+sh install.sh
+```
+
+The source installer also honours `MILO_BIN_DIR` and defaults to `~/.local/bin`.
+
 ## In Rex
 
 Run `milo setup` inside a Rex tab. Use Up and Down to select a row and `Space` or `Enter` to change it. You can choose the outline, history and usage panes and the width of the left column, which holds them from top to bottom. Press `a` to try your choices in this tab without saving, or `s` to save them. The added panes leave the keyboard in your shell.
@@ -46,11 +73,11 @@ Setup does not rewrite your actions or key bindings. It refuses to change read-o
 
 1. To remove the Rex setup, run `milo setup` inside Rex. Turn off **Outline**, **History**, **Usage** and **Arrange new shell tabs**, then press `s`. This removes milo's lines from Rex's settings, stops the listener and removes generated files that milo still owns. A generated file you edited by hand is left in place. To close panes already open, use **Milo: Close Panes in This Tab** before removing the actions, or close the panes yourself.
 2. To remove milo from the Claude Code status line too, turn off **Show Claude Code limits** and save. You can also do this outside Rex.
-3. From the milo checkout, run `sh install.sh --uninstall` to remove the binary. Use the same `MILO_BIN_DIR` you installed to if you set one. This command does not change Rex or Claude Code settings or remove milo's saved state.
+3. Remove the binary with `brew uninstall milo` if you installed with Homebrew. If you used the release installer, run `sh milo-install.sh --uninstall` with your downloaded copy. If you built from source, run `sh install.sh --uninstall` from the checkout. For either script, use the same `MILO_BIN_DIR` you installed to if you set one. Removing the binary does not change Rex or Claude Code settings or remove milo's saved state.
 
 ## Troubleshooting
 
-- **`milo` is not found:** the installer puts it in `~/.local/bin` unless you set `MILO_BIN_DIR`. Add the install directory to your `PATH`, or run the binary by its full path.
+- **`milo` is not found:** for Homebrew, check that Homebrew is on `PATH`. The scripts put milo in `~/.local/bin` unless you set `MILO_BIN_DIR`. Add the install directory to `PATH`, or run the binary by its full path.
 - **Setup says milo's Rex lines were moved, copied or changed:** setup leaves the file alone. Put a single copy of the original two lines back at the top, just after any interpreter line, then reopen setup and save.
 - **A save was interrupted:** reopen setup, check the choices and press `s`. If Rex still needs to reload, setup says “Rex still needs to reload. Check your choices, then press s.”
 - **Another setup is saving:** only one setup can save at a time. Wait for the other save to finish, then try again.

@@ -52,7 +52,7 @@ if ! repo=$(git rev-parse --show-toplevel 2>/dev/null) ||
     trap 'exit 1' HUP INT TERM
     repo=$scratch/source
     if ! git clone --depth 1 https://github.com/mcc0x/milo "$repo"; then
-        fail 'Could not clone milo. The repository is private and you need access.' \
+        fail 'Could not clone milo from GitHub.' \
             'If you already have a clone, change to its directory and run: sh install.sh'
     fi
 fi

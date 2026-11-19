@@ -5,22 +5,31 @@
 <p align="center">A Git-aware file tree, commit history, diff reader and usage limits in native panes for <a href="https://www.superlogical.com/rex">Superlogical’s Rex terminal</a>.</p>
 
 <p align="center">
-  <a href="https://usemilo.net">
+  <a href="https://site-production-ad7e256b.up.railway.app">
     <picture>
       <source media="(max-width: 600px)" srcset="docs/img/web-demo-mobile.webp">
       <img src="docs/img/web-demo.webp" width="960" alt="Milo’s web demo: a file tree and commit history beside a Claude Code transcript, with Codex and Claude usage percentages above it">
     </picture>
   </a>
-  <br><sub><a href="https://usemilo.net">Watch the demo</a> cycle through Claude Code, Codex and omp. The project and usage figures are examples.</sub>
+  <br><sub><a href="https://site-production-ad7e256b.up.railway.app">Watch the demo</a> cycle through Claude Code, Codex and omp. The project and usage figures are examples.</sub>
 </p>
 
 ## Install
 
-The installer builds Milo from source. You need Git, Rust 1.91 or later, and access to clone this repository.
+The v0.1.0 release is available for Apple Silicon Macs. Install it with Homebrew:
 
 ```sh
-curl -fsSL https://usemilo.net/install.sh | sh
+brew install mcc0x/tap/milo
 ```
+
+Without Homebrew, download and run the installer from the release tag:
+
+```sh
+curl -fsSLo milo-install.sh https://raw.githubusercontent.com/mcc0x/milo/v0.1.0/site/public/install.sh &&
+  sh milo-install.sh
+```
+
+The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
 
 In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes. Check **On save:** and press `s` to save. Turn on **Arrange new shell tabs** to use the layout in new shell tabs and new sessions.
 
