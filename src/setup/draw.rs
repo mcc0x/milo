@@ -10,13 +10,14 @@ use crate::keys::Key;
 use crate::preferences::Source;
 use crate::screen::{self, Screen, Style};
 use crate::ui::{self, ADD, FAINT, HEADING};
-use crate::width::char_width;
+use crate::width::{char_width, str_width};
 
 use super::preview::{Preview, Rect, pane_label};
 use super::{Claude, Confirm, Panel, Row, SECTIONS, SaveKind, Scope, Setup, Side, TUNE};
 
 const ACCENT: Style = Style::fg(screen::CYAN);
 const UNSAVED: Style = Style::fg(screen::YELLOW).bold();
+const NARROW: usize = 24;
 
 #[derive(Default)]
 struct RowHit {
@@ -81,8 +82,9 @@ impl Visible {
         }
         let label = self.footer.item_at(x, y)?;
         Some(match label.chars().next()? {
-            'E' | '‹' => Key::Esc,
+            'E' | '‹' | 'b' => Key::Esc,
             'T' => Key::Ctrl(b'i'),
+            't' => Key::Char('a'),
             '↑' => Key::Up,
             '↓' => Key::Down,
             ch => Key::Char(ch),
@@ -112,6 +114,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.visible.current = true;
         self.visible.footer = self.footer(s);
         let end = self.notice(s);
+        if end == 1 && !self.rows().is_empty() {
+            self.draw_rows(s, 0, end, s.w.min(54));
+            return;
+        }
         let mut y = 1;
         let tab = self.panel.tab();
         // Keep a content row in short rails by using the heading for tabs.
@@ -137,7 +143,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             self.visible.tab_y = tab_y;
         }
         let rows = self.rows();
-        if self.panel != Panel::Exit && end.saturating_sub(y) > rows.len().clamp(1, 3) {
+        let narrow = s.w < NARROW;
+        let narrow_editor = narrow && tab.is_some() && !rows.is_empty();
+        if !narrow_editor && self.panel != Panel::Exit && end.saturating_sub(y) > rows.len().clamp(1, 3) {
             y += usize::from(end >= 12);
             self.title(s, y);
             y += 1 + usize::from(end >= 12);
@@ -148,8 +156,17 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
 
         let width = s.w.saturating_sub(2);
+        let selected = rows.get(self.selected).map(|&row| (row, self.cell(row)));
+        let detail_width = s.w - 1;
+        let summary = selected
+            .filter(|&(_, cell)| narrow && (cell.value.is_some() || cell.label != cell.short))
+            .map(|(_, cell)| compact_detail(cell, detail_width));
+        // Reserve space only for a complete summary and leave at least one control on screen.
+        let space = end.saturating_sub(y);
+        let summary_rows = summary.as_ref().map_or(0, |lines| lines.clone().take(space).count());
+        let summary_rows = if summary_rows < space { summary_rows } else { 0 };
         if let Some(text) = self.intro() {
-            let spare = end.saturating_sub(y + rows.len().min(3));
+            let spare = end.saturating_sub(y + rows.len().min(3) + summary_rows);
             for line in wrap(text, width).take(spare) {
                 s.put(1, y, width, line, FAINT);
                 y += 1;
@@ -193,17 +210,34 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             };
             preview.draw(s, Rect { x, y: y + 1, width, height }, highlight);
         }
-        self.draw_rows(s, y, form_end, form_width);
-        let next = y + self.visible.len;
-        if let Some(&row) = rows.get(self.selected)
-            && next + 1 < form_end
-        {
-            let cell = self.cell(row);
-            let detail = self.detail(row, cell);
-            for (i, line) in wrap(detail, form_width.saturating_sub(3)).take(form_end - next - 1).enumerate() {
-                s.put(2, next + 1 + i, form_width - 3, line, FAINT);
-            }
-        }
+        let rows_end =
+            if let Some(lines) = summary.filter(|_| summary_rows > 0 && summary_rows < form_end.saturating_sub(y)) {
+                let top = (y + rows.len()).min(form_end - summary_rows);
+                for (i, (line, value)) in lines.enumerate() {
+                    let at = top + i;
+                    let used = s.put(1, at, detail_width, line, FAINT);
+                    if let Some(value) = value {
+                        s.put(1 + used, at, 1, ":", FAINT);
+                        if !value.is_empty() {
+                            s.put(used + 3, at, detail_width - used - 2, value, FAINT);
+                        }
+                    }
+                }
+                top
+            } else {
+                let next = (y + rows.len()).min(form_end);
+                if !narrow
+                    && let Some((row, cell)) = selected
+                    && next + 1 < form_end
+                {
+                    let detail = self.detail(row, cell);
+                    for (i, line) in wrap(detail, form_width - 3).take(form_end - next - 1).enumerate() {
+                        s.put(2, next + 1 + i, form_width - 3, line, FAINT);
+                    }
+                }
+                form_end
+            };
+        self.draw_rows(s, y, rows_end, form_width);
 
         if let Some(top) = sample {
             if self.panel == Panel::Appearance {
@@ -238,7 +272,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn title(&self, s: &mut Screen, y: usize) {
         let show_heading = !matches!(self.panel, Panel::Layout | Panel::Appearance | Panel::Workflow) || !self.inside;
         let at = if show_heading {
-            let heading = self.panel.title();
+            let heading = if s.w < NARROW {
+                match self.panel {
+                    Panel::Save(SaveKind::Layout) => "Save layout",
+                    Panel::Save(_) => "Save prefs",
+                    Panel::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global?",
+                    Panel::Confirm(Confirm::Repair) => "Repair?",
+                    Panel::Confirm(Confirm::Remove) => "Remove?",
+                    _ => self.panel.title(),
+                }
+            } else {
+                self.panel.title()
+            };
             ui::section_heading(s, y, s.w - 2, heading);
             heading.len() + 3
         } else {
@@ -319,17 +364,21 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let back = self.panel.modal() || matches!(self.panel, Panel::Tune | Panel::Diagnostics);
         let exit = match (back, s.w) {
             (true, 26..) => "Esc back",
+            (true, 18..=23) => "back",
             (true, 12..) => "Esc",
             (true, _) => "‹",
+            (false, 18..=23) => "quit",
             (false, 15..) => "q quit",
             (false, _) => "q",
         };
         let full = s.w >= 54;
-        let compact = s.w >= 24;
+        let compact = s.w >= NARROW;
         let save = if full {
             "s save…"
         } else if compact {
             "s save"
+        } else if s.w >= 18 {
+            "save"
         } else {
             "s"
         };
@@ -340,6 +389,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     (false, true, _) => &["a try", "Tab sections", "? help"],
                     (true, false, true) => &["u undo", "?"],
                     (false, false, true) => &["a try", "?"],
+                    (true, false, false) if s.w >= 18 => &["undo", "?"],
+                    (false, false, false) if s.w >= 18 => &["try", "?"],
                     (true, false, false) => &["u", "?"],
                     (false, false, false) => &["a", "?"],
                 };
@@ -365,6 +416,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let first = self.selected.saturating_sub(len.saturating_sub(1)).min(rows.len() - len);
         let draw_width = width - 1;
         let left = if width < 8 { 1 } else { 2 };
+        let narrow = width < NARROW;
         self.visible.first = first;
         self.visible.y = y;
         self.visible.len = len;
@@ -376,25 +428,39 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             if selected {
                 s.put(0, row_y, 1, "›", if disabled { FAINT } else { ACCENT.bold() });
             }
-            let (label, name_style) = (
-                if width >= 42 { cell.label } else { cell.short },
-                if disabled {
-                    FAINT
-                } else if selected {
-                    HEADING
-                } else {
-                    Style::PLAIN
-                },
-            );
+            let name_style = if disabled {
+                FAINT
+            } else if selected {
+                HEADING
+            } else {
+                Style::PLAIN
+            };
             let hit = if let Some((value, style)) = cell.value {
-                let gap = usize::from(draw_width - left > 3);
-                let room = ((draw_width - left - gap) / 2).clamp(1, 13);
+                let space = draw_width - left;
+                let gap = usize::from(space > 3);
+                let value = if narrow { cell.short_value.unwrap_or(value) } else { value };
+                let room = if narrow {
+                    let width = str_width(value);
+                    if width + str_width(cell.short) + gap <= space { width } else { 0 }
+                } else {
+                    ((space - gap) / 2).clamp(1, 13)
+                };
                 let start = draw_width - room;
-                let label_width = s.put_fit(left, row_y, start - left - gap, label, name_style);
-                let value_width = s.put_fit(start, row_y, room, value, if disabled { FAINT } else { style });
+                let label_room = start - left - gap * usize::from(room > 0);
+                let label = cell.row_label(narrow, label_room);
+                let label_width = s.put_fit(left, row_y, label_room, label, name_style);
+                let value_style = if disabled { FAINT } else { style };
+                let value_width = if room == 0 {
+                    0
+                } else if narrow {
+                    s.put(start, row_y, room, value, value_style)
+                } else {
+                    s.put_fit(start, row_y, room, value, value_style)
+                };
                 RowHit { marker: selected, label: left..left + label_width, value: start..start + value_width }
             } else {
-                let used = s.put_fit(left, row_y, draw_width - left, label, name_style);
+                let room = draw_width - left;
+                let used = s.put_fit(left, row_y, room, cell.row_label(narrow, room), name_style);
                 RowHit { marker: selected, label: left..left + used, ..RowHit::default() }
             };
             self.visible.rows[i] = hit;
@@ -484,23 +550,19 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let prefs = &self.prefs;
         match row {
             Row::Tree => Cell::action("Just the tree", "Just the tree", "Browse files beside your shell."),
-            Row::Sidebar => {
-                Cell::action("Project sidebar", "Project sidebar", "Files, commits and usage beside your shell.")
-            }
+            Row::Sidebar => Cell::action("Project sidebar", "Sidebar", "Files, commits and usage beside your shell."),
             Row::Capture => Cell::action(
                 "Use this tab’s layout",
-                "Use this tab’s layout",
+                "Use tab layout",
                 "Read Milo's side, order and split sizes without moving anything.",
             ),
             Row::Tune => Cell::action("Customize panes", "Customize panes", "Choose the panes, side, order and size."),
             Row::Undo => Cell::action("Undo trial", "Undo trial", "Close only the panes created by this trial."),
-            Row::SaveLayout => Cell::action(
-                "Save layout for…",
-                "Save layout for…",
-                "Choose a worktree override or the global default.",
-            ),
+            Row::SaveLayout => {
+                Cell::action("Save layout for…", "Save layout", "Choose a worktree override or the global default.")
+            }
             Row::UseGlobal => {
-                Cell::action("Use global default", "Use global default", "Remove this worktree's layout override.")
+                Cell::action("Use global default", "Use global", "Remove this worktree's layout override.")
             }
             Row::Pane(pane) => Cell::toggle(
                 pane_label(pane),
@@ -510,21 +572,22 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             ),
             Row::Side => Cell::choice(
                 "Rail side",
-                "Rail side",
+                "Side",
                 if layout.geometry.side == Side::Left { "Left" } else { "Right" },
                 "Which side of your shell holds Milo panes.",
             ),
             Row::Width => Cell::choice(
                 "Rail width",
-                "Rail width",
+                "Width",
                 layout.width_name(),
                 "Cycle relative widths. The preview shows the draft percentage.",
             ),
             Row::Order(index) => {
-                let label = ["First position", "Second position", "Third position"][index];
+                let (label, short) =
+                    [("First position", "First"), ("Second position", "Second"), ("Third position", "Third")][index];
                 Cell::choice(
                     label,
-                    label,
+                    short,
                     pane_label(layout.geometry.order[index]),
                     "Swap the role in this position. Hidden panes are skipped.",
                 )
@@ -534,23 +597,25 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     if layout.geometry.shares.is_some() { "Captured" } else { fraction_label(&layout.outline_share) };
                 Cell::choice(
                     "Outline share",
-                    "Outline share",
+                    "Share",
                     value,
                     "Outline's share above or below History, excluding Usage. Changing this replaces captured heights.",
                 )
+                .with_short_value(if value.len() > 9 { "Custom" } else { value })
             }
             Row::UsageRows => {
                 let value = if layout.geometry.shares.is_some() { "Captured" } else { &layout.usage_rows };
                 Cell::choice(
                     "Usage rows",
-                    "Usage rows",
+                    "Rows",
                     value,
                     "Target rows for Usage, capped at 40% of a shared rail. Changing this replaces captured heights.",
                 )
+                .with_short_value(if value.len() > 10 { "Custom" } else { value })
             }
             Row::AutoArrange => Cell::toggle(
                 "Arrange new shell tabs",
-                "Auto-arrange",
+                "New tabs",
                 layout.new_tabs,
                 "Global only. New command tabs and tabs with a layout are skipped.",
             ),
@@ -560,15 +625,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::SaveAndExit => Cell::action("Save", "Save", "Save changes and leave Settings."),
             Row::Discard => Cell::action("Discard", "Discard", "Leave Settings without saving these changes."),
             Row::Back | Row::Cancel => Cell::action("Back", "Back", "Return without writing settings."),
-            Row::Icons => Cell::choice(
-                "Icons",
-                "Icons",
-                prefs.icons.label(),
-                "Choose Nerd Font symbols, plain symbols, or no icons.",
-            ),
+            Row::Icons => {
+                let value = prefs.icons.label();
+                Cell::choice("Icons", "Icons", value, "Choose Nerd Font symbols, plain symbols, or no icons.")
+                    .with_short_value(if prefs.icons == super::IconMode::Nerd { "Nerd" } else { value })
+            }
             Row::Activity => Cell::choice(
                 "Activity marks",
-                "Activity marks",
+                "Motion",
                 if prefs.static_marks { "Static" } else { "Pulse" },
                 "Show recent edits with a still or pulsing marker.",
             ),
@@ -580,28 +644,31 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             ),
             Row::UsageStyle => Cell::choice(
                 "Usage display",
-                "Usage display",
+                "Usage",
                 if prefs.usage_large_figures { "Large figures" } else { "Auto compact" },
                 "Auto uses text in narrow panes and large figures where there is room.",
-            ),
+            )
+            .with_short_value(if prefs.usage_large_figures { "Large" } else { "Auto" }),
             Row::FollowProject => Cell::choice(
                 "Project tracking",
                 "Project",
                 prefs.project_mode.label(),
                 "Follow the originating shell, or stay with the starting project.",
-            ),
+            )
+            .with_short_value(if prefs.project_mode == super::ProjectMode::Pin { "Pin" } else { "Follow" }),
             Row::FollowActivity => Cell::toggle(
                 "Follow file edits",
-                "Follow edits",
+                "Track edits",
                 prefs.follow_activity,
                 "Reveal active files without remembering temporary reveals.",
             ),
             Row::ChangesOnly => Cell::choice(
                 "Outline starts with",
-                "Outline starts",
+                "Outline",
                 if prefs.changes_only { "Changes" } else { "All files" },
                 "Set the initial Outline view. Press c in Outline to switch.",
-            ),
+            )
+            .with_short_value(if prefs.changes_only { "Changes" } else { "All" }),
             Row::HistoryFollow => Cell::toggle(
                 "Follow new commits",
                 "New commits",
@@ -612,61 +679,59 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 if self.claude.editable() {
                     Cell::toggle(
                         "Show Claude Code limits",
-                        "Claude limits",
+                        "Claude",
                         self.show_limits,
                         "Use Milo's Claude Code status line to read limits.",
                     )
                 } else {
-                    Cell::choice("Show Claude Code limits", "Claude limits", "Unchanged", "")
+                    Cell::choice("Show Claude Code limits", "Claude", "Unchanged", "").with_short_value("Locked")
                 }
             }
-            Row::SavePrefs => Cell::action(
-                "Save pane preferences for…",
-                "Save preferences…",
-                "Save the appearance and workflow draft.",
-            ),
+            Row::SavePrefs => {
+                Cell::action("Save pane preferences for…", "Save prefs", "Save the appearance and workflow draft.")
+            }
             Row::UseGlobalPrefs => Cell::action(
                 "Use global pane preferences",
-                "Use global prefs",
+                "Use global",
                 "Remove this worktree's pane preferences override.",
             ),
             Row::SaveClaude => Cell::action(
                 "Save Claude Code choices",
-                "Save Claude choices",
+                "Save Claude",
                 "Only changes Claude Code's status line, if Milo owns it or it is unused.",
             ),
             Row::Diagnostics => Cell::action(
                 "Read diagnostics",
-                "Read diagnostics",
+                "Diagnostics",
                 "Check preference scope, Rex, auto-arrange and usage data sources.",
             ),
             Row::Repair => Cell::action(
                 "Repair integration…",
-                "Repair integration…",
+                "Repair",
                 "Update Milo's Rex launcher and restart auto-arrange if needed.",
             ),
             Row::Remove => Cell::action(
                 "Remove Milo integration…",
-                "Remove integration…",
+                "Remove",
                 "Remove only the integrations Milo manages. Nothing is removed until you confirm.",
             ),
             Row::SaveGlobal => Cell::action(
                 "As global default",
-                "As global default",
+                "Global default",
                 "Save for tabs and panes without a worktree override.",
             ),
             Row::SaveWorktree => {
-                Cell::action("For this worktree", "For this worktree", "Save only for the current Git worktree.")
+                Cell::action("For this worktree", "This worktree", "Save only for the current Git worktree.")
             }
             Row::Continue => match self.panel {
                 Panel::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => {
                     Cell::action("Remove override", "Remove override", "Use the global setting from now on.")
                 }
                 Panel::Confirm(Confirm::Repair) => {
-                    Cell::action("Repair integration", "Repair integration", "Apply the repair now.")
+                    Cell::action("Repair integration", "Repair now", "Apply the repair now.")
                 }
                 Panel::Confirm(Confirm::Remove) => {
-                    Cell::action("Remove integration", "Remove integration", "Apply removal now.")
+                    Cell::action("Remove integration", "Remove now", "Apply removal now.")
                 }
                 _ => unreachable!("only confirmation pages have a continue row"),
             },
@@ -708,21 +773,57 @@ struct Cell<'a> {
     label: &'static str,
     short: &'static str,
     value: Option<(&'a str, Style)>,
+    short_value: Option<&'a str>,
     detail: &'static str,
 }
 
 impl<'a> Cell<'a> {
     fn action(label: &'static str, short: &'static str, detail: &'static str) -> Self {
-        Self { label, short, value: None, detail }
+        Self { label, short, value: None, short_value: None, detail }
     }
 
     fn choice(label: &'static str, short: &'static str, value: &'a str, detail: &'static str) -> Self {
-        Self { label, short, value: Some((value, ACCENT)), detail }
+        Self { label, short, value: Some((value, ACCENT)), short_value: None, detail }
     }
 
     fn toggle(label: &'static str, short: &'static str, on: bool, detail: &'static str) -> Self {
-        Self { label, short, value: Some(if on { ("On", ADD) } else { ("Off", FAINT) }), detail }
+        Self { label, short, value: Some(if on { ("On", ADD) } else { ("Off", FAINT) }), short_value: None, detail }
     }
+
+    fn with_short_value(mut self, value: &'a str) -> Self {
+        self.short_value = Some(value);
+        self
+    }
+
+    fn row_label(self, narrow: bool, room: usize) -> &'static str {
+        if !narrow && str_width(self.label) <= room { self.label } else { self.short }
+    }
+}
+
+// Wrap borrowed strings separately so drawing a selection needs no formatted copy.
+fn compact_detail(cell: Cell<'_>, width: usize) -> impl Iterator<Item = (&str, Option<&str>)> + Clone {
+    let mut label = wrap(cell.label, width).peekable();
+    let mut value = cell.value.map(|(value, _)| value);
+    let mut remaining = wrap("", width);
+    std::iter::from_fn(move || {
+        let Some(line) = label.next() else {
+            return remaining.next().map(|line| (line, None));
+        };
+        let suffix = if label.peek().is_none()
+            && let Some(value) = value.take()
+        {
+            let used = str_width(line);
+            if used + 2 + str_width(value) <= width {
+                Some(value)
+            } else {
+                remaining = wrap(value, width);
+                (used < width).then_some("")
+            }
+        } else {
+            None
+        };
+        Some((line, suffix))
+    })
 }
 
 fn tabs(s: &mut Screen, columns: Range<usize>, y: usize, active: usize) -> [Range<usize>; SECTIONS.len()] {

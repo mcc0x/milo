@@ -283,11 +283,89 @@ fn short_pane_keeps_the_chosen_row_and_a_way_back() {
     choose(&mut pane, Row::Tune);
     pane.selected = TUNE.iter().position(|&row| row == Row::AutoArrange).unwrap();
     let rows = frame(&mut pane, 28, 5);
-    assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("Auto-arrange")));
+    assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("New tabs")));
     assert!(!rows.iter().any(|row| row.contains('┌')));
     assert!(rows[4].contains("Esc back"));
     assert_eq!(pane.key(Key::Esc), After::Stay);
     assert_eq!(pane.panel, Panel::Layout);
+}
+
+#[test]
+fn narrow_settings_shows_short_choices_and_wraps_only_the_selected_detail() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("drawing does not call Rex"));
+    pane.key(Key::Char('2'));
+    let rows = frame(&mut pane, 18, 8);
+    assert!(rows[2].contains("Icons") && rows[2].contains("Plain"));
+    assert!(rows[3].contains("Motion") && rows[3].contains("Pulse"));
+    assert!(rows[4].contains("Git marks") && rows[4].contains("Style"));
+    assert!(rows[5].contains("Usage") && rows[5].contains("Auto"));
+    assert_eq!(rows[6].trim(), "Icons: Plain");
+    assert_eq!(rows[7].trim(), "save ? quit");
+
+    for _ in 0..3 {
+        assert_eq!(pane.key(Key::Down), After::Stay);
+    }
+    let rows = frame(&mut pane, 18, 8);
+    let selected = rows.iter().position(|line| line.starts_with('›')).unwrap();
+    assert!(rows[selected].contains("Usage") && rows[selected].contains("Auto"));
+    assert_eq!(rows[5].trim(), "Usage display:");
+    assert_eq!(rows[6].trim(), "Auto compact");
+    assert_eq!(pane.key(click_at(&rows, 5, "Usage display:")), After::Ignored, "the summary is not a mouse target");
+    assert_eq!(pane.key(click_at(&rows, selected, "Auto")), After::Stay);
+    let rows = frame(&mut pane, 18, 8);
+    assert!(rows[0].contains("Unsaved changes"));
+    assert_eq!(rows[6].trim(), "Large figures");
+
+    pane.key(Key::Char('3'));
+    pane.claude = Claude::Foreign;
+    pane.selected = pane.rows().iter().position(|&row| row == Row::ClaudeLimits).unwrap();
+    let rows = frame(&mut pane, 18, 8);
+    assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("Claude") && row.contains("Locked")));
+    assert_eq!(rows[5].trim(), "Show Claude Code");
+    assert_eq!(rows[6].trim(), "limits: Unchanged");
+    for height in [2, 3] {
+        let rows = frame(&mut pane, 18, height);
+        assert!(rows[..height - 1].iter().any(|row| row.starts_with('›') && row.contains("Claude")));
+        assert!(rows[height - 1].contains("quit"));
+    }
+}
+
+#[test]
+fn every_settings_control_fits_a_narrow_row_when_selected() {
+    let f = Fixture::folder();
+    let mut pane =
+        Setup::new(Some(store(&f)), true, None, Some(f.root.clone()), |_| panic!("drawing does not call Rex"));
+    pane.scope = Scope::Worktree;
+    pane.layout.geometry.shares = Some([540_000, 260_000, 200_000]);
+    pane.prefs.icons = IconMode::Nerd;
+    pane.prefs.usage_large_figures = true;
+    pane.prefs.project_mode = ProjectMode::Pin;
+    pane.prefs.text_git_marks = true;
+    pane.prefs.static_marks = true;
+    pane.prefs.changes_only = true;
+    let panels = [
+        Panel::Layout,
+        Panel::Tune,
+        Panel::Appearance,
+        Panel::Workflow,
+        Panel::Health,
+        Panel::Save(SaveKind::Layout),
+        Panel::Save(SaveKind::Workflow),
+        Panel::Confirm(Confirm::UseGlobal),
+        Panel::Confirm(Confirm::Repair),
+        Panel::Confirm(Confirm::Remove),
+        Panel::Exit,
+    ];
+    for panel in panels {
+        pane.select_panel(panel, 0);
+        for selected in 0..pane.rows().len() {
+            pane.selected = selected;
+            let rows = frame(&mut pane, 18, 8);
+            let row = rows.iter().find(|line| line.starts_with('›')).unwrap_or_else(|| panic!("{panel:?}: {rows:?}"));
+            assert!(!row.contains('…'), "{panel:?} row {selected} was clipped: {row:?}");
+        }
+    }
 }
 
 #[test]
@@ -598,6 +676,15 @@ fn narrow_rails_keep_tabs_scrolled_rows_and_footer_actions_mouse_accessible() {
     assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
     let rows = frame(&mut pane, 10, 5);
     assert_eq!(pane.key(click_at(&rows, 4, "‹")), After::Stay);
+    let rows = frame(&mut pane, 18, 8);
+    assert_eq!(pane.key(click_at(&rows, 7, "try")), After::Stay);
+    assert!(pane.message.as_ref().unwrap().0.contains("Could not find this Rex pane"));
+    let rows = frame(&mut pane, 18, 8);
+    assert_eq!(pane.key(click_at(&rows, 7, "save")), After::Stay);
+    assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    let rows = frame(&mut pane, 18, 8);
+    assert_eq!(pane.key(click_at(&rows, 7, "back")), After::Stay);
+    assert_eq!(pane.panel, Panel::Layout);
     let rows = frame(&mut pane, 10, 5);
     assert_eq!(pane.key(click_at(&rows, 4, "q")), After::Leave);
     assert!(!f.root.join("init.lua").exists());

@@ -297,7 +297,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn select_panel(&mut self, panel: Panel, selected: usize) {
         self.panel = panel;
-        self.selected = selected;
+        self.selected = selected.min(self.rows().len().saturating_sub(1));
         self.visible = draw::Visible::default();
         self.modal_click.clear();
         self.message = None;
