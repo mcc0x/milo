@@ -55,8 +55,10 @@ if ! repo=$(git rev-parse --show-toplevel 2>/dev/null) ||
     fi
 fi
 
-(cd "$repo" && cargo build --release --locked --target-dir target)
-built=$repo/target/release/milo
+# Pin the host target so Cargo configuration cannot change the output path.
+host=$(cd "$repo" && cargo -vV | sed -n 's/^host: //p')
+(cd "$repo" && cargo build --release --locked --target-dir target --target "$host")
+built=$repo/target/$host/release/milo
 if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$built" "$binary"; then
     printf 'milo is already installed at %s. Nothing to do.\n' "$binary"
 else
