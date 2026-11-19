@@ -2,6 +2,8 @@
 
 Run the panes in a Unix terminal with 256 colours. Outline and history start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, outline shows just the files and history says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
 
+If you initialize Git in that folder, open panes pick up the repository and its saved worktree choices without restarting. Switching branches does not erase remembered folder folds or mark the newly visible timeline as newly arrived.
+
 ## What fits in a pane
 
 | Pane | Size | What you see |
@@ -34,7 +36,7 @@ A shallow clone has only part of the project's history. Milo lists the commits G
 
 ## Reading files
 
-Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader, leaving the original pane in place. Elsewhere the reader takes over that pane; `q` brings you back.
+Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader. Opening another file from that pane replaces only its previous reader, even after following the shell to another project. Any shell you split beside the reader stays open. Outside Rex the reader takes over the pane; `q` brings you back.
 History catches up with repository changes when you return from a file, keeping that file selected if it is still in the timeline.
 
 On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](https://www.superlogical.com/rex/docs/reference/ios-settings#setting-keyboard-open-keyboard-manually) to browse without raising the keyboard. Tap a folder to expand it, tap a file to select it, and double-tap to open it. This setting affects **all** terminal panes on that iPhone, not just Outline. Tap the keyboard button to type in a shell. If the keyboard reopens when you return to a terminal, turn off **Keep Keyboard Open** in the same settings.
