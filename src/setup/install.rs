@@ -131,7 +131,8 @@ impl Store {
         if (rex_changed || pending.is_some()) && !reload_failed && fs::remove_file(pending_path).is_err() {
             return Err("Saved, but could not clear the Rex reload reminder.");
         }
-        let stop_failed = (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err());
+        let stop_failed =
+            (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err());
         let listener = if stop_failed {
             Saved::ListenerDidNotStop
         } else if watch_layout && !lock::wait_running(&self.state).unwrap_or(false) {
@@ -166,9 +167,9 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use std::cell::RefCell;
+    use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
-    use std::os::unix::fs::MetadataExt as _;
 
     fn store(fixture: &Fixture) -> Store {
         store_at(&fixture.root)
@@ -645,8 +646,7 @@ mod tests {
         fs::write(&store.init, format!("{}\n{}\n", std::str::from_utf8(MANAGED).unwrap(), loader(&store.rex_file())))
             .unwrap();
         fs::create_dir(&store.config).unwrap();
-        let original =
-            rex_lua(&layout, &executable().unwrap(), store.listener_env()) + "-- Keep my notes here.\n";
+        let original = rex_lua(&layout, &executable().unwrap(), store.listener_env()) + "-- Keep my notes here.\n";
         fs::write(store.rex_file(), &original).unwrap();
         let result = store.save(Some(&Layout::default()), None, &|_| panic!("can't safely turn off the old launcher"));
         assert!(result.unwrap_err().contains("Your file was left alone."));

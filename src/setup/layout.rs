@@ -16,7 +16,8 @@ const OLD_START_LISTENER: &str = "\n-- During a syntax check or a one-off layout
 
 const LISTENER_COMMENT: &str = "-- During a syntax check or a one-off layout, do not start a listener.";
 const LISTENER_GUARD: &str = "if not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then";
-const CHOSEN_LISTENER_GUARD: &str = "if arrange_new_tabs and not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then";
+const CHOSEN_LISTENER_GUARD: &str =
+    "if arrange_new_tabs and not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then";
 const LISTENER_CALL: &str = "  rex.exec.start({ milo, \"listen\" }, { detach = true, env = { XDG_CONFIG_HOME = ";
 const LISTENER_STATE_ARG: &str = ", XDG_STATE_HOME = ";
 const LISTENER_CALL_END: &str = " } })";
@@ -437,10 +438,8 @@ pub(super) fn update_actions(
     let with_newlines = |footer: &'static str| {
         if newline == "\n" { Cow::Borrowed(footer) } else { Cow::Owned(footer.replace('\n', newline)) }
     };
-    let legacy = [
-        (with_newlines(OLD_START_LISTENER), LISTENER_GUARD),
-        (with_newlines(START_LISTENER), CHOSEN_LISTENER_GUARD),
-    ];
+    let legacy =
+        [(with_newlines(OLD_START_LISTENER), LISTENER_GUARD), (with_newlines(START_LISTENER), CHOSEN_LISTENER_GUARD)];
     let legacy_suffix =
         legacy.iter().find_map(|(footer, guard)| text.ends_with(footer.as_ref()).then_some((footer.len(), *guard)));
     if old == *layout && legacy_suffix.is_none() {
@@ -633,9 +632,11 @@ mod tests {
     #[test]
     fn shipped_launcher_pins_the_install_paths_and_detects_state_mismatch() {
         let text = rex_lua(&Layout::default(), Path::new("/fixture/bin/milo"), environment());
-        assert!(text.contains(&format!(
-            "env = {{ XDG_CONFIG_HOME = \"{CONFIG_HOME}\", XDG_STATE_HOME = \"{STATE_HOME}\" }}"
-        )));
+        assert!(
+            text.contains(&format!(
+                "env = {{ XDG_CONFIG_HOME = \"{CONFIG_HOME}\", XDG_STATE_HOME = \"{STATE_HOME}\" }}"
+            ))
+        );
         assert!(owns_actions(&text));
         assert!(listener_state_matches(&text, Path::new(STATE_HOME)));
         let edited = text.replace('\n', "\r\n") + "\r\n-- keep my comments\r\n";

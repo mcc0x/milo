@@ -727,7 +727,8 @@ mod tests {
 
         let state = Fixture::folder();
         let store = || FoldStore::in_state_dir(&state.root, &f.root);
-        let open = || Outline::build(Repo::open(&f.root).unwrap(), false, &Preferences::default(), false, Some(store()));
+        let open =
+            || Outline::build(Repo::open(&f.root).unwrap(), false, &Preferences::default(), false, Some(store()));
         let mut outline = open();
         outline.sel = outline.tree.row_of("src/").unwrap();
         outline.key(Key::Right);

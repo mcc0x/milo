@@ -73,8 +73,9 @@ impl<'a> Settings<'a> {
             Status::Absent
         } else if self.command.is_some_and(|command| match owned_command {
             Some(owned) => command.is(owned),
-            None => command.is(LEGACY_COMMAND)
-                || command.string(self.text.len()).is_some_and(|value| is_launcher(&value)),
+            None => {
+                command.is(LEGACY_COMMAND) || command.string(self.text.len()).is_some_and(|value| is_launcher(&value))
+            }
         }) {
             Status::Milo
         } else {

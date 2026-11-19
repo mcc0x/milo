@@ -222,12 +222,10 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
             "no matching ownership note; left alone. ",
             "If Milo was installed with a different XDG_STATE_HOME, rerun with that value.\n",
         )),
-        Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => writeln!(
-            out,
-            "unknown; check the Claude Code ownership note in Milo's state directory ({:?})",
-            store.state
-        )
-        .unwrap(),
+        Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => {
+            writeln!(out, "unknown; check the Claude Code ownership note in Milo's state directory ({:?})", store.state)
+                .unwrap()
+        }
         Claude::Invalid => writeln!(out, "unreadable; check Claude settings ({:?})", store.claude).unwrap(),
     }
     for (provider, source) in usage::sources() {
@@ -482,8 +480,9 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
     }
     let saved = store.save(rex.then_some(&disable), claude, run)?;
     check_listener(saved.listener)?;
-    let mut message =
-        String::from("Removed managed integrations. Saved preferences, user-owned settings and open panes were left alone.");
+    let mut message = String::from(
+        "Removed managed integrations. Saved preferences, user-owned settings and open panes were left alone.",
+    );
     if saved.reload_failed {
         message.push_str("\nRex was not reloaded. Restart Rex or run milo setup --repair to unload Milo's actions.");
     }

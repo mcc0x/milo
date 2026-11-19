@@ -164,12 +164,8 @@ mod tests {
         let text = settings::new("'/a/milo' claude-status");
         let settings = Some(Image { bytes: text.into_bytes(), mode: 0o600 });
         let note = Some(Image { bytes: b"created\n'/other/milo' claude-status".to_vec(), mode: 0o600 });
-        let files = ClaudeFiles {
-            path: Cow::Borrowed(Path::new("settings.json")),
-            settings,
-            note,
-            note_path: PathBuf::new(),
-        };
+        let files =
+            ClaudeFiles { path: Cow::Borrowed(Path::new("settings.json")), settings, note, note_path: PathBuf::new() };
         assert!(files.status() == Claude::Foreign);
         assert!(files.plan(false, &mut Vec::new()).is_err());
     }
