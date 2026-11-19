@@ -598,6 +598,37 @@ fn a_narrow_focus_peek_wraps_the_subject_and_restores_the_same_list_on_blur() {
 }
 
 #[test]
+fn a_narrow_subject_peek_keeps_clicked_files_under_the_pointer() {
+    let f = Fixture::new();
+    for name in ['a', 'b', 'c', 'd', 'e', 'f'] {
+        f.write(&format!("{name}.txt"), &format!("stored {name}\n"));
+    }
+    f.commit("first chapter second chapter final chapter");
+
+    for (already_focused, y, name, peek_rows) in [(false, 7, 'f', 0), (false, 6, 'e', 1), (true, 2, 'd', 3)] {
+        let mut history = open(&f);
+        draw(&mut history, 21, 8);
+        history.key(Key::Enter);
+        history.key(if already_focused { Key::End } else { Key::Focus(false) });
+        let file = format!("{name}.txt");
+        let before = draw(&mut history, 21, 8).text();
+        assert!(before[y].contains(&file), "{before:?}");
+
+        // Focus and the first click can be received before a new frame.
+        history.key(Key::Focus(true));
+        let now = Instant::now();
+        history.input(Key::Click(6, y), now);
+        let selected = draw(&mut history, 21, 8);
+        let rows = selected.text();
+        assert!(rows[y].contains(&file) && selected.bar_at(y), "{rows:?}");
+        assert_eq!(rows.iter().position(|line| line.contains('↳')), (peek_rows > 0).then_some(8 - peek_rows));
+
+        history.input(Key::Click(6, y), now + std::time::Duration::from_millis(1));
+        assert_eq!(draw(&mut history, 21, 8).text()[1], format!(" 1 + stored {name}"));
+    }
+}
+
+#[test]
 fn new_commits_only_take_the_selection_when_following_at_the_tip() {
     let f = Fixture::new();
     for i in 0..8 {

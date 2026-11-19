@@ -4,7 +4,7 @@ use crate::keys::{DOUBLE_CLICK, Key};
 use crate::pane::After;
 use crate::reader::ReadFile;
 
-use super::{FILE_PREVIEW, History, TimelineRow};
+use super::{Click, FILE_PREVIEW, History, TimelineRow};
 
 impl History {
     pub(super) fn input(&mut self, key: Key, now: Instant) -> After {
@@ -97,9 +97,9 @@ impl History {
             self.clicked = None;
             return;
         };
-        let again = self.clicked.is_some_and(|(r, at)| r == row && now.duration_since(at) < DOUBLE_CLICK);
+        let again = self.clicked.is_some_and(|click| click.row == row && now.duration_since(click.at) < DOUBLE_CLICK);
         self.cursor = at;
-        self.clicked = Some((row, now));
+        self.clicked = Some(Click { row, offset, at: now });
         match (row, again) {
             (TimelineRow::Commit(i), false) => {
                 self.toggle_files(i);

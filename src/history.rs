@@ -65,6 +65,14 @@ struct OpenCommit {
     all_files: bool,
 }
 
+/// A click anchors its selected row and may be the first of a double click.
+#[derive(Clone, Copy)]
+struct Click {
+    row: TimelineRow,
+    offset: usize,
+    at: Instant,
+}
+
 pub struct History {
     repo: Repo,
     version: Option<HistoryVersion>,
@@ -76,8 +84,7 @@ pub struct History {
     top: usize,
     shown: usize,
     painted: Option<Painted>,
-    /// The last row clicked and when, to tell a double click.
-    clicked: Option<(TimelineRow, Instant)>,
+    clicked: Option<Click>,
     compact: bool,
     focused: bool,
     detail: Option<Detail>,

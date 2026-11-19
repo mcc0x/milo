@@ -16,6 +16,8 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
 | Reader | 2 rows | The filename and one line of content; keyboard hints return at 3 rows |
 
+In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer.
+
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
 If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.

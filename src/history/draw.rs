@@ -80,11 +80,14 @@ impl History {
         let body_top = usize::from(!compact) + usize::from(dots);
         self.shown = s.h - body_top - usize::from(hint);
         self.keep_cursor_in_view();
+        let click_offset = self.clicked.map(|click| click.offset);
+        let below_click = click_offset.map_or(self.shown, |offset| self.shown.saturating_sub(offset + 1));
+        let room = (self.shown / 2).min(DETAIL_ROWS).min(below_click);
         let previous_detail = self.detail.take();
         let mut detail = [""; DETAIL_ROWS];
         let mut remaining = "";
         let mut detail_rows = 0;
-        if self.focused && s.w <= DETAIL_COLS && self.shown > 1 {
+        if self.focused && s.w <= DETAIL_COLS && room > 0 {
             let commit = match self.selected() {
                 Some(TimelineRow::Commit(i)) => Some(i),
                 Some(TimelineRow::File(_) | TimelineRow::More) => self.open_index(),
@@ -98,7 +101,6 @@ impl History {
                     detail[0] = first;
                     detail_rows = 1;
                     remaining = rest;
-                    let room = (self.shown / 2).min(DETAIL_ROWS);
                     for line in &mut detail[1..room] {
                         if remaining.is_empty() {
                             break;
@@ -112,8 +114,12 @@ impl History {
             }
         }
         self.shown -= detail_rows;
-        // A detail peek may hide rows but must not move the underlying list.
-        let top = self.top.max((self.cursor + 1).saturating_sub(self.shown));
+        // Keep the clicked row under the pointer; otherwise the peek can hide
+        // rows without changing the underlying list.
+        let top = click_offset.map_or_else(
+            || self.top.max((self.cursor + 1).saturating_sub(self.shown)),
+            |offset| self.cursor.saturating_sub(offset.min(self.shown - 1)),
+        );
         if !compact {
             self.draw_heading(s);
         }
