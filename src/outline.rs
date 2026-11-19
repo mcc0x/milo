@@ -228,14 +228,7 @@ impl Outline {
     }
 
     fn visible_row(&self, path: &str) -> Option<usize> {
-        self.tree.row_of(path).or_else(|| {
-            let parent = folders_above(path).next()?;
-            // Parents precede their descendants, so scan back to the closest one.
-            self.tree.rows.iter().rposition(|row| {
-                let node = self.tree.node(row.node);
-                node.dir && parent.starts_with(node.path.as_ref())
-            })
-        })
+        std::iter::once(path).chain(folders_above(path)).find_map(|p| self.tree.row_of(p))
     }
 
     /// Applies the folder choices. A plain tree must list its open folders again
