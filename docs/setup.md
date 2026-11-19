@@ -4,7 +4,7 @@
 
 ## Install
 
-The v0.1.1 prebuilt release is for Apple Silicon macOS. Use Homebrew:
+The v0.1.2 prebuilt release is for Apple Silicon macOS. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -13,7 +13,7 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.1/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.2/install.sh &&
   sh milo-install.sh
 ```
 
