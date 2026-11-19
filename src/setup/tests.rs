@@ -779,7 +779,7 @@ fn home_doctor_and_settings_share_the_diagnostic_worker() {
     assert!(matches!(home.check_external(), External::Unchanged));
     doctor::wait_ready(home.external_fd());
     assert!(matches!(home.check_external(), External::Redraw));
-    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains("Worktree: none detected")));
+    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains("Worktree: Git could not be run.")));
 
     assert_eq!(home.key(Key::Char('r')), After::Stay);
     let abandoned = home.external_fd();
@@ -793,7 +793,7 @@ fn home_doctor_and_settings_share_the_diagnostic_worker() {
     assert!(matches!(home.check_external(), External::Unchanged));
     doctor::wait_ready(home.external_fd());
     assert!(matches!(home.check_external(), External::Redraw));
-    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains("Worktree: none detected")));
+    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains("Worktree: Git could not be run.")));
 }
 
 #[test]

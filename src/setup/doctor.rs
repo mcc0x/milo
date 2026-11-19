@@ -102,15 +102,15 @@ fn store() -> Result<Store, String> {
 }
 
 pub(crate) fn report() -> Result<String, String> {
-    let store = store()?;
-    match discover_worktree(Path::new(".")) {
-        Ok(root) => report_for(&store, root.as_deref()),
-        Err(note) => report_with_worktree(&store, Err(note)),
-    }
+    report_for(&store()?, None)
 }
 
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {
-    report_with_worktree(store, Ok(root))
+    if root.is_some() {
+        return report_with_worktree(store, Ok(root));
+    }
+    let discovered = discover_worktree(Path::new("."));
+    report_with_worktree(store, discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note))
 }
 
 fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static str>) -> Result<String, String> {
