@@ -222,13 +222,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn footer(&self, s: &mut Screen) {
         let back = matches!(self.panel, Panel::Tune | Panel::Save(_) | Panel::Confirm(_) | Panel::Diagnostics);
-        let exit = if back {
-            "Esc back"
-        } else if self.offered {
-            "q next"
-        } else {
-            "q quit"
-        };
+        let exit = if back { "Esc back" } else { "q quit" };
         if s.w < 20 {
             s.put_fit(1, s.h - 1, s.w - 1, exit, FAINT);
             return;
@@ -240,13 +234,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             s.put_fit(x, s.h - 1, s.w - x, exit, FAINT);
             return;
         }
-        let last = if back {
-            "Esc back · ? help"
-        } else if self.offered {
-            "q next · ? help"
-        } else {
-            "q quit · ? help"
-        };
+        let last = if back { "Esc back · ? help" } else { "q quit · ? help" };
         let (first, middle): (&str, &[&str]) = match self.panel {
             Panel::Diagnostics => ("↑↓ scroll", &["r refresh"]),
             Panel::Save(_) | Panel::Confirm(_) => ("Enter choose", &[]),
@@ -636,7 +624,7 @@ fn fraction_label(part: &str) -> &str {
 }
 
 /// Wrap whole words, but make forward progress even on a too-wide glyph.
-fn wrap(text: &str, width: usize) -> impl Iterator<Item = &str> + Clone {
+pub(crate) fn wrap(text: &str, width: usize) -> impl Iterator<Item = &str> + Clone {
     text.lines().flat_map(move |mut text| {
         let mut blank = text.is_empty();
         std::iter::from_fn(move || {

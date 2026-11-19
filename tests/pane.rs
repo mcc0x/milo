@@ -323,3 +323,25 @@ fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
         assert_eq!(fs::read(&settings).unwrap(), original);
     }
 }
+
+#[test]
+fn unattended_skip_is_shared_by_home_and_settings_without_applying_preferences() {
+    let project = Project::new();
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let command = || {
+        let mut c = project.command(milo);
+        c.env_remove("REX_CONFIG").env("CLAUDE_CONFIG_DIR", project.0.join("claude"));
+        c
+    };
+    let skipped = command().args(["setup", "--skip-onboarding"]).output().unwrap();
+    assert!(skipped.status.success(), "{}", String::from_utf8_lossy(&skipped.stderr));
+    for (args, expected) in [(&[][..], "Uninstall"), (&["setup"][..], "Workflow")] {
+        let mut tty = Terminal::run(command().args(args));
+        tty.until(expected);
+        tty.master.write_all(b"q").unwrap();
+        assert!(tty.wait_for_exit().success());
+        assert!(tty.restored());
+    }
+    assert!(!project.0.join("config/milo/preferences.conf").exists());
+    assert!(!project.0.join("config/rex/init.lua").exists());
+}

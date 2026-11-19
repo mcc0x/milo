@@ -33,6 +33,8 @@ The script verifies the release binary against its SHA-256 checksum and installs
 
 The install commands above install **v0.1.0**. To try the workspace preferences described here before the next release, build this checkout with `cargo build` and run `./target/debug/milo setup` inside Rex.
 
+<p align="center"><img src="docs/img/home.png" width="510" alt="Milo’s blue mascot and version beside Settings, Doctor and Uninstall"></p>
+
 Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone.
 
 You can also run each pane on its own.
@@ -73,6 +75,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 
 | Command | Opens |
 | --- | --- |
+| `milo` | Milo home: Settings, Doctor and Uninstall |
 | `milo outline [PATH]` | File tree |
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |
@@ -80,7 +83,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | `milo setup` | Setup screen |
 | `milo doctor` | Read-only preference and integration report |
 
-`PATH` defaults to the current directory. Bare `milo` opens the outline and can offer setup the first time in Rex. Use `milo --help` for all commands or `?` for help when a pane has room.
+`milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
 
 ## Documentation
 

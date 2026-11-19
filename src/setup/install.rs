@@ -12,7 +12,7 @@ use super::lock;
 use crate::paths;
 
 const RELOAD: [&str; 2] = ["config", "reload"];
-const RELOAD_PENDING: &str = "rex-reload-pending";
+pub(super) const RELOAD_PENDING: &str = "rex-reload-pending";
 
 /// Lets setup use the real Rex command while tests use an isolated stand-in.
 pub(super) type RunRex<'a> = dyn Fn(&[&OsStr]) -> bool + 'a;
@@ -129,7 +129,7 @@ mod tests {
     use super::super::claude::{Claude, OWN_CLAUDE};
     use super::super::files::Change;
     use super::super::layout::{GENERATED, TabPane, WIDTHS, rex_lua};
-    use super::super::rex_files::{MANAGED, OFFERED, executable, loader, managed};
+    use super::super::rex_files::{LAYOUT_DISABLED, MANAGED, executable, loader, managed};
     use super::*;
     use crate::fixture::Fixture;
     use std::cell::RefCell;
@@ -242,25 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_is_only_offered_once_and_never_when_already_installed() {
-        let fixture = Fixture::folder();
-        let store = store(&fixture);
-        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
-        assert!(!store.offer_once());
-        assert!(!store.state.join(OFFERED).exists());
-        store.save(Some(&off()), None, &|_| true).unwrap();
-        assert!(store.offer_once());
-        assert!(!store.offer_once());
-        let linked = Fixture::folder();
-        let linked = store_at(&linked.root);
-        let elsewhere = fixture.root.join("elsewhere");
-        fs::create_dir(&elsewhere).unwrap();
-        symlink(&elsewhere, &linked.state).unwrap();
-        assert!(!linked.offer_once());
-        assert!(!elsewhere.join(OFFERED).exists());
-    }
-
-    #[test]
     fn setup_removes_only_the_claude_status_line_it_installed() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
@@ -299,7 +280,6 @@ mod tests {
         assert!(fs::read_to_string(&claude).unwrap().contains("milo claude-status"));
         assert!(store.layout().unwrap().1);
         assert!(store.claude() == Claude::On);
-        assert!(!store.offer_once());
 
         store.save(Some(&off()), Some(false), &|_| true).unwrap();
         assert_eq!(fs::read_link(&store.init).unwrap(), Path::new("dotfiles/rex.lua"));
@@ -494,12 +474,12 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_removal_is_not_offered_as_a_new_install() {
+    fn an_interrupted_removal_keeps_the_disabled_layout() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
         store.save(Some(&Layout::default()), None, &|_| true).unwrap();
         fs::write(store.state.join(RELOAD_PENDING), []).unwrap();
-        fs::write(store.state.join("layout-disabled"), []).unwrap();
+        fs::write(store.state.join(LAYOUT_DISABLED), []).unwrap();
         let (reopened, active) = store.layout().unwrap();
         assert!(active && !reopened.enabled());
         store.save(Some(&reopened), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();

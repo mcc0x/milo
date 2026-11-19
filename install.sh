@@ -80,4 +80,4 @@ on_path() {
 if ! on_path; then
     printf '%s is not on PATH. Add it to PATH before running milo.\n' "$bin_dir"
 fi
-printf '%s\n' 'Run milo setup inside Rex to choose your panes, then press s to save.'
+printf '%s\n' 'Run milo to get started, or milo setup --skip-onboarding for an unattended install.'

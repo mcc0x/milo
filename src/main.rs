@@ -7,6 +7,7 @@ mod fs_ops;
 mod git;
 mod help;
 mod history;
+mod home;
 mod icons;
 mod json;
 mod keys;
@@ -24,6 +25,7 @@ mod syntax;
 mod term;
 mod tree;
 mod ui;
+mod uninstall;
 mod usage;
 mod walk;
 mod watch;
@@ -44,20 +46,23 @@ use reader::Reader;
 const USAGE: &str = "\
 milo — file, history, usage, and reader panes for your terminal
 
-Usage: milo outline [PATH]
+Usage: milo
+       milo outline [PATH]
        milo history [PATH]
        milo usage
        milo setup
        milo doctor
        milo setup --repair | --remove
        milo view FILE [--commit ID]
-       milo [PATH]
+       milo PATH
+       milo [setup] --skip-onboarding
        milo listen [--stop]
        milo claude-status
        milo --help | --version
 
-PATH defaults to the current directory. Bare milo [PATH] opens the outline.
-Inside Rex, a bare milo offers setup the first time if no layout is installed.
+Bare milo opens Home. milo PATH opens the outline at PATH.
+On first launch, milo and milo setup share a short welcome guide.
+--skip-onboarding marks the guide skipped and exits without opening a terminal or changing settings.
 milo setup saves a Rex layout and can enable Claude Code usage limits.
 milo doctor explains local preferences, integration health and usage sources.
 milo listen and milo claude-status are used by Rex and Claude Code.
@@ -129,7 +134,7 @@ fn command_help(name: &str) -> Option<&'static str> {
         "usage" => "Usage: milo usage\n\nSee usage and limits for Claude and Codex.",
         "view" => "Usage: milo view FILE [--commit ID]\n\nRead a file now or as it was at a Git commit.",
         "setup" => {
-            "Usage: milo setup\n       milo setup --repair | --remove\n\nPreview and save Milo preferences, repair managed integrations or remove them."
+            "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
         }
         "doctor" => {
             "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
@@ -177,7 +182,9 @@ enum Command<'a> {
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Path(&'a OsStr),
     Usage,
-    Setup { offered: bool },
+    Home,
+    Setup,
+    SkipOnboarding,
     Doctor,
     Repair,
     Remove,
@@ -192,7 +199,6 @@ fn command<'a>(
     first: Option<&'a OsStr>,
     second: Option<&'a OsStr>,
     rest: &'a [OsString],
-    offer_setup: impl FnOnce() -> bool,
 ) -> Result<Command<'a>, String> {
     let name = first.and_then(OsStr::to_str);
     let option = second.and_then(OsStr::to_str);
@@ -239,7 +245,9 @@ fn command<'a>(
             Command::View { file, commit }
         }
         (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID]".to_string()),
-        (Some("setup"), None) => Command::Setup { offered: false },
+        (Some("setup"), None) => Command::Setup,
+        (Some("--skip-onboarding"), None) => Command::SkipOnboarding,
+        (Some("setup"), Some(flag)) if flag == "--skip-onboarding" => Command::SkipOnboarding,
         (Some("doctor"), None) => Command::Doctor,
         (Some("setup"), Some(flag)) if flag == "--repair" => Command::Repair,
         (Some("setup"), Some(flag)) if flag == "--remove" => Command::Remove,
@@ -256,8 +264,7 @@ fn command<'a>(
         (Some(option), _) if option.starts_with('-') => return Err(format!("no option {option}; see milo --help")),
         (_, None) => match first {
             Some(path) => Command::Path(path),
-            None if offer_setup() => Command::Setup { offered: true },
-            None => Command::Outline(None),
+            None => Command::Home,
         },
         _ => return Err("expected a command or path; see milo --help".to_string()),
     })
@@ -305,9 +312,18 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),
-        Command::Setup { offered } => {
-            let start = if offered { Start::Offer(|| open_outline(None)) } else { Start::Loaded };
-            run(start, &|| Ok(Box::new(setup::Setup::open(offered))))
+        Command::SkipOnboarding => setup::skip_welcome(),
+        Command::Home | Command::Setup => {
+            let destination: fn() -> Result<Box<dyn Pane>, String> = if command == Command::Home {
+                || Ok(Box::new(home::Home::new()))
+            } else {
+                || Ok(Box::new(setup::Setup::open()))
+            };
+            if setup::needs_welcome()? {
+                run(Start::Welcome(destination), &|| Ok(Box::new(setup::Welcome::open()?)))
+            } else {
+                run(Start::Loaded, &destination)
+            }
         }
         Command::Listen(stop) => exit(setup::listen(stop)),
         Command::ClaudeStatus => exit(usage::claude_status()),
@@ -351,8 +367,7 @@ fn main() {
     }
     let second = args.next();
     let rest: Vec<_> = args.collect();
-    let command =
-        command(first.as_deref(), second.as_deref(), &rest, setup::offer_once).unwrap_or_else(|why| fail(&why));
+    let command = command(first.as_deref(), second.as_deref(), &rest).unwrap_or_else(|why| fail(&why));
     let result = dispatch(command, pane::run);
     if term::TERMINATED.load(std::sync::atomic::Ordering::Relaxed) {
         exit(1);
@@ -375,7 +390,7 @@ mod tests {
     }
 
     fn command_frame(first: Option<&OsStr>, second: Option<&OsStr>) -> Vec<String> {
-        let command = command(first, second, &[], || false).unwrap();
+        let command = command(first, second, &[]).unwrap();
         let mut pane = open_pane(command).unwrap();
         let mut screen = Screen::sized(65, 12);
         pane.draw(&mut screen);
@@ -415,7 +430,7 @@ mod tests {
 
         let file = f.root.join("-notes.txt");
         let args = ["--commit".into(), id.into()];
-        let command = command(Some(OsStr::new("view")), Some(file.as_os_str()), &args, || false).unwrap();
+        let command = command(Some(OsStr::new("view")), Some(file.as_os_str()), &args).unwrap();
         let mut pane = open_pane(command).unwrap();
         assert!(pane.watch_scope().roots.is_empty());
         let mut screen = Screen::sized(65, 12);
@@ -452,39 +467,31 @@ mod tests {
     fn the_view_command_rejects_non_hex_ids_in_argument_parsing() {
         for id in ["--all", "HEAD", "123", "b...e", "abc\n", &"f".repeat(65)] {
             let args = ["--commit".into(), id.into()];
-            let command = command(Some(OsStr::new("view")), Some(OsStr::new("-notes")), &args, || false);
+            let command = command(Some(OsStr::new("view")), Some(OsStr::new("-notes")), &args);
             assert_eq!(command, Err("commit ID must be 4 to 64 hex digits".to_string()));
         }
     }
 
     #[test]
-    fn no_arguments_choose_the_outline_in_the_current_directory() {
-        assert_eq!(command(None, None, &[], || false), Ok(Command::Outline(None)));
+    fn home_and_explicit_paths_have_separate_destinations() {
+        assert_eq!(command(None, None, &[]), Ok(Command::Home));
+        let directory = OsStr::new("./work");
+        assert_eq!(command(Some(directory), None, &[]), Ok(Command::Path(directory)));
     }
 
     #[test]
     fn setup_usage_and_helper_commands_reach_separate_destinations() {
         for (name, arg, expected) in [
-            ("setup", None, Command::Setup { offered: false }),
+            ("setup", None, Command::Setup),
+            ("--skip-onboarding", None, Command::SkipOnboarding),
+            ("setup", Some("--skip-onboarding"), Command::SkipOnboarding),
             ("usage", None, Command::Usage),
             ("claude-status", None, Command::ClaudeStatus),
             ("listen", None, Command::Listen(false)),
             ("listen", Some("--stop"), Command::Listen(true)),
         ] {
-            assert_eq!(
-                command(Some(OsStr::new(name)), arg.map(OsStr::new), &[], || panic!(
-                    "explicit commands never offer setup"
-                )),
-                Ok(expected)
-            );
+            assert_eq!(command(Some(OsStr::new(name)), arg.map(OsStr::new), &[]), Ok(expected));
         }
-    }
-
-    #[test]
-    fn only_bare_milo_can_offer_setup() {
-        assert_eq!(command(None, None, &[], || true), Ok(Command::Setup { offered: true }));
-        let directory = OsStr::new("./work");
-        assert_eq!(command(Some(directory), None, &[], || panic!("path was explicit")), Ok(Command::Path(directory)));
     }
 
     #[test]
@@ -501,7 +508,7 @@ mod tests {
     fn an_unknown_word_points_to_the_commands() {
         let f = fixture::Fixture::folder();
         let missing = f.root.join("not-a-milo-command");
-        let command = command(Some(missing.as_os_str()), None, &[], || false).unwrap();
+        let command = command(Some(missing.as_os_str()), None, &[]).unwrap();
         let Err(why) = open_pane(command) else {
             panic!("unknown word opened a pane");
         };

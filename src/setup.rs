@@ -11,8 +11,11 @@ mod preview;
 mod profiles;
 mod rex_files;
 mod settings;
+mod welcome;
 
+pub(crate) use draw::wrap;
 pub use profiles::{layout_profile, return_from_peek};
+pub use welcome::{Welcome, needs_welcome, skip_welcome};
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -136,7 +139,6 @@ const WORKFLOW: &[Row] = &[
 pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     store: Option<Store>,
     inside: bool,
-    offered: bool,
     target: Option<rex::Target>,
     root: Option<PathBuf>,
     run: R,
@@ -163,7 +165,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
 }
 
 impl Setup {
-    pub fn open(offered: bool) -> Self {
+    pub fn open() -> Self {
         let inside = rex::inside();
         let target = rex::Target::current();
         let store = Store::real();
@@ -179,7 +181,6 @@ impl Setup {
         if let Err(why) = setup.reload_prefs() {
             setup.report(Err(why));
         }
-        setup.offered = offered;
         setup.real = true;
         if setup.message.as_ref().is_some_and(|(_, style)| *style == DEL.bold()) {
             setup.failure_status(true);
@@ -194,7 +195,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let mut setup = Self {
             store,
             inside,
-            offered: false,
             target,
             root,
             run,
@@ -443,11 +443,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn preset(&mut self, tree: bool) {
-        let mut layout = Layout { new_tabs: self.layout.new_tabs, ..Layout::default() };
-        if tree {
-            layout.panes = [true, false, false];
-        }
-        self.layout = layout;
+        self.layout = layout_preset(tree, self.layout.new_tabs);
     }
 
     fn capture(&mut self) -> Result<&'static str, &'static str> {
@@ -612,6 +608,10 @@ fn same_geometry(first: &Layout, second: &Layout) -> bool {
         && first.usage_rows == second.usage_rows
 }
 
+fn layout_preset(tree: bool, new_tabs: bool) -> Layout {
+    Layout { panes: [true, !tree, !tree], new_tabs, ..Layout::default() }
+}
+
 fn cycle(value: &mut String, options: &[&str]) {
     let next = options.iter().skip_while(|&&option| option != value.as_str()).nth(1).unwrap_or(&options[0]);
     value.clear();
@@ -639,7 +639,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
             key("s     ", "choose where to save"),
             key("r     ", "refresh preview/report"),
             key("Esc   ", "back"),
-            key("q     ", if self.offered { "open outline" } else { "quit" }),
+            key("q     ", "quit"),
         ]);
         Page::new(rows)
     }
@@ -748,11 +748,6 @@ impl<R> Drop for Setup<R> {
         }
         self.failure_status(false);
     }
-}
-
-/// A bare launch offers setup only when Rex can use it.
-pub fn offer_once() -> bool {
-    rex::inside() && Store::real().is_some_and(|store| store.offer_once())
 }
 
 /// Rex calls this separately so listener lifetime does not depend on a pane.

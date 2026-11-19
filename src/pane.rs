@@ -61,12 +61,12 @@ pub trait Pane {
 
 pub type Open<'a> = dyn Fn() -> Result<Box<dyn Pane>, String> + 'a;
 
-/// How a pane starts: a project to read, a loaded pane, a first check, or an offer before the outline.
+/// The first-run guide hands off to the originally requested screen without leaving the terminal.
 pub enum Start<'a> {
     Reading(&'a Path),
     Loaded,
     Check,
-    Offer(fn() -> Result<Box<dyn Pane>, String>),
+    Welcome(fn() -> Result<Box<dyn Pane>, String>),
 }
 
 const LOADING_DELAY: Duration = Duration::from_millis(75);
@@ -268,7 +268,7 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
 
 fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Result<(), String> {
     let check_on_open = matches!(start, Start::Check);
-    let mut next = if let Start::Offer(open) = start { Some(open) } else { None };
+    let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
     let mut screen = Screen::new();
     let mut input = Input::default();
     let load = |open: &Open<'_>| {
@@ -326,21 +326,10 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                         After::Ignored => {}
                         After::Stay => redraw = true,
                         After::Leave => {
-                            if matches!(key, Key::Char('q') | Key::Esc)
+                            if !matches!(key, Key::Ctrl(b'c') | Key::Eof)
                                 && let Some(open) = next.take()
                             {
-                                let opened = with_loading(
-                                    &mut screen,
-                                    Some(Path::new(".")),
-                                    terminal,
-                                    &mut input,
-                                    LOADING_DELAY,
-                                    || load(&open),
-                                );
-                                if term::TERMINATED.load(Ordering::Relaxed) {
-                                    return Ok(());
-                                }
-                                (pane, watcher, pace) = opened?;
+                                (pane, watcher, pace) = load(&open)?;
                                 redraw = true;
                             } else {
                                 break 'run;

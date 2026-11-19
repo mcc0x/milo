@@ -24,6 +24,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 | Command | What it does |
 | --- | --- |
+| `milo` | Opens the interactive home menu. |
+| `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows available local usage limits and, when there is room, Claude Code activity. |
@@ -32,9 +34,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo listen [--stop]` | Starts or stops layout memory and automatic new-tab arrangement; normally managed by setup. |
 | `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
 
-`PATH` defaults to the current directory. Use `milo outline` to avoid the
-first-run setup offer that bare `milo` can show inside Rex. Use `milo --help`
-for the CLI guide and `?` for keys and marks when a pane has room.
+`PATH` defaults to the current directory. Use direct pane commands when launching a pane for the user; they bypass the home menu and onboarding. Use `milo --help` for the CLI guide and `?` for pane keys.
 
 ## Open a file for the user
 

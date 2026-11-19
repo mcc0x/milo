@@ -3,9 +3,8 @@
 use std::borrow::Cow;
 use std::env;
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::files::{self, Change, Image, staged};
@@ -13,7 +12,7 @@ use super::install::{RunRex, Store, read, settings_path};
 use super::layout::{Layout, listener_lua, lua_path, owns_actions, owns_listener, rex_lua, update_actions};
 const CREATED: &[u8] = b"-- Managed by milo setup. Milo created this file.";
 pub(super) const MANAGED: &[u8] = b"-- Managed by milo setup.";
-pub(super) const OFFERED: &str = "setup-offered";
+pub(super) const LAYOUT_DISABLED: &str = "layout-disabled";
 
 impl Store {
     pub(super) fn rex_file(&self) -> PathBuf {
@@ -24,25 +23,12 @@ impl Store {
         self.config.join("listener.lua")
     }
 
-    /// An installed layout or the first offer's marker suppresses future offers.
-    pub fn offer_once(&self) -> bool {
-        if self.state.join(OFFERED).exists() {
-            return false;
-        }
-        if self.has_layout() != Ok(false) {
-            return false;
-        }
-        fs::create_dir_all(&self.state).is_ok()
-            && crate::fs_ops::open_dir(&self.state).is_ok()
-            && OpenOptions::new().write(true).create_new(true).mode(0o600).open(self.state.join(OFFERED)).is_ok()
-    }
-
     /// An unconfigured screen starts with a suggestion; a previously disabled one starts off.
     pub fn layout(&self) -> Result<(Layout, bool), &'static str> {
         check_config_dir(&self.config)?;
         let active = self.has_layout()?;
         let pending = self.rex_reload_pending();
-        let disabled = self.state.join("layout-disabled").is_file();
+        let disabled = self.state.join(LAYOUT_DISABLED).is_file();
         if (active || pending) && !(pending && disabled) {
             let saved = read(&self.rex_file())?
                 .as_ref()
@@ -74,7 +60,7 @@ impl Store {
         let enabled = layout.enabled();
         let rex_path = self.rex_file();
         let init = plan_init(settings_path(&self.init)?, &loader(&rex_path), enabled)?;
-        let note = self.state.join("layout-disabled");
+        let note = self.state.join(LAYOUT_DISABLED);
         let disabled = read(&note)?;
         if disabled.as_ref().is_some_and(|file| !file.bytes.is_empty()) {
             return Err("Milo's saved layout note was changed. It was left alone.");
