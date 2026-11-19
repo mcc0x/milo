@@ -95,6 +95,8 @@ From Home, choose **Uninstall** to review and confirm removal. **Health → Remo
 
 ## Troubleshooting
 
+Choose **Doctor** in Home or **Read diagnostics** in Settings to check the installation. Press `Esc` to go back without waiting for the checks to finish. For a report to copy from the shell, run `milo doctor`.
+
 - **`milo` is not found:** for Homebrew, check that Homebrew is on `PATH`. The scripts put milo in `~/.local/bin` unless you set `MILO_BIN_DIR`. Add the install directory to `PATH`, or run the binary by its full path.
 - **Setup says milo's Rex lines were moved, copied or changed:** setup leaves the file alone. Put a single copy of the original two lines back at the top, just after any interpreter line, then reopen setup and save.
 - **A save was interrupted or actions are missing:** run `milo doctor`. If it reports a stale launcher, pending reload or missing managed actions, run `milo setup --repair` with the binary you intend Rex to use. The **Health** section in setup offers the same diagnostics, repair and removal.

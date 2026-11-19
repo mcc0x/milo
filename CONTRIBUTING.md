@@ -130,6 +130,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
+| `src/git/pending.rs` | Counts lines in pending changes and reuses tracked-file counts across unrelated edits. |
 | `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden. |
 | `src/help.rs` | Draws and scrolls the in-pane help page. |
 | `src/history.rs` | Keeps commits, opened file lists, and selection state. |
