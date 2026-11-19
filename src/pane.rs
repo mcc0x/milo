@@ -18,6 +18,7 @@ use crate::watch::{Scope, Watcher};
 pub enum After {
     Ignored,
     Stay,
+    Help,
     Leave,
 }
 
@@ -321,10 +322,21 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         match terminal.wait(timeout_ms, watcher.fd(), pane.external_fd()) {
             Wait::Input => {
                 input.receive(&mut terminal.keyboard, &mut keys);
+                let mut overlay_changed = false;
                 for key in keys.drain(..) {
+                    if overlay_changed && matches!(key, Key::Click(..)) {
+                        continue; // Wait for a frame showing the new click targets.
+                    }
+                    let had_help = help.is_some();
                     match route_key(pane.as_mut(), &mut screen, &mut help, key) {
                         After::Ignored => {}
                         After::Stay => redraw = true,
+                        After::Help => {
+                            if Page::fits(&screen) {
+                                help = Some(pane.help());
+                                redraw = true;
+                            }
+                        }
                         After::Leave => {
                             if !matches!(key, Key::Ctrl(b'c') | Key::Eof)
                                 && let Some(open) = next.take()
@@ -336,6 +348,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                             }
                         }
                     }
+                    overlay_changed |= had_help != help.is_some();
                 }
             }
             Wait::Woken => {

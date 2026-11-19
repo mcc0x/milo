@@ -5,7 +5,7 @@ use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::help::{self, Page};
+use crate::help::{self, HintHits, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
 use crate::preferences::{IconMode, Preferences};
@@ -137,6 +137,7 @@ const ICONS: &[OptionRow] = &[
     SKIP,
 ];
 const DONE: &[OptionRow] = &[("Continue", "", Action::Done)];
+const CHOOSE_HINT: &str = "Enter choose";
 
 struct HitRows {
     x: usize,
@@ -145,12 +146,25 @@ struct HitRows {
     stride: usize,
     start: usize,
     count: usize,
+    indent: usize,
+    selected: usize,
 }
 
 impl HitRows {
-    fn index_at(&self, x: usize, y: usize) -> Option<usize> {
-        let row = y.checked_sub(self.y)? / self.stride;
-        (row < self.count && x.checked_sub(self.x)? < self.w).then_some(self.start + row)
+    fn index_at(&self, x: usize, y: usize, rows: &[OptionRow]) -> Option<usize> {
+        let x = x.checked_sub(self.x)?;
+        let y = y.checked_sub(self.y)?;
+        let row = y / self.stride;
+        if x >= self.w || row >= self.count {
+            return None;
+        }
+        let index = self.start + row;
+        let (label, detail, _) = rows[index];
+        let label_line = y.is_multiple_of(self.stride);
+        let on_marker = label_line && self.indent != 0 && x == 0 && self.selected == index;
+        let text = if label_line { label } else { detail };
+        let on_text = x.checked_sub(self.indent).is_some_and(|col| col < text.len());
+        (on_marker || on_text).then_some(index)
     }
 }
 
@@ -160,6 +174,7 @@ pub struct Welcome {
     selected: usize,
     notice: Option<String>,
     hit: Option<HitRows>,
+    footer: HintHits<'static>,
 }
 
 impl Welcome {
@@ -174,7 +189,7 @@ impl Welcome {
     }
 
     fn new(mode: Mode) -> Self {
-        Self { mode, step: Step::Intro, selected: 0, notice: None, hit: None }
+        Self { mode, step: Step::Intro, selected: 0, notice: None, hit: None, footer: HintHits::default() }
     }
 
     fn rows(&self) -> &'static [OptionRow] {
@@ -192,6 +207,15 @@ impl Welcome {
         self.selected = 0;
         self.notice = notice;
         self.hit = None;
+        self.footer = HintHits::default();
+    }
+
+    fn footer_last(&self) -> (&'static str, Key) {
+        match self.step {
+            Step::Intro => ("q skip", Key::Char('q')),
+            Step::Choose => ("Esc back", Key::Esc),
+            Step::Saved => ("Enter continue", Key::Enter),
+        }
     }
 
     fn error(&mut self, error: String) -> After {
@@ -306,7 +330,7 @@ impl Welcome {
         for (i, line) in notice.enumerate() {
             s.put(x, first + count * stride + i, w, line, DEL.bold());
         }
-        self.hit = Some(HitRows { x, y: first, w, stride, start, count });
+        self.hit = Some(HitRows { x, y: first, w, stride, start, count, indent, selected: self.selected });
     }
 }
 
@@ -325,6 +349,7 @@ fn brand(s: &mut Screen, x: usize, y: usize, w: usize, h: usize) {
 impl Pane for Welcome {
     fn draw(&mut self, s: &mut Screen) {
         let (w, h) = (s.w, s.h);
+        self.footer = HintHits::default();
         if w == 0 || h == 0 {
             self.hit = None;
             return;
@@ -352,15 +377,11 @@ impl Pane for Welcome {
             self.picker(s, x, top, width, body - top);
         }
         if footer != 0 {
-            let last = match self.step {
-                Step::Intro => "q skip",
-                Step::Choose => "Esc back",
-                Step::Saved => "Enter continue",
-            };
+            let (last, _) = self.footer_last();
             if self.step == Step::Saved || w < 21 {
-                s.put_fit(usize::from(w > 2), h - 1, w.saturating_sub(2), last, FAINT);
+                self.footer = help::draw_hint(s, "", &[], last);
             } else {
-                help::draw_hint(s, "Enter choose", &["↑↓ move"], last);
+                self.footer = help::draw_hint(s, CHOOSE_HINT, &["↑↓ move"], last);
             }
         }
     }
@@ -378,6 +399,20 @@ impl Pane for Welcome {
 
     fn key(&mut self, key: Key) -> After {
         let rows = self.rows();
+        let key = if let Key::Click(x, y) = key {
+            if let Some(index) = self.hit.as_ref().and_then(|hit| hit.index_at(x, y, rows)) {
+                self.selected = index;
+                return self.act(rows[index].2);
+            }
+            let (last, action) = self.footer_last();
+            match self.footer.item_at(x, y) {
+                Some(hint) if hint == last => action,
+                Some(CHOOSE_HINT) if self.hit.as_ref().is_some_and(|hit| hit.selected == self.selected) => Key::Enter,
+                _ => return After::Ignored,
+            }
+        } else {
+            key
+        };
         if let Some(delta) = key.rows(rows.len()) {
             let selected = self.selected.saturating_add_signed(delta).min(rows.len() - 1);
             if selected != self.selected {
@@ -388,14 +423,6 @@ impl Pane for Welcome {
         }
         match key {
             Key::Enter | Key::Char(' ') => self.act(rows[self.selected].2),
-            Key::Click(x, y) => {
-                if let Some(index) = self.hit.as_ref().and_then(|hit| hit.index_at(x, y)) {
-                    self.selected = index;
-                    After::Stay
-                } else {
-                    After::Ignored
-                }
-            }
             Key::Esc if self.step == Step::Choose => {
                 self.show(Step::Intro, None);
                 After::Stay
@@ -411,6 +438,45 @@ impl Pane for Welcome {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    fn click_on(s: &Screen, label: &str) -> Key {
+        s.text()
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| line.find(label).map(|x| Key::Click(crate::width::str_width(&line[..x]), y)))
+            .unwrap()
+    }
+
+    #[test]
+    fn welcome_clicks_only_activate_drawn_rows_and_footer_actions() {
+        let fixture = Fixture::folder();
+        let state = fixture.root.join("state");
+        let mut welcome = Welcome::new(Mode::Icons(state.clone()));
+        let mut wide = Screen::sized(48, 14);
+        welcome.draw(&mut wide);
+        let detail = "Choose icons for your terminal.";
+        let click = click_on(&wide, detail);
+        let Key::Click(x, y) = click else { unreachable!() };
+        assert_eq!(welcome.key(Key::Click(x + detail.len(), y)), After::Ignored);
+        assert_eq!(welcome.key(click), After::Stay);
+        assert!(welcome.step == Step::Choose);
+        assert_eq!(welcome.key(click), After::Ignored);
+        assert_eq!(welcome.key(click_on(&wide, "q skip")), After::Ignored);
+
+        let mut compact = Screen::sized(13, 5);
+        welcome.draw(&mut compact);
+        assert_eq!(welcome.key(click_on(&compact, "Esc back")), After::Stay);
+        assert!(welcome.step == Step::Intro);
+        assert!(!state.exists());
+
+        welcome.draw(&mut wide);
+        assert_eq!(welcome.key(click_on(&wide, CHOOSE_HINT)), After::Stay);
+        assert!(welcome.step == Step::Choose);
+        let mut choose = Screen::sized(48, 14);
+        welcome.draw(&mut choose);
+        assert_eq!(welcome.key(click_on(&choose, "Skip setup")), After::Leave);
+        assert!(state.join(COMPLETE).exists());
+    }
 
     #[test]
     fn first_launch_is_read_only_until_explicit_skip() {

@@ -2,7 +2,7 @@
 
 mod mascot;
 
-use crate::help::{self, Page};
+use crate::help::{self, HintHits, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
 use crate::screen::{self, Screen, Style};
@@ -32,6 +32,8 @@ pub(crate) struct Home {
     view: View,
     selected: usize,
     picker: Picker,
+    footer: HintHits<'static>,
+    confirm_click: crate::keys::ConfirmClick,
 }
 
 enum View {
@@ -43,14 +45,41 @@ enum View {
 
 impl Home {
     pub(crate) fn new() -> Self {
-        Self { view: View::Menu, selected: 0, picker: Picker::default() }
+        Self {
+            view: View::Menu,
+            selected: 0,
+            picker: Picker::default(),
+            footer: HintHits::default(),
+            confirm_click: Default::default(),
+        }
     }
 
     fn show(&mut self, view: View) -> After {
-        // Mouse input received before the next draw must not hit the previous page's picker.
+        // Clicks received before the next draw must not hit controls from the previous view.
         self.picker = Picker::default();
+        self.footer = HintHits::default();
+        if !matches!(view, View::Confirm { .. }) {
+            self.confirm_click.clear();
+        }
         self.view = view;
         After::Stay
+    }
+
+    fn click(&mut self, x: usize, y: usize) -> Option<Key> {
+        let hint = self.footer.index_at(x, y);
+        let (selected, labels) = match &mut self.view {
+            View::Menu | View::Confirm { .. } if hint == Some(2) => return Some(Key::Esc),
+            View::Menu => (&mut self.selected, MENU),
+            View::Confirm { selected } => (selected, CONFIRM),
+            View::Report(_) if hint == Some(1) => return Some(Key::Esc),
+            _ => return None,
+        };
+        if hint == Some(1) {
+            // A pending keyboard move must not activate a different option than the one shown.
+            return (*selected == self.picker.selected).then_some(Key::Enter);
+        }
+        *selected = self.picker.index_at(x, y, labels)?;
+        Some(Key::Enter)
     }
 
     fn draw_menu(&mut self, s: &mut Screen, body: usize) {
@@ -95,6 +124,7 @@ impl Pane for Home {
             return;
         }
         s.clear();
+        self.footer = HintHits::default();
         if s.w == 0 || s.h == 0 {
             self.picker = Picker::default();
             return;
@@ -105,14 +135,14 @@ impl Pane for Home {
             View::Menu => {
                 self.draw_menu(s, body);
                 if footer {
-                    help::draw_hint(s, "↑↓ move", &["Enter open"], "q quit");
+                    self.footer = help::draw_hint(s, "↑↓ move", &["Enter open"], "q quit");
                 }
             }
-            View::Report(report) => report.draw(s),
+            View::Report(report) => self.footer = report.draw(s),
             View::Confirm { selected } => {
                 self.picker = draw_confirm(s, body, *selected);
                 if footer {
-                    help::draw_hint(s, "↑↓ move", &["Enter choose"], "Esc back");
+                    self.footer = help::draw_hint(s, "↑↓ move", &["Enter choose"], "Esc back");
                 }
             }
             View::Settings(_) => unreachable!("settings draws its own frame"),
@@ -145,6 +175,20 @@ impl Pane for Home {
     }
 
     fn key(&mut self, key: Key) -> After {
+        let key = if let Key::Click(x, y) = key
+            && !matches!(self.view, View::Settings(_))
+        {
+            if matches!(self.view, View::Confirm { .. }) && self.confirm_click.is_repeat(x, y) {
+                return After::Ignored;
+            }
+            let Some(key) = self.click(x, y) else { return After::Ignored };
+            if matches!(self.view, View::Menu) && self.selected == 2 && key == Key::Enter {
+                self.confirm_click.opened(x, y);
+            }
+            key
+        } else {
+            key
+        };
         let back = matches!(key, Key::Esc | Key::Char('q'));
         let choose = matches!(key, Key::Enter | Key::Char(' '));
         match &mut self.view {
@@ -155,7 +199,7 @@ impl Pane for Home {
                 2 => View::Confirm { selected: 0 },
                 _ => unreachable!("selection stays within the menu"),
             }),
-            View::Menu => self.picker.select(&mut self.selected, MENU.len(), key),
+            View::Menu => move_selection(&mut self.selected, MENU.len(), key),
             View::Settings(setup) => match setup.key(key) {
                 After::Leave => self.show(View::Menu),
                 after => after,
@@ -166,7 +210,7 @@ impl Pane for Home {
                 self.show(View::Report(Report::new("Uninstall Milo", crate::uninstall::run())))
             }
             View::Confirm { .. } if back || choose => self.show(View::Menu),
-            View::Confirm { selected } => self.picker.select(selected, CONFIRM.len(), key),
+            View::Confirm { selected } => move_selection(selected, CONFIRM.len(), key),
         }
     }
 }
@@ -187,6 +231,8 @@ struct Picker {
     first: usize,
     len: usize,
     step: usize,
+    marker: usize,
+    selected: usize,
 }
 
 impl Picker {
@@ -214,26 +260,32 @@ impl Picker {
             };
             s.put(x + marker, row, width - marker, label, style);
         }
-        Self { x, y, width, first, len, step }
+        Self { x, y, width, first, len, step, marker, selected }
     }
 
-    fn select(self, selected: &mut usize, count: usize, key: Key) -> After {
-        let next = match key {
-            Key::Click(x, y) if self.len > 0 && x >= self.x && x - self.x < self.width && y >= self.y => {
-                let row = y - self.y;
-                let i = row / self.step;
-                (i < self.len && row.is_multiple_of(self.step)).then_some(self.first + i)
-            }
-            _ => key.rows(count).map(|rows| selected.saturating_add_signed(rows).min(count - 1)),
-        };
-        if let Some(next) = next
-            && next != *selected
-        {
+    fn index_at(self, x: usize, y: usize, labels: &[&str]) -> Option<usize> {
+        let x = x.checked_sub(self.x)?;
+        let row = y.checked_sub(self.y)?;
+        let i = row.checked_div(self.step)?;
+        if x >= self.width || i >= self.len || !row.is_multiple_of(self.step) {
+            return None;
+        }
+        let index = self.first + i;
+        let on_marker = self.marker != 0 && x == 0 && self.selected == index;
+        let on_label = x.checked_sub(self.marker).is_some_and(|col| col < labels[index].len());
+        (on_marker || on_label).then_some(index)
+    }
+}
+
+fn move_selection(selected: &mut usize, count: usize, key: Key) -> After {
+    if let Some(rows) = key.rows(count) {
+        let next = selected.saturating_add_signed(rows).min(count - 1);
+        if next != *selected {
             *selected = next;
             return After::Stay;
         }
-        After::Ignored
     }
+    After::Ignored
 }
 
 fn draw_confirm(s: &mut Screen, body: usize, selected: usize) -> Picker {
@@ -270,7 +322,7 @@ impl Report {
         Self { title, text, failed, top: 0, last: 0, shown: 0 }
     }
 
-    fn draw(&mut self, s: &mut Screen) {
+    fn draw(&mut self, s: &mut Screen) -> HintHits<'static> {
         let x = usize::from(s.w >= 3);
         let width = s.w - 2 * x;
         let footer = s.h > 1;
@@ -293,9 +345,7 @@ impl Report {
         if x != 0 {
             ui::thumb(s, s.w - 1, y, self.shown, len, self.top);
         }
-        if footer {
-            help::draw_hint(s, "↑↓ scroll", &[], "Esc back");
-        }
+        if footer { help::draw_hint(s, "↑↓ scroll", &[], "Esc back") } else { HintHits::default() }
     }
 
     fn scroll(&mut self, key: Key) -> After {
@@ -313,6 +363,14 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn click_on(s: &Screen, label: &str) -> Key {
+        s.text()
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| line.find(label).map(|x| Key::Click(crate::width::str_width(&line[..x]), y)))
+            .unwrap()
+    }
 
     #[test]
     fn home_places_the_picker_beside_art_or_below_it() {
@@ -350,6 +408,40 @@ mod tests {
     }
 
     #[test]
+    fn home_and_confirmation_clicks_only_act_on_drawn_controls() {
+        let mut home = Home::new();
+        let mut screen = Screen::sized(60, 20);
+        home.draw(&mut screen);
+        let uninstall = click_on(&screen, "Uninstall");
+        let old_footer = click_on(&screen, "Enter open");
+        assert_eq!(home.key(uninstall), After::Stay);
+        assert!(matches!(home.view, View::Confirm { selected: 0 }));
+        assert_eq!(home.key(uninstall), After::Ignored);
+        assert_eq!(home.key(old_footer), After::Ignored);
+
+        home.draw(&mut screen);
+        let cancel = click_on(&screen, "Cancel");
+        let Key::Click(x, y) = cancel else { unreachable!() };
+        assert_eq!(home.key(Key::Click(x + "Cancel".len(), y)), After::Ignored);
+        let Key::Click(x, y) = click_on(&screen, "Enter choose") else { unreachable!() };
+        assert_eq!(home.key(Key::Down), After::Stay);
+        // Test the mapping without risking a real uninstall if the guard regresses.
+        assert_eq!(home.click(x, y), None);
+        assert!(matches!(home.view, View::Confirm { selected: 1 }));
+        assert_eq!(home.key(Key::Up), After::Stay);
+        assert_eq!(home.key(cancel), After::Stay);
+        assert!(matches!(home.view, View::Menu));
+
+        home.draw(&mut screen);
+        assert_eq!(home.key(click_on(&screen, "Enter open")), After::Stay);
+        home.draw(&mut screen);
+        assert_eq!(home.key(click_on(&screen, "Esc back")), After::Stay);
+        assert!(matches!(home.view, View::Menu));
+        home.draw(&mut screen);
+        assert_eq!(home.key(click_on(&screen, "q quit")), After::Leave);
+    }
+
+    #[test]
     fn a_one_row_terminal_keeps_the_selected_action_visible() {
         let mut home = Home::new();
         let mut screen = Screen::sized(9, 1);
@@ -373,7 +465,7 @@ mod tests {
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut screen);
         assert!(screen.text()[2].contains("Last line."));
-        assert_eq!(home.key(Key::Esc), After::Stay);
+        assert_eq!(home.key(click_on(&screen, "Esc back")), After::Stay);
         assert!(matches!(home.view, View::Menu));
     }
 

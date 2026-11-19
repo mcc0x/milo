@@ -23,7 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::help::{self, Page};
-use crate::keys::Key;
+use crate::keys::{ConfirmClick, Key};
 use crate::pane::{After, Pane};
 use crate::preferences::{IconMode, Preferences, ProjectMode, Source};
 use crate::screen::{Screen, Style};
@@ -45,6 +45,8 @@ enum Panel {
     Save(SaveKind),
     Confirm(Confirm),
 }
+
+const SECTIONS: [Panel; 4] = [Panel::Layout, Panel::Appearance, Panel::Workflow, Panel::Health];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SaveKind {
@@ -156,6 +158,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     panel: Panel,
     selected: usize,
     visible: draw::Visible,
+    modal_click: ConfirmClick,
     health: String,
     health_top: usize,
     icon_override: Option<IconMode>,
@@ -212,6 +215,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             panel: if inside { Panel::Layout } else { Panel::Workflow },
             selected: 0,
             visible: draw::Visible::default(),
+            modal_click: ConfirmClick::default(),
             health: String::new(),
             health_top: 0,
             icon_override: None,
@@ -277,6 +281,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.panel = panel;
         self.selected = selected;
         self.visible = draw::Visible::default();
+        self.modal_click.clear();
         self.message = None;
     }
 
@@ -629,6 +634,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
             heading("Setup keys"),
             key("↑↓    ", "move (k j)"),
             key("Enter ", "choose or change"),
+            key("Click ", "choose or change"),
             key("1 2 3 4", "switch sections"),
             key("Tab   ", "next section"),
         ];
@@ -645,8 +651,52 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
     }
 
     fn key(&mut self, key: Key) -> After {
+        let after = self.input(key);
+        if after != After::Ignored {
+            // Several input events may arrive before the next draw. Only act on a
+            // click when its target still belongs to the frame on screen.
+            self.visible.invalidate();
+        }
+        after
+    }
+}
+
+impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
+    fn click(&mut self, x: usize, y: usize) -> After {
+        if let Some(panel) = self.visible.tab_at(x, y) {
+            self.select_panel(panel, 0);
+            return After::Stay;
+        }
+        let panel = self.panel;
+        let after = if let Some(key) = self.visible.footer_at(x, y) {
+            if key == Key::Char('?') { After::Help } else { self.input(key) }
+        } else {
+            let Some(index) = self.visible.index_at(x, y) else { return After::Ignored };
+            let Some(&row) = self.rows().get(index) else { return After::Ignored };
+            if self.disabled(row)
+                || matches!(row, Row::Continue | Row::SaveGlobal | Row::SaveWorktree)
+                    && self.modal_click.is_repeat(x, y)
+            {
+                return After::Ignored;
+            }
+            self.selected = index;
+            if self.activate(row) { After::Stay } else { After::Ignored }
+        };
+        if self.panel != panel && matches!(self.panel, Panel::Save(_) | Panel::Confirm(_)) {
+            self.modal_click.opened(x, y);
+        }
+        after
+    }
+
+    fn input(&mut self, key: Key) -> After {
         let modal = matches!(self.panel, Panel::Save(_) | Panel::Confirm(_));
         if let Some(rows) = key.rows(self.visible.len) {
+            let rows = if matches!(key, Key::WheelUp | Key::WheelDown) {
+                let page = self.visible.len.clamp(1, 3).cast_signed();
+                rows.clamp(-page, page)
+            } else {
+                rows
+            };
             if self.panel == Panel::Diagnostics {
                 self.health_top = self.health_top.saturating_add_signed(rows);
             } else {
@@ -656,20 +706,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
         }
         let action = match key {
             Key::Enter | Key::Char(' ') => self.rows().get(self.selected).copied(),
-            Key::Click(x, y) => {
-                if let Some(index) = self.visible.index_at(x, y) {
-                    self.selected = index;
-                    return After::Stay;
-                }
-                None
-            }
+            Key::Click(x, y) => return self.click(x, y),
             Key::Ctrl(b'i') if !modal => {
                 self.next_panel();
                 return After::Stay;
             }
             Key::Char(digit @ '1'..='4') if !modal => {
-                let panel =
-                    [Panel::Layout, Panel::Appearance, Panel::Workflow, Panel::Health][usize::from(digit as u8 - b'1')];
+                let panel = SECTIONS[usize::from(digit as u8 - b'1')];
                 self.select_panel(panel, 0);
                 return After::Stay;
             }

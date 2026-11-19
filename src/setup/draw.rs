@@ -1,32 +1,74 @@
 //! Draw setup in a full tab or in a narrow rail without hiding the cursor.
 
 use std::ffi::OsStr;
+use std::ops::Range;
 
 use crate::git::Kind;
 use crate::help;
 use crate::icons;
+use crate::keys::Key;
 use crate::preferences::Source;
 use crate::screen::{self, Screen, Style};
 use crate::ui::{self, ADD, FAINT, HEADING};
 use crate::width::char_width;
 
 use super::preview::{Preview, Rect, pane_label};
-use super::{Claude, Confirm, Panel, Row, SaveKind, Scope, Setup, Side};
+use super::{Claude, Confirm, Panel, Row, SECTIONS, SaveKind, Scope, Setup, Side, TUNE};
 
 const ACCENT: Style = Style::fg(screen::CYAN);
 
 #[derive(Default)]
+struct RowHit {
+    marker: bool,
+    label: Range<usize>,
+    value: Range<usize>,
+}
+
+#[derive(Default)]
 pub(super) struct Visible {
+    current: bool,
     first: usize,
     y: usize,
-    width: usize,
     pub(super) len: usize,
+    rows: [RowHit; TUNE.len()],
+    tab_y: usize,
+    tabs: [Range<usize>; SECTIONS.len()],
+    footer: help::HintHits<'static>,
 }
 
 impl Visible {
+    pub(super) fn invalidate(&mut self) {
+        self.current = false;
+    }
+
     pub(super) fn index_at(&self, x: usize, y: usize) -> Option<usize> {
         let offset = y.checked_sub(self.y)?;
-        (x < self.width && offset < self.len).then_some(self.first + offset)
+        if !self.current || offset >= self.len {
+            return None;
+        }
+        let row = self.rows.get(offset)?;
+        (x == 0 && row.marker || row.label.contains(&x) || row.value.contains(&x)).then_some(self.first + offset)
+    }
+
+    pub(super) fn tab_at(&self, x: usize, y: usize) -> Option<Panel> {
+        if !self.current || y != self.tab_y {
+            return None;
+        }
+        self.tabs.iter().position(|span| span.contains(&x)).map(|index| SECTIONS[index])
+    }
+
+    pub(super) fn footer_at(&self, x: usize, y: usize) -> Option<Key> {
+        if !self.current {
+            return None;
+        }
+        let label = self.footer.item_at(x, y)?;
+        Some(match label.chars().next()? {
+            'E' | '‹' => Key::Esc,
+            'T' => Key::Ctrl(b'i'),
+            '↑' => Key::Up,
+            '↓' => Key::Down,
+            ch => Key::Char(ch),
+        })
     }
 }
 
@@ -37,23 +79,34 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if s.w < 4 || s.h == 0 {
             return;
         }
-        ui::section_heading(s, 0, s.w - 1, "Milo setup");
         if s.h == 1 {
+            ui::section_heading(s, 0, s.w - 1, "Milo setup");
             return;
         }
-        self.footer(s);
+        self.visible.current = true;
+        self.visible.footer = self.footer(s);
         let end = self.notice(s);
-        let tab = self.panel.tab();
         let mut y = 1;
-        if let Some(active) = tab {
-            if s.w >= 60 {
-                tabs(s, 15, 0, active);
-            } else if end >= 5 {
-                tabs(s, 1, y, active);
-                y += 1;
-            }
+        let tab = self.panel.tab();
+        // Keep a content row in short rails by using the heading for tabs.
+        let tabs_in_heading = tab.is_some() && s.w < 60 && end < 3;
+        if !tabs_in_heading {
+            ui::section_heading(s, 0, s.w - 1, "Milo setup");
         }
-        if end >= y + 2 {
+        if let Some(active) = tab {
+            let (x, tab_y) = if s.w >= 60 {
+                (15, 0)
+            } else if tabs_in_heading {
+                (usize::from(s.w >= 8), 0)
+            } else {
+                y += 1;
+                (usize::from(s.w >= 8), 1)
+            };
+            self.visible.tabs = tabs(s, x, tab_y, active);
+            self.visible.tab_y = tab_y;
+        }
+        let rows = self.rows();
+        if end.saturating_sub(y) > rows.len().clamp(1, 3) {
             y += usize::from(end >= 12);
             self.title(s, y);
             y += 1 + usize::from(end >= 12);
@@ -63,7 +116,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             return;
         }
 
-        let rows = self.rows();
         let width = s.w.saturating_sub(2);
         if let Some(text) = self.intro() {
             let spare = end.saturating_sub(y + rows.len().min(3));
@@ -99,19 +151,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             sample = Some(form_end + 1);
         }
 
-        let visible = self.draw_rows(s, y, form_end, form_width);
-        let next = visible.y + visible.len;
-        if let Some(&row) = rows.get(self.selected)
-            && next + 1 < form_end
-        {
-            let cell = self.cell(row);
-            let detail = self.detail(row, cell);
-            for (i, line) in wrap(detail, form_width.saturating_sub(3)).take(form_end - next - 1).enumerate() {
-                s.put(2, next + 1 + i, form_width - 3, line, FAINT);
-            }
-        }
-        self.visible = visible;
-
         if let (Some(Rect { x, y, width, height }), Some(preview)) = (diagram, preview)
             && y < end
         {
@@ -123,6 +162,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             };
             preview.draw(s, Rect { x, y: y + 1, width, height }, highlight);
         }
+        self.draw_rows(s, y, form_end, form_width);
+        let next = y + self.visible.len;
+        if let Some(&row) = rows.get(self.selected)
+            && next + 1 < form_end
+        {
+            let cell = self.cell(row);
+            let detail = self.detail(row, cell);
+            for (i, line) in wrap(detail, form_width.saturating_sub(3)).take(form_end - next - 1).enumerate() {
+                s.put(2, next + 1 + i, form_width - 3, line, FAINT);
+            }
+        }
+
         if let Some(top) = sample {
             if self.panel == Panel::Appearance {
                 self.appearance_sample(s, top);
@@ -220,38 +271,59 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         })
     }
 
-    fn footer(&self, s: &mut Screen) {
+    fn footer(&self, s: &mut Screen) -> help::HintHits<'static> {
         let back = matches!(self.panel, Panel::Tune | Panel::Save(_) | Panel::Confirm(_) | Panel::Diagnostics);
-        let exit = if back { "Esc back" } else { "q quit" };
-        if s.w < 20 {
-            s.put_fit(1, s.h - 1, s.w - 1, exit, FAINT);
-            return;
-        }
-        if self.panel == Panel::Layout && self.inside && self.saved.is_some() && (24..36).contains(&s.w) {
-            let trial = if self.trial.is_some() { "u undo" } else { "a try" };
-            let x = 1 + s.put(1, s.h - 1, 6, trial, FAINT);
-            let x = x + s.put(x, s.h - 1, 10, "  s save  ", FAINT);
-            s.put_fit(x, s.h - 1, s.w - x, exit, FAINT);
-            return;
-        }
-        let last = if back { "Esc back · ? help" } else { "q quit · ? help" };
-        let (first, middle): (&str, &[&str]) = match self.panel {
-            Panel::Diagnostics => ("↑↓ scroll", &["r refresh"]),
-            Panel::Save(_) | Panel::Confirm(_) => ("Enter choose", &[]),
-            Panel::Layout | Panel::Tune if self.inside && self.saved.is_some() => {
-                ("s save…", if self.trial.is_some() { &["u undo", "Tab sections"] } else { &["a try", "Tab sections"] })
-            }
-            Panel::Appearance | Panel::Workflow if self.saved_prefs.is_some() => ("s save…", &["Enter", "Tab section"]),
-            _ => ("Enter", &["Tab section"]),
+        let exit = match (back, s.w) {
+            (true, 26..) => "Esc back",
+            (true, 12..) => "Esc",
+            (true, _) => "‹",
+            (false, 15..) => "q quit",
+            (false, _) => "q",
         };
-        help::draw_hint(s, first, middle, last);
+        let full = s.w >= 54;
+        let compact = s.w >= 24;
+        let save = if full {
+            "s save…"
+        } else if compact {
+            "s save"
+        } else {
+            "s"
+        };
+        let (first, middle): (&'static str, &'static [&'static str]) = match self.panel {
+            Panel::Layout | Panel::Tune if self.inside && self.saved.is_some() => {
+                let middle: &'static [&'static str] = match (self.trial.is_some(), full, compact) {
+                    (true, true, _) => &["u undo", "Tab sections", "? help"],
+                    (false, true, _) => &["a try", "Tab sections", "? help"],
+                    (true, false, true) => &["u undo", "?"],
+                    (false, false, true) => &["a try", "?"],
+                    (true, false, false) => &["u", "?"],
+                    (false, false, false) => &["a", "?"],
+                };
+                (save, middle)
+            }
+            Panel::Appearance | Panel::Workflow if self.saved_prefs.is_some() => {
+                (save, if full { &["Tab sections", "? help"] } else { &["?"] })
+            }
+            Panel::Diagnostics if full => ("r refresh", &["↑ up", "↓ down", "? help"]),
+            Panel::Diagnostics if compact => ("r refresh", &["↑", "↓", "?"]),
+            Panel::Diagnostics => ("r", &["↑", "↓", "?"]),
+            _ if full && self.panel.tab().is_some() => ("Tab sections", &["? help"]),
+            _ => ("", if compact { &["? help"] } else { &["?"] }),
+        };
+        // The last middle item is always help; don't advertise it when it cannot open.
+        let middle = if help::Page::fits(s) { middle } else { &middle[..middle.len() - 1] };
+        if full { help::draw_hint(s, first, middle, exit) } else { help::draw_compact_hint(s, first, middle, exit) }
     }
 
-    fn draw_rows(&self, s: &mut Screen, y: usize, end: usize, width: usize) -> Visible {
+    fn draw_rows(&mut self, s: &mut Screen, y: usize, end: usize, width: usize) {
         let rows = self.rows();
         let len = end.saturating_sub(y).min(rows.len());
         let first = self.selected.saturating_sub(len.saturating_sub(1)).min(rows.len() - len);
-        let draw_width = width.saturating_sub(1);
+        let draw_width = width - 1;
+        let left = if width < 8 { 1 } else { 2 };
+        self.visible.first = first;
+        self.visible.y = y;
+        self.visible.len = len;
         for (i, &row) in rows[first..first + len].iter().enumerate() {
             let row_y = y + i;
             let cell = self.cell(row);
@@ -270,17 +342,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Style::PLAIN
                 },
             );
-            if let Some((value, style)) = cell.value {
-                let room = (draw_width.saturating_sub(4) / 2).min(13);
-                let start = draw_width.saturating_sub(room);
-                s.put_fit(2, row_y, start.saturating_sub(3), label, name_style);
-                s.put_fit(start, row_y, room, value, if disabled { FAINT } else { style });
+            let hit = if let Some((value, style)) = cell.value {
+                let gap = usize::from(draw_width - left > 3);
+                let room = ((draw_width - left - gap) / 2).clamp(1, 13);
+                let start = draw_width - room;
+                let label_width = s.put_fit(left, row_y, start - left - gap, label, name_style);
+                let value_width = s.put_fit(start, row_y, room, value, if disabled { FAINT } else { style });
+                RowHit { marker: selected, label: left..left + label_width, value: start..start + value_width }
             } else {
-                s.put_fit(2, row_y, draw_width.saturating_sub(2), label, name_style);
-            }
+                let used = s.put_fit(left, row_y, draw_width - left, label, name_style);
+                RowHit { marker: selected, label: left..left + used, ..RowHit::default() }
+            };
+            self.visible.rows[i] = hit;
         }
         ui::thumb(s, draw_width, y, len, rows.len(), first);
-        Visible { first, y, width, len }
     }
 
     fn draw_diagnostics(&mut self, s: &mut Screen, y: usize, end: usize) {
@@ -600,17 +675,22 @@ impl<'a> Cell<'a> {
     }
 }
 
-fn tabs(s: &mut Screen, mut x: usize, y: usize, active: usize) {
-    let labels = ["Layout", "Appearance", "Workflow", "Health"];
-    if s.w < 37 {
-        s.put_fit(x, y, s.w.saturating_sub(x), labels[active], HEADING);
-        return;
-    }
-    let spacing = 2;
-    for (index, text) in labels.into_iter().enumerate() {
+fn tabs(s: &mut Screen, mut x: usize, y: usize, active: usize) -> [Range<usize>; SECTIONS.len()] {
+    let (labels, gap) = match s.w - x {
+        36.. => (["Layout", "Appearance", "Workflow", "Health"], 2),
+        24.. => (["Layout", "Looks", "Flow", "Health"], 1),
+        17.. => (["Lay", "App", "Flow", "Hlth"], 1),
+        7.. => (["L", "A", "W", "H"], 1),
+        _ => (["L", "A", "W", "H"], 0),
+    };
+    std::array::from_fn(|index| {
+        let text = labels[index];
         let style = if index == active { ACCENT.bold() } else { FAINT };
-        x += s.put(x, y, text.len(), text, style) + spacing;
-    }
+        let start = x;
+        let used = s.put(x, y, text.len(), text, style);
+        x += used + gap;
+        start..start + used
+    })
 }
 
 fn fraction_label(part: &str) -> &str {

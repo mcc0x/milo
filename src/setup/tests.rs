@@ -17,6 +17,16 @@ fn frame(pane: &mut dyn Pane, width: usize, height: usize) -> Vec<String> {
     screen.text()
 }
 
+fn click_at(rows: &[String], y: usize, label: &str) -> Key {
+    let at = rows[y].find(label).unwrap_or_else(|| panic!("missing {label:?} in {:?}", rows[y]));
+    Key::Click(crate::width::str_width(&rows[y][..at]), y)
+}
+
+fn click_label(rows: &[String], label: &str) -> Key {
+    let y = rows.iter().position(|row| row.contains(label)).unwrap_or_else(|| panic!("missing {label:?}: {rows:?}"));
+    click_at(rows, y, label)
+}
+
 fn choose<R: Fn(&[&OsStr]) -> bool>(pane: &mut Setup<R>, row: Row) -> After {
     pane.selected = pane.rows().iter().position(|&it| it == row).expect("visible setup choice");
     pane.key(Key::Enter)
@@ -62,7 +72,7 @@ fn short_pane_keeps_the_chosen_row_and_a_way_back() {
     let rows = frame(&mut pane, 28, 5);
     assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("Auto-arrange")));
     assert!(!rows.iter().any(|row| row.contains('┌')));
-    assert!(rows[4].ends_with("Esc back · ? help"));
+    assert!(rows[4].contains("Esc back"));
     assert_eq!(pane.key(Key::Esc), After::Stay);
     assert_eq!(pane.panel, Panel::Layout);
 }
@@ -152,8 +162,9 @@ fn appearance_changes_its_live_sample_without_global_writes() {
     let before = frame(&mut pane, 70, 20);
     assert!(before.iter().any(|line| line.contains("●") && line.contains("main.rs")));
     assert!(before.iter().any(|line| line.contains("Claude 5h · 12% left")));
-    choose(&mut pane, Row::Activity);
-    choose(&mut pane, Row::UsageStyle);
+    assert_eq!(pane.key(click_label(&before, "Activity marks")), After::Stay);
+    let rows = frame(&mut pane, 70, 20);
+    assert_eq!(pane.key(click_label(&rows, "Usage display")), After::Stay);
     pane.icon_override = Some(IconMode::Off);
     let after = frame(&mut pane, 70, 20);
     assert!(after.iter().any(|line| line.contains("Sample (MILO_ICONS override)")));
@@ -169,8 +180,11 @@ fn no_target_cannot_try_and_health_removal_is_not_the_default_action() {
     assert_eq!(pane.key(Key::Char('a')), After::Stay);
     assert!(frame(&mut pane, 60, 18).iter().any(|line| line.contains("Could not find this Rex pane")));
     assert_eq!(pane.key(Key::Char('4')), After::Stay);
-    assert_eq!(choose(&mut pane, Row::Remove), After::Stay);
+    let rows = frame(&mut pane, 80, 18);
+    let remove = click_label(&rows, "Remove Milo integration…");
+    assert_eq!(pane.key(remove), After::Stay);
     assert_eq!(pane.panel, Panel::Confirm(Confirm::Remove));
+    assert_eq!(pane.key(remove), After::Ignored);
     assert_eq!(pane.key(Key::Enter), After::Stay);
     assert_eq!(pane.panel, Panel::Health);
     assert!(!f.root.join("init.lua").exists());
@@ -183,5 +197,130 @@ fn a_narrow_notice_does_not_hide_the_control_or_exit() {
     pane.key(Key::Char('a'));
     let rows = frame(&mut pane, 10, 5);
     assert!(rows.iter().any(|row| row.starts_with('›')));
-    assert_eq!(rows[4].trim(), "q quit");
+    assert_eq!(rows[4].trim(), "s a ? q");
+}
+
+#[test]
+fn clicking_a_setting_changes_the_draft_and_ignores_padding_disabled_and_stale_hits() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| panic!("draft changes do not call Rex"));
+    let rows = frame(&mut pane, 110, 27);
+    let tree = click_label(&rows, "Just the tree");
+    let Key::Click(x, y) = tree else { unreachable!() };
+    assert_eq!(pane.key(Key::Click(x + "Just the tree".len(), y)), After::Ignored);
+    assert_eq!(pane.key(click_label(&rows, "Use this tab’s layout")), After::Ignored);
+    assert_eq!(pane.key(tree), After::Stay);
+    assert_eq!(pane.layout.panes, [true, false, false]);
+    let tune = click_label(&rows, "Customize panes");
+    assert_eq!(pane.key(tune), After::Ignored, "a click must refer to a freshly drawn frame");
+    let rows = frame(&mut pane, 110, 27);
+    assert_eq!(pane.key(click_label(&rows, "Customize panes")), After::Stay);
+    assert_eq!(pane.panel, Panel::Tune);
+    let rows = frame(&mut pane, 110, 27);
+    let side = rows.iter().position(|line| line.contains("Rail side")).unwrap();
+    assert_eq!(pane.key(click_at(&rows, side, "Left")), After::Stay);
+    assert_eq!(pane.layout.geometry.side, Side::Right);
+    let rows = frame(&mut pane, 110, 27);
+    assert_eq!(pane.key(click_at(&rows, 0, "Appearance")), After::Stay);
+    assert_eq!(pane.panel, Panel::Appearance);
+    let rows = frame(&mut pane, 110, 27);
+    let activity = click_label(&rows, "Activity marks");
+    frame(&mut pane, 8, 1);
+    assert_eq!(pane.key(activity), After::Ignored, "a clipped redraw clears previous mouse targets");
+    assert!(!f.root.join("init.lua").exists());
+}
+
+#[test]
+fn clicked_save_and_inheritance_keep_their_scope_prompts() {
+    let f = Fixture::new();
+    let mut pane = Setup::new(Some(store(&f)), true, None, Some(f.root.clone()), |_| true);
+    let rows = frame(&mut pane, 80, 18);
+    assert_eq!(pane.key(click_label(&rows, "s save")), After::Stay);
+    assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    assert_eq!(pane.key(click_at(&rows, 0, "Health")), After::Ignored);
+    let rows = frame(&mut pane, 80, 18);
+    assert!(!rows[0].contains("Health"));
+    assert_eq!(pane.key(click_at(&rows, 17, "Esc back")), After::Stay);
+    assert!(!f.root.join("init.lua").exists());
+
+    let rows = frame(&mut pane, 80, 18);
+    assert_eq!(pane.key(click_label(&rows, "s save")), After::Stay);
+    let rows = frame(&mut pane, 80, 18);
+    assert_eq!(pane.key(click_label(&rows, "For this worktree")), After::Stay);
+    assert_eq!(pane.scope, Scope::Worktree);
+
+    let rows = frame(&mut pane, 80, 18);
+    let inherit = click_label(&rows, "Use global default");
+    assert_eq!(pane.key(inherit), After::Stay);
+    assert_eq!(pane.panel, Panel::Confirm(Confirm::UseGlobal));
+    assert_eq!(pane.key(inherit), After::Ignored);
+    assert_eq!(pane.scope, Scope::Worktree);
+    let rows = frame(&mut pane, 80, 18);
+    let remove = click_label(&rows, "Remove override");
+    let Key::Click(x, y) = remove else { unreachable!() };
+    // A newly drawn confirming action may land at the opening click.
+    pane.modal_click.opened(x, y);
+    assert_eq!(pane.key(remove), After::Ignored);
+    assert_eq!(pane.scope, Scope::Worktree);
+    pane.modal_click.clear();
+    assert_eq!(pane.key(remove), After::Stay);
+    assert_eq!(pane.scope, Scope::Global);
+}
+
+#[test]
+fn diagnostics_refresh_scroll_and_return_by_click() {
+    let mut pane = Setup::new(None, false, None, None, |_| panic!("outside Rex"));
+    let rows = frame(&mut pane, 75, 8);
+    assert_eq!(pane.key(click_at(&rows, 0, "Health")), After::Stay);
+    let rows = frame(&mut pane, 75, 8);
+    assert_eq!(pane.key(click_label(&rows, "Read diagnostics")), After::Stay);
+    assert_eq!(pane.panel, Panel::Diagnostics);
+    let report = pane.health.clone();
+    assert!(report.contains("Could not find your settings folders"));
+
+    pane.health = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9".into();
+    let rows = frame(&mut pane, 75, 8);
+    assert_eq!(pane.key(click_at(&rows, 7, "↓ down")), After::Stay);
+    assert_eq!(pane.health_top, 1);
+    let rows = frame(&mut pane, 75, 8);
+    assert_eq!(pane.key(click_at(&rows, 7, "r refresh")), After::Stay);
+    assert_eq!(pane.health_top, 0);
+    assert_eq!(pane.health, report);
+    let rows = frame(&mut pane, 75, 8);
+    assert_eq!(pane.key(click_at(&rows, 7, "Esc back")), After::Stay);
+    assert_eq!(pane.panel, Panel::Health);
+}
+
+#[test]
+fn narrow_rails_keep_tabs_scrolled_rows_and_footer_actions_mouse_accessible() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| panic!("no Rex target"));
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 1, "A")), After::Stay);
+    assert_eq!(pane.panel, Panel::Appearance);
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 1, "L")), After::Stay);
+
+    // The first row is selected when entering the Layout section; a one-row
+    // view must not skip any controls when using the wheel.
+    for label in ["Project sidebar", "Use this tab’s layout", "Customize panes"] {
+        frame(&mut pane, 28, 3);
+        assert_eq!(pane.key(Key::WheelDown), After::Stay);
+        let rows = frame(&mut pane, 28, 3);
+        assert!(rows[1].contains(label), "{rows:?}");
+    }
+
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 4, "a")), After::Stay);
+    assert!(pane.message.as_ref().unwrap().0.contains("Could not find this Rex pane"));
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 4, "?")), After::Help);
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 4, "s")), After::Stay);
+    assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 4, "‹")), After::Stay);
+    let rows = frame(&mut pane, 10, 5);
+    assert_eq!(pane.key(click_at(&rows, 4, "q")), After::Leave);
+    assert!(!f.root.join("init.lua").exists());
 }

@@ -12,16 +12,74 @@ pub type HelpRow = Vec<(&'static str, Style)>;
 const SEPARATOR: &str = " · ";
 const CLOSE: &str = "q close";
 
+/// Hit-test the exact labels drawn, not the separators or shortcuts omitted for space.
+#[derive(Default)]
+pub struct HintHits<'a> {
+    y: usize,
+    gap: usize,
+    first: &'a str,
+    middle: &'a [&'a str],
+    start: usize,
+    last: &'a str,
+}
+
+impl HintHits<'_> {
+    fn items(&self) -> impl Iterator<Item = (usize, &str)> {
+        std::iter::once((0, self.first))
+            .chain(self.middle.iter().copied().enumerate().skip(self.start).map(|(i, text)| (i + 1, text)))
+            .chain(std::iter::once((self.middle.len() + 1, self.last)))
+            .filter(|(_, text)| !text.is_empty())
+    }
+
+    pub fn index_at(&self, x: usize, y: usize) -> Option<usize> {
+        self.hit(x, y).map(|(index, _)| index)
+    }
+
+    pub fn item_at(&self, x: usize, y: usize) -> Option<&str> {
+        self.hit(x, y).map(|(_, text)| text)
+    }
+
+    fn hit(&self, x: usize, y: usize) -> Option<(usize, &str)> {
+        if y != self.y {
+            return None;
+        }
+        let mut left = 1;
+        for (index, text) in self.items() {
+            let end = left + str_width(text);
+            if (left..end).contains(&x) {
+                return Some((index, text));
+            }
+            left = end + self.gap;
+        }
+        None
+    }
+}
+
 /// Keeps the last hint whole, dropping middle items before the first.
-pub fn draw_hint(s: &mut Screen, first: &str, middle: &[&str], last: &str) {
+pub fn draw_hint<'a>(s: &mut Screen, first: &'a str, middle: &'a [&'a str], last: &'a str) -> HintHits<'a> {
+    draw_hint_with(s, first, middle, last, SEPARATOR)
+}
+
+pub fn draw_compact_hint<'a>(s: &mut Screen, first: &'a str, middle: &'a [&'a str], last: &'a str) -> HintHits<'a> {
+    draw_hint_with(s, first, middle, last, " ")
+}
+
+fn draw_hint_with<'a>(
+    s: &mut Screen,
+    first: &'a str,
+    middle: &'a [&'a str],
+    last: &'a str,
+    separator: &str,
+) -> HintHits<'a> {
     let room = s.w.saturating_sub(2);
     let last_width = str_width(last);
-    if last_width > room {
-        return;
+    if last_width > room || s.h == 0 {
+        return HintHits::default();
     }
-    let gap = str_width(SEPARATOR);
-    let first = if str_width(first) + gap + last_width <= room { first } else { "" };
-    let mut used = last_width + if first.is_empty() { 0 } else { str_width(first) + gap };
+    let gap = str_width(separator);
+    let first_width = str_width(first);
+    let first = if first_width + gap + last_width <= room { first } else { "" };
+    let mut used = last_width + if first.is_empty() { 0 } else { first_width + gap };
     let mut start = middle.len();
     for item in middle.iter().rev() {
         used += gap + str_width(item);
@@ -31,12 +89,15 @@ pub fn draw_hint(s: &mut Screen, first: &str, middle: &[&str], last: &str) {
         start -= 1;
     }
     let y = s.h - 1;
+    let hits = HintHits { y, gap, first, middle, start, last };
     let mut x = 1;
-    for item in std::iter::once(first).chain(middle[start..].iter().copied()).filter(|item| !item.is_empty()) {
-        x += s.put(x, y, room, item, FAINT);
-        x += s.put(x, y, gap, SEPARATOR, FAINT);
+    for (i, (_, text)) in hits.items().enumerate() {
+        if i != 0 {
+            x += s.put(x, y, gap, separator, FAINT);
+        }
+        x += s.put(x, y, room, text, FAINT);
     }
-    s.put(x, y, last_width, last, FAINT);
+    hits
 }
 
 pub fn heading(text: &'static str) -> HelpRow {
@@ -70,12 +131,13 @@ pub fn note(text: &'static str) -> HelpRow {
 pub struct Page {
     rows: Vec<HelpRow>,
     top: usize,
+    footer: HintHits<'static>,
 }
 
 impl Page {
     /// A page of a pane's own making, from the row builders above.
     pub fn new(rows: Vec<HelpRow>) -> Self {
-        Self { rows, top: 0 }
+        Self { rows, top: 0, footer: HintHits::default() }
     }
 
     #[cfg(test)]
@@ -93,6 +155,7 @@ impl Page {
 
     pub fn draw(&mut self, s: &mut Screen) {
         if !Self::fits(s) {
+            self.footer = HintHits::default();
             return;
         }
         s.clear();
@@ -106,12 +169,21 @@ impl Page {
             }
         }
         ui::thumb(s, w - 1, 0, shown, self.rows.len(), self.top);
-        draw_hint(s, "↑↓ scroll", &["Esc close"], CLOSE);
+        self.footer = draw_hint(s, "↑↓ scroll", &["Esc close"], CLOSE);
     }
 
     /// Scrolls the page. Returns false when the key closes it instead.
     pub fn scroll(&mut self, key: Key, height: usize) -> bool {
         let shown = height.saturating_sub(1);
+        let key = match key {
+            Key::Click(x, y) => match self.footer.index_at(x, y) {
+                Some(1 | 2) => return false,
+                Some(0) if x == 1 => Key::Up,
+                Some(0) => Key::Down,
+                _ => return true,
+            },
+            key => key,
+        };
         let Some(rows) = key.rows(shown) else { return false };
         let rows = if matches!(key, Key::WheelUp | Key::WheelDown) { rows.signum() } else { rows };
         let last = self.rows.len().saturating_sub(shown);
@@ -123,6 +195,16 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn footer_clicks_follow_visible_cells_after_reflow() {
+        let mut screen = Screen::sized(14, 2);
+        let hits = draw_hint(&mut screen, "too long to fit", &["first", "界"], "q quit");
+        assert_eq!(hits.index_at(2, 1), Some(2)); // Second column of the visible wide glyph.
+        assert_eq!(hits.index_at(3, 1), None); // Separator, not an action.
+        assert_eq!(hits.index_at(6, 1), Some(3));
+        assert_eq!(hits.index_at(6, 0), None);
+    }
 
     #[test]
     fn a_narrow_hint_drops_middle_items_without_clipping_the_end() {

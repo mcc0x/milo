@@ -15,6 +15,24 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// A second click on the same item within this long opens it.
 pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// Don't let the opening double-click confirm a destructive dialog underneath it.
+#[derive(Default)]
+pub struct ConfirmClick(Option<(usize, usize, Instant)>);
+
+impl ConfirmClick {
+    pub fn opened(&mut self, x: usize, y: usize) {
+        self.0 = Some((x, y, Instant::now()));
+    }
+
+    pub fn is_repeat(&self, x: usize, y: usize) -> bool {
+        self.0.is_some_and(|(a, b, at)| (a, b) == (x, y) && at.elapsed() < DOUBLE_CLICK)
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     Char(char),
@@ -296,11 +314,11 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
     if let Some(mouse) = params.strip_prefix(b"<") {
         let mut it = std::str::from_utf8(mouse).ok()?.split(';').map(|p| p.parse::<usize>().ok());
         let (btn, x, y) = (it.next()??, it.next()??.checked_sub(1)?, it.next()??.checked_sub(1)?);
-        // Bit 6 marks the wheel; the low bits are the button. 'M' is a press.
-        return match (fin, btn & 64 != 0, btn & 3) {
-            (b'M', true, 0) => Some(Key::WheelUp),
-            (b'M', true, 1) => Some(Key::WheelDown),
-            (b'M', false, 0) => Some(Key::Click(x, y)),
+        // Ignore modifier bits, but never treat motion or an extended button as a press.
+        return match (fin, btn & !(4 | 8 | 16)) {
+            (b'M', 64) => Some(Key::WheelUp),
+            (b'M', 65) => Some(Key::WheelDown),
+            (b'M', 0) => Some(Key::Click(x, y)),
             _ => None,
         };
     }
@@ -411,6 +429,7 @@ mod tests {
     fn mouse_reports_decode() {
         assert_eq!(keys(b"\x1b[<0;8;3M"), [Key::Click(7, 2)]);
         assert_eq!(keys(b"\x1b[<0;8;3m"), []);
+        assert_eq!(keys(b"\x1b[<32;8;3M\x1b[<128;8;3M"), []);
         assert_eq!(keys(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [Key::WheelUp, Key::WheelDown]);
     }
 
