@@ -31,6 +31,7 @@ pub fn project(
         pane: make(repo, &prefs),
         make,
         note: (shell.is_some() && source.is_none()).then_some(NO_CWD),
+        notice_only: false,
         preference_note,
         source,
         last_dir: None,
@@ -53,6 +54,7 @@ struct Project<F> {
     source: Option<ShellObserver>,
     last_dir: Option<PathBuf>,
     note: Option<&'static str>,
+    notice_only: bool,
     preference_note: Option<&'static str>,
     focus: Option<bool>,
 }
@@ -95,6 +97,7 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
 
 impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     fn draw(&mut self, screen: &mut Screen) {
+        self.notice_only = self.note.is_some() && screen.h == 1;
         let Some(note) = self.note.filter(|_| screen.h > 0) else {
             self.pane.draw(screen);
             return;
@@ -102,10 +105,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         // The pane lays out only rows it can really draw into, so the notice
         // doesn't cover a selectable row or jump on top of a picture.
         screen.h -= 1;
-        if screen.h > 0 {
-            self.pane.draw(screen);
-        } else {
+        if self.notice_only {
             screen.clear();
+        } else {
+            self.pane.draw(screen);
         }
         screen.h += 1;
         screen.put_fit(1, screen.h - 1, screen.w.saturating_sub(2), note, Style::fg(screen::YELLOW));
@@ -152,7 +155,7 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn next_frame(&self) -> Option<Duration> {
-        self.pane.next_frame()
+        if self.notice_only { None } else { self.pane.next_frame() }
     }
 
     fn key(&mut self, key: Key) -> After {
@@ -189,6 +192,7 @@ mod tests {
             source: None,
             last_dir: None,
             note: None,
+            notice_only: false,
             preference_note: None,
             focus: Some(false),
         };
@@ -204,5 +208,57 @@ mod tests {
         pane.draw(&mut screen);
         assert!(screen.text().iter().any(|row| row.contains("other.rs")));
         assert!(matches!(pane.observe(second.root.clone()), External::Unchanged));
+    }
+
+    #[test]
+    fn a_notice_only_frame_suspends_the_inner_pane_deadline() {
+        struct Due;
+        impl Pane for Due {
+            fn draw(&mut self, screen: &mut Screen) {
+                screen.clear();
+                screen.put(0, 0, screen.w, "Content", Style::fg(screen::YELLOW));
+            }
+            fn help(&self) -> Page {
+                Page::new(vec![])
+            }
+            fn next_frame(&self) -> Option<Duration> {
+                Some(Duration::ZERO)
+            }
+            fn key(&mut self, _: Key) -> After {
+                After::Ignored
+            }
+        }
+
+        let mut pane = Project {
+            root: PathBuf::new(),
+            git: false,
+            pane: Box::new(Due),
+            make: |_: Repo, _: &Preferences| -> Box<dyn Pane> { Box::new(Due) },
+            source: None,
+            last_dir: None,
+            note: Some(NO_CWD),
+            notice_only: false,
+            preference_note: None,
+            focus: None,
+        };
+        let mut screen = Screen::sized(40, 1);
+        pane.draw(&mut screen);
+        assert!(screen.text()[0].contains(NO_CWD));
+        assert_eq!(pane.next_frame(), None);
+
+        screen.resize(40, 2);
+        pane.draw(&mut screen);
+        assert_eq!(screen.text()[0], "Content");
+        assert!(screen.text()[1].contains(NO_CWD));
+        assert_eq!(pane.next_frame(), Some(Duration::ZERO));
+
+        screen.resize(40, 1);
+        pane.draw(&mut screen);
+        assert_eq!(pane.next_frame(), None);
+
+        assert!(matches!(pane.set_note(None), External::Redraw));
+        pane.draw(&mut screen);
+        assert_eq!(screen.text()[0], "Content");
+        assert_eq!(pane.next_frame(), Some(Duration::ZERO));
     }
 }
