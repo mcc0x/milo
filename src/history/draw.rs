@@ -86,7 +86,10 @@ impl History {
         // An expanded commit needs a second row for its files or empty note.
         let list_rows =
             if matches!(selected, Some(TimelineRow::Commit(i)) if self.open_index() == Some(i)) { 2 } else { 1 };
-        let room = (self.shown / 2).min(DETAIL_ROWS).min(below_click).min(self.shown.saturating_sub(list_rows));
+        let room = (self.shown / 2)
+            .min(DETAIL_ROWS)
+            .min(below_click.saturating_sub(list_rows - 1))
+            .min(self.shown.saturating_sub(list_rows));
         let previous_detail = self.detail.take();
         let mut detail = [""; DETAIL_ROWS];
         let mut remaining = "";
@@ -121,7 +124,7 @@ impl History {
         // Keep the clicked row under the pointer; otherwise the peek can hide
         // rows without changing the underlying list.
         let top = click_offset.map_or_else(
-            || self.top.max((self.cursor + 1).saturating_sub(self.shown)),
+            || self.top.max((self.cursor + list_rows.min(self.shown)).saturating_sub(self.shown)),
             |offset| self.cursor.saturating_sub(offset.min(self.shown - 1)),
         );
         if !compact {

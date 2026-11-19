@@ -474,6 +474,20 @@ fn a_two_row_focused_pane_keeps_the_open_commit_preview_visible() {
 }
 
 #[test]
+fn a_subject_peek_keeps_the_preview_below_a_keyboard_opened_commit() {
+    let f = Fixture::new();
+    commit(&f, "first chapter second chapter final chapter");
+    commit(&f, "newer");
+    let mut history = open(&f);
+    draw(&mut history, 25, 4);
+    history.key(Key::Down);
+    history.key(Key::Enter);
+    let rows = draw(&mut history, 25, 4).text();
+    assert!(rows[1].contains("first chapter") && rows[2].contains("No files changed."), "{rows:?}");
+    assert!(rows[3].contains("↳"), "{rows:?}");
+}
+
+#[test]
 fn the_newest_commit_preview_can_scroll_past_the_uncommitted_row() {
     let f = Fixture::new();
     commit(&f, "first");
