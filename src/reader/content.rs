@@ -69,15 +69,27 @@ impl Reader {
     /// The current repository takes precedence over whatever is at the old path today.
     pub fn at_commit(file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
         let cwd = std::env::current_dir().map_err(|_| "Cannot find the current directory.")?;
-        let absolute = cwd.join(file);
-        let (repo, path) = if let Some(repo) = Repo::open(&cwd).filter(|r| r.git)
+        Self::at_commit_from(&cwd, file, id)
+    }
+
+    pub(super) fn at_commit_from(cwd: &Path, file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
+        let base = if file.is_absolute() { Path::new("") } else { cwd };
+        let mut absolute = PathBuf::with_capacity(base.as_os_str().len() + file.as_os_str().len() + 1);
+        absolute.push(base);
+        for part in file.components() {
+            match part {
+                Component::ParentDir => return Err("File paths at a commit cannot contain '..'."),
+                Component::CurDir => {}
+                _ => absolute.push(part),
+            }
+        }
+        let (repo, path) = if let Some(repo) = Repo::open(cwd).filter(|r| r.git)
             && let Ok(tail) = absolute.strip_prefix(&repo.root)
-            && tail.components().all(|part| matches!(part, Component::Normal(_)))
         {
             (repo, tail.to_string_lossy().into_owned())
         } else {
             let location =
-                Location::find(file).filter(|l| l.repo.git).ok_or("This file is not in a git repository.")?;
+                Location::find(&absolute).filter(|l| l.repo.git).ok_or("This file is not in a git repository.")?;
             (location.repo, location.path)
         };
         let commit = repo.resolve_commit(id).ok_or("No commit with that ID.")?;

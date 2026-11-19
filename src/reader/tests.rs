@@ -1,5 +1,6 @@
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::Path;
 
 use super::content::NOT_TEXT;
 use super::*;
@@ -46,6 +47,49 @@ fn text_with_a_picture_extension_still_shows_its_edits() {
     let id = CommitId::parse(&commits[0].hash).unwrap();
     let mut committed = Reader::at_commit(&file, id).unwrap();
     assert_eq!(drawn(&mut committed, 60, 6)[1], " 1 + initial notes");
+}
+
+#[test]
+fn committed_file_paths_normalize_dot_components_and_repeated_slashes() {
+    let f = Fixture::new();
+    f.write("sub/deep/page.txt", "stored content\n");
+    f.commit("first");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    fs::remove_dir_all(f.root.join("sub")).unwrap();
+    let absolute = f.root.join("sub//deep/./page.txt");
+
+    for (cwd, path) in [
+        (f.root.as_path(), Path::new("./sub//./deep///page.txt")),
+        (f.root.as_path(), absolute.as_path()),
+        (f.root.parent().unwrap(), absolute.as_path()),
+    ] {
+        let mut reader = Reader::at_commit_from(cwd, path, id).unwrap();
+        assert_eq!(reader.path, "sub/deep/page.txt");
+        assert_eq!(drawn(&mut reader, 60, 6)[1], " 1 + stored content");
+    }
+}
+
+#[test]
+fn committed_file_paths_reject_parent_components() {
+    let f = Fixture::new();
+    f.write("sub/keep.txt", "keep the directory\n");
+    f.write("page.txt", "stored content\n");
+    f.commit("first");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    let absolute = f.root.join("sub/../page.txt");
+
+    for path in [Path::new("sub/../page.txt"), absolute.as_path()] {
+        assert_eq!(
+            Reader::at_commit_from(&f.root, path, id).err(),
+            Some("File paths at a commit cannot contain '..'.")
+        );
+    }
 }
 
 #[test]
