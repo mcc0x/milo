@@ -4,8 +4,10 @@
 //! scanner does not parse a grammar, so it can mistake text for an opener
 //! and colour later lines as a string or comment until a closer appears.
 
+mod delimiters;
 mod langs;
 
+use delimiters::{Delimiter, Dialect};
 pub use langs::for_file;
 
 /// What a coloured piece of source text resembles.
@@ -47,6 +49,7 @@ pub struct Lang {
     line_comments: &'static [&'static str],
     /// Pairs of delimiters for comments that can cross line breaks.
     block_comments: &'static [(&'static str, &'static str)],
+    dialect: Dialect,
     /// Tried in order, so a longer opener must come before its prefix.
     quotes: &'static [Quote],
     /// Words reserved by the language.
@@ -73,14 +76,14 @@ pub struct Lang {
     table_headers: bool,
 }
 
-/// What is still open between lines, by its place in a language's table.
-/// A state from another language is discarded if its index is invalid.
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+/// What is still open at the start of a line.
+#[derive(Clone, Default, PartialEq, Debug)]
 pub enum State {
     #[default]
     Code,
-    Comment(u8),
+    Comment(u8, usize),
     Quote(u8),
+    Delimited(Delimiter),
 }
 
 fn is_word(c: u8) -> bool {
@@ -112,6 +115,30 @@ fn listed(words: &[&str], word: &str) -> bool {
 fn find_end(b: &[u8], from: usize, needle: &str) -> Option<usize> {
     let last = b.len().checked_sub(needle.len())?;
     (from..=last).find(|&i| begins(&b[i..], needle)).map(|i| i + needle.len())
+}
+
+/// Rust comments nest; C-style comments in other languages end at the first closer.
+fn comment_end(b: &[u8], mut i: usize, close: &str, depth: &mut usize, nested: bool) -> Option<usize> {
+    if !nested {
+        return find_end(b, i, close);
+    }
+    while i < b.len() {
+        match &b[i..] {
+            [b'/', b'*', ..] => *depth += 1,
+            [b'*', b'/', ..] => {
+                *depth -= 1;
+                if *depth == 0 {
+                    return Some(i + 2);
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+    None
 }
 
 /// Where the closing quote ends, skipping escaped delimiters.
@@ -185,12 +212,14 @@ impl Lang {
 
     /// Finish any open comment or string, or return `None` if it stays open.
     fn resume(&self, b: &[u8], state: &mut State, emit: &mut impl FnMut(Span)) -> Option<usize> {
-        let open = match *state {
+        let open = match state {
             State::Code => return Some(0),
-            State::Comment(k) => {
-                self.block_comments.get(usize::from(k)).map(|(_, close)| (find_end(b, 0, close), Class::Comment))
-            }
-            State::Quote(k) => self.quotes.get(usize::from(k)).map(|q| (string_end(b, 0, q), Class::Str)),
+            State::Comment(k, depth) => self
+                .block_comments
+                .get(usize::from(*k))
+                .map(|(_, close)| (comment_end(b, 0, close, depth, self.nested_comments()), Class::Comment)),
+            State::Quote(k) => self.quotes.get(usize::from(*k)).map(|q| (string_end(b, 0, q), Class::Str)),
+            State::Delimited(mark) => Some((mark.end(b), Class::Str)),
         };
         let Some((close, class)) = open else {
             *state = State::Code;
@@ -219,12 +248,22 @@ impl Lang {
         }
         let k = self.block_comments.iter().position(|(open, _)| begins(rest, open))?;
         let (open, close) = self.block_comments[k];
-        let end = find_end(b, i + open.len(), close).unwrap_or_else(|| {
-            *state = State::Comment(u8::try_from(k).expect("block comment index fits in a byte"));
+        let mut depth = 1;
+        let end = comment_end(b, i + open.len(), close, &mut depth, self.nested_comments()).unwrap_or_else(|| {
+            *state = State::Comment(u8::try_from(k).expect("block comment index fits in a byte"), depth);
             b.len()
         });
         emit((i, end, Class::Comment));
         Some(end)
+    }
+
+    fn nested_comments(&self) -> bool {
+        matches!(self.dialect, Dialect::Rust)
+    }
+
+    pub fn lookahead(&self) -> usize {
+        // Rust raw strings can start with up to 255 `#` characters.
+        if matches!(self.dialect, Dialect::Rust) { 260 } else { 32 }
     }
 
     #[inline]
@@ -235,6 +274,15 @@ impl Lang {
         state: &mut State,
         emit: &mut impl FnMut(Span),
     ) -> Option<usize> {
+        if let Some((end, open)) = self.dialect.string(b, i) {
+            if DRAW {
+                emit((i, end, Class::Str));
+            }
+            if let Some(open) = open {
+                *state = State::Delimited(open);
+            }
+            return Some(end);
+        }
         let k = self.quotes.iter().position(|q| self.opens_quote(b, i, q))?;
         let q = &self.quotes[k];
         let close = string_end(b, i + q.open.len(), q);
@@ -498,7 +546,7 @@ mod tests {
                 lang.scan(text, &mut state, &mut out);
                 valid_spans(text, &out);
             }
-            for mut state in [State::Comment(u8::MAX), State::Quote(u8::MAX)] {
+            for mut state in [State::Comment(u8::MAX, 1), State::Quote(u8::MAX)] {
                 lang.scan("é", &mut state, &mut out);
                 valid_spans("é", &out);
                 assert_eq!(state, State::Code);

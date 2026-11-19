@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -44,20 +44,28 @@ impl Store {
 
     /// An unconfigured screen starts with a suggestion; a previously disabled one starts off.
     pub fn layout(&self) -> Result<(Layout, bool), &'static str> {
-        if !self.has_layout()? {
-            let panes = if self.state.join("layout-disabled").is_file() { [false; 3] } else { [true; 3] };
-            return Ok((Layout { panes, ..Layout::default() }, false));
+        check_config_dir(&self.config)?;
+        let active = self.has_layout()?;
+        let pending = self.rex_reload_pending();
+        let disabled = self.state.join("layout-disabled").is_file();
+        if (active || pending) && !(pending && disabled) {
+            let saved = read(&self.rex_file())?
+                .as_ref()
+                .and_then(|file| std::str::from_utf8(&file.bytes).ok().and_then(Layout::parse));
+            if let Some(saved) = saved {
+                return Ok((saved, active));
+            }
+            if active {
+                return Err("Could not read the saved Rex layout.");
+            }
         }
-        read(&self.rex_file())?
-            .as_ref()
-            .and_then(|file| std::str::from_utf8(&file.bytes).ok().and_then(Layout::parse))
-            .map(|layout| (layout, true))
-            .ok_or("Could not read the installed Rex layout.")
+        Ok((Layout { panes: [!disabled; 3], ..Layout::default() }, active))
     }
 
     fn has_layout(&self) -> Result<bool, &'static str> {
         let path = settings_path(&self.init)?;
-        read_init_prefix(&path).map_err(|_| "Could not read Rex settings. No files were changed.")
+        read_init_prefix(&path, &loader(&self.rex_file()))
+            .map_err(|_| "Could not read Rex settings. No files were changed.")
     }
 
     /// Check generated files before the shared installer touches user settings.
@@ -67,10 +75,20 @@ impl Store {
         changes: &mut Vec<Change>,
         run: &RunRex<'_>,
     ) -> Result<RexPlan, &'static str> {
+        check_config_dir(&self.config)?;
         let init_path = settings_path(&self.init)?;
         let init = read(&init_path)?;
         let rex_path = self.rex_file();
-        let init_after = edit_init(init.as_ref(), &rex_path, layout.enabled(), matches!(init_path, Cow::Owned(_)))?;
+        let init_after =
+            edit_init(init.as_ref(), &loader(&rex_path), layout.enabled(), matches!(init_path, Cow::Owned(_)))?;
+        let note = self.state.join("layout-disabled");
+        let disabled = read(&note)?;
+        if disabled.as_ref().is_some_and(|file| !file.bytes.is_empty()) {
+            return Err("Milo's saved layout note was changed. It was left alone.");
+        }
+        // Record removal first so an interrupted removal does not look like first-time setup.
+        changes.extend(Change::new(note, disabled, (!layout.enabled()).then(Vec::new)));
+        let first_rex_change = changes.len();
         if layout.enabled() {
             self.plan_actions(layout, &rex_path, changes, run)?;
         }
@@ -84,10 +102,7 @@ impl Store {
         if !layout.enabled() {
             self.remove_shipped(&rex_path, changes)?;
         }
-        let reload = !changes.is_empty();
-        let note = self.state.join("layout-disabled");
-        changes.extend(Change::new(note.clone(), read(&note)?, (!layout.enabled()).then(Vec::new)));
-        Ok(RexPlan { reload, listener_changed })
+        Ok(RexPlan { reload: changes.len() != first_rex_change, listener_changed })
     }
 
     fn plan_actions(
@@ -157,12 +172,12 @@ impl Store {
 
     /// Try these exact choices in the current tab without installing or reloading.
     pub fn arrange(&self, layout: &Layout, target: &rex::Target, run: &RunRex<'_>) -> Result<(), &'static str> {
+        check_config_dir(&self.config)?;
         if !layout.panes.contains(&true) {
             return Err("Choose at least one pane first.");
         }
         let scope = [OsStr::new("-s"), target.session.as_os_str(), OsStr::new("-b"), target.block.as_os_str()];
         let action = OsStr::new("milo_layout");
-        // Try these exact choices without installing or reloading anything.
         let lua = rex_lua(layout, &executable()?);
         let temp = staged(&self.config, lua.as_bytes()).map_err(|_| "Could not prepare the Rex layout.")?;
         let done = run(&[
@@ -179,23 +194,29 @@ impl Store {
     }
 }
 
+pub(super) fn check_config_dir(path: &Path) -> Result<(), &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(info) if info.is_dir() => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err("Milo's settings folder must be a regular folder. It was left alone."),
+    }
+}
+
 fn text_is(file: &Image, test: impl FnOnce(&str) -> bool) -> bool {
     std::str::from_utf8(&file.bytes).is_ok_and(test)
 }
 
-/// Opening setup only needs the loader at the top of the file, not the user's Lua.
-fn read_init_prefix(path: &Path) -> io::Result<bool> {
+/// A long first line need not be copied into memory just to check for our loader.
+fn read_init_prefix(path: &Path, load: &str) -> io::Result<bool> {
     let Some((file, _)) = files::open(path)? else { return Ok(false) };
     let mut file = BufReader::new(file);
-    let mut prefix = Vec::new();
-    file.read_until(b'\n', &mut prefix)?;
-    if init_start(&prefix) == prefix.len() && !prefix.is_empty() {
-        file.read_until(b'\n', &mut prefix)?;
+    if without_bom(file.fill_buf()?).starts_with(b"#!") {
+        file.skip_until(b'\n')?;
     }
-    if matches!(line(&prefix, init_start(&prefix)).0, MANAGED | CREATED) {
-        file.read_until(b'\n', &mut prefix)?;
-    }
-    Ok(managed(&prefix).is_some())
+    let limit = 3 + CREATED.len() + load.len() + 4;
+    let mut prefix = Vec::with_capacity(limit + 1);
+    file.take((limit + 1) as u64).read_to_end(&mut prefix)?;
+    Ok(managed(&prefix, load).is_some())
 }
 
 /// Rex uses the same binary as setup, even if milo was invoked via a link.
@@ -212,18 +233,26 @@ fn line(bytes: &[u8], start: usize) -> (&[u8], usize) {
     })
 }
 
+fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+}
+
 fn init_start(bytes: &[u8]) -> usize {
-    let start = if bytes.starts_with(b"\xef\xbb\xbf") { 3 } else { 0 };
-    if bytes[start..].starts_with(b"#!") { line(bytes, start).1 } else { start }
+    let body = without_bom(bytes);
+    let start = bytes.len() - body.len();
+    if body.starts_with(b"#!") { line(bytes, start).1 } else { start }
+}
+
+pub(super) fn loader(path: &Path) -> String {
+    format!("pcall(dofile, {})", lua_path(path))
 }
 
 /// Only the first lines can belong to setup; a quoted example farther down cannot.
-pub(super) fn managed(bytes: &[u8]) -> Option<(std::ops::Range<usize>, bool)> {
+pub(super) fn managed(bytes: &[u8], load: &str) -> Option<(std::ops::Range<usize>, bool)> {
     let start = init_start(bytes);
     let (comment, next) = line(bytes, start);
-    let (load, end) = line(bytes, next);
-    (matches!(comment, MANAGED | CREATED) && load.starts_with(b"pcall(dofile, \"") && load.ends_with(b"\")"))
-        .then_some((start..end, comment == CREATED))
+    let (call, end) = line(bytes, next);
+    (matches!(comment, MANAGED | CREATED) && call == load.as_bytes()).then_some((start..end, comment == CREATED))
 }
 
 enum InitEdit {
@@ -232,14 +261,26 @@ enum InitEdit {
     Remove,
 }
 
-fn edit_init(original: Option<&Image>, rex_file: &Path, enable: bool, linked: bool) -> Result<InitEdit, &'static str> {
+fn edit_init(original: Option<&Image>, load: &str, enable: bool, linked: bool) -> Result<InitEdit, &'static str> {
     let bytes = original.map_or(&[][..], |file| file.bytes.as_slice());
     let start = init_start(bytes);
-    let (first, next) = line(bytes, start);
-    let block = managed(bytes);
-    let load = format!("pcall(dofile, {})", lua_path(rex_file));
-    if matches!(first, MANAGED | CREATED) && line(bytes, next).0 != load.as_bytes() {
-        return Err("Milo's lines in Rex settings have changed. Your file was left alone.");
+    let block = managed(bytes, load);
+    let other = &bytes[block.as_ref().map_or(start, |(range, _)| range.end)..];
+    // An exact loader elsewhere is ambiguous: it may be active, commented out, or quoted.
+    // Do not add a second copy or remove the files it may still load.
+    if (block.is_none() && matches!(line(bytes, start).0, MANAGED | CREATED))
+        || other.split(|&byte| byte == b'\n').any(|line| {
+            let mut line = line.trim_ascii();
+            while let Some(rest) = line.strip_prefix(b"--") {
+                line = rest.trim_ascii_start();
+            }
+            line.strip_prefix(load.as_bytes()).is_some_and(|rest| {
+                let rest = rest.trim_ascii_start();
+                rest.is_empty() || rest.starts_with(b"--")
+            })
+        })
+    {
+        return Err("Milo's lines in Rex settings were moved, copied or changed. Your file was left alone.");
     }
     if let Some((range, created)) = block {
         if enable {
@@ -253,8 +294,7 @@ fn edit_init(original: Option<&Image>, rex_file: &Path, enable: bool, linked: bo
     if !enable {
         return Ok(InitEdit::Keep);
     }
-    let first_line = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-    if start == bytes.len() && first_line.starts_with(b"#!") && !bytes.ends_with(b"\n") {
+    if start == bytes.len() && without_bom(bytes).starts_with(b"#!") && !bytes.ends_with(b"\n") {
         return Err("Rex's settings file has an unfinished first line.");
     }
     let newline: &[u8] = match bytes.iter().position(|&b| b == b'\n') {

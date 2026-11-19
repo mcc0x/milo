@@ -1,0 +1,258 @@
+//! Delimiters that depend on the opener rather than a fixed table entry.
+
+use std::rc::Rc;
+
+use super::{Escape, Quote, find_end, is_word, string_end};
+
+#[derive(Clone, Copy)]
+pub(super) enum Dialect {
+    Plain,
+    Rust,
+    Cpp,
+    Csharp,
+    Php,
+    Javascript,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Delimiter {
+    RustRaw(u8),
+    CppRaw(Rc<[u8]>),
+    CsharpRaw(usize),
+    Heredoc(Rc<[u8]>),
+    Template(Rc<Template>),
+}
+
+impl Dialect {
+    /// Returns where a string ends, and the delimiter to keep if it stays open.
+    pub(super) fn string(self, b: &[u8], from: usize) -> Option<(usize, Option<Delimiter>)> {
+        let rest = &b[from..];
+        let (end, open) = match self {
+            Self::Rust if matches!(b[from], b'b' | b'c' | b'r') => {
+                let (start, hashes) = rust_hashes(rest)?;
+                let end = repeated_end(b, from + start, b'"', b'#', hashes.into());
+                (end, end.is_none().then_some(Delimiter::RustRaw(hashes)))
+            }
+            Self::Cpp if matches!(b[from], b'R' | b'u' | b'U' | b'L') => {
+                let (start, marks) = cpp_open(rest)?;
+                let end = cpp_end(b, from + start, marks);
+                (end, end.is_none().then(|| Delimiter::CppRaw(marks.into())))
+            }
+            Self::Csharp if rest.starts_with(b"\"\"\"") => {
+                let width = rest.iter().take_while(|&&c| c == b'"').count();
+                let end = repeated_end(b, from + width, b'"', b'"', width - 1);
+                (end, end.is_none().then_some(Delimiter::CsharpRaw(width)))
+            }
+            Self::Php if rest.starts_with(b"<<<") => (None, Some(Delimiter::Heredoc(php_label(&rest[3..])?.into()))),
+            Self::Javascript if b[from] == b'`' => {
+                let mut template = Template::default();
+                let end = template.end(b, from + 1);
+                (end, end.is_none().then(|| Delimiter::Template(Rc::new(template))))
+            }
+            _ => return None,
+        };
+        Some((end.unwrap_or(b.len()), open))
+    }
+}
+
+impl Delimiter {
+    pub(super) fn end(&mut self, b: &[u8]) -> Option<usize> {
+        match self {
+            Self::RustRaw(hashes) => repeated_end(b, 0, b'"', b'#', (*hashes).into()),
+            Self::CsharpRaw(width) => repeated_end(b, 0, b'"', b'"', *width - 1),
+            Self::CppRaw(marks) => cpp_end(b, 0, marks),
+            Self::Heredoc(label) => {
+                let line = b.trim_ascii_start();
+                let after = line.strip_prefix(&**label)?;
+                if after.first().is_some_and(|&c| is_word(c)) {
+                    return None;
+                }
+                Some(b.len() - after.len() + usize::from(after.starts_with(b";")))
+            }
+            Self::Template(template) => Rc::make_mut(template).end(b, 0),
+        }
+    }
+}
+
+fn rust_hashes(rest: &[u8]) -> Option<(usize, u8)> {
+    let prefix = usize::from(matches!(rest.first(), Some(b'b' | b'c')));
+    let after = rest.get(prefix..)?.strip_prefix(b"r")?;
+    let count = after.iter().take_while(|&&c| c == b'#').count();
+    (after.get(count) == Some(&b'"')).then_some(())?;
+    Some((prefix + count + 2, u8::try_from(count).ok()?))
+}
+
+fn repeated_end(b: &[u8], from: usize, first: u8, repeat: u8, count: usize) -> Option<usize> {
+    // A failed run contains fewer than `count` repeats. Skip it rather than
+    // trying the same bytes again for delimiters made of repeated quotes.
+    let mut i = from;
+    while i < b.len() {
+        if b[i] != first {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let n = b[i..].iter().take(count).take_while(|&&c| c == repeat).count();
+        i += n;
+        if n == count {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn cpp_open(rest: &[u8]) -> Option<(usize, &[u8])> {
+    let prefix = [b"R\"".as_slice(), b"u8R\"", b"uR\"", b"UR\"", b"LR\""]
+        .iter()
+        .find(|&&prefix| rest.starts_with(prefix))?
+        .len();
+    let marks = &rest[prefix..];
+    let end = marks.iter().take(17).position(|&c| c == b'(')?;
+    let marks = &marks[..end];
+    marks.iter().all(|&c| c.is_ascii_graphic() && !matches!(c, b')' | b'\\')).then_some((prefix + end + 1, marks))
+}
+
+fn cpp_end(b: &[u8], from: usize, marks: &[u8]) -> Option<usize> {
+    let offset = marks.len() + 1;
+    (from..b.len().saturating_sub(offset))
+        .find(|&i| b[i] == b')' && b[i + 1..i + offset] == *marks && b[i + offset] == b'"')
+        .map(|i| i + offset + 1)
+}
+
+fn php_label(after: &[u8]) -> Option<&[u8]> {
+    let after = after.trim_ascii();
+    let label = if let [quote @ (b'\'' | b'"'), inner @ ..] = after { inner.strip_suffix(&[*quote])? } else { after };
+    if label.first().is_none_or(|c| c.is_ascii_digit()) || !label.iter().all(|&c| is_word(c)) {
+        return None;
+    }
+    Some(label)
+}
+
+/// Inside `${…}` we only track what can hide a closing brace or backtick.
+#[derive(Clone, Debug, Default)]
+pub struct Template {
+    part: Part,
+    parent: Option<Rc<Parent>>,
+    barrier: Option<Barrier>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Part {
+    #[default]
+    Text,
+    Expr(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Barrier {
+    Comment,
+    Quote(u8),
+}
+
+impl Barrier {
+    fn end(self, b: &[u8], i: usize) -> Option<usize> {
+        match self {
+            Self::Comment => find_end(b, i, "*/"),
+            Self::Quote(mark) => {
+                let close = if mark == b'\'' { "'" } else { "\"" };
+                string_end(b, i, &Quote { open: close, close, multiline: false, escape: Escape::Backslash })
+            }
+        }
+    }
+}
+
+/// Share unchanged ancestors between line starts rather than copying the stack.
+#[derive(Debug)]
+struct Parent {
+    part: Part,
+    parent: Option<Rc<Self>>,
+}
+
+impl Drop for Parent {
+    fn drop(&mut self) {
+        // A file can contain deeply nested templates. Drop unique ancestors iteratively.
+        let mut next = self.parent.take();
+        while let Some(mut parent) = next.and_then(Rc::into_inner) {
+            next = parent.parent.take();
+        }
+    }
+}
+
+impl PartialEq for Template {
+    fn eq(&self, other: &Self) -> bool {
+        self.part == other.part
+            && self.barrier == other.barrier
+            && match (&self.parent, &other.parent) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Template {
+    fn push(&mut self, next: Part) {
+        let part = std::mem::replace(&mut self.part, next);
+        self.parent = Some(Rc::new(Parent { part, parent: self.parent.take() }));
+    }
+
+    fn pop(&mut self) -> bool {
+        let Some(parent) = self.parent.take() else { return false };
+        self.part = parent.part;
+        self.parent = parent.parent.clone();
+        true
+    }
+
+    fn end(&mut self, b: &[u8], mut i: usize) -> Option<usize> {
+        if let Some(barrier) = self.barrier {
+            i = barrier.end(b, i)?;
+            self.barrier = None;
+        }
+        while i < b.len() {
+            let rest = &b[i..];
+            let barrier = match self.part {
+                Part::Text => {
+                    if rest.starts_with(b"`") {
+                        if !self.pop() {
+                            return Some(i + 1);
+                        }
+                    } else if rest.starts_with(b"${") {
+                        self.push(Part::Expr(0));
+                        i += 1;
+                    } else if rest.starts_with(b"\\") {
+                        i += 1;
+                    }
+                    None
+                }
+                Part::Expr(braces) => match rest {
+                    [b'/', b'/', ..] => return None,
+                    [b'/', b'*', ..] => Some((Barrier::Comment, i + 2)),
+                    [mark @ (b'\'' | b'"'), ..] => Some((Barrier::Quote(*mark), i + 1)),
+                    [c, ..] => {
+                        match c {
+                            b'{' => self.part = Part::Expr(braces + 1),
+                            b'}' if braces > 0 => self.part = Part::Expr(braces - 1),
+                            b'}' => {
+                                self.pop();
+                            }
+                            b'`' => self.push(Part::Text),
+                            _ => {}
+                        }
+                        None
+                    }
+                    [] => unreachable!(),
+                },
+            };
+            if let Some((barrier, from)) = barrier {
+                let Some(end) = barrier.end(b, from) else {
+                    self.barrier = Some(barrier);
+                    return None;
+                };
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+}

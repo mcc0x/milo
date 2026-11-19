@@ -14,7 +14,7 @@ use crate::keys::Key;
 use crate::pane::{After, Pane};
 use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::{Screen, Style};
-use crate::tree::{Folds, Tree};
+use crate::tree::{Folds, Tree, folders_above};
 use crate::ui::{self, ADD, DEL};
 use crate::walk;
 use crate::watch::Scope;
@@ -124,10 +124,8 @@ impl Outline {
             }
             // Pending work opens a folder unless the user closed it.
             // Suggested folds persist so committing work does not hide it.
-            let mut p = f.path.as_str();
-            while let Some((dir, _)) = p.rsplit_once('/') {
+            for dir in folders_above(&f.path) {
                 self.folds.suggest(dir);
-                p = dir;
             }
         }
         let files = &self.pending;
@@ -204,16 +202,10 @@ impl Outline {
     /// Brings the latest marked file into view and says why the cursor moved.
     /// If the user closed a folder, stop at the nearest visible ancestor.
     fn follow(&mut self, path: &str) {
-        let mut shown = path;
-        self.sel = loop {
-            if let Some(row) = self.tree.row_of(shown) {
-                break row;
-            }
-            match shown.rsplit_once('/') {
-                Some((dir, _)) => shown = dir,
-                None => return,
-            }
+        let Some(row) = std::iter::once(path).chain(folders_above(path)).find_map(|p| self.tree.row_of(p)) else {
+            return;
         };
+        self.sel = row;
         self.by_click = false;
         let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
         self.say(format!("following {name}"));
@@ -369,7 +361,7 @@ mod tests {
         f.write("page.txt", "before\n");
         f.commit("first");
         let mut o = open(&f);
-        assert!(draw(&mut o, 60, 10).text()[0].ends_with("✓ all committed · no remote"));
+        assert!(draw(&mut o, 60, 10).text()[0].ends_with("✓ all committed"));
 
         f.push();
         assert!(o.check());
@@ -394,6 +386,16 @@ mod tests {
         let pending: Vec<_> = o.pending.iter().map(|f| (f.path.as_str(), f.unpushed)).collect();
         assert_eq!(pending, [("note.txt", false)]);
         assert_eq!(o.tree.row(o.tree.row_of("page.txt").unwrap()).unwrap().kind, Kind::None);
+    }
+
+    #[test]
+    fn a_remote_without_a_branch_to_compare_does_not_look_missing() {
+        let f = Fixture::new();
+        f.write("page.txt", "a file\n");
+        f.commit("first");
+        f.git(&["remote", "add", "origin", "https://example.invalid/project.git"]);
+        let mut o = open(&f);
+        assert!(draw(&mut o, 80, 24).text()[0].ends_with("✓ all committed"));
     }
 
     #[test]
@@ -596,6 +598,88 @@ mod tests {
                 assert_eq!(o.selected_path().as_deref(), Some(path));
             }
         }
+    }
+
+    #[test]
+    fn jumps_and_change_columns_follow_a_rename_into_a_closed_folder() {
+        let f = Fixture::new();
+        let original = "a long line that stays the same\n";
+        f.write("a.txt", original);
+        f.write("b.txt", "b\n");
+        f.write("folder/keep.txt", "keep\n");
+        f.commit("first");
+        f.write("a.txt", &format!("{original}an edit\n"));
+        let mut o = open(&f);
+        let before = draw(&mut o, 80, 24).text();
+        assert!(file_row(&before, "a.txt").ends_with("edited +1"));
+        o.key(Key::Char('g'));
+        o.key(Key::Enter);
+        o.key(Key::Enter);
+        o.key(Key::Focus(true));
+
+        f.git(&["mv", "a.txt", "folder/moved.txt"]);
+        fs::remove_file(f.root.join("b.txt")).unwrap();
+        assert!(o.check());
+        let closed = draw(&mut o, 80, 24).text();
+        assert!(closed.iter().any(|row| row.contains("▸ folder 1")), "{closed:?}");
+        assert!(file_row(&closed, "b.txt").contains("removed"));
+        assert!(!closed.iter().any(|row| row.contains("a.txt") || row.contains("moved.txt")));
+        o.key(Key::Char('n'));
+        assert_eq!(o.selected_path().as_deref(), Some("folder/moved.txt"));
+        let opened = draw(&mut o, 80, 24).text();
+        let moved = file_row(&opened, "moved.txt");
+        let removed = file_row(&opened, "b.txt");
+        let col = |row: &str, label| crate::width::str_width(row.split_once(label).unwrap().0);
+        assert_eq!(col(moved, "moved "), col(removed, "removed"));
+        o.key(Key::Char('n'));
+        assert_eq!(o.selected_path().as_deref(), Some("b.txt"));
+    }
+
+    #[test]
+    fn a_new_file_can_be_read_when_it_replaces_a_folder() {
+        let f = Fixture::new();
+        f.write("shape/old.txt", "old contents\n");
+        f.commit("first");
+        let mut o = open(&f);
+        o.key(Key::Focus(true));
+        fs::remove_dir_all(f.root.join("shape")).unwrap();
+        f.write("shape", "new contents\n");
+        assert!(o.check());
+        let rows = draw(&mut o, 80, 24).text();
+        assert!(rows.iter().any(|row| row.contains("▾ shape")), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("old.txt") && row.contains("removed")), "{rows:?}");
+
+        o.key(Key::Char('n'));
+        o.key(Key::Char('n'));
+        o.key(Key::Enter);
+        let reader = draw(&mut o, 80, 24).text();
+        assert!(reader.iter().any(|row| row.contains("new contents")), "{reader:?}");
+    }
+
+    #[test]
+    fn a_live_change_keeps_the_file_visible_in_a_one_row_strip() {
+        let f = Fixture::new();
+        let mut o = open(&f);
+        o.key(Key::Focus(false));
+        f.write("new.txt", "a new file\n");
+        assert!(o.check());
+        let rows = draw(&mut o, 80, 1).text();
+        assert_eq!(rows, [" • new.txt"]);
+    }
+
+    #[test]
+    fn a_tree_note_does_not_cover_the_cursor() {
+        let f = Fixture::folder();
+        for name in ["a.txt", "b.txt", "c.txt", "last.txt"] {
+            f.write(name, "a file\n");
+        }
+        let mut o = open(&f);
+        o.key(Key::End);
+        o.say("Cannot open this file");
+        let frame = draw(&mut o, 80, 5);
+        let rows = frame.text();
+        assert_eq!(rows[4], " Cannot open this file");
+        assert!(rows[3].contains("last.txt") && frame.bar_at(3), "{rows:?}");
     }
 
     #[test]

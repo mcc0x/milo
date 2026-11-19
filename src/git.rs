@@ -122,7 +122,7 @@ pub struct Commit {
 
 /// The local tip and, when it is ahead, the commit used as the comparison base.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub struct Ends {
+struct Ends {
     base: Option<String>,
     tip: String,
 }
@@ -166,6 +166,28 @@ impl<'a> Basis<'a> {
 }
 
 #[derive(Default)]
+enum ReadFor {
+    #[default]
+    Pending,
+    History,
+}
+
+/// The state a loaded history list was drawn from.
+pub struct HistoryVersion {
+    tip: String,
+    target: Option<String>,
+    pub ahead: Option<u32>,
+}
+
+impl HistoryVersion {
+    pub fn matches(&self, repo: &Repo) -> bool {
+        self.tip == repo.ends().tip
+            && self.target.as_deref() == repo.history_target()
+            && self.ahead == repo.upstream_ahead()
+    }
+}
+
+#[derive(Default)]
 struct Unpushed {
     ends: Ends,
     files: Vec<PendingFile>,
@@ -202,6 +224,7 @@ pub struct Repo {
     git_dir: Option<PathBuf>,
     common_dir: Option<PathBuf>,
     config: Option<run::Config>,
+    read_for: ReadFor,
     /// When set, status is limited to this path.
     file: Option<String>,
     stand_in: Option<StandIn>,
@@ -258,6 +281,12 @@ impl Repo {
         Some(Self { root, name, git, ok, git_dir, common_dir, config, ..Self::default() })
     }
 
+    /// History compares commits directly. Only pending file diffs need a merge base.
+    pub fn for_history(mut self) -> Self {
+        self.read_for = ReadFor::History;
+        self
+    }
+
     /// Limits status to one file without narrowing the repository's root.
     pub fn only(&mut self, path: &str) {
         self.file = Some(path.to_string());
@@ -294,7 +323,7 @@ impl Repo {
         self.ok.get()
     }
 
-    pub fn ends(&self) -> &Ends {
+    fn ends(&self) -> &Ends {
         &self.status.ends
     }
 
@@ -410,11 +439,13 @@ impl Repo {
         };
         let mut status = parse_status(&raw);
         let Some(stand_in) = self.stand_in(&status) else { return };
-        if Basis::new(&status, stand_in.as_ref()) == Basis::new(&self.status, self.stand_in.as_ref()) {
-            status.ends.base = self.status.ends.base.take();
-        } else {
-            let Some(base) = self.merge_base(&status, stand_in.as_ref()) else { return };
-            status.ends.base = base;
+        if matches!(self.read_for, ReadFor::Pending) {
+            if Basis::new(&status, stand_in.as_ref()) == Basis::new(&self.status, self.stand_in.as_ref()) {
+                status.ends.base = self.status.ends.base.take();
+            } else {
+                let Some(base) = self.merge_base(&status, stand_in.as_ref()) else { return };
+                status.ends.base = base;
+            }
         }
         (self.raw, self.status, self.stand_in) = (raw, status, stand_in);
         self.ok.set(true);
@@ -617,8 +648,24 @@ impl Repo {
     }
 
     /// The full number ahead of the upstream, if this branch has one.
-    pub fn upstream_ahead(&self) -> Option<u32> {
+    fn upstream_ahead(&self) -> Option<u32> {
         self.status.upstream.as_ref().map(|_| self.status.ahead)
+    }
+
+    pub fn history_version(&self) -> HistoryVersion {
+        HistoryVersion {
+            tip: self.ends().tip.clone(),
+            target: self.history_target().map(str::to_owned),
+            ahead: self.upstream_ahead(),
+        }
+    }
+
+    fn history_target(&self) -> Option<&str> {
+        match self.upstream_ahead() {
+            Some(0) => None,
+            Some(_) => self.status.upstream.as_deref(),
+            None => self.stand_in.as_ref()?.oid.as_deref().filter(|&oid| oid != self.ends().tip),
+        }
     }
 
     /// Finds the full object name and date without reading the work tree.
@@ -662,14 +709,9 @@ impl Repo {
         if !self.ends().has_commit() {
             return Some(Vec::new());
         }
-        let target = match self.upstream_ahead() {
-            Some(0) => None,
-            Some(_) => self.status.upstream.as_deref(),
-            None => self.ends().base.as_deref(),
-        };
         let limit = limit.to_string();
         let tip = &self.ends().tip;
-        let unpushed = match target {
+        let unpushed = match self.history_target() {
             Some(target) => self.git(&["rev-list", "-n", &limit, "--end-of-options", &format!("{target}..{tip}")])?,
             None => Vec::new(),
         };
@@ -775,6 +817,24 @@ mod tests {
         assert_only_unpushed_page(&repo.pending().unwrap());
         let history = repo.history(2).unwrap();
         assert!(history[0].unpushed && !history[1].unpushed);
+    }
+
+    #[test]
+    fn commits_not_in_the_remote_default_branch_are_unpushed_even_without_a_common_commit() {
+        let f = Fixture::new();
+        f.write("remote.txt", "remote\n");
+        f.commit("on the remote");
+        f.push();
+        f.git(&["remote", "set-head", "origin", "main"]);
+        f.git(&["switch", "-q", "--orphan", "topic"]);
+        f.write("local.txt", "local\n");
+        f.commit("start a different history");
+
+        let mut repo = Repo::open(&f.root).unwrap().for_history();
+        repo.read();
+        let commits = repo.history(1).unwrap();
+        assert_eq!(commits[0].subject, "start a different history");
+        assert!(commits[0].unpushed);
     }
 
     #[test]

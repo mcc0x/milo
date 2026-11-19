@@ -127,12 +127,19 @@ fn undo(changes: &[Change]) -> bool {
 
 /// Rex must see the new settings before accepting them, but rejection rolls them back.
 pub(super) fn install(changes: &[Change], accept: impl FnOnce() -> bool) -> Result<(), &'static str> {
+    if changes.iter().any(|change| change.before.as_ref().is_some_and(|file| file.mode & 0o222 == 0)) {
+        return Err("A settings file is read-only. No files were changed.");
+    }
     for (i, change) in changes.iter().enumerate() {
-        if change.replace(&change.before, change.after.as_ref()).is_err() {
-            return Err(if undo(&changes[..i]) {
-                "Could not save. No files were changed."
-            } else {
+        if let Err(error) = change.replace(&change.before, change.after.as_ref()) {
+            return Err(if !undo(&changes[..i]) {
                 "Could not save or put every file back."
+            } else if error.kind() == ErrorKind::PermissionDenied {
+                "Could not write to a settings folder. Your files were left as they were."
+            } else if matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::AlreadyExists) {
+                "A settings file changed while saving. Reopen setup and try again."
+            } else {
+                "Could not save. No files were changed."
             });
         }
     }

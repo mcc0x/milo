@@ -1,10 +1,11 @@
 //! Defines the code-colouring rules and selects them by file extension.
 
-use super::{Escape, Lang, Quote};
+use super::{Dialect, Escape, Lang, Quote};
 
 const PLAIN: Lang = Lang {
     line_comments: &[],
     block_comments: &[],
+    dialect: Dialect::Plain,
     quotes: &[],
     keywords: &[],
     constants: &[],
@@ -28,16 +29,10 @@ static RUST: Lang = Lang {
     chars: true,
     line_comments: &["//"],
     block_comments: C_COMMENTS,
+    dialect: Dialect::Rust,
     quotes: &[
-        Quote { open: "r###\"", close: "\"###", multiline: true, escape: Escape::None },
-        Quote { open: "r##\"", close: "\"##", multiline: true, escape: Escape::None },
-        Quote { open: "r#\"", close: "\"#", multiline: true, escape: Escape::None },
-        Quote { open: "r\"", multiline: true, escape: Escape::None, ..DOUBLE },
-        Quote { open: "br###\"", close: "\"###", multiline: true, escape: Escape::None },
-        Quote { open: "br##\"", close: "\"##", multiline: true, escape: Escape::None },
-        Quote { open: "br#\"", close: "\"#", multiline: true, escape: Escape::None },
-        Quote { open: "br\"", multiline: true, escape: Escape::None, ..DOUBLE },
         Quote { open: "b\"", multiline: true, ..DOUBLE },
+        Quote { open: "c\"", multiline: true, ..DOUBLE },
         Quote { multiline: true, ..DOUBLE },
         SINGLE,
     ],
@@ -67,7 +62,6 @@ static PYTHON: Lang = Lang {
     ..PLAIN
 };
 
-const JS_QUOTES: &[Quote] = &[Quote { open: "`", close: "`", multiline: true, ..DOUBLE }, DOUBLE, SINGLE];
 const JS_WORDS: &[&str] = &[
     "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
     "else", "export", "extends", "finally", "for", "from", "function", "if", "import", "in", "instanceof", "let",
@@ -85,7 +79,8 @@ const TS_WORDS: &[&str] = &[
 static JAVASCRIPT: Lang = Lang {
     line_comments: &["//"],
     block_comments: C_COMMENTS,
-    quotes: JS_QUOTES,
+    dialect: Dialect::Javascript,
+    quotes: C_QUOTES,
     keywords: JS_WORDS,
     constants: &["true", "false", "null", "undefined", "NaN", "Infinity"],
     ..PLAIN
@@ -150,23 +145,15 @@ static C: Lang = Lang {
     constants: &["true", "false", "NULL", "nullptr"],
     ..PLAIN
 };
-static CPP: Lang = Lang {
-    keywords: CPP_WORDS,
-    quotes: &[Quote { open: "R\"(", close: ")\"", multiline: true, escape: Escape::None }, DOUBLE, SINGLE],
-    ..C
-};
+static CPP: Lang = Lang { keywords: CPP_WORDS, dialect: Dialect::Cpp, ..C };
 
 static CSHARP: Lang = Lang {
     chars: true,
     directives: true,
     line_comments: &["//"],
     block_comments: C_COMMENTS,
-    quotes: &[
-        Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, escape: Escape::None },
-        Quote { open: "@\"", multiline: true, escape: Escape::Doubled, ..DOUBLE },
-        DOUBLE,
-        SINGLE,
-    ],
+    dialect: Dialect::Csharp,
+    quotes: &[Quote { open: "@\"", multiline: true, escape: Escape::Doubled, ..DOUBLE }, DOUBLE, SINGLE],
     keywords: &[
         "abstract", "as", "async", "await", "base", "bool", "break", "byte", "case", "catch", "char", "class", "const",
         "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event", "explicit", "extern",
@@ -185,12 +172,8 @@ static PHP: Lang = Lang {
     line_comments: &["//", "#"],
     block_comments: C_COMMENTS,
     attributes: true,
-    quotes: &[
-        // Use the first semicolon as the end, normally the one after the closing label.
-        Quote { open: "<<<", close: ";", multiline: true, escape: Escape::None },
-        Quote { multiline: true, ..DOUBLE },
-        Quote { multiline: true, ..SINGLE },
-    ],
+    dialect: Dialect::Php,
+    quotes: &[Quote { multiline: true, ..DOUBLE }, Quote { multiline: true, ..SINGLE }],
     keywords: &[
         "abstract", "and", "array", "as", "break", "callable", "case", "catch", "class", "clone", "const", "continue",
         "declare", "default", "do", "echo", "else", "elseif", "empty", "enum", "extends", "final", "finally", "fn",
@@ -227,7 +210,7 @@ static JSON: Lang = Lang {
 };
 static YAML: Lang = Lang {
     line_comments: &["#"],
-    quotes: &[DOUBLE, Quote { escape: Escape::Doubled, ..SINGLE }],
+    quotes: &[Quote { multiline: true, ..DOUBLE }, Quote { multiline: true, escape: Escape::Doubled, ..SINGLE }],
     constants: &["true", "false", "null", "yes", "no", "on", "off"],
     names: false,
     key_end: Some(b':'),
@@ -369,6 +352,18 @@ mod tests {
     }
 
     #[test]
+    fn rust_raw_c_strings_need_all_the_hashes_to_close() {
+        let marks = "#".repeat(255);
+        let start = format!("cr{marks}\"start");
+        let close = format!("\"{marks}");
+        let end = format!("{close}; let n = 1;");
+        let mut state = State::Code;
+        assert_eq!(pieces(&RUST, &start, &mut state), [(start.as_str(), Class::Str)]);
+        assert_eq!(pieces(&RUST, "\"# // still raw", &mut state), [("\"# // still raw", Class::Str)]);
+        assert_eq!(pieces(&RUST, &end, &mut state)[..2], [(close.as_str(), Class::Str), ("let", Class::Keyword)]);
+    }
+
+    #[test]
     fn typescript_keywords_are_not_javascript_keywords() {
         let ts = "type number string any declare interface namespace readonly keyof satisfies \
                   unknown never abstract implements private protected public enum is as boolean get set";
@@ -425,6 +420,16 @@ mod tests {
     }
 
     #[test]
+    fn yaml_quoted_values_can_extend_across_lines() {
+        let mut state = State::Code;
+        pieces(&YAML, "text: 'one", &mut state);
+        assert_eq!(
+            pieces(&YAML, "  two'' # text' # comment", &mut state),
+            [("  two'' # text'", Class::Str), ("# comment", Class::Comment)]
+        );
+    }
+
+    #[test]
     fn php_multiline_strings_and_heredocs_protect_comment_markers() {
         for quote in ["\"", "'"] {
             let mut state = State::Code;
@@ -446,6 +451,17 @@ mod tests {
     }
 
     #[test]
+    fn php_heredocs_end_at_the_label_not_at_a_semicolon_inside() {
+        let mut state = State::Code;
+        pieces(&PHP, "echo f(<<<'END'", &mut state);
+        for line in ["a; /* body", "END_MORE", "text ending with END"] {
+            assert_eq!(pieces(&PHP, line, &mut state), [(line, Class::Str)]);
+        }
+        assert_eq!(pieces(&PHP, "  END, 42);", &mut state), [("  END", Class::Str), ("42", Class::Number)]);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
     fn cpp_raw_strings_can_contain_quotes_and_comments() {
         let mut state = State::Code;
         assert_eq!(
@@ -455,6 +471,15 @@ mod tests {
         assert_eq!(pieces(&CPP, "/* raw */", &mut state), [("/* raw */", Class::Str)]);
         assert_eq!(pieces(&CPP, ")\"; return;", &mut state), [(")\"", Class::Str), ("return", Class::Keyword)]);
         assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn cpp_raw_strings_match_the_custom_delimiter() {
+        let mut state = State::Code;
+        let start = "u8R\"tag(initial )\" still raw";
+        assert_eq!(pieces(&CPP, start, &mut state), [(start, Class::Str)]);
+        assert_eq!(pieces(&CPP, "/* raw */", &mut state), [("/* raw */", Class::Str)]);
+        assert_eq!(pieces(&CPP, ")tag\"; return;", &mut state), [(")tag\"", Class::Str), ("return", Class::Keyword)]);
     }
 
     #[test]
@@ -468,6 +493,20 @@ mod tests {
             assert_eq!(one(lang, "return x // comment").last(), Some(&("// comment", Class::Comment)));
             assert!(one(lang, "<p title='hello'>").contains(&("'hello'", Class::Str)));
         }
+    }
+
+    #[test]
+    fn nested_javascript_templates_keep_the_outer_string_open() {
+        let mut state = State::Code;
+        let first = "const tpl = `outer ${f(`nested ${";
+        let next = "  { key: '`}' }.key /* } `";
+        let last = " */} end`) } tail`";
+        assert_eq!(pieces(&JAVASCRIPT, first, &mut state)[1..], [(&first[12..], Class::Str)]);
+        assert_eq!(pieces(&JAVASCRIPT, next, &mut state), [(next, Class::Str)]);
+        assert_eq!(
+            pieces(&JAVASCRIPT, &format!("{last}; return;"), &mut state),
+            [(last, Class::Str), ("return", Class::Keyword)]
+        );
     }
 
     #[test]
@@ -500,6 +539,18 @@ mod tests {
         let words = "partial where when goto unsafe init ushort sbyte";
         assert_eq!(one(&CSHARP, words).len(), words.split_whitespace().count());
         assert!(one(&CSHARP, words).iter().all(|p| p.1 == Class::Keyword));
+    }
+
+    #[test]
+    fn csharp_raw_strings_use_the_length_of_the_opening_quote_run() {
+        let mut state = State::Code;
+        pieces(&CSHARP, "var s = \"\"\"\"", &mut state);
+        let body = "  \"\"\" // still raw";
+        assert_eq!(pieces(&CSHARP, body, &mut state), [(body, Class::Str)]);
+        assert_eq!(
+            pieces(&CSHARP, "  \"\"\"\"; return;", &mut state),
+            [("  \"\"\"\"", Class::Str), ("return", Class::Keyword)]
+        );
     }
 
     #[test]

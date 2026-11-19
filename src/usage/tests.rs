@@ -153,7 +153,7 @@ fn compressed_and_unrelated_files_are_ignored() {
     write(&f, "claude/project/subagents/session.jsonl", &assistant(NOW, 600, 900, 100), NOW);
     write(&f, CLAUDE, &assistant(NOW, 600, 900, 100), NOW - 2 * DAY);
     let rows = frame(&mut open(&f, NOW), 140, 4);
-    assert!(rows[2].contains("no Codex sessions here"));
+    assert!(rows[2].contains("no local source found"));
     assert!(!rows.join("\n").contains("tokens today"));
 }
 
@@ -172,7 +172,7 @@ fn session_files_and_folders_are_not_followed_through_links() {
     symlink(f.root.join("elsewhere/claude.jsonl"), f.root.join(CLAUDE)).unwrap();
     let mut usage = open(&f, NOW);
     let rows = frame(&mut usage, 140, 4);
-    assert!(rows[2].contains("no Codex sessions here"));
+    assert!(rows[2].contains("no local source found"));
     assert!(!rows.join("\n").contains("tokens today"));
     assert_eq!(usage.bytes_read, 0);
 }
@@ -221,7 +221,7 @@ fn malformed_enormous_and_deeply_nested_lines_are_skipped() {
 }
 
 mod omp_limits {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     use super::*;
 
@@ -343,30 +343,49 @@ mod omp_limits {
 
     #[test]
     fn omp_errors_are_quiet_and_stop_reading_oversized_or_stalled_children() {
-        use std::os::unix::fs::PermissionsExt;
-
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         let wait = Duration::from_secs(3);
         assert!(omp::read(&f.root.join("missing.db"), NOW).is_none());
         assert!(omp::query(f.root.join("missing-sqlite").as_os_str(), &path, wait).is_none());
         let executable = f.root.join("sqlite-stub");
-        let script = |lines: &str| {
-            fs::write(&executable, format!("#!/bin/sh\n{lines}\n")).unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        };
+        let script = |lines: &str| write_executable(&executable, lines);
         script("printf '%s' 'not JSON'");
         let bytes = omp::query(executable.as_os_str(), &path, wait).unwrap();
         assert!(omp::parse(&bytes, NOW).is_none());
-        script("printf '%70000s' x");
+        script("printf '%s\\n' \"$$\" >\"$0.pid\"; printf '%70000s' x");
         assert!(omp::query(executable.as_os_str(), &path, wait).is_none());
-        script("exec 1>&-; exec /bin/sleep 8");
+        assert_reaped(&executable);
+        script("printf '%s\\n' \"$$\" >\"$0.pid\"; exec 1>&-; exec /bin/sleep 8");
         let wait = Duration::from_millis(250);
         let started = Instant::now();
         assert!(omp::query(executable.as_os_str(), &path, wait).is_none());
         assert!(started.elapsed() >= wait && started.elapsed() < Duration::from_secs(4));
+        assert_reaped(&executable);
         exec(&path, "DROP TABLE usage_history;");
         assert!(omp::read(&path, NOW).is_none());
+    }
+
+    /// Writes a stand-in program and waits until it can be run. A child that
+    /// another test thread forks at this instant holds the file open for
+    /// writing until it execs, and a file open for writing cannot be run.
+    fn write_executable(path: &Path, lines: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::write(path, format!("#!/bin/sh\n[ \"$1\" = ready ] && exit 0\n{lines}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Command::new(path).arg("ready").status().is_err() {
+            assert!(Instant::now() < deadline, "the stand-in never became runnable");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn assert_reaped(executable: &Path) {
+        let pid: libc::pid_t = fs::read_to_string(executable.with_extension("pid")).unwrap().trim().parse().unwrap();
+        // SAFETY: WNOHANG does not block and a null status pointer is allowed.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
     }
 
     #[test]
@@ -383,6 +402,54 @@ mod omp_limits {
         }
         // Use a child that would otherwise succeed even on a database without sidecars.
         assert!(omp::query(std::ffi::OsStr::new("/usr/bin/true"), &path, Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn omp_reads_committed_wal_limits_during_a_write_without_recreating_a_lost_sidecar() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let db = f.root.join("agent #?% café.db");
+        fs::rename(path, &db).unwrap();
+        let week = window("anthropic:7d", "0.27", (NOW + DAY) * 1000, 10_080, "null");
+        let mut writer = Command::new(omp::sqlite())
+            .args(["-batch", "-bail", "-init", "/dev/null"])
+            .current_dir(&f.root)
+            .arg(&db)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let sql = format!(
+            "PRAGMA journal_mode=WAL;\n\
+             INSERT INTO cache VALUES ('usage_cache:report:claude', '{{\"value\":{{\"provider\":\"anthropic\",
+                 \"fetchedAt\":{},\"limits\":[{week}]}}}}', 0);\n\
+             BEGIN IMMEDIATE; UPDATE cache SET value='uncommitted';\n\
+             .once ready\n\
+             SELECT 1;",
+            NOW * 1000
+        );
+        writeln!(writer.stdin.as_mut().unwrap(), "{sql}").unwrap();
+        let ready = f.root.join("ready");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let committed = omp::read(&db, NOW);
+        let copied = ["", "-wal", "-shm"].into_iter().try_for_each(|suffix| {
+            fs::copy(f.root.join(format!("agent #?% café.db{suffix}")), f.root.join(format!("copy.db{suffix}")))
+                .map(|_| ())
+        });
+        drop(writer.stdin.take());
+        assert!(writer.wait().unwrap().success() && ready.exists());
+        copied.unwrap();
+        assert_eq!(committed.unwrap().claude.unwrap().windows.base[1].unwrap().percent, 27.0);
+
+        // Simulate a sidecar disappearing after milo's preflight but before SQLite opens it.
+        let stub = f.root.join("sqlite-stub");
+        write_executable(&stub, "/bin/rm \"${0%/*}/copy.db-shm\"; exec /usr/bin/sqlite3 \"$@\"");
+        let result = omp::query(stub.as_os_str(), &f.root.join("copy.db"), Duration::from_secs(1));
+        assert!(!f.root.join("copy.db-shm").exists());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -474,6 +541,29 @@ mod omp_limits {
         }
         assert_eq!(omp::database_in(Some(&f.root), None).unwrap(), f.root.join(".omp/agent/agent.db"));
         assert_eq!(omp::database_in(None, Some(&f.root)).unwrap(), f.root.join("agent.db"));
+    }
+
+    #[test]
+    fn a_deleted_omp_database_no_longer_supplies_a_saved_report() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        report(&path, "claude", "anthropic", NOW * 1000, "[]");
+        let start = Instant::now();
+        let mut poll = omp::Poll::new(Some(path.clone()));
+        let mut read = |clock| {
+            assert!(poll.check(NOW, clock).is_none() && poll.pending());
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(report) = poll.check(NOW, clock) {
+                    break report;
+                }
+                assert!(poll.pending() && Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        };
+        assert!(read(start).claude.is_some());
+        fs::remove_file(path).unwrap();
+        assert!(read(start + Duration::from_secs(20)).claude.is_none());
     }
 }
 

@@ -1,6 +1,7 @@
 //! Uses keyboard focus to decide whether to follow work and when to fade marks.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::ops::Bound::{Included, Unbounded};
 use std::time::{Duration, Instant};
 
 /// How long an outline without focus reports waits before following work.
@@ -28,13 +29,13 @@ struct Mark {
 pub(super) struct Attention {
     focus: Focus,
     used: Instant,
-    marks: HashMap<String, Mark>,
+    marks: BTreeMap<String, Mark>,
     unseen_marks: bool,
 }
 
 impl Attention {
     pub(super) fn new(now: Instant) -> Self {
-        Self { focus: Focus::Unknown, used: now, marks: HashMap::new(), unseen_marks: false }
+        Self { focus: Focus::Unknown, used: now, marks: BTreeMap::new(), unseen_marks: false }
     }
 
     /// Returns whether mark expiry changed, so the next frame can be scheduled again.
@@ -95,12 +96,12 @@ impl Attention {
             .min()
     }
 
-    /// A closed folder carries the latest mark among the files it hides.
+    /// A closed folder path ends in `/` and carries the latest mark among the files it hides.
     pub(super) fn marked_at(&self, path: &str, closed_folder: bool) -> Option<Instant> {
         if closed_folder {
             self.marks
-                .iter()
-                .filter(|(file, _)| file.strip_prefix(path).is_some_and(|rest| rest.starts_with('/')))
+                .range::<str, _>((Included(path), Unbounded))
+                .take_while(|(file, _)| file.starts_with(path))
                 .map(|(_, mark)| mark.at)
                 .max()
         } else {

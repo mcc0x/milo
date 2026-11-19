@@ -251,7 +251,11 @@ fn main() {
     let rest: Vec<_> = args.collect();
     let command =
         command(first.as_deref(), second.as_deref(), &rest, setup::offer_once).unwrap_or_else(|why| fail(&why));
-    dispatch(command, pane::run).unwrap_or_else(|why| fail(&why));
+    let result = dispatch(command, pane::run);
+    if term::TERMINATED.load(std::sync::atomic::Ordering::Relaxed) {
+        exit(1);
+    }
+    result.unwrap_or_else(|why| fail(&why));
 }
 
 #[cfg(test)]

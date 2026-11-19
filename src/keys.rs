@@ -77,6 +77,8 @@ impl Key {
 #[derive(Default)]
 pub struct Input {
     pending: Vec<u8>,
+    /// An overlong sequence is ignored through its terminator, not decoded as keys.
+    discard: Option<Sequence>,
     /// While pasting, how many bytes of the end marker have been seen.
     paste_end: Option<usize>,
 }
@@ -124,7 +126,22 @@ impl Input {
         self.finish(keys);
     }
 
-    fn feed(&mut self, bytes: &[u8], keys: &mut Vec<Key>) {
+    fn feed(&mut self, mut bytes: &[u8], keys: &mut Vec<Key>) {
+        if let Some(sequence) = self.discard {
+            // Keep at most one ESC across reads so a split string terminator still works.
+            if self.pending.pop().is_some() && bytes.starts_with(b"\\") {
+                self.discard = None;
+                bytes = &bytes[1..];
+            } else if let Some((_, end)) = sequence.end(bytes) {
+                self.discard = None;
+                bytes = &bytes[end..];
+            } else {
+                if sequence != Sequence::Csi && bytes.ends_with(b"\x1b") {
+                    self.pending.push(0x1b);
+                }
+                return;
+            }
+        }
         if self.pending.is_empty() {
             self.pending.extend_from_slice(decode(bytes, &mut self.paste_end, keys));
         } else {
@@ -133,17 +150,22 @@ impl Input {
             let used = self.pending.len() - left;
             self.pending.drain(..used);
         }
-        // The replies we use are short. Don't keep a growing, unterminated reply.
-        if self.pending.len() >= READ_SIZE {
-            self.pending.clear();
+        if self.pending.len() >= READ_SIZE
+            && let Some(sequence) = Sequence::of(&self.pending[1..])
+        {
+            let split_end = sequence != Sequence::Csi && self.pending.ends_with(b"\x1b");
+            self.discard = Some(sequence);
+            self.pending.truncate(usize::from(split_end));
         }
     }
 
     fn finish(&mut self, keys: &mut Vec<Key>) {
-        if self.pending == [0x1b] {
-            keys.push(Key::Esc);
+        if self.discard.is_none() && Sequence::of(self.pending.get(1..).unwrap_or_default()).is_none() {
+            if self.pending == [0x1b] {
+                keys.push(Key::Esc);
+            }
+            self.pending.clear();
         }
-        self.pending.clear();
     }
 }
 
@@ -153,7 +175,10 @@ fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
     let mut used = 0;
     while used < bytes.len() {
         if matched == 0 {
-            let Some(i) = bytes[used..].iter().position(|&c| c == PASTE_END[0]) else { return bytes.len() };
+            let Some(i) = bytes[used..].iter().position(|&c| c == PASTE_END[0]) else {
+                *end = Some(0);
+                return bytes.len();
+            };
             used += i + 1;
             matched = 1;
         } else {
@@ -174,6 +199,43 @@ fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
     used
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sequence {
+    Csi,
+    Osc,
+    Apc,
+    OtherString,
+}
+
+impl Sequence {
+    fn of(after_escape: &[u8]) -> Option<Self> {
+        Some(match after_escape.first()? {
+            b'[' => Self::Csi,
+            b']' => Self::Osc,
+            b'_' => Self::Apc,
+            b'P' | b'X' | b'^' => Self::OtherString,
+            _ => return None,
+        })
+    }
+
+    /// Returns the body length and the offset to resume reading keys.
+    fn end(self, body: &[u8]) -> Option<(usize, usize)> {
+        if self == Self::Csi {
+            let i = body.iter().position(|b| !(0x20..=0x3f).contains(b))?;
+            return Some((i, i + usize::from(body[i] != 0x1b)));
+        }
+        for (i, &byte) in body.iter().enumerate() {
+            match byte {
+                0x18 | 0x1a => return Some((i, i + 1)), // CAN or SUB cancel a control string.
+                7 if self == Self::Osc => return Some((i, i + 1)),
+                0x1b if body.get(i + 1) == Some(&b'\\') => return Some((i, i + 2)),
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
 /// Decodes complete keys and returns any partial sequence at the end.
 fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec<Key>) -> &'a [u8] {
     loop {
@@ -182,39 +244,29 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
         let (key, tail) = match c {
             0x1b => match rest {
                 [] | [b'O'] => return bytes,
-                [b'[', body @ ..] => {
-                    let Some(end) = body.iter().position(|c| (0x40..=0x7e).contains(c)) else { return bytes };
-                    let tail = &body[end + 1..];
-                    if &body[..=end] == b"200~" {
-                        *paste_end = Some(0);
-                        (None, tail)
+                [_, body @ ..] if let Some(sequence) = Sequence::of(rest) => {
+                    let Some((end, resume)) = sequence.end(body) else { return bytes };
+                    let (answer, tail) = (&body[..end], &body[resume..]);
+                    let key = if end >= READ_SIZE {
+                        None
                     } else {
-                        (csi(&body[..end], body[end]), tail)
-                    }
-                }
-                [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
-                // OSC ends in BEL or ESC \. APC (including pictures) ends only in ESC \.
-                [kind @ (b']' | b'_'), body @ ..] => {
-                    let osc = *kind == b']';
-                    let Some(end) = body.iter().position(|&c| c == 0x1b || osc && c == 7) else {
-                        return bytes;
-                    };
-                    let tail = match &body[end..] {
-                        [7, tail @ ..] | [0x1b, b'\\', tail @ ..] => tail,
-                        [0x1b] => return bytes,
-                        other => {
-                            bytes = other;
-                            continue;
+                        match (sequence, body[end]) {
+                            (Sequence::Csi, b'~') if answer == b"200" => {
+                                *paste_end = Some(0);
+                                None
+                            }
+                            (Sequence::Csi, fin @ 0x40..=0x7e) => csi(answer, fin),
+                            (_, 0x18 | 0x1a) => None,
+                            (Sequence::Osc, _) => background_reply(answer).map(Key::Background),
+                            (Sequence::Apc, _) if answer.starts_with(b"Gi=31;") => {
+                                Some(Key::Pictures(answer.ends_with(b";OK")))
+                            }
+                            _ => None,
                         }
-                    };
-                    let answer = &body[..end];
-                    let key = if osc {
-                        background_reply(answer).map(Key::Background)
-                    } else {
-                        answer.starts_with(b"G").then(|| Key::Pictures(answer.ends_with(b";OK")))
                     };
                     (key, tail)
                 }
+                [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
                 // Alt-modified key: drop it rather than act on the bare key.
                 [_, tail @ ..] => (None, tail),
             },
@@ -395,6 +447,40 @@ mod tests {
             input.feed(part, &mut keys);
         }
         assert_eq!(keys, [Key::Char('j'), Key::Char('k')]);
+    }
+
+    #[test]
+    fn a_failed_paste_end_match_does_not_carry_over_to_the_next_read() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        for part in [b"\x1b[200~\x1b[20".as_slice(), b"x more text", b"1~q\x03\x1b[201~k"] {
+            input.feed(part, &mut keys);
+        }
+        assert_eq!(keys, [Key::Char('k')]);
+    }
+
+    #[test]
+    fn a_pause_inside_a_paste_start_does_not_turn_pasted_text_into_keys() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.feed(b"\x1b[20", &mut keys);
+        input.finish(&mut keys);
+        input.feed(b"0~q\x03\x1b[201~k", &mut keys);
+        assert_eq!(keys, [Key::Char('k')]);
+    }
+
+    #[test]
+    fn unknown_and_overlong_terminal_strings_do_not_type_commands() {
+        assert_eq!(keys(b"\x1bPq\x03\x1b\\k"), [Key::Char('k')]);
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.feed(b"\x1b]", &mut keys);
+        input.feed(&[b'q'; READ_SIZE], &mut keys);
+        input.finish(&mut keys);
+        input.feed(b"q\x03\x1b", &mut keys);
+        input.finish(&mut keys);
+        input.feed(b"\\k", &mut keys);
+        assert_eq!(keys, [Key::Char('k')]);
     }
 
     #[test]

@@ -1,12 +1,5 @@
-//! Keeps exactly one new-tab listener running, however often Rex reloads
-//! its configuration.
-//!
-//! The listener holds a lock on a file for as long as it runs. The lock is
-//! the kind that belongs to one process: a program the listener starts does
-//! not share it, it lasts when the listener turns into `rex`, and it goes
-//! when that process ends. The system itself says which process holds it.
-//! So whether a listener is running, and which process it is, is asked of
-//! the system, and never read from a note that could be out of date.
+//! Process-owned file locks are not inherited by children. The setup lock
+//! lasts through a save; the listener lock stays open when milo becomes Rex.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
@@ -15,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const LOCK: &str = "listener.lock";
+const LISTENER_LOCK: &str = "listener.lock";
 /// How long a listener asked to stop is given to wind down.
 const WIND_DOWN: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(10);
@@ -33,6 +26,21 @@ fn open(path: &Path, create: bool) -> io::Result<File> {
         return Err(ErrorKind::InvalidInput.into());
     }
     Ok(file)
+}
+
+/// Keep the marker in place so every setup locks the same file.
+pub(super) fn setup(dir: &Path) -> Result<File, &'static str> {
+    fn acquire(dir: &Path) -> io::Result<Option<File>> {
+        fs::create_dir_all(dir)?;
+        let _directory = crate::fs_ops::open_dir(dir)?;
+        let lock = open(&dir.join("setup.lock"), true)?;
+        Ok(take(&lock)?.then_some(lock))
+    }
+    match acquire(dir) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err("Another setup is saving. Wait a moment, then try again."),
+        Err(_) => Err("Could not open Milo's saved settings folder. No files were changed."),
+    }
 }
 
 /// A lock over a whole file, of the kind asked for.
@@ -75,7 +83,7 @@ fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
 }
 
 fn existing(dir: &Path) -> io::Result<Option<File>> {
-    match open(&dir.join(LOCK), false) {
+    match open(&dir.join(LISTENER_LOCK), false) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -108,7 +116,7 @@ pub(super) fn wait_running(dir: &Path) -> io::Result<bool> {
 /// at once. On success it never returns, having turned into `rex`.
 pub(super) fn listen(dir: &Path, script: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let lock = open(&dir.join(LOCK), true)?;
+    let lock = open(&dir.join(LISTENER_LOCK), true)?;
     if !take(&lock)? {
         return Ok(());
     }
@@ -167,7 +175,7 @@ mod tests {
     #[test]
     fn a_lock_nobody_holds_names_no_process() {
         let f = Fixture::folder();
-        let lock = open(&f.root.join(LOCK), true).unwrap();
+        let lock = open(&f.root.join(LISTENER_LOCK), true).unwrap();
         assert_eq!(holder(&lock).unwrap(), None);
         stop(&f.root).unwrap();
     }

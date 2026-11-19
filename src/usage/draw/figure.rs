@@ -142,16 +142,16 @@ impl Figure {
 thread_local! {
     // One ID per displayed window: two equal figures may still be placed at
     // different cells. When a reading changes only that window is replaced.
-    static IMAGES: RefCell<[Option<(Figure, bool, Picture)>; 4]> = const { RefCell::new([const { None }; 4]) };
+    static IMAGES: RefCell<[Option<(Figure, bool, Picture)>; 5]> = const { RefCell::new([const { None }; 5]) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage::draw::{Chart, Metric, Report};
-    use crate::usage::{Activity, CodexSessions, Window};
+    use crate::usage::draw::{Chart, Hint, Metric, Report, Tool};
+    use crate::usage::{Activity, Window};
 
-    fn metric(percent: f64) -> Metric {
+    fn metric(percent: f64) -> Metric<'static> {
         Metric::limit(Window { minutes: 300, percent, resets: None, observed: 0 }, 0)
     }
 
@@ -181,7 +181,7 @@ mod tests {
     fn short_panels_keep_plain_text_even_when_pictures_are_supported() {
         let mut screen = Screen::sized(32, 2);
         screen.set_pictures(true);
-        let mut report = Report::codex(None, &CodexSessions::Present, 0);
+        let mut report = Report::new(Tool::Codex, None, Hint::NO_LIMITS, 0);
         report.first = metric(27.0);
         report.panel(&mut screen, Area { x: 0, y: 0, w: 32, h: 2 }, 2, Activity::default);
         assert_eq!(screen.text(), ["██ Codex 5h 27%", ""]);

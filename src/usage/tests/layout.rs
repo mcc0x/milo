@@ -120,6 +120,31 @@ fn frame_rows_are_the_same_in_all_data_states() {
 }
 
 #[test]
+fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
+    let f = Fixture::folder();
+    let mut usage = open(&f, NOW);
+    let window = |minutes, percent| Window { minutes, percent, resets: Some(NOW + HOUR), observed: NOW };
+    usage.claude.saved = Some(Limits {
+        base: [Some(window(300, 12.0)), Some(window(10_080, 34.0))],
+        model_week: ModelWeek::new("opus", window(10_080, 56.0)),
+    });
+    for (width, model) in [(80, false), (140, true)] {
+        let rows = frame(&mut usage, width, 3);
+        let claude = |row: usize| rows[row].split_once('│').unwrap().1;
+        assert!(claude(0).contains("5h") && claude(0).contains("week"));
+        assert!(claude(1).contains("12%") && claude(1).contains("34%"));
+        assert_eq!(claude(0).contains("Opus week"), model);
+        assert_eq!(claude(1).contains("56%"), model);
+    }
+
+    let mut screen = Screen::sized(140, 5);
+    screen.set_pictures(true);
+    usage.draw(&mut screen);
+    // The right panel has three figure pictures and one mark.
+    assert_eq!(screen.picture_placements().filter(|(x, ..)| *x > 69).count(), 4);
+}
+
+#[test]
 fn a_tiny_frame_keeps_an_intact_primary_figure() {
     let f = with_limits();
     let mut usage = open(&f, NOW);
@@ -163,11 +188,11 @@ fn activity_follows_the_hint_and_never_sits_under_a_window_like_its_caption() {
     // Five rows leave none to spare under the captions.
     let rows = frame(&mut open(&f, now), 140, 5);
     let claude = rows[4].split_once('│').unwrap().1.trim();
-    assert_eq!(claude, "turn on in milo setup · 13k tokens today");
+    assert_eq!(claude, "no local source found · 13k tokens today");
     // With a row to spare it has that row to itself.
     let rows = frame(&mut open(&f, now), 140, 6);
     let below: Vec<&str> = rows[4..].iter().map(|row| row.split_once('│').unwrap().1.trim()).collect();
-    assert_eq!(below, ["turn on in milo setup", "13k tokens today"]);
+    assert_eq!(below, ["no local source found", "13k tokens today"]);
 }
 
 #[test]

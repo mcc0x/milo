@@ -66,7 +66,7 @@ pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget, now:
     }
     let at = time::Timestamp::millis(at?)?;
     (at.seconds <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
-    let [five, week] = usage.filter(|object| object.object())?.fields(["five_hour", "seven_day"]);
+    let [five, week] = usage.filter(|value| value.object() || value.null())?.fields(["five_hour", "seven_day"]);
     let window = |value: Option<Value<'_>>, minutes| {
         let [percent, reset] = value?.fields(["utilization", "resets_at"]);
         Some(Window {

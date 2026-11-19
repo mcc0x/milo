@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 const REPORT_DEPTH: usize = 32;
-const SETTINGS_DEPTH: usize = 128;
+const SETTINGS_DEPTH: usize = 129; // The root object and up to 128 nested containers.
 
 /// Settings edits preserve unknown values and whitespace byte for byte.
 pub struct Member<'a> {
@@ -17,7 +17,6 @@ pub struct Member<'a> {
 /// Visit only the top-level members, returning the offset just after the opening brace.
 pub fn settings_object<'a>(text: &'a str, mut visit: impl FnMut(Member<'a>)) -> Option<usize> {
     let mut input = Input::<true>(text);
-    input.space();
     let open = text.len() - input.0.len() + 1;
     input.0.starts_with('{').then_some(())?;
     input.collection(1, |key, value, key_tail, value_tail| {
@@ -146,15 +145,13 @@ impl<'a, const SETTINGS: bool> Input<'a, SETTINGS> {
 
     fn value(&mut self, depth: usize) -> Option<Value<'a>> {
         self.space();
-        if SETTINGS && depth > SETTINGS_DEPTH {
-            return None;
-        }
+        let limit = if SETTINGS { SETTINGS_DEPTH } else { REPORT_DEPTH };
         let start = self.0;
         match start.as_bytes().first()? {
             b'"' => {
                 self.string()?;
             }
-            b'{' | b'[' if SETTINGS || depth < REPORT_DEPTH => self.collection(depth + 1, |_, _, _, _| {})?,
+            b'{' | b'[' if depth < limit => self.collection(depth + 1, |_, _, _, _| {})?,
             b'-' | b'0'..=b'9' => self.number()?,
             b't' => self.0 = start.strip_prefix("true")?,
             b'f' => self.0 = start.strip_prefix("false")?,
@@ -291,7 +288,21 @@ mod tests {
         assert!(Value::parse(array(33, "0").as_bytes()).is_none());
 
         let settings = |depth, value| format!("{{\"other\":{}}}", array(depth, value));
-        assert!(settings_object(&settings(128, ""), |_| {}).is_some());
-        assert!(settings_object(&settings(128, "0"), |_| {}).is_none());
+        for inner in ["", "0"] {
+            assert!(settings_object(&settings(128, inner), |_| {}).is_some());
+            assert!(settings_object(&settings(129, inner), |_| {}).is_none());
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_number_does_not_hide_other_fields() {
+        let huge = "9".repeat(100_000);
+        let report = format!("{{\"impossible\":{huge},\"maximum\":{},\"next\":42}}", u64::MAX);
+        let value = Value::parse(report.as_bytes()).unwrap();
+        let [impossible, maximum, next] = value.fields(["impossible", "maximum", "next"]);
+        let impossible = impossible.unwrap();
+        assert_eq!((impossible.integer(), impossible.unsigned(), impossible.number()), (None, None, None));
+        assert_eq!(maximum.unwrap().unsigned(), Some(u64::MAX));
+        assert_eq!(next.unwrap().integer(), Some(42));
     }
 }

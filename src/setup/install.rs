@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::env;
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::files::{self, Image};
@@ -11,6 +12,7 @@ use super::lock;
 use crate::paths;
 
 const RELOAD: [&str; 2] = ["config", "reload"];
+const RELOAD_PENDING: &str = "rex-reload-pending";
 
 /// Lets setup use the real Rex command while tests use an isolated stand-in.
 pub(super) type RunRex<'a> = dyn Fn(&[&OsStr]) -> bool + 'a;
@@ -43,14 +45,33 @@ impl Store {
         Some(Self { init, config, state: paths::state_dir()?, claude: home.join(".claude/settings.json") })
     }
 
+    pub fn rex_reload_pending(&self) -> bool {
+        fs::symlink_metadata(self.state.join(RELOAD_PENDING)).is_ok_and(|info| info.is_file() && info.len() == 0)
+    }
+
     /// Plan both sets of changes before writing so one failed plan cannot leave a partial save.
     pub fn save(&self, layout: Option<&Layout>, claude: Option<bool>, run: &RunRex<'_>) -> Result<Saved, &'static str> {
+        if layout.is_none() && claude.is_none() {
+            return Ok(Saved::Ready);
+        }
+        let _lock = lock::setup(&self.state)?;
         let mut changes = Vec::new();
         let new_tabs = layout.is_some_and(|layout| layout.new_tabs);
         let rex = layout.map(|layout| self.plan_rex(layout, &mut changes, run)).transpose()?;
+        let pending_path = self.state.join(RELOAD_PENDING);
+        let pending = if layout.is_some() { read(&pending_path)? } else { None };
+        if pending.as_ref().is_some_and(|file| !file.bytes.is_empty()) {
+            return Err("Milo's Rex reload note was changed. It was left alone.");
+        }
+        let rex_changed = rex.as_ref().is_some_and(|plan| plan.reload);
+        if rex_changed && pending.is_none() {
+            // The file changes are atomic one at a time; Rex must reload even if
+            // the previous save ended after publishing every wanted file.
+            changes.splice(..0, files::Change::new(pending_path.clone(), None, Some(Vec::new())));
+        }
         let listener_running = new_tabs && lock::running(&self.state).unwrap_or(false);
-        let reload = rex.as_ref().is_some_and(|plan| plan.reload) || (new_tabs && !listener_running);
-        let restart = listener_running && rex.is_some_and(|plan| plan.listener_changed);
+        let reload = rex_changed || pending.is_some() || (new_tabs && !listener_running);
+        let restart = listener_running && (pending.is_some() || rex.is_some_and(|plan| plan.listener_changed));
         if let Some(enabled) = claude {
             self.claude_files()?.plan(enabled, &mut changes)?;
         }
@@ -65,6 +86,9 @@ impl Store {
             call(run, RELOAD);
         }
         installed?;
+        if (rex_changed || pending.is_some()) && fs::remove_file(pending_path).is_err() {
+            return Err("Saved, but could not clear the Rex reload reminder.");
+        }
         Ok(if (restart && !stopped) || (layout.is_some() && !new_tabs && lock::stop(&self.state).is_err()) {
             Saved::ListenerDidNotStop
         } else if new_tabs && !lock::wait_running(&self.state).unwrap_or(false) {
@@ -94,22 +118,26 @@ mod tests {
     use super::super::claude::{Claude, OWN_CLAUDE};
     use super::super::files::Change;
     use super::super::layout::{GENERATED, TabPane, WIDTHS, lua_path, rex_lua};
-    use super::super::rex_files::{MANAGED, OFFERED, executable, managed};
+    use super::super::rex_files::{MANAGED, OFFERED, executable, loader, managed};
     use super::*;
     use crate::fixture::Fixture;
     use crate::rex;
     use std::cell::RefCell;
     use std::ffi::OsString;
-    use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
     use std::rc::Rc;
 
     fn store(fixture: &Fixture) -> Store {
+        store_at(&fixture.root)
+    }
+
+    fn store_at(root: &Path) -> Store {
         Store {
-            init: fixture.root.join("init.lua"),
-            config: fixture.root.join("config"),
-            state: fixture.root.join("state"),
-            claude: fixture.root.join("settings.json"),
+            init: root.join("init.lua"),
+            config: root.join("config"),
+            state: root.join("state"),
+            claude: root.join("settings.json"),
         }
     }
 
@@ -159,7 +187,7 @@ mod tests {
             }
             store.save(Some(&Layout::default()), None, &|_| true).unwrap();
             let installed = fs::read(&store.init).unwrap();
-            let (block, _) = managed(&installed).unwrap();
+            let (block, _) = managed(&installed, &loader(&store.rex_file())).unwrap();
             assert!(installed[block].starts_with(MANAGED));
             if original.is_some() {
                 assert_eq!(fs::metadata(&store.init).unwrap().permissions().mode() & 0o777, 0o640);
@@ -190,7 +218,8 @@ mod tests {
         assert!(store.save(Some(&Layout::default()), Some(true), &run).unwrap_err().contains("could not check"));
         assert_eq!(fs::read(&store.init).unwrap(), b"-- Keep this");
         assert_eq!(fs::read(&store.claude).unwrap(), b"{\"keep\":1}");
-        assert!(!store.config.exists() && !store.state.exists());
+        assert!(!store.config.exists());
+        assert!(!store.rex_reload_pending() && !store.state.join(OWN_CLAUDE).exists());
         assert!(!checked.borrow().as_ref().unwrap().exists());
     }
 
@@ -280,7 +309,7 @@ mod tests {
         assert!(!store.layout().unwrap().1);
         assert!(store.claude() == Claude::Off);
         store.save(Some(&Layout::default()), Some(true), &|_| true).unwrap();
-        assert!(managed(&fs::read(&init).unwrap()).is_some());
+        assert!(managed(&fs::read(&init).unwrap(), &loader(&store.rex_file())).is_some());
         assert!(fs::read_to_string(&claude).unwrap().contains("milo claude-status"));
         assert!(store.layout().unwrap().1);
         assert!(store.claude() == Claude::On);
@@ -376,6 +405,166 @@ mod tests {
     }
 
     #[test]
+    fn moved_copied_or_commented_loaders_are_never_changed_or_installed_twice() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let load = loader(&store.rex_file());
+        let block = format!("{}\n{load}\n", std::str::from_utf8(MANAGED).unwrap());
+        for original in [
+            format!("-- My Rex settings\n{block}"),
+            format!("{block}-- My Rex settings\n{block}"),
+            format!("-- {load}\n"),
+            format!("{block}-- {load}\n"),
+        ] {
+            fs::write(&store.init, &original).unwrap();
+            for layout in [Layout::default(), off()] {
+                let result = store.save(Some(&layout), None, &|_| panic!("ambiguous settings need no Rex calls"));
+                assert!(result.unwrap_err().contains("moved, copied or changed"));
+                assert_eq!(fs::read_to_string(&store.init).unwrap(), original);
+                assert!(!store.rex_file().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn saving_does_not_replace_read_only_settings_even_in_writable_folders() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        for (path, original, layout, limits) in [
+            (&store.init, "-- Keep my settings", Some(Layout::default()), None),
+            (&store.claude, r#"{"keep":true}"#, None, Some(true)),
+        ] {
+            fs::write(path, original).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+            let result = store.save(layout.as_ref(), limits, &|args| args[1] == "check");
+            assert!(result.unwrap_err().contains("read-only"));
+            assert_eq!(fs::read_to_string(path).unwrap(), original);
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o444);
+            assert!(!store.rex_file().exists());
+            assert!(!store.rex_reload_pending() && !store.state.join(OWN_CLAUDE).exists());
+        }
+    }
+
+    #[test]
+    fn saving_does_not_write_inside_a_linked_milo_folder() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let elsewhere = fixture.root.join("dotfiles");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("notes"), "Keep these").unwrap();
+        symlink(&elsewhere, &store.config).unwrap();
+        let result = store.save(Some(&Layout::default()), None, &|_| panic!("cannot save through the link"));
+        assert!(result.unwrap_err().contains("regular folder"));
+        assert_eq!(fs::read_link(&store.config).unwrap(), elsewhere);
+        assert_eq!(fs::read_to_string(elsewhere.join("notes")).unwrap(), "Keep these");
+        assert!(!store.init.exists() && !elsewhere.join("rex.lua").exists());
+    }
+
+    #[test]
+    fn another_setup_cannot_save_while_the_first_is_waiting_for_rex() {
+        const TEST: &str = "setup::install::tests::another_setup_cannot_save_while_the_first_is_waiting_for_rex";
+        const ROOT: &str = "MILO_TEST_SETUP_CONTENTION";
+        if let Some(root) = env::var_os(ROOT) {
+            let store = store_at(Path::new(&root));
+            let second = store.save(Some(&off()), None, &|_| panic!("a blocked save must not call Rex"));
+            assert!(second.unwrap_err().contains("Another setup is saving"));
+            return;
+        }
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store
+            .save(Some(&Layout::default()), None, &|args| {
+                if args == RELOAD.map(OsStr::new) {
+                    let child = Command::new(env::current_exe().unwrap())
+                        .args(["--exact", TEST])
+                        .env(ROOT, &fixture.root)
+                        .output()
+                        .unwrap();
+                    let output = String::from_utf8_lossy(&child.stdout);
+                    assert!(child.status.success() && output.contains("1 passed"), "{output}");
+                }
+                true
+            })
+            .unwrap();
+        assert!(store.layout().unwrap().1);
+        assert!(!store.rex_reload_pending());
+    }
+
+    #[test]
+    fn saving_again_reloads_rex_if_the_last_save_stopped_at_reload() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        fs::write(&store.init, "-- Keep my settings").unwrap();
+        let note = store.state.join(RELOAD_PENDING);
+        let before_reload = RefCell::new(None);
+        store
+            .save(Some(&Layout::default()), None, &|args| {
+                if args == RELOAD.map(OsStr::new) {
+                    *before_reload.borrow_mut() = fs::read(&note).ok();
+                }
+                true
+            })
+            .unwrap();
+        assert!(!note.exists());
+        // Restore the state at the interrupted reload, without letting a normal rollback run.
+        fs::write(&note, before_reload.into_inner().expect("a save must leave a reload reminder")).unwrap();
+        let called = RefCell::new(false);
+        store
+            .save(Some(&Layout::default()), None, &|args| {
+                assert_eq!(args, RELOAD.map(OsStr::new));
+                *called.borrow_mut() = true;
+                true
+            })
+            .unwrap();
+        assert!(called.into_inner());
+        assert!(!note.exists());
+        assert!(fs::read_to_string(&store.init).unwrap().ends_with("-- Keep my settings"));
+    }
+
+    #[test]
+    fn an_interrupted_install_keeps_the_layout_choices_already_saved() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        fs::create_dir(&store.state).unwrap();
+        fs::write(store.state.join(RELOAD_PENDING), []).unwrap();
+        fs::create_dir(&store.config).unwrap();
+        let layout = Layout { panes: [true, false, true], width: "0.30".into(), ..Layout::default() };
+        fs::write(store.rex_file(), rex_lua(&layout, &executable().unwrap())).unwrap();
+        let (reopened, active) = store.layout().unwrap();
+        assert!(!active && reopened == layout);
+        store.save(Some(&reopened), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
+        assert!(store.layout().unwrap().1);
+        assert!(!store.rex_reload_pending());
+    }
+
+    #[test]
+    fn an_interrupted_removal_is_not_offered_as_a_new_install() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        fs::write(store.state.join(RELOAD_PENDING), []).unwrap();
+        fs::write(store.state.join("layout-disabled"), []).unwrap();
+        let (reopened, active) = store.layout().unwrap();
+        assert!(active && !reopened.enabled());
+        store.save(Some(&reopened), None, &|args| args == RELOAD.map(OsStr::new)).unwrap();
+        assert!(!store.init.exists() && !store.rex_file().exists());
+        assert!(!store.rex_reload_pending());
+    }
+
+    #[test]
+    fn saving_does_not_replace_a_changed_ownership_note() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        fs::create_dir(&store.state).unwrap();
+        let note = store.state.join(OWN_CLAUDE);
+        fs::write(&note, "Keep this").unwrap();
+        let result = store.save(None, Some(true), &|_| panic!("Claude Code settings do not need Rex"));
+        assert!(result.unwrap_err().contains("note was changed"));
+        assert_eq!(fs::read_to_string(&note).unwrap(), "Keep this");
+        assert!(!store.claude.exists());
+    }
+
+    #[test]
     fn unrelated_rex_files_are_not_overwritten_on_install() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
@@ -386,6 +575,29 @@ mod tests {
         assert!(result.unwrap_err().contains("Your file was left alone."));
         assert_eq!(fs::read(store.rex_file()).unwrap(), original);
         assert!(!store.init.exists());
+    }
+
+    #[test]
+    fn setup_does_not_edit_ambiguous_or_quoted_layout_declarations() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let layout = Layout::default();
+        store.save(Some(&layout), None, &|_| true).unwrap();
+        let file = store.rex_file();
+        let shipped = fs::read_to_string(&file).unwrap();
+        let mut updated = layout;
+        updated.next_width();
+        updated.toggle(TabPane::Usage);
+        for original in [
+            shipped.replace("local column_width = 0.22", "local column_width = 0.20\nlocal column_width = 0.22"),
+            shipped.replace("  usage = true,", "  usage = false,\n  usage = true,"),
+            format!("{GENERATED}local example = [=[\n{}]=]\n", &shipped[GENERATED.len()..]),
+        ] {
+            fs::write(&file, &original).unwrap();
+            let result = store.save(Some(&updated), None, &|_| panic!("could not prove what setup should edit"));
+            assert!(result.unwrap_err().contains("Your file was left alone."));
+            assert_eq!(fs::read_to_string(&file).unwrap(), original);
+        }
     }
 
     #[test]
@@ -400,6 +612,23 @@ mod tests {
         assert!(store.save(Some(&layout), None, &|_| true).unwrap_err().contains("listener file"));
         assert_eq!(fs::read(store.listener_file()).unwrap(), listener);
         assert_eq!(fs::read(store.rex_file()).unwrap(), saved);
+    }
+
+    #[test]
+    fn an_old_unconditional_launcher_followed_by_user_code_is_left_alone() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let layout = Layout { new_tabs: true, ..Layout::default() };
+        fs::write(&store.init, format!("{}\n{}\n", std::str::from_utf8(MANAGED).unwrap(), loader(&store.rex_file())))
+            .unwrap();
+        fs::create_dir(&store.config).unwrap();
+        let original = rex_lua(&layout, &executable().unwrap())
+            .replace("if arrange_new_tabs and not rex.args", "if not rex.args")
+            + "-- Keep my notes here.\n";
+        fs::write(store.rex_file(), &original).unwrap();
+        let result = store.save(Some(&Layout::default()), None, &|_| panic!("can't safely turn off the old launcher"));
+        assert!(result.unwrap_err().contains("Your file was left alone."));
+        assert_eq!(fs::read_to_string(store.rex_file()).unwrap(), original);
     }
 
     #[test]

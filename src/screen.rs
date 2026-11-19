@@ -205,10 +205,11 @@ struct Pictures {
     able: Option<bool>,
     /// The size of one cell in pixels: width, height.
     cell: (u16, u16),
-    /// Placements asked for in this frame, and those sent in the last one.
+    /// The current request and the last set uploaded, which help can hide briefly.
     wanted: Vec<Placement>,
-    shown: Vec<Placement>,
-    /// A resize erases the placements, but the terminal still has the pictures.
+    uploaded: Vec<Placement>,
+    hidden: bool,
+    /// A resize calls for a fresh placement, without uploading the data again.
     erased: bool,
     /// Data for pictures in `wanted` that are not already on the terminal.
     data: Vec<u8>,
@@ -217,7 +218,15 @@ struct Pictures {
 impl Default for Pictures {
     fn default() -> Self {
         // Most terminals draw a cell about twice as tall as it is wide.
-        Self { able: None, cell: (8, 16), wanted: Vec::new(), shown: Vec::new(), erased: false, data: Vec::new() }
+        Self {
+            able: None,
+            cell: (8, 16),
+            wanted: Vec::new(),
+            uploaded: Vec::new(),
+            hidden: false,
+            erased: false,
+            data: Vec::new(),
+        }
     }
 }
 
@@ -228,6 +237,8 @@ pub struct Screen {
     prev: Vec<Cell>,
     marks: Marks,
     prev_marks: Marks,
+    /// Previous cells still refer to `marks` until the next clear swaps arenas.
+    marks_flushed: bool,
     out: Vec<u8>,
     light_background: bool,
     /// Each wash is 0 while unknown, otherwise 0x01RRGGBB.
@@ -246,6 +257,7 @@ impl Screen {
             prev: Vec::new(),
             marks: Marks::default(),
             prev_marks: Marks::default(),
+            marks_flushed: false,
             out: SYNC_ON.to_vec(),
             light_background: false,
             washes: [0; 3],
@@ -280,6 +292,7 @@ impl Screen {
         // The erase below already puts plain blanks in every cell.
         self.marks.clear();
         self.prev_marks.clear();
+        self.marks_flushed = false;
         self.prev.resize(w * h, BLANK);
         self.out.extend_from_slice(b"\x1b[0m\x1b[2J");
         self.pictures.erased = true;
@@ -287,6 +300,9 @@ impl Screen {
 
     pub fn clear(&mut self) {
         self.cur.fill(BLANK);
+        if std::mem::take(&mut self.marks_flushed) {
+            std::mem::swap(&mut self.marks, &mut self.prev_marks);
+        }
         self.marks.clear();
         self.pictures.wanted.clear();
         self.pictures.data.clear();
@@ -328,15 +344,10 @@ impl Screen {
             *wanted = at;
             return;
         }
-        if !pictures.shown.iter().any(|shown| shown.id == at.id) {
+        if !pictures.uploaded.iter().any(|old| old.id == at.id) {
             picture.transmit(&mut pictures.data);
         }
         pictures.wanted.push(at);
-    }
-
-    /// Blanks one row, including its colours.
-    pub fn clear_row(&mut self, y: usize) {
-        self.span(0, y, self.w).0.fill(BLANK);
     }
 
     /// The cells of row `y` from `x`, at most `w` wide, clipped to the screen.
@@ -350,9 +361,25 @@ impl Screen {
         (cells, &mut self.marks)
     }
 
+    /// Overwriting one column of a wide glyph erases the other column too.
+    fn cut_wide(&mut self, x: usize, y: usize, used: usize, starts_on_cont: bool) {
+        if used == 0 {
+            return;
+        }
+        let start = y * self.w;
+        if starts_on_cont && x > 0 {
+            self.cur[start + x - 1].glyph = BLANK.glyph;
+        }
+        let end = x + used;
+        if end < self.w && self.cur[start + end].glyph == CONT {
+            self.cur[start + end].glyph = BLANK.glyph;
+        }
+    }
+
     /// Draws `s` at (x, y) in at most `max_w` columns. Returns the columns used.
     pub fn put(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
         let (row, marks) = self.span(x, y, max_w);
+        let starts_on_cont = row.first().is_some_and(|cell| cell.glyph == CONT);
         let (mut used, mut base) = (0, 0);
         for ch in s.chars() {
             let cw = char_width(ch);
@@ -372,6 +399,7 @@ impl Screen {
             }
             used += cw;
         }
+        self.cut_wide(x, y, used, starts_on_cont);
         used
     }
 
@@ -384,15 +412,20 @@ impl Screen {
 
     /// Draws a decimal number ending just before column `end`.
     pub fn put_number(&mut self, end: usize, y: usize, mut number: u64, st: Style) {
+        let end = end.min(self.w);
+        let (mut used, mut starts_on_cont) = (0, false);
         for cell in self.span(0, y, end).0.iter_mut().rev() {
             let digit = u8::try_from(number % 10).expect("remainder is a decimal digit");
             let ch = char::from(b'0' + digit);
+            used += 1;
+            starts_on_cont = cell.glyph == CONT;
             *cell = Cell::new(ch, st);
             number /= 10;
             if number == 0 {
                 break;
             }
         }
+        self.cut_wide(end - used, y, used, starts_on_cont);
     }
 
     /// Like `put`, but ends a string that does not fit with an ellipsis.
@@ -444,40 +477,51 @@ impl Screen {
     }
 
     /// Writes only the cells that changed since the last flush.
-    pub fn flush(&mut self) {
-        self.flush_to(|parts| {
-            let mut stdout = io::stdout().lock();
-            for part in parts {
-                if stdout.write_all(part).is_err() {
-                    return;
-                }
-            }
-            let _ = stdout.flush();
-        });
+    pub fn flush(&mut self, send: impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<()> {
+        self.flush_to(|parts| parts.iter().copied().try_for_each(send)).unwrap_or(Ok(()))
+    }
+
+    /// Release even the hidden uploads before giving the terminal back.
+    pub fn release_pictures(&mut self, send: impl FnOnce(&[u8])) {
+        self.out.truncate(SYNC_ON.len());
+        for old in self.pictures.uploaded.drain(..) {
+            delete_picture(&mut self.out, old.id, 'I');
+        }
+        if self.out.len() > SYNC_ON.len() {
+            send(&self.out[SYNC_ON.len()..]);
+            self.out.truncate(SYNC_ON.len());
+        }
     }
 
     /// Places, moves or removes the pictures asked for in this frame.
     /// They lie over the cells, outside the frame of text.
     fn flush_picture(&mut self) -> usize {
         let pictures = &mut self.pictures;
-        if !pictures.erased && pictures.wanted == pictures.shown {
+        if pictures.wanted.is_empty() {
+            if !pictures.hidden && !pictures.uploaded.is_empty() {
+                for old in &pictures.uploaded {
+                    delete_picture(&mut self.out, old.id, 'i');
+                }
+                pictures.hidden = true;
+            }
             return self.out.len();
         }
-        for old in &pictures.shown {
+        let place_again = pictures.erased || pictures.hidden;
+        if !place_again && pictures.wanted == pictures.uploaded {
+            return self.out.len();
+        }
+        for old in &pictures.uploaded {
             match pictures.wanted.iter().find(|at| at.id == old.id) {
-                None => {
-                    let _ = write!(self.out, "\x1b_Ga=d,d=I,i={},q=2\x1b\\", old.id);
-                }
-                Some(at) if at != old || pictures.erased => {
-                    // Take only the placement away; the data is still needed.
-                    let _ = write!(self.out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", old.id);
+                None => delete_picture(&mut self.out, old.id, 'I'),
+                Some(at) if !pictures.hidden && (at != old || pictures.erased) => {
+                    delete_picture(&mut self.out, old.id, 'i');
                 }
                 Some(_) => {}
             }
         }
         let data_at = self.out.len();
         for at in &pictures.wanted {
-            if pictures.erased || !pictures.shown.contains(at) {
+            if place_again || !pictures.uploaded.contains(at) {
                 let _ = write!(
                     self.out,
                     "\x1b[{};{}H\x1b_Ga=p,i={},c={},r={},C=1,q=2\x1b\\",
@@ -489,15 +533,18 @@ impl Screen {
                 );
             }
         }
-        pictures.shown.clone_from(&pictures.wanted);
+        pictures.uploaded.clone_from(&pictures.wanted);
+        pictures.hidden = false;
         pictures.erased = false;
         data_at
     }
 
-    fn flush_to(&mut self, write_frame: impl FnOnce(&[&[u8]])) {
+    fn flush_to<T>(&mut self, write_frame: impl FnOnce(&[&[u8]]) -> T) -> Option<T> {
         let washes = &self.washes;
         let prev_washes = &self.prev_washes;
         let palette_changed = washes != prev_washes;
+        let same_arena = self.marks_flushed;
+        let prev_marks = if same_arena { &self.marks } else { &self.prev_marks };
         let mut active = None;
         let mut utf8 = [0u8; 4];
         for y in 0..self.h {
@@ -506,9 +553,10 @@ impl Screen {
             let mut next_col = usize::MAX;
             for (x, (&cell, old)) in cur.iter().zip(prev).enumerate() {
                 let same = cell.st == old.st
-                    && match (self.marks.get(cell.glyph), self.prev_marks.get(old.glyph)) {
-                        (None, None) => cell.glyph == old.glyph,
-                        (new, old) => new == old,
+                    && if cell.glyph.0 < MARKED || same_arena && cell.glyph == old.glyph {
+                        cell.glyph == old.glyph
+                    } else {
+                        self.marks.get(cell.glyph) == prev_marks.get(old.glyph)
                     };
                 if cell != *old {
                     *old = cell;
@@ -547,20 +595,27 @@ impl Screen {
         }
         let data_at = self.flush_picture();
         self.prev_washes = self.washes;
-        self.prev_marks.text.clone_from(&self.marks.text);
-        self.prev_marks.ranges.clone_from(&self.marks.ranges);
+        self.marks_flushed = true;
         if self.out.len() > SYNC_ON.len() {
             self.out.extend_from_slice(b"\x1b[0m\x1b[?2026l");
-            if self.pictures.data.is_empty() {
-                write_frame(&[&self.out]);
+            let result = if self.pictures.data.is_empty() {
+                write_frame(&[&self.out])
             } else {
                 let (before, after) = self.out.split_at(data_at);
-                write_frame(&[before, &self.pictures.data, after]);
+                let result = write_frame(&[before, &self.pictures.data, after]);
                 self.pictures.data.clear();
-            }
+                result
+            };
             self.out.truncate(SYNC_ON.len());
+            Some(result)
+        } else {
+            None
         }
     }
+}
+
+fn delete_picture(out: &mut Vec<u8>, id: u32, delete: char) {
+    let _ = write!(out, "\x1b_Ga=d,d={delete},i={id},q=2\x1b\\");
 }
 
 #[cfg(test)]
@@ -614,7 +669,7 @@ impl Screen {
     /// Captures exactly what a flush would send to the terminal.
     pub fn emitted(&mut self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        self.flush_to(|parts| bytes.extend(parts.iter().copied().flatten()));
+        let _ = self.flush_to(|parts| bytes.extend(parts.iter().copied().flatten()));
         bytes
     }
 }
@@ -637,6 +692,20 @@ mod tests {
         screen.put(3, 0, 4, "界 should not spill", Style::PLAIN);
         screen.put(3, 1, 4, "界", Style::PLAIN);
         assert_eq!(screen.text(), ["  界", ""]);
+    }
+
+    #[test]
+    fn overwriting_either_half_of_a_wide_character_clears_its_other_half() {
+        let mut screen = Screen::sized(4, 2);
+        screen.put(0, 0, 4, "界y", Style::PLAIN);
+        screen.put(0, 1, 4, "界y", Style::PLAIN);
+        screen.emitted();
+
+        screen.put(0, 0, 1, "x", Style::PLAIN);
+        screen.put_number(2, 1, 1, Style::PLAIN);
+        assert_eq!(screen.text(), ["x y", " 1y"]);
+        let updated = frame(&mut screen);
+        assert!(updated.contains("\x1b[1;1H\x1b[0mx ") && updated.contains("\x1b[2;1H 1"), "{updated:?}");
     }
 
     #[test]
@@ -672,6 +741,10 @@ mod tests {
         screen.clear();
         screen.put(0, 0, 6, "界\u{301}e\u{302}x", Style::PLAIN);
         assert_eq!(frame(&mut screen), "");
+        screen.clear();
+        screen.clear();
+        screen.put(0, 0, 6, "界\u{308}e\u{302}x", Style::PLAIN);
+        assert!(frame(&mut screen).contains("界\u{308}"));
         screen.put(0, 0, 6, "界\u{300}ex", Style::PLAIN);
         let updated = frame(&mut screen);
         assert!(updated.contains("\x1b[1;1H") && updated.contains("界\u{300}e"), "{updated:?}");
@@ -704,10 +777,18 @@ mod tests {
         let moved = frame(&mut screen);
         assert!(!moved.contains("a=t") && moved.contains("a=d,d=i,i=1") && moved.contains("\x1b[2;5H\x1b_Ga=p"));
 
-        // A frame without it takes it off the terminal altogether.
+        // Help hides the placement, but closing it does not upload the picture again.
         screen.clear();
-        assert!(frame(&mut screen).contains("a=d,d=I,i=1"));
+        assert!(frame(&mut screen).contains("a=d,d=i,i=1"));
         assert_eq!(frame(&mut screen), "");
+        screen.show_picture(&picture, 4, 1, 5, 2);
+        let shown_again = frame(&mut screen);
+        assert!(shown_again.contains("a=p,i=1") && !shown_again.contains("a=t"));
+        screen.clear();
+        frame(&mut screen);
+        let mut released = false;
+        screen.release_pictures(|bytes| released = bytes.starts_with(b"\x1b_Ga=d,d=I,i=1,"));
+        assert!(released);
     }
 
     #[test]
@@ -739,10 +820,13 @@ mod tests {
         assert_eq!(resized.matches("a=p,").count(), 2);
 
         screen.clear();
-        let empty = frame(&mut screen);
-        assert!(empty.contains(&format!("a=d,d=I,i={},", a.id)));
-        assert!(empty.contains(&format!("a=d,d=I,i={},", b.id)));
-        assert_eq!(frame(&mut screen), "");
+        let hidden = frame(&mut screen);
+        assert!(hidden.contains(&format!("a=d,d=i,i={},", a.id)));
+        assert!(hidden.contains(&format!("a=d,d=i,i={},", b.id)));
+        screen.show_picture(&b, 12, 1, 4, 2);
+        let replaced = frame(&mut screen);
+        assert!(replaced.contains(&format!("a=d,d=I,i={},", a.id)));
+        assert!(!replaced.contains("a=t") && replaced.contains(&format!("a=p,i={},", b.id)));
     }
 
     #[test]
@@ -774,6 +858,6 @@ mod tests {
                 .as_bytes()
         );
         screen.set_background([0; 3]);
-        screen.flush_to(|_| panic!("the palette did not change"));
+        let _ = screen.flush_to(|_| panic!("the palette did not change"));
     }
 }

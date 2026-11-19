@@ -116,11 +116,6 @@ impl Limits {
         Self { base, model_week: None }
     }
 
-    /// The two all-models windows; the scoped week is a separate figure.
-    fn map<T>(self, figure: impl FnMut(Option<Window>) -> T) -> [T; 2] {
-        self.base.map(figure)
-    }
-
     /// Include the model-specific week when scheduling the next reset.
     fn windows(self) -> impl Iterator<Item = Window> {
         self.base.into_iter().flatten().chain(self.model_week.map(|model| model.window))
@@ -131,7 +126,7 @@ impl Limits {
 #[derive(Clone, Copy)]
 struct ModelWeek {
     window: Window,
-    name: [u8; 32],
+    caption: [u8; 37],
     len: usize,
 }
 
@@ -142,14 +137,20 @@ impl ModelWeek {
         if len == 0 || !tier.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
             return None;
         }
-        let mut name = [0; 32];
-        name.get_mut(..len)?.copy_from_slice(tier.as_bytes());
-        name[0].make_ascii_uppercase();
-        Some(Self { window, name, len })
+        let mut caption = [0; 37];
+        let (name, suffix) = caption.get_mut(..len + 5)?.split_at_mut(len);
+        name.copy_from_slice(tier.as_bytes());
+        suffix.copy_from_slice(b" week");
+        caption[0].make_ascii_uppercase();
+        Some(Self { window, caption, len })
     }
 
     fn label(&self) -> &str {
-        std::str::from_utf8(&self.name[..self.len]).expect("model labels are ASCII")
+        &self.caption()[..self.len]
+    }
+
+    fn caption(&self) -> &str {
+        std::str::from_utf8(&self.caption[..self.len + 5]).expect("model captions are ASCII")
     }
 }
 
@@ -735,10 +736,10 @@ fn help_rows() -> Vec<help::HelpRow> {
         note("starts again at 0%."),
         HelpRow::new(),
         heading("Claude Code"),
-        note("Turn on its limits in"),
-        note("milo setup. Tokens today"),
-        note("show local activity,"),
-        note("not a limit."),
+        note("Tokens today show local"),
+        note("activity, not a limit."),
+        note("Setup can add a status"),
+        note("line to collect limits."),
         key("r", "reload"),
         key("q", "quit"),
     ]

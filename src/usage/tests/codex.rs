@@ -53,7 +53,7 @@ fn an_unreadable_codex_report_supersedes_older_figures() {
         let rows = frame(&mut open(&f, NOW), 140, 3);
         let left = |y: usize| rows[y].split_once('│').unwrap().0;
         assert!(left(1).contains('—') && !left(1).contains("40%"));
-        assert!(left(2).contains("could not read Codex's figures"));
+        assert!(left(2).contains("no limits reported"));
     }
 }
 
@@ -133,11 +133,11 @@ fn no_codex_sessions_and_sessions_without_limits_have_different_notes() {
     let f = Fixture::folder();
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
-    assert!(rows[2].contains("no Codex sessions here"));
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no local source found");
     write(&f, CODEX, "{}\n", NOW);
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
-    assert!(rows[2].contains("no limits reported") && !rows[2].contains("no Codex sessions"));
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no limits reported");
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn an_unreadable_codex_root_is_not_reported_as_no_limits() {
     let f = Fixture::folder();
     f.write("codex", "not a directory");
     let rows = frame(&mut open(&f, NOW), 140, 3);
-    assert!(rows[2].contains("could not read Codex sessions"), "{}", rows[2]);
+    assert!(rows[2].contains("could not read sessions"), "{}", rows[2]);
 }
 
 #[test]
@@ -159,6 +159,6 @@ fn an_unreadable_codex_day_is_not_reported_as_no_sessions() {
     let rows = fs::read_dir(&dir).is_err().then(|| frame(&mut open(&f, NOW), 140, 3));
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     if let Some(rows) = rows {
-        assert!(rows[2].contains("could not read Codex sessions"), "{}", rows[2]);
+        assert!(rows[2].contains("could not read sessions"), "{}", rows[2]);
     }
 }

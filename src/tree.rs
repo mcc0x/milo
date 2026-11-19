@@ -9,6 +9,7 @@ use crate::keys::Direction;
 
 pub struct Node {
     name_at: usize,
+    /// A folder ends in `/`, so it can coexist with a file of the same name.
     pub path: Rc<str>,
     parent: u32,
     /// Number of pending files before this node in tree order.
@@ -48,7 +49,7 @@ impl Node {
 
     /// The last part of the path, as it appears in the tree.
     pub fn name(&self) -> &str {
-        &self.path[self.name_at..]
+        self.path[self.name_at..].trim_end_matches('/')
     }
 
     fn is_pending_file(&self) -> bool {
@@ -87,7 +88,18 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     (x.len() - i).cmp(&(y.len() - j)).then_with(|| a.cmp(b))
 }
 
-/// Folder choices override the default for folders with no choice.
+/// Folders containing `path`, closest first, including the final `/` of each.
+pub fn folders_above(path: &str) -> impl Iterator<Item = &str> {
+    let mut path = path.strip_suffix('/').unwrap_or(path);
+    std::iter::from_fn(move || {
+        let slash = path.rfind('/')?;
+        let folder = &path[..=slash];
+        path = &path[..slash];
+        Some(folder)
+    })
+}
+
+/// Choices for folder paths (ending in `/`) override the default.
 #[derive(Default)]
 pub struct Folds {
     choice: HashMap<String, bool>,
@@ -119,11 +131,9 @@ impl Folds {
     /// Opens every folder above `path`, returning whether any were closed.
     pub fn open_above(&mut self, path: &str) -> bool {
         let mut opened = false;
-        let mut p = path;
-        while let Some((dir, _)) = p.rsplit_once('/') {
+        for dir in folders_above(path) {
             opened |= !self.is_open(dir);
             self.set(dir, true);
-            p = dir;
         }
         opened
     }
@@ -176,10 +186,7 @@ impl Tree {
         self.pending_order.clear();
         self.nodes.push(Node::new(Rc::from(""), 0, 0, true));
         for path in paths {
-            match path.strip_suffix('/') {
-                Some(dir) => self.insert(dir, true),
-                None => self.insert(path, false),
-            };
+            self.insert(path);
         }
         for file in files {
             self.count(file);
@@ -210,16 +217,14 @@ impl Tree {
         }
     }
 
-    fn insert(&mut self, path: &str, dir: bool) -> u32 {
+    fn insert(&mut self, path: &str) -> u32 {
         if let Some(&i) = self.index.get(path) {
-            // A directory that became a file is still where its old files hang.
-            self.node_mut(i).dir |= dir;
             return i;
         }
-        let (parent, name_at) = match path.rsplit_once('/') {
-            Some((dir, _)) => (self.insert(dir, true), dir.len() + 1),
-            None => (0, 0),
-        };
+        let name_path = path.trim_end_matches('/');
+        let dir = name_path.len() != path.len();
+        let name_at = name_path.rfind('/').map_or(0, |slash| slash + 1);
+        let parent = if name_at == 0 { 0 } else { self.insert(&path[..name_at]) };
         let i = u32::try_from(self.nodes.len()).expect("too many nodes in the project tree");
         let path: Rc<str> = Rc::from(path);
         self.nodes.push(Node::new(Rc::clone(&path), name_at, parent, dir));
@@ -231,7 +236,7 @@ impl Tree {
     /// Records one pending file on its node and on every directory above it.
     /// Use the uncommitted entry when the same path is also unpushed.
     fn count(&mut self, file: &PendingFile) {
-        let mut i = self.insert(&file.path, false);
+        let mut i = self.insert(&file.path);
         let first = !std::mem::replace(&mut self.node_mut(i).counted, true);
         loop {
             let n = self.node_mut(i);
@@ -344,7 +349,7 @@ mod tests {
     }
 
     fn names(tree: &Tree) -> Vec<&str> {
-        tree.rows.iter().map(|r| tree.node(r.node).path.as_ref()).collect()
+        tree.rows.iter().map(|r| tree.node(r.node).path.trim_end_matches('/')).collect()
     }
 
     impl Tree {
@@ -415,7 +420,8 @@ mod tests {
         let mut tree = Tree::build(["dir"].into_iter(), &files);
         assert_eq!((tree.node(0).pending, tree.node(0).add), (2, 1));
         tree.layout(|_| true, false);
-        assert_eq!(names(&tree), ["dir", "dir/a.txt"]);
+        assert_eq!(names(&tree), ["dir", "dir/a.txt", "dir"]);
+        assert_eq!(tree.row(2).unwrap().kind, Kind::Untracked);
     }
 
     #[test]
@@ -430,7 +436,7 @@ mod tests {
     fn jumps_find_siblings_folders_and_pending_files() {
         let files = [file("b/y.rs", Kind::Modified, 1, false)];
         let mut tree = Tree::build(["a/x.rs", "b/y.rs", "c.txt"].into_iter(), &files);
-        tree.layout(|p| p == "a", false);
+        tree.layout(|p| p == "a/", false);
         assert_eq!(names(&tree), ["a", "a/x.rs", "b", "c.txt"]);
         assert_eq!(tree.sibling_row(0, Direction::Next), Some(2));
         assert_eq!(tree.sibling_row(2, Direction::Previous), Some(0));

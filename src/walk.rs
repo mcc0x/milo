@@ -37,9 +37,8 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
             };
             let mut path = format!("{dir}{}", name.to_string_lossy());
             if kind.is_dir() {
-                let descend = listing.paths.len() < CAP && open(&path);
                 path.push('/');
-                if descend {
+                if listing.paths.len() < CAP && open(&path) {
                     dirs.push(path.clone());
                 }
             }

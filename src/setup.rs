@@ -47,7 +47,7 @@ impl Choice {
             (Self::Pane(TabPane::Outline), false) => ("Outline", "Files on the left"),
             (Self::Pane(TabPane::History), false) => ("History", "Commits on the left"),
             (Self::Pane(TabPane::Usage), false) => ("Usage", "A strip across the top"),
-            (Self::Width, false) => ("Column width", "Room for files and commits"),
+            (Self::Width, false) => ("Column width", "Left side of the tab"),
             (Self::NewTabs, false) => ("Arrange new shell tabs", "Skip tabs that run a command"),
             (Self::ClaudeLimits, false) => ("Show Claude Code limits", "For the usage strip"),
             (Self::Pane(TabPane::Outline), true) => ("Outline", "Files"),
@@ -100,6 +100,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Ok((saved, active)) => {
                     installed = if active { Installed::Active(saved.clone()) } else { Installed::Absent };
                     layout = saved;
+                    if store.rex_reload_pending() {
+                        message = Some(("Rex still needs to reload. Check your choices, then press s.", FAINT));
+                    }
                 }
                 Err(why) => message = Some((why, Style::PLAIN.bold())),
             }
@@ -254,7 +257,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 top += 1;
             }
             if !self.inside && end > 6 {
-                s.put_fit(1, top, s.w - 1, "Tab layouts need Rex.", FAINT);
+                s.put_fit(1, top, s.w - 1, "Open setup in Rex to arrange tabs.", FAINT);
                 s.put_fit(1, top + 1, s.w - 1, "Panes work anywhere: milo outline, milo history, milo usage.", FAINT);
                 top += 2;
             }
@@ -270,9 +273,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             next = self.draw_save_plan(s, next, end);
         }
         let issue = match self.claude {
-            Claude::Foreign => "Claude Code already has a status line; milo will not replace it.",
-            Claude::NotOwned => "Milo did not add this status line, so it will leave it alone.",
-            Claude::Invalid => "Milo could not read Claude Code settings. They won't be changed.",
+            Claude::Foreign => "Milo will leave your Claude Code status line alone.",
+            Claude::NotOwned => "You already have Milo on the Claude Code status line.",
+            Claude::Invalid => "Could not read Claude Code settings. Milo will leave them alone.",
             Claude::On | Claude::Off => "",
         };
         for text in wrap(issue, s.w - 1) {
@@ -294,12 +297,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             ""
         } else if self.layout.enabled() {
             match saved {
-                None => "Add two lines to Rex settings.",
-                Some(layout) if layout != &self.layout => "Update the layout in Rex.",
+                None => "Add Milo actions to Rex.",
+                Some(layout) if layout != &self.layout => "Update the Rex layout.",
                 Some(_) => "",
             }
         } else if saved.is_some() {
-            "Remove Milo's two lines from Rex settings."
+            "Remove Milo actions from Rex."
         } else {
             ""
         };
@@ -442,9 +445,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
         match key {
             Key::Up | Key::Char('k') if self.inside => self.move_selection(-1),
             Key::Down | Key::Char('j') if self.inside => self.move_selection(1),
-            Key::Enter | Key::Char(' ') => self.toggle(),
+            Key::Enter | Key::Char(' ') if self.selected != Choice::ClaudeLimits || self.claude.editable() => {
+                self.toggle();
+            }
             Key::Char('a') if self.inside => {
-                let tried = self.arrange().map(|()| "Tried in this tab. Not saved yet: press s to keep it.");
+                let tried = self.arrange().map(|()| "Tried in this tab. Press s to save your choices.");
                 self.report(tried);
             }
             Key::Char('s') if self.can_save() => {
@@ -484,6 +489,7 @@ pub fn listen(stop: bool) -> i32 {
             lock::stop(&state)
         } else {
             let config = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
+            rex_files::check_config_dir(&config).map_err(io::Error::other)?;
             lock::listen(&state, &config.join("listener.lua"))
         }
     }
@@ -565,7 +571,7 @@ mod tests {
         let mut pane = Setup::new(Some(store), false, None, |_| panic!("outside Rex"));
         let rows = frame(&mut pane, 75, 10);
         assert!(rows[1].contains("Not set up yet"));
-        assert!(rows[2].contains("Tab layouts need Rex"));
+        assert!(rows[2].contains("Open setup in Rex to arrange tabs"));
         assert!(rows[3].contains("milo outline, milo history, milo usage"));
         assert!(rows[4].contains("Show Claude Code limits"));
         assert!(!rows.iter().any(|row| row.contains("Arrange new shell tabs")));
@@ -584,9 +590,9 @@ mod tests {
         fs::write(&store.claude, original).unwrap();
         let mut pane = Setup::new(Some(store), false, None, |_| panic!("outside Rex"));
         let rows = frame(&mut pane, 78, 10);
-        assert!(rows.iter().any(|row| row.contains("Claude Code already has a status line; milo will not replace it")));
+        assert!(rows.iter().any(|row| row.contains("Milo will leave your Claude Code status line alone")));
         assert!(!rows[9].contains("save"));
-        pane.key(Key::Enter);
+        assert_eq!(pane.key(Key::Enter), After::Ignored);
         pane.key(Key::Char('s'));
         assert_eq!(fs::read_to_string(f.root.join("settings.json")).unwrap(), original);
     }
@@ -609,10 +615,10 @@ mod tests {
         for text in [
             "Set up panes for Rex tabs.",
             "not set up yet",
-            "Add two lines to Rex settings.",
+            "Add Milo actions to Rex.",
             "Arrange new shell tabs.",
             "Add milo to Claude Code's status line.",
-            "Tried in this tab. Not saved yet: press s to keep it.",
+            "Tried in this tab. Press s to save your choices.",
         ] {
             assert!(words.contains(text), "{text:?} missing from {rows:?}");
         }
@@ -635,7 +641,7 @@ mod tests {
             pane.key(Key::Down);
         }
         let rows = frame(&mut pane, 80, 24);
-        assert!(rows.iter().any(|row| row.contains("Remove Milo's two lines from Rex settings.")));
+        assert!(rows.iter().any(|row| row.contains("Remove Milo actions from Rex.")));
         assert_eq!(pane.key(Key::Char('s')), After::Stay);
         let rows = frame(&mut pane, 80, 24);
         assert_eq!(rows[22].trim(), "Removed milo from Rex.");

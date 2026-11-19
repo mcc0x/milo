@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
@@ -22,6 +23,7 @@ const MAX_OUTPUT: usize = 64 * 1024;
 /// that is absent from the newest report, and a newer row replaces its limit id.
 pub(super) const SQL: &str = r"
 PRAGMA query_only=ON;
+PRAGMA trusted_schema=OFF;
 WITH cache_json AS (
     SELECT CASE WHEN json_valid(value) THEN value END AS body
     FROM cache WHERE key GLOB 'usage_cache:report:*'
@@ -72,6 +74,7 @@ pub(super) fn database_in(home: Option<&Path>, dir: Option<&Path>) -> Option<Pat
 }
 
 /// OMP keeps separate account snapshots for the two providers.
+#[derive(Default)]
 pub(super) struct Reports {
     pub claude: Option<Reading>,
     pub codex: Option<Reading>,
@@ -87,7 +90,7 @@ pub(super) struct Poll {
 
 impl Poll {
     pub(super) fn new(path: Option<PathBuf>) -> Self {
-        Self { path, ..Self::default() }
+        Self { path, last: None, job: None }
     }
 
     /// Keep checking quickly enough to collect a worker that has not finished.
@@ -108,15 +111,30 @@ impl Poll {
         }
         let path = self.path.clone()?;
         self.last = Some(clock);
-        self.job = thread::Builder::new().spawn(move || read(&path, now)).ok();
+        self.job = thread::Builder::new()
+            .spawn(move || {
+                read(&path, now).or_else(|| {
+                    let missing =
+                        std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+                    missing.then(Reports::default)
+                })
+            })
+            .ok();
         None
     }
 }
 
-/// Prefer the system binary over an executable found in the user's path.
+impl Drop for Poll {
+    fn drop(&mut self) {
+        // Let the worker reap SQLite before this process goes away.
+        if let Some(job) = self.job.take() {
+            let _ = job.join();
+        }
+    }
+}
+
 pub(super) fn sqlite() -> &'static OsStr {
-    let system = Path::new("/usr/bin/sqlite3");
-    if system.is_file() { system.as_os_str() } else { OsStr::new("sqlite3") }
+    OsStr::new("/usr/bin/sqlite3")
 }
 
 pub(super) fn read(path: &Path, now: i64) -> Option<Reports> {
@@ -124,14 +142,12 @@ pub(super) fn read(path: &Path, now: i64) -> Option<Reports> {
     parse(&bytes, now)
 }
 
-/// A read-only SQLite connection can create missing WAL sidecars on a writable directory.
-/// Look at the journal versions in the database header before opening the connection.
+/// Skip incomplete WAL file sets rather than opening an unusable database.
 fn readable(path: &Path) -> bool {
     let mut header = [0; 20];
-    if !path.is_absolute() || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
-        return false;
-    }
-    if fs_ops::open_read(path).and_then(|mut file| file.read_exact(&mut header)).is_err()
+    let Ok(mut file) = fs_ops::open_read(path) else { return false };
+    if !file.metadata().is_ok_and(|m| m.is_file())
+        || file.read_exact(&mut header).is_err()
         || &header[..16] != b"SQLite format 3\0"
     {
         return false;
@@ -147,15 +163,41 @@ fn readable(path: &Path) -> bool {
     }
 }
 
+/// Keep SQLite's URI syntax separate from literal path bytes, including non-UTF-8 names.
+fn read_only_uri(path: &Path) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    const OPTIONS: &str = "?mode=ro&readonly_shm=1";
+    let bytes = path.as_os_str().as_bytes();
+    let mut uri = String::with_capacity(5 + bytes.len() + OPTIONS.len());
+    uri.push_str("file:");
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
+            uri.push(char::from(b));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEX[usize::from(b >> 4)]));
+            uri.push(char::from(HEX[usize::from(b & 15)]));
+        }
+    }
+    // Keep WAL locking, but never create or write the shared-memory sidecar.
+    uri.push_str(OPTIONS);
+    uri
+}
+
 /// Bound both child output and wall time so a busy database cannot keep a worker alive.
 pub(super) fn query(executable: &OsStr, path: &Path, wait: Duration) -> Option<Vec<u8>> {
-    if !readable(path) {
+    if !path.is_absolute() {
+        return None;
+    }
+    // `-nofollow` also rejects links in ancestors, including /tmp on macOS.
+    let path = path.parent()?.canonicalize().ok()?.join(path.file_name()?);
+    if !readable(&path) {
         return None;
     }
     let deadline = Instant::now() + wait;
     let mut child = Command::new(executable)
-        .args(["-batch", "-readonly", "-json", "-init", "/dev/null"])
-        .arg(path)
+        .args(["-batch", "-safe", "-bail", "-nofollow", "-readonly", "-json", "-init", "/dev/null", "--"])
+        .arg(read_only_uri(&path))
         .arg(SQL)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -258,5 +300,28 @@ fn history_window<'a>(claude: bool, id: Option<&'a str>, label: Option<Value<'_>
         "5 hour" | "5 hours" | "5h" => Some((300, None)),
         "7 day" | "7 days" | "7d" => Some((10_080, None)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_usage_waits_for_its_sqlite_worker_to_reap_the_child() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let job = thread::spawn(move || {
+            let mut child = Command::new("/bin/sleep").arg("0.1").spawn().unwrap();
+            send.send(child.id()).unwrap();
+            child.wait().unwrap();
+            None
+        });
+        let mut poll = Poll::default();
+        poll.job = Some(job);
+        let pid = libc::pid_t::try_from(receive.recv().unwrap()).unwrap();
+        drop(poll);
+        // SAFETY: WNOHANG does not block and a null status pointer is allowed.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
     }
 }

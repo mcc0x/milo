@@ -61,3 +61,13 @@ windows[1] = tab("slow", "slow")
 created("slow")
 for _ = 1, 9 do table.remove(timers, 1)() end
 assert(#timers == 0 and #splits == 0)
+
+-- A note below the launcher must not keep a disabled listener running.
+-- The optional second argument comes from turning off new tabs after adding such a note.
+if arg[2] then
+  local launches = 0
+  rex.action = function() end
+  rex.exec = { start = function() launches = launches + 1 end }
+  assert(loadfile(arg[2]))()
+  assert(launches == 0, "turning off new shell tabs must stop launching the listener")
+end

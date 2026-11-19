@@ -1,17 +1,17 @@
 //! Sets terminal modes and waits for keyboard input, signals or file notifications.
 
-use std::fs::File;
+use std::ffi::CStr;
+use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, IsTerminal, PipeReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
-use std::sync::OnceLock;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// Redraw at the current size after startup or a resize signal.
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
 /// Wind down after a termination signal, including while waiting on git.
 pub static TERMINATED: AtomicBool = AtomicBool::new(false);
-/// Modes saved for restoration on exit, including from the panic hook.
-static ORIG: OnceLock<libc::termios> = OnceLock::new();
 /// The write end of the wake pipe, kept open for handlers until the program exits.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
 
@@ -22,7 +22,8 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 // terminal type reply tells us the terminal has finished answering.
 const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\
     \x1b]11;?\x1b\\\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
-const LEAVE: &[u8] = b"\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+// End a partial control string or synchronized update before changing modes.
+const LEAVE: &[u8] = b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 /// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
 pub fn wake(fd: RawFd) {
@@ -51,7 +52,7 @@ extern "C" fn on_term(_: libc::c_int) {
     wake(WAKE.load(Ordering::Relaxed));
 }
 
-fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
+fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> io::Result<()> {
     // With no SA_RESTART, signals can also interrupt a wait on descriptors.
     // SAFETY: A zeroed sigaction has no flags and no handler; fill both the
     // handler and the signal mask before passing it to sigaction.
@@ -60,90 +61,170 @@ fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
     // SAFETY: The mask is writable storage for an empty signal set.
     unsafe { libc::sigemptyset(&mut sa.sa_mask) };
     // SAFETY: `sa` holds the C signal handler and its mask; no old action is requested.
-    unsafe { libc::sigaction(sig, &sa, std::ptr::null_mut()) };
+    let result = unsafe { libc::sigaction(sig, &sa, std::ptr::null_mut()) };
+    if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
-pub fn enter() -> io::Result<File> {
-    let stdout = io::stdout();
-    if !stdout.is_terminal() {
-        return Err(io::Error::other("standard output is not a terminal"));
-    }
-    // Stdout treats a bad descriptor as a successful write. The opening
-    // sequence must report that failure so the keyboard can be restored.
-    let mut out = File::from(stdout.as_fd().try_clone_to_owned()?);
-    let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
-    let fd = keyboard.as_raw_fd();
-    // SAFETY: A zeroed termios holds valid zero values in its integer fields.
-    let mut t: libc::termios = unsafe { std::mem::zeroed() };
-    // SAFETY: The keyboard descriptor is open and `t` is writable.
-    if unsafe { libc::tcgetattr(fd, &mut t) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut raw = t;
-    // SAFETY: `raw` is a writable copy of the keyboard's terminal modes.
-    unsafe { libc::cfmakeraw(&mut raw) };
-    raw.c_cc[libc::VMIN] = 0;
-    raw.c_cc[libc::VTIME] = 0;
-    // SAFETY: The keyboard descriptor is open and `raw` holds valid terminal modes.
-    if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let _ = ORIG.set(t);
-    if let Err(e) = out.write_all(ENTER) {
-        leave();
-        return Err(e);
-    }
-    Ok(keyboard)
+/// Owns the terminal modes until the pane returns or unwinds.
+pub struct Session {
+    pub keyboard: File,
+    output: File,
+    signal: PipeReader,
+    saved: Option<libc::termios>,
 }
 
-/// Starts heeding signals. Asked to stop, the program winds down by itself
-/// from then on: it puts the terminal back and takes any git command it is
-/// waiting for down with it. Returns the listening end of the wake pipe.
-pub fn listen() -> Option<PipeReader> {
-    let reader = io::pipe().ok().and_then(|(reader, writer)| {
-        // A signal just before a wait must still wake it, without ever
-        // blocking the handler or leaving the event loop stuck reading.
-        for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
-            // SAFETY: `fd` is an open pipe end and F_SETFL takes an integer flag.
-            if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
-                return None;
+impl Session {
+    pub fn open() -> io::Result<Self> {
+        let stdout = io::stdout();
+        if !stdout.is_terminal() {
+            return Err(io::Error::other("standard output is not a terminal"));
+        }
+        let output = terminal_output(stdout.as_raw_fd())?;
+        let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
+        Self::enter(keyboard, output, listen()?)
+    }
+
+    fn enter(keyboard: File, output: File, signal: PipeReader) -> io::Result<Self> {
+        let fd = keyboard.as_raw_fd();
+        // SAFETY: A zeroed termios holds valid zero values in its integer fields.
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: The keyboard descriptor is open and `saved` is writable.
+        if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: The keyboard descriptor is open; discard input queued before startup.
+        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+        let mut raw = saved;
+        // SAFETY: `raw` is a writable copy of the keyboard's terminal modes.
+        unsafe { libc::cfmakeraw(&mut raw) };
+        raw.c_cc[libc::VMIN] = 0;
+        raw.c_cc[libc::VTIME] = 0;
+        // SAFETY: The keyboard descriptor is open and `raw` holds valid terminal modes.
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut session = Self { keyboard, output, signal, saved: Some(saved) };
+        session.write(ENTER)?;
+        Ok(session)
+    }
+
+    pub fn wait(&self, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
+        wait(&self.keyboard, Some(&self.signal), timeout_ms, extra)
+    }
+
+    pub fn wait_for_open(&self, timeout_ms: i32, done: RawFd) -> Wait {
+        wait_for(&self.keyboard, Some(&self.signal), timeout_ms, Some(done), true)
+    }
+
+    /// Make progress while the terminal is reading, but let a signal interrupt backpressure.
+    pub fn write(&mut self, mut data: &[u8]) -> io::Result<()> {
+        while !data.is_empty() {
+            if TERMINATED.load(Ordering::Relaxed) {
+                return Err(ErrorKind::Interrupted.into());
+            }
+            match self.output.write(data) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(n) => data = &data[n..],
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    let mut fds = [
+                        libc::pollfd { fd: self.output.as_raw_fd(), events: libc::POLLOUT, revents: 0 },
+                        libc::pollfd { fd: self.signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                    ];
+                    if wait_ready(&mut fds, -1) < 0 {
+                        let e = io::Error::last_os_error();
+                        if e.kind() != ErrorKind::Interrupted {
+                            return Err(e);
+                        }
+                    } else if fds[1].revents != 0 {
+                        drain_signal(&self.signal);
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
-        WAKE.store(writer.into_raw_fd(), Ordering::Relaxed);
-        Some(reader)
-    });
-    install(libc::SIGWINCH, on_winch);
-    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
-        install(sig, on_term);
+        Ok(())
     }
-    reader
-}
 
-pub fn leave() {
-    // Restore keyboard modes even if writes to the terminal fail.
-    if let Some(t) = ORIG.get() {
+    pub fn finish(&mut self, data: &[u8]) {
+        let _ = self.output.write_all(data);
+    }
+
+    pub fn size(&self) -> (usize, usize) {
+        let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: TIOCGWINSZ writes into the live `winsize` record.
+        let result = unsafe { libc::ioctl(self.output.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut ws) };
+        if result == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+            (usize::from(ws.ws_col), usize::from(ws.ws_row))
+        } else {
+            (80, 24)
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_pty() -> (Self, File, io::PipeWriter) {
+        let (keyboard, master) = test_pair();
+        let output = keyboard.try_clone().unwrap();
+        let (signals, writer) = io::pipe().unwrap();
+        (Self::enter(keyboard, output, signals).unwrap(), master, writer)
+    }
+
+    pub fn restore(&mut self) {
+        let Some(saved) = self.saved.take() else { return };
+        let fd = self.keyboard.as_raw_fd();
         loop {
-            // SAFETY: `t` contains saved terminal modes and is live for the call.
-            let result = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, t) };
+            // SAFETY: `saved` holds the keyboard's original modes and lives through the call.
+            let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
             if result == 0 || io::Error::last_os_error().kind() != ErrorKind::Interrupted {
                 break;
             }
         }
+        // SAFETY: The keyboard descriptor is open; unread keys do not belong to the shell.
+        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+        if self.output.write_all(LEAVE).is_err_and(|e| e.kind() == ErrorKind::WouldBlock) {
+            // Drop pending drawing bytes to make room for the cleanup sequence.
+            // SAFETY: The output descriptor is open and this flush does not wait for a reader.
+            unsafe { libc::tcflush(self.output.as_raw_fd(), libc::TCOFLUSH) };
+            let _ = self.output.write_all(LEAVE);
+        }
     }
-    let mut out = io::stdout().lock();
-    let _ = out.write_all(LEAVE);
-    let _ = out.flush();
 }
 
-pub fn size() -> (usize, usize) {
-    let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
-    // SAFETY: TIOCGWINSZ writes into the live `winsize` record.
-    let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ as _, &raw mut ws) };
-    if result == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-        (usize::from(ws.ws_col), usize::from(ws.ws_row))
-    } else {
-        (80, 24)
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.restore();
     }
+}
+
+/// Open a separate description so non-blocking writes don't change the shell's stdout flags.
+fn terminal_output(fd: RawFd) -> io::Result<File> {
+    let mut path = [0; 4096];
+    // SAFETY: `path` provides writable storage for the tty name, including its trailing NUL.
+    let result = unsafe { libc::ttyname_r(fd, path.as_mut_ptr().cast(), path.len()) };
+    if result != 0 {
+        return Err(io::Error::from_raw_os_error(result));
+    }
+    let name = CStr::from_bytes_until_nul(&path).map_err(io::Error::other)?;
+    let name = std::ffi::OsStr::from_bytes(name.to_bytes());
+    OpenOptions::new().write(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(name)
+}
+
+fn listen() -> io::Result<PipeReader> {
+    let (reader, writer) = io::pipe()?;
+    // A signal just before a wait must still wake it, without ever
+    // blocking the handler or leaving the event loop stuck reading.
+    for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+        // SAFETY: `fd` is an open pipe end and F_SETFL takes an integer flag.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    WAKE.store(writer.into_raw_fd(), Ordering::Relaxed);
+    install(libc::SIGWINCH, on_winch)?;
+    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+        install(sig, on_term)?;
+    }
+    Ok(reader)
 }
 
 pub enum Wait {
@@ -152,11 +233,27 @@ pub enum Wait {
     Woken,
     Timeout,
     Interrupted,
+    Closed,
+}
+
+fn drain_signal(mut reader: &PipeReader) {
+    let mut buf = [0u8; 64];
+    while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
+}
+
+fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
+    wait_for(keyboard, signal, timeout_ms, extra, false)
 }
 
 /// Waits for input, a signal, the extra descriptor or a timeout.
-/// Signals take priority, then the keyboard, then the extra descriptor.
-pub fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
+/// Signals always take priority; loading also prioritizes completion over keystrokes.
+fn wait_for(
+    keyboard: &File,
+    signal: Option<&PipeReader>,
+    timeout_ms: i32,
+    extra: Option<RawFd>,
+    opening: bool,
+) -> Wait {
     let mut fds = [
         libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
@@ -167,18 +264,38 @@ pub fn wait(keyboard: &File, signal: Option<&PipeReader>, timeout_ms: i32, extra
     if ready == 0 {
         Wait::Timeout
     } else if ready < 0 {
-        Wait::Interrupted
+        if io::Error::last_os_error().kind() == ErrorKind::Interrupted { Wait::Interrupted } else { Wait::Closed }
     } else if fds[2].revents != 0 {
-        if let Some(mut reader) = signal {
-            let mut buf = [0u8; 64];
-            while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
+        if let Some(reader) = signal {
+            drain_signal(reader);
         }
         Wait::Interrupted
-    } else if fds[0].revents != 0 {
+    } else if opening && fds[1].revents != 0 {
+        Wait::Woken
+    } else if fds[0].revents & libc::POLLIN != 0 {
         Wait::Input
+    } else if fds[0].revents != 0 {
+        Wait::Closed
     } else {
         Wait::Woken
     }
+}
+
+#[cfg(test)]
+fn test_pair() -> (File, File) {
+    use std::os::fd::FromRawFd;
+
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: The descriptor outputs are writable, and the other parameters are optional.
+    let result = unsafe {
+        libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    assert_eq!(result, 0, "{}", io::Error::last_os_error());
+    // SAFETY: openpty returned ownership of the slave descriptor.
+    let keyboard = unsafe { File::from_raw_fd(slave) };
+    // SAFETY: openpty returned ownership of the separate master descriptor.
+    let master = unsafe { File::from_raw_fd(master) };
+    (keyboard, master)
 }
 
 #[cfg(test)]
@@ -199,5 +316,41 @@ mod tests {
 
         wake(input.as_raw_fd());
         assert!(matches!(wait(&keyboard, None, 0, extra), Wait::Input));
+    }
+
+    fn modes(terminal: &File) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {
+        // SAFETY: A zeroed termios is valid and `tcgetattr` can fill it.
+        let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: The descriptor is open and attrs is writable storage.
+        assert_eq!(unsafe { libc::tcgetattr(terminal.as_raw_fd(), &mut attrs) }, 0);
+        (attrs.c_iflag, attrs.c_oflag, attrs.c_cflag, attrs.c_lflag)
+    }
+
+    #[test]
+    fn unwinding_restores_keyboard_modes_and_leaves_the_alternate_screen() {
+        let (keyboard, mut master) = test_pair();
+        let before = modes(&keyboard);
+        let result = std::panic::catch_unwind(|| {
+            let terminal =
+                Session::enter(keyboard.try_clone().unwrap(), keyboard.try_clone().unwrap(), io::pipe().unwrap().0)
+                    .unwrap();
+            assert_ne!(modes(&terminal.keyboard), before);
+            std::panic::resume_unwind(Box::new("panic while drawing"));
+        });
+        assert!(result.is_err());
+        assert_eq!(modes(&keyboard), before);
+        let mut output = [0; 512];
+        let n = master.read(&mut output).unwrap();
+        assert!(output[..n].starts_with(ENTER) && output[..n].ends_with(LEAVE));
+    }
+
+    #[test]
+    fn a_failed_open_write_still_restores_keyboard_modes() {
+        let (keyboard, _master) = test_pair();
+        let before = modes(&keyboard);
+        let read_only = File::open("/dev/null").unwrap();
+        let failed = Session::enter(keyboard.try_clone().unwrap(), read_only, io::pipe().unwrap().0);
+        assert!(failed.is_err());
+        assert_eq!(modes(&keyboard), before);
     }
 }

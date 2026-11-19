@@ -82,17 +82,15 @@ impl Outline {
         if layout.strip {
             self.draw_strip(s, &layout);
         } else {
-            self.draw_tree(s, &layout, now);
-        }
-        if let Some((note, _)) = &self.note {
-            let y = s.h - 1;
-            s.clear_row(y);
-            s.put_fit(1, y, s.w - 2, note, Style::fg(screen::YELLOW));
-            if !layout.hint && !layout.strip {
+            if self.note.is_some() && !layout.hint {
                 layout.body_rows -= 1;
             }
-        } else if layout.hint && self.attention.show_controls() {
-            self.draw_hint(s);
+            self.draw_tree(s, &layout, now);
+            if let Some((note, _)) = &self.note {
+                s.put_fit(1, s.h - 1, s.w - 2, note, Style::fg(screen::YELLOW));
+            } else if layout.hint && self.attention.show_controls() {
+                self.draw_hint(s);
+            }
         }
         self.painted = layout;
     }
@@ -155,9 +153,6 @@ impl Outline {
                 (Form::Compact, _) => "✓ clean",
             };
             parts[0] = (text, Style::fg(screen::GREEN));
-            if matches!((form, remote), (Form::Long, false)) {
-                parts[1] = (" · no remote", FAINT);
-            }
         } else {
             parts = pending_parts(commit, push, form);
         }
@@ -179,6 +174,9 @@ impl Outline {
 
     fn draw_tree(&mut self, s: &mut Screen, layout: &Layout, now: Instant) {
         let (y0, rows) = (layout.body_top, layout.body_rows);
+        if rows == 0 {
+            return;
+        }
         let len = self.tree.rows.len();
         if len == 0 {
             // The heading already says why no tree could be loaded.

@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -64,9 +64,13 @@ struct Terminal {
 
 impl Terminal {
     fn run(command: &mut Command) -> Self {
+        Self::sized(command, 80, 24)
+    }
+
+    fn sized(command: &mut Command, cols: u16, rows: u16) -> Self {
         let mut master = -1;
         let mut slave = -1;
-        let mut size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         // SAFETY: Both descriptor outputs and the size are live, and optional outputs are null.
         let result =
             unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) };
@@ -75,6 +79,10 @@ impl Terminal {
         let master = unsafe { File::from_raw_fd(master) };
         // SAFETY: The slave is a different descriptor from the master.
         let slave = unsafe { File::from_raw_fd(slave) };
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            // SAFETY: The descriptor is open; the child gets only the slave on its standard streams.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+        }
         let modes = modes(&slave);
         let child = command
             .stdin(slave.try_clone().unwrap())
@@ -107,6 +115,17 @@ impl Terminal {
 
     fn output(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.bytes)
+    }
+
+    fn wait_for_exit(&mut self) -> ExitStatus {
+        let until = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < until, "milo didn't exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn restored(&self) -> bool {
@@ -145,6 +164,49 @@ fn a_slow_open_draws_the_project_name_before_it_has_the_files() {
     assert!(!terminal.restored());
     fs::write(project.0.join("go"), "").unwrap();
     terminal.until("page.txt");
+}
+
+#[test]
+fn ctrl_c_during_a_slow_open_restores_the_terminal_without_waiting_for_git() {
+    let project = Project::new();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    project.slow_git(&mut command);
+    let mut terminal = Terminal::run(command.arg("outline"));
+    terminal.until("Reading…");
+    assert!(!terminal.restored());
+    terminal.master.write_all(b"\x03").unwrap();
+    terminal.until("\x1b[?1049l");
+    assert!(terminal.restored());
+    assert_eq!(terminal.wait_for_exit().code(), Some(1));
+    assert!(!project.0.join("go").exists());
+}
+
+#[test]
+fn a_closed_pty_stops_a_slow_open_without_waiting_for_git() {
+    let project = Project::new();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    project.slow_git(&mut command);
+    let mut terminal = Terminal::run(command.arg("outline"));
+    terminal.until("Reading…");
+    terminal.master = File::open("/dev/null").unwrap();
+    assert_eq!(terminal.wait_for_exit().code(), Some(1));
+    #[cfg(target_os = "macos")]
+    assert!(terminal.restored());
+}
+
+#[test]
+fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
+    let project = Project::new();
+    fs::write(project.0.join("project/wall.txt"), format!("{}\n", "X".repeat(600)).repeat(200)).unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut terminal = Terminal::sized(command.args(["view", "wall.txt"]), 600, 200);
+    terminal.until("\x1b[?2026h");
+    let pid = i32::try_from(terminal.child.id()).unwrap();
+    // SAFETY: This is our own, still-owned child, not a process group.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    assert_eq!(terminal.wait_for_exit().code(), Some(1));
+    assert!(terminal.restored());
+    terminal.until("\x1b[?1049l");
 }
 
 #[test]

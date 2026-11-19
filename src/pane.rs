@@ -1,18 +1,15 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
-use std::ffi::OsStr;
-use std::fs::File;
-use std::io::PipeReader;
+use std::io;
+use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::exit;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::help::Page;
 use crate::keys::{Input, Key};
 use crate::screen::Screen;
-use crate::term::{self, Wait};
+use crate::term::{self, Session, Wait};
 use crate::ui;
 use crate::watch::{Scope, Watcher};
 
@@ -126,14 +123,24 @@ fn draw_pane(pane: &mut dyn Pane, screen: &mut Screen, help: Option<&mut Page>) 
     }
 }
 
-/// Routes terminal replies and help keys before the pane sees them.
-fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> After {
+fn terminal_reply(screen: &mut Screen, key: Key) -> bool {
     match key {
-        Key::Ctrl(b'c') | Key::Eof => return After::Leave,
         Key::Background(rgb) => screen.set_background(rgb),
         Key::Pictures(able) => screen.set_pictures(able),
         Key::CellSize(width, height) => screen.set_cell_size(width, height),
         Key::Answered => screen.answered(),
+        _ => return false,
+    }
+    true
+}
+
+/// Routes terminal replies and help keys before the pane sees them.
+fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, key: Key) -> After {
+    if terminal_reply(screen, key) {
+        return After::Stay;
+    }
+    match key {
+        Key::Ctrl(b'c') | Key::Eof => return After::Leave,
         // The pane still sees focus changes while its help is up.
         Key::Focus(_) => return pane.key(key),
         _ => {
@@ -166,85 +173,113 @@ fn watch_pane(pane: &dyn Pane, needs_polling: bool) -> (Watcher, Option<Duration
     (watcher, idle)
 }
 
-/// Avoid a flash on a fast open. The pane stays on this thread; the
-/// waiting thread only borrows the screen, handing it back before drawing.
-fn with_loading<T>(screen: &mut Screen, dir: &Path, open: impl FnOnce() -> T) -> T {
+fn draw_loading(screen: &mut Screen, dir: Option<&Path>, w: usize, h: usize) {
+    screen.resize(w, h);
+    let Some(dir) = dir.filter(|_| h > 1) else {
+        screen.put_fit(0, 0, w, "Reading…", ui::FAINT);
+        return;
+    };
+    let absolute = dir.canonicalize().ok();
+    let dir = absolute.as_deref().unwrap_or(dir);
+    let project = dir.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(dir);
+    let name = project.file_name().unwrap_or(project.as_os_str()).to_string_lossy();
+    let room = w.saturating_sub(2);
+    ui::section_heading(screen, 0, room, &name);
+    screen.put_fit(1, 1, room, "Reading…", ui::FAINT);
+}
+
+/// A worker manages the terminal while the main thread opens the pane.
+/// Closing the pipe stops the worker before the main thread uses the terminal again.
+fn with_loading<T>(
+    screen: &mut Screen,
+    dir: Option<&Path>,
+    terminal: &mut Session,
+    input: &mut Input,
+    open: impl FnOnce() -> T,
+) -> T {
+    let Ok((ready, done)) = io::pipe() else { return open() };
     std::thread::scope(|scope| {
-        let (done, ready) = mpsc::channel();
         scope.spawn(move || {
-            if ready.recv_timeout(Duration::from_millis(75)) == Err(mpsc::RecvTimeoutError::Timeout)
-                && !term::TERMINATED.load(Ordering::Relaxed)
-            {
-                let absolute = dir.canonicalize().ok();
-                let dir = absolute.as_deref().unwrap_or(dir);
-                let project = dir.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(dir);
-                let name =
-                    project.file_name().map_or_else(|| project.as_os_str().to_string_lossy(), OsStr::to_string_lossy);
-                let (w, h) = term::size();
-                screen.resize(w, h);
-                let room = w.saturating_sub(2);
-                ui::section_heading(screen, 0, room, &name);
-                screen.put_fit(1, 1, room, "Reading…", ui::FAINT);
-                screen.flush();
+            let delay = Instant::now() + Duration::from_millis(75);
+            let mut painted = false;
+            let mut keys = Vec::new();
+            while !term::TERMINATED.load(Ordering::Relaxed) {
+                let timeout = if painted { -1 } else { milliseconds(delay.saturating_duration_since(Instant::now())) };
+                match terminal.wait_for_open(timeout, ready.as_raw_fd()) {
+                    Wait::Woken => return,
+                    Wait::Closed => break,
+                    Wait::Timeout => {
+                        let (w, h) = terminal.size();
+                        draw_loading(screen, dir, w, h);
+                        if screen.flush(|bytes| terminal.write(bytes)).is_err() {
+                            break;
+                        }
+                        painted = true;
+                    }
+                    Wait::Input => {
+                        input.receive(&mut terminal.keyboard, &mut keys);
+                        if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
+                            break;
+                        }
+                        for key in keys.drain(..) {
+                            terminal_reply(screen, key);
+                        }
+                    }
+                    Wait::Interrupted => {}
+                }
             }
+            term::TERMINATED.store(true, Ordering::Relaxed);
+            terminal.restore();
         });
         let opened = open();
-        let _ = done.send(());
+        drop(done);
         opened
     })
 }
 
+fn milliseconds(wait: Duration) -> i32 {
+    i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX)
+}
+
 pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
-    let signal = term::listen();
-    let mut keyboard = match term::enter() {
-        Ok(keyboard) => keyboard,
+    let mut terminal = match Session::open() {
+        Ok(terminal) => terminal,
         Err(e) => {
             // An invalid command path has the same error with or without a terminal.
             open()?;
             return Err(format!("cannot use this terminal: {e}"));
         }
     };
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        term::leave();
-        hook(info);
-    }));
-    let result = run_entered(start, open, &mut keyboard, signal.as_ref());
-    term::leave();
-    result
+    run_entered(start, open, &mut terminal)
 }
 
-fn run_entered(
-    start: Start<'_>,
-    open: &Open<'_>,
-    keyboard: &mut File,
-    signal: Option<&PipeReader>,
-) -> Result<(), String> {
+fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Result<(), String> {
     let check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Offer(open) = start { Some(open) } else { None };
     let mut screen = Screen::new();
+    let mut input = Input::default();
     let load = |open: &Open<'_>| {
-        let pane = open()?;
+        let mut pane = open()?;
         let (watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
-        Ok::<_, String>((pane, watcher, idle))
+        let pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
+        Ok::<_, String>((pane, watcher, pace))
     };
-    let (mut pane, mut watcher, idle) = match start {
-        Start::Reading(dir) => with_loading(&mut screen, dir, || load(open)),
+    let opened = match start {
+        Start::Reading(dir) => with_loading(&mut screen, Some(dir), terminal, &mut input, || load(open)),
+        Start::Check => with_loading(&mut screen, None, terminal, &mut input, || load(open)),
         _ => load(open),
-    }?;
+    };
     if term::TERMINATED.load(Ordering::Relaxed) {
-        term::leave();
-        exit(1);
+        return Ok(());
     }
+    let (mut pane, mut watcher, mut pace) = opened?;
     let mut help = None;
     let mut keys = Vec::new();
-    let mut input = Input::default();
-    let mut pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
     let mut redraw = true;
     let mut frame_due = None;
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) {
-            let (w, h) = term::size();
+            let (w, h) = terminal.size();
             screen.resize(w, h);
             if !Page::fits(&screen) {
                 help = None;
@@ -253,7 +288,12 @@ fn run_entered(
         }
         if std::mem::take(&mut redraw) {
             draw_pane(pane.as_mut(), &mut screen, help.as_mut());
-            screen.flush();
+            if let Err(e) = screen.flush(|bytes| terminal.write(bytes)) {
+                if term::TERMINATED.load(Ordering::Relaxed) {
+                    break;
+                }
+                return Err(format!("cannot write to this terminal: {e}"));
+            }
             frame_due = if help.is_some() { None } else { pane.next_frame().map(|wait| Instant::now() + wait) };
         }
 
@@ -263,13 +303,11 @@ fn run_entered(
             .map(|pace| pace.until_look(now))
             .into_iter()
             .chain(frame_due.map(|due: Instant| due.saturating_duration_since(now)))
-            // If the signal pipe couldn't be opened, don't sleep through a signal.
-            .chain(signal.is_none().then_some(UNWATCHED))
             .min();
-        let timeout_ms = wait.map_or(-1, |wait| i32::try_from(wait.as_millis() + 1).unwrap_or(i32::MAX));
-        match term::wait(keyboard, signal, timeout_ms, watcher.fd()) {
+        let timeout_ms = wait.map_or(-1, milliseconds);
+        match terminal.wait(timeout_ms, watcher.fd()) {
             Wait::Input => {
-                input.receive(keyboard, &mut keys);
+                input.receive(&mut terminal.keyboard, &mut keys);
                 for key in keys.drain(..) {
                     match route_key(pane.as_mut(), &mut screen, &mut help, key) {
                         After::Ignored => {}
@@ -278,11 +316,17 @@ fn run_entered(
                             if matches!(key, Key::Char('q') | Key::Esc)
                                 && let Some(open) = next.take()
                             {
-                                let (loaded, watching, idle) =
-                                    with_loading(&mut screen, Path::new("."), || load(&open))?;
+                                let opened =
+                                    with_loading(&mut screen, Some(Path::new(".")), terminal, &mut input, || {
+                                        load(&open)
+                                    });
+                                if term::TERMINATED.load(Ordering::Relaxed) {
+                                    return Ok(());
+                                }
+                                let (loaded, watching, next_pace) = opened?;
                                 pane = loaded;
                                 watcher = watching;
-                                pace = idle.map(|idle| Pace::new(idle, Instant::now()));
+                                pace = next_pace;
                                 redraw = true;
                             } else {
                                 break 'run;
@@ -298,6 +342,10 @@ fn run_entered(
                 }
             }
             Wait::Timeout | Wait::Interrupted => {}
+            Wait::Closed => return Ok(()),
+        }
+        if term::TERMINATED.load(Ordering::Relaxed) {
+            break;
         }
         let now = Instant::now();
         redraw |= frame_due.is_some_and(|due| due <= now);
@@ -308,9 +356,7 @@ fn run_entered(
             redraw = true;
         }
     }
-    // A picture is not part of the text, so it is taken down by name.
-    screen.clear();
-    screen.flush();
+    screen.release_pictures(|bytes| terminal.finish(bytes));
     Ok(())
 }
 
@@ -322,9 +368,53 @@ mod tests {
     #[test]
     fn a_fast_open_does_not_draw_a_loading_frame() {
         let mut screen = Screen::new();
-        assert_eq!(with_loading(&mut screen, Path::new("."), || 42), 42);
+        let (mut terminal, _master, _signals) = Session::test_pty();
+        assert_eq!(with_loading(&mut screen, Some(Path::new(".")), &mut terminal, &mut Input::default(), || 42), 42);
         assert_eq!((screen.w, screen.h), (0, 0));
         assert!(screen.emitted().is_empty());
+    }
+
+    #[test]
+    fn a_one_row_pane_says_it_is_reading_instead_of_showing_only_the_project() {
+        let mut screen = Screen::new();
+        draw_loading(&mut screen, Some(Path::new(".")), 10, 1);
+        assert_eq!(screen.text(), ["Reading…"]);
+    }
+
+    #[test]
+    fn a_slow_first_check_has_a_loading_frame() {
+        use std::fs::File;
+        use std::io::{Read, Write};
+
+        struct Checked(File);
+        impl Pane for Checked {
+            fn check(&mut self) -> bool {
+                let until = Instant::now() + Duration::from_secs(2);
+                let mut output = Vec::new();
+                while !String::from_utf8_lossy(&output).contains("Reading…") {
+                    let mut fds = [libc::pollfd { fd: self.0.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+                    let left = until.saturating_duration_since(Instant::now());
+                    assert!(term::wait_ready(&mut fds, milliseconds(left)) > 0, "nothing was drawn during the check");
+                    let mut bytes = [0; 512];
+                    let n = self.0.read(&mut bytes).unwrap();
+                    output.extend_from_slice(&bytes[..n]);
+                }
+                true
+            }
+            fn draw(&mut self, screen: &mut Screen) {
+                screen.put(0, 0, screen.w, "Ready", ui::FAINT);
+                self.0.write_all(b"q").unwrap();
+            }
+            fn help(&self) -> Page {
+                Page::new(vec![])
+            }
+            fn key(&mut self, key: Key) -> After {
+                if key == Key::Char('q') { After::Leave } else { After::Ignored }
+            }
+        }
+
+        let (mut terminal, master, _signals) = Session::test_pty();
+        run_entered(Start::Check, &|| Ok(Box::new(Checked(master.try_clone().unwrap()))), &mut terminal).unwrap();
     }
 
     #[test]

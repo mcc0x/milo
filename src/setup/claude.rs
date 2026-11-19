@@ -62,7 +62,11 @@ impl ClaudeFiles<'_> {
 
     /// A matching command without a note may have been added by the user.
     fn status(&self) -> Claude {
-        match self.editor().map(|settings| settings.status()) {
+        self.status_of(self.editor().as_ref())
+    }
+
+    fn status_of(&self, editor: Option<&Settings<'_>>) -> Claude {
+        match editor.map(Settings::status) {
             Some(Status::Absent) => Claude::Off,
             Some(Status::Foreign) => Claude::Foreign,
             Some(Status::Milo) if self.owned() => Claude::On,
@@ -73,11 +77,15 @@ impl ClaudeFiles<'_> {
 
     /// Recheck ownership against the files just read rather than the pane's old state.
     pub(super) fn plan(self, enabled: bool, changes: &mut Vec<Change>) -> Result<(), &'static str> {
-        let status = self.status();
+        let json = self.editor();
+        let status = self.status_of(json.as_ref());
         if !status.editable() {
             return Err("Claude Code settings changed. Reopen setup to see them.");
         }
-        let json = self.editor().expect("editable settings are valid");
+        if self.note.is_some() && !self.owned() {
+            return Err("Milo's Claude Code note was changed. It was left alone.");
+        }
+        let json = json.expect("editable settings are valid");
         match (status, enabled) {
             (Claude::Off, true) => {
                 let created = self.settings.is_none();

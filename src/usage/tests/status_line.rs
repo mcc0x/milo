@@ -183,15 +183,20 @@ fn claude_status_prints_a_plain_line_when_its_input_remains_open() {
 #[test]
 fn a_newer_empty_claude_reading_explains_why_no_figures_are_shown() {
     let f = with_limits();
-    let config = format!(r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{},"utilization":{{}}}}}}"#, NOW * 1000 + 100);
-    write(&f, ".claude.json", &config, NOW);
-    let mut usage = unopened(&f, NOW);
-    usage.claude_config = Some(f.root.join(".claude.json"));
-    assert!(usage.check());
-    let rows = frame(&mut usage, 140, 3);
-    let claude = |row: usize| rows[row].split_once('│').unwrap().1;
-    assert!(!claude(1).contains('%'));
-    assert!(claude(2).contains("no limits reported"), "{}", claude(2));
+    for utilization in ["{}", "null"] {
+        let config = format!(
+            r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{},"utilization":{utilization}}}}}"#,
+            NOW * 1000 + 100
+        );
+        write(&f, ".claude.json", &config, NOW);
+        let mut usage = unopened(&f, NOW);
+        usage.claude_config = Some(f.root.join(".claude.json"));
+        assert!(usage.check());
+        let rows = frame(&mut usage, 140, 3);
+        let claude = |row: usize| rows[row].split_once('│').unwrap().1;
+        assert!(!claude(1).contains('%'));
+        assert_eq!(claude(2).trim(), "no limits reported");
+    }
 }
 
 #[test]

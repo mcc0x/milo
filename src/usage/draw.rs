@@ -14,7 +14,7 @@ use crate::when::{self, Detail};
 use crate::width::str_width;
 
 use self::figure::Figure;
-use super::{AGE_NOTE, Activity, CodexSessions, Limits, Reading, Usage, Window};
+use super::{AGE_NOTE, Activity, CodexSessions, Limits, Usage, Window};
 
 const SIDE_BY_SIDE: usize = 64;
 // Two short names, two four-character figures and the rule.
@@ -91,8 +91,8 @@ impl When {
 }
 
 /// Prepared display data lets each layout use the same figure and reset wording.
-struct Metric {
-    label: Cow<'static, str>,
+struct Metric<'a> {
+    label: Cow<'a, str>,
     number: Option<Figure>,
     when: When,
     /// Seconds since the figure was reported, once that is worth saying:
@@ -100,7 +100,7 @@ struct Metric {
     age: Option<i64>,
 }
 
-impl Metric {
+impl Metric<'_> {
     /// A known, elapsed window is back at zero even before another report arrives.
     fn limit(mut window: Window, now: i64) -> Self {
         let age = now.saturating_sub(window.observed);
@@ -175,6 +175,10 @@ struct Hint {
 }
 
 impl Hint {
+    const NO_SOURCE: Self = Self { full: "no local source found", short: "no source" };
+    const NO_LIMITS: Self = Self { full: "no limits reported", short: "no limits" };
+    const UNREADABLE: Self = Self { full: "could not read sessions", short: "could not read" };
+
     /// Draws the hint, with `also` after it on the same row when both fit.
     fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<String>) {
         match also {
@@ -186,60 +190,28 @@ impl Hint {
     }
 }
 
-/// Each provider can show at most two figures without crowding the strip.
-struct Report {
+struct Report<'a> {
     tool: Tool,
-    first: Metric,
-    second: Option<Metric>,
+    first: Metric<'a>,
+    extra: [Option<Metric<'a>>; 2],
     hint: Option<Hint>,
 }
 
-impl Report {
-    /// Distinguish missing sessions from unreadable or unreported limits.
-    fn codex(reading: Option<Reading>, sessions: &CodexSessions, now: i64) -> Self {
-        let [first, second] = figures(reading.map(|reading| reading.windows), now);
-        let (first, second, hint) = match (first, second) {
-            (Some(first), second) => (first, second, None),
-            (None, Some(second)) => (second, None, None),
-            (None, None) => (
-                Metric::missing("limits"),
-                None,
-                Some(match sessions {
-                    _ if reading.is_some() => Hint { full: "could not read Codex's figures", short: "could not read" },
-                    CodexSessions::Unreadable => {
-                        Hint { full: "could not read Codex sessions", short: "could not read" }
-                    }
-                    CodexSessions::Missing => Hint { full: "no Codex sessions here", short: "no sessions" },
-                    CodexSessions::Present => Hint { full: "no limits reported", short: "no limits" },
-                }),
-            ),
-        };
-        Self { tool: Tool::Codex, first, second, hint }
-    }
-
-    /// Shows the windows the account has, in the order 5h, week, one
-    /// model's week. A window nobody reported gets no empty place, and the
-    /// two slots go to the first two there are.
-    fn claude(limits: Option<Limits>, now: i64) -> Self {
-        let model = limits.into_iter().filter_map(|limits| limits.model_week).map(|model| {
+impl<'a> Report<'a> {
+    /// Leave out unreported windows; a dash stands for the whole missing report.
+    fn new(tool: Tool, limits: Option<&'a Limits>, missing: Hint, now: i64) -> Self {
+        let base = limits.into_iter().flat_map(|limits| limits.base.into_iter().flatten());
+        let model = limits.and_then(|limits| limits.model_week.as_ref()).map(|model| {
             let mut metric = Metric::limit(model.window, now);
-            metric.label = format!("{} week", model.label()).into();
+            metric.label = model.caption().into();
             metric
         });
-        let mut known = figures(limits, now).into_iter().flatten().chain(model);
-        let (first, second, hint) = match known.next() {
-            Some(first) => (first, known.next(), None),
-            None => (
-                Metric::missing("5h"),
-                Some(Metric::missing("week")),
-                Some(if limits.is_some() {
-                    Hint { full: "no limits reported", short: "no limits" }
-                } else {
-                    Hint { full: "turn on in milo setup", short: "milo setup" }
-                }),
-            ),
+        let mut figures = base.map(|window| Metric::limit(window, now)).chain(model);
+        let (first, hint) = match figures.next() {
+            Some(first) => (first, None),
+            None => (Metric::missing("limits"), Some(if limits.is_some() { Hint::NO_LIMITS } else { missing })),
         };
-        Self { tool: Tool::Claude, first, second, hint }
+        Self { tool, first, extra: [figures.next(), figures.next()], hint }
     }
 
     fn has_number(&self) -> bool {
@@ -257,10 +229,18 @@ impl Report {
             .unwrap_or_default();
         let identity = if name.is_empty() { 0 } else { name.len() + 1 };
         let label = identity + first.inline_width() <= area.w;
-        let used = identity + if label { first.inline_width() } else { first.number_width() };
-        let second = self.second.as_ref().filter(|second| label && used + 2 + second.inline_width() <= area.w);
-        let tile =
-            label && !name.is_empty() && used + second.map_or(0, |second| second.inline_width() + 2) + 3 <= area.w;
+        let mut used = identity + if label { first.inline_width() } else { first.number_width() };
+        let extras = self.extra.iter().flatten().take_while(|metric| {
+            let width = 2 + metric.inline_width();
+            if label && used + width <= area.w {
+                used += width;
+                true
+            } else {
+                false
+            }
+        });
+        let count = extras.count();
+        let tile = label && !name.is_empty() && used + 3 <= area.w;
         let mut row = RowWriter { screen, x: area.x, y: area.y, left: area.w };
         if used > area.w {
             return;
@@ -274,15 +254,10 @@ impl Report {
             row.add(" ", FAINT);
         }
         first.inline(&mut row, label);
-        if let Some(second) = second {
+        for metric in self.extra.iter().flatten().take(count) {
             row.add("  ", FAINT);
-            second.inline(&mut row, true);
+            metric.inline(&mut row, true);
         }
-    }
-
-    /// The age of the oldest figure shown, when it is old enough to say.
-    fn age(&self) -> Option<i64> {
-        self.first.age.max(self.second.as_ref().and_then(|second| second.age))
     }
 
     /// Draws one tool in `area`. `marks` is the height both tools' marks are
@@ -296,9 +271,12 @@ impl Report {
         let text_row = chart.label + 1 + usize::from(chart.large);
         let column = Area { w: lane - 1, ..area };
         let beneath = self.mark(screen, Area { h: marks.min(area.h), ..column }, text_row);
+        let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
+        let (count, gap) = self.figure_grid(figures.w);
+        let metrics = std::iter::once(&self.first).chain(self.extra.iter().flatten()).take(count);
         // How old the reading is, said once for the tool rather than under
         // each of its windows.
-        if let Some(age) = self.age()
+        if let Some(age) = metrics.clone().filter_map(|metric| metric.age).max()
             && beneath <= chart.note
         {
             let exact = format!("{} ago", when::duration(age, Detail::Exact));
@@ -306,20 +284,15 @@ impl Report {
                 if exact.len() <= column.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
             column.note(screen, chart.note, &text);
         }
-        let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
-        let slot = self.tool as usize * 2;
-        if let Some(metric) = &self.second {
-            let gap = match figures.w {
-                36.. => 3,
-                24..36 => 2,
-                _ => 1,
-            };
-            let (first, second) = figures.split(gap);
-            self.first.panel(screen, first, chart, slot);
-            metric.panel(screen, second, chart, slot + 1);
-        } else {
-            // A lone figure has the whole width, so that its caption fits.
-            self.first.panel(screen, figures, chart, slot);
+        let slot = match self.tool {
+            Tool::Codex => 0,
+            Tool::Claude => 2,
+        };
+        let width = figures.w - (count - 1) * gap;
+        for (i, metric) in metrics.enumerate() {
+            let start = width * i / count;
+            let w = width * (i + 1) / count - start;
+            metric.panel(screen, Area { x: figures.x + start + i * gap, w, ..figures }, chart, slot + i);
         }
         // Activity is not a limit, so it never sits under a window as if it
         // were that window's caption: it has a row of its own, or follows
@@ -334,6 +307,22 @@ impl Report {
             None if spare => figures.note(screen, chart.note + 1, &activity_text(activity()).unwrap_or_default()),
             None => {}
         }
+    }
+
+    fn figure_grid(&self, width: usize) -> (usize, usize) {
+        // Three columns still need room for large figures and the model's full caption.
+        if self.extra[1].as_ref().is_some_and(|metric| width.saturating_sub(4) / 3 >= metric.label.len().max(15)) {
+            return (3, 2);
+        }
+        if self.extra[0].is_none() {
+            return (1, 0);
+        }
+        let gap = match width {
+            36.. => 3,
+            24..36 => 2,
+            _ => 1,
+        };
+        (2, gap)
     }
 
     /// Draws the tool's mark four fifths as tall as `area`, in its middle,
@@ -353,10 +342,6 @@ impl Report {
             text_row + 1
         }
     }
-}
-
-fn figures(limits: Option<Limits>, now: i64) -> [Option<Metric>; 2] {
-    limits.unwrap_or_default().map(|window| window.map(|window| Metric::limit(window, now)))
 }
 
 /// Leaves a row for a caption, and one more for activity when it fits.
@@ -477,8 +462,16 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     if w == 0 || h == 0 {
         return;
     }
-    let reports =
-        [Report::codex(usage.codex.latest(), &usage.codex.sessions, now), Report::claude(usage.claude.saved, now)];
+    let codex = usage.codex.latest();
+    let missing = match usage.codex.sessions {
+        CodexSessions::Missing => Hint::NO_SOURCE,
+        CodexSessions::Present => Hint::NO_LIMITS,
+        CodexSessions::Unreadable => Hint::UNREADABLE,
+    };
+    let reports = [
+        Report::new(Tool::Codex, codex.as_ref().map(|reading| &reading.windows), missing, now),
+        Report::new(Tool::Claude, usage.claude.saved.as_ref(), Hint::NO_SOURCE, now),
+    ];
     let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
     // Leave the captions and activity their rows in a compact pane.
     let footer = w >= 8 && h >= if split { 7 } else { 14 };
@@ -502,22 +495,23 @@ mod tests {
     use super::super::ModelWeek;
     use super::*;
 
-    fn labels(limits: Option<Limits>) -> Vec<String> {
-        let report = Report::claude(limits, 1000);
-        std::iter::once(&report.first).chain(&report.second).map(|metric| metric.label.to_string()).collect()
+    fn labels(limits: Option<&Limits>) -> Vec<String> {
+        let report = Report::new(Tool::Claude, limits, Hint::NO_SOURCE, 1000);
+        std::iter::once(&report.first)
+            .chain(report.extra.iter().flatten())
+            .map(|metric| metric.label.to_string())
+            .collect()
     }
 
     #[test]
     fn claude_shows_the_windows_the_account_has_and_no_empty_place_for_one_it_lacks() {
         let window = |minutes| Window { minutes, percent: 27.0, resets: Some(5000), observed: 1000 };
         let week = Limits::new([None, Some(window(10_080))]);
-        assert_eq!(labels(Some(week)), ["week"]);
+        assert_eq!(labels(Some(&week)), ["week"]);
         let model_week = ModelWeek::new("fable", window(10_080));
-        assert_eq!(labels(Some(Limits { model_week, ..week })), ["week", "Fable week"]);
-        // With all three, the two all-models windows come first.
+        assert_eq!(labels(Some(&Limits { model_week, ..week })), ["week", "Fable week"]);
         let all = Limits { base: [Some(window(300)), Some(window(10_080))], model_week };
-        assert_eq!(labels(Some(all)), ["5h", "week"]);
-        // Nothing known at all keeps both places, to say what is missing.
-        assert_eq!(labels(None), ["5h", "week"]);
+        assert_eq!(labels(Some(&all)), ["5h", "week", "Fable week"]);
+        assert_eq!(labels(None), ["limits"]);
     }
 }

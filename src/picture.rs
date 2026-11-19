@@ -17,12 +17,13 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use crate::fs_ops::{self, Temp};
+#[cfg(target_os = "macos")]
 use crate::read::{self, Content};
 #[cfg(target_os = "macos")]
 use crate::term;
 
 /// Picture files larger than this are not opened.
-const FILE_LIMIT: u64 = 64 << 20;
+pub const FILE_LIMIT: u64 = 64 << 20;
 /// The longest side kept, in pixels: more than any pane has to show it with.
 const LONGEST_SIDE: u32 = 1600;
 /// How long a conversion may take before it is given up on.
@@ -53,21 +54,15 @@ pub struct Picture {
 }
 
 impl Picture {
-    /// Reads the picture at `path`, or says in plain words why it cannot be
-    /// shown. A link is not followed: what it points to may be anywhere.
-    pub fn open(path: &Path) -> Result<Self, &'static str> {
-        let bytes = match read::file(path, FILE_LIMIT) {
-            Content::Bytes(bytes) => bytes,
-            Content::Gone => return Err("This file is gone."),
-            Content::TooLarge => return Err("Too large to show."),
-            Content::Unreadable => return Err("This file cannot be read."),
-            Content::NotFile | Content::Link(_) => return Err("Not a file, so there is nothing to show."),
-        };
+    /// Prepares bytes read from a regular file for the terminal.
+    pub fn decode(bytes: Vec<u8>, path: &Path) -> Result<Self, &'static str> {
         let png = match png_size(&bytes) {
             Some((w, h)) if w.max(h) <= LONGEST_SIDE => Some(bytes),
-            size => convert(bytes, path, size.is_some()),
+            _ => convert(bytes, path),
         };
-        png.and_then(|png| Self::png(png.into())).ok_or("This picture cannot be shown.")
+        png.and_then(|png| Self::png(png.into()))
+            .filter(|picture| picture.width.max(picture.height) <= LONGEST_SIDE)
+            .ok_or("This picture cannot be shown.")
     }
 
     /// Opens a PNG built into milo without copying its bytes.
@@ -134,9 +129,36 @@ fn png_size(png: &[u8]) -> Option<(u32, u32)> {
     (header.get(4..8)? == b"IHDR" && width > 0 && height > 0).then_some((width, height))
 }
 
+/// Find the JPEG frame header without decoding or scanning the image data.
+#[cfg(target_os = "macos")]
+fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |a, b| u16::from_be_bytes([a, b]);
+    let mut rest = jpeg.strip_prefix(b"\xff\xd8")?;
+    loop {
+        let mut marker = rest.strip_prefix(b"\xff")?;
+        while let Some(tail) = marker.strip_prefix(b"\xff") {
+            marker = tail;
+        }
+        let (&kind, [a, b, data @ ..]) = marker.split_first()? else { return None };
+        if matches!(kind, 0xd9 | 0xda) {
+            return None;
+        }
+        let length = usize::from(be16(*a, *b)).checked_sub(2)?;
+        let field = data.get(..length)?;
+        // Start of frame, excluding the Huffman and arithmetic tables and JPG extension.
+        if matches!(kind, 0xc0..=0xcf) && !matches!(kind, 0xc4 | 0xc8 | 0xcc) {
+            let [_, h1, h2, w1, w2, ..] = *field else { return None };
+            let (w, h) = (u32::from(be16(w1, w2)), u32::from(be16(h1, h2)));
+            return (w != 0 && h != 0).then_some((w, h));
+        }
+        rest = &data[length..];
+    }
+}
+
 /// Convert a private copy: the original path may no longer name the file we opened.
 #[cfg(target_os = "macos")]
-fn convert(bytes: Vec<u8>, path: &Path, known_large: bool) -> Option<Vec<u8>> {
+fn convert(bytes: Vec<u8>, path: &Path) -> Option<Vec<u8>> {
+    let size = png_size(&bytes).or_else(|| jpeg_size(&bytes));
     let dir = std::env::temp_dir();
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let prefix = format!("milo-{}-{id}", std::process::id());
@@ -147,24 +169,26 @@ fn convert(bytes: Vec<u8>, path: &Path, known_large: bool) -> Option<Vec<u8>> {
     drop(bytes);
     let (output, _) = Temp::create(dir.join(format!("{prefix}-out.png"))).ok()?;
 
-    let side = LONGEST_SIDE.to_string();
     let sips = |source: &Path, resize: bool| {
         let mut command = Command::new("/usr/bin/sips");
         if resize {
-            command.args(["-Z", &side]);
+            command.args(["-Z", &LONGEST_SIDE.to_string()]);
         }
         command.args(["-s", "format", "png"]).arg(source).arg("--out").arg(output.path());
         finishes(command)
     };
-    if !sips(input.path(), known_large) {
+    // `-Z` can enlarge a small picture. For unknown formats only resize
+    // after the converted PNG tells us it is too large.
+    if !sips(input.path(), size.is_some_and(|(w, h)| w.max(h) > LONGEST_SIDE)) {
         return None;
     }
-    // The unscaled conversion may be large; only read its dimensions before shrinking.
-    let mut header = [0; 24];
-    fs_ops::open_read(output.path()).ok()?.read_exact(&mut header).ok()?;
-    let (w, h) = png_size(&header)?;
-    if w.max(h) > LONGEST_SIDE && !sips(output.path(), true) {
-        return None;
+    if size.is_none() {
+        let mut header = [0; 24];
+        fs_ops::open_read(output.path()).ok()?.read_exact(&mut header).ok()?;
+        let (w, h) = png_size(&header)?;
+        if w.max(h) > LONGEST_SIDE && !sips(output.path(), true) {
+            return None;
+        }
     }
     match read::file(output.path(), FILE_LIMIT) {
         Content::Bytes(png) => Some(png),
@@ -174,7 +198,7 @@ fn convert(bytes: Vec<u8>, path: &Path, known_large: bool) -> Option<Vec<u8>> {
 
 /// Without a converter at hand, only what is already a PNG can be shown.
 #[cfg(not(target_os = "macos"))]
-fn convert(_: Vec<u8>, _: &Path, _: bool) -> Option<Vec<u8>> {
+fn convert(_: Vec<u8>, _: &Path) -> Option<Vec<u8>> {
     None
 }
 
@@ -263,6 +287,25 @@ mod tests {
         assert_eq!(png_size(&png), Some((300, 200)));
         assert_eq!(png_size(&png[..20]), None);
         assert_eq!(png_size(b"GIF89a, not a PNG at all"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn converting_small_pictures_keeps_their_size() {
+        // A single grey pixel with one Huffman code in each table.
+        let mut jpeg = b"\xff\xd8\xff\xdb\0\x43\0".to_vec();
+        jpeg.extend([1; 64]);
+        jpeg.extend_from_slice(b"\xff\xc0\0\x0b\x08\0\x01\0\x01\x01\x01\x11\0");
+        for table in [0, 0x10] {
+            jpeg.extend([0xff, 0xc4, 0, 0x14, table, 1]);
+            jpeg.extend([0; 16]);
+        }
+        jpeg.extend_from_slice(b"\xff\xda\0\x08\x01\x01\0\0\x3f\0\x3f\xff\xd9");
+        let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
+        for (data, name) in [(jpeg, "pixel.jpg"), (gif.to_vec(), "pixel.gif")] {
+            let p = Picture::decode(data, Path::new(name)).unwrap();
+            assert_eq!((p.width, p.height), (1, 1), "{name}");
+        }
     }
 
     #[test]

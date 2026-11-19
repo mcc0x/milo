@@ -27,7 +27,5 @@ opt-level = 3
 lto = true
 # Optimise the crate together rather than in separate units.
 codegen-units = 1
-# Omit stack unwinding to keep the binary smaller.
-panic = "abort"
 # Remove symbols from the installed binary.
 strip = true

@@ -158,8 +158,6 @@ fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
         .args(["-c", "core.quotePath=false", "-c", "color.ui=false"])
         .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
         .args(["-c", "safe.bareRepository=explicit"])
-        // Repeated small reads do not repay the cost of parallel index preloading.
-        .args(["-c", "core.preloadIndex=false"])
         // Comparing the whole tree must not write a refreshed index.
         .args(["-c", "diff.autoRefreshIndex=false"])
         .args(guard)

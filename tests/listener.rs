@@ -5,7 +5,7 @@
 //! on request, and never confused with a program the listener left behind.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -172,4 +172,18 @@ fn starting_without_a_saved_listener_explains_how_to_enable_it() {
     assert!(!output.status.success());
     assert!(!home.started());
     assert!(String::from_utf8(output.stderr).unwrap().contains("new shell tabs are on in milo setup"));
+}
+
+#[test]
+fn listening_leaves_a_linked_milo_folder_alone() {
+    let home = Home::new(STAYS);
+    let config = home.root.join(".config/milo");
+    let elsewhere = home.root.join("dotfiles");
+    fs::rename(&config, &elsewhere).unwrap();
+    symlink(&elsewhere, &config).unwrap();
+    let output = home.milo(&["listen"]).stderr(Stdio::piped()).output().unwrap();
+    assert!(!output.status.success());
+    assert!(!home.started());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("must be a regular folder"));
+    assert_eq!(fs::read_link(config).unwrap(), elsewhere);
 }
