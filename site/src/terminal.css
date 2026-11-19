@@ -11,91 +11,42 @@
 }
 
 .hero {
-  --cat-width: clamp(9rem, 17vw, 11.75rem);
-  /* The picture is 479 by 508. */
-  --cat-height: calc(var(--cat-width) * 1.061);
   width: min(calc(100% - 3rem), 73.75rem);
   margin-inline: auto;
+  padding-top: clamp(1.25rem, 4vh, 2.75rem);
 }
 
-/* The pane choices sit above the window, to the right of the cat. */
-.demo-head {
+/* The cat and the name, what milo is, and how to get it: one centred stack. */
+.intro {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  justify-content: flex-end;
-  gap: .75rem;
-  min-height: calc(var(--cat-height) + .5rem);
-  max-width: calc(100% - var(--cat-width) - 14%);
-  margin-inline-start: auto;
-  padding: 1.25rem 0 1.1rem;
-  text-align: right;
+  align-items: center;
+  padding-bottom: 1.6rem;
+  text-align: center;
 }
-
-.pane-tabs {
+.lockup {
   display: flex;
-  gap: .2rem;
-  padding: .25rem;
-  border: 1px solid var(--edge);
-  border-radius: 999px;
-  background: var(--surface);
+  align-items: center;
+  gap: .35rem;
+  /* The cat is lighter than the word; nudged so the pair looks centred. */
+  margin-inline-start: -.9rem;
 }
-.pane-tabs button {
-  min-height: 2.75rem;
-  padding: .4rem 1.15rem;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--secondary);
-  font: 600 .95rem/1.2 Bricolage, system-ui, sans-serif;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.pane-tabs button:hover { color: var(--ink); }
-.pane-tabs button[aria-selected='true'] { background: var(--ink); color: #fff; }
-.pane-tabs button:focus-visible { outline-offset: 2px; }
-#agent-tab { display: none; }
-
-/* Two lines are always reserved, so choosing a pane moves nothing. */
-.pane-notes {
-  min-height: 3.1rem;
-  color: var(--secondary);
-  font-size: 1rem;
-  line-height: 1.55;
-}
-.pane-notes p:focus-visible { outline-offset: 6px; border-radius: .25rem; }
-
-/* The cat sits on whatever the window's top edge is. */
-.stage { position: relative; }
-
-.mascot {
-  position: absolute;
-  bottom: calc(100% - .45rem);
-  left: 6%;
-  z-index: 2;
-  width: var(--cat-width);
-  pointer-events: none;
-}
-
-.mascot::before {
-  content: '';
-  position: absolute;
-  bottom: -.2rem;
-  left: 16%;
-  width: 64%;
-  height: .95rem;
-  border-radius: 50%;
-  background: #171734;
-  filter: blur(6px);
-  opacity: .52;
-}
-
+.mascot { flex: none; width: clamp(4.5rem, 7vw, 5.75rem); }
 .mascot img {
-  position: relative;
   display: block;
   width: 100%;
   height: auto;
-  filter: drop-shadow(0 7px 9px #11154d32);
+  filter: drop-shadow(0 6px 8px #11154d2e);
+}
+
+/* Under the window: what the scene is showing at this moment. */
+.caption {
+  min-height: 1.6rem;
+  margin-top: .95rem;
+  color: var(--secondary);
+  font-weight: 560;
+  font-size: 1.05rem;
+  text-align: center;
 }
 
 .terminal {
@@ -119,7 +70,11 @@
   background: var(--term-bg);
   color: var(--term-text);
   box-shadow: 0 2px 3px #1b246626, 0 30px 50px -24px #27206375;
-  font: 400 clamp(.6875rem, 1.24vw, .85rem)/1.28 var(--mono);
+  /* Sized by the window's height as well as its width, so the intro and
+     the whole window share the first screen: 39.7 lines of text and 27.5rem
+     of everything else. */
+  font: 400 clamp(.6875rem, min(1.24vw, calc((100vh - 27.5rem) / 39.7)), .85rem)/1.28 var(--mono);
+  font: 400 clamp(.6875rem, min(1.24vw, calc((100svh - 27.5rem) / 39.7)), .85rem)/1.28 var(--mono);
   font-variant-ligatures: none;
   font-variant-numeric: tabular-nums;
 }
@@ -172,7 +127,7 @@
 .term-pane {
   min-width: 0;
   background: var(--term-bg);
-  transition: filter .2s ease;
+  transition: filter .4s ease;
 }
 /* A pane's hint line stays at its foot, whatever is listed above it. */
 .outline, .history { display: flex; flex-direction: column; padding: var(--pane-y) var(--pane-x); }
@@ -190,8 +145,9 @@
   pointer-events: none;
 }
 
-:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.53); }
-.terminal[data-view='reader'] .term-pane { filter: brightness(.39); }
+/* The scene draws the eye to one pane at a time: the rest step back. */
+:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.62); }
+.terminal[data-view='reader'] .term-pane { filter: brightness(.45); }
 .terminal[data-view='outline'] .outline,
 .terminal[data-view='history'] .history,
 .terminal[data-view='usage'] .usage,
@@ -253,15 +209,16 @@
   column-gap: clamp(.375rem, 1vw, 1.05rem);
   align-items: start;
   padding-inline: var(--pane-x);
-  font-size: clamp(.5625rem, 1.1vw, .78rem);
+  /* In ems, so the strip shrinks with the rest of the window. */
+  font-size: .92em;
   color: var(--term-muted);
 }
 .usage-tool + .usage-tool { border-inline-start: 1px solid var(--term-line); }
 .usage-mark { grid-row: span 2; display: grid; justify-items: center; gap: .3rem; }
-.usage-mark img { display: block; width: clamp(2.25rem, 4.65vw, 4.4rem); height: auto; }
+.usage-mark img { display: block; width: 5.6em; height: auto; }
 .usage-mark span, .usage-limit span { white-space: nowrap; }
 .usage-limit { display: grid; }
-.usage-limit strong { font: clamp(1.875rem, 3.9vw, 3.4rem)/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
+.usage-limit strong { font: 4.35em/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
 .usage-limit small { margin-left: .11em; font-size: .5em; letter-spacing: 0; }
 .usage-activity { grid-column: 2/-1; white-space: nowrap; }
 .level-green { color: #3fb950; }
@@ -339,35 +296,36 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .term-lit, .figure-tick, .agent-step:not([hidden]), .composer-caret, .agent-status[data-state='working']::before { animation: none; }
+  .term-lit, .figure-tick, .agent-step:not([hidden]), .composer-caret, .agent-status[data-state='working']::before, .reader:not([hidden]) { animation: none; }
   .term-pane, .agent-session { transition: none; }
 }
 
+/* The reader floats over the tab, as it does in Rex. */
 .reader {
   position: absolute;
   inset: 50% auto auto 50%;
   z-index: 2;
   width: min(calc(100% - 2rem), 39rem);
-  transform: translate(-50%, -50%);
+  translate: -50% -50%;
   border: 1px solid #78b7ff;
   border-radius: .65rem;
   overflow: hidden;
   background: var(--term-bg);
   box-shadow: 0 18px 38px #070b17b0, 0 0 0 3px #2a89fb30;
 }
+.reader:not([hidden]) { animation: reader-in .28s ease-out both; }
+@keyframes reader-in {
+  from { opacity: 0; scale: .97; }
+}
 .reader-bar {
-  display: grid;
-  grid-template-columns: 2.5rem 1fr 2.5rem;
+  display: flex;
   align-items: center;
-  min-height: 2.3rem;
+  justify-content: center;
+  min-height: 2.1rem;
   border-bottom: 1px solid var(--term-line);
   background: var(--term-chrome);
   color: var(--term-muted);
-  text-align: center;
 }
-.reader-bar span { grid-column: 2; }
-.reader-bar button { padding: 0; align-self: stretch; background: transparent; border: 0; color: var(--term-text); font: inherit; font-size: 1.3em; cursor: pointer; }
-.reader-bar button:focus-visible { outline-color: var(--sky); outline-offset: -4px; }
 .reader-content { padding: .65rem var(--pane-x); }
 .reader-heading { margin-bottom: .5em; }
 .reader-content .diff-line { grid-template-columns: 2ch 1ch minmax(0, 1fr); }
@@ -377,8 +335,6 @@
   .term-hint { font-size: .84em; }
   .terminal-panes { grid-template-columns: 43.5% minmax(0, 1fr); }
   .usage-tool { column-gap: .5rem; padding-inline: .55rem; }
-  .demo-head { max-width: calc(100% - var(--cat-width) - 9%); }
-  .pane-tabs button { padding-inline: .85rem; }
 }
 
 @media (min-width: 45.001rem) and (max-width: 53rem) {
@@ -386,21 +342,11 @@
   .usage-limit span:last-child { letter-spacing: -.05em; }
 }
 
-/* A phone shows one pane at a time, chosen above the cat. */
+/* A phone shows one pane at a time: the one the scene is on. */
 @media (max-width: 45rem) {
-  .hero { --cat-width: 8.125rem; width: calc(100% - 1.5rem); }
-  .demo-head {
-    align-items: stretch;
-    gap: .6rem;
-    min-height: 0;
-    max-width: none;
-    padding: .9rem 0 calc(var(--cat-height) + .1rem);
-    text-align: left;
-  }
-  .pane-tabs button { flex: 1; padding-inline: .3rem; font-size: .875rem; }
-  #agent-tab { display: block; }
-  .pane-notes { min-height: 3rem; padding-inline: .3rem; font-size: .95rem; }
-  .mascot { left: 50%; transform: translateX(-50%); }
+  .hero { width: calc(100% - 1.5rem); }
+  /* Room for two lines, so a longer caption moves nothing below it. */
+  .caption { min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
   .terminal { --pane-x: .65rem; --line: 1.45em; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
   .terminal-bar { height: 2.2rem; }
   .terminal-panes { display: block; min-height: max(22rem, calc(var(--line) * 18 + 2 * var(--pane-y))); background: var(--term-bg); }
@@ -425,6 +371,3 @@
   .agent-step { margin-top: .6rem; }
 }
 
-@media (max-width: 24rem) {
-  .pane-tabs button { padding-inline: .2rem; font-size: .8125rem; }
-}

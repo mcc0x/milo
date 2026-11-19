@@ -165,7 +165,7 @@ export function renderFrame(frame: Frame) {
   for (const step of agentSteps) step.hidden = stage < order.indexOf(step.dataset.step as Phase);
   renderReader(stage >= order.indexOf('edit'));
   // Beside the composer: nothing while the request is typed, then working, then done.
-  const state = frame.phase === 'compose' ? 'idle' : frame.phase === 'usage' ? 'done' : 'working';
+  const state = frame.phase === 'compose' ? 'idle' : stage >= order.indexOf('usage') ? 'done' : 'working';
   status.dataset.state = state;
   status.textContent = state === 'idle' ? '' : state === 'done' ? '✓ done' : 'working';
 }

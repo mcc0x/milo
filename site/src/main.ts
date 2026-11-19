@@ -1,19 +1,13 @@
-import { frameAt, loopLength, request, scene, typing, type Phase } from './scene';
+import { frameAt, loopLength, request, scene, typing } from './scene';
 import { element, renderFrame } from './terminal';
 
-type View = 'outline' | 'history' | 'usage' | 'reader' | 'agent';
 const demo = element('demo');
-const hero = demo.closest<HTMLElement>('.hero')!;
-const tablist = hero.querySelector<HTMLElement>('[role="tablist"]')!;
-const tabs = [...tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 const reader = element('reader-pane');
-const hint = element('pane-hint');
+const caption = element('caption');
 const composer = element('composer-text');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
-const phone = matchMedia('(max-width: 45rem)');
 // How long the agent's side fades before the scene starts again; matches the CSS transition.
 const fade = 320;
-let current: View | null = null;
 let timers: number[] = [];
 
 function later(ms: number, run: () => void) {
@@ -25,8 +19,12 @@ function stopScene() {
   timers = [];
 }
 
-function show(phase: Phase) {
+/** Draws one step: its panes, the pane it draws the eye to, and the line that says why. */
+function show({ phase, focus, caption: words }: typeof scene[number]) {
   renderFrame(frameAt(phase));
+  demo.dataset.view = focus ?? 'whole';
+  reader.hidden = focus !== 'reader';
+  caption.textContent = words;
   composer.textContent = '';
   if (phase !== 'compose') return;
   const perLetter = typing.length / request.length;
@@ -41,83 +39,24 @@ function show(phase: Phase) {
 function play() {
   stopScene();
   demo.classList.remove('scene-out');
+  const [first, ...rest] = scene;
   if (reduceMotion.matches) {
-    show('usage');
+    show(scene[scene.length - 1]);
     return;
   }
-  show('compose');
-  for (const { at, phase } of scene.slice(1)) later(at, () => show(phase));
+  show(first);
+  for (const step of rest) later(step.at, () => show(step));
   later(loopLength - fade, () => demo.classList.add('scene-out'));
   later(loopLength, play);
 }
 
-function select(view: View | null) {
-  current = view;
-  demo.dataset.view = view ?? 'whole';
-  reader.hidden = view !== 'reader';
-  hint.hidden = view !== null;
-  for (const tab of tabs) {
-    const active = tab.id === `${view}-tab`;
-    tab.setAttribute('aria-selected', String(active));
-    element(tab.getAttribute('aria-controls')!).hidden = !active;
-  }
+// Each card below shows its pane as it stands when the scene has finished.
+renderFrame(frameAt('rest'));
+for (const shot of document.querySelectorAll<HTMLElement>('[data-shot]')) {
+  const copy = element(shot.dataset.shot!).cloneNode(true) as HTMLElement;
+  for (const node of copy.querySelectorAll('[id]')) node.removeAttribute('id');
+  shot.replaceChildren(...copy.childNodes);
 }
-
-function focusTab(tab: HTMLButtonElement) {
-  for (const other of tabs) other.tabIndex = other === tab ? 0 : -1;
-  tab.focus({ preventScroll: true });
-}
-
-// Choosing the chosen pane again returns to the whole tab.
-for (const tab of tabs) {
-  const view = tab.id.replace('-tab', '') as View;
-  tab.addEventListener('click', () => {
-    focusTab(tab);
-    select(current === view ? null : view);
-  });
-}
-
-tablist.addEventListener('keydown', event => {
-  const visible = phone.matches ? tabs : tabs.filter(tab => tab.id !== 'agent-tab');
-  const index = visible.indexOf(document.activeElement as HTMLButtonElement);
-  let next: HTMLButtonElement;
-  switch (event.key) {
-    case 'ArrowLeft': next = visible[(index - 1 + visible.length) % visible.length]; break;
-    case 'ArrowRight': next = visible[(index + 1) % visible.length]; break;
-    case 'Home': next = visible[0]; break;
-    case 'End': next = visible[visible.length - 1]; break;
-    default: return;
-  }
-  event.preventDefault();
-  focusTab(next);
-});
-
-hero.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || !current) return;
-  event.preventDefault();
-  const tab = tabs.find(tab => tab.id === `${current}-tab`)!;
-  const focus = document.activeElement;
-  if (reader.contains(focus) || element(tab.getAttribute('aria-controls')!).contains(focus)) focusTab(tab);
-  select(null);
-});
-
-element('close-reader').addEventListener('click', () => {
-  select(null);
-  focusTab(tabs.find(tab => tab.id === 'reader-tab')!);
-});
-
-// The Agent choice exists only where one pane is shown at a time.
-phone.addEventListener('change', event => {
-  if (event.matches) return;
-  if (current === 'agent') select(null);
-  const agent = element('agent-tab');
-  if (agent.tabIndex !== 0) return;
-  if (document.activeElement === agent) focusTab(tabs[0]);
-  else {
-    agent.tabIndex = -1;
-    tabs[0].tabIndex = 0;
-  }
-});
 
 reduceMotion.addEventListener('change', play);
 // Nothing plays to a hidden page; it starts from the top when the person comes back.

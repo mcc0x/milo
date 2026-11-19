@@ -9,24 +9,29 @@ export type Commit = { title: string; age: string; files?: readonly DemoFile[] }
 // What the person asks the agent for; it is typed into the composer first.
 export const request = 'Add wind speed to the weekend forecast.';
 
+export type Pane = 'outline' | 'history' | 'usage' | 'reader' | 'agent';
+
 // One pass of the demo, in milliseconds from its start. Each step is caused
 // by the one before: the request is typed and sent, the agent edits a file
-// (the outline marks it), tests, commits (the history gains a commit), and
-// the usage figure rises.
+// (the outline marks it, the reader shows it), tests, commits (the history
+// gains a commit), and the usage figure rises. `focus` is the pane the
+// window draws the eye to, and `caption` says why.
 export const scene = [
-  { at: 0, phase: 'compose' },
-  { at: 1900, phase: 'prompt' },
-  { at: 2900, phase: 'plan' },
-  { at: 4300, phase: 'edit' },
-  { at: 6100, phase: 'test' },
-  { at: 7400, phase: 'commit' },
-  { at: 8700, phase: 'usage' },
-] as const;
+  { at: 0, phase: 'compose', focus: 'agent', caption: 'You work with your coding agent, as usual.' },
+  { at: 1900, phase: 'prompt', focus: 'agent', caption: 'You work with your coding agent, as usual.' },
+  { at: 2900, phase: 'plan', focus: 'agent', caption: 'You work with your coding agent, as usual.' },
+  { at: 4300, phase: 'edit', focus: 'outline', caption: 'The outline marks the file the moment it changes.' },
+  { at: 6400, phase: 'read', focus: 'reader', caption: 'The reader shows what was added and removed.' },
+  { at: 9000, phase: 'test', focus: 'agent', caption: 'The agent carries on.' },
+  { at: 10300, phase: 'commit', focus: 'history', caption: 'The history gains the new commit.' },
+  { at: 12500, phase: 'usage', focus: 'usage', caption: 'Usage shows what that cost of your limits.' },
+  { at: 14700, phase: 'rest', focus: null, caption: 'All of it stays in view, beside your work.' },
+] as const satisfies readonly { at: number; phase: string; focus: Pane | null; caption: string }[];
 
 // When typing starts and how long it takes, inside the compose step.
 export const typing = { start: 350, length: 1250 };
 // The finished state is held, then the scene starts again.
-export const loopLength = 13200;
+export const loopLength = 18200;
 
 export type Phase = typeof scene[number]['phase'];
 type Usage = { five: number; week: number; age: string };
@@ -90,10 +95,13 @@ export const pushed: readonly Commit[] = [
   { title: 'Start the shore guide', age: '4d' },
 ];
 
+const order = scene.map(step => step.phase);
+
 export function frameAt(phase: Phase): Frame {
-  const edited = phase === 'edit' || phase === 'test';
-  const committed = phase === 'commit' || phase === 'usage';
-  const files = tree.map((file): DemoFile => file.path === edit.path && (edited || committed)
+  const reached = (step: Phase) => order.indexOf(phase) >= order.indexOf(step);
+  const committed = reached('commit');
+  const risen = reached('usage');
+  const files = tree.map((file): DemoFile => file.path === edit.path && reached('edit')
     ? { ...edit, pending: committed ? 'push' : 'commit' }
     : file);
   return {
@@ -103,7 +111,7 @@ export function frameAt(phase: Phase): Frame {
     toPush: files.filter(file => file.pending === 'push').length,
     ahead: committed ? [newCommit, ...ahead] : ahead,
     usage: {
-      codex: { five: phase === 'usage' ? 19 : 17, week: 69, age: phase === 'usage' ? 'just now' : '4 m ago' },
+      codex: { five: risen ? 19 : 17, week: 69, age: risen ? 'just now' : '4 m ago' },
       claude: { five: 31, week: 58, age: '6 m ago' },
     },
   };
