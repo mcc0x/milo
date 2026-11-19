@@ -1,5 +1,5 @@
 //! Inspect the current installation without starting Rex. Repair and removal
-//! are explicit operations using the same ownership checks and rollback as setup.
+//! are explicit operations using the same ownership checks as setup.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use super::claude::Claude;
-use super::install::{Saved, Store, read};
+use super::install::{RunRex, Saved, Store, read};
 use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
 use super::profiles::Scope;
 use super::{lock, rex_files};
@@ -413,7 +413,10 @@ pub(crate) fn repair() -> Result<String, String> {
 }
 
 pub(crate) fn remove() -> Result<String, String> {
-    let store = store()?;
+    remove_from(&store()?, &rex::run)
+}
+
+fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
     let disable = Layout { panes: [false; 3], new_tabs: false, ..Layout::default() };
     let rex = store.has_layout()?
         || store.rex_file().try_exists().map_err(|e| e.to_string())?
@@ -424,8 +427,14 @@ pub(crate) fn remove() -> Result<String, String> {
     if !rex && claude.is_none() {
         return Ok("No managed integration to remove. Preferences and user settings were left alone.".into());
     }
-    check_listener(store.save(rex.then_some(&disable), claude, &rex::run)?)?;
-    Ok("Removed managed integrations. Saved preferences, user-owned settings and open panes were left alone.".into())
+    let saved = store.save(rex.then_some(&disable), claude, run)?;
+    check_listener(saved.listener)?;
+    let mut message =
+        String::from("Removed managed integrations. Saved preferences, user-owned settings and open panes were left alone.");
+    if saved.reload_failed {
+        message.push_str("\nRex was not reloaded. Restart Rex or run milo setup --repair to unload Milo's actions.");
+    }
+    Ok(message)
 }
 
 fn check_listener(result: Saved) -> Result<(), String> {
@@ -448,6 +457,27 @@ pub(crate) fn wait_ready(fd: Option<RawFd>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::Fixture;
+
+    fn fixture_store(fixture: &Fixture) -> Store {
+        Store {
+            init: fixture.root.join("init.lua"),
+            config: fixture.root.join("config"),
+            state: fixture.root.join("state"),
+            claude: fixture.root.join("settings.json"),
+        }
+    }
+
+    #[test]
+    fn removal_reports_that_rex_was_not_reloaded() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let message = remove_from(&store, &|_| false).unwrap();
+        assert!(message.contains("Removed managed integrations"));
+        assert!(message.contains("Rex was not reloaded"));
+        assert!(!store.init.exists());
+    }
 
     #[test]
     fn replacing_a_discarded_diagnostic_runs_only_the_latest_request() {

@@ -1,4 +1,4 @@
-//! Coordinates settings changes so a failed Rex reload can put all files back.
+//! Coordinates settings changes and rolls back installs that Rex cannot reload.
 
 use std::borrow::Cow;
 use std::env;
@@ -23,6 +23,12 @@ pub(super) enum Saved {
     Ready,
     ListenerDidNotStart,
     ListenerDidNotStop,
+}
+
+#[derive(Debug)]
+pub(super) struct SaveOutcome {
+    pub listener: Saved,
+    pub reload_failed: bool,
 }
 
 /// Keeps the user settings and milo's files together for one setup transaction.
@@ -51,11 +57,18 @@ impl Store {
     }
 
     /// Plan both sets of changes before writing so one failed plan cannot leave a partial save.
-    pub fn save(&self, layout: Option<&Layout>, claude: Option<bool>, run: &RunRex<'_>) -> Result<Saved, &'static str> {
+    pub fn save(
+        &self,
+        layout: Option<&Layout>,
+        claude: Option<bool>,
+        run: &RunRex<'_>,
+    ) -> Result<SaveOutcome, &'static str> {
         if layout.is_none() && claude.is_none() {
-            return Ok(Saved::Ready);
+            return Ok(SaveOutcome { listener: Saved::Ready, reload_failed: false });
         }
-        self.save_with(layout, claude, run, |_| Ok(()))
+        // Removing the loader is safe even when Rex is missing or its config is broken.
+        let reload_optional = layout.is_some_and(|layout| !layout.enabled());
+        self.save_transaction(layout, claude, run, reload_optional, |_| Ok(()))
     }
 
     /// Plan Milo-only preferences under the same lock and roll them back with Rex settings.
@@ -66,6 +79,17 @@ impl Store {
         run: &RunRex<'_>,
         extra: impl FnOnce(&mut Vec<files::Change>) -> Result<(), &'static str>,
     ) -> Result<Saved, &'static str> {
+        self.save_transaction(layout, claude, run, false, extra).map(|saved| saved.listener)
+    }
+
+    fn save_transaction(
+        &self,
+        layout: Option<&Layout>,
+        claude: Option<bool>,
+        run: &RunRex<'_>,
+        reload_optional: bool,
+        extra: impl FnOnce(&mut Vec<files::Change>) -> Result<(), &'static str>,
+    ) -> Result<SaveOutcome, &'static str> {
         let _lock = lock::setup(&self.state)?;
         let mut changes = Vec::new();
         extra(&mut changes)?;
@@ -88,26 +112,30 @@ impl Store {
             self.claude_files()?.plan(enabled, &mut changes)?;
         }
         let mut stopped = false;
+        let mut reload_failed = false;
         let installed = files::install(&changes, || {
             // A running listener has already loaded its script; a reload alone won't update it.
             stopped = restart && lock::stop(&self.state).is_ok();
-            !reload || call(run, RELOAD)
+            reload_failed = reload && !call(run, RELOAD);
+            !reload_failed || reload_optional
         });
         if installed.is_err() && stopped {
             // The previous files are back, so give Rex a chance to start the old listener again.
             call(run, RELOAD);
         }
         installed?;
-        if (rex_changed || pending.is_some()) && fs::remove_file(pending_path).is_err() {
+        if (rex_changed || pending.is_some()) && !reload_failed && fs::remove_file(pending_path).is_err() {
             return Err("Saved, but could not clear the Rex reload reminder.");
         }
-        Ok(if (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err()) {
+        let stop_failed = (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err());
+        let listener = if stop_failed {
             Saved::ListenerDidNotStop
         } else if watch_layout && !lock::wait_running(&self.state).unwrap_or(false) {
             Saved::ListenerDidNotStart
         } else {
             Saved::Ready
-        })
+        };
+        Ok(SaveOutcome { listener, reload_failed })
     }
 }
 
@@ -240,6 +268,41 @@ mod tests {
         assert_eq!(fs::read(&store.claude).unwrap(), b"{\"keep\":1}");
         assert!(!store.rex_file().exists() && !store.listener_file().exists());
         assert!(!store.state.join(OWN_CLAUDE).exists());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_removal_and_leaves_a_reminder() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let initial = b"-- Keep my settings";
+        let claude = b"{\"keep\":1}";
+        fs::write(&store.init, initial).unwrap();
+        fs::write(&store.claude, claude).unwrap();
+        store.save(Some(&Layout::default()), Some(true), &|_| true).unwrap();
+
+        let reject = |args: &[&OsStr]| {
+            assert_eq!(args, RELOAD.map(OsStr::new));
+            false
+        };
+        // Repair uses strict reloads, even when recovering a disabled layout.
+        assert!(store.save_with(Some(&off()), Some(false), &reject, |_| Ok(())).unwrap_err().contains("put back"));
+        assert!(store.layout().unwrap().1);
+        assert!(store.claude() == Claude::On);
+        assert!(!store.rex_reload_pending());
+
+        let removed = store.save(Some(&off()), Some(false), &reject).unwrap();
+        assert_eq!(removed.listener, Saved::Ready);
+        assert!(removed.reload_failed);
+        assert_eq!(fs::read(&store.init).unwrap(), initial);
+        assert_eq!(fs::read(&store.claude).unwrap(), claude);
+        assert!(!store.rex_file().exists() && !store.listener_file().exists());
+        assert!(!store.state.join(OWN_CLAUDE).exists());
+        assert!(store.rex_reload_pending());
+
+        let (disabled, active) = store.layout().unwrap();
+        assert!(!disabled.enabled() && !active);
+        store.save_with(Some(&disabled), None, &|args| args == RELOAD.map(OsStr::new), |_| Ok(())).unwrap();
+        assert!(!store.rex_reload_pending());
     }
 
     #[test]
