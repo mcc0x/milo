@@ -44,11 +44,8 @@ impl Untracked {
         let start = files.partition_point(|f| f.kind != Kind::Untracked && !f.unpushed);
         let end = start + files[start..].partition_point(|f| f.kind == Kind::Untracked);
         let old = &old[self.files.clone()];
-        let cached: HashMap<_, _> = old
-            .iter()
-            .filter(|f| f.stamp.is_some() || !f.lines_pending)
-            .map(|f| (f.path.as_str(), f))
-            .collect();
+        let cached: HashMap<_, _> =
+            old.iter().filter(|f| f.stamp.is_some() || !f.lines_pending).map(|f| (f.path.as_str(), f)).collect();
         self.files = start..end;
         self.shown.clear();
         self.unstamped.clear();

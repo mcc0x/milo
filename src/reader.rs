@@ -185,6 +185,13 @@ impl Text {
 }
 
 impl Reader {
+    pub(super) fn working_repo(&self) -> Option<&Repo> {
+        match &self.source {
+            Source::Working(work) => Some(&work.repo),
+            Source::Committed { .. } => None,
+        }
+    }
+
     fn new(path: String, source: Source, icons: IconMode) -> Self {
         Self {
             source,
@@ -263,11 +270,12 @@ impl Pane for Reader {
         }
     }
 
+    fn git_busy(&self) -> bool {
+        self.working_repo().is_some_and(Repo::busy)
+    }
+
     fn check(&mut self) -> bool {
         let Source::Working(work) = &mut self.source else { return true };
-        if work.repo.busy() {
-            return false;
-        }
         if work.repo.poll(&[]) || work.absolute.symlink_metadata().ok().as_ref().map(Stamp::of) != work.stamp {
             self.load();
             self.top = self.top.min(self.last_top());

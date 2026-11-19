@@ -114,6 +114,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         self.pane.watch_scope()
     }
 
+    fn git_busy(&self) -> bool {
+        self.pane.git_busy()
+    }
+
     fn check(&mut self) -> bool {
         self.pane.check()
     }

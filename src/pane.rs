@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::help::Page;
 use crate::keys::{Input, Key};
-use crate::screen::Screen;
+use crate::screen::{Screen, Style, YELLOW};
 use crate::term::{self, Session, Wait, milliseconds};
 use crate::ui;
 use crate::watch::{Scope, Watcher};
@@ -44,6 +44,11 @@ pub trait Pane {
     /// An empty, complete scope means nothing outside the pane can change it.
     fn watch_scope(&self) -> Scope {
         Scope { roots: Vec::new(), ignored: Default::default(), complete: true }
+    }
+
+    /// When Git is updating the index, keep the previous snapshot.
+    fn git_busy(&self) -> bool {
+        false
     }
 
     /// Takes in changes from outside. False asks the loop to check again soon.
@@ -92,6 +97,10 @@ const REST: u32 = 4;
 pub(super) const WATCHED: Duration = Duration::from_secs(30);
 /// Time between looks when the watcher cannot cover the project.
 const UNWATCHED: Duration = Duration::from_secs(2);
+/// Ignore brief index locks, then wait without taking or repainting snapshots.
+const GIT_GRACE: Duration = Duration::from_millis(400);
+const GIT_RETRY: Duration = Duration::from_millis(500);
+const WAITING_FOR_GIT: &str = "Waiting for Git";
 
 /// When to look for changes again, with or without a report from the watcher.
 pub(super) struct Pace {
@@ -99,11 +108,12 @@ pub(super) struct Pace {
     ended: Instant,
     took: Duration,
     reported: bool,
+    git_locked_since: Option<Instant>,
 }
 
 impl Pace {
     fn new(idle: Duration, now: Instant) -> Self {
-        Self { idle, ended: now, took: Duration::ZERO, reported: false }
+        Self { idle, ended: now, took: Duration::ZERO, reported: false, git_locked_since: None }
     }
 
     #[cfg(test)]
@@ -115,8 +125,24 @@ impl Pace {
         self.reported = true;
     }
 
+    fn waiting_for_git(&self) -> bool {
+        self.git_locked_since.is_some_and(|since| self.ended - since >= GIT_GRACE)
+    }
+
+    /// Only the transition to a visible wait needs a new frame.
+    fn block_on_git(&mut self, now: Instant) -> bool {
+        let was_waiting = self.waiting_for_git();
+        self.git_locked_since.get_or_insert(now);
+        self.ended = now;
+        !was_waiting && self.waiting_for_git()
+    }
+
     /// Time until the event loop next calls `Pane::check`.
     fn until_look(&self, now: Instant) -> Duration {
+        if let Some(since) = self.git_locked_since {
+            let due = if self.waiting_for_git() { self.ended + GIT_RETRY } else { since + GIT_GRACE };
+            return due.saturating_duration_since(now);
+        }
         let rest = if self.reported { MIN_LOOK_INTERVAL } else { self.idle }.max(self.took * REST);
         rest.saturating_sub(now.saturating_duration_since(self.ended))
     }
@@ -124,6 +150,7 @@ impl Pace {
     /// An unsettled look, say during a checkout, is retried as if a change was reported.
     fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
         (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
+        self.git_locked_since = None;
     }
 }
 
@@ -133,6 +160,18 @@ fn draw_pane(pane: &mut dyn Pane, screen: &mut Screen, help: Option<&mut Page>) 
     } else {
         pane.draw(screen);
     }
+}
+
+fn draw_git_wait(pane: &mut dyn Pane, screen: &mut Screen) {
+    if screen.h == 0 {
+        return;
+    }
+    // Leave room for the notice rather than covering a selectable row or picture.
+    screen.h -= 1;
+    pane.draw(screen);
+    screen.h += 1;
+    let margin = usize::from(screen.w >= WAITING_FOR_GIT.len() + 2);
+    screen.put_fit(margin, screen.h - 1, screen.w - margin * 2, WAITING_FOR_GIT, Style::fg(YELLOW));
 }
 
 fn hover_at(pane: &dyn Pane, help: Option<&Page>, x: usize, y: usize) -> Option<(usize, Range<usize>)> {
@@ -195,6 +234,10 @@ pub(super) fn watch_pane(pane: &mut dyn Pane, check_on_open: bool) -> (Watcher, 
     let mut pace = watch_idle(&watcher, check_on_open).map(|idle| Pace::new(idle, Instant::now()));
     if check_on_open {
         check_watched_pane(pane, &mut watcher, &mut pace, true);
+    } else if let Some(timing) = &mut pace
+        && pane.git_busy()
+    {
+        timing.block_on_git(Instant::now());
     }
     (watcher, pace)
 }
@@ -204,9 +247,12 @@ pub(super) fn check_watched_pane(
     watcher: &mut Watcher,
     pace: &mut Option<Pace>,
     keep_polling: bool,
-) {
-    let Some(timing) = pace else { return };
+) -> bool {
+    let Some(timing) = pace else { return false };
     let started = Instant::now();
+    if pane.git_busy() {
+        return timing.block_on_git(started);
+    }
     let settled = pane.check();
     // A snapshot cannot see edits made just after it. If coverage changed,
     // check again under the new scope rather than relying on the old event queue.
@@ -217,6 +263,7 @@ pub(super) fn check_watched_pane(
     } else {
         *pace = None;
     }
+    true
 }
 
 fn draw_loading(screen: &mut Screen, dir: Option<&Path>, w: usize, h: usize) {
@@ -338,7 +385,11 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                 terminal.track_motion(want_motion).map_err(|e| format!("cannot configure mouse tracking: {e}"))?;
                 tracking = want_motion;
             }
-            draw_pane(pane.as_mut(), &mut screen, help.as_mut());
+            if help.is_none() && pace.as_ref().is_some_and(Pace::waiting_for_git) {
+                draw_git_wait(pane.as_mut(), &mut screen);
+            } else {
+                draw_pane(pane.as_mut(), &mut screen, help.as_mut());
+            }
             highlighted = pointer.and_then(|(x, y)| hover_at(pane.as_ref(), help.as_ref(), x, y));
             if let Some((y, span)) = &highlighted {
                 screen.underline(*y, span.clone());
@@ -431,8 +482,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         let now = Instant::now();
         redraw |= frame_due.is_some_and(|due| due <= now);
         if pace.as_ref().is_some_and(|pace| pace.until_look(now).is_zero()) {
-            check_watched_pane(pane.as_mut(), &mut watcher, &mut pace, check_on_open);
-            redraw = true;
+            redraw |= check_watched_pane(pane.as_mut(), &mut watcher, &mut pace, check_on_open);
         }
     }
     screen.release_pictures(|bytes| terminal.finish(bytes));
@@ -609,6 +659,45 @@ mod tests {
         assert_eq!(pace.until_look(retry), Duration::ZERO);
         pace.finish_look(retry, retry + Duration::from_millis(10), true);
         assert_eq!(pace.until_look(retry + Duration::from_millis(10)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_brief_git_lock_does_not_get_a_waiting_frame() {
+        let start = Instant::now();
+        let mut pace = Pace::new(WATCHED, start);
+        assert!(!pace.block_on_git(start));
+        assert!(!pace.waiting_for_git());
+        assert_eq!(pace.until_look(start), GIT_GRACE);
+
+        let unlocked = start + GIT_GRACE;
+        pace.finish_look(unlocked, unlocked, true);
+        assert!(!pace.waiting_for_git());
+        assert_eq!(pace.until_look(unlocked), WATCHED);
+    }
+
+    #[test]
+    fn a_persistent_git_lock_gets_one_waiting_frame_and_slow_probes() {
+        let start = Instant::now();
+        let mut pace = Pace::new(WATCHED, start);
+        assert!(!pace.block_on_git(start));
+
+        let grace = start + GIT_GRACE;
+        assert_eq!(pace.until_look(grace), Duration::ZERO);
+        assert!(pace.block_on_git(grace));
+        assert!(pace.waiting_for_git());
+        pace.report_change();
+        assert_eq!(pace.until_look(grace), GIT_RETRY);
+
+        let retry = grace + GIT_RETRY;
+        assert_eq!(pace.until_look(retry), Duration::ZERO);
+        assert!(!pace.block_on_git(retry));
+        assert!(pace.waiting_for_git());
+        assert_eq!(pace.until_look(retry), GIT_RETRY);
+
+        let unlocked = retry + GIT_RETRY;
+        pace.finish_look(unlocked, unlocked, true);
+        assert!(!pace.waiting_for_git());
+        assert_eq!(pace.until_look(unlocked), WATCHED);
     }
 
     #[cfg(target_os = "macos")]

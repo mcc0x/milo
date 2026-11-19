@@ -202,6 +202,56 @@ fn a_slow_open_draws_the_project_name_before_it_has_the_files() {
 }
 
 #[test]
+fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
+    let project = Project::new();
+    let git = |args: &[&str]| {
+        let output = project
+            .command("git")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .args(["-c", "user.name=Milo Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let root = project.0.join("project");
+    git(&["init"]);
+    fs::write(root.join("page.txt"), "before\n").unwrap();
+    git(&["add", "page.txt"]);
+    git(&["commit", "-m", "Baseline"]);
+    let later = git(&["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "UnlockedCommit"]);
+    let lock = root.join(".git/index.lock");
+    fs::write(&lock, "held by Git").unwrap();
+
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let mut panes = [
+        (Terminal::sized(project.command(milo).arg("outline"), 80, 8), "later.txt"),
+        (Terminal::sized(project.command(milo).arg("history"), 80, 8), "UnlockedCommit"),
+        (Terminal::sized(project.command(milo).args(["view", "page.txt"]), 80, 8), "updated"),
+    ];
+    for (terminal, _) in &mut panes {
+        terminal.until("Waiting for Git");
+    }
+    assert_eq!(fs::read_to_string(&lock).unwrap(), "held by Git");
+
+    fs::write(root.join("later.txt"), "new file\n").unwrap();
+    fs::write(root.join("page.txt"), "updated\n").unwrap();
+    git(&["update-ref", "HEAD", later.trim()]);
+    fs::remove_file(lock).unwrap();
+    for (terminal, updated) in &mut panes {
+        terminal.until(updated);
+        terminal.master.write_all(b"q").unwrap();
+        assert!(terminal.wait_for_exit().success());
+    }
+}
+
+#[test]
 fn ctrl_c_during_a_slow_open_restores_the_terminal_without_waiting_for_git() {
     let project = Project::new();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));

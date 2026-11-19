@@ -218,6 +218,7 @@ pub struct Repo {
     /// its branches. They differ in a linked worktree.
     git_dir: Option<PathBuf>,
     common_dir: Option<PathBuf>,
+    index_lock: Option<PathBuf>,
     config: run::Config,
     read_for: ReadFor,
     /// When set, status is limited to this path.
@@ -278,7 +279,8 @@ impl Repo {
             None => (dir.canonicalize().ok().filter(|d| d.is_dir())?, false, None, None),
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Some(Self { root, name, git, ok: Cell::new(true), git_dir, common_dir, ..Self::default() })
+        let index_lock = git_dir.as_ref().map(|dir| dir.join("index.lock"));
+        Some(Self { root, name, git, ok: Cell::new(true), git_dir, common_dir, index_lock, ..Self::default() })
     }
 
     /// History compares commits directly. Only pending file diffs need a merge base.
@@ -383,7 +385,7 @@ impl Repo {
     /// Whether git is in the middle of changing things here, so that what
     /// is on disk is half of one state and half of another.
     pub fn busy(&self) -> bool {
-        self.git_dir.as_ref().is_some_and(|dir| dir.join("index.lock").exists())
+        self.index_lock.as_ref().is_some_and(|path| path.symlink_metadata().is_ok())
     }
 
     fn status_raw(&mut self) -> Option<Vec<u8>> {

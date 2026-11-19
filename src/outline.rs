@@ -293,12 +293,18 @@ impl Pane for Outline {
         self.repo.watch_scope()
     }
 
+    fn git_busy(&self) -> bool {
+        self.repo.busy()
+            || self
+                .reading
+                .as_ref()
+                .and_then(Reader::working_repo)
+                .is_some_and(|repo| repo.root != self.repo.root && repo.busy())
+    }
+
     /// Checks both the outline and the reader when they share a pane.
     fn check(&mut self) -> bool {
         let reader_settled = self.reading.as_mut().is_none_or(Pane::check);
-        if self.repo.busy() {
-            return false;
-        }
         if self.repo.git {
             self.check_untracked(Instant::now());
             if self.repo.poll(&self.pending) {

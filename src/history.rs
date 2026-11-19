@@ -260,12 +260,13 @@ impl Pane for History {
         self.repo.watch_scope()
     }
 
+    fn git_busy(&self) -> bool {
+        self.reading.is_none() && self.repo.busy()
+    }
+
     fn check(&mut self) -> bool {
         if !self.repo.git || self.reading.is_some() {
             return true;
-        }
-        if self.repo.busy() {
-            return false;
         }
         if self.repo.poll(&[]) {
             self.load();
