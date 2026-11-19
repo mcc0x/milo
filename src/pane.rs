@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::help::Page;
 use crate::keys::{ConfirmClick, Input, Key};
+use crate::reader::OpenReader;
 use crate::screen::{Screen, Style, YELLOW};
 use crate::term::{self, Session, Wait, milliseconds};
 use crate::ui;
@@ -48,6 +49,11 @@ pub trait Pane {
     /// An empty, complete scope means nothing outside the pane can change it.
     fn watch_scope(&self) -> Scope {
         Scope { roots: Vec::new(), ignored: Default::default(), complete: true }
+    }
+
+    /// The reader opener belongs to the terminal pane, not its current project.
+    fn reader_opener(&mut self) -> Option<&mut OpenReader> {
+        None
     }
 
     /// When Git is updating the index, keep the previous snapshot.

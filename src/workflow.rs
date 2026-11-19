@@ -73,7 +73,11 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
         self.preference_note = preference_note;
         self.root.clone_from(&repo.root);
         self.git = repo.git;
-        self.pane = (self.make)(repo, &prefs);
+        let mut pane = (self.make)(repo, &prefs);
+        if let (Some(previous), Some(next)) = (self.pane.reader_opener(), pane.reader_opener()) {
+            std::mem::swap(previous, next);
+        }
+        self.pane = pane;
         if let Some(focused) = self.focus {
             self.pane.key(Key::Focus(focused));
         }
@@ -164,6 +168,7 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use crate::outline::Outline;
+    use crate::reader::OpenReader;
 
     #[test]
     fn retargets_both_pane_and_watcher_only_when_the_project_changes() {
@@ -174,7 +179,7 @@ mod tests {
         second.write("other.rs", "second\n");
         second.commit("second");
         let make =
-            |repo, prefs: &Preferences| -> Box<dyn Pane> { Box::new(Outline::with_preferences(repo, false, prefs)) };
+            |repo, prefs: &Preferences| -> Box<dyn Pane> { Box::new(Outline::with_preferences(repo, true, prefs)) };
         let repo = Repo::open(&first.root).unwrap();
         let mut pane = Project {
             root: repo.root.clone(),
@@ -187,9 +192,14 @@ mod tests {
             preference_note: None,
             focus: Some(false),
         };
+        *pane.pane.reader_opener().unwrap() = OpenReader::Floating { block: Some("block:previous".into()) };
         assert!(matches!(pane.observe(first.root.join("src")), External::Unchanged));
         assert!(matches!(pane.observe(second.root.clone()), External::NewScope));
         assert_eq!(pane.watch_scope().roots.first(), Some(&pane.root));
+        assert!(matches!(
+            pane.pane.reader_opener(),
+            Some(OpenReader::Floating { block: Some(block) }) if block.as_str() == "block:previous"
+        ));
         let mut screen = Screen::sized(30, 8);
         pane.draw(&mut screen);
         assert!(screen.text().iter().any(|row| row.contains("other.rs")));

@@ -268,6 +268,10 @@ impl Pane for History {
         self.repo.watch_scope()
     }
 
+    fn reader_opener(&mut self) -> Option<&mut OpenReader> {
+        Some(&mut self.opener)
+    }
+
     fn git_busy(&self) -> bool {
         self.reading.is_none() && self.repo.busy()
     }
