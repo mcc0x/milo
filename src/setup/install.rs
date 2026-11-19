@@ -154,7 +154,7 @@ mod tests {
                     let panes = std::array::from_fn(|i| mask & (1 << i) != 0);
                     let layout = Layout { width: width.into(), panes, new_tabs, ..Layout::default() };
                     let lua = rex_lua(&layout, &executable);
-                    assert!(lua.contains("local usage_rows = 5\n"));
+                    assert!(lua.contains("local usage_rows = 10\n"));
                     let (_, choices) = lua.split_once("local chosen = {\n").unwrap();
                     let (choices, _) = choices.split_once("}\n").unwrap();
                     for (name, chosen) in TabPane::ALL.map(TabPane::name).into_iter().zip(panes) {
@@ -362,9 +362,9 @@ mod tests {
         let hand_edited = fs::read_to_string(&file)
             .unwrap()
             .replace("-- Fraction of the tab for the left column.", "--[=[ Old width:\nlocal column_width = 0.52\n]=]")
-            .replace("local column_width = 0.22", "  local column_width=0.27 -- My width")
+            .replace("local column_width = 0.20", "  local column_width=0.27 -- My width")
             .replace("0.70", "0.67 -- My outline height")
-            .replace("usage_rows = 5", "usage_rows = 7 -- My usage height")
+            .replace("usage_rows = 10", "usage_rows = 7 -- My usage height")
             .replace("false\n", "false -- Only on demand\n")
             .replace("  history = true,", "  --[[\n  history = true,\n  ]]\n  history = false, -- Only when needed")
             .replace('\n', "\r\n");
@@ -614,9 +614,9 @@ mod tests {
         updated.next_width();
         updated.toggle(TabPane::Usage);
         for original in [
-            shipped.replace("local column_width = 0.22", "local column_width = 0.20\nlocal column_width = 0.22"),
+            shipped.replace("local column_width = 0.20", "local column_width = 0.20\nlocal column_width = 0.22"),
             shipped.replace("  usage = true,", "  usage = false,\n  usage = true,"),
-            shipped.replace("local column_width = 0.22", "local column_width = 0.22 --[[]] local column_width = 0.30"),
+            shipped.replace("local column_width = 0.20", "local column_width = 0.20 --[[]] local column_width = 0.30"),
             format!("{GENERATED}local example = [=[\n{}]=]\n", &shipped[GENERATED.len()..]),
         ] {
             fs::write(&file, &original).unwrap();

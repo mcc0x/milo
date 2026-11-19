@@ -42,3 +42,13 @@ end
 rex.on("window_created", function(ctx, event)
   arrange_shell(ctx.session_id, event.window_id, 9)
 end)
+
+-- A new session comes with its first tab, which is not announced on its own.
+rex.on("session_created", function(_, event)
+  local session_id = event.session and event.session.session_id
+  local view = session_id and rex.session.view{ session_id = session_id }
+  if not view then return end
+  for _, window in ipairs(view.windows) do
+    arrange_shell(session_id, window.window_id, 9)
+  end
+end)

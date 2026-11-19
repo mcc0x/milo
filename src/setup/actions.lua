@@ -35,13 +35,15 @@ end
 
 -- The split never takes the keyboard from the pane the action came from.
 local function split(ctx, anchor, direction, side, ratio, layout)
-  local _, err = rex.session.new_split{
+  local made, err = rex.session.new_split{
     session_id = ctx.session_id, anchor_id = anchor, direction = direction,
     side = side, ratio = ratio, layout = layout,
   }
   if err then error(err, 0) end
+  return made and made.block_ids and made.block_ids[1]
 end
 
+-- The left column holds the outline, the history and the usage, top to bottom.
 local function arrange(ctx, wanted, shell)
   local present, main
   if shell then
@@ -51,31 +53,58 @@ local function arrange(ctx, wanted, shell)
     present, main = tab_panes(ctx)
   end
   if not main then return end
-  local outline = wanted.outline and not present[labels.outline]
-  local history = wanted.history and not present[labels.history]
-  local usage = wanted.usage and not present[labels.usage]
-  if not (outline or history or usage) then return end
+  local above, below, usage = present[labels.outline], present[labels.history], present[labels.usage]
+  local add = {
+    outline = wanted.outline and not above,
+    history = wanted.history and not below,
+    usage = wanted.usage and not usage,
+  }
+  if not (add.outline or add.history or add.usage) then return end
 
   local process = shell or rex.call(terminal .. ".process", { session_id = ctx.session_id, block_id = main })
   local cwd = process and (process.foreground and process.foreground.cwd or process.child and process.child.cwd)
-  if outline and history then
-    local column = rex.layout.vertical(outline_share, pane("outline", cwd), pane("history", cwd))
-    split(ctx, main, "horizontal", "before", column_width, column)
-  elseif outline and present[labels.history] then
-    split(ctx, present[labels.history], "vertical", "before", outline_share, pane("outline", cwd))
-  elseif history and present[labels.outline] then
-    split(ctx, present[labels.outline], "vertical", "after", outline_share, pane("history", cwd))
-  elseif outline or history then
-    local name = outline and "outline" or "history"
-    split(ctx, main, "horizontal", "before", column_width, pane(name, cwd))
+  -- The share of a pane's height left to it once the usage has its rows below.
+  -- A pane no app has shown yet reports a size that is not its own.
+  local function above_usage(block)
+    local size = rex.call(terminal .. ".size", { session_id = ctx.session_id, block_id = block })
+    local rows = size and size.owner and size.rows or 0
+    return 1 - (rows > 0 and math.min(usage_rows / rows, 0.4) or 0.15)
   end
 
-  -- Read the main pane's height after placing the sidebar.
-  if usage then
-    local size = rex.call(terminal .. ".size", { session_id = ctx.session_id, block_id = main })
-    if size and size.rows and size.rows > usage_rows + 1 then
-      split(ctx, main, "vertical", "before", usage_rows / size.rows, pane("usage", cwd))
+  if not (above or below or usage) then
+    local column
+    if add.outline and add.history then
+      column = rex.layout.vertical(outline_share, pane("outline", cwd), pane("history", cwd))
+    elseif add.outline or add.history then
+      column = pane(add.outline and "outline" or "history", cwd)
     end
+    if add.usage then
+      -- The column is as tall as the main pane, which is the whole tab here.
+      local strip = pane("usage", cwd)
+      column = column and rex.layout.vertical(above_usage(main), column, strip) or strip
+    end
+    split(ctx, main, "horizontal", "before", column_width, column)
+    return
+  end
+
+  -- The column is there already, so each missing pane goes beside a neighbour.
+  if add.outline then
+    if below then
+      above = split(ctx, below, "vertical", "before", outline_share, pane("outline", cwd))
+    else
+      above = split(ctx, usage, "vertical", "before", above_usage(usage), pane("outline", cwd))
+    end
+  end
+  if add.history then
+    if above then
+      below = split(ctx, above, "vertical", "after", outline_share, pane("history", cwd))
+    else
+      below = split(ctx, usage, "vertical", "before", above_usage(usage), pane("history", cwd))
+    end
+  end
+  if add.usage then
+    local neighbour = below or above
+    split(ctx, neighbour, "vertical", "after", above_usage(neighbour), pane("usage", cwd))
   end
 end
 
@@ -98,7 +127,7 @@ rex.action{
   run = function(ctx) arrange(ctx, { history = true }) end,
 }
 rex.action{
-  name = "milo_usage", title = "Milo: Add the Usage Strip",
+  name = "milo_usage", title = "Milo: Add the Usage",
   run = function(ctx) arrange(ctx, { usage = true }) end,
 }
 rex.action{

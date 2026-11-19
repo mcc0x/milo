@@ -143,8 +143,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
 | `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
-| `src/setup/listener.lua` | Arranges new shell tabs that do not already have a layout. |
-| `src/setup/listener_test.lua` | Checks the new-tab handler with a stand-in for Rex. |
+| `src/setup/listener.lua` | Arranges new shell tabs and new sessions that do not already have a layout. |
+| `src/setup/listener_test.lua` | Checks the new-tab and new-session handlers with a stand-in for Rex. |
 | `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |

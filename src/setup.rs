@@ -46,13 +46,13 @@ impl Choice {
         match (self, compact) {
             (Self::Pane(TabPane::Outline), false) => ("Outline", "Files on the left"),
             (Self::Pane(TabPane::History), false) => ("History", "Commits on the left"),
-            (Self::Pane(TabPane::Usage), false) => ("Usage", "A strip across the top"),
+            (Self::Pane(TabPane::Usage), false) => ("Usage", "Limits on the left"),
             (Self::Width, false) => ("Column width", "Left side of the tab"),
             (Self::NewTabs, false) => ("Arrange new shell tabs", "Skip tabs that run a command"),
-            (Self::ClaudeLimits, false) => ("Show Claude Code limits", "For the usage strip"),
+            (Self::ClaudeLimits, false) => ("Show Claude Code limits", "For the usage pane"),
             (Self::Pane(TabPane::Outline), true) => ("Outline", "Files"),
             (Self::Pane(TabPane::History), true) => ("History", "Git"),
-            (Self::Pane(TabPane::Usage), true) => ("Usage", "Top"),
+            (Self::Pane(TabPane::Usage), true) => ("Usage", "Limits"),
             (Self::Width, true) => ("Column width", "Left"),
             (Self::NewTabs, true) => ("Shell tabs", "Auto"),
             (Self::ClaudeLimits, true) => ("Claude limits", "Usage"),
@@ -373,8 +373,9 @@ fn wrap(mut text: &str, width: usize) -> impl Iterator<Item = &str> + Clone {
 fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout) {
     const LINE: &str = "───────────────────────────────";
     const INTERIOR: usize = 31;
-    let [outline, history, usage] = TabPane::ALL.map(|pane| layout.chosen(pane));
-    let left = outline || history;
+    let chosen = TabPane::ALL.map(|pane| layout.chosen(pane));
+    let count = chosen.iter().filter(|&&pane| pane).count();
+    let left = count > 0;
     let column = layout.sketch_width();
     let joint = if left { 1 + column } else { 0 };
     let right = INTERIOR + 1;
@@ -396,22 +397,25 @@ fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout) {
             draw(joint, row, "│");
         }
     }
-    if left {
-        draw(2, if outline && history { 2 } else { 3 }, if outline { "Outline" } else { "History" });
-        if outline && history {
-            draw(0, 4, "├");
-            draw(1, 4, &LINE[..3 * column]);
-            draw(joint, 4, "┤");
-            draw(2, 5, "History");
+    // One pane sits in the middle of the column; more are spread down it.
+    let (first, step) = match count {
+        1 => (3, 0),
+        2 => (2, 3),
+        _ => (1, 2),
+    };
+    let names = ["Outline", "History", "Usage"].into_iter().zip(chosen).filter_map(|(name, on)| on.then_some(name));
+    for (i, name) in names.enumerate() {
+        let row = first + i * step;
+        draw(2, row, name);
+        if i + 1 < count {
+            // Two panes leave a blank row above the rule so the first stays centred.
+            let rule = if count == 2 { 4 } else { row + 1 };
+            draw(0, rule, "├");
+            draw(1, rule, &LINE[..3 * column]);
+            draw(joint, rule, "┤");
         }
     }
-    if usage {
-        draw(joint + 2, 1, "Usage");
-        draw(joint, 2, "├");
-        draw(joint + 1, 2, &LINE[..3 * (INTERIOR - joint)]);
-        draw(right, 2, "┤");
-    }
-    draw(joint + 2, if usage { 4 } else { 3 }, "Your work");
+    draw(joint + 2, 3, "Your work");
 }
 
 impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {

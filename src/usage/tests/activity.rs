@@ -215,12 +215,12 @@ fn claude_shows_activity_below_limits_and_resets_without_a_change_to_the_save() 
     let rows = frame(&mut usage, 140, 4);
     let claude = |row: usize| rows[row].split('│').nth(1).unwrap();
     assert!(claude(0).contains("5h") && claude(0).contains("week"));
-    assert!(claude(1).contains("23%") && claude(1).contains("61%") && !claude(1).contains("tokens"));
+    assert!(claude(1).contains("77%") && claude(1).contains("39%") && !claude(1).contains("tokens"));
     assert!(claude(3).contains("1.2k tokens today"));
     usage.fixed_now = Some(1_795_110_000);
     let rows = frame(&mut usage, 140, 4);
     let claude = |row: usize| rows[row].split('│').nth(1).unwrap();
-    assert!(claude(1).contains("0%") && !claude(1).contains("23%") && claude(1).contains("61%"));
+    assert!(claude(1).contains("100%") && !claude(1).contains("77%") && claude(1).contains("39%"));
     assert!(claude(2).contains("reset"));
 }
 

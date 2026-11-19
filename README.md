@@ -5,7 +5,7 @@
 <p align="center">milo puts your files, commits, and coding tool limits in terminal panes beside your work.</p>
 
 <p align="center">
-  <img src="docs/img/tab.png" width="860" alt="A Rex tab layout with the outline and history on the left, and usage above the shell">
+  <img src="docs/img/tab.png" width="860" alt="A Rex tab layout with the outline, history and usage on the left of the shell">
   <br><sub>A sample Rex tab with made-up usage figures.</sub>
 </p>
 
@@ -19,7 +19,7 @@ cd milo
 sh install.sh
 ```
 
-In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes. Check **On save:** and press `s` to save. Turn on **Arrange new shell tabs** to use the layout in new shell tabs.
+In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes. Check **On save:** and press `s` to save. Turn on **Arrange new shell tabs** to use the layout in new shell tabs and new sessions.
 
 You can also run each pane on its own.
 
@@ -42,10 +42,10 @@ See recent commits and, when the branch tracks a remote branch, how many still n
 ## Usage
 
 <p align="center">
-  <img src="docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent used, time until reset and an Opus weekly limit">
+  <img src="docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent left, time until reset and an Opus weekly limit">
 </p>
 
-See how much of each reported limit you have used. Milo reads local reports saved by oh-my-pi, Codex and Claude Code. Where the terminal can show pictures, such as in Rex, the strip can draw the logos and large figures as pictures.
+See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
 
 ## Reader
 
@@ -61,7 +61,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | --- | --- |
 | `milo outline [PATH]` | File tree |
 | `milo history [PATH]` | Recent commits |
-| `milo usage` | Usage strip |
+| `milo usage` | Usage limits |
 | `milo view FILE [--commit ID]` | File reader |
 | `milo setup` | Setup screen |
 

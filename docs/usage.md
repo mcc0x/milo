@@ -1,6 +1,6 @@
 # Usage limits
 
-`milo usage` shows how much of each limit has been **used**, not how much is left. For example, `5h 31%` means 31% of the five-hour window has been used. Milo shows only the windows reported for the account. When there is room, it also shows their reset times, the age of the reading and any limit for a model's week, such as `Opus week` as a third figure. After a window's reset time it shows `0%` and, when there is room, `reset` until a new reading arrives. A dash means a tool has no figure to show, not that it used zero.
+`milo usage` shows how much of each limit is **left**, not how much has been used. For example, `5h 69%` means 69% of the five-hour window is left. Claude Code's status line says the same: `5h 69% · week 42% left`. Milo shows only the windows reported for the account. When there is room, it also shows their reset times, the age of the reading and any limit for a model's week, such as `Opus week` as a third figure. In a narrow pane the first window keeps the large figure and the others follow below it as text. After a window's reset time it shows `100%` and, when there is room, `reset` until a new reading arrives. A dash means a tool has no figure to show, not that nothing is left.
 
 ## Where the figures come from
 

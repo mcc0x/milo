@@ -109,9 +109,9 @@ fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
             let _ = save(path, now, windows);
         }
         match (five, week) {
-            (Some(a), Some(b)) => return Some(format!("5h {} · week {}", label(a), label(b))),
-            (Some(a), None) => return Some(format!("5h {}", label(a))),
-            (None, Some(b)) => return Some(format!("week {}", label(b))),
+            (Some(a), Some(b)) => return Some(format!("5h {} · week {} left", label(a), label(b))),
+            (Some(a), None) => return Some(format!("5h {} left", label(a))),
+            (None, Some(b)) => return Some(format!("week {} left", label(b))),
             (None, None) => {}
         }
     }

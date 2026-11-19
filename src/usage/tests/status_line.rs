@@ -9,7 +9,7 @@ fn saved_claude_limits_are_still_shown_three_days_later() {
     let status = std::str::from_utf8(STATUS).unwrap().strip_prefix('{').unwrap();
     f.write(&format!("{STATE}/{SAVED_LIMITS}"), &format!("{{\"saved_at\":{then},{status}"));
     let rows = frame(&mut open(&f, NOW), 140, 3);
-    assert!(rows[1].contains("23%") && rows[1].contains("61%"));
+    assert!(rows[1].contains("77%") && rows[1].contains("39%"));
     assert_eq!(rows[2].matches("3 d ago").count(), 1);
 }
 
@@ -19,7 +19,7 @@ fn claude_status_saves_limits_and_prints_a_short_plain_line() {
     let path = f.root.join(STATE).join(SAVED_LIMITS);
     let mut output = Vec::new();
     assert_eq!(status::run(STATUS, &mut output, Some(&path), NOW), 0);
-    assert_eq!(String::from_utf8(output).unwrap(), "5h 23% · week 61%\n");
+    assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
     assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
     let mut usage = open(&f, NOW);
     assert!(frame(&mut usage, 100, 2)[1].contains("week"));
@@ -56,7 +56,7 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
     );
     let mut usage = open(&f, NOW);
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].contains("85%") && rows[1].contains("45%"));
+    assert!(rows[1].contains("15%") && rows[1].contains("55%"));
     // Keeping the higher, older figures keeps their age too.
     assert_eq!(rows[2].matches("2 h ago").count(), 1);
 
@@ -67,18 +67,19 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
     claude_report(&path, &format!(r#"{{"seven_day":{{"used_percentage":55,"resets_at":{week}}}}}"#), NOW);
     assert!(usage.check());
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].contains("85%") && rows[1].contains("55%"));
+    assert!(rows[1].contains("15%") && rows[1].contains("45%"));
     assert_eq!(rows[2].matches("2 h ago").count(), 1);
 
     usage.fixed_now = Some(reset);
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].contains("0%") && rows[2].contains("reset"));
+    assert!(rows[1].contains("100%") && rows[2].contains("reset"));
     let next = reset + 5 * HOUR;
     claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":5,"resets_at":{next}}}}}"#), reset);
     claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":95,"resets_at":{reset}}}}}"#), reset);
     assert!(usage.check());
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].split_whitespace().any(|figure| figure == "5%") && !rows[1].contains("95%"));
+    let figures: Vec<&str> = rows[1].split_whitespace().collect();
+    assert!(figures.contains(&"95%") && !figures.contains(&"5%"));
 }
 
 #[test]
@@ -121,7 +122,7 @@ fn a_claude_save_replaces_the_whole_private_file_at_once() {
     let mut still_old = Vec::new();
     before.read_to_end(&mut still_old).unwrap();
     assert_eq!(still_old, old_bytes);
-    assert!(frame(&mut open(&f, NOW + 1), 100, 2)[1].contains("53%"));
+    assert!(frame(&mut open(&f, NOW + 1), 100, 2)[1].contains("47%"));
 }
 
 #[test]
@@ -152,7 +153,7 @@ fn claude_status_prints_the_limits_even_when_the_save_cannot_be_made() {
     for path in [None, Some(path.as_path())] {
         let mut output = Vec::new();
         assert_eq!(status::run(STATUS, &mut output, path, NOW), 0);
-        assert_eq!(String::from_utf8(output).unwrap(), "5h 23% · week 61%\n");
+        assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
     }
 }
 
@@ -177,7 +178,7 @@ fn claude_status_prints_a_plain_line_when_its_input_remains_open() {
     drop(writer);
     let mut output = Vec::new();
     assert_eq!(status::run_fd(reader, &mut output, None, NOW, TEST_WAIT), 0);
-    assert_eq!(String::from_utf8(output).unwrap(), "5h 23% · week 61%\n");
+    assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
 }
 
 #[test]

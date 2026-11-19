@@ -58,16 +58,18 @@ impl Window {
         value.number().filter(|n| (0.0..=100.0).contains(n)).map(|n| n.abs())
     }
 
+    /// How much of the window is left, as the pane and the status line show it.
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window percent is in 0..=100")]
     fn number(self) -> &'static str {
-        // Rounding 99.9% to 100% would suggest there is nothing left.
-        if self.percent > 99.0 && self.percent < 100.0 {
-            return "99+%";
-        }
-        if self.percent > 0.0 && self.percent < 1.0 {
+        let left = 100.0 - self.percent;
+        // Rounding 0.4% to 0% would suggest there is nothing left.
+        if left > 0.0 && left < 1.0 {
             return "<1%";
         }
-        let rounded = self.percent.round_ties_even() as usize;
+        if left > 99.0 && left < 100.0 {
+            return "99+%";
+        }
+        let rounded = left.round_ties_even() as usize;
         let skip = usize::from(rounded < 100) + usize::from(rounded < 10);
         std::str::from_utf8(&PERCENT_TEXT[rounded][skip..]).expect("the figures are ASCII")
     }
@@ -727,11 +729,11 @@ fn help_rows() -> Vec<help::HelpRow> {
     vec![
         heading("Usage limits"),
         note("Figures show the percent"),
-        note("used in each window."),
+        note("left in each window."),
         note("From the newest local"),
         note("report for each tool."),
         note("Past its reset, a window"),
-        note("starts again at 0%."),
+        note("is back at 100%."),
         HelpRow::new(),
         heading("Claude Code"),
         note("Tokens today show local"),

@@ -96,12 +96,15 @@ impl Figure {
         self.level.style()
     }
 
-    /// Cells across at the figure's natural aspect ratio, rounded up and
-    /// limited to this window's share of the pane.
+    /// Cells across at the figure's natural aspect ratio, rounded up.
+    pub(super) fn cols(self, (cell_w, cell_h): (u16, u16)) -> usize {
+        (self.width() * usize::from(cell_h) * LARGE_ROWS).div_ceil(HEIGHT * usize::from(cell_w))
+    }
+
+    /// The caller has checked that the figure fits across `area`.
     pub(super) fn draw(self, screen: &mut Screen, area: Area, y: usize, slot: usize) {
         let light = screen.light_background();
-        let (cell_w, cell_h) = screen.cell_size();
-        let cols = (self.width() * usize::from(cell_h) * LARGE_ROWS).div_ceil(HEIGHT * usize::from(cell_w)).min(area.w);
+        let cols = self.cols(screen.cell_size());
         IMAGES.with_borrow_mut(|images| {
             let cached = &mut images[slot];
             if cached.as_ref().is_none_or(|(figure, theme, _)| *figure != self || *theme != light) {
@@ -157,7 +160,7 @@ mod tests {
     #[test]
     fn confirmation_selects_pictures_and_leaves_other_terminals_with_blocks() {
         let area = Area { x: 4, y: 2, w: 16, h: 5 };
-        let metric = metric(27.0);
+        let metric = metric(73.0);
         for able in [None, Some(false), Some(true)] {
             let mut screen = Screen::sized(20, 7);
             if let Some(able) = able {
@@ -181,9 +184,9 @@ mod tests {
         let mut screen = Screen::sized(32, 2);
         screen.set_pictures(true);
         let mut report = Report::new(Tool::Codex, None, Hint::NO_LIMITS, 0);
-        report.first = metric(27.0);
+        report.first = metric(73.0);
         report.panel(&mut screen, Area { x: 0, y: 0, w: 32, h: 2 }, 2, Activity::default);
-        assert_eq!(screen.text(), ["██ Codex 5h 27%", ""]);
+        assert_eq!(screen.text(), ["██ Codex 5h 27% left", ""]);
         assert_eq!(screen.picture_at(), None);
     }
 

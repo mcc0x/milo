@@ -82,7 +82,7 @@ pub(super) struct Width {
 }
 
 pub(super) const WIDTHS: [Width; 3] = [
-    Width { name: "Thin", proportion: "0.22", sketch: 9 },
+    Width { name: "Thin", proportion: "0.20", sketch: 9 },
     Width { name: "Medium", proportion: "0.30", sketch: 12 },
     Width { name: "Wide", proportion: "0.38", sketch: 15 },
 ];
@@ -104,7 +104,7 @@ impl Default for Layout {
             new_tabs: false,
             width: WIDTHS[0].proportion.into(),
             outline_share: "0.70".into(),
-            usage_rows: "5".into(),
+            usage_rows: "10".into(),
         }
     }
 }
@@ -353,7 +353,7 @@ fn shipped_actions(text: &str, layout: &Layout, exe: &str) -> bool {
         };
         body = code;
     }
-    body == ACTIONS || fingerprint(body) == 0x560c_5b9a_caa8_625d
+    body == ACTIONS || [0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f].contains(&fingerprint(body))
 }
 
 /// The installed and temporary layouts must run exactly the same actions.
@@ -398,6 +398,7 @@ fn listener_prefix(rex_file: &Path) -> String {
 }
 
 pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
-    text.strip_prefix(&listener_prefix(rex_file))
-        .is_some_and(|body| body == LISTENER || fingerprint(body) == 0x18ff_d6b9_f7bd_6f63)
+    text.strip_prefix(&listener_prefix(rex_file)).is_some_and(|body| {
+        body == LISTENER || [0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8].contains(&fingerprint(body))
+    })
 }

@@ -4,7 +4,7 @@
 
 ## In Rex
 
-Run `milo setup` inside a Rex tab. Use Up and Down to select a row and `Space` or `Enter` to change it. You can choose the outline, history and usage panes and the width of the left column. Press `a` to try your choices in this tab without saving, or `s` to save them. The added panes leave the keyboard in your shell.
+Run `milo setup` inside a Rex tab. Use Up and Down to select a row and `Space` or `Enter` to change it. You can choose the outline, history and usage panes and the width of the left column, which holds them from top to bottom. Press `a` to try your choices in this tab without saving, or `s` to save them. The added panes leave the keyboard in your shell.
 
 When there is room, **On save:** lists what will change. For a new setup with both **Arrange new shell tabs** and **Show Claude Code limits** on, it says:
 
@@ -14,7 +14,9 @@ When there is room, **On save:** lists what will change. For a new setup with bo
 
 Later it can say “Update the Rex layout.” or “Remove Milo actions from Rex.” Turning off an option can show “Stop arranging new shell tabs.” or “Take milo off Claude Code's status line.”
 
-Turn on **Arrange new shell tabs** to apply the layout to new shell tabs. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save to stop arranging new tabs. The panes also work on their own outside Rex.
+Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save to stop arranging new tabs. The panes also work on their own outside Rex.
+
+The usage pane takes 10 rows at the foot of the column, and never more than two fifths of it. To change that, edit `usage_rows` in `~/.config/milo/rex.lua`. In a narrow column each tool shows its mark beside one large figure, with a row of words for each window below.
 
 Bare `milo` offers setup once in an unconfigured Rex. Use `milo outline` to skip the offer. Outside Rex, `milo setup` only offers the Claude Code option.
 
@@ -27,7 +29,7 @@ Saving installs these actions in the Rex command palette:
 | Milo: Arrange This Tab | `milo_layout` |
 | Milo: Add the Outline | `milo_outline` |
 | Milo: Add the History | `milo_history` |
-| Milo: Add the Usage Strip | `milo_usage` |
+| Milo: Add the Usage | `milo_usage` |
 | Milo: Close Panes in This Tab | `milo_close` |
 
 Milo does not add key bindings. To add your own, put something like `rex.bind("cmd+shift+m", "milo_layout")` in Rex's `init.lua`.

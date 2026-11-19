@@ -34,8 +34,43 @@ pub fn run(args: &[&OsStr]) -> bool {
 }
 
 /// Replaces milo without releasing the listener's inherited lock.
+///
+/// The Rex server starts the listener with a short system path that leaves
+/// `rex` out, so when it is not found by name, the server's own program is used.
 pub fn exec_listener(script: &Path) -> io::Error {
-    Command::new("rex").arg("do").arg(script).arg("--all").stdin(Stdio::null()).stdout(Stdio::null()).exec()
+    let listen = |rex: &OsStr| {
+        Command::new(rex).arg("do").arg(script).arg("--all").stdin(Stdio::null()).stdout(Stdio::null()).exec()
+    };
+    let error = listen(OsStr::new("rex"));
+    match parent_program() {
+        Some(parent) if error.kind() == io::ErrorKind::NotFound && parent.file_name() == Some(OsStr::new("rex")) => {
+            listen(parent.as_os_str())
+        }
+        _ => error,
+    }
+}
+
+/// The program that started milo, if the system will say.
+#[cfg(target_os = "macos")]
+fn parent_program() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut path = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let size = u32::try_from(path.len()).ok()?;
+    // SAFETY: Asking for the parent's ID touches no memory.
+    let parent = unsafe { libc::getppid() };
+    // SAFETY: The buffer is writable for the size given.
+    let len = unsafe { libc::proc_pidpath(parent, path.as_mut_ptr().cast(), size) };
+    path.truncate(usize::try_from(len).ok().filter(|&len| len > 0)?);
+    Some(OsString::from_vec(path).into())
+}
+
+/// The program that started milo, if the system will say.
+#[cfg(not(target_os = "macos"))]
+fn parent_program() -> Option<std::path::PathBuf> {
+    // SAFETY: Asking for the parent's ID touches no memory.
+    let parent = unsafe { libc::getppid() };
+    std::fs::read_link(format!("/proc/{parent}/exe")).ok()
 }
 
 /// A string as a JSON literal.

@@ -195,7 +195,7 @@ fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
     assert_eq!(pace.idle(), Duration::from_secs(2));
     write(&f, CODEX, &codex(now, 61, now + HOUR, "null"), now);
     pace.look(&mut usage, true);
-    assert!(frame(&mut usage, 100, 2)[0].contains("61%"));
+    assert!(frame(&mut usage, 100, 2)[0].contains("39%"));
     // A new root is not guaranteed to be covered by the original watcher.
     assert_eq!(pace.idle(), Duration::from_secs(2));
 }
@@ -218,7 +218,7 @@ fn malformed_enormous_and_deeply_nested_lines_are_skipped() {
     write(&f, CODEX, &codex_data, NOW);
     write(&f, CLAUDE, &claude_data, NOW);
     let rows = frame(&mut open(&f, NOW), 140, 4);
-    assert!(rows[1].contains("23%") && rows[3].contains("1.2k tokens today"));
+    assert!(rows[1].contains("77%") && rows[3].contains("1.2k tokens today"));
 }
 
 mod omp_limits {

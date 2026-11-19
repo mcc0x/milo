@@ -78,15 +78,21 @@ enum When {
 }
 
 impl When {
+    /// Says that the figure is what is left, and when there is room, when it starts over.
     fn draw(self, screen: &mut Screen, area: Area, row: usize) {
         match self {
-            Self::Reset => area.note(screen, row, "reset"),
-            Self::Running(left) => {
-                let left = when::duration(left, Detail::Exact);
-                let prefix = if left.len() + 10 <= area.w { "resets in " } else { "in " };
-                area.note(screen, row, &format!("{prefix}{left}"));
+            Self::Reset => area.note(screen, row, if area.w >= 12 { "left · reset" } else { "left" }),
+            Self::Running(seconds) => {
+                let time = when::duration(seconds, Detail::Exact);
+                if time.len() + 17 <= area.w {
+                    area.note(screen, row, &format!("left · resets in {time}"));
+                } else if time.len() + 7 <= area.w {
+                    area.note(screen, row, &format!("left · {time}"));
+                } else {
+                    area.note(screen, row, "left");
+                }
             }
-            Self::Unknown => {}
+            Self::Unknown => area.note(screen, row, "left"),
         }
     }
 }
@@ -151,21 +157,71 @@ impl Metric<'_> {
         row.add(self.number(), self.colour().bold());
     }
 
+    /// Columns the figure needs when drawn large on this screen.
+    fn large_width(&self, screen: &Screen) -> usize {
+        match self.number {
+            Some(number) if screen.pictures() == Some(true) => number.cols(screen.cell_size()),
+            Some(number) => digits::width(number.text),
+            None => 1,
+        }
+    }
+
     /// Stay legible when either images or large text glyphs do not fit.
     fn panel(&self, screen: &mut Screen, area: Area, rows: Chart, slot: usize) {
         area.note(screen, rows.label, &self.label);
-        let y = area.y + rows.label + 1;
-        match (rows.large, self.number) {
-            (true, Some(number)) if screen.pictures() == Some(true) => number.draw(screen, area, y, slot),
+        self.figure(screen, area, area.y + rows.label + 1, rows.large, slot);
+        self.when.draw(screen, area, rows.note);
+    }
+
+    /// The figure as a picture, as block digits, or as plain text in the middle of their rows.
+    fn figure(&self, screen: &mut Screen, area: Area, y: usize, large: bool, slot: usize) {
+        match (large, self.number) {
+            (true, Some(number)) if screen.pictures() == Some(true) && number.cols(screen.cell_size()) <= area.w => {
+                number.draw(screen, area, y, slot);
+            }
             (true, Some(number)) if digits::width(number.text) <= area.w => {
                 digits::draw(screen, area.x, y, number.text, number.style());
             }
             _ if self.number_width() <= area.w => {
-                screen.put(area.x, y + usize::from(rows.large), area.w, self.number(), self.colour().bold());
+                screen.put(area.x, y + usize::from(large), area.w, self.number(), self.colour().bold());
             }
             _ => {}
         }
-        self.when.draw(screen, area, rows.note);
+    }
+
+    /// One row of words under a lone large figure, such as “of week left”,
+    /// then the reading's age if it is old, or else when the window starts over.
+    fn caption(&self, screen: &mut Screen, area: Area, row: usize) {
+        let (lead, detail) = match (self.age, self.when) {
+            (Some(age), _) => ("", Some(format!("{} ago", when::duration(age, Detail::Rounded)))),
+            (None, When::Reset) => ("", Some("reset".into())),
+            (None, When::Running(seconds)) => ("resets in ", Some(when::duration(seconds, Detail::Exact))),
+            (None, When::Unknown) => ("", None),
+        };
+        let words = self.label.len() + 8;
+        if words > area.w {
+            return area.note(screen, row, &self.label);
+        }
+        let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
+        writer.add("of ", FAINT);
+        writer.add(&self.label, FAINT);
+        writer.add(" left", FAINT);
+        if let Some(detail) = detail.filter(|detail| words + 3 + detail.len() <= area.w) {
+            writer.add(" · ", FAINT);
+            if words + 3 + lead.len() + detail.len() <= area.w {
+                writer.add(lead, FAINT);
+            }
+            writer.add(&detail, FAINT);
+        }
+    }
+
+    /// A window in words, for one without a large figure of its own.
+    fn row(&self, screen: &mut Screen, area: Area, row: usize) {
+        let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
+        self.inline(&mut writer, true);
+        if self.inline_width() + 5 <= area.w {
+            writer.add(" left", FAINT);
+        }
     }
 }
 
@@ -264,22 +320,38 @@ impl<'a> Report<'a> {
             row.add("  ", FAINT);
             metric.inline(&mut row, true);
         }
+        if self.has_number() && used + 3 * usize::from(tile) + 5 <= area.w {
+            row.add(" left", FAINT);
+        }
     }
 
     /// Draws one tool in `area`. `marks` is the height both tools' marks are
     /// sized for, so that they come out the same.
     fn panel(&self, screen: &mut Screen, area: Area, marks: usize, activity: impl FnOnce() -> Activity) {
-        if area.w < 24 || area.h < 3 {
+        if area.w < 17 || area.h < 3 {
             return self.inline(screen, area);
+        }
+        if area.w < 30 {
+            return self.compact(screen, area, activity);
         }
         let chart = Chart::new(area.h);
         let lane = if area.w >= 56 { 16 } else { 10 };
         let text_row = chart.label + 1 + usize::from(chart.large);
         let column = Area { w: lane - 1, ..area };
-        let beneath = self.mark(screen, Area { h: marks.min(area.h), ..column }, text_row);
+        let mark = Area { h: marks.min(area.h), ..column };
+        let beneath = self.mark(screen, mark, (4 * mark.h + 2) / 5, text_row);
         let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
-        let (count, gap) = self.figure_grid(figures.w);
-        let metrics = std::iter::once(&self.first).chain(self.extra.iter().flatten()).take(count);
+        let (mut count, gap) = self.figure_grid(figures.w);
+        let all = || std::iter::once(&self.first).chain(self.extra.iter().flatten());
+        // Large figures too wide to sit side by side: the first keeps the
+        // width, and the others follow below it as text.
+        if chart.large && count > 1 {
+            let each = (figures.w - (count - 1) * gap) / count;
+            if all().take(count).any(|metric| metric.large_width(screen) > each) {
+                count = 1;
+            }
+        }
+        let metrics = all().take(count);
         // How old the reading is, said once for the tool rather than under
         // each of its windows.
         if let Some(age) = metrics.clone().filter_map(|metric| metric.age).max()
@@ -300,16 +372,27 @@ impl<'a> Report<'a> {
             let w = width * (i + 1) / count - start;
             metric.panel(screen, Area { x: figures.x + start + i * gap, w, ..figures }, chart, slot + i);
         }
+        // A window without a figure of its own gets a row below the captions,
+        // across the whole panel once it is clear of the mark.
+        let mut row = chart.note + 1;
+        for metric in all().skip(count) {
+            let line = if row >= beneath { area } else { figures };
+            if row >= area.h || metric.inline_width() > line.w {
+                break;
+            }
+            metric.row(screen, line, row);
+            row += 1;
+        }
         // Activity is not a limit, so it never sits under a window as if it
         // were that window's caption: it has a row of its own, or follows
         // the hint on the hint's row, or is left out.
-        let spare = chart.note + 1 < area.h;
+        let spare = row < area.h;
         let activity = (spare || self.hint.is_some()).then(|| activity_text(activity())).flatten();
         if let Some(hint) = &self.hint {
             hint.draw(screen, figures, chart.note, activity.as_deref().filter(|_| !spare));
         }
         if spare && let Some(activity) = activity {
-            figures.note(screen, chart.note + 1, &activity);
+            figures.note(screen, row, &activity);
         }
     }
 
@@ -329,12 +412,48 @@ impl<'a> Report<'a> {
         (2, gap)
     }
 
-    /// Draws the tool's mark four fifths as tall as `area`, in its middle,
-    /// and returns the first row beneath it.
-    fn mark(&self, screen: &mut Screen, area: Area, text_row: usize) -> usize {
+    /// A narrow panel: the mark beside one large figure, then a row of
+    /// words for each window, with nothing above the figure.
+    fn compact(&self, screen: &mut Screen, area: Area, activity: impl FnOnce() -> Activity) {
+        let windows = 1 + self.extra.iter().flatten().count();
+        let top = area.h.saturating_sub(LARGE_ROWS + windows) / 2;
+        let area = Area { y: area.y + top, h: area.h - top, ..area };
+        // A mark three rows tall is six columns across; its name in words needs nine.
+        let lane = if screen.pictures() == Some(true) { 8 } else { 10 };
+        self.mark(screen, Area { w: lane - 1, h: LARGE_ROWS, ..area }, LARGE_ROWS, 1);
+        let slot = match self.tool {
+            Tool::Codex => 0,
+            Tool::Claude => 2,
+        };
+        self.first.figure(screen, Area { x: area.x + lane, w: area.w - lane, ..area }, area.y, true, slot);
+        let mut row = LARGE_ROWS;
+        if row < area.h {
+            match &self.hint {
+                Some(hint) => hint.draw(screen, area, row, None),
+                None => self.first.caption(screen, area, row),
+            }
+            row += 1;
+        }
+        for metric in self.extra.iter().flatten() {
+            if row >= area.h || metric.inline_width() > area.w {
+                break;
+            }
+            metric.row(screen, area, row);
+            row += 1;
+        }
+        if row < area.h
+            && let Some(activity) = activity_text(activity())
+        {
+            area.note(screen, row, &activity);
+        }
+    }
+
+    /// Draws the tool's mark `rows` tall in the middle of `area`, and
+    /// returns the first row beneath it.
+    fn mark(&self, screen: &mut Screen, area: Area, rows: usize, text_row: usize) -> usize {
         if screen.pictures() == Some(true) {
             let mark = self.tool.picture();
-            let (cols, rows) = mark.fit(screen.cell_size(), area.w, (4 * area.h + 2) / 5);
+            let (cols, rows) = mark.fit(screen.cell_size(), area.w, rows);
             let top = (area.h - rows) / 2;
             screen.show_picture(mark, area.x, area.y + top, cols, rows);
             top + rows

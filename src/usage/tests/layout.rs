@@ -19,7 +19,7 @@ fn example_limits(f: &Fixture, codex_at: Option<i64>, claude_at: Option<i64>, re
 }
 
 fn assert_figures(rows: &[String], width: usize, codex: (&str, &str), claude: (&str, &str)) {
-    let tall = matches!(rows.len(), 5 | 12);
+    let tall = matches!(rows.len(), 5 | 8 | 12);
     let (codex, claude) = if tall { (codex.1, claude.1) } else { (codex.0, claude.0) };
     match rows.len() {
         1 if width < 15 => assert!(rows[0].contains(if codex == "—" { claude } else { codex })),
@@ -51,16 +51,16 @@ fn size_classes_keep_the_primary_figures_in_both_panels() {
     let next = now + 2 * HOUR + 10 * MINUTE;
     // Each figure as plain text, and as the foot of its large form: the
     // last row of the digits with the percent sign closed up after them.
-    let codex = ("27%", "█▄▄  █ %");
-    let claude = ("52%", "▄▄▛ █▄▄%");
+    let codex = ("73%", " █  ▄▄▛%");
+    let claude = ("48%", "  █ ▜▄▛%");
     let dash = ("—", "—");
-    let zero = ("0%", "▜▄▛%");
+    let full = ("100%", "▄█▄ ▜▄▛ ▜▄▛%");
     for (name, codex_at, claude_at, reset_at, left, right) in [
         ("both", Some(now), Some(now), next, codex, claude),
         ("Codex only", Some(now), None, next, codex, dash),
         ("Claude only", None, Some(now), next, dash, claude),
         ("neither", None, None, next, dash, dash),
-        ("reset", Some(now - HOUR), Some(now - HOUR), now, zero, zero),
+        ("reset", Some(now - HOUR), Some(now - HOUR), now, full, full),
         ("old", Some(now - 10 * DAY), Some(now - 3 * DAY), next, codex, claude),
     ] {
         let f = Fixture::folder();
@@ -140,9 +140,9 @@ fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
         let rows = frame(&mut usage, width, 3);
         let claude = |row: usize| rows[row].split_once('│').unwrap().1;
         assert!(claude(0).contains("5h") && claude(0).contains("week"));
-        assert!(claude(1).contains("12%") && claude(1).contains("34%"));
+        assert!(claude(1).contains("88%") && claude(1).contains("66%"));
         assert_eq!(claude(0).contains("Opus week"), model);
-        assert_eq!(claude(1).contains("56%"), model);
+        assert_eq!(claude(1).contains("44%"), model);
     }
 
     let mut screen = Screen::sized(140, 5);
@@ -153,11 +153,28 @@ fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
 }
 
 #[test]
+fn a_narrow_column_has_one_large_figure_and_a_row_of_words_for_each_window() {
+    let f = Fixture::folder();
+    let mut usage = open(&f, NOW);
+    let window = |percent| Window { minutes: 10_080, percent, resets: Some(NOW + DAY), observed: NOW };
+    usage.claude.native = Some(Reading {
+        at: Timestamp::seconds(NOW),
+        windows: Limits { base: [None, Some(window(31.0))], model_week: ModelWeek::new("fable", window(58.0)) },
+    });
+    // Claude has the six rows below the rule, and needs five of them.
+    let rows = frame(&mut usage, 24, 13);
+    assert!(rows[9].ends_with("▜▄▛ ▄▄▛%"), "{}", rows[9]);
+    assert_eq!(rows[10].trim(), "of week left · 1 d");
+    assert_eq!(rows[11].trim(), "Fable week 42% left");
+    assert!(rows[12].is_empty());
+}
+
+#[test]
 fn a_tiny_frame_keeps_an_intact_primary_figure() {
     let f = with_limits();
     let mut usage = open(&f, NOW);
-    assert_eq!(frame(&mut usage, 6, 1), ["Cx 23%"]);
-    assert_eq!(frame(&mut usage, 12, 2), ["Codex 23%", "Claude 23%"]);
+    assert_eq!(frame(&mut usage, 6, 1), ["Cx 77%"]);
+    assert_eq!(frame(&mut usage, 12, 2), ["Codex 77%", "Claude 77%"]);
     for w in 0..=48 {
         for h in 0..=8 {
             frame(&mut usage, w, h);
@@ -214,7 +231,7 @@ fn an_old_reading_says_so_once_and_each_window_keeps_its_reset_time() {
         let codex = frame(&mut usage, w, h)[..5].join("\n");
         assert_eq!(codex.matches("ago").count(), 1, "{codex}");
         assert!(codex.contains(age), "{codex}");
-        assert!(codex.contains("in 2 h") && codex.contains("in 2 d"), "{codex}");
+        assert!(codex.contains("left") && codex.contains("2 h") && codex.contains("2 d"), "{codex}");
     }
 }
 
@@ -226,7 +243,7 @@ fn a_millisecond_reset_has_the_same_countdown_as_seconds() {
     let mut usage = open(&f, NOW);
     assert_eq!(frame(&mut usage, 140, 3)[2].matches("resets in 2 h").count(), 2);
     usage.fixed_now = Some(reset);
-    assert_eq!(frame(&mut usage, 140, 3)[1].matches("0%").count(), 2);
+    assert_eq!(frame(&mut usage, 140, 3)[1].matches("100%").count(), 2);
 }
 
 #[test]
@@ -243,7 +260,7 @@ fn a_lone_figure_has_room_for_its_reset_caption() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 23, NOW + 2 * HOUR + 10 * MINUTE, "null"), NOW);
     let rows = frame(&mut open(&f, NOW), 28, 12);
-    assert_eq!(rows[4].trim(), "in 2 h 10 m");
+    assert_eq!(rows[3].trim(), "of week left · 2 h 10 m");
 }
 
 #[test]

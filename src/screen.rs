@@ -202,8 +202,6 @@ struct Pictures {
     wanted: Vec<Placement>,
     uploaded: Vec<Placement>,
     hidden: bool,
-    /// A resize calls for a fresh placement, without uploading the data again.
-    erased: bool,
     /// Data for pictures in `wanted` that are not already on the terminal.
     data: Vec<u8>,
 }
@@ -211,15 +209,7 @@ struct Pictures {
 impl Default for Pictures {
     fn default() -> Self {
         // Most terminals draw a cell about twice as tall as it is wide.
-        Self {
-            able: None,
-            cell: (8, 16),
-            wanted: Vec::new(),
-            uploaded: Vec::new(),
-            hidden: false,
-            erased: false,
-            data: Vec::new(),
-        }
+        Self { able: None, cell: (8, 16), wanted: Vec::new(), uploaded: Vec::new(), hidden: false, data: Vec::new() }
     }
 }
 
@@ -288,7 +278,12 @@ impl Screen {
         self.marks_flushed = false;
         self.prev.resize(w * h, BLANK);
         self.out.extend_from_slice(b"\x1b[0m\x1b[2J");
-        self.pictures.erased = true;
+        // Erasing the display makes some terminals, Rex among them, drop the
+        // pictures' data as well. Free it everywhere and upload it afresh.
+        for old in self.pictures.uploaded.drain(..) {
+            delete_picture(&mut self.out, old.id, 'I');
+        }
+        self.pictures.hidden = false;
     }
 
     pub fn clear(&mut self) {
@@ -494,14 +489,14 @@ impl Screen {
             }
             return self.out.len();
         }
-        let place_again = pictures.erased || pictures.hidden;
+        let place_again = pictures.hidden;
         if !place_again && pictures.wanted == pictures.uploaded {
             return self.out.len();
         }
         for old in &pictures.uploaded {
             match pictures.wanted.iter().find(|at| at.id == old.id) {
                 None => delete_picture(&mut self.out, old.id, 'I'),
-                Some(at) if !pictures.hidden && (at != old || pictures.erased) => {
+                Some(at) if !pictures.hidden && at != old => {
                     delete_picture(&mut self.out, old.id, 'i');
                 }
                 Some(_) => {}
@@ -523,7 +518,6 @@ impl Screen {
         }
         pictures.uploaded.clone_from(&pictures.wanted);
         pictures.hidden = false;
-        pictures.erased = false;
         data_at
     }
 
@@ -807,9 +801,13 @@ mod tests {
         assert!(moved.contains(&format!("a=d,d=i,i={},", a.id)));
         assert!(moved.contains(&format!("\x1b[2;4H\x1b_Ga=p,i={},", a.id)));
 
+        // A resize erases the display, and with it the terminal may drop the pictures.
         screen.resize(24, 6);
+        screen.clear();
+        screen.show_picture(&a, 3, 1, 4, 2);
+        screen.show_picture(&b, 12, 1, 4, 2);
         let resized = frame(&mut screen);
-        assert!(!resized.contains("a=t"));
+        assert_eq!(resized.matches("a=t,f=100,").count(), 2);
         assert_eq!(resized.matches("a=p,").count(), 2);
 
         screen.clear();

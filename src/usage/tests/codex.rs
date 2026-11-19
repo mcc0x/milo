@@ -7,7 +7,7 @@ fn codex_shows_percent_window_and_time_until_reset() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 23, NOW + 2 * HOUR + 10 * MINUTE, "null"), NOW);
     let rows = frame(&mut open(&f, NOW), 140, 3);
-    assert!(rows[0].contains("week") && rows[1].contains("23%") && rows[2].contains("resets in 2 h 10 m"));
+    assert!(rows[0].contains("week") && rows[1].contains("77%") && rows[2].contains("left · resets in 2 h 10 m"));
 }
 
 #[test]
@@ -17,7 +17,7 @@ fn newest_snapshot_wins_across_files_regardless_of_file_order_or_mtime() {
     write(&f, CODEX, &codex_at(&format!("{stamp}.901Z"), 67, NOW + HOUR, "null"), NOW - 60);
     write(&f, OTHER_CODEX, &codex_at(&format!("{stamp}.101Z"), 13, NOW + HOUR, "null"), NOW);
     let rows = frame(&mut open(&f, NOW), 85, 2);
-    assert!(rows[0].contains("67%") && !rows[0].contains("13%"));
+    assert!(rows[0].contains("33%") && !rows[0].contains("87%"));
 }
 
 #[test]
@@ -27,14 +27,14 @@ fn codex_clamps_overfull_windows_and_accepts_whole_minutes_written_as_floats() {
         let window = format!(r#"{{"used_percent":{percent},"window_minutes":{minutes}}}"#);
         write(&f, CODEX, &codex_snapshot(&format!("{}Z", iso(NOW)), &window, "null"), NOW);
         let rows = frame(&mut open(&f, NOW), 100, 2);
-        assert!(rows[0].contains("5h 100%"));
+        assert!(rows[0].contains("5h 0%"));
     }
 }
 
 #[test]
 fn a_nonzero_window_near_an_endpoint_does_not_look_empty_or_full() {
     let f = Fixture::folder();
-    for (percent, shown) in [("0.4", "<1%"), ("99.9", "99+%")] {
+    for (percent, shown) in [("0.4", "99+%"), ("99.9", "<1%")] {
         let window = format!(r#"{{"used_percent":{percent},"window_minutes":300}}"#);
         write(&f, CODEX, &codex_snapshot(&format!("{}Z", iso(NOW)), &window, "null"), NOW);
         assert!(frame(&mut open(&f, NOW), 100, 2)[0].contains(shown));
@@ -52,7 +52,7 @@ fn an_unreadable_codex_report_supersedes_older_figures() {
         write(&f, OTHER_CODEX, &previous, NOW - MINUTE);
         let rows = frame(&mut open(&f, NOW), 140, 3);
         let left = |y: usize| rows[y].split_once('│').unwrap().0;
-        assert!(left(1).contains('—') && !left(1).contains("40%"));
+        assert!(left(1).contains('—') && !left(1).contains("60%"));
         assert!(left(2).contains("no limits to show"));
     }
 }
@@ -68,7 +68,7 @@ fn codex_token_count_without_a_limit_report_does_not_erase_the_previous_figure()
              \"rate_limits\":{limits}}}}}\n"
         );
         write(&f, CODEX, &format!("{previous}{record}"), NOW);
-        assert!(frame(&mut open(&f, NOW), 140, 3)[1].contains("40%"));
+        assert!(frame(&mut open(&f, NOW), 140, 3)[1].contains("60%"));
     }
 }
 
@@ -84,7 +84,7 @@ fn codex_allows_a_little_clock_skew_but_ignores_far_future_events() {
     .concat();
     write(&f, CODEX, &data, NOW);
     let rows = frame(&mut open(&f, NOW), 100, 2);
-    assert!(rows[0].contains("62%") && !rows[0].contains("41%") && !rows[0].contains("95%"));
+    assert!(rows[0].contains("38%") && !rows[0].contains("59%") && !rows[0].contains(" 5%"));
 }
 
 #[test]
@@ -92,14 +92,14 @@ fn codex_shows_reset_when_the_time_passes_without_an_append() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 77, NOW + 5, "null"), NOW);
     let mut usage = open(&f, NOW);
-    assert!(frame(&mut usage, 85, 2)[0].contains("77%"));
+    assert!(frame(&mut usage, 85, 2)[0].contains("23%"));
     assert_eq!(usage.next_frame(), Some(Duration::from_secs(5)));
     usage.fixed_now = Some(NOW + 4);
-    assert!(frame(&mut usage, 85, 2)[0].contains("77%"));
+    assert!(frame(&mut usage, 85, 2)[0].contains("23%"));
     usage.fixed_now = Some(NOW + 5);
     assert_eq!(usage.next_frame(), Some(Duration::from_secs(60)));
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].contains("0%") && !rows[1].contains("77%"));
+    assert!(rows[1].contains("100%") && !rows[1].contains("23%"));
     assert!(rows[2].split('│').next().unwrap().contains("reset"));
 }
 
@@ -109,7 +109,7 @@ fn an_old_codex_snapshot_says_how_old_it_is() {
     let then = NOW - 10 * DAY;
     write(&f, CODEX, &codex(then, 33, NOW + DAY, "null"), then);
     let rows = frame(&mut open(&f, NOW), 140, 3);
-    assert!(rows[1].contains("33%"));
+    assert!(rows[1].contains("67%"));
     assert!(rows[2].contains("10 d ago"));
 }
 
@@ -121,7 +121,7 @@ fn codex_ignores_null_secondary_and_shows_a_present_one() {
     let secondary = codex_window(89, 300, NOW + HOUR);
     write(&f, CODEX, &codex(NOW, 23, NOW + DAY, &secondary), NOW);
     let rows = frame(&mut open(&f, NOW), 100, 2);
-    assert!(rows[0].contains("5h") && rows[0].contains("89%") && rows[0].contains("23%"));
+    assert!(rows[0].contains("5h") && rows[0].contains("11%") && rows[0].contains("77%"));
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn codex_reads_only_the_newest_plain_sessions_and_reuses_unchanged_tails() {
     }
     let mut usage = open(&f, NOW);
     let rows = frame(&mut usage, 100, 2);
-    assert!(rows[0].contains("46%") && !rows[0].contains("99%"));
+    assert!(rows[0].contains("54%") && !rows[0].contains(" 1%"));
     assert_eq!(usage.bytes_read, u64::try_from(kept.len() + 3 * empty.len()).unwrap());
     assert!(usage.check());
     assert_eq!(usage.bytes_read, 0);
