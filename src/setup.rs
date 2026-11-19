@@ -477,11 +477,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn save_prefs(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
+        const SAVE_FAILED: &str = "Could not save Milo's pane preferences.";
+        let before = self.saved_prefs.ok_or(SAVE_FAILED)?;
         let root = match scope {
             Scope::Global => None,
             Scope::Worktree => Some(self.root.as_deref().ok_or("This tab is not in a Git worktree.")?),
         };
-        self.prefs.save(root).map_err(|_| "Could not save Milo's pane preferences.")?;
+        self.prefs.save_changes(before, root).map_err(|_| SAVE_FAILED)?;
         self.reload_prefs()?;
         if self.exit_from.is_none() {
             self.back();

@@ -360,9 +360,7 @@ impl Welcome {
 }
 
 fn save_icons(icons: IconMode) -> Result<(), String> {
-    let mut prefs = Preferences::load(None).map_err(|error| format!("Could not read pane preferences: {error}"))?;
-    prefs.icons = icons;
-    prefs.save(None).map_err(|error| format!("Could not save pane preferences: {error}"))
+    Preferences::set_icons(icons).map_err(|error| format!("Could not save pane preferences: {error}"))
 }
 
 fn brand(s: &mut Screen, x: usize, y: usize, w: usize, h: usize) {

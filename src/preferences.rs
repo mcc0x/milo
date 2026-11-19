@@ -158,28 +158,34 @@ impl Preferences {
         Ok(())
     }
 
-    fn encode(&self) -> String {
-        let project = if self.project_mode == ProjectMode::Follow { "follow" } else { "pin" };
-        format!(
-            concat!(
-                "icons = {}\nstatic_marks = {}\ntext_git_marks = {}\nfollow_activity = {}\n",
-                "changes_only = {}\nproject_mode = {}\nhistory_follow_new = {}\nusage_large_figures = {}\n"
-            ),
-            self.icons.value(),
-            self.static_marks,
-            self.text_git_marks,
-            self.follow_activity,
-            self.changes_only,
-            project,
-            self.history_follow_new,
-            self.usage_large_figures,
+    /// Apply only the edits made since the editor loaded its resolved preferences.
+    pub fn save_changes(&self, before: Self, worktree: Option<&Path>) -> io::Result<()> {
+        let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
+        let boolean = |old, new| (old != new).then(|| bool_value(new));
+        update(
+            &config_file(&dir, worktree),
+            &[
+                ("icons", (before.icons != self.icons).then(|| self.icons.value())),
+                ("static_marks", boolean(before.static_marks, self.static_marks)),
+                ("text_git_marks", boolean(before.text_git_marks, self.text_git_marks)),
+                ("follow_activity", boolean(before.follow_activity, self.follow_activity)),
+                ("changes_only", boolean(before.changes_only, self.changes_only)),
+                (
+                    "project_mode",
+                    (before.project_mode != self.project_mode).then_some(match self.project_mode {
+                        ProjectMode::Follow => "follow",
+                        ProjectMode::Pin => "pin",
+                    }),
+                ),
+                ("history_follow_new", boolean(before.history_follow_new, self.history_follow_new)),
+                ("usage_large_figures", boolean(before.usage_large_figures, self.usage_large_figures)),
+            ],
         )
     }
 
-    pub fn save(&self, worktree: Option<&Path>) -> io::Result<()> {
+    pub fn set_icons(icons: IconMode) -> io::Result<()> {
         let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
-        let file = config_file(&dir, worktree);
-        locked(&file, |dir| replace(dir, &file, &self.encode()))
+        update(&config_file(&dir, None), &[("icons", Some(icons.value()))])
     }
 
     pub fn clear(worktree: &Path) -> io::Result<()> {
@@ -201,21 +207,43 @@ impl Preferences {
     }
 
     fn set_changes_only_in(dir: &Path, worktree: &Path, value: bool) -> io::Result<()> {
-        let file = config_file(dir, Some(worktree));
-        locked(&file, |dir| {
-            let old = read(&file, 1 << 16)?.unwrap_or_default();
-            // Do not turn a malformed hand-edited file into a different set of preferences.
-            Self::default().apply(&old)?;
-            let mut text = String::with_capacity(old.len() + 24);
-            for line in old.lines() {
-                if !line.split_once('=').is_some_and(|(key, _)| key.trim() == "changes_only") {
-                    let _ = writeln!(text, "{line}");
-                }
-            }
-            let _ = writeln!(text, "changes_only = {value}");
-            replace(dir, &file, &text)
-        })
+        update(&config_file(dir, Some(worktree)), &[("changes_only", Some(bool_value(value)))])
     }
+}
+
+fn bool_value(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+fn update(path: &Path, edits: &[(&str, Option<&str>)]) -> io::Result<()> {
+    let extra = edits.iter().filter_map(|(key, value)| value.map(|value| key.len() + value.len() + 4)).sum::<usize>();
+    if extra == 0 {
+        return Ok(());
+    }
+    locked(path, |dir| {
+        let old = read(path, 1 << 16)?.unwrap_or_default();
+        // Validate the destination without filling in its missing (inherited) settings.
+        Preferences::default().apply(&old)?;
+        let mut text = String::with_capacity(old.len() + extra + 1);
+        for line in old.split_inclusive('\n') {
+            let edited = line.split_once('=').is_some_and(|(key, _)| {
+                let key = key.trim();
+                edits.iter().any(|&(changed, value)| value.is_some() && key == changed)
+            });
+            if !edited {
+                text.push_str(line);
+            }
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        for (key, value) in edits {
+            if let Some(value) = value {
+                let _ = writeln!(text, "{key} = {value}");
+            }
+        }
+        replace(dir, path, &text)
+    })
 }
 
 fn config_file(dir: &Path, worktree: Option<&Path>) -> PathBuf {
@@ -350,8 +378,7 @@ mod tests {
         let left = f.root.join("left");
         let right = f.root.join("right");
         let global = Preferences { icons: IconMode::Off, text_git_marks: true, ..Preferences::default() };
-        let global_file = config_file(&config, None);
-        locked(&global_file, |dir| replace(dir, &global_file, &global.encode())).unwrap();
+        update(&config_file(&config, None), &[("icons", Some("off")), ("text_git_marks", Some("true"))]).unwrap();
         Preferences::set_changes_only_in(&config, &left, true).unwrap();
         assert_eq!(Preferences::resolve_in(&config, Some(&right)).unwrap(), (global, Source::Global));
         assert_eq!(

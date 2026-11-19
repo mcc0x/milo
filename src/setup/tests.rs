@@ -173,6 +173,75 @@ fn exit_save_scopes_preferences_then_saves_claude() {
 }
 
 #[test]
+fn global_preference_save_does_not_copy_worktree_or_stale_values() {
+    let Some(root) = isolated_settings("setup::tests::global_preference_save_does_not_copy_worktree_or_stale_values")
+    else {
+        return;
+    };
+    let worktree = root.join("worktree");
+    Preferences::set_changes_only(&worktree, true).unwrap();
+    let global = root.join("milo/preferences.conf");
+    fs::write(&global, "icons = nerd\nchanges_only = false\n").unwrap();
+
+    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    pane.reload_prefs().unwrap();
+    choose(&mut pane, Row::HistoryFollow);
+    choose(&mut pane, Row::FollowProject);
+    fs::write(&global, "icons = off\nchanges_only = false\nfollow_activity = false\n").unwrap();
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+
+    let expected = Preferences {
+        icons: IconMode::Off,
+        follow_activity: false,
+        history_follow_new: true,
+        project_mode: ProjectMode::Pin,
+        ..Preferences::default()
+    };
+    assert_eq!(Preferences::resolve(None).unwrap(), (expected, Source::Global));
+    assert_eq!(
+        Preferences::resolve(Some(&worktree)).unwrap(),
+        (Preferences { changes_only: true, ..expected }, Source::Worktree),
+    );
+    assert!(!pane.prefs_dirty());
+}
+
+#[test]
+fn worktree_preference_save_keeps_other_fields_inherited_or_overridden() {
+    let Some(root) =
+        isolated_settings("setup::tests::worktree_preference_save_keeps_other_fields_inherited_or_overridden")
+    else {
+        return;
+    };
+    let worktree = root.join("worktree");
+    let config = root.join("milo");
+    fs::create_dir(&config).unwrap();
+    let global = config.join("preferences.conf");
+    let global_before = "icons = off\nchanges_only = false\n";
+    fs::write(&global, global_before).unwrap();
+
+    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    pane.reload_prefs().unwrap();
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    assert!(!config.join("worktrees").exists(), "saving no edits creates no override");
+
+    choose(&mut pane, Row::HistoryFollow);
+    Preferences::set_changes_only(&worktree, false).unwrap();
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    assert_eq!(fs::read_to_string(&global).unwrap(), global_before);
+    assert!(!pane.prefs_dirty());
+
+    fs::write(&global, "icons = nerd\nchanges_only = true\nfollow_activity = false\n").unwrap();
+    let expected = Preferences { icons: IconMode::Nerd, follow_activity: false, ..Preferences::default() };
+    assert_eq!(
+        Preferences::resolve(Some(&worktree)).unwrap(),
+        (Preferences { history_follow_new: true, ..expected }, Source::Worktree),
+    );
+}
+
+#[test]
 fn exit_layout_save_reports_failure_and_requires_global_scope_for_auto_arrange() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), true, None, Some(f.root.clone()), |_| false);
