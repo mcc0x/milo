@@ -115,7 +115,9 @@ impl Preferences {
     }
 
     fn for_pane_in(dir: &Path, worktree: Option<&Path>) -> (Self, Option<&'static str>) {
-        let Ok((global, _)) = Self::resolve_in(dir, None) else { return (Self::default(), None) };
+        let Ok((global, _)) = Self::resolve_in(dir, None) else {
+            return (Self::default(), Some("milo doctor: global prefs ignored"));
+        };
         let Some(root) = worktree else { return (global, None) };
         match global.read_layer(&config_file(dir, Some(root))) {
             Ok(prefs) => (prefs.unwrap_or(global), None),
@@ -410,6 +412,16 @@ mod tests {
         assert_eq!(
             Preferences::resolve_in(&config, Some(&left)).unwrap(),
             (Preferences { changes_only: true, ..global }, Source::Worktree),
+        );
+    }
+
+    #[test]
+    fn panes_warn_when_broken_global_preferences_force_defaults() {
+        let f = Fixture::folder();
+        fs::write(config_file(&f.root, None), "icons = off\nchanges_only = invalid\n").unwrap();
+        assert_eq!(
+            Preferences::for_pane_in(&f.root, None),
+            (Preferences::default(), Some("milo doctor: global prefs ignored")),
         );
     }
 
