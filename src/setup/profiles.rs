@@ -12,6 +12,7 @@ use super::rex_files::{check_config_dir, executable};
 use crate::{git, rex};
 
 const BAD_PROFILE: &str = "Could not read the saved Milo layout. It was left alone.";
+const PROFILE_CHANGED: &str = "The saved Milo layout changed. Reopen Settings before saving again.";
 const NO_WORKTREE: &str = "Open a shell in a Git worktree first.";
 const NO_TAB: &str = "Could not find this Rex tab.";
 const MIXED_RAIL: &str = "Milo panes must share one side rail, separate from other panes.";
@@ -104,28 +105,42 @@ impl Store {
         claude: Option<bool>,
         run: &RunRex<'_>,
     ) -> Result<Saved, &'static str> {
-        self.save_for_with(layout, scope, root, claude, run, |_| Ok(()))
+        self.save_profile(layout, scope, root, claude, run, None)
     }
 
-    pub fn save_for_with(
+    pub(super) fn save_draft(
+        &self,
+        layout: &Layout,
+        expected: (&Layout, Scope),
+        scope: Scope,
+        root: Option<&Path>,
+        run: &RunRex<'_>,
+    ) -> Result<Saved, &'static str> {
+        self.save_profile(layout, scope, root, None, run, Some(expected))
+    }
+
+    fn save_profile(
         &self,
         layout: &Layout,
         scope: Scope,
         root: Option<&Path>,
         claude: Option<bool>,
         run: &RunRex<'_>,
-        extra: impl FnOnce(&mut Vec<Change>) -> Result<(), &'static str>,
+        expected: Option<(&Layout, Scope)>,
     ) -> Result<Saved, &'static str> {
         let location = Location::new(&self.config, root_for(scope, root)?)?;
         let _profiles = location.lock()?;
         // Keep the legacy choices as the fallback when a global capture is reset.
+        let prepare_fallback = |fallback: &mut Layout| {
+            if scope == Scope::Global {
+                fallback.new_tabs = layout.new_tabs;
+            }
+            if !fallback.enabled() {
+                fallback.panes = Layout::default().panes;
+            }
+        };
         let (mut fallback, _) = self.layout()?;
-        if scope == Scope::Global {
-            fallback.new_tabs = layout.new_tabs;
-        }
-        if !fallback.enabled() {
-            fallback.panes = Layout::default().panes;
-        }
+        prepare_fallback(&mut fallback);
         self.save_with(Some(&fallback), claude, run, |changes| {
             if let Some(image) = read(&self.rex_file())?
                 && !std::str::from_utf8(&image.bytes).is_ok_and(owns_actions)
@@ -134,8 +149,34 @@ impl Store {
                     "Milo's rex.lua is customized. It was left alone; layout profiles need the shipped actions.",
                 );
             }
-            location.plan(Some(layout), changes)?;
-            extra(changes)
+            let profile = location.load()?;
+            if let Some((before, before_scope)) = expected {
+                let (mut legacy, _) = self.layout()?;
+                let global = if scope == Scope::Worktree && profile.is_none() {
+                    Location::new(&self.config, None)?.load()?
+                } else {
+                    None
+                };
+                let (current, current_scope) = match (&profile, &global) {
+                    (Some((current, _)), _) => (current, scope),
+                    (None, Some((current, _))) => (current, Scope::Global),
+                    (None, None) => (&legacy, Scope::Global),
+                };
+                if current_scope != before_scope
+                    || legacy.new_tabs != before.new_tabs
+                    || !super::same_geometry(current, before)
+                {
+                    return Err(PROFILE_CHANGED);
+                }
+                // The state lock is acquired inside save_with; don't publish a
+                // fallback that changed between planning and taking that lock.
+                prepare_fallback(&mut legacy);
+                if legacy != fallback {
+                    return Err(PROFILE_CHANGED);
+                }
+            }
+            changes.extend(location.change(profile.map(|(_, image)| image), Some(layout)));
+            Ok(())
         })
     }
 
@@ -496,6 +537,46 @@ mod tests {
         assert!(result.is_err());
         assert!(!store.init.exists() && !store.rex_file().exists());
         assert!(store.layout_for(None).unwrap().0 == first);
+    }
+
+    #[test]
+    fn settings_refuses_to_overwrite_a_layout_remembered_while_open() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        update(&store.config, Scope::Global, None, Some(&Layout::default())).unwrap();
+        let mut setup = super::super::Setup::new(Some(store.clone()), true, None, None, |_| {
+            panic!("a stale draft must not invoke Rex")
+        });
+        setup.layout.toggle(TabPane::Outline);
+
+        let remembered = Layout::parse_rail("v1 r 0.38 .7 2 ohu 111 500000 250000 250000").unwrap();
+        update(&store.config, Scope::Global, None, Some(&remembered)).unwrap();
+        assert_eq!(setup.save_layout(Scope::Global), Err(PROFILE_CHANGED));
+        assert!(setup.layout_dirty());
+        assert_eq!(store.layout_for(None).unwrap().0.rail_code(), remembered.rail_code());
+        assert!(!store.init.exists());
+    }
+
+    #[test]
+    fn settings_checks_the_destination_when_promoting_a_worktree_draft() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let root = fixture.root.join("project");
+        let global = Layout::default();
+        let mut worktree = Layout::default();
+        worktree.next_width();
+        update(&store.config, Scope::Global, None, Some(&global)).unwrap();
+        update(&store.config, Scope::Worktree, Some(&root), Some(&worktree)).unwrap();
+        let mut setup = super::super::Setup::new(Some(store.clone()), true, None, Some(root.clone()), |_| {
+            panic!("a stale draft must not invoke Rex")
+        });
+        setup.layout.next_width();
+
+        let concurrent = Layout { width: "0.34".into(), ..global };
+        update(&store.config, Scope::Global, None, Some(&concurrent)).unwrap();
+        assert_eq!(setup.save_layout(Scope::Global), Err(PROFILE_CHANGED));
+        assert_eq!(store.layout_for(None).unwrap().0.width, concurrent.width);
+        assert_eq!(store.layout_for(Some(&root)).unwrap().0.width, worktree.width);
     }
 
     #[test]

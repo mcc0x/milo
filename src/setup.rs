@@ -157,6 +157,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     run: R,
     layout: Layout,
     saved: Option<Layout>,
+    saved_global: Option<Result<Layout, &'static str>>,
     scope: Scope,
     installed: bool,
     trial: Option<(profiles::Trial, Layout)>,
@@ -221,6 +222,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             run,
             layout: Layout::default(),
             saved: None,
+            saved_global: None,
             scope: Scope::Global,
             installed: false,
             trial: None,
@@ -264,6 +266,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn reload_layout(&mut self) -> Result<(), &'static str> {
         let (layout, installed, scope) = self.store()?.layout_for(self.root.as_deref())?;
+        self.saved_global = (scope == Scope::Worktree).then(|| {
+            let (mut global, _, _) = self.store()?.layout_for(None)?;
+            // Auto-arrange is global, including in the displayed worktree draft.
+            global.new_tabs = layout.new_tabs;
+            Ok(global)
+        });
         self.saved = Some(layout.clone());
         self.layout = layout;
         self.installed = installed;
@@ -441,18 +449,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
         let auto_changed = self.auto_arrange_dirty();
         let draft_auto = self.layout.new_tabs;
+        let before = self.saved.as_ref().ok_or("Reopen Settings before saving the layout.")?;
+        let expected = match (scope, &self.saved_global) {
+            (Scope::Global, Some(global)) => (global.as_ref().map_err(|&why| why)?, Scope::Global),
+            _ => (before, self.scope),
+        };
         let global;
         let layout = if scope == Scope::Global && self.only_auto_arrange_dirty() && self.scope == Scope::Worktree {
-            // A worktree layout must not become the global layout just because
-            // the remaining draft is the global auto-arrange switch.
-            let (mut saved, _, _) = self.store()?.layout_for(None)?;
-            saved.new_tabs = draft_auto;
-            global = saved;
+            // Do not promote the worktree layout just to save the global switch.
+            global = Layout { new_tabs: draft_auto, ..expected.0.clone() };
             &global
         } else {
             &self.layout
         };
-        let saved = self.store()?.save_for(layout, scope, self.root.as_deref(), None, &self.run)?;
+        let saved = self.store()?.save_draft(layout, expected, scope, self.root.as_deref(), &self.run)?;
         self.reload_layout()?;
         if scope == Scope::Worktree && auto_changed {
             self.layout.new_tabs = draft_auto;
