@@ -1,9 +1,11 @@
 -- Run with Lua 5.1 against listener.lua from a saved layout with new shell tabs on.
 local handlers, timers, splits, windows, processes = {}, {}, {}, {}, {}
 local saves, revision = {}, 1
+local measured = { rows = 50, owner = "app", desired = {{ client_id = "app", rows = 50 }} }
+local sizes = {}
 local function terminal(method, args)
   assert(args.session_id == "project")
-  if method == "size" then return { rows = 50, owner = "app" } end
+  if method == "size" then return sizes[args.block_id] or measured end
   assert(method == "process")
   return processes[args.block_id]
 end
@@ -12,7 +14,7 @@ rex = {
   on = function(event, fn) handlers[event] = fn end,
   sleep = function() error("a starting shell held up the listener") end,
   after = function(wait, fn)
-    assert(wait == 0 or wait == 0.05 or wait == 0.2)
+    assert(wait == 0 or wait == 0.2, "new tabs must not start retry timers")
     local cancelled
     timers[#timers + 1] = function() if not cancelled then fn() end end
     return { cancel = function() cancelled = true end }
@@ -21,6 +23,11 @@ rex = {
     view = function(args)
       assert(attached, "cannot read a baseline before attach_all")
       assert(args.session_id == "project")
+      for _, window in ipairs(windows) do
+        for _, block in ipairs(window.layers[1].blocks) do
+          block.owner = (sizes[block.block_id] or measured).owner
+        end
+      end
       return { windows = windows, revision = revision }
     end,
     new_split = function(args) table.insert(splits, args); return {} end,
@@ -65,18 +72,28 @@ local function tab(id, ...)
   return { window_id = id, layers = {{ kind = "tiled", layer_id = "layer:" .. id, layout = layout, blocks = blocks }} }
 end
 local function created(id) handlers.window_created({ session_id = "project" }, { window_id = id }) end
+local function emit(event, block)
+  handlers[event]({ session_id = "project", block_id = block }, { block_id = block })
+end
+local function changed()
+  revision = revision + 1
+  handlers.session_view_changed({ session_id = "project" }, { revision = revision })
+end
 local project = { foreground = { argv0 = "-zsh", cwd = "/my project" } }
 
--- One slow shell must not delay another tab's layout or turn command tabs into shell tabs.
+-- Waiting for a slow shell or a client measurement does not delay another tab.
 timers, splits = {}, {}
-windows = { tab("slow", "slow"), tab("quick", "quick"), tab("command", "command") }
+windows = { tab("slow", "slow"), tab("quick", "quick"), tab("command", "command"), tab("unowned", "unowned") }
 processes = {
   slow = { child = { path = "/usr/bin/login" }, foreground = { argv0 = "login" } },
   quick = project,
   command = { foreground = { argv0 = "build" } },
+  unowned = project,
 }
+sizes.unowned = { rows = 24 }
 created("slow")
-assert(#timers == 1 and #splits == 0)
+created("unowned")
+assert(#timers == 0 and #splits == 0)
 created("command")
 assert(#splits == 0)
 created("quick")
@@ -88,9 +105,24 @@ assert(column[2].label == "milo:usage" and math.abs(column.ratio - 0.96) < 0.000
 assert(not splits[1].focus)
 assert(column[1][1].options.command[3] == "--shell" and column[1][1].options.command[4] == "quick")
 assert(column[2].options.command[3] == nil)
+emit("terminal.size_changed", "slow")
+assert(#splits == 1)
 processes.slow = project
-table.remove(timers, 1)()
+emit("terminal.process_changed", "slow")
 assert(#splits == 2 and splits[2].anchor_id == "slow")
+
+-- Owning a tab isn't the same as measuring it. Only the owner's measurement counts.
+sizes.unowned = { rows = 24, owner = "app", desired = {{ client_id = "other", rows = 24 }} }
+emit("block_owner_changed", "unowned")
+assert(#splits == 2)
+sizes.unowned = measured
+emit("terminal.size_changed", "unowned")
+assert(#splits == 3 and splits[3].anchor_id == "unowned")
+assert(math.abs(splits[3].layout.ratio - 0.96) < .000001)
+emit("terminal.size_changed", "unowned")
+processes.command = project
+emit("terminal.process_changed", "command")
+assert(#splits == 3 and #timers == 0)
 
 -- A new session's first tab is arranged too, though no tab is announced for it.
 splits = {}
@@ -103,12 +135,14 @@ windows = { tab("slow", "slow"), tab("quick", "quick"), tab("command", "command"
 -- A remembered profile takes precedence on a new shell tab, including right
 -- placement, top-to-bottom order and shares rather than legacy Usage rows.
 splits = {}
+sizes.quick = { rows = 24 }
 remembered = "v1 r 0.28 0.70 10 uho 011 0 300000 700000"
 processes.quick = project
 created("quick")
 assert(#splits == 1 and splits[1].side == "after" and math.abs(splits[1].ratio - 0.72) < 0.000001)
 assert(splits[1].layout[1].label == "milo:usage" and splits[1].layout[2].label == "milo:history")
 assert(math.abs(splits[1].layout.ratio - 0.7) < 0.000001)
+sizes.quick = measured
 
 -- A split created during profile lookup wins even if the tab was pristine when the event arrived.
 splits = {}
@@ -117,21 +151,67 @@ created("quick")
 assert(#splits == 0)
 on_profile, remembered = nil, nil
 
--- A shell split by the user while waiting must not get Milo panes.
-timers, splits, processes = {}, {}, {}
+on_profile = function() processes.quick = { foreground = { argv0 = "build" } } end
+windows[2] = tab("quick", "quick")
+created("quick")
+on_profile, processes.quick = nil, project
+emit("terminal.process_changed", "quick")
+assert(#splits == 0)
+
+-- A cancelled lookup may not split even if the tab is already pristine again.
+on_profile = function()
+  windows[2] = tab("quick", "quick", "user split")
+  changed()
+  windows[2] = tab("quick", "quick")
+end
+created("quick")
+assert(#splits == 0)
+
+on_profile = function()
+  processes.quick = { foreground = { argv0 = "build" } }
+  emit("terminal.process_changed", "quick")
+  processes.quick = project
+end
+created("quick")
+assert(#splits == 0)
+
+-- Repeated readiness signals cannot commit the same arrangement twice.
+on_profile = function()
+  on_profile = nil
+  emit("terminal.size_changed", "quick")
+end
+created("quick")
+assert(#splits == 1 and splits[1].anchor_id == "quick")
+
+-- A shell split by the user while waiting stays cancelled even after an undo.
+splits, processes = {}, {}
 windows[1] = tab("slow", "slow")
 created("slow")
 windows[1] = tab("slow", "slow", "user split")
+changed()
+windows[1] = tab("slow", "slow")
 processes.slow = project
-table.remove(timers, 1)()
+emit("terminal.process_changed", "slow")
 assert(#timers == 0 and #splits == 0)
 
--- A shell that never starts must not keep a timer alive forever.
-timers, splits, processes = {}, {}, {}
-windows[1] = tab("slow", "slow")
+-- A command started while waiting for measurement wins, even once it exits.
+sizes.slow = { rows = 24 }
 created("slow")
-for _ = 1, 9 do table.remove(timers, 1)() end
-assert(#timers == 0 and #splits == 0)
+processes.slow = { foreground = { argv0 = "build" }, child = { path = "/usr/bin/login" } }
+emit("terminal.process_changed", "slow")
+processes.slow, sizes.slow = project, measured
+emit("terminal.size_changed", "slow")
+assert(#splits == 0)
+
+-- Close and exit events remove outstanding work, including keep-open terminals.
+for _, event in ipairs({ "block_closed", "terminal.child_exited", "window_closed", "session_destroyed" }) do
+  processes.slow = nil
+  created("slow")
+  handlers[event]({ session_id = "project" }, { session_id = "project", window_id = "slow", block_id = "slow" })
+  processes.slow = project
+  emit("terminal.process_changed", "slow")
+  assert(#splits == 0)
+end
 
 local function rail(id, width, height, exe)
   local window = tab(id, id .. "-shell", id .. "-outline", id .. "-usage")
@@ -147,11 +227,6 @@ local function rail(id, width, height, exe)
   processes[shell.block_id] = { foreground = { argv0 = "-zsh", cwd = "/different worktree" } }
   processes[outline.block_id], processes[usage.block_id] = pane, pane
   return window
-end
-
-local function changed()
-  revision = revision + 1
-  handlers.session_view_changed({ session_id = "project" }, { revision = revision })
 end
 
 -- An open rail can be resized on the first event after attach. If an event

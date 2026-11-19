@@ -226,15 +226,23 @@ made = splits[#splits]
 assert(made.direction == "horizontal" and made.layout.label == usage.label)
 near(made.ratio, 0.2)
 
--- New tabs wait for client measurement and recheck the shell before arranging.
-local pending
-rex.after = function(_, callback) pending = callback end
+-- Automatic sizing requires the owner's measurement and rechecks the shell
+-- before splitting. A profile saved while the tab waits should still win.
 local listener = assert(loadstring("local arrange_new_tabs = true\n" .. prefix .. code))("listener")
-local process = rex.call(terminal .. ".process", ctx)
 local split_count = #splits
-listener.arrange(ctx, process, function(cwd) return cwd == "/my project" end)
-assert(#splits == split_count and pending)
+local apply = listener.prepare_arrangement(ctx, "/my project")
+assert(not apply(function() error("the tab was not measured yet") end))
 sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50 }
-pending()
-assert(#splits == split_count + 1)
-near(1 - splits[#splits].layout.ratio, 2 / 50)
+assert(not apply(function() error("claiming ownership is not a measurement") end))
+sizes[shell.block_id].desired = {{ client_id = "client:one", rows = 50 }}
+assert(not apply(function(owner) assert(owner == "client:one"); return true, true end) and #splits == split_count)
+assert(apply(function() return false end) and #splits == split_count)
+
+sizes[shell.block_id] = nil
+apply = listener.prepare_arrangement(ctx, "/my project")
+assert(not apply(function() error("the tab was not measured yet") end))
+profile_reply.stdout = "v1 l 0.20 0.70 4 ohu 111"
+sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50,
+  desired = {{ client_id = "client:one", rows = 50 }} }
+assert(apply(function() return true end) and #splits == split_count + 1)
+near(1 - splits[#splits].layout.ratio, 4 / 50)

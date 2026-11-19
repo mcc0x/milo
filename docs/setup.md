@@ -43,7 +43,7 @@ Usage starts as a two-row strip in the shared sidebar. Drag a divider in an inst
 
 ![A Rex tab with Outline, History and the compact Usage readout in one rail beside the shell](img/tab.png)
 
-Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save to stop arranging new tabs. The panes also work on their own outside Rex.
+Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. If Usage is sized in rows, Milo waits for a Rex client to measure the tab, so a background tab may arrange when you first show it. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save to stop arranging new tabs. The panes also work on their own outside Rex.
 
 Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
 

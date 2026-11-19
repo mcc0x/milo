@@ -424,24 +424,42 @@ if ... == "listener" then
 
   local memory = { snapshot = snapshot, directories = directories, save = save }
   if arrange_new_tabs then
-    memory.arrange = function(ctx, process, still_single)
-      local cwd = shell_cwd(process)
-      if not cwd then return end
-      local selected = effective(cwd)
+    local function uses_rows(selected)
       local wanted = selected.wanted
-      local needs_rows = wanted.usage and (wanted.outline or wanted.history)
+      return wanted.usage and (wanted.outline or wanted.history)
         and not (selected.shares and selected.shares.usage > 0)
-      local function arrange_sized(retries)
-        local _, rows, owner = cells(ctx, ctx.block_id)
-        if not still_single(cwd) then return end
-        if needs_rows and type(owner) ~= "string" and retries > 0 then
-          -- The login shell can become ready before its client measures the tab.
-          rex.after(0.05, function() arrange_sized(retries - 1) end)
-        else
-          make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows)
-        end
+    end
+
+    local function owned_rows(ctx)
+      local size = terminal_call(ctx, ctx.block_id, "size")
+      if not size or type(size.owner) ~= "string" or not size.rows or size.rows <= 0 then return end
+      -- The block can have an owner before its client has measured the tab.
+      for _, request in ipairs(size.desired or {}) do
+        if request.client_id == size.owner and request.rows == size.rows then return size.rows, size.owner end
       end
-      arrange_sized(9)
+    end
+
+    memory.prepare_arrangement = function(ctx, cwd)
+      local selected = effective(cwd)
+      local needs_rows = uses_rows(selected)
+      return function(still_current)
+        if not selected then
+          if not owned_rows(ctx) then return false end
+          selected = effective(cwd)
+          needs_rows = uses_rows(selected)
+        end
+        local rows, owner
+        if needs_rows then rows, owner = owned_rows(ctx) end
+        if needs_rows and not rows then
+          -- Re-read the profile when a background tab is finally measured.
+          selected = nil
+          return false
+        end
+        local current, owner_changed = still_current(owner)
+        if owner_changed then return false end
+        if current then make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows) end
+        return true
+      end
     end
   end
   return memory
