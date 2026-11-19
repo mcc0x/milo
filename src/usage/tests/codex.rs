@@ -277,6 +277,37 @@ fn codex_large_growth_uses_a_bounded_tail_and_resumes_at_its_new_end() {
 }
 
 #[test]
+fn codex_preserves_a_report_outside_the_tail_after_chmod() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let f = Fixture::folder();
+    write(&f, CODEX, &codex(NOW - 1, 23, NOW + DAY, "null"), NOW - 1);
+    let mut usage = open(&f, NOW);
+    append(&f, &"x".repeat(usize::try_from(TAIL_BYTES).unwrap()), NOW);
+    assert!(usage.check());
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+
+    let path = f.root.join(CODEX);
+    let before = path.metadata().unwrap();
+    let permissions = fs::Permissions::from_mode(before.mode() ^ 0o100);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let after = loop {
+        fs::set_permissions(&path, permissions.clone()).unwrap();
+        let after = path.metadata().unwrap();
+        if (after.ctime(), after.ctime_nsec()) != (before.ctime(), before.ctime_nsec()) {
+            break after;
+        }
+        assert!(Instant::now() < deadline, "inode change time did not advance");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0);
+    assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
+}
+
+#[test]
 fn no_codex_sessions_and_sessions_without_limits_have_different_notes() {
     let f = Fixture::folder();
     let rows = frame(&mut open(&f, NOW), 140, 3);

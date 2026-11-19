@@ -20,13 +20,12 @@ const MAX_ENTRIES: usize = 32_768;
 const MAX_LINE: usize = 2 * 1024 * 1024;
 const BLOCK: usize = 32 * 1024;
 
-/// A transcript can be rewritten in place without changing its size or mtime.
+/// Incremental transcripts use file identity, length and mtime, not metadata-only changes such as chmod.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct FileVersion {
     device: i128,
     inode: u128,
     modified: (i128, i128),
-    changed: (i128, i128),
     pub len: u64,
 }
 
@@ -41,20 +40,8 @@ impl FileVersion {
             device: i128::from(stat.st_dev).rem_euclid(1_i128 << 64),
             inode: u128::from(stat.st_ino),
             modified: (i128::from(stat.st_mtime), i128::from(stat.st_mtime_nsec)),
-            changed: (i128::from(stat.st_ctime), i128::from(stat.st_ctime_nsec)),
             len: u64::try_from(stat.st_size).ok()?,
         })
-    }
-
-    /// Compare the directory entry to the prior open file without opening it again.
-    pub(super) fn metadata(metadata: &std::fs::Metadata) -> Self {
-        Self {
-            device: i128::from(metadata.dev()),
-            inode: u128::from(metadata.ino()),
-            modified: (i128::from(metadata.mtime()), i128::from(metadata.mtime_nsec())),
-            changed: (i128::from(metadata.ctime()), i128::from(metadata.ctime_nsec())),
-            len: metadata.len(),
-        }
     }
 
     /// Check the actual descriptor in case the directory entry changed during open.
@@ -69,6 +56,27 @@ impl FileVersion {
     /// Appends keep their identity even when the timestamp and size change.
     pub(super) fn same_file(self, other: Self) -> bool {
         self.device == other.device && self.inode == other.inode
+    }
+}
+
+/// Whole-file snapshots also detect in-place rewrites that preserve size and mtime.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct SnapshotVersion {
+    file: FileVersion,
+    changed: (i64, i64),
+}
+
+impl SnapshotVersion {
+    fn regular(metadata: &std::fs::Metadata) -> Option<Self> {
+        metadata.is_file().then(|| Self {
+            file: FileVersion {
+                device: i128::from(metadata.dev()),
+                inode: u128::from(metadata.ino()),
+                modified: (i128::from(metadata.mtime()), i128::from(metadata.mtime_nsec())),
+                len: metadata.len(),
+            },
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
     }
 }
 
@@ -88,23 +96,23 @@ pub(super) fn read_small(file: File, version: FileVersion, cap: u64, budget: &mu
 /// Reads only changed regular files; a removed or bad file stops being a source.
 pub(super) fn read_cached<T>(
     path: &Path,
-    previous: &mut Option<FileVersion>,
+    previous: &mut Option<SnapshotVersion>,
     snapshot: &mut Option<T>,
     budget: &mut Budget,
     parse: impl FnOnce(File, FileVersion, &mut Budget) -> Option<T>,
 ) {
-    let Some(metadata) = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()) else {
+    let Some(version) = path.symlink_metadata().ok().and_then(|metadata| SnapshotVersion::regular(&metadata)) else {
         *previous = None;
         *snapshot = None;
         return;
     };
-    if *previous == Some(FileVersion::metadata(&metadata)) {
+    if *previous == Some(version) {
         return;
     }
     *snapshot = fs_ops::open_read(path).ok().and_then(|file| {
-        let version = FileVersion::opened(&file)?;
+        let version = SnapshotVersion::regular(&file.metadata().ok()?)?;
         *previous = Some(version);
-        parse(file, version, budget)
+        parse(file, version.file, budget)
     });
 }
 

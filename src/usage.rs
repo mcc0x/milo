@@ -22,7 +22,7 @@ use crate::watch::Scope;
 use crate::when::{DAY, MINUTE};
 use crate::{paths, preferences, when};
 
-use self::files::{Budget, FileVersion, Reverse, Sessions, Stream, Tree};
+use self::files::{Budget, FileVersion, Reverse, Sessions, SnapshotVersion, Stream, Tree};
 use self::time::Timestamp;
 
 const CLOCK_SKEW: i64 = 5 * MINUTE;
@@ -544,9 +544,9 @@ struct Claude {
     files: HashMap<PathBuf, ClaudeFile>,
     identified: Vec<Sample>,
     partial: bool,
-    saved_version: Option<FileVersion>,
+    saved_version: Option<SnapshotVersion>,
     status: Option<Reading>,
-    native_version: Option<FileVersion>,
+    native_version: Option<SnapshotVersion>,
     native: Option<Reading>,
     omp: Option<Reading>,
 }
