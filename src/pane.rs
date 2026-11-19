@@ -720,12 +720,13 @@ mod tests {
         let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
         let (mut watcher, mut pace) = watch_pane(&mut pane, false);
         let original = watcher.fd().unwrap();
-        assert!(watcher.scope().ignored.is_empty());
+        let ignored = &watcher.scope().ignored;
+        assert!(ignored.dirs.is_empty() && ignored.files.is_empty());
 
         f.write("build/generated/output", "first build\n");
         check_watched_pane(&mut pane, &mut watcher, &mut pace, false);
         let ignored = pane.watch_scope().ignored;
-        assert_eq!(ignored.as_ref(), [f.root.join("build/generated")]);
+        assert_eq!(ignored.dirs, std::collections::HashSet::from([f.root.join("build/generated")]));
         let current = watcher.fd().unwrap();
         assert_ne!(original, current);
         assert!(pace.as_ref().unwrap().reported);
@@ -737,7 +738,7 @@ mod tests {
         let mut screen = Screen::sized(80, 12);
         pane.draw(&mut screen);
         assert!(screen.text().iter().any(|row| row.contains("source.rs") && row.ends_with("+1")));
-        assert!(std::rc::Rc::ptr_eq(&ignored, &pane.watch_scope().ignored));
+        assert!(std::sync::Arc::ptr_eq(&ignored, &pane.watch_scope().ignored));
         assert_eq!(watcher.fd(), Some(current), "unchanged exclusions must not restart the stream");
         assert!(!pace.as_ref().unwrap().reported, "an unchanged scope must not request another check");
     }

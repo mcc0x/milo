@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::read::{self, Content};
-use crate::watch::Scope;
+use crate::watch::{Ignored, Scope};
 use parse::{Status, parse_files, parse_history, parse_status};
 use run::OutputError;
 
@@ -227,8 +227,8 @@ pub struct Repo {
     /// The status last read, as git printed it and as parsed.
     raw: Vec<u8>,
     status: Status,
-    /// Shared with the watcher until Git reports a different ignored-directory list.
-    watch_ignored: Rc<[PathBuf]>,
+    /// Shared with the watcher until Git reports different ignored paths.
+    watch_ignored: Arc<Ignored>,
     /// A status `poll` found to differ, kept for `read` to take in.
     polled: Option<Vec<u8>>,
     unpushed: Unpushed,
@@ -293,8 +293,8 @@ impl Repo {
     pub fn only(&mut self, path: &str) {
         self.file = Some(path.to_string());
         self.polled = None;
-        if !self.status.ignored.is_empty() {
-            self.watch_ignored = self.exclusions(&self.status.ignored);
+        if !self.status.ignored_dirs.is_empty() || !self.status.ignored_files.is_empty() {
+            self.watch_ignored = self.exclusions(&self.status);
         }
     }
 
@@ -351,7 +351,7 @@ impl Repo {
     }
 
     /// Watches the worktree and any shared Git directory outside it, as in a
-    /// linked worktree. The current status supplies the ignored directories.
+    /// linked worktree. The current status supplies the ignored paths.
     pub fn watch_scope(&self) -> Scope {
         let mut roots = vec![self.root.clone()];
         roots.extend(self.common_dir.as_ref().filter(|dir| !dir.starts_with(&self.root)).cloned());
@@ -359,27 +359,33 @@ impl Repo {
         // repository that plainly keeps them inside itself can be trusted.
         let inside = || std::fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
         let complete = !self.git || self.common_dir.is_some() || inside();
-        Scope { roots, ignored: Rc::clone(&self.watch_ignored), complete }
+        Scope { roots, ignored: Arc::clone(&self.watch_ignored), complete }
     }
 
-    fn exclusions(&self, paths: &[PathBuf]) -> Rc<[PathBuf]> {
-        // A file-limited status cannot find all the ignored directories.
-        // Missing exclusions are fine: they widen the watch, not the checks.
-        let internal = [self.git_dir.as_deref(), self.common_dir.as_deref()]
+    fn exclusions(&self, status: &Status) -> Arc<Ignored> {
+        // A file-limited status can miss exclusions, which only widens the watch.
+        let [git, common] = [self.git_dir.as_deref(), self.common_dir.as_deref()]
             .map(|dir| dir.and_then(|dir| dir.strip_prefix(&self.root).ok()));
+        let metadata = [Some(Path::new(".git")), git, common];
         let file = self.file.as_deref().map(Path::new);
-        let mut ignored: Vec<_> = paths
-            .iter()
-            .map(PathBuf::as_path)
-            .filter_map(|dir| {
-                let needed = Path::new(".git").starts_with(dir)
-                    || internal.iter().flatten().any(|git| git.starts_with(dir))
-                    || file.is_some_and(|file| file.starts_with(dir));
-                (!needed).then(|| (dir.components().count(), dir))
-            })
-            .collect();
-        ignored.sort_unstable();
-        ignored.into_iter().map(|(_, dir)| self.root.join(dir)).collect()
+        let exclusions = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .filter(|path| {
+                    // Ignore rules can ignore themselves, but changing them or
+                    // Git's metadata can make a previously ignored path visible.
+                    let ignore_rules = path
+                        .file_name()
+                        .is_some_and(|name| name.as_encoded_bytes().eq_ignore_ascii_case(b".gitignore"));
+                    let needed = ignore_rules
+                        || metadata.iter().flatten().any(|git| git.starts_with(path) || path.starts_with(git))
+                        || file.is_some_and(|file| file.starts_with(path));
+                    !needed
+                })
+                .map(|path| self.root.join(path))
+                .collect()
+        };
+        Arc::new(Ignored { dirs: exclusions(&status.ignored_dirs), files: exclusions(&status.ignored_files) })
     }
 
     /// Whether git is in the middle of changing things here, so that what
@@ -454,8 +460,8 @@ impl Repo {
                 status.ends.base = base;
             }
         }
-        if status.ignored != self.status.ignored {
-            self.watch_ignored = self.exclusions(&status.ignored);
+        if status.ignored_dirs != self.status.ignored_dirs || status.ignored_files != self.status.ignored_files {
+            self.watch_ignored = self.exclusions(&status);
         }
         (self.raw, self.status, self.stand_in) = (raw, status, stand_in);
         self.ok.set(true);

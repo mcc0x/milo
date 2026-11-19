@@ -4,10 +4,11 @@
 //! FSEvents watches a whole directory tree through a single stream.
 //! The loop also checks periodically on macOS in case notifications miss a change.
 
+use std::collections::HashSet;
 use std::io::{ErrorKind, PipeReader, Read};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// FSEvents accepts at most this many directory exclusions.
 const NATIVE_LIMIT: usize = 8;
@@ -15,8 +16,14 @@ const NATIVE_LIMIT: usize = 8;
 /// What to watch, what to leave out, and whether the roots cover every change.
 pub struct Scope {
     pub roots: Vec<PathBuf>,
-    pub ignored: Rc<[PathBuf]>,
+    pub ignored: Arc<Ignored>,
     pub complete: bool,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub struct Ignored {
+    pub dirs: HashSet<PathBuf>,
+    pub files: HashSet<PathBuf>,
 }
 
 pub struct Watcher {
@@ -33,8 +40,8 @@ struct Listener {
 
 impl Watcher {
     pub fn new(scope: Scope) -> Watcher {
-        let native = native_exclusions(&scope.ignored, &[]);
-        let listener = imp::start(&scope.roots, &native, &scope.ignored);
+        let native = native_exclusions(&scope.ignored.dirs, &[]);
+        let listener = imp::start(&scope.roots, &native, Arc::clone(&scope.ignored));
         Watcher { listener, scope, native }
     }
 
@@ -42,7 +49,7 @@ impl Watcher {
         &self.scope
     }
 
-    /// Reuses the native stream when only overflow exclusions change.
+    /// Reuses the native stream when only callback exclusions change.
     /// True means a follow-up snapshot is needed after changing live coverage.
     pub fn refresh(&mut self, scope: Scope) -> bool {
         let roots_changed = self.scope.roots != scope.roots;
@@ -53,16 +60,16 @@ impl Watcher {
         }
         let was_live = self.listener.is_some();
         let mut restart = roots_changed;
-        if ignored_changed {
-            let native = native_exclusions(&scope.ignored, &self.native);
+        if ignored_changed && self.scope.ignored.dirs != scope.ignored.dirs {
+            let native = native_exclusions(&scope.ignored.dirs, &self.native);
             restart |= self.native != native;
             self.native = native;
         }
         if restart {
             // Start listening on the new stream before dropping the old one.
-            self.listener = imp::start(&scope.roots, &self.native, &scope.ignored);
+            self.listener = imp::start(&scope.roots, &self.native, Arc::clone(&scope.ignored));
         } else if ignored_changed && let Some(listener) = &self.listener {
-            listener.stream.set_ignored(&scope.ignored);
+            listener.stream.set_ignored(Arc::clone(&scope.ignored));
         }
         self.scope = scope;
         was_live || self.listener.is_some()
@@ -89,19 +96,22 @@ impl Watcher {
 }
 
 /// Keep occupied native slots so adding an overflow directory need not restart the stream.
-fn native_exclusions(ignored: &[PathBuf], previous: &[PathBuf]) -> Vec<PathBuf> {
-    previous
-        .iter()
-        .filter(|path| ignored.contains(path))
-        .chain(ignored.iter().filter(|path| path.to_str().is_some() && !previous.contains(path)))
-        .take(NATIVE_LIMIT)
-        .cloned()
-        .collect()
+fn native_exclusions(dirs: &HashSet<PathBuf>, previous: &[PathBuf]) -> Vec<PathBuf> {
+    let mut native: Vec<_> = previous.iter().filter(|&path| dirs.contains(path)).cloned().collect();
+    if native.len() < NATIVE_LIMIT {
+        let mut candidates: Vec<_> = dirs
+            .iter()
+            .filter(|&path| path.to_str().is_some() && !previous.contains(path))
+            .map(|path| (path.components().count(), path))
+            .collect();
+        candidates.sort_unstable();
+        native.extend(candidates.into_iter().take(NATIVE_LIMIT - native.len()).map(|(_, path)| path.clone()));
+    }
+    native
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::collections::HashSet;
     use std::ffi::{CStr, OsStr, c_void};
     use std::io::{self, PipeWriter};
     use std::os::fd::AsRawFd;
@@ -110,13 +120,16 @@ mod imp {
     use std::ptr::{null, null_mut};
     use std::sync::{Arc, Mutex, PoisonError};
 
-    use super::Listener;
+    use super::{Ignored, Listener};
 
     /// Seconds FSEvents can wait to combine follow-up notifications.
     const LATENCY: f64 = 0.05;
     const SINCE_NOW: u64 = u64::MAX;
     /// Deliver the first event of a burst at once, not after `LATENCY`.
     const NO_DEFER: u32 = 0x2;
+    /// Directory-only notifications cannot identify writes to individual files.
+    const FILE_EVENTS: u32 = 0x10;
+    const IS_DIR: u32 = 0x0002_0000;
     const UTF8: u32 = 0x0800_0100;
     // Stream-wide flags (dropped/coalesced events, changed roots and mounted volumes)
     // require a check regardless of path. HistoryDone (0x10) isn't a change.
@@ -124,7 +137,7 @@ mod imp {
 
     struct CallbackState {
         signal: PipeWriter,
-        ignored: Mutex<HashSet<PathBuf>>,
+        ignored: Mutex<Arc<Ignored>>,
     }
 
     pub(super) struct Stream {
@@ -134,8 +147,7 @@ mod imp {
     }
 
     impl Stream {
-        pub(super) fn set_ignored(&self, paths: &[PathBuf]) {
-            let ignored = paths.iter().cloned().collect();
+        pub(super) fn set_ignored(&self, ignored: Arc<Ignored>) {
             *self.callback.ignored.lock().unwrap_or_else(PoisonError::into_inner) = ignored;
         }
     }
@@ -238,7 +250,7 @@ mod imp {
         // SAFETY: The context is held by Stream until its serial callback queue is drained.
         let state = unsafe { &*info.cast::<CallbackState>() };
         let ignored = state.ignored.lock().unwrap_or_else(PoisonError::into_inner);
-        let relevant = if ignored.is_empty() || paths.is_null() || flags.is_null() {
+        let relevant = if (ignored.dirs.is_empty() && ignored.files.is_empty()) || paths.is_null() || flags.is_null() {
             true
         } else {
             // SAFETY: Without UseCFTypes, FSEvents supplies `count` C strings and flags.
@@ -252,7 +264,8 @@ mod imp {
                 // SAFETY: FSEvents guarantees the event path is a NUL-terminated string.
                 let path = unsafe { CStr::from_ptr(path) };
                 let path = Path::new(OsStr::from_bytes(path.to_bytes()));
-                !path.ancestors().any(|ancestor| ignored.contains(ancestor))
+                (flags & IS_DIR != 0 || !ignored.files.contains(path))
+                    && !path.ancestors().any(|ancestor| ignored.dirs.contains(ancestor))
             })
         };
         if relevant {
@@ -260,7 +273,7 @@ mod imp {
         }
     }
 
-    pub(super) fn start(roots: &[PathBuf], native: &[PathBuf], ignored: &[PathBuf]) -> Option<Listener> {
+    pub(super) fn start(roots: &[PathBuf], native: &[PathBuf], ignored: Arc<Ignored>) -> Option<Listener> {
         if roots.is_empty() {
             return None;
         }
@@ -271,8 +284,7 @@ mod imp {
                 return None;
             }
         }
-        let ignored = Mutex::new(ignored.iter().cloned().collect());
-        let callback = Arc::new(CallbackState { signal: writer, ignored });
+        let callback = Arc::new(CallbackState { signal: writer, ignored: Mutex::new(ignored) });
         let (stream, queue) = start_stream(roots, native, Arc::as_ptr(&callback))?;
         Some(Listener { stream: Stream { stream, queue, callback }, heard: reader })
     }
@@ -318,8 +330,9 @@ mod imp {
         let info = callback.cast_mut().cast::<c_void>();
         let mut context = Context { version: 0, info, retain: None, release: None, describe: None };
         // SAFETY: paths is a live CFArray. The stream copies the fields of context.
-        let stream =
-            unsafe { FSEventStreamCreate(null(), on_event, &mut context, paths, SINCE_NOW, LATENCY, NO_DEFER) };
+        let stream = unsafe {
+            FSEventStreamCreate(null(), on_event, &mut context, paths, SINCE_NOW, LATENCY, NO_DEFER | FILE_EVENTS)
+        };
         // SAFETY: paths was created above and the stream keeps its own paths.
         unsafe { CFRelease(paths) };
         if stream.is_null() {
@@ -361,15 +374,16 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
-    use super::Listener;
+    use super::{Ignored, Listener};
 
     pub(super) struct Stream;
     impl Stream {
-        pub(super) fn set_ignored(&self, _: &[PathBuf]) {}
+        pub(super) fn set_ignored(&self, _: Arc<Ignored>) {}
     }
 
-    pub(super) fn start(_: &[PathBuf], _: &[PathBuf], _: &[PathBuf]) -> Option<Listener> {
+    pub(super) fn start(_: &[PathBuf], _: &[PathBuf], _: Arc<Ignored>) -> Option<Listener> {
         None
     }
 }
@@ -378,6 +392,7 @@ mod imp {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+    use crate::git::Repo;
 
     fn changed(watcher: &Watcher, timeout_ms: i32) -> bool {
         let fd = watcher.fd().expect("the stream should have a notification descriptor");
@@ -393,6 +408,13 @@ mod tests {
         }
     }
 
+    fn settle(watcher: &Watcher) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while changed(watcher, 300) {
+            assert!(std::time::Instant::now() < deadline, "fixture never settled");
+        }
+    }
+
     #[test]
     fn overflow_exclusions_are_live_without_restarting_or_hiding_a_source_sibling() {
         let f = Fixture::folder();
@@ -402,23 +424,24 @@ mod tests {
         }
         f.write("a-build/log", "old");
         f.write("a-build-source/code", "old");
-        let roots = vec![f.root.clone()];
-        let mut watcher = Watcher::new(Scope { roots: roots.clone(), ignored: ignored.clone().into(), complete: true });
+        let scope = |dirs: &[PathBuf]| Scope {
+            roots: vec![f.root.clone()],
+            ignored: Arc::new(Ignored { dirs: dirs.iter().cloned().collect(), ..Ignored::default() }),
+            complete: true,
+        };
+        let mut watcher = Watcher::new(scope(&ignored));
         let original = watcher.fd().unwrap();
 
         // A path ahead of the existing eight in sort order must not evict one.
         ignored.insert(0, f.root.join("a-build"));
-        assert!(watcher.refresh(Scope { roots: roots.clone(), ignored: ignored.clone().into(), complete: true }));
+        assert!(watcher.refresh(scope(&ignored)));
         assert_eq!(watcher.fd(), Some(original));
-        assert!(!watcher.refresh(Scope { roots: roots.clone(), ignored: ignored.clone().into(), complete: true }));
+        assert!(!watcher.refresh(scope(&ignored)));
         // Startup can deliver coalesced events from creating the fixture. Observe a
         // visible write, then drain that batch before measuring only ignored writes.
         f.write("a-build-source/code", "ready");
         assert!(changed(&watcher, 30_000));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while changed(&watcher, 300) {
-            assert!(std::time::Instant::now() < deadline, "fixture never settled");
-        }
+        settle(&watcher);
         f.write("cache-0/log", "kernel exclusion");
         f.write("a-build/log", "overflow exclusion");
         assert!(!changed(&watcher, 300), "ignored build writes must not wake Git");
@@ -428,9 +451,49 @@ mod tests {
         assert!(changed(&watcher, 30_000), "an ignored prefix must not hide its sibling");
 
         ignored.remove(0);
-        assert!(watcher.refresh(Scope { roots, ignored: ignored.into(), complete: true }));
+        assert!(watcher.refresh(scope(&ignored)));
         assert_eq!(watcher.fd(), Some(original));
         f.write("a-build/log", "no longer ignored");
+        assert!(changed(&watcher, 30_000));
+    }
+
+    #[test]
+    fn ignored_files_are_callback_only_and_get_rechecked_after_ignore_and_index_edits() {
+        let f = Fixture::new();
+        f.write(".gitignore", ".gitignore\nbuild.log\nscratch.log\n");
+        f.write("build.log", "old build output");
+        f.write("scratch.log", "old scratch output");
+        f.write("build.log-source", "source");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let mut watcher = Watcher::new(repo.watch_scope());
+        let original = watcher.fd().unwrap();
+        assert!(watcher.native.is_empty(), "files must not use native directory slots");
+
+        f.write("build.log-source", "ready");
+        assert!(changed(&watcher, 30_000), "a prefix shared with an ignored file is still visible");
+        settle(&watcher);
+        f.write("build.log", "new build output");
+        f.write("scratch.log", "new scratch output");
+        assert!(!changed(&watcher, 300), "ignored file writes must not wake Git");
+
+        f.write(".gitignore", ".gitignore\nscratch.log\n");
+        assert!(changed(&watcher, 30_000), "an ignored .gitignore must still wake Git");
+        repo.read();
+        assert!(watcher.refresh(repo.watch_scope()));
+        assert_eq!(watcher.fd(), Some(original));
+        settle(&watcher);
+        f.write("build.log", "no longer ignored");
+        assert!(changed(&watcher, 30_000));
+        settle(&watcher);
+
+        f.git(&["add", "-f", "--", "scratch.log"]);
+        assert!(changed(&watcher, 30_000), "changing the index must still wake Git");
+        repo.read();
+        assert!(watcher.refresh(repo.watch_scope()));
+        assert_eq!(watcher.fd(), Some(original));
+        settle(&watcher);
+        f.write("scratch.log", "now tracked");
         assert!(changed(&watcher, 30_000));
     }
 

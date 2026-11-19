@@ -23,7 +23,8 @@ pub(super) struct Status {
     pub(super) sources: Vec<String>,
     pub(super) untracked: Vec<String>,
     /// Directories git ignores whole; none of their contents are listed.
-    pub(super) ignored: Vec<PathBuf>,
+    pub(super) ignored_dirs: Vec<PathBuf>,
+    pub(super) ignored_files: Vec<PathBuf>,
     /// Paths left in conflict by a merge.
     pub(super) unmerged: Vec<String>,
 }
@@ -37,9 +38,14 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
     // The path is the last of a fixed number of fields, and may hold spaces.
     let path = |entry: &str, fields: usize| entry.splitn(fields, ' ').nth(fields - 1).map(str::to_string);
     while let Some(bytes) = entries.next() {
-        if let Some(dir) = bytes.strip_prefix(b"! ").and_then(|path| path.strip_suffix(b"/")) {
+        if let Some(path) = bytes.strip_prefix(b"! ") {
             // Don't accidentally exclude a different path with a replacement character.
-            st.ignored.push(PathBuf::from(OsStr::from_bytes(dir)));
+            let decode = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+            if let Some(dir) = path.strip_suffix(b"/") {
+                st.ignored_dirs.push(decode(dir));
+            } else {
+                st.ignored_files.push(decode(path));
+            }
             continue;
         }
         let text = String::from_utf8_lossy(bytes);
@@ -188,14 +194,17 @@ mod tests {
     }
 
     #[test]
-    fn status_separates_ignored_directories_from_uncommitted_files() {
+    fn status_separates_ignored_paths_from_uncommitted_files() {
         let st = parse_status(
-            b"! cache with spaces/\0! raw-\xff/\0! build.log\0? scratch.txt\0\
+            b"! cache with spaces/\0! raw-\xff/\0! build log\0! raw-\xfe.log\0? scratch.txt\0\
               1 .M N... 100644 100644 100644 h1 h2 source.rs\0",
         );
-        assert_eq!(st.ignored[0], PathBuf::from("cache with spaces"));
-        assert_eq!(st.ignored[1].as_os_str().as_bytes(), b"raw-\xff");
-        assert_eq!(st.ignored.len(), 2);
+        assert_eq!(st.ignored_dirs[0], PathBuf::from("cache with spaces"));
+        assert_eq!(st.ignored_dirs[1].as_os_str().as_bytes(), b"raw-\xff");
+        assert_eq!(st.ignored_dirs.len(), 2);
+        assert_eq!(st.ignored_files[0], PathBuf::from("build log"));
+        assert_eq!(st.ignored_files[1].as_os_str().as_bytes(), b"raw-\xfe.log");
+        assert_eq!(st.ignored_files.len(), 2);
         assert_eq!(st.untracked, ["scratch.txt"]);
         assert_eq!(st.tracked_uncommitted, ["source.rs"]);
         assert!(st.unmerged.is_empty());
