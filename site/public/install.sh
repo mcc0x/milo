@@ -34,9 +34,7 @@ if [ "${1-}" = --uninstall ]; then
         printf 'No milo binary at %s. Nothing to do.\n' "$binary"
     fi
     printf '%s\n' 'Rex and Claude Code settings were not changed.' \
-        'To remove your Rex layout, run milo setup inside Rex while milo is installed.' \
-        'Turn off Outline, History, Usage and Arrange new shell tabs, then press s.' \
-        'To remove milo from the Claude Code status line, turn off Show Claude Code limits and press s.'
+        'To disconnect a remaining managed integration, reinstall Milo and run milo setup --remove.'
     exit 0
 fi
 
@@ -45,9 +43,9 @@ if [ "$(uname -s)" != Darwin ] ||
     fail 'This release requires an Apple Silicon Mac. See https://github.com/mcc0x/milo for source installation.'
 fi
 
-version=v0.1.0
+version=v0.1.1
 asset=milo-aarch64-apple-darwin
-expected=e469ed3d206a8d24d458c2cbbdadf4338ec0277e0b37a18e1906cf14413b7d04
+expected=8d668fa72a2a7942738dc7b4b98e8c5060fedca2d405917ccb91b820954b26da
 release=https://github.com/mcc0x/milo/releases/download/$version
 
 # Stage on the same filesystem so a verified download can replace milo by rename.
@@ -73,7 +71,7 @@ fi
 
 active=$(command -v milo || :)
 if [ -n "$active" ] && [ "$active" -ef "$binary" ]; then
-    printf '%s\n' 'Run milo setup inside Rex to choose your panes, then press s to save.'
+    printf '%s\n' 'Run milo to get started, or milo setup --skip-onboarding for an unattended install.'
 else
     if [ -n "$active" ]; then
         printf 'Your PATH selects %s instead of %s.\n' "$active" "$binary"
@@ -82,5 +80,5 @@ else
     fi
     printf "Run this copy: '"
     printf '%s' "$binary" | sed "s/'/'\\\\''/g"
-    printf "' setup\n"
+    printf "'\n"
 fi

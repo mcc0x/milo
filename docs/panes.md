@@ -13,8 +13,8 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | History | 52 columns and 8 rows or more | A row of dots when there is more than one commit |
 | History | Narrow | A shorter summary, such as `↑2` for two commits to push or `no tracking` for a branch that does not track a remote branch |
 | History | Narrow and focused | The selected commit's subject wraps so you can read it without widening the rail |
-| Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
-| Reader | 2 rows | The filename and one line of content; keyboard hints return at 3 rows |
+| Usage | Narrow | The limiting window takes priority; if its status does not fit, the provider name stays visible |
+| Reader | 2 rows | The filename and one line of content; `n` and `N` show the changed line itself |
 
 In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer.
 
@@ -23,6 +23,8 @@ The outline and history update on their own. macOS uses file-change notification
 If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.
 
 Untracked files appear before Milo counts their lines. In a wide outline, `?` means the count is not ready, not zero. The outline counts the files in view in small batches as you scroll; a folder shows `?` while any of its new files are still uncounted.
+
+If filtering or folding hides the selected file, Outline keeps the cursor on its nearest visible folder. Press `r` to refresh counts, including offscreen files.
 
 ## Comparing commits
 

@@ -13,7 +13,7 @@
 
 ## Install
 
-The v0.1.0 release is available for Apple Silicon Macs. Install it with Homebrew:
+The v0.1.1 release is available for Apple Silicon Macs. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -22,13 +22,13 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.0/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.1/install.sh &&
   sh milo-install.sh
 ```
 
 The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
 
-The install commands above install **v0.1.0**. To try the workspace preferences described here before the next release, build this checkout with `cargo build` and run `./target/debug/milo setup` inside Rex.
+Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
 <p align="center"><img src="docs/img/home.png" width="510" alt="Milo’s blue mascot and version beside Settings, Doctor and Uninstall"></p>
 
