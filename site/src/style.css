@@ -4,19 +4,41 @@
   font-family: Bricolage;
   src: url('./fonts/bricolage-grotesque-latin.woff2') format('woff2');
   font-weight: 400 800;
-  font-display: optional;
+  /* Preloaded, so it is nearly always there for the first paint; if not,
+     the text shows at once and changes face when it arrives. */
+  font-display: swap;
 }
 
+/* The colours are the cat's: its blue, the sky of its highlight, the
+   lavender of its tile, the navy of its eyes. */
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --page: #eceafb;
   --surface: #f9f8ff;
   --ink: #1b2466;
-  --secondary: #464b73;
+  --on-ink: #fff;
+  --secondary: #4d5280;
   --blue: #2a89fb;
-  --sky: #80dafc;
   --edge: #cecae8;
+  --tint: #dcebff;
+  --tint-edge: #c2dafa;
+  --deep: #1b2466;
   --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d1030;
+    --surface: #151a45;
+    --ink: #eef0ff;
+    --on-ink: #0d1030;
+    --secondary: #a7acd8;
+    --blue: #5aa5ff;
+    --edge: #262d66;
+    --tint: #14275a;
+    --tint-edge: #20387a;
+    --deep: #232e86;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -26,13 +48,14 @@ body {
   background: var(--page);
   color: var(--ink);
   font: 400 1rem/1.5 Bricolage, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 h1, h2, h3, p { margin: 0; }
 
 :focus-visible {
-  outline: 3px solid var(--ink);
-  outline-offset: 4px;
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
 }
 
 .visually-hidden {
@@ -54,16 +77,16 @@ h1 {
 }
 
 .description {
-  margin-top: .8rem;
-  font-weight: 560;
-  font-size: clamp(1.2rem, 2.1vw, 1.5rem);
-  line-height: 1.2;
-  letter-spacing: -.01em;
+  margin-top: .85rem;
+  font-weight: 600;
+  font-size: clamp(1.25rem, 2.2vw, 1.6rem);
+  line-height: 1.18;
+  letter-spacing: -.015em;
   text-wrap: balance;
 }
 
 .subtext {
-  margin-top: .45rem;
+  margin-top: .5rem;
   color: var(--secondary);
   font-size: 1rem;
   line-height: 1.45;
@@ -75,9 +98,11 @@ h1 {
 .rex {
   color: var(--ink);
   font-weight: 650;
+  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
   text-decoration-thickness: 1px;
   text-underline-offset: .2em;
 }
+.rex:hover { text-decoration-color: currentColor; }
 .rex img {
   display: inline-block;
   width: 1.3em;
@@ -90,35 +115,41 @@ h1 {
   align-items: center;
   gap: .7rem;
   max-width: 100%;
-  margin-top: 1.1rem;
+  margin-top: 1.15rem;
   padding: .3rem .3rem .3rem .95rem;
   border: 1px solid var(--edge);
   border-radius: .7rem;
   background: var(--surface);
+  box-shadow: 0 1px 2px #1b24660f;
   text-align: left;
 }
 
-.install-prompt { color: #8a8fb5; font: 400 .875rem/1 var(--mono); user-select: none; }
+.install-prompt { color: var(--secondary); opacity: .7; font: 400 .875rem/1 var(--mono); user-select: none; }
 
+/* One click selects the whole command. */
 .install code {
   min-width: 0;
   font: 400 clamp(.75rem, 2.9vw, .875rem)/1.5 var(--mono);
   overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .install button {
   flex: none;
-  min-width: 4.6rem;
+  min-width: 4.9rem;
   height: 2.5rem;
   padding: 0 .9rem;
   border: 0;
   border-radius: .45rem;
   background: var(--ink);
-  color: #fff;
+  color: var(--on-ink);
   cursor: pointer;
   font: 650 .875rem/1 Bricolage, system-ui, sans-serif;
+  transition: background-color .2s ease, scale .12s ease;
 }
-.install button:active { background: #101748; }
+.install button:active { scale: .96; }
+.install button[data-state='copied'] { background: #1f9d55; color: #fff; }
+.install button[data-state='copied']::before { content: '✓ '; }
 
 /* One card for each pane: what it looks like, then how it works. */
 .bento {
@@ -132,7 +163,7 @@ h1 {
 .card {
   display: flex;
   flex-direction: column;
-  gap: 1.4rem;
+  gap: 1.5rem;
   padding: clamp(1.1rem, 2.2vw, 1.75rem);
   border: 1px solid var(--edge);
   border-radius: 1.5rem;
@@ -140,14 +171,14 @@ h1 {
 }
 /* The outline runs the full width, words beside the pane; then two pairs. */
 .card-outline { grid-column: span 12; flex-direction: row; align-items: center; gap: clamp(1.4rem, 4vw, 3.5rem); }
-.card-outline .card-text { flex: 0 0 34%; }
+.card-outline .card-text { flex: 0 0 32%; }
 .card-outline .shot { flex: 1; min-width: 0; }
 .card-usage { grid-column: span 7; }
 .card-setup { grid-column: span 5; }
 .card-history, .card-reader { grid-column: span 6; }
-/* Two cards break the run of white: the sky of the cat's highlight, and its eyes. */
-.card-usage { background: #dcebff; border-color: #c2dafa; }
-.card-setup { background: var(--ink); border-color: var(--ink); color: #fff; }
+/* Two cards break the run: the sky of the cat's highlight, and its eyes. */
+.card-usage { background: var(--tint); border-color: var(--tint-edge); }
+.card-setup { background: var(--deep); border-color: var(--deep); color: #fff; }
 /* Where a card is taller than its contents, the pane and the words sit at
    its two ends. */
 .card-history, .card-reader, .card-usage, .card-setup { justify-content: space-between; }
@@ -159,32 +190,53 @@ h1 {
   letter-spacing: -.03em;
 }
 .card p {
-  max-width: 48ch;
-  margin-top: .6rem;
+  max-width: 46ch;
+  margin-top: .65rem;
   color: var(--secondary);
+  text-wrap: pretty;
 }
-.card p + p { margin-top: .35rem; }
+.card p + p { margin-top: .4rem; }
 .card-setup p { color: #c9cdf0; }
-.card code { font: 400 .9em/1 var(--mono); color: #fff; }
+.card code { padding: .1em .35em; border-radius: .3em; background: #ffffff1f; color: #fff; font: 400 .88em/1 var(--mono); }
 
-/* A pane on its own, as it stands when the scene above has finished. */
+/* A pane on its own, at the moment that says most about it. */
 .shot {
-  box-shadow: none;
-  border-radius: .8rem;
+  border-radius: .7rem;
+  background: var(--term-bg);
+  box-shadow: 0 1px 2px #0d103026, 0 14px 28px -18px #0d103066;
   font: 400 clamp(.6875rem, 1.05vw, .8rem)/1.28 var(--mono);
 }
 .shot.outline, .shot.history { padding: .9rem 1.1rem; }
-.shot.usage { padding-block: 1rem; }
-.shot.reader-content { padding: .9rem 1.1rem; }
-.shot.sketch {
-  margin-bottom: 0;
-  padding: 1.1rem 1.25rem;
-  border-color: #3a4384;
-  background: #141b52;
-  color: #aeb6ea;
-  line-height: 1.18;
-  overflow-x: auto;
+.shot.usage { padding-block: 1.1rem; }
+/* The reader keeps its title bar and its ring, so it reads as a window. */
+.shot.reader-window { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 18px 34px -18px #0d1030a0; }
+.shot.reader-window .reader-content { padding: .8rem 1.1rem .9rem; }
+
+/* What setup arranges: the panes around the person's own work. */
+.layout-sketch {
+  display: grid;
+  grid-template-columns: 30% 1fr;
+  grid-template-rows: 2.6rem 3.9rem 3.6rem;
+  grid-template-areas: 'outline usage' 'outline work' 'history work';
+  gap: .4rem;
+  padding: .4rem;
+  border: 1px solid #ffffff26;
+  border-radius: .8rem;
+  background: #0d103059;
+  font: 500 .78rem/1 var(--mono);
 }
+.layout-sketch span {
+  display: grid;
+  place-items: center;
+  border: 1px solid #ffffff2e;
+  border-radius: .45rem;
+  background: #ffffff12;
+  color: #dfe3ff;
+}
+.sketch-outline { grid-area: outline; }
+.sketch-history { grid-area: history; }
+.sketch-usage { grid-area: usage; }
+.layout-sketch .sketch-work { grid-area: work; border-style: dashed; background: none; color: #a9b0e6; }
 
 .footer {
   width: min(calc(100% - 3rem), 73.75rem);
@@ -208,6 +260,10 @@ h1 {
   .install code { flex: 1; }
   .bento { width: calc(100% - 1.5rem); gap: .75rem; }
   .card { border-radius: 1.15rem; }
-  .shot { font-size: clamp(.6875rem, 3vw, .78rem); }
+  .shot, .shot.usage { font-size: clamp(.6875rem, 3vw, .78rem); }
   .footer { width: calc(100% - 1.5rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .install button { transition: none; }
 }

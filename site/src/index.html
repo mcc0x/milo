@@ -3,7 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#eceafb">
+    <meta name="theme-color" content="#eceafb" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0d1030" media="(prefers-color-scheme: dark)">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <title>milo — Terminal panes for coders who don’t want to learn key binds</title>
     <meta name="description" content="Your files, commits and usage limits in panes beside your shell. Native to Rex.">
     <link rel="canonical" href="https://usemilo.net/">
@@ -15,12 +17,12 @@
     <meta property="og:image" content="https://usemilo.net/milo-preview.jpg">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="Milo, a blue cat, beside the words ‘Terminal panes beside your work.’">
+    <meta property="og:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Terminal panes for coders who don’t want to learn key binds.’">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="milo — Terminal panes for coders who don’t want to learn key binds">
     <meta name="twitter:description" content="Your files, commits and usage limits in panes beside your shell. Native to Rex.">
     <meta name="twitter:image" content="https://usemilo.net/milo-preview.jpg">
-    <meta name="twitter:image:alt" content="Milo, a blue cat, beside the words ‘Terminal panes beside your work.’">
+    <meta name="twitter:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Terminal panes for coders who don’t want to learn key binds.’">
     <link rel="preload" href="./fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="./fonts/terminal-symbols.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="./fonts/terminal-figures.woff2" as="font" type="font/woff2" crossorigin>
@@ -54,7 +56,7 @@
             <div class="window-lights"><i></i><i></i><i></i></div>
             <span class="terminal-tab">tidebook</span>
             <span class="terminal-tab is-idle">notes</span>
-            <span class="terminal-app">Rex</span>
+            <span class="terminal-new">+</span>
           </div>
           <div class="terminal-panes">
             <section class="term-pane outline" id="outline-pane"></section>
@@ -78,7 +80,7 @@
                 <div class="agent-step" data-step="plan">
                   <p><b>Agent</b><br>I’ll add wind speed in km/h and check the forecast output.</p>
                 </div>
-                <div class="agent-step" data-step="edit">
+                <div class="agent-step" data-step="editing">
                   <p class="agent-tool">┌ <b>Edit</b> <span>src/weather.ts</span> <span id="agent-tally"></span></p>
                   <div class="agent-diff" id="agent-diff"></div>
                 </div>
@@ -86,7 +88,7 @@
                   <p class="agent-tool">┌ <b>Run</b> <span>bun test tests/weather.test.ts</span></p>
                   <p class="agent-result">└ <span class="term-green">✓</span> 1 passed · 0 failed</p>
                 </div>
-                <div class="agent-step" data-step="commit">
+                <div class="agent-step" data-step="committing">
                   <p class="agent-tool">┌ <b>Commit</b> <span>src/weather.ts</span></p>
                   <p class="agent-result">└ <span class="term-green" id="agent-commit-id"></span> <span id="agent-commit-title"></span></p>
                 </div>
@@ -112,46 +114,48 @@
         <article class="card card-outline">
           <div class="card-text">
             <h3>Outline</h3>
-            <p>Your project’s files, kept up to date as they change. Bold means changed and not yet committed. Regular means committed and waiting to be pushed.</p>
-            <p>Click a folder to open it. Double-click a file to read it.</p>
+            <p>Your files, live. Bold is changed and not yet committed. Regular is committed and waiting to be pushed.</p>
+            <p>Double-click a file to read it.</p>
           </div>
-          <div class="terminal shot outline" data-shot="outline-pane" aria-hidden="true"></div>
+          <div class="terminal shot outline" data-shot="outline-pane" data-frame="edit" aria-hidden="true"></div>
         </article>
 
         <article class="card card-usage">
-          <div class="terminal shot usage" data-shot="usage-pane" aria-hidden="true"></div>
+          <div class="terminal shot usage" data-shot="usage-pane" data-frame="rest" aria-hidden="true"></div>
           <div class="card-text">
             <h3>Usage</h3>
-            <p>How much of your Codex and Claude limits you have used, and when each one resets. Milo reads what those tools already save on your computer. Nothing is sent anywhere.</p>
+            <p>How much of your Codex and Claude limits is used, and when each resets. Milo reads what those tools already save on your computer.</p>
           </div>
         </article>
         <article class="card card-setup">
           <div class="card-text">
             <h3>Setup</h3>
-            <p>Run <code>milo setup</code> once and choose your panes. Rex then arranges every new shell tab for you.</p>
+            <p>Run <code>milo setup</code> once and choose your panes. From then on, every new shell tab in Rex opens arranged.</p>
           </div>
-          <pre class="terminal shot sketch" aria-hidden="true">┌─────────┬─────────────────────┐
-│         │ Usage               │
-│ Outline ├─────────────────────┤
-│         │                     │
-├─────────┤ Your work           │
-│ History │                     │
-└─────────┴─────────────────────┘</pre>
+          <div class="layout-sketch" aria-hidden="true">
+            <span class="sketch-outline">Outline</span>
+            <span class="sketch-history">History</span>
+            <span class="sketch-usage">Usage</span>
+            <span class="sketch-work">Your work</span>
+          </div>
         </article>
 
         <article class="card card-history">
-          <div class="terminal shot history" data-shot="history-pane" aria-hidden="true"></div>
+          <div class="terminal shot history" data-shot="history-pane" data-frame="rest" aria-hidden="true"></div>
           <div class="card-text">
             <h3>History</h3>
-            <p>Your recent commits, with the ones still to push above the line. Click a commit to see the files it touched.</p>
+            <p>Your recent commits. The ones still to push sit above the line. Click a commit to see its files.</p>
           </div>
         </article>
 
         <article class="card card-reader">
-          <div class="terminal shot reader-content" data-shot="reader-content" aria-hidden="true"></div>
+          <div class="terminal shot reader-window" aria-hidden="true">
+            <div class="reader-bar"><span>weather.ts</span></div>
+            <div class="reader-content" data-shot="reader-content" data-frame="rest"></div>
+          </div>
           <div class="card-text">
             <h3>Reader</h3>
-            <p>A whole file with the added and removed lines marked, in a window that floats over your work. Open it from the outline, or from a commit to read the file as it was then.</p>
+            <p>A file with its added and removed lines marked, floating over your work. Open one from the outline, or from a commit to read it as it was then.</p>
           </div>
         </article>
       </section>

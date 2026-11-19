@@ -131,10 +131,18 @@ function renderUsage(frame: Frame) {
       const figure = element(`${name}-${slot}`);
       const percent = document.createElement('small');
       percent.textContent = '%';
-      // The figure that has just risen flashes once.
-      const ticked = frame.phase === 'usage' && name === 'codex' && slot === 'five';
-      figure.className = `${value >= 90 ? 'level-red' : value >= 70 ? 'level-amber' : 'level-green'}${ticked ? ' figure-tick' : ''}`;
-      figure.replaceChildren(String(value), percent);
+      figure.className = value >= 90 ? 'level-red' : value >= 70 ? 'level-amber' : 'level-green';
+      // A figure that has just risen counts up to its new value; the
+      // stylesheet draws the number from these two properties.
+      const from = slot === 'five' ? frame.usage[name].from : undefined;
+      if (from === undefined) {
+        figure.replaceChildren(String(value), percent);
+        continue;
+      }
+      const count = span('', 'count');
+      count.style.setProperty('--from', String(from));
+      count.style.setProperty('--n', String(value));
+      figure.replaceChildren(count, percent);
     }
   }
 }

@@ -21,7 +21,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-bottom: 1.6rem;
+  padding-bottom: 1.7rem;
   text-align: center;
 }
 .lockup {
@@ -31,7 +31,8 @@
   /* The cat is lighter than the word; nudged so the pair looks centred. */
   margin-inline-start: -.9rem;
 }
-.mascot { flex: none; width: clamp(4.5rem, 7vw, 5.75rem); }
+/* It turns about its feet when it looks over at a pane. */
+.mascot { flex: none; width: clamp(4.5rem, 7vw, 5.75rem); transform-origin: 50% 90%; }
 .mascot img {
   display: block;
   width: 100%;
@@ -42,39 +43,45 @@
 /* Under the window: what the scene is showing at this moment. */
 .caption {
   min-height: 1.6rem;
-  margin-top: .95rem;
+  margin-top: 1rem;
   color: var(--secondary);
-  font-weight: 560;
+  font-weight: 500;
   font-size: 1.05rem;
   text-align: center;
 }
+.caption b { color: var(--blue); font-weight: 700; }
 
+/* The window is drawn with Rex's own default dark theme: its canvas, its
+   pane and border colours, its accent, and its terminal palette. */
 .terminal {
-  --term-bg: #131827;
-  --term-chrome: #1e2537;
-  --term-line: #353d52;
-  --term-text: #eff1fa;
-  --term-muted: #a2acca;
-  --term-select: #29334b;
-  --term-green: #85d69a;
-  --term-amber: #efbd69;
-  --term-red: #ff9c97;
-  --term-blue: #82bbff;
-  --term-purple: #c1a6f6;
+  --canvas: #0c0e11;
+  --term-bg: #0e1117;
+  --term-raised: #1e2023;
+  --term-line: #2f3135;
+  --term-text: #e7edf3;
+  --term-muted: #8b9198;
+  --term-select: #1a2233;
+  --accent: #4582f9;
+  --term-green: #3fb950;
+  --term-amber: #d29922;
+  --term-red: #ff7b72;
+  --term-blue: #58a6ff;
+  --term-purple: #bc8cff;
   --line: 1.28em;
-  --pane-x: clamp(.65rem, 1.3vw, 1.15rem);
-  --pane-y: .625rem;
+  --pane-x: clamp(.65rem, 1.2vw, 1.05rem);
+  --pane-y: .6rem;
+  --gap: .375rem;
   border: 1px solid var(--term-line);
-  border-radius: .8125rem;
+  border-radius: .75rem;
   overflow: hidden;
-  background: var(--term-bg);
+  background: var(--canvas);
   color: var(--term-text);
-  box-shadow: 0 2px 3px #1b246626, 0 30px 50px -24px #27206375;
+  box-shadow: 0 0 0 1px #0000001f, 0 2px 4px #1b246622, 0 32px 56px -26px #1b246680;
   /* Sized by the window's height as well as its width, so the intro and
-     the whole window share the first screen: 39.7 lines of text and 27.5rem
+     the whole window share the first screen: 39.7 lines of text and 28.5rem
      of everything else. */
-  font: 400 clamp(.6875rem, min(1.24vw, calc((100vh - 27.5rem) / 39.7)), .85rem)/1.28 var(--mono);
-  font: 400 clamp(.6875rem, min(1.24vw, calc((100svh - 27.5rem) / 39.7)), .85rem)/1.28 var(--mono);
+  font: 400 clamp(.6875rem, min(1.24vw, calc((100vh - 28.5rem) / 39.7)), .85rem)/1.28 var(--mono);
+  font: 400 clamp(.6875rem, min(1.24vw, calc((100svh - 28.5rem) / 39.7)), .85rem)/1.28 var(--mono);
   font-variant-ligatures: none;
   font-variant-numeric: tabular-nums;
 }
@@ -82,36 +89,19 @@
 .terminal-bar {
   display: flex;
   align-items: center;
-  gap: 1.1rem;
-  height: 2.5rem;
-  padding-inline: .9rem;
-  border-bottom: 1px solid var(--term-line);
-  background: var(--term-chrome);
-  box-shadow: inset 0 1px #ffffff10;
-}
-
-.window-lights { display: flex; gap: .44rem; }
-.window-lights i { width: .56rem; height: .56rem; border-radius: 50%; background: #fa878f; }
-.window-lights i:nth-child(2) { background: #ffd080; }
-.window-lights i:nth-child(3) { background: #89dfa0; }
-.terminal-tab {
-  align-self: end;
-  padding: .40rem 1.3rem .36rem;
-  margin-bottom: -1px;
-  border: 1px solid var(--term-line);
-  border-bottom-color: var(--term-bg);
-  border-radius: .375rem .375rem 0 0;
-  background: var(--term-bg);
-  font-weight: 700;
-}
-.terminal-tab.is-idle {
-  margin-inline-start: -1.1rem;
-  border-color: transparent;
-  background: transparent;
+  gap: .25rem;
+  height: 2.4rem;
+  padding-inline: .85rem;
   color: var(--term-muted);
-  font-weight: 400;
+  font: 500 .78rem/1 system-ui, sans-serif;
 }
-.terminal-app { margin-inline-start: auto; color: var(--term-muted); }
+.window-lights { display: flex; gap: .5rem; margin-inline-end: .9rem; }
+.window-lights i { width: .75rem; height: .75rem; border-radius: 50%; background: #ff5f57; }
+.window-lights i:nth-child(2) { background: #febc2e; }
+.window-lights i:nth-child(3) { background: #28c840; }
+.terminal-tab { padding: .38rem .8rem; border-radius: .4rem; background: var(--term-raised); color: var(--term-text); }
+.terminal-tab.is-idle { background: none; color: inherit; }
+.terminal-new { padding-inline: .5rem; font-size: 1.05rem; }
 
 .terminal-panes {
   position: relative;
@@ -120,43 +110,37 @@
   grid-template-columns: 42.75% minmax(0, 1fr);
   grid-template-rows: calc(var(--line) * 6 + .75rem) auto calc(var(--line) * 13 + 2 * var(--pane-y));
   grid-template-areas: 'outline usage' 'outline agent' 'history agent';
-  background: var(--term-line);
-  gap: 1px;
+  gap: var(--gap);
+  padding: 0 var(--gap) var(--gap);
 }
 
+/* Each pane is a card on the canvas. */
 .term-pane {
   min-width: 0;
+  border: 1px solid var(--term-line);
+  border-radius: .5rem;
   background: var(--term-bg);
-  transition: filter .4s ease;
+  transition: filter .45s ease, border-color .45s ease, box-shadow .45s ease;
 }
 /* A pane's hint line stays at its foot, whatever is listed above it. */
 .outline, .history { display: flex; flex-direction: column; padding: var(--pane-y) var(--pane-x); }
 .outline { grid-area: outline; }
 .history { grid-area: history; }
 .outline > .term-hint, .history > .term-hint { margin-top: auto; }
-.agent { grid-area: agent; position: relative; display: flex; flex-direction: column; overflow: hidden; }
-/* The pane the keyboard is in. */
-.agent::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border: 1px solid #6e9dda53;
-  border-top-color: #6e9dda87;
-  pointer-events: none;
-}
+/* The pane the keyboard is in wears the accent, as in Rex. */
+.agent { grid-area: agent; display: flex; flex-direction: column; overflow: hidden; border-color: #4582f999; }
 
-/* The scene draws the eye to one pane at a time: the rest step back. */
-:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.62); }
-.terminal[data-view='reader'] .term-pane { filter: brightness(.45); }
+/* The scene draws the eye to one pane at a time: the rest step back a little. */
+:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.74) saturate(.85); }
+.terminal[data-view='reader'] .term-pane { filter: brightness(.5) saturate(.8); }
 .terminal[data-view='outline'] .outline,
 .terminal[data-view='history'] .history,
 .terminal[data-view='usage'] .usage,
 .terminal[data-view='agent'] .agent {
   filter: none;
-  outline: 1px solid #70b3ff;
-  outline-offset: -1px;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 1.75rem #4582f933;
   z-index: 1;
-  box-shadow: inset 0 0 1rem #2a89fb20;
 }
 
 .term-line { min-width: 0; min-height: var(--line); }
@@ -167,10 +151,10 @@
 .term-red { color: var(--term-red); }
 .term-blue { color: var(--term-blue); }
 .term-purple { color: var(--term-purple); }
-.term-cyan { color: #65c9ff; }
-.term-slate { color: #9cbada; }
-.term-yellow { color: #dbdc83; }
-.term-orange { color: #ff8f64; }
+.term-cyan { color: #39c5cf; }
+.term-slate { color: #8b9198; }
+.term-yellow { color: #e3b341; }
+.term-orange { color: #ffa657; }
 .term-header, .term-commit { display: flex; justify-content: space-between; gap: .75ch; white-space: nowrap; }
 .term-project, .term-summary { white-space: nowrap; }
 .term-project { display: inline-flex; gap: 2ch; }
@@ -185,17 +169,20 @@
 .term-hint { white-space: nowrap; padding-top: .1em; }
 .term-selected { background: var(--term-select); box-shadow: -.4rem 0 var(--term-select), .4rem 0 var(--term-select); }
 /* A row that has just changed: the edited file, the new commit. */
-.term-lit { animation: row-lit 1.4s ease-out; }
+.term-lit { animation: row-lit 1.8s ease-out; }
 .history-dots { white-space: pre; }
 .history-divider { display: flex; align-items: center; gap: 1ch; }
 .history-divider::after { content: ''; flex: 1; border-top: 1px solid currentColor; }
 
 @keyframes row-lit {
-  0%, 30% { background: #2d5a8a; box-shadow: -.4rem 0 #2d5a8a, .4rem 0 #2d5a8a; }
+  0%, 25% { background: #24457e; box-shadow: -.4rem 0 #24457e, .4rem 0 #24457e; }
   100% { background: var(--term-select); box-shadow: -.4rem 0 var(--term-select), .4rem 0 var(--term-select); }
 }
 
+/* The figures and marks take their size from the strip's own width, so
+   they never collide in a narrow one. */
 .usage {
+  container-type: inline-size;
   grid-area: usage;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -215,46 +202,59 @@
 }
 .usage-tool + .usage-tool { border-inline-start: 1px solid var(--term-line); }
 .usage-mark { grid-row: span 2; display: grid; justify-items: center; gap: .3rem; }
-.usage-mark img { display: block; width: 5.6em; height: auto; }
+.usage-mark img { display: block; width: min(5.6em, 10.5cqi); height: auto; }
 .usage-mark span, .usage-limit span { white-space: nowrap; }
 .usage-limit { display: grid; }
-.usage-limit strong { font: 4.35em/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
+.usage-limit strong { font: min(4.35em, 8.3cqi)/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
 .usage-limit small { margin-left: .11em; font-size: .5em; letter-spacing: 0; }
 .usage-activity { grid-column: 2/-1; white-space: nowrap; }
-.level-green { color: #3fb950; }
-.level-amber { color: #d29922; }
-.level-red { color: #ff7b72; }
-/* The figure that has just gone up. */
-.figure-tick { animation: figure-tick 1.1s ease-out; }
-@keyframes figure-tick {
-  0%, 20% { filter: brightness(1.75); }
-  100% { filter: none; }
+.level-green { color: var(--term-green); }
+.level-amber { color: var(--term-amber); }
+.level-red { color: var(--term-red); }
+
+/* A figure that has just risen counts up: the number is drawn from --n,
+   which runs from --from to its value. Where a browser cannot animate a
+   number, it simply shows the value. */
+@property --n {
+  syntax: '<integer>';
+  inherits: false;
+  initial-value: 0;
+}
+.count { counter-reset: n var(--n); animation: count-up 1.2s ease-out both; }
+.count::before { content: counter(n); }
+@keyframes count-up {
+  from { --n: var(--from); }
 }
 
 .agent-session {
   flex: 1;
   min-height: 0;
-  padding: clamp(.75rem, 1.6vw, 1.35rem) var(--pane-x) 0;
+  padding: clamp(.75rem, 1.5vw, 1.25rem) var(--pane-x) 0;
   transition: opacity .32s ease;
 }
 /* The scene is about to start again. */
 .scene-out .agent-session { opacity: 0; }
-.agent-request { padding: .46rem .7rem .53rem; border-inline-start: 2px solid #668acb; background: #1e293f; }
-.agent-request b, .agent-step > p:first-child b { color: #a6c8fa; }
+.agent-request { padding: .46rem .7rem .53rem; border-inline-start: 2px solid var(--accent); border-radius: 0 .3rem .3rem 0; background: #161b22; }
+.agent-request b, .agent-step > p:first-child b { color: var(--term-blue); }
 .agent-step { margin-top: clamp(.5rem, 1.1vw, .85rem); }
 .agent-step:first-child { margin-top: 0; }
-.agent-step:not([hidden]) { animation: step-in .26s ease-out both; }
+.agent-step:not([hidden]) { animation: step-in .3s ease-out both; }
 @keyframes step-in {
-  from { opacity: 0; transform: translateY(.4em); }
+  from { opacity: 0; translate: 0 .4em; }
 }
 .agent-tool, .agent-result { color: var(--term-muted); }
 .agent-tool > span:first-of-type, #agent-commit-title { color: var(--term-text); }
+/* What the agent has just done glows for a moment, before a pane answers it. */
+.agent-step:not([hidden]) > .agent-tool { animation: tool-in 1.3s ease-out; }
+@keyframes tool-in {
+  0%, 30% { background: #4582f92e; box-shadow: -.4rem 0 #4582f92e, .4rem 0 #4582f92e; }
+}
 #agent-tally { margin-inline-start: .75ch; }
 .agent-diff { margin: .22rem 0 0 1.5ch; }
 .diff-line { display: grid; grid-template-columns: 1.1ch minmax(0, 1fr); column-gap: 1ch; padding-inline: .5ch; }
 .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
-.diff-added { background: #142b27; }
-.diff-removed { background: #341f2a; color: var(--term-red); }
+.diff-added { background: #3fb95026; }
+.diff-removed { background: #f8514926; color: var(--term-red); }
 .diff-added .diff-marker, .diff-added .diff-number { color: var(--term-green); }
 .diff-removed .diff-marker { color: var(--term-red); }
 
@@ -264,20 +264,20 @@
   align-items: center;
   gap: 1ch;
   min-height: calc(var(--line) + 1.1rem);
-  margin: .6rem var(--pane-x) clamp(.65rem, 1.2vw, 1rem);
+  margin: .6rem var(--pane-x) clamp(.6rem, 1.1vw, .9rem);
   padding: .5rem .8rem;
   border: 1px solid var(--term-line);
   border-radius: .4rem;
-  background: #171d2e;
+  background: #161b22;
 }
-.composer-prompt { color: #a6c8fa; }
+.composer-prompt { color: var(--term-blue); }
 .composer-text { min-width: 0; overflow: hidden; white-space: nowrap; }
 .composer-caret {
   flex: none;
   width: .55em;
   height: 1.15em;
   margin-inline-start: -.6ch;
-  background: var(--term-text);
+  background: var(--accent);
   animation: caret 1.1s steps(1) infinite;
 }
 @keyframes caret {
@@ -295,11 +295,6 @@
   50% { opacity: .25; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .term-lit, .figure-tick, .agent-step:not([hidden]), .composer-caret, .agent-status[data-state='working']::before, .reader:not([hidden]) { animation: none; }
-  .term-pane, .agent-session { transition: none; }
-}
-
 /* The reader floats over the tab, as it does in Rex. */
 .reader {
   position: absolute;
@@ -307,29 +302,36 @@
   z-index: 2;
   width: min(calc(100% - 2rem), 39rem);
   translate: -50% -50%;
-  border: 1px solid #78b7ff;
-  border-radius: .65rem;
+  border: 1px solid var(--accent);
+  border-radius: .6rem;
   overflow: hidden;
   background: var(--term-bg);
-  box-shadow: 0 18px 38px #070b17b0, 0 0 0 3px #2a89fb30;
+  box-shadow: 0 22px 44px #000000b0, 0 0 0 1px var(--accent), 0 0 2rem #4582f933;
 }
-.reader:not([hidden]) { animation: reader-in .28s ease-out both; }
+.reader:not([hidden]) { animation: reader-in .32s cubic-bezier(.2, .8, .2, 1) both; }
 @keyframes reader-in {
-  from { opacity: 0; scale: .97; }
+  from { opacity: 0; scale: .96; }
 }
 .reader-bar {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 2.1rem;
+  min-height: 2rem;
   border-bottom: 1px solid var(--term-line);
-  background: var(--term-chrome);
+  background: #161b22;
   color: var(--term-muted);
+  font: 500 .78rem/1 system-ui, sans-serif;
 }
 .reader-content { padding: .65rem var(--pane-x); }
 .reader-heading { margin-bottom: .5em; }
 .reader-content .diff-line { grid-template-columns: 2ch 1ch minmax(0, 1fr); }
 .reader-content .term-hint { margin-top: .5em; }
+
+@media (prefers-reduced-motion: reduce) {
+  .term-lit, .count, .agent-step:not([hidden]), .agent-step:not([hidden]) > .agent-tool,
+  .composer-caret, .agent-status[data-state='working']::before, .reader:not([hidden]) { animation: none; }
+  .term-pane, .agent-session { transition: none; }
+}
 
 @media (min-width: 45.001rem) and (max-width: 62rem) {
   .term-hint { font-size: .84em; }
@@ -349,11 +351,11 @@
   .caption { min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
   .terminal { --pane-x: .65rem; --line: 1.45em; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
   .terminal-bar { height: 2.2rem; }
-  .terminal-panes { display: block; min-height: max(22rem, calc(var(--line) * 18 + 2 * var(--pane-y))); background: var(--term-bg); }
-  .term-pane { display: none; }
+  .terminal-panes { display: block; min-height: max(22rem, calc(var(--line) * 18 + 2 * var(--pane-y) + var(--gap))); }
+  .term-pane { display: none; min-height: inherit; }
   .terminal[data-view='whole'] .outline, .terminal[data-view='reader'] .outline,
-  .terminal[data-view='outline'] .outline, .terminal[data-view='history'] .history { display: flex; min-height: inherit; }
-  .terminal[data-view='agent'] .agent { display: flex; min-height: inherit; }
+  .terminal[data-view='outline'] .outline, .terminal[data-view='history'] .history { display: flex; }
+  .terminal[data-view='agent'] .agent { display: flex; }
   .terminal[data-view='usage'] .usage { display: grid; }
   .term-project { gap: 1.2ch; }
   .term-hint { font-size: .9em; }
@@ -361,7 +363,7 @@
   .reader { width: calc(100% - 1rem); }
   .reader-content { padding-inline: .45rem; }
   .reader-content .diff-line { grid-template-columns: 1.6ch 1ch minmax(0, 1fr); column-gap: .65ch; }
-  .usage { min-height: inherit; grid-template-columns: 1fr; align-content: center; padding: .7rem 1rem; }
+  .usage { grid-template-columns: 1fr; align-content: center; padding: .7rem 1rem; }
   .usage-tool { grid-template-columns: 5.2rem 1fr 1fr; gap: 0 .9rem; font-size: .6875rem; padding: .75rem 0; }
   .usage-tool + .usage-tool { border-inline: 0; border-top: 1px solid var(--term-line); }
   .usage-limit strong { font-size: 2.75rem; }
@@ -370,4 +372,3 @@
   .agent-session { padding-inline: .65rem; }
   .agent-step { margin-top: .6rem; }
 }
-
