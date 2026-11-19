@@ -363,6 +363,7 @@ fn brand(s: &mut Screen, x: usize, y: usize, w: usize, h: usize) {
 
 impl Pane for Welcome {
     fn draw(&mut self, s: &mut Screen) {
+        s.clear();
         let (w, h) = (s.w, s.h);
         self.footer = HintHits::default();
         if w == 0 || h == 0 {
@@ -497,6 +498,25 @@ mod tests {
         assert_eq!(narrow.text(), [" › C…"]);
         assert_eq!(welcome.hover_span(4, 0), Some(3..5));
         assert_eq!(welcome.hover_span(5, 0), None);
+    }
+
+    #[test]
+    fn welcome_replaces_the_previous_frame_on_a_reused_screen() {
+        let fixture = Fixture::folder();
+        let mut welcome = Welcome::new(Mode::Icons(fixture.root.join("state")));
+        let mut screen = Screen::sized(48, 14);
+        welcome.draw(&mut screen);
+        assert!(screen.text().iter().any(|line| line.contains("› Continue")));
+
+        for (key, selected) in [(Key::Enter, "› Save Nerd Font icons"), (Key::Down, "› Save plain icons")] {
+            assert_eq!(welcome.key(key), After::Stay);
+            welcome.draw(&mut screen);
+            let mut fresh = Screen::sized(48, 14);
+            welcome.draw(&mut fresh);
+            let frame = screen.text();
+            assert!(frame.iter().any(|line| line.contains(selected)));
+            assert_eq!(frame, fresh.text());
+        }
     }
 
     #[test]
