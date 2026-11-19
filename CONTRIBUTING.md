@@ -31,6 +31,10 @@ cargo test                         # everything passes
 
 Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
+## Tagging a release
+
+Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. GitHub Actions runs `cargo test --release --locked` on an arm64 macOS runner. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
+
 ## What a good change looks like
 
 **It solves one thing.** A bug fix does not also rename a module. A refactoring does not also change behaviour.
