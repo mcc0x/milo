@@ -20,9 +20,6 @@
   --secondary: #4d5280;
   --blue: #2a89fb;
   --edge: #cecae8;
-  --tint: #dcebff;
-  --tint-edge: #c2dafa;
-  --deep: #1b2466;
   --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
 }
 
@@ -35,9 +32,6 @@
     --secondary: #a7acd8;
     --blue: #5aa5ff;
     --edge: #262d66;
-    --tint: #14275a;
-    --tint-edge: #20387a;
-    --deep: #232e86;
   }
 }
 
@@ -51,7 +45,15 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-h1, h2, h3, p { margin: 0; }
+/* The whole page is one screen: it sits in the middle of the window. */
+main {
+  display: grid;
+  align-content: center;
+  min-height: 100vh;
+  min-height: 100svh;
+}
+
+h1, p { margin: 0; }
 
 :focus-visible {
   outline: 3px solid var(--blue);
@@ -78,36 +80,37 @@ h1 {
 
 .description {
   margin-top: .85rem;
-  font-weight: 600;
-  font-size: clamp(1.25rem, 2.2vw, 1.6rem);
+  font-weight: 620;
+  font-size: clamp(1.4rem, 2.6vw, 1.9rem);
   line-height: 1.18;
-  letter-spacing: -.015em;
+  letter-spacing: -.02em;
   text-wrap: balance;
 }
 
 .subtext {
-  margin-top: .5rem;
+  max-width: 62ch;
+  margin-top: .55rem;
   color: var(--secondary);
   font-size: 1rem;
   line-height: 1.45;
   text-wrap: balance;
 }
-.native { white-space: nowrap; }
 
-/* Rex's own icon rides in the sentence, a little taller than the letters. */
+/* Rex's own icon rides in the headline, about as tall as its capitals. */
 .rex {
-  color: var(--ink);
-  font-weight: 650;
-  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
-  text-decoration-thickness: 1px;
-  text-underline-offset: .2em;
+  color: inherit;
+  font-weight: inherit;
+  white-space: nowrap;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: .18em;
 }
 .rex:hover { text-decoration-color: currentColor; }
 .rex img {
   display: inline-block;
-  width: 1.3em;
-  height: 1.3em;
-  margin: -.2em .22em -.28em 0;
+  width: 1.1em;
+  height: 1.1em;
+  margin: -.15em .2em -.2em .05em;
 }
 
 .install {
@@ -151,119 +154,34 @@ h1 {
 .install button[data-state='copied'] { background: #1f9d55; color: #fff; }
 .install button[data-state='copied']::before { content: '✓ '; }
 
-/* One card for each pane: what it looks like, then how it works. */
-.bento {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 1rem;
-  width: min(calc(100% - 3rem), 73.75rem);
-  margin: clamp(3.5rem, 9vw, 6.5rem) auto 0;
-}
-
-.card {
+/* Under the window: where the code is. */
+.source {
   display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  padding: clamp(1.1rem, 2.2vw, 1.75rem);
+  align-items: center;
+  gap: .55rem;
+  width: fit-content;
+  margin: .5rem auto 0;
+  padding: .45rem .95rem .45rem .8rem;
   border: 1px solid var(--edge);
-  border-radius: 1.5rem;
+  border-radius: 999px;
   background: var(--surface);
+  box-shadow: 0 1px 2px #1b24660f;
+  color: var(--ink);
+  font-size: .9375rem;
+  line-height: 1.2;
+  text-decoration: none;
+  transition: border-color .2s ease, box-shadow .2s ease;
 }
-/* The outline runs the full width, words beside the pane; then two pairs. */
-.card-outline { grid-column: span 12; flex-direction: row; align-items: center; gap: clamp(1.4rem, 4vw, 3.5rem); }
-.card-outline .card-text { flex: 0 0 32%; }
-.card-outline .shot { flex: 1; min-width: 0; }
-.card-usage { grid-column: span 7; }
-.card-setup { grid-column: span 5; }
-.card-history, .card-reader { grid-column: span 6; }
-/* Two cards break the run: the sky of the cat's highlight, and its eyes. */
-.card-usage { background: var(--tint); border-color: var(--tint-edge); }
-.card-setup { background: var(--deep); border-color: var(--deep); color: #fff; }
-/* Where a card is taller than its contents, the pane and the words sit at
-   its two ends. */
-.card-history, .card-reader, .card-usage, .card-setup { justify-content: space-between; }
-
-.card h3 {
-  font-size: 1.75rem;
-  line-height: 1;
-  font-weight: 760;
-  letter-spacing: -.03em;
-}
-.card p {
-  max-width: 46ch;
-  margin-top: .65rem;
-  color: var(--secondary);
-  text-wrap: pretty;
-}
-.card p + p { margin-top: .4rem; }
-.card-setup p { color: #c9cdf0; }
-.card code { padding: .1em .35em; border-radius: .3em; background: #ffffff1f; color: #fff; font: 400 .88em/1 var(--mono); }
-
-/* A pane on its own, at the moment that says most about it. */
-.shot {
-  border-radius: .7rem;
-  background: var(--term-bg);
-  box-shadow: 0 1px 2px #0d103026, 0 14px 28px -18px #0d103066;
-  font: 400 clamp(.6875rem, 1.05vw, .8rem)/1.28 var(--mono);
-}
-.shot.outline, .shot.history { padding: .9rem 1.1rem; }
-.shot.usage { padding-block: 1.1rem; }
-/* The reader keeps its title bar and its ring, so it reads as a window. */
-.shot.reader-window { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 18px 34px -18px #0d1030a0; }
-.shot.reader-window .reader-content { padding: .8rem 1.1rem .9rem; }
-
-/* What setup arranges: the panes around the person's own work. */
-.layout-sketch {
-  display: grid;
-  grid-template-columns: 30% 1fr;
-  grid-template-rows: 2.6rem 3.9rem 3.6rem;
-  grid-template-areas: 'outline usage' 'outline work' 'history work';
-  gap: .4rem;
-  padding: .4rem;
-  border: 1px solid #ffffff26;
-  border-radius: .8rem;
-  background: #0d103059;
-  font: 500 .78rem/1 var(--mono);
-}
-.layout-sketch span {
-  display: grid;
-  place-items: center;
-  border: 1px solid #ffffff2e;
-  border-radius: .45rem;
-  background: #ffffff12;
-  color: #dfe3ff;
-}
-.sketch-outline { grid-area: outline; }
-.sketch-history { grid-area: history; }
-.sketch-usage { grid-area: usage; }
-.layout-sketch .sketch-work { grid-area: work; border-style: dashed; background: none; color: #a9b0e6; }
-
-.footer {
-  width: min(calc(100% - 3rem), 73.75rem);
-  margin: 3rem auto 0;
-  padding-bottom: 2rem;
-  color: var(--secondary);
-  font-size: .875rem;
-  text-align: center;
-}
-.footer a { color: inherit; text-underline-offset: .22em; text-decoration-thickness: 1px; }
-
-@media (max-width: 62rem) {
-  .card-outline { flex-direction: column; align-items: stretch; }
-  .card-outline .card-text { flex: none; }
-  .card-usage, .card-history, .card-reader, .card-setup { grid-column: span 12; }
-}
+.source b { font-weight: 650; }
+.source-mark { flex: none; width: 1.2rem; height: 1.2rem; fill: currentColor; }
+.source:hover { border-color: var(--blue); box-shadow: 0 1px 2px #1b24660f, 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
 
 @media (max-width: 45rem) {
   h1 { font-size: 4rem; }
   .install { width: 100%; }
   .install code { flex: 1; }
-  .bento { width: calc(100% - 1.5rem); gap: .75rem; }
-  .card { border-radius: 1.15rem; }
-  .shot, .shot.usage { font-size: clamp(.6875rem, 3vw, .78rem); }
-  .footer { width: calc(100% - 1.5rem); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .install button { transition: none; }
+  .install button, .source { transition: none; }
 }

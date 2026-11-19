@@ -11,9 +11,9 @@
 }
 
 .hero {
-  width: min(calc(100% - 3rem), 73.75rem);
+  width: min(calc(100% - 3rem), 78rem);
   margin-inline: auto;
-  padding-top: clamp(1.25rem, 4vh, 2.75rem);
+  padding-block: clamp(1rem, 3vh, 2.5rem);
 }
 
 /* The cat and the name, what milo is, and how to get it: one centred stack. */
@@ -21,7 +21,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-bottom: 1.7rem;
+  padding-bottom: 1.4rem;
   text-align: center;
 }
 .lockup {
@@ -31,8 +31,7 @@
   /* The cat is lighter than the word; nudged so the pair looks centred. */
   margin-inline-start: -.9rem;
 }
-/* It turns about its feet when it looks over at a pane. */
-.mascot { flex: none; width: clamp(4.5rem, 7vw, 5.75rem); transform-origin: 50% 90%; }
+.mascot { flex: none; width: clamp(4.5rem, 7vw, 5.75rem); }
 .mascot img {
   display: block;
   width: 100%;
@@ -43,7 +42,7 @@
 /* Under the window: what the scene is showing at this moment. */
 .caption {
   min-height: 1.6rem;
-  margin-top: 1rem;
+  margin-top: .8rem;
   color: var(--secondary);
   font-weight: 500;
   font-size: 1.05rem;
@@ -51,15 +50,16 @@
 }
 .caption b { color: var(--blue); font-weight: 700; }
 
-/* The window is drawn with Rex's own default dark theme: its canvas, its
-   pane and border colours, its accent, and its terminal palette. */
+/* The window is drawn as Rex draws it: a sidebar of sessions and their
+   tabs, then flat panes on a dark canvas, each under a slim header, with
+   hairlines between. The colours are Rex's default dark theme. */
 .terminal {
   --canvas: #0c0e11;
   --term-bg: #0e1117;
-  --term-raised: #1e2023;
-  --term-line: #2f3135;
+  --term-line: #ffffff14;
   --term-text: #e7edf3;
   --term-muted: #8b9198;
+  --term-dim: #6c7178;
   --term-select: #1a2233;
   --accent: #4582f9;
   --term-green: #3fb950;
@@ -70,76 +70,127 @@
   --line: 1.28em;
   --pane-x: clamp(.65rem, 1.2vw, 1.05rem);
   --pane-y: .6rem;
-  --gap: .375rem;
-  border: 1px solid var(--term-line);
-  border-radius: .75rem;
+  --head: 1.9rem;
+  display: grid;
+  grid-template-columns: 9.75rem minmax(0, 1fr);
+  border: 1px solid #ffffff1f;
+  border-radius: .8rem;
   overflow: hidden;
   background: var(--canvas);
   color: var(--term-text);
-  box-shadow: 0 0 0 1px #0000001f, 0 2px 4px #1b246622, 0 32px 56px -26px #1b246680;
-  /* Sized by the window's height as well as its width, so the intro and
-     the whole window share the first screen: 39.7 lines of text and 28.5rem
-     of everything else. */
-  font: 400 clamp(.6875rem, min(1.24vw, calc((100vh - 28.5rem) / 39.7)), .85rem)/1.28 var(--mono);
-  font: 400 clamp(.6875rem, min(1.24vw, calc((100svh - 28.5rem) / 39.7)), .85rem)/1.28 var(--mono);
+  box-shadow: 0 0 0 1px #00000026, 0 2px 4px #1b246622, 0 32px 56px -26px #1b246680;
+  /* Sized by the window's height as well as its width: 39.7 lines of text
+     and 37rem of everything else, between a smallest and a largest size. */
+  font: 400 clamp(.78rem, min(1.2vw, calc((100vh - 37rem) / 39.7)), .9rem)/1.28 var(--mono);
+  font: 400 clamp(.78rem, min(1.2vw, calc((100svh - 37rem) / 39.7)), .9rem)/1.28 var(--mono);
   font-variant-ligatures: none;
   font-variant-numeric: tabular-nums;
 }
 
-.terminal-bar {
+/* Rex's sidebar: each session, and under it the tabs open in it. */
+.rex-side {
   display: flex;
-  align-items: center;
-  gap: .25rem;
-  height: 2.4rem;
-  padding-inline: .85rem;
-  color: var(--term-muted);
-  font: 500 .78rem/1 system-ui, sans-serif;
+  flex-direction: column;
+  gap: .12rem;
+  min-width: 0;
+  padding: .75rem .5rem;
+  border-inline-end: 1px solid var(--term-line);
+  color: var(--term-dim);
+  font: 500 .78rem/1.2 system-ui, sans-serif;
 }
-.window-lights { display: flex; gap: .5rem; margin-inline-end: .9rem; }
+.rex-side p { margin: 0; }
+.rex-top { padding: .15rem .35rem .55rem; }
+.window-lights { display: flex; gap: .5rem; }
 .window-lights i { width: .75rem; height: .75rem; border-radius: 50%; background: #ff5f57; }
 .window-lights i:nth-child(2) { background: #febc2e; }
 .window-lights i:nth-child(3) { background: #28c840; }
-.terminal-tab { padding: .38rem .8rem; border-radius: .4rem; background: var(--term-raised); color: var(--term-text); }
-.terminal-tab.is-idle { background: none; color: inherit; }
-.terminal-new { padding-inline: .5rem; font-size: 1.05rem; }
+.rex-side .rex-group { margin-top: .55rem; padding: 0 .45rem .2rem; font-size: .68rem; font-weight: 600; }
+.rex-item {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  padding: .34rem .45rem;
+  border-radius: .55rem;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: background-color .35s ease;
+}
+.rex-item span { margin-inline-end: -.15rem; color: var(--term-text); font-weight: 600; }
+/* The tab the scene is in. */
+.rex-item.is-current { background: #ffffff1c; }
+.rex-tile {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: .3rem;
+  color: #fff;
+  font: 700 .62rem/1 system-ui, sans-serif;
+}
+.tile-omp { background: #a45cf6; }
+.tile-shell { background: #3a3d42; font-size: .5rem; }
 
 .terminal-panes {
   position: relative;
   display: grid;
   isolation: isolate;
-  grid-template-columns: 42.75% minmax(0, 1fr);
-  grid-template-rows: calc(var(--line) * 6 + .75rem) auto calc(var(--line) * 13 + 2 * var(--pane-y));
+  grid-template-columns: 44% minmax(0, 1fr);
+  grid-template-rows: calc(var(--head) + var(--line) * 5 + .5rem) auto calc(var(--head) + var(--line) * 13 + var(--pane-y));
   grid-template-areas: 'outline usage' 'outline agent' 'history agent';
-  gap: var(--gap);
-  padding: 0 var(--gap) var(--gap);
 }
 
-/* Each pane is a card on the canvas. */
+/* Each pane: a slim header naming what runs in it, then its screen. */
 .term-pane {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  border: 1px solid var(--term-line);
-  border-radius: .5rem;
-  background: var(--term-bg);
-  transition: filter .45s ease, border-color .45s ease, box-shadow .45s ease;
+  transition: filter .45s ease, box-shadow .45s ease, background-color .45s ease;
+}
+.outline { grid-area: outline; border-inline-end: 1px solid var(--term-line); }
+.history { grid-area: history; border-inline-end: 1px solid var(--term-line); border-top: 1px solid var(--term-line); }
+.usage { grid-area: usage; }
+.agent { grid-area: agent; border-top: 1px solid var(--term-line); overflow: hidden; }
+.pane-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  height: var(--head);
+  padding-inline: var(--pane-x);
+  color: var(--term-dim);
+  font: 500 .74rem/1 system-ui, sans-serif;
+  white-space: nowrap;
+}
+.pane-head .rex-tile { width: 1rem; height: 1rem; margin-inline-end: .15rem; vertical-align: -.22em; font-size: .56rem; }
+/* Rex's pane controls: split, stack, float, grow, close. */
+.pane-tools {
+  flex: none;
+  width: 4.1rem;
+  height: .6rem;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 70 10' fill='none' stroke='%236c7178' stroke-width='1.1'%3E%3Crect x='.6' y='.6' width='8.8' height='8.8' rx='2'/%3E%3Cpath d='M5 .6v8.8'/%3E%3Crect x='15.6' y='.6' width='8.8' height='8.8' rx='2'/%3E%3Cpath d='M15.6 5h8.8'/%3E%3Crect x='32.6' y='.6' width='6.8' height='6.8' rx='1.6'/%3E%3Crect x='30.6' y='2.6' width='6.8' height='6.8' rx='1.6'/%3E%3Cpath d='M46 4V1h3M54 6v3h-3M46.5 8.5l7-7'/%3E%3Cpath d='M61.5 1.5l7 7m0-7l-7 7'/%3E%3C/svg%3E") right / contain no-repeat;
 }
 /* A pane's hint line stays at its foot, whatever is listed above it. */
-.outline, .history { display: flex; flex-direction: column; padding: var(--pane-y) var(--pane-x); }
-.outline { grid-area: outline; }
-.history { grid-area: history; }
-.outline > .term-hint, .history > .term-hint { margin-top: auto; }
-/* The pane the keyboard is in wears the accent, as in Rex. */
-.agent { grid-area: agent; display: flex; flex-direction: column; overflow: hidden; border-color: #4582f999; }
+.pane-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 var(--pane-x) var(--pane-y);
+}
+.pane-body > .term-hint { margin-top: auto; }
 
 /* The scene draws the eye to one pane at a time: the rest step back a little. */
-:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.74) saturate(.85); }
-.terminal[data-view='reader'] .term-pane { filter: brightness(.5) saturate(.8); }
+:where(.terminal:not([data-view='whole'])) .term-pane { filter: brightness(.7) saturate(.85); }
+.terminal[data-view='reader'] .term-pane { filter: brightness(.48) saturate(.8); }
 .terminal[data-view='outline'] .outline,
 .terminal[data-view='history'] .history,
 .terminal[data-view='usage'] .usage,
 .terminal[data-view='agent'] .agent {
   filter: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 0 1.75rem #4582f933;
+  background-color: #4582f90f;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
   z-index: 1;
 }
 
@@ -154,7 +205,6 @@
 .term-cyan { color: #39c5cf; }
 .term-slate { color: #8b9198; }
 .term-yellow { color: #e3b341; }
-.term-orange { color: #ffa657; }
 .term-header, .term-commit { display: flex; justify-content: space-between; gap: .75ch; white-space: nowrap; }
 .term-project, .term-summary { white-space: nowrap; }
 .term-project { display: inline-flex; gap: 2ch; }
@@ -181,13 +231,13 @@
 
 /* The figures and marks take their size from the strip's own width, so
    they never collide in a narrow one. */
-.usage {
+.usage-strip {
   container-type: inline-size;
-  grid-area: usage;
   display: grid;
+  flex: 1;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
-  padding-block: .4rem;
+  padding-bottom: .35rem;
 }
 .usage-tool {
   display: grid;
@@ -202,12 +252,11 @@
 }
 .usage-tool + .usage-tool { border-inline-start: 1px solid var(--term-line); }
 .usage-mark { grid-row: span 2; display: grid; justify-items: center; gap: .3rem; }
-.usage-mark img { display: block; width: min(5.6em, 10.5cqi); height: auto; }
+.usage-mark img { display: block; width: min(4.1em, 8.6cqi); height: auto; }
 .usage-mark span, .usage-limit span { white-space: nowrap; }
 .usage-limit { display: grid; }
-.usage-limit strong { font: min(4.35em, 8.3cqi)/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
+.usage-limit strong { font: min(3.1em, 6.4cqi)/1.04 'Terminal Figures', Bricolage, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
 .usage-limit small { margin-left: .11em; font-size: .5em; letter-spacing: 0; }
-.usage-activity { grid-column: 2/-1; white-space: nowrap; }
 .level-green { color: var(--term-green); }
 .level-amber { color: var(--term-amber); }
 .level-red { color: var(--term-red); }
@@ -312,16 +361,7 @@
 @keyframes reader-in {
   from { opacity: 0; scale: .96; }
 }
-.reader-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 2rem;
-  border-bottom: 1px solid var(--term-line);
-  background: #161b22;
-  color: var(--term-muted);
-  font: 500 .78rem/1 system-ui, sans-serif;
-}
+.reader .pane-head { border-bottom: 1px solid var(--term-line); background: #161b22; }
 .reader-content { padding: .65rem var(--pane-x); }
 .reader-heading { margin-bottom: .5em; }
 .reader-content .diff-line { grid-template-columns: 2ch 1ch minmax(0, 1fr); }
@@ -334,8 +374,8 @@
 }
 
 @media (min-width: 45.001rem) and (max-width: 62rem) {
+  .terminal { grid-template-columns: 8.25rem minmax(0, 1fr); }
   .term-hint { font-size: .84em; }
-  .terminal-panes { grid-template-columns: 43.5% minmax(0, 1fr); }
   .usage-tool { column-gap: .5rem; padding-inline: .55rem; }
 }
 
@@ -346,29 +386,28 @@
 
 /* A phone shows one pane at a time: the one the scene is on. */
 @media (max-width: 45rem) {
-  .hero { width: calc(100% - 1.5rem); }
+  .hero { width: calc(100% - 1.5rem); padding-block: .9rem; }
   /* Room for two lines, so a longer caption moves nothing below it. */
   .caption { min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
-  .terminal { --pane-x: .65rem; --line: 1.45em; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
-  .terminal-bar { height: 2.2rem; }
-  .terminal-panes { display: block; min-height: max(22rem, calc(var(--line) * 18 + 2 * var(--pane-y) + var(--gap))); }
-  .term-pane { display: none; min-height: inherit; }
+  /* No room for the sidebar: the window is its panes. */
+  .terminal { --pane-x: .65rem; --line: 1.45em; display: block; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
+  .rex-side { display: none; }
+  .terminal-panes { display: block; min-height: max(22rem, calc(var(--head) + var(--line) * 18 + var(--pane-y))); }
+  .term-pane { display: none; min-height: inherit; border: 0; }
   .terminal[data-view='whole'] .outline, .terminal[data-view='reader'] .outline,
-  .terminal[data-view='outline'] .outline, .terminal[data-view='history'] .history { display: flex; }
-  .terminal[data-view='agent'] .agent { display: flex; }
-  .terminal[data-view='usage'] .usage { display: grid; }
+  .terminal[data-view='outline'] .outline, .terminal[data-view='history'] .history,
+  .terminal[data-view='agent'] .agent, .terminal[data-view='usage'] .usage { display: flex; }
   .term-project { gap: 1.2ch; }
   .term-hint { font-size: .9em; }
   .history { --line: 1.58rem; }
   .reader { width: calc(100% - 1rem); }
   .reader-content { padding-inline: .45rem; }
   .reader-content .diff-line { grid-template-columns: 1.6ch 1ch minmax(0, 1fr); column-gap: .65ch; }
-  .usage { grid-template-columns: 1fr; align-content: center; padding: .7rem 1rem; }
-  .usage-tool { grid-template-columns: 5.2rem 1fr 1fr; gap: 0 .9rem; font-size: .6875rem; padding: .75rem 0; }
+  .usage-strip { grid-template-columns: 1fr; align-content: center; padding: .4rem 1rem .7rem; }
+  .usage-tool { grid-template-columns: 4.6rem 1fr 1fr; gap: 0 .9rem; font-size: .6875rem; padding: .75rem 0; }
   .usage-tool + .usage-tool { border-inline: 0; border-top: 1px solid var(--term-line); }
-  .usage-limit strong { font-size: 2.75rem; }
-  .usage-mark img { width: 3.7rem; }
-  .usage-activity { padding-top: .18rem; }
+  .usage-limit strong { font-size: 2.4rem; }
+  .usage-mark img { width: 3.2rem; }
   .agent-session { padding-inline: .65rem; }
   .agent-step { margin-top: .6rem; }
 }

@@ -26,12 +26,10 @@ const symbols = {
   ts: ['\ue628', 'cyan'],
   md: ['\ue73e', 'slate'],
   json: ['\ue60b', 'yellow'],
-  git: ['\ue702', 'orange'],
-  npm: ['\ue71e', 'red'],
 } as const;
 
 function icon(name: string, folder = false) {
-  const kind = folder ? 'folder' : name === '.gitignore' ? 'git' : name === 'package.json' ? 'npm'
+  const kind = folder ? 'folder'
     : name.endsWith('.ts') ? 'ts' : name.endsWith('.md') ? 'md' : 'json';
   const [glyph, color] = symbols[kind];
   const node = span(glyph, `term-icon term-${color}`);
@@ -110,7 +108,7 @@ function commitRows(commit: Commit, open: boolean, remote = false, lit = false) 
 }
 
 function renderHistory(frame: Frame) {
-  const progress = row('history-dots', span(`○ ${'●  '.repeat(frame.ahead.length)}`, 'term-bold'), span('│  ●  ●  ●', 'term-muted'));
+  const progress = row('history-dots', span(`○ ${'●  '.repeat(frame.ahead.length)}`, 'term-bold'), span(`│${'  ●'.repeat(pushed.length)}`, 'term-muted'));
   const items = [
     row('term-header', project(), span(`${frame.ahead.length} commits to push`, 'term-summary')),
     progress,

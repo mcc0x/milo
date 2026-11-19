@@ -6,23 +6,23 @@
     <meta name="theme-color" content="#eceafb" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0d1030" media="(prefers-color-scheme: dark)">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-    <title>milo — Terminal panes for coders who don’t want to learn key binds</title>
-    <meta name="description" content="Your files, commits and usage limits in panes beside your shell. Native to Rex.">
+    <title>milo — Bring the IDE feel to Rex, natively</title>
+    <meta name="description" content="Your files, commits and usage limits in panes beside Claude Code, Codex, omp or whichever agent you run. Native to Rex.">
     <link rel="canonical" href="https://usemilo.net/">
     <link rel="icon" type="image/png" sizes="48x48" href="/favicon.png">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://usemilo.net/">
-    <meta property="og:title" content="milo — Terminal panes for coders who don’t want to learn key binds">
-    <meta property="og:description" content="Your files, commits and usage limits in panes beside your shell. Native to Rex.">
+    <meta property="og:title" content="milo — Bring the IDE feel to Rex, natively">
+    <meta property="og:description" content="Your files, commits and usage limits in panes beside Claude Code, Codex, omp or whichever agent you run.">
     <meta property="og:image" content="https://usemilo.net/milo-preview.jpg">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Terminal panes for coders who don’t want to learn key binds.’">
+    <meta property="og:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Bring the IDE feel to Rex, natively.’">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="milo — Terminal panes for coders who don’t want to learn key binds">
-    <meta name="twitter:description" content="Your files, commits and usage limits in panes beside your shell. Native to Rex.">
+    <meta name="twitter:title" content="milo — Bring the IDE feel to Rex, natively">
+    <meta name="twitter:description" content="Your files, commits and usage limits in panes beside Claude Code, Codex, omp or whichever agent you run.">
     <meta name="twitter:image" content="https://usemilo.net/milo-preview.jpg">
-    <meta name="twitter:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Terminal panes for coders who don’t want to learn key binds.’">
+    <meta name="twitter:image:alt" content="Milo, a blue cat, beside the name milo and the words ‘Bring the IDE feel to Rex, natively.’">
     <link rel="preload" href="./fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="./fonts/terminal-symbols.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="./fonts/terminal-figures.woff2" as="font" type="font/woff2" crossorigin>
@@ -40,8 +40,8 @@
             </picture>
             <h1 id="title">milo</h1>
           </div>
-          <p class="description">Terminal panes for coders who don’t want to learn key binds.</p>
-          <p class="subtext">Your files, commits and usage limits, beside your shell. <span class="native">Native to <a class="rex" href="https://www.superlogical.com/rex"><img src="./images/rex.png" width="72" height="72" alt="">Rex</a>.</span></p>
+          <p class="description">Bring the IDE feel to <a class="rex" href="https://www.superlogical.com/rex"><img src="./images/rex.png" width="72" height="72" alt="">Rex</a>, natively.</p>
+          <p class="subtext">Your files, commits and usage limits beside Claude Code, Codex, omp or whichever agent you run. No key binds to learn.</p>
           <div class="install">
             <span class="install-prompt" aria-hidden="true">$</span>
             <code id="install-command">curl -fsSL https://usemilo.net/install.sh | sh</code>
@@ -50,35 +50,47 @@
           <p id="copy-feedback" class="visually-hidden" role="status"></p>
         </div>
 
-        <!-- A demo that plays by itself; the cards below say the same in words. -->
-        <div class="terminal" id="demo" data-view="whole" role="img" aria-label="A Rex tab with milo’s outline, history and usage panes beside a coding agent at work">
-          <div class="terminal-bar">
-            <div class="window-lights"><i></i><i></i><i></i></div>
-            <span class="terminal-tab">tidebook</span>
-            <span class="terminal-tab is-idle">notes</span>
-            <span class="terminal-new">+</span>
-          </div>
+        <!-- A demo that plays by itself; its label says what it shows. -->
+        <div class="terminal" id="demo" data-view="whole" role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work">
+          <aside class="rex-side">
+            <div class="rex-top"><div class="window-lights"><i></i><i></i><i></i></div></div>
+            <p class="rex-group">tidebook</p>
+            <p class="rex-item" data-harness="claude"><img class="rex-tile" src="./images/claude.png" width="192" height="192" alt=""><span>claude</span> ~/tidebook</p>
+            <p class="rex-item" data-harness="codex"><img class="rex-tile" src="./images/codex.png" width="192" height="192" alt=""><span>codex</span> ~/tidebook</p>
+            <p class="rex-item" data-harness="omp"><b class="rex-tile tile-omp">π</b><span>omp</span> ~/tidebook</p>
+            <p class="rex-group">notes</p>
+            <p class="rex-item"><b class="rex-tile tile-shell">›_</b><span>zsh</span> ~/notes</p>
+          </aside>
           <div class="terminal-panes">
-            <section class="term-pane outline" id="outline-pane"></section>
-            <section class="term-pane history" id="history-pane"></section>
-            <section class="term-pane usage" id="usage-pane">
-              <div class="usage-tool">
-                <div class="usage-mark"><img src="./images/codex.png" width="192" height="192" alt="Codex"><span id="codex-age"></span></div>
-                <div class="usage-limit"><span>5h</span><strong id="codex-five"></strong><span>in 2 h 38 m</span></div>
-                <div class="usage-limit"><span>week</span><strong id="codex-week"></strong><span>resets in 2 d</span></div>
-              </div>
-              <div class="usage-tool">
-                <div class="usage-mark"><img src="./images/claude.png" width="192" height="192" alt="Claude Code"><span id="claude-age"></span></div>
-                <div class="usage-limit"><span>5h</span><strong id="claude-five"></strong><span>in 1 h 58 m</span></div>
-                <div class="usage-limit"><span>week</span><strong id="claude-week"></strong><span>resets in 2 d</span></div>
-                <span class="usage-activity">186k tokens today</span>
+            <section class="term-pane outline">
+              <header class="pane-head"><span>›_ milo ~/tidebook</span><i class="pane-tools"></i></header>
+              <div class="pane-body" id="outline-pane"></div>
+            </section>
+            <section class="term-pane history">
+              <header class="pane-head"><span>›_ milo ~/tidebook</span><i class="pane-tools"></i></header>
+              <div class="pane-body" id="history-pane"></div>
+            </section>
+            <section class="term-pane usage">
+              <header class="pane-head"><span>›_ milo ~/tidebook</span><i class="pane-tools"></i></header>
+              <div class="usage-strip" id="usage-pane">
+                <div class="usage-tool">
+                  <div class="usage-mark"><img src="./images/codex.png" width="192" height="192" alt="Codex"><span id="codex-age"></span></div>
+                  <div class="usage-limit"><span>5h</span><strong id="codex-five"></strong><span>in 2 h 38 m</span></div>
+                  <div class="usage-limit"><span>week</span><strong id="codex-week"></strong><span>resets in 2 d</span></div>
+                </div>
+                <div class="usage-tool">
+                  <div class="usage-mark"><img src="./images/claude.png" width="192" height="192" alt="Claude Code"><span id="claude-age"></span></div>
+                  <div class="usage-limit"><span>5h</span><strong id="claude-five"></strong><span>in 1 h 58 m</span></div>
+                  <div class="usage-limit"><span>week</span><strong id="claude-week"></strong><span>resets in 2 d</span></div>
+                </div>
               </div>
             </section>
             <section class="term-pane agent" id="agent-pane">
+              <header class="pane-head"><span id="agent-title"></span><i class="pane-tools"></i></header>
               <div class="agent-session">
                 <p class="agent-step agent-request" data-step="prompt"><b>You</b><br><span id="agent-request-text"></span></p>
                 <div class="agent-step" data-step="plan">
-                  <p><b>Agent</b><br>I’ll add wind speed in km/h and check the forecast output.</p>
+                  <p><b id="agent-name"></b><br>I’ll add wind speed in km/h and check the forecast output.</p>
                 </div>
                 <div class="agent-step" data-step="editing">
                   <p class="agent-tool">┌ <b>Edit</b> <span>src/weather.ts</span> <span id="agent-tally"></span></p>
@@ -100,69 +112,17 @@
               </div>
             </section>
             <section class="reader" id="reader-pane" hidden>
-              <div class="reader-bar"><span>weather.ts</span></div>
+              <header class="pane-head"><span>›_ milo view weather.ts</span><i class="pane-tools"></i></header>
               <div class="reader-content" id="reader-content"></div>
             </section>
           </div>
         </div>
         <p class="caption" id="caption" aria-hidden="true"></p>
-      </section>
-
-      <section class="bento" aria-labelledby="panes-title">
-        <h2 id="panes-title" class="visually-hidden">What each pane does</h2>
-
-        <article class="card card-outline">
-          <div class="card-text">
-            <h3>Outline</h3>
-            <p>Your files, live. Bold is changed and not yet committed. Regular is committed and waiting to be pushed.</p>
-            <p>Double-click a file to read it.</p>
-          </div>
-          <div class="terminal shot outline" data-shot="outline-pane" data-frame="edit" aria-hidden="true"></div>
-        </article>
-
-        <article class="card card-usage">
-          <div class="terminal shot usage" data-shot="usage-pane" data-frame="rest" aria-hidden="true"></div>
-          <div class="card-text">
-            <h3>Usage</h3>
-            <p>How much of your Codex and Claude limits is used, and when each resets. Milo reads what those tools already save on your computer.</p>
-          </div>
-        </article>
-        <article class="card card-setup">
-          <div class="card-text">
-            <h3>Setup</h3>
-            <p>Run <code>milo setup</code> once and choose your panes. From then on, every new shell tab in Rex opens arranged.</p>
-          </div>
-          <div class="layout-sketch" aria-hidden="true">
-            <span class="sketch-outline">Outline</span>
-            <span class="sketch-history">History</span>
-            <span class="sketch-usage">Usage</span>
-            <span class="sketch-work">Your work</span>
-          </div>
-        </article>
-
-        <article class="card card-history">
-          <div class="terminal shot history" data-shot="history-pane" data-frame="rest" aria-hidden="true"></div>
-          <div class="card-text">
-            <h3>History</h3>
-            <p>Your recent commits. The ones still to push sit above the line. Click a commit to see its files.</p>
-          </div>
-        </article>
-
-        <article class="card card-reader">
-          <div class="terminal shot reader-window" aria-hidden="true">
-            <div class="reader-bar"><span>weather.ts</span></div>
-            <div class="reader-content" data-shot="reader-content" data-frame="rest"></div>
-          </div>
-          <div class="card-text">
-            <h3>Reader</h3>
-            <p>A file with its added and removed lines marked, floating over your work. Open one from the outline, or from a commit to read it as it was then.</p>
-          </div>
-        </article>
+        <a class="source" href="https://github.com/mcc0x/milo">
+          <svg class="source-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+          <b>milo is open source</b>
+        </a>
       </section>
     </main>
-
-    <footer class="footer">
-      <a href="/LICENSE">MIT licence</a>
-    </footer>
   </body>
 </html>

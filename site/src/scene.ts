@@ -11,19 +11,28 @@ export const request = 'Add wind speed to the weekend forecast.';
 
 export type Pane = 'outline' | 'history' | 'usage' | 'reader' | 'agent';
 
+// milo sits beside whichever coding agent runs in the shell. Each pass of
+// the demo plays in the next one's tab: `tab` is its name in Rex's sidebar,
+// `name` is what the caption calls it.
+export const harnesses = [
+  { tab: 'claude', name: 'Claude Code' },
+  { tab: 'codex', name: 'Codex' },
+  { tab: 'omp', name: 'omp' },
+] as const;
+
 // One pass of the demo, in milliseconds from its start. Each effect follows
 // its cause by a beat: the agent's edit appears, then the outline marks the
 // file; the agent commits, then the history gains the commit. `focus` is the
 // pane the window draws the eye to; `say` is the caption, a pane's name and
-// what it is doing.
+// what it is doing, with {agent} standing for the harness in this pass.
 export const scene = [
-  { at: 0, phase: 'compose', focus: 'agent', say: ['', 'You ask your coding agent, as usual.'] },
-  { at: 2000, phase: 'prompt', focus: 'agent', say: ['', 'You ask your coding agent, as usual.'] },
-  { at: 3100, phase: 'plan', focus: 'agent', say: ['', 'You ask your coding agent, as usual.'] },
+  { at: 0, phase: 'compose', focus: 'agent', say: ['', 'You ask {agent}, as usual.'] },
+  { at: 2000, phase: 'prompt', focus: 'agent', say: ['', 'You ask {agent}, as usual.'] },
+  { at: 3100, phase: 'plan', focus: 'agent', say: ['', 'You ask {agent}, as usual.'] },
   { at: 4700, phase: 'editing', focus: 'agent', say: ['', 'It edits a file.'] },
   { at: 5500, phase: 'edit', focus: 'outline', say: ['Outline', 'marks the file the moment it changes.'] },
   { at: 8600, phase: 'read', focus: 'reader', say: ['Reader', 'shows what was added and removed.'] },
-  { at: 12000, phase: 'test', focus: 'agent', say: ['', 'The agent carries on.'] },
+  { at: 12000, phase: 'test', focus: 'agent', say: ['', '{agent} carries on.'] },
   { at: 13500, phase: 'committing', focus: 'agent', say: ['', 'It commits the change.'] },
   { at: 14300, phase: 'commit', focus: 'history', say: ['History', 'gains the new commit.'] },
   { at: 17300, phase: 'usage', focus: 'usage', say: ['Usage', 'shows what that used of your limits.'] },
@@ -81,7 +90,7 @@ const tree: readonly DemoFile[] = [
   { path: 'tests/fixtures/tides.json' },
   { path: 'tests/tides.test.ts', change: { kind: 'new', added: 4 }, pending: 'commit' },
   { path: 'tests/weather.test.ts', change: { kind: 'new', added: 2 }, pending: 'push' },
-  { path: '.gitignore' },
+  { path: 'README.md' },
   { path: 'package.json' },
 ];
 
