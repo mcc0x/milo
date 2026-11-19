@@ -4,10 +4,10 @@
 //! committed, and unpushed if it has been committed but not pushed.
 
 mod parse;
+mod pending;
 pub(crate) mod run;
 
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use crate::read::{self, Content};
 use crate::watch::{Ignored, Scope};
 use parse::{Status, parse_files, parse_history, parse_status};
+use pending::{TrackedDiff, tracked_records};
 use run::OutputError;
 
 /// A diff of one file larger than this is not loaded.
@@ -232,6 +233,7 @@ pub struct Repo {
     /// A status `poll` found to differ, kept for `read` to take in.
     polled: Option<Vec<u8>>,
     unpushed: Unpushed,
+    pending_tracked: Option<TrackedDiff>,
     tracked: Tracked,
     moved: Option<RenameLookup>,
 }
@@ -452,13 +454,26 @@ impl Repo {
         };
         let mut status = parse_status(&raw);
         let Some(stand_in) = self.stand_in(&status) else { return };
-        if matches!(self.read_for, ReadFor::Pending) {
+        let base_changed = if matches!(self.read_for, ReadFor::Pending) {
             if Basis::new(&status, stand_in.as_ref()) == Basis::new(&self.status, self.stand_in.as_ref()) {
                 status.ends.base = self.status.ends.base.take();
+                false
             } else {
                 let Some(base) = self.merge_base(&status, stand_in.as_ref()) else { return };
+                let changed = base != self.status.ends.base;
                 status.ends.base = base;
+                changed
             }
+        } else {
+            self.status.ends.base.is_some()
+        };
+        if self.pending_tracked.is_some()
+            && (!self.ok()
+                || base_changed
+                || status.ends.tip != self.status.ends.tip
+                || !tracked_records(&raw).eq(tracked_records(&self.raw)))
+        {
+            self.invalidate_tracked_diff();
         }
         if status.ignored_dirs != self.status.ignored_dirs || status.ignored_files != self.status.ignored_files {
             self.watch_ignored = self.exclusions(&status);
@@ -496,61 +511,6 @@ impl Repo {
         files.extend(self.status.untracked.iter().map(|path| PendingFile::new(path, Kind::Untracked)));
         self.add_unpushed(&mut files)?;
         Some(files)
-    }
-
-    fn tracked_uncommitted(&self) -> Option<Vec<PendingFile>> {
-        let paths = &self.status.tracked_uncommitted;
-        if paths.is_empty() {
-            return Some(Vec::new());
-        }
-        // An edit during the diff must leave a different stamp for the next poll.
-        let stamps: HashMap<&str, _> = paths.iter().map(|p| (p.as_str(), FileStamp::at(&self.root.join(p)))).collect();
-        let named = paths.len() <= PATHS_LIMIT;
-        // Naming the paths lets the outline use the Reader's base without
-        // including files that are only unpushed.
-        let against = if named { self.against() } else { self.ends().head() };
-        let args = ["diff", against, "-M", "--raw", "--numstat", "-z"];
-        let raw = if named {
-            let mut scoped = Vec::with_capacity(args.len() + 1 + paths.len());
-            scoped.extend(args);
-            scoped.push("--");
-            scoped.extend(paths.iter().map(String::as_str));
-            self.git(&scoped)?
-        } else {
-            self.git(&args)?
-        };
-        let mut files = parse_files(&raw);
-        if named {
-            self.add_missing_files(&mut files, &stamps);
-        } else {
-            // The whole-tree diff does not limit itself to these paths.
-            files.retain(|file| stamps.contains_key(file.path.as_str()));
-        }
-        for file in &mut files {
-            file.stamp = stamps.get(file.path.as_str()).copied().flatten();
-        }
-        self.mark_conflicts(&mut files);
-        Some(files)
-    }
-
-    fn mark_conflicts(&self, files: &mut Vec<PendingFile>) {
-        // Git can report a conflict as an ordinary edit or omit it from the diff.
-        for path in &self.status.unmerged {
-            match files.iter_mut().find(|f| f.path == *path) {
-                Some(file) => file.kind = Kind::Conflict,
-                None => files.push(PendingFile::new(path, Kind::Conflict)),
-            }
-        }
-    }
-
-    fn add_missing_files(&self, files: &mut Vec<PendingFile>, stamps: &HashMap<&str, Option<FileStamp>>) {
-        // A file put back to what the remote has can still differ from HEAD.
-        for path in &self.status.tracked_uncommitted {
-            if !self.status.sources.contains(path) && !files.iter().any(|f| f.path == *path) {
-                let kind = if stamps[path.as_str()].is_some() { Kind::Modified } else { Kind::Deleted };
-                files.push(PendingFile::new(path, kind));
-            }
-        }
     }
 
     fn add_unpushed(&mut self, files: &mut Vec<PendingFile>) -> Option<()> {
