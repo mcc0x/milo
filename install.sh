@@ -30,8 +30,9 @@ if [ "${1-}" = --uninstall ]; then
         printf 'No milo binary at %s. Nothing to do.\n' "$binary"
     fi
     printf '%s\n' 'Rex and Claude Code settings were not changed.' \
-        'To remove the Rex setup while milo is installed, run milo setup inside Rex.' \
-        'Turn off all three panes and Arrange new shell tabs, then press s to save.'
+        'To remove your Rex layout, run milo setup inside Rex while milo is installed.' \
+        'Turn off Outline, History, Usage and Arrange new shell tabs, then press s.' \
+        'To remove milo from the Claude Code status line, turn off Show Claude Code limits and press s.'
     exit 0
 fi
 
@@ -51,7 +52,7 @@ if ! repo=$(git rev-parse --show-toplevel 2>/dev/null) ||
     trap 'exit 1' HUP INT TERM
     repo=$scratch/source
     if ! git clone --depth 1 https://github.com/mcc0x/milo "$repo"; then
-        fail 'Could not clone milo. The repository is not public yet.' \
+        fail 'Could not clone milo. The repository is private and you need access.' \
             'If you already have a clone, change to its directory and run: sh install.sh'
     fi
 fi
@@ -81,4 +82,4 @@ on_path() {
 if ! on_path; then
     printf '%s is not on PATH. Add it to PATH before running milo.\n' "$bin_dir"
 fi
-printf '%s\n' 'Run milo setup inside Rex to choose your panes.'
+printf '%s\n' 'Run milo setup inside Rex to choose your panes, then press s to save.'

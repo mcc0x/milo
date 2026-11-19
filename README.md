@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="docs/img/tab.png" width="860" alt="A Rex tab layout with the outline and history on the left, and usage above the shell">
-  <br><sub>A Rex layout with sample usage figures.</sub>
+  <br><sub>A sample Rex tab with made-up usage figures.</sub>
 </p>
 
 ## Install
@@ -19,7 +19,9 @@ cd milo
 sh install.sh
 ```
 
-In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes, then press `s` to save. Setup installs Rex actions and can arrange new shell tabs for you. You can also run each pane on its own.
+In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes. Check **On save:** and press `s` to save. Turn on **Arrange new shell tabs** to use the layout in new shell tabs.
+
+You can also run each pane on its own.
 
 ## Outline
 
@@ -35,15 +37,15 @@ See changed files in the project tree as you work. Bold colours mark changes to 
   <img src="docs/img/history.png" width="570" alt="Recent commits, with the newest commit open to show its changed files">
 </p>
 
-See recent commits and which still need to be pushed. Press `Enter` on a commit to see the files it touched, then on a file to read that version.
+See recent commits and, when the branch tracks a remote branch, how many still need to be pushed. Press `Enter` on a commit to see the files it touched, then on a file to read that version.
 
 ## Usage
 
 <p align="center">
-  <img src="docs/img/usage.png" width="780" alt="Codex and Claude Code limits showing percent used and time until reset">
+  <img src="docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent used, time until reset and an Opus weekly limit">
 </p>
 
-See how much of your Codex and Claude Code limits you have used. milo reads reports saved by oh-my-pi, Codex and Claude Code. In Rex, the strip can show the Codex and Claude logos and large numbers.
+See how much of each reported limit you have used. Milo reads local reports saved by oh-my-pi, Codex and Claude Code. Where the terminal can show pictures, such as in Rex, the strip can draw the logos and large figures as pictures.
 
 ## Reader
 
@@ -51,7 +53,7 @@ See how much of your Codex and Claude Code limits you have used. milo reads repo
   <img src="docs/img/reader.png" width="675" alt="A TypeScript file with coloured code and green and red lines showing edits">
 </p>
 
-Read a whole file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changes.
+Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks.
 
 ## Commands
 
@@ -63,7 +65,7 @@ Read a whole file with added and removed lines marked, or open it as it was at a
 | `milo view FILE [--commit ID]` | File reader |
 | `milo setup` | Setup screen |
 
-`PATH` defaults to the current directory. Use `milo --help` for all commands or `?` for help in a pane.
+`PATH` defaults to the current directory. Bare `milo` opens the outline and can offer setup the first time in Rex. Use `milo --help` for all commands or `?` for help when a pane has room.
 
 ## Documentation
 

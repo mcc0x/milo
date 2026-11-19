@@ -1,6 +1,6 @@
 # Keys and marks
 
-Press `?` for help in any pane. `Esc`, `q` or `?` closes the help page; `Ctrl-C` quits milo.
+Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses.
 
 ## Moving around
 
@@ -55,11 +55,11 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 
 ### Usage and setup
 
-In usage, `r` reads the local sources again and `q` quits. In setup, Up / Down or `k` / `j` move between choices, `Enter` or `Space` changes a choice, `s` saves and `a` tries the layout in this Rex tab without saving. `q` or `Esc` leaves setup; if bare `milo` offered setup, it opens the outline instead.
+In usage, `r` checks local data again without bypassing the [oh-my-pi read interval](usage.md#where-the-figures-come-from), and `q` quits. In setup, `Enter` or `Space` changes a choice and `s` saves. In Rex, Up / Down or `k` / `j` move between choices, and `a` tries the layout in this tab without saving. `q` or `Esc` leaves setup; if bare `milo` offered setup, these keys open the outline instead.
 
 ## Colours and marks
 
-In a Git outline, **bold** means changes to commit and regular coloured names mean changes to push. Plain names have no changes marked. When there is nothing to compare with on a remote, history says so.
+In a Git outline, **bold** means changes to commit and regular coloured names mean changes to push. Plain names have no changes marked.
 
 | Colour | Change |
 | --- | --- |
@@ -79,6 +79,6 @@ In a Git outline, **bold** means changes to commit and regular coloured names me
 
 When focus is elsewhere, the outline can follow the file being written (for example, `following tides.ts`). It does not move the cursor while you use it or reopen a folder you closed.
 
-In history, a hollow dot means uncommitted work. A bold dot is a commit to push, a faint dot is already pushed, and a regular dot means there is no remote comparison. A `•` beside a commit means it arrived while the pane was open. Open a commit to see what changed in each file, in the same colours as the outline.
+In history, a hollow dot means uncommitted work. With a remote branch to compare against, a bold dot marks a commit not on that branch, and a faint dot marks one already on it. A regular dot means there is no comparison. The heading says `no branch tracked` if the current branch does not track a remote branch; that does not mean there are no commits to push. A `•` beside a commit means it arrived while the pane was open. Open a commit to see what changed in each file, in the same colours as the outline.
 
 In the reader, added lines have a green background and keep their code colours; removed lines stay in place with a red background. If only part of a line changed, that part is highlighted.

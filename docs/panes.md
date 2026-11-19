@@ -11,9 +11,15 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | Outline and history | 12 rows or more | A key hint |
 | History | 3 rows or fewer | Recent commits without the heading, dots or divider |
 | History | 52 columns and 8 rows or more | A row of dots when there is more than one commit |
-| History | Narrow | A compact count, such as `↑2` for two commits to push |
+| History | Narrow | A shorter summary, such as `↑2` for two commits to push or `no tracking` for a branch that does not track a remote branch |
 
-The outline and history update on their own. macOS gets file-change notifications; when there is no watch, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for what the colours and symbols mean.
+The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
+
+## Comparing commits
+
+History counts commits to push against the branch's tracked remote branch. `no branch tracked` means there is no tracked branch, not that all commits have been pushed. Milo can still use the remote's default branch to mark commits for comparison. `no remote` means the project has no remote configured.
+
+A shallow clone has only part of the project's history. Milo lists the commits Git has, but it cannot list a commit's changed files if its parent is missing. In that case history shows `Git did not answer for this commit.` instead of showing every file as new.
 
 ## Reading files
 
@@ -21,10 +27,10 @@ Open a file from the outline or history with `Enter` or a double-click. Inside R
 
 `milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
 
-The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, shell, JSON, YAML and TOML. It uses a small scanner, not a full parser: it recognises comments, strings, numbers and reserved words and guesses types and calls from their names.
+The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, shell, JSON, YAML and TOML. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
 
 ## Reading pictures
 
-The working-file reader can show PNG, JPEG, GIF, WebP, HEIC and HEIF, TIFF, BMP, ICO and ICNS, SVG, PSD and the first page of a PDF, where conversion is supported. It fits the picture without changing its proportions. For formats other than PNG, and for large PNGs, conversion uses `sips` on macOS; other systems show only PNGs that do not need conversion. At a commit, the reader shows the stored file as text or a note rather than rendering it as a picture.
+The working-file reader can show PNG, JPEG, GIF, WebP, HEIC and HEIF, TIFF, BMP, ICO and ICNS, SVG, PSD and the first page of a PDF, where conversion is supported. It fits the picture without changing its proportions. On macOS, `/usr/bin/sips` converts other formats and resizes large PNGs; other systems show only PNGs that do not need conversion. Ordinary text still shows as text if a file has a picture extension. At a commit, the reader shows the stored file as text or a note, not as a picture.
 
-Pictures need a terminal that supports the kitty graphics protocol, such as kitty, Ghostty, WezTerm or Rex. Milo asks the terminal whether it can draw pictures and shows a message if it cannot.
+Pictures need a terminal that supports the kitty graphics protocol, such as Rex. Milo asks the terminal whether it can draw pictures and shows a message if it cannot.

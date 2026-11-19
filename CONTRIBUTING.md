@@ -1,13 +1,15 @@
 # Contributing to milo
 
-Thanks for wanting to help. milo is small on purpose, and the bar for a change is that it leaves the program simpler, faster or more correct without making it larger than it needs to be.
+Keep changes small and make milo simpler, faster or more correct.
 
 ## Getting set up
 
 You need Rust 1.91 or later, git, and a terminal.
 
+Set `fork_url` to the URL of a fork you can access, then run:
+
 ```sh
-git clone <your fork>
+git clone "$fork_url" milo
 cd milo
 cargo build --release
 ./target/release/milo outline    # the outline, in this repository
@@ -18,7 +20,7 @@ cargo build --release
 
 ## Before you open a pull request
 
-All four of these must be clean. They are quick: the whole test suite runs in under a second.
+Run these checks:
 
 ```sh
 cargo build --release              # no warnings
@@ -27,7 +29,7 @@ cargo fmt -- --check               # no diff; the settings are in rustfmt.toml
 cargo test                         # everything passes
 ```
 
-Then run the program and look at the thing you changed. Tests read the screen as text, so they cannot tell you that something looks wrong.
+Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
 ## What a good change looks like
 
@@ -35,9 +37,11 @@ Then run the program and look at the thing you changed. Tests read the screen as
 
 **It adds no dependency.** milo depends on `libc` and nothing else. If you believe a crate would earn its place, open an issue first and say what it replaces.
 
-**It is tested by what the user sees.** Most tests build a throwaway git repository (`src/fixture.rs`), open milo on it, and assert on the frame of text it draws. Write tests that would fail if the behaviour broke, not tests that repeat the code. A bug fix comes with the test that would have caught it.
+**It is tested by what the user sees.** Use throwaway Git repositories (`src/fixture.rs`) and check the frames the program draws where practical. Write tests that would fail if the behaviour broke, not tests that repeat the code. A bug fix comes with the test that would have caught it.
 
-**It keeps untrusted repositories safe.** milo is often pointed at code its user has not read. It must never run a program a repository names (hooks, filters, external diff tools, file-system monitors), never follow a link out of the project to show a file, and never write an escape sequence from a file name or a commit message to the terminal. `git/run.rs` is where git is called; nothing else should start a process except `rex.rs`.
+**It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
+
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/omp.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It stays read-only.** milo never changes a repository. Every git command it runs only reads.
 
@@ -55,55 +59,32 @@ The code is written to be read. A few habits keep it that way:
 
 ## Finding your way around
 
-The README has a one-line description of every module. The short version:
-
-| If you want to change… | Look in… |
-| --- | --- |
-| what a row, the header or the hint line looks like | `src/outline/draw.rs` |
-| what a key or click does in the outline | `src/outline/input.rs` |
-| when the outline follows work, or how long a mark stays | `src/outline/attention.rs` |
-| the history heading, commit list or opened files | `src/history.rs` |
-| the reader | `src/reader.rs`, and `src/diff.rs` for how a diff becomes lines |
-| which git commands run, and how safely | `src/git/run.rs` |
-| Rex setup and its sketch | `src/setup.rs` |
-| how setup saves both sets of settings or puts them back | `src/setup/install.rs`, `src/setup/files.rs` |
-| changes to Rex settings and the generated layout | `src/setup/rex_files.rs`, `src/setup/layout.rs` |
-| changes to Claude Code settings | `src/setup/claude.rs`, `src/setup/settings.rs` |
-| how usage reads provider reports | `src/usage.rs`, `src/usage/files.rs`, `src/usage/omp.rs`, `src/usage/status.rs` |
-| the usage strip and its figures | `src/usage/draw.rs` |
-| the JSON reader shared by usage and setup | `src/json.rs` |
-| guarded file opens and atomic replacements | `src/fs_ops.rs` |
-| the Lua actions and the new-tab listener | `src/setup/actions.lua`, `src/setup/listener.lua` |
-| what is read from git's output | `src/git/parse.rs` |
-| what milo remembers about a repository | `src/git.rs` |
-| how the screen is drawn and what a style is | `src/screen.rs` |
-| keys and mouse input | `src/keys.rs` |
-| how often milo looks for changes | `Pace` in `src/pane.rs` |
-| the contract a pane implements | `Pane` in `src/pane.rs` |
+The [source map](#source-map) lists the files under `src/` and `tests/`.
 
 ### Adding a pane
 
-Put the screen in a new module under `src/` and implement `pane::Pane`. Give it a frame to draw, its own help page built with `Page::new`, and a handler for its keys. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to leave the frame alone. If outside changes can affect the pane, implement `watch_scope` and `check`. A pane with nothing to watch or update on a timer sleeps until input; a pane with timed redraws implements `next_frame`.
+Put the pane in a module under `src/` and implement `pane::Pane`: `draw` fills a `Screen`, `help` returns its own `Page::new` guide, and `key` handles pane-specific input. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to keep the frame. For outside changes, add `watch_scope` and `check`; for timed redraws, add `next_frame`. A pane with no watch or timer sleeps until input, resize or a signal.
 
-Declare the module in `src/main.rs`, add the command to `Command`, its parser and `dispatch`, and list it in `--help`. Do not add a second event loop.
+Declare the module in `src/main.rs`. Add the command to `Command`, the argument parser, `dispatch` and `--help`. Use the shared loop; choose whether the pane starts loaded, does a first check or shows `Reading…` on a slow open.
 
 ### Changing the Rex layout
 
 The two Lua templates are in `src/setup/`. `layout.rs` adds the choices and
 proportions above the actions in `rex.lua`, and the path to that file above
-the handler in `listener.lua`. `rex_files.rs` checks both before installation.
+the handler in `listener.lua`. `rex_files.rs` asks Rex to check changed
+generated files before writing settings.
 
 Run `cargo test setup::` for generation, screen and installation tests. The
-tests use throwaway settings and a stand-in for Rex. To check a generated file
-with Rex itself, copy it to a scratch directory and run
-`MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`; the flag prevents the
-new-tab listener from starting during the check. Check both files and try the
-different pane choices. Only try a reload or the actions on a disposable Rex
-configuration and session, never as part of the automated tests.
+tests use throwaway settings and a stand-in for Rex. To check a generated
+file with Rex itself, run `MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`
+on a scratch copy. The flag prevents the actions file starting a listener
+during the check. Check both files and try the pane choices. Only try a
+reload or the actions on a disposable Rex configuration and session, never
+as part of the automated tests.
 
 ### Adding a language to the reader
 
-Code colouring is a small scanner (`src/syntax.rs`) driven by tables (`src/syntax/langs.rs`). To add a language you should only need to touch the tables:
+Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings whose closing marks depend on the opener. Adding a language normally means changing only the tables:
 
 1. Add a `Lang` constant: its line and block comments, its quotes (list a longer opener before any opener it starts with), its keywords and constants.
 2. Map its file extensions in `for_file`.
@@ -122,3 +103,81 @@ Say what you ran, what you saw and what you expected. If it depends on a reposit
 ## Licence
 
 By contributing you agree that your work is released under the MIT licence that covers the project (see `LICENSE`).
+
+## Source map
+
+| File | Purpose |
+| --- | --- |
+| `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
+| `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
+| `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
+| `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
+| `src/git/parse.rs` | Reads Git status, diff, and log output. |
+| `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden. |
+| `src/help.rs` | Draws and scrolls the in-pane help page. |
+| `src/history.rs` | Keeps commits, opened file lists, and selection state. |
+| `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
+| `src/history/input.rs` | Handles history keys and mouse clicks. |
+| `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
+| `src/icons.rs` | Chooses file and folder symbols and their colours. |
+| `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
+| `src/keys.rs` | Decodes keys, mouse events, paste markers, and terminal replies. |
+| `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
+| `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
+| `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
+| `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
+| `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
+| `src/paths.rs` | Finds milo's configuration and state folders. |
+| `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
+| `src/read.rs` | Reads regular files and the names that file links point to. |
+| `src/reader.rs` | Keeps reader state and handles navigation and updates. |
+| `src/reader/content.rs` | Locates files and loads text, diffs, or pictures. |
+| `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
+| `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
+| `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
+| `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
+| `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes. |
+| `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
+| `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
+| `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
+| `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
+| `src/setup/listener.lua` | Arranges new shell tabs that do not already have a layout. |
+| `src/setup/listener_test.lua` | Checks the new-tab handler with a stand-in for Rex. |
+| `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
+| `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
+| `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
+| `src/syntax.rs` | Scans source text to find spans to colour. |
+| `src/syntax/delimiters.rs` | Handles string closers that depend on their openers. |
+| `src/syntax/langs.rs` | Defines language rules and maps them to file extensions. |
+| `src/term.rs` | Sets and restores terminal modes and waits for events. |
+| `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
+| `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
+| `src/usage.rs` | Collects the latest limits and today's Claude Code activity. |
+| `src/usage/draw.rs` | Lays out usage figures, reset times, and hints. |
+| `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
+| `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
+| `src/usage/files.rs` | Scans session files and bounds how much a refresh reads. |
+| `src/usage/marks/Inter-OFL.txt` | Records the licence for the font used in usage figures. |
+| `src/usage/marks/README.md` | Records artwork sources and figure generation instructions. |
+| `src/usage/marks/claude.png` | Embeds the Claude mark shown in the pane. |
+| `src/usage/marks/claude.svg` | Stores the SVG source for the Claude mark. |
+| `src/usage/marks/codex.png` | Embeds the Codex mark shown in the pane. |
+| `src/usage/marks/codex.svg` | Wraps the original Codex bitmap in SVG. |
+| `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
+| `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
+| `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
+| `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
+| `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
+| `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
+| `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
+| `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
+| `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
+| `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
+| `src/walk.rs` | Lists files and folders outside Git. |
+| `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
+| `src/when.rs` | Works out local dates and wording for ages and durations. |
+| `src/width.rs` | Measures and shortens text in terminal columns. |
+| `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
+| `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |

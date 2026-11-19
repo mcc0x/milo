@@ -9,14 +9,14 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 - Run `command -v milo` and `milo --version` in the environment where the pane
   will run. A version confirms the binary is available, not that Rex is set up.
-- In the intended Rex environment, check the server action list (`rex actions`,
-  with no client selected) for `milo_layout` (Milo: Arrange This Tab). Its
-  presence confirms the Rex layout actions are loaded. There is no milo setup
-  status flag.
-- If the user wants to configure milo, open `milo setup` inside Rex. Let the
-  user choose the panes and optionally enable **Show Claude Code limits**.
-  `s` saves; `a` tries the layout in this tab. To remove the Rex setup, turn off
-  all three panes and **Arrange new shell tabs**, then press `s`.
+- In the intended Rex environment, check `rex actions` without `-C` or
+  `REX_CLIENT`. Look for `milo_layout` (Milo: Arrange This Tab) in the server's
+  action list. There is no milo setup status flag.
+- If the user wants to configure milo, open `milo setup` inside Rex. Let them
+  choose panes, **Arrange new shell tabs** and **Show Claude Code limits**.
+  `a` tries this tab without saving. Review **On save:** before pressing `s`.
+  To remove the Rex setup, turn off all three panes and **Arrange new shell
+  tabs**, then press `s`. The Claude Code choice can be turned off separately.
 
 ## Commands
 
@@ -24,7 +24,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | --- | --- |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
-| `milo usage` | Shows local coding activity and available usage limits. |
+| `milo usage` | Shows available local usage limits and, when there is room, Claude Code activity. |
 | `milo view FILE [--commit ID]` | Opens the read-only reader. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo listen [--stop]` | Starts or stops Rex's new-tab listener; normally managed by setup. |
@@ -32,7 +32,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 `PATH` defaults to the current directory. Use `milo outline` to avoid the
 first-run setup offer that bare `milo` can show inside Rex. Use `milo --help`
-for the CLI guide and `?` for keys and marks in a pane.
+for the CLI guide and `?` for keys and marks when a pane has room.
 
 ## Open a file for the user
 
