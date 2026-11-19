@@ -677,6 +677,15 @@ impl Repo {
         Some(parse_files(&raw))
     }
 
+    /// Finds the change for one path without asking Git for any line counts.
+    pub(crate) fn changed_file_at(&self, hash: &str, path: &str) -> Option<Option<PendingFile>> {
+        if !self.has_parent_history(hash) {
+            return None;
+        }
+        let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Paths).ok()?;
+        Some(parse::changed_file(&raw, path))
+    }
+
     /// Reads a whole-file patch, using both paths when a file moved.
     pub fn file_diff_at(&self, hash: &str, file: &PendingFile) -> Result<Vec<u8>, OutputError> {
         if !self.has_parent_history(hash) {
@@ -991,6 +1000,26 @@ mod tests {
         assert!(!repo.ok());
         assert_eq!(repo.tracked.paths, "page.txt\0");
         assert_eq!(repo.tracked.index, previous);
+    }
+
+    #[test]
+    fn a_commit_file_lookup_does_not_need_other_files_line_counts() {
+        let f = Fixture::new();
+        f.write("unrelated.txt", "an unrelated blob\n");
+        f.write("page.txt", "stored content\n");
+        f.commit("add two files");
+        let repo = read_repo(&f);
+        let hash = &repo.ends().tip;
+        let oid = repo.git(&["rev-parse", "HEAD:unrelated.txt"]).unwrap();
+        let oid = std::str::from_utf8(&oid).unwrap().trim();
+        // Prevent Git from reading the unrelated blob from disk or the work tree.
+        fs::remove_file(f.root.join(".git/objects").join(&oid[..2]).join(&oid[2..])).unwrap();
+        fs::remove_file(f.root.join("unrelated.txt")).unwrap();
+
+        assert!(repo.files_at(hash).is_none(), "the commit's line counts should be unavailable");
+        let file = repo.changed_file_at(hash, "page.txt").unwrap().unwrap();
+        assert_eq!(file.kind, Kind::Added);
+        assert!(repo.file_diff_at(hash, &file).ok().unwrap().ends_with(b"+stored content\n"));
     }
 
     #[test]

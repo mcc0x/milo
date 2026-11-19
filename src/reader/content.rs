@@ -81,9 +81,8 @@ impl Reader {
             (location.repo, location.path)
         };
         let commit = repo.resolve_commit(id).ok_or("No commit with that ID.")?;
-        let files = repo.files_at(&commit.hash).ok_or("Git did not answer for this commit.")?;
-        let changed = files.iter().find(|file| file.path == path);
-        Ok(Self::committed(&repo, &path, &commit.hash, commit.time, changed))
+        let changed = repo.changed_file_at(&commit.hash, &path).ok_or("Git did not answer for this commit.")?;
+        Ok(Self::committed(&repo, &path, &commit.hash, commit.time, changed.as_ref()))
     }
 
     pub(super) fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {

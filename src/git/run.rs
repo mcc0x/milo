@@ -42,6 +42,7 @@ pub(super) fn limited_output(root: &Path, guard: &[String], args: &[&str], limit
 
 pub(super) enum CommitDiff<'a> {
     Files,
+    Paths,
     File(&'a PendingFile),
 }
 
@@ -70,6 +71,11 @@ pub(super) fn commit_diff(root: &Path, hash: &str, diff: CommitDiff<'_>) -> Resu
     let limit = match diff {
         CommitDiff::Files => {
             cmd.args(["-M", "--raw", "--numstat", "-z", "--end-of-options", hash, "--"]);
+            OUTPUT_LIMIT
+        }
+        CommitDiff::Paths => {
+            // Keep both sides of renames visible, without counting lines in unrelated files.
+            cmd.args(["-M", "--name-status", "-z", "--end-of-options", hash, "--"]);
             OUTPUT_LIMIT
         }
         CommitDiff::File(file) => {

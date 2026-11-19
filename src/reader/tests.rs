@@ -505,3 +505,49 @@ fn an_unreadable_picture_explains_why_it_cannot_be_shown() {
     let mut reader = Reader::open(&file).unwrap();
     assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file cannot be read.");
 }
+
+#[test]
+fn single_file_commit_reads_distinguish_rename_destinations_deletions_and_unchanged_files() {
+    let f = Fixture::new();
+    let shared = "first retained line\nsecond retained line\nthird retained line\n";
+    f.write("old.txt", &format!("{shared}before\n"));
+    f.write("gone.txt", "removed content\n");
+    f.write("unchanged.txt", "stored content\n");
+    f.commit("first");
+    fs::rename(f.root.join("old.txt"), f.root.join("new.txt")).unwrap();
+    fs::remove_file(f.root.join("gone.txt")).unwrap();
+    f.write("new.txt", &format!("{shared}after\n"));
+    f.commit("rename and remove");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+
+    for (path, expected) in [
+        ("new.txt", &[" 1   first retained line", "   - before", " 4 + after"][..]),
+        ("gone.txt", &["   - removed content"][..]),
+        ("unchanged.txt", &[" 1   stored content"][..]),
+        ("old.txt", &["  There is no file here in this commit."][..]),
+    ] {
+        let mut reader = Reader::at_commit(&f.root.join(path), id).unwrap();
+        let rows = drawn(&mut reader, 60, 8);
+        assert!(expected.iter().all(|&row| rows.iter().any(|r| r == row)), "{path}: {rows:?}");
+    }
+}
+
+#[test]
+fn a_single_file_commit_read_does_not_treat_a_shallow_boundary_as_a_root() {
+    let f = Fixture::new();
+    f.write("page.txt", "already there\n");
+    f.commit("first");
+    f.write("new.txt", "just added\n");
+    f.commit("second");
+    f.git(&["clone", "-q", "--depth=1", &format!("file://{}", f.root.display()), "shallow"]);
+    let root = f.root.join("shallow");
+    let mut repo = Repo::open(&root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+
+    assert_eq!(Reader::at_commit(&root.join("page.txt"), id).err(), Some("Git did not answer for this commit."));
+}

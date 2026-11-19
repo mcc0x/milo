@@ -75,6 +75,31 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
     st
 }
 
+fn diff_kind(code: u8) -> Kind {
+    match code {
+        b'A' | b'C' => Kind::Added,
+        b'D' => Kind::Deleted,
+        b'U' => Kind::Conflict,
+        b'R' => Kind::Renamed,
+        _ => Kind::Modified,
+    }
+}
+
+/// Finds the exact destination path in `--name-status -z` output.
+pub(super) fn changed_file(raw: &[u8], path: &str) -> Option<PendingFile> {
+    let mut tokens = raw.split(|&b| b == 0);
+    while let Some(&code) = tokens.next()?.first() {
+        // Renames and copies list the old path first.
+        let old = if matches!(code, b'R' | b'C') { Some(tokens.next()?) } else { None };
+        if tokens.next()? == path.as_bytes() {
+            let mut file = PendingFile::new(path, diff_kind(code));
+            file.from = old.filter(|_| code == b'R').map(|old| String::from_utf8_lossy(old).into_owned());
+            return Some(file);
+        }
+    }
+    None
+}
+
 /// Parses `--raw --numstat -z` output: what happened to each path, then how
 /// many lines each gained and lost.
 pub(super) fn parse_files(raw: &[u8]) -> Vec<PendingFile> {
@@ -85,13 +110,7 @@ pub(super) fn parse_files(raw: &[u8]) -> Vec<PendingFile> {
     while let Some(tok) = tokens.next() {
         if tok.starts_with(':') {
             let code = tok.rsplit(' ').next().and_then(|c| c.bytes().next()).unwrap_or(b'M');
-            let kind = match code {
-                b'A' | b'C' => Kind::Added,
-                b'D' => Kind::Deleted,
-                b'U' => Kind::Conflict,
-                b'R' => Kind::Renamed,
-                _ => Kind::Modified,
-            };
+            let kind = diff_kind(code);
             // Renames and copies list the old path first.
             let old = if matches!(code, b'R' | b'C') { tokens.next() } else { None };
             if let Some(path) = tokens.next() {
