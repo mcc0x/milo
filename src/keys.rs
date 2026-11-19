@@ -49,6 +49,8 @@ pub enum Key {
     End,
     /// A left click, at this column and row.
     Click(usize, usize),
+    /// Pointer motion with no button held.
+    Hover(usize, usize),
     WheelUp,
     WheelDown,
     /// The pane gained or lost keyboard focus.
@@ -305,7 +307,15 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
                 }
             }
         };
-        keys.extend(key);
+        if let Some(key) = key {
+            if matches!(key, Key::Hover(..))
+                && let Some(last @ Key::Hover(..)) = keys.last_mut()
+            {
+                *last = key; // Only the final position can be painted in this frame.
+            } else {
+                keys.push(key);
+            }
+        }
         bytes = tail;
     }
 }
@@ -319,6 +329,7 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
             (b'M', 64) => Some(Key::WheelUp),
             (b'M', 65) => Some(Key::WheelDown),
             (b'M', 0) => Some(Key::Click(x, y)),
+            (b'M', 35) => Some(Key::Hover(x, y)),
             _ => None,
         };
     }
@@ -429,6 +440,8 @@ mod tests {
     fn mouse_reports_decode() {
         assert_eq!(keys(b"\x1b[<0;8;3M"), [Key::Click(7, 2)]);
         assert_eq!(keys(b"\x1b[<0;8;3m"), []);
+        assert_eq!(keys(b"\x1b[<35;8;3M\x1b[<39;2;1M"), [Key::Hover(1, 0)]);
+        assert_eq!(keys(b"\x1b[<35;8;3Mj\x1b[<35;2;1M"), [Key::Hover(7, 2), Key::Char('j'), Key::Hover(1, 0)]);
         assert_eq!(keys(b"\x1b[<32;8;3M\x1b[<128;8;3M"), []);
         assert_eq!(keys(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [Key::WheelUp, Key::WheelDown]);
     }

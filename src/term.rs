@@ -24,7 +24,8 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\
     \x1b]11;?\x1b\\\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
 // End a partial control string or synchronized update before changing modes.
-const LEAVE: &[u8] = b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+const LEAVE: &[u8] =
+    b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 /// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
 pub fn wake(fd: RawFd) {
@@ -149,6 +150,10 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    pub fn track_motion(&mut self, enabled: bool) -> io::Result<()> {
+        self.write(if enabled { b"\x1b[?1003h" } else { b"\x1b[?1003l\x1b[?1000h" })
     }
 
     pub fn finish(&mut self, data: &[u8]) {

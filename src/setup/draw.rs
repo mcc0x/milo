@@ -24,6 +24,20 @@ struct RowHit {
     value: Range<usize>,
 }
 
+impl RowHit {
+    fn span_at(&self, x: usize) -> Option<Range<usize>> {
+        if self.marker && x == 0 {
+            Some(0..1)
+        } else if self.label.contains(&x) {
+            Some(self.label.clone())
+        } else if self.value.contains(&x) {
+            Some(self.value.clone())
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Visible {
     current: bool,
@@ -41,20 +55,23 @@ impl Visible {
         self.current = false;
     }
 
-    pub(super) fn index_at(&self, x: usize, y: usize) -> Option<usize> {
+    pub(super) fn row_at(&self, x: usize, y: usize) -> Option<(usize, Range<usize>)> {
         let offset = y.checked_sub(self.y)?;
         if !self.current || offset >= self.len {
             return None;
         }
-        let row = self.rows.get(offset)?;
-        (x == 0 && row.marker || row.label.contains(&x) || row.value.contains(&x)).then_some(self.first + offset)
+        let span = self.rows.get(offset)?.span_at(x)?;
+        Some((self.first + offset, span))
     }
 
-    pub(super) fn tab_at(&self, x: usize, y: usize) -> Option<Panel> {
+    pub(super) fn tab_at(&self, x: usize, y: usize) -> Option<(Panel, Range<usize>)> {
         if !self.current || y != self.tab_y {
             return None;
         }
-        self.tabs.iter().position(|span| span.contains(&x)).map(|index| SECTIONS[index])
+        self.tabs
+            .iter()
+            .enumerate()
+            .find_map(|(index, span)| span.contains(&x).then(|| (SECTIONS[index], span.clone())))
     }
 
     pub(super) fn footer_at(&self, x: usize, y: usize) -> Option<Key> {
@@ -69,6 +86,13 @@ impl Visible {
             '↓' => Key::Down,
             ch => Key::Char(ch),
         })
+    }
+
+    pub(super) fn footer_span_at(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        if !self.current {
+            return None;
+        }
+        self.footer.span_at(x, y)
     }
 }
 

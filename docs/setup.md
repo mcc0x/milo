@@ -33,7 +33,7 @@ The source installer also honours `MILO_BIN_DIR` and defaults to `~/.local/bin`.
 
 In a Rex shell run `milo setup`. Pick **Just the tree**, **Project sidebar**, or start from the tab you already arranged. Adjust the individual panes and appearance if needed. Trying the layout does not change your saved default; undo the trial before saving if it isn't what you want.
 
-In Home, the welcome guide and Settings, **click once** to open a menu, switch sections or change a value. Click **Save** and choose a scope to keep your changes. The arrow keys and Enter work too.
+In Home, the welcome guide and Settings, moving the pointer over a clickable control underlines it without changing your keyboard selection. **Click once** to open a menu, switch sections or change a value. Click **Save** and choose a scope to keep your changes. Terminals without mouse-motion reporting still support the arrow keys and Enter.
 
 Save for **this worktree** to keep a project-specific setup, or save a **global default** for projects without an override. Worktrees of the same repository can have different choices. Preferences live on the machine running Milo, outside the repository. A project cannot install actions or supply a command for Milo to execute.
 

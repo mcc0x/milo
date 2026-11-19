@@ -231,6 +231,71 @@ fn clicking_a_setting_changes_the_draft_and_ignores_padding_disabled_and_stale_h
 }
 
 #[test]
+fn hovering_setup_rows_only_matches_rendered_enabled_parts() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| panic!("hover never calls Rex"));
+    pane.selected = 0;
+    assert!(pane.tracks_hover());
+    let rows = frame(&mut pane, 110, 27);
+    let Key::Click(x, y) = click_label(&rows, "Just the tree") else { unreachable!() };
+    let end = x + "Just the tree".len();
+    assert_eq!(pane.hover_span(end - 1, y), Some(x..end));
+    assert_eq!(pane.hover_span(end, y), None);
+    assert_eq!(pane.hover_span(0, y), Some(0..1));
+    assert_eq!(pane.hover_span(1, y), None);
+    assert_eq!(pane.selected, 0);
+    assert_eq!(pane.key(Key::Down), After::Stay);
+    assert_eq!(pane.hover_span(x, y), None, "keyboard input makes the previous frame stale");
+
+    assert_eq!(pane.key(Key::Down), After::Stay);
+    let rows = frame(&mut pane, 110, 27);
+    let Key::Click(x, y) = click_label(&rows, "Use this tab’s layout") else { unreachable!() };
+    assert!(rows[y].starts_with('›'));
+    assert_eq!(pane.hover_span(x, y), None);
+    assert_eq!(pane.hover_span(0, y), None);
+
+    assert_eq!(pane.key(click_label(&rows, "Customize panes")), After::Stay);
+    let rows = frame(&mut pane, 110, 27);
+    let Key::Click(label, y) = click_label(&rows, "Rail side") else { unreachable!() };
+    let Key::Click(value, _) = click_at(&rows, y, "Left") else { unreachable!() };
+    assert_eq!(pane.hover_span(label, y), Some(label..label + "Rail side".len()));
+    assert_eq!(pane.hover_span(label + "Rail side".len(), y), None);
+    assert_eq!(pane.hover_span(value, y), Some(value..value + "Left".len()));
+    assert_eq!(pane.layout.geometry.side, Side::Left);
+    assert_eq!(pane.key(Key::Click(value, y)), After::Stay);
+    assert_eq!(pane.layout.geometry.side, Side::Right);
+}
+
+#[test]
+fn hovering_setup_tabs_footer_and_save_choices_uses_the_current_frame() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| panic!("hover never calls Rex"));
+    let rows = frame(&mut pane, 80, 18);
+    let Key::Click(tab, top) = click_at(&rows, 0, "Appearance") else { unreachable!() };
+    assert_eq!(pane.hover_span(tab + 2, top), Some(tab..tab + "Appearance".len()));
+    assert_eq!(pane.hover_span(tab - 1, top), None);
+    let save_label = "s save…";
+    let save = click_at(&rows, 17, save_label);
+    let Key::Click(x, y) = save else { unreachable!() };
+    let end = x + crate::width::str_width(save_label);
+    assert_eq!(pane.hover_span(end - 1, y), Some(x..end));
+    assert_eq!(pane.hover_span(end, y), None);
+    assert_eq!(pane.panel, Panel::Layout);
+
+    assert_eq!(pane.key(save), After::Stay);
+    let rows = frame(&mut pane, 80, 18);
+    assert_eq!(pane.hover_span(tab, top), None, "the modal hides the tabs");
+    let label = "As global default";
+    let Key::Click(x, y) = click_label(&rows, label) else { unreachable!() };
+    assert_eq!(pane.hover_span(x, y), Some(x..x + label.len()));
+    assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    assert_eq!(pane.selected, 0, "hovering a save choice does not select it");
+    frame(&mut pane, 8, 1);
+    assert_eq!(pane.hover_span(x, y), None, "a clipped redraw clears previous targets");
+    assert!(!f.root.join("init.lua").exists());
+}
+
+#[test]
 fn clicked_save_and_inheritance_keep_their_scope_prompts() {
     let f = Fixture::new();
     let mut pane = Setup::new(Some(store(&f)), true, None, Some(f.root.clone()), |_| true);

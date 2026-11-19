@@ -32,14 +32,18 @@ impl HintHits<'_> {
     }
 
     pub fn index_at(&self, x: usize, y: usize) -> Option<usize> {
-        self.hit(x, y).map(|(index, _)| index)
+        self.hit(x, y).map(|(index, _, _)| index)
     }
 
     pub fn item_at(&self, x: usize, y: usize) -> Option<&str> {
-        self.hit(x, y).map(|(_, text)| text)
+        self.hit(x, y).map(|(_, text, _)| text)
     }
 
-    fn hit(&self, x: usize, y: usize) -> Option<(usize, &str)> {
+    pub fn span_at(&self, x: usize, y: usize) -> Option<std::ops::Range<usize>> {
+        self.hit(x, y).map(|(_, _, span)| span)
+    }
+
+    pub(crate) fn hit(&self, x: usize, y: usize) -> Option<(usize, &str, std::ops::Range<usize>)> {
         if y != self.y {
             return None;
         }
@@ -47,7 +51,7 @@ impl HintHits<'_> {
         for (index, text) in self.items() {
             let end = left + str_width(text);
             if (left..end).contains(&x) {
-                return Some((index, text));
+                return Some((index, text, left..end));
             }
             left = end + self.gap;
         }
@@ -170,6 +174,10 @@ impl Page {
         }
         ui::thumb(s, w - 1, 0, shown, self.rows.len(), self.top);
         self.footer = draw_hint(s, "↑↓ scroll", &["Esc close"], CLOSE);
+    }
+
+    pub fn hover_span(&self, x: usize, y: usize) -> Option<std::ops::Range<usize>> {
+        self.footer.span_at(x, y)
     }
 
     /// Scrolls the page. Returns false when the key closes it instead.

@@ -2,6 +2,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io;
+use std::ops::Range;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -151,20 +152,22 @@ struct HitRows {
 }
 
 impl HitRows {
-    fn index_at(&self, x: usize, y: usize, rows: &[OptionRow]) -> Option<usize> {
-        let x = x.checked_sub(self.x)?;
+    fn row_at(&self, x: usize, y: usize, rows: &[OptionRow]) -> Option<(usize, Range<usize>)> {
         let y = y.checked_sub(self.y)?;
         let row = y / self.stride;
-        if x >= self.w || row >= self.count {
+        if row >= self.count {
             return None;
         }
         let index = self.start + row;
         let (label, detail, _) = rows[index];
         let label_line = y.is_multiple_of(self.stride);
-        let on_marker = label_line && self.indent != 0 && x == 0 && self.selected == index;
+        if label_line && self.indent != 0 && x == self.x && self.selected == index {
+            return Some((index, x..x + 1));
+        }
         let text = if label_line { label } else { detail };
-        let on_text = x.checked_sub(self.indent).is_some_and(|col| col < text.len());
-        (on_marker || on_text).then_some(index)
+        let start = self.x + self.indent;
+        let span = start..start + text.len().min(self.w - self.indent);
+        span.contains(&x).then_some((index, span))
     }
 }
 
@@ -215,6 +218,18 @@ impl Welcome {
             Step::Intro => ("q skip", Key::Char('q')),
             Step::Choose => ("Esc back", Key::Esc),
             Step::Saved => ("Enter continue", Key::Enter),
+        }
+    }
+
+    fn footer_hit(&self, x: usize, y: usize) -> Option<(Key, Range<usize>)> {
+        let (_, hint, span) = self.footer.hit(x, y)?;
+        let (last, key) = self.footer_last();
+        match hint {
+            hint if hint == last => Some((key, span)),
+            CHOOSE_HINT if self.hit.as_ref().is_some_and(|hit| hit.selected == self.selected) => {
+                Some((Key::Enter, span))
+            }
+            _ => None,
         }
     }
 
@@ -386,6 +401,18 @@ impl Pane for Welcome {
         }
     }
 
+    fn tracks_hover(&self) -> bool {
+        true
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        self.hit
+            .as_ref()
+            .and_then(|hit| hit.row_at(x, y, self.rows()))
+            .map(|(_, span)| span)
+            .or_else(|| self.footer_hit(x, y).map(|(_, span)| span))
+    }
+
     fn help(&self) -> Page {
         use help::{heading, key};
         Page::new(vec![
@@ -400,16 +427,12 @@ impl Pane for Welcome {
     fn key(&mut self, key: Key) -> After {
         let rows = self.rows();
         let key = if let Key::Click(x, y) = key {
-            if let Some(index) = self.hit.as_ref().and_then(|hit| hit.index_at(x, y, rows)) {
+            if let Some((index, _)) = self.hit.as_ref().and_then(|hit| hit.row_at(x, y, rows)) {
                 self.selected = index;
                 return self.act(rows[index].2);
             }
-            let (last, action) = self.footer_last();
-            match self.footer.item_at(x, y) {
-                Some(hint) if hint == last => action,
-                Some(CHOOSE_HINT) if self.hit.as_ref().is_some_and(|hit| hit.selected == self.selected) => Key::Enter,
-                _ => return After::Ignored,
-            }
+            let Some((key, _)) = self.footer_hit(x, y) else { return After::Ignored };
+            key
         } else {
             key
         };
@@ -448,6 +471,35 @@ mod tests {
     }
 
     #[test]
+    fn welcome_hover_only_matches_drawn_actions() {
+        let fixture = Fixture::folder();
+        let mut welcome = Welcome::new(Mode::Icons(fixture.root.join("state")));
+        let mut screen = Screen::sized(48, 14);
+        welcome.draw(&mut screen);
+        for label in ["Continue", "Choose icons for your terminal.", CHOOSE_HINT, "q skip"] {
+            let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
+            let end = x + label.len();
+            assert_eq!(welcome.hover_span(x, y), Some(x..end));
+            assert_eq!(welcome.hover_span(end - 1, y), Some(x..end));
+            assert_eq!(welcome.hover_span(end, y), None);
+        }
+        let Key::Click(x, y) = click_on(&screen, "Continue") else { unreachable!() };
+        assert_eq!(welcome.hover_span(x - 2, y), Some(x - 2..x - 1));
+        assert_eq!(welcome.hover_span(x - 1, y), None);
+        for label in ["Welcome to Milo", "↑↓ move"] {
+            let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
+            assert_eq!(welcome.hover_span(x, y), None);
+        }
+        assert_eq!(welcome.selected, 0);
+
+        let mut narrow = Screen::sized(6, 1);
+        welcome.draw(&mut narrow);
+        assert_eq!(narrow.text(), [" › C…"]);
+        assert_eq!(welcome.hover_span(4, 0), Some(3..5));
+        assert_eq!(welcome.hover_span(5, 0), None);
+    }
+
+    #[test]
     fn welcome_clicks_only_activate_drawn_rows_and_footer_actions() {
         let fixture = Fixture::folder();
         let state = fixture.root.join("state");
@@ -462,6 +514,8 @@ mod tests {
         assert!(welcome.step == Step::Choose);
         assert_eq!(welcome.key(click), After::Ignored);
         assert_eq!(welcome.key(click_on(&wide, "q skip")), After::Ignored);
+        let Key::Click(x, y) = click_on(&wide, "q skip") else { unreachable!() };
+        assert_eq!(welcome.hover_span(x, y), None);
 
         let mut compact = Screen::sized(13, 5);
         welcome.draw(&mut compact);

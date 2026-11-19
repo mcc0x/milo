@@ -2,6 +2,8 @@
 
 mod mascot;
 
+use std::ops::Range;
+
 use crate::help::{self, HintHits, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
@@ -65,20 +67,29 @@ impl Home {
         After::Stay
     }
 
-    fn click(&mut self, x: usize, y: usize) -> Option<Key> {
-        let hint = self.footer.index_at(x, y);
-        let (selected, labels) = match &mut self.view {
-            View::Menu | View::Confirm { .. } if hint == Some(2) => return Some(Key::Esc),
-            View::Menu => (&mut self.selected, MENU),
-            View::Confirm { selected } => (selected, CONFIRM),
-            View::Report(_) if hint == Some(1) => return Some(Key::Esc),
+    fn footer_hit(&self, x: usize, y: usize) -> Option<(Key, Range<usize>)> {
+        let (index, _, span) = self.footer.hit(x, y)?;
+        let key = match (&self.view, index) {
+            (View::Menu | View::Confirm { .. }, 2) | (View::Report(_), 1) => Key::Esc,
+            // A pending keyboard move must not activate a different option than the one shown.
+            (View::Menu, 1) if self.selected == self.picker.selected => Key::Enter,
+            (View::Confirm { selected }, 1) if *selected == self.picker.selected => Key::Enter,
             _ => return None,
         };
-        if hint == Some(1) {
-            // A pending keyboard move must not activate a different option than the one shown.
-            return (*selected == self.picker.selected).then_some(Key::Enter);
+        Some((key, span))
+    }
+
+    fn click(&mut self, x: usize, y: usize) -> Option<Key> {
+        if let Some((key, _)) = self.footer_hit(x, y) {
+            return Some(key);
         }
-        *selected = self.picker.index_at(x, y, labels)?;
+        let (selected, labels) = match &mut self.view {
+            View::Menu => (&mut self.selected, MENU),
+            View::Confirm { selected } => (selected, CONFIRM),
+            _ => return None,
+        };
+        let (index, _) = self.picker.row_at(x, y, labels)?;
+        *selected = index;
         Some(Key::Enter)
     }
 
@@ -147,6 +158,20 @@ impl Pane for Home {
             }
             View::Settings(_) => unreachable!("settings draws its own frame"),
         }
+    }
+
+    fn tracks_hover(&self) -> bool {
+        true
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        let row = match &self.view {
+            View::Settings(setup) => return setup.hover_span(x, y),
+            View::Menu => self.picker.row_at(x, y, MENU),
+            View::Confirm { .. } => self.picker.row_at(x, y, CONFIRM),
+            View::Report(_) => None,
+        };
+        row.map(|(_, span)| span).or_else(|| self.footer_hit(x, y).map(|(_, span)| span))
     }
 
     fn help(&self) -> Page {
@@ -263,17 +288,19 @@ impl Picker {
         Self { x, y, width, first, len, step, marker, selected }
     }
 
-    fn index_at(self, x: usize, y: usize, labels: &[&str]) -> Option<usize> {
-        let x = x.checked_sub(self.x)?;
+    fn row_at(self, x: usize, y: usize, labels: &[&str]) -> Option<(usize, Range<usize>)> {
         let row = y.checked_sub(self.y)?;
         let i = row.checked_div(self.step)?;
-        if x >= self.width || i >= self.len || !row.is_multiple_of(self.step) {
+        if i >= self.len || !row.is_multiple_of(self.step) {
             return None;
         }
         let index = self.first + i;
-        let on_marker = self.marker != 0 && x == 0 && self.selected == index;
-        let on_label = x.checked_sub(self.marker).is_some_and(|col| col < labels[index].len());
-        (on_marker || on_label).then_some(index)
+        if self.marker != 0 && x == self.x && self.selected == index {
+            return Some((index, x..x + 1));
+        }
+        let start = self.x + self.marker;
+        let span = start..start + labels[index].len().min(self.width - self.marker);
+        span.contains(&x).then_some((index, span))
     }
 }
 
@@ -408,6 +435,34 @@ mod tests {
     }
 
     #[test]
+    fn home_hover_only_matches_drawn_actions() {
+        let mut home = Home::new();
+        let mut screen = Screen::sized(60, 20);
+        home.draw(&mut screen);
+        for label in ["Settings", "Doctor", "Uninstall", "Enter open", "q quit"] {
+            let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
+            let end = x + label.len();
+            assert_eq!(home.hover_span(x, y), Some(x..end));
+            assert_eq!(home.hover_span(end - 1, y), Some(x..end));
+            assert_eq!(home.hover_span(end, y), None);
+        }
+        let Key::Click(x, y) = click_on(&screen, "Settings") else { unreachable!() };
+        assert_eq!(home.hover_span(x - 2, y), Some(x - 2..x - 1));
+        assert_eq!(home.hover_span(x - 1, y), None);
+        for label in ["Milo  v", "↑↓ move"] {
+            let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
+            assert_eq!(home.hover_span(x, y), None);
+        }
+        assert_eq!(home.selected, 0);
+
+        let mut narrow = Screen::sized(4, 1);
+        home.draw(&mut narrow);
+        assert_eq!(narrow.text(), ["Sett"]);
+        assert_eq!(home.hover_span(3, 0), Some(0..4));
+        assert_eq!(home.hover_span(4, 0), None);
+    }
+
+    #[test]
     fn home_and_confirmation_clicks_only_act_on_drawn_controls() {
         let mut home = Home::new();
         let mut screen = Screen::sized(60, 20);
@@ -422,11 +477,14 @@ mod tests {
         home.draw(&mut screen);
         let cancel = click_on(&screen, "Cancel");
         let Key::Click(x, y) = cancel else { unreachable!() };
+        assert_eq!(home.hover_span(x, y), Some(x..x + "Cancel".len()));
         assert_eq!(home.key(Key::Click(x + "Cancel".len(), y)), After::Ignored);
         let Key::Click(x, y) = click_on(&screen, "Enter choose") else { unreachable!() };
+        assert_eq!(home.hover_span(x, y), Some(x..x + "Enter choose".len()));
         assert_eq!(home.key(Key::Down), After::Stay);
         // Test the mapping without risking a real uninstall if the guard regresses.
         assert_eq!(home.click(x, y), None);
+        assert_eq!(home.hover_span(x, y), None);
         assert!(matches!(home.view, View::Confirm { selected: 1 }));
         assert_eq!(home.key(Key::Up), After::Stay);
         assert_eq!(home.key(cancel), After::Stay);
@@ -465,6 +523,8 @@ mod tests {
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut screen);
         assert!(screen.text()[2].contains("Last line."));
+        let Key::Click(x, y) = click_on(&screen, "Esc back") else { unreachable!() };
+        assert_eq!(home.hover_span(x, y), Some(x..x + "Esc back".len()));
         assert_eq!(home.key(click_on(&screen, "Esc back")), After::Stay);
         assert!(matches!(home.view, View::Menu));
     }

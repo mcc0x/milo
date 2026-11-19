@@ -1,6 +1,7 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
 use std::io;
+use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -33,6 +34,13 @@ pub enum External {
 pub trait Pane {
     fn draw(&mut self, screen: &mut Screen);
     fn help(&self) -> Page;
+    fn tracks_hover(&self) -> bool {
+        false
+    }
+    fn hover_span(&self, _x: usize, _y: usize) -> Option<Range<usize>> {
+        None
+    }
+
     /// An empty, complete scope means nothing outside the pane can change it.
     fn watch_scope(&self) -> Scope {
         Scope { roots: Vec::new(), ignored: Vec::new(), complete: true }
@@ -139,6 +147,14 @@ fn draw_pane(pane: &mut dyn Pane, screen: &mut Screen, help: Option<&mut Page>) 
     } else {
         pane.draw(screen);
     }
+}
+
+fn hover_at(pane: &dyn Pane, help: Option<&Page>, x: usize, y: usize) -> Option<(usize, Range<usize>)> {
+    let span = match help {
+        Some(page) => page.hover_span(x, y),
+        None => pane.hover_span(x, y),
+    };
+    span.map(|span| (y, span))
 }
 
 fn terminal_reply(screen: &mut Screen, key: Key) -> bool {
@@ -291,17 +307,30 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
     let mut keys = Vec::new();
     let mut redraw = true;
     let mut frame_due = None;
+    let mut tracking = false;
+    let mut pointer = None;
+    let mut highlighted = None;
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) || screen.w == 0 {
             let (w, h) = terminal.size();
             screen.resize(w, h);
+            pointer = None;
             if !Page::fits(&screen) {
                 help = None;
             }
             redraw = true;
         }
         if std::mem::take(&mut redraw) {
+            let want_motion = pane.tracks_hover() || help.is_some();
+            if tracking != want_motion {
+                terminal.track_motion(want_motion).map_err(|e| format!("cannot configure mouse tracking: {e}"))?;
+                tracking = want_motion;
+            }
             draw_pane(pane.as_mut(), &mut screen, help.as_mut());
+            highlighted = pointer.and_then(|(x, y)| hover_at(pane.as_ref(), help.as_ref(), x, y));
+            if let Some((y, span)) = &highlighted {
+                screen.underline(*y, span.clone());
+            }
             if let Err(e) = screen.flush(|bytes| terminal.write(bytes)) {
                 if term::TERMINATED.load(Ordering::Relaxed) {
                     break;
@@ -324,6 +353,17 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                 input.receive(&mut terminal.keyboard, &mut keys);
                 let mut overlay_changed = false;
                 for key in keys.drain(..) {
+                    if let Key::Hover(x, y) = key {
+                        if tracking && !overlay_changed {
+                            pointer = Some((x, y));
+                            redraw |= hover_at(pane.as_ref(), help.as_ref(), x, y) != highlighted;
+                        }
+                        continue;
+                    }
+                    if !matches!(key, Key::Background(_) | Key::Pictures(_) | Key::CellSize(..) | Key::Answered) {
+                        pointer = None;
+                        redraw |= highlighted.is_some();
+                    }
                     if overlay_changed && matches!(key, Key::Click(..)) {
                         continue; // Wait for a frame showing the new click targets.
                     }

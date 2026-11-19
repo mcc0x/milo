@@ -27,25 +27,26 @@ pub enum Wash {
 
 /// Packed cell style: bits 0–8 hold the text colour (0 = default, n+1 =
 /// palette colour n); bits 9–13 hold bold, italic, strike, faint and reverse
-/// in that order; bits 14–15 hold the wash (0 = none).
+/// in that order; bits 14–15 hold the wash (0 = none), bit 16 underlines.
 /// Palette colours 0–15 follow the terminal theme; 16–255 are fixed.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct Style(u16);
+pub struct Style(u32);
 
-const FG: u16 = 0x1ff;
-const BOLD: u16 = 1 << 9;
-const ITALIC: u16 = 1 << 10;
-const STRIKE: u16 = 1 << 11;
-const FAINT: u16 = 1 << 12;
-const REVERSE: u16 = 1 << 13;
-const WASH_SHIFT: u16 = 14;
-const WASH: u16 = 3 << WASH_SHIFT;
+const FG: u32 = 0x1ff;
+const BOLD: u32 = 1 << 9;
+const ITALIC: u32 = 1 << 10;
+const STRIKE: u32 = 1 << 11;
+const FAINT: u32 = 1 << 12;
+const REVERSE: u32 = 1 << 13;
+const WASH_SHIFT: u32 = 14;
+const WASH: u32 = 3 << WASH_SHIFT;
+const UNDERLINE: u32 = 1 << 16;
 
 impl Style {
     pub const PLAIN: Style = Style(0);
 
     pub const fn fg(c: u8) -> Style {
-        Style(c as u16 + 1)
+        Style(c as u32 + 1)
     }
 
     pub const fn bold(self) -> Style {
@@ -71,7 +72,7 @@ impl Style {
     }
 
     fn with_wash(self, wash: Wash) -> Style {
-        Style(self.0 & !WASH | (wash as u16) << WASH_SHIFT)
+        Style(self.0 & !WASH | (wash as u32) << WASH_SHIFT)
     }
 
     fn wash_id(self) -> usize {
@@ -82,6 +83,9 @@ impl Style {
         out.extend_from_slice(b"\x1b[0");
         if self.0 & BOLD != 0 {
             out.extend_from_slice(b";1");
+        }
+        if self.0 & UNDERLINE != 0 {
+            out.extend_from_slice(b";4");
         }
         if self.0 & ITALIC != 0 {
             out.extend_from_slice(b";3");
@@ -294,6 +298,15 @@ impl Screen {
         self.marks.clear();
         self.pictures.wanted.clear();
         self.pictures.data.clear();
+    }
+
+    pub fn underline(&mut self, y: usize, span: Range<usize>) {
+        if y < self.h {
+            let row = &mut self.cur[y * self.w..(y + 1) * self.w];
+            for cell in row.get_mut(span).into_iter().flatten() {
+                cell.st.0 |= UNDERLINE;
+            }
+        }
     }
 
     /// Notes that the terminal can, or cannot, show pictures.

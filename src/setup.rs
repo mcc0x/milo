@@ -20,6 +20,7 @@ pub use welcome::{Welcome, needs_welcome, skip_welcome};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::help::{self, Page};
@@ -628,6 +629,21 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
         self.draw_setup(s);
     }
 
+    fn tracks_hover(&self) -> bool {
+        true
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        if let Some((_, span)) = self.visible.tab_at(x, y) {
+            return Some(span);
+        }
+        if let Some(span) = self.visible.footer_span_at(x, y) {
+            return Some(span);
+        }
+        let (index, span) = self.visible.row_at(x, y)?;
+        (!self.disabled(*self.rows().get(index)?)).then_some(span)
+    }
+
     fn help(&self) -> Page {
         use help::{heading, key};
         let mut rows = vec![
@@ -663,7 +679,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
 
 impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn click(&mut self, x: usize, y: usize) -> After {
-        if let Some(panel) = self.visible.tab_at(x, y) {
+        if let Some((panel, _)) = self.visible.tab_at(x, y) {
             self.select_panel(panel, 0);
             return After::Stay;
         }
@@ -671,7 +687,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let after = if let Some(key) = self.visible.footer_at(x, y) {
             if key == Key::Char('?') { After::Help } else { self.input(key) }
         } else {
-            let Some(index) = self.visible.index_at(x, y) else { return After::Ignored };
+            let Some((index, _)) = self.visible.row_at(x, y) else { return After::Ignored };
             let Some(&row) = self.rows().get(index) else { return After::Ignored };
             if self.disabled(row)
                 || matches!(row, Row::Continue | Row::SaveGlobal | Row::SaveWorktree)
