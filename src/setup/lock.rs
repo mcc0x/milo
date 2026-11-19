@@ -47,18 +47,19 @@ pub(super) fn setup(dir: &Path) -> Result<File, &'static str> {
     }
 }
 
-/// A lock over a whole file, of the kind asked for.
-fn whole_file(kind: libc::c_short) -> libc::flock {
+/// A write lock covering the entire file.
+fn whole_file_write_lock() -> libc::flock {
     // SAFETY: A flock is plain numbers, for which all zeros is a valid
     // value: from the start of the file, with no length, meaning to its end.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = kind;
+    // POSIX lock constants are int on Linux, short on macOS; l_type is short on both.
+    lock.l_type = libc::F_WRLCK as _;
     lock
 }
 
 /// Takes the lock for this process. False if another process holds it.
 fn take(file: &File) -> io::Result<bool> {
-    let lock = whole_file(libc::F_WRLCK);
+    let lock = whole_file_write_lock();
     loop {
         // SAFETY: The descriptor is open for the call, and `lock` is a whole
         // flock, which is what setting a lock reads.
@@ -76,14 +77,14 @@ fn take(file: &File) -> io::Result<bool> {
 
 /// The process that holds the lock, if another process does.
 fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
-    let mut lock = whole_file(libc::F_WRLCK);
+    let mut lock = whole_file_write_lock();
     // SAFETY: The descriptor is open for the call, and asking about a lock
     // writes one flock, into `lock`.
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut lock) } != 0 {
         return Err(io::Error::last_os_error());
     }
     // The answer keeps the kind "unlocked" when nothing stands in the way.
-    Ok((lock.l_type != libc::F_UNLCK && lock.l_pid > 1).then_some(lock.l_pid))
+    Ok((lock.l_type != libc::F_UNLCK as _ && lock.l_pid > 1).then_some(lock.l_pid))
 }
 
 fn existing(dir: &Path) -> io::Result<Option<File>> {
