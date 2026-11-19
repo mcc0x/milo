@@ -76,6 +76,7 @@ pub struct Session {
     pub keyboard: File,
     output: File,
     signal: PipeReader,
+    pending_interrupt: bool,
     saved: Option<libc::termios>,
 }
 
@@ -109,12 +110,15 @@ impl Session {
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut session = Self { keyboard, output, signal, saved: Some(saved) };
+        let mut session = Self { keyboard, output, signal, pending_interrupt: false, saved: Some(saved) };
         session.write(ENTER)?;
         Ok(session)
     }
 
-    pub fn wait(&self, timeout_ms: i32, watch: Option<RawFd>, external: Option<RawFd>) -> Wait {
+    pub fn wait(&mut self, timeout_ms: i32, watch: Option<RawFd>, external: Option<RawFd>) -> Wait {
+        if std::mem::take(&mut self.pending_interrupt) {
+            return Wait::Interrupted;
+        }
         wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [watch, external], false)
     }
 
@@ -144,6 +148,9 @@ impl Session {
                         }
                     } else if fds[1].revents != 0 {
                         drain_signal(&self.signal);
+                        // Keep the wakeup for the pane without leaving the pipe readable
+                        // while the terminal is still blocked.
+                        self.pending_interrupt = true;
                     }
                 }
                 Err(e) => return Err(e),
@@ -366,6 +373,59 @@ mod tests {
         assert!(matches!(wait(), Wait::External));
         wake(input.as_raw_fd());
         assert!(matches!(wait(), Wait::Input));
+    }
+
+    #[test]
+    fn a_signal_drained_during_a_blocked_write_still_interrupts_the_next_wait() {
+        use std::os::fd::OwnedFd;
+        use std::time::Instant;
+
+        let (keyboard, _input) = io::pipe().unwrap();
+        let (mut read, output) = io::pipe().unwrap();
+        let (signal, wakeup) = io::pipe().unwrap();
+        for fd in [output.as_raw_fd(), signal.as_raw_fd()] {
+            // SAFETY: Both descriptors are open; F_SETFL sets nonblocking mode.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) }, 0);
+        }
+        let mut output = File::from(OwnedFd::from(output));
+        let frame = [b'x'; 4096];
+        let mut buffered = 0;
+        loop {
+            match output.write(&frame) {
+                Ok(n) => buffered += n,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("cannot fill output pipe: {e}"),
+            }
+        }
+        let signal_fd = signal.as_raw_fd();
+        let mut terminal = Session {
+            keyboard: File::from(OwnedFd::from(keyboard)),
+            output,
+            signal,
+            pending_interrupt: false,
+            saved: None,
+        };
+        wake(wakeup.as_raw_fd());
+        std::thread::scope(|scope| {
+            let writing = scope.spawn(|| terminal.write(&frame));
+            let until = Instant::now() + Duration::from_secs(5);
+            let mut fds = [libc::pollfd { fd: signal_fd, events: libc::POLLIN, revents: 0 }];
+            // Don't free the output pipe until the writer has consumed the wakeup.
+            let drained = loop {
+                if wait_ready(&mut fds, 0) == 0 {
+                    break true;
+                }
+                if Instant::now() >= until {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            read.read_exact(&mut vec![0; buffered]).unwrap();
+            writing.join().unwrap().unwrap();
+            assert!(drained, "the writer did not consume the signal byte while blocked");
+        });
+        assert!(matches!(terminal.wait(0, None, None), Wait::Interrupted));
+        assert!(matches!(terminal.wait(0, None, None), Wait::Timeout));
     }
 
     fn modes(terminal: &File) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {
