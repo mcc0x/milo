@@ -172,12 +172,19 @@ fn parent_program() -> Option<std::path::PathBuf> {
 
 /// A string as a JSON literal.
 fn json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+    json_chars(s.chars(), s.len())
+}
+
+fn json_chars(chars: impl Iterator<Item = char>, bytes: usize) -> String {
+    let mut out = String::with_capacity(bytes + 2);
     out.push('"');
-    for c in s.chars() {
+    for c in chars {
         match c {
             '"' | '\\' => out.extend(['\\', c]),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                write!(out, "\\u{:04x}", c as u32).unwrap();
+            }
             c => out.push(c),
         }
     }
@@ -202,12 +209,31 @@ pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str
     let previous = previous.map(json).unwrap_or_else(|| "null".into());
     let args = format!(
         r#"{{"label":{},"cwd":{},"command":{command},"previous":{previous}}}"#,
-        json(name),
+        reader_label(name),
         json(&root.to_string_lossy()),
     );
     script(Some(&target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
         .filter(|reply| reply.starts_with("block:") && !reply.contains(char::is_whitespace))
         .ok_or("Rex did not open the file.")
+}
+
+/// Quote a Rex label without changing the path passed to the reader.
+fn reader_label(name: &str) -> String {
+    const LIMIT: usize = 128;
+    // Limit UTF-8 bytes without cutting a character in half.
+    let mut chars = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .scan(LIMIT, |left, c| {
+            *left = left.checked_sub(c.len_utf8())?;
+            Some(c)
+        })
+        .peekable();
+    if chars.peek().is_none() {
+        // Let Rex use the block flavor's default label.
+        return "null".into();
+    }
+    json_chars(chars, name.len().min(LIMIT))
 }
 
 fn reader_command(exe: &Path, file: &Path, commit: Option<&str>) -> String {
@@ -339,7 +365,7 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, ShellChange, json, probe_output, reader_command};
+    use super::{Frame, ShellChange, json, probe_output, reader_command, reader_label};
     use std::path::Path;
     use std::process::Command;
     use std::time::Duration;
@@ -384,8 +410,21 @@ mod tests {
     }
 
     #[test]
+    fn floating_reader_labels_remove_controls_and_fit_at_utf8_boundaries() {
+        assert_eq!(reader_label("ordinary.rs"), json("ordinary.rs"));
+        assert_eq!(reader_label("a\tb\n\u{85}.rs"), json("ab.rs"));
+        assert_eq!(reader_label("\t\n"), "null");
+        let full = "x".repeat(128);
+        assert_eq!(reader_label(&format!("{full}z")), json(&full));
+        let prefix = "x".repeat(127);
+        assert_eq!(reader_label(&format!("{prefix}é")), json(&prefix));
+        let prefix = format!("{}é", "x".repeat(126));
+        assert_eq!(reader_label(&format!("{prefix}z")), json(&prefix));
+    }
+
+    #[test]
     fn a_floating_reader_passes_the_path_and_commit_as_separate_words() {
-        let command = reader_command(Path::new("/bin/milo"), Path::new("-odd \"name"), Some("a123456"));
-        assert_eq!(command, r#"["/bin/milo","view","-odd \"name","--commit","a123456"]"#);
+        let command = reader_command(Path::new("/bin/milo"), Path::new("-odd \"name\t\n"), Some("a123456"));
+        assert_eq!(command, r#"["/bin/milo","view","-odd \"name\u0009\u000a","--commit","a123456"]"#);
     }
 }
