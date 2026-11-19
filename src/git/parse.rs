@@ -56,11 +56,17 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
         } else if e.starts_with("1 ") {
             st.tracked_uncommitted.extend(path(e, 9));
         } else if e.starts_with("2 ") {
-            // A rename is followed by its old path, which is not an entry.
-            st.tracked_uncommitted.extend(path(e, 10));
-            let from = String::from_utf8_lossy(entries.next().unwrap_or_default());
-            st.tracked_uncommitted.push(from.to_string());
-            st.sources.push(from.into_owned());
+            let mut fields = e.splitn(10, ' ');
+            let score = fields.nth(8);
+            st.tracked_uncommitted.extend(fields.next().map(str::to_string));
+            // Both renames and copies have a second path, but only a move
+            // makes its source part of the change.
+            let from = entries.next().unwrap_or_default();
+            if score.is_some_and(|score| score.starts_with('R')) {
+                let from = String::from_utf8_lossy(from);
+                st.tracked_uncommitted.push(from.to_string());
+                st.sources.push(from.into_owned());
+            }
         } else if e.starts_with("u ") {
             st.unmerged.extend(path(e, 11));
             st.tracked_uncommitted.extend(path(e, 11));
@@ -223,7 +229,19 @@ mod tests {
               2 R. N... 100644 100644 100644 h1 h2 R100 new.txt\0? old looks untracked\0? real.txt\0",
         );
         assert_eq!(st.unmerged, ["both sides.txt"]);
+        assert_eq!(st.sources, ["? old looks untracked"]);
         assert_eq!(st.untracked, ["real.txt"]);
+    }
+
+    #[test]
+    fn status_keeps_a_modified_copy_source_independent() {
+        let st = parse_status(
+            b"1 MM N... 100644 100644 100644 h1 h2 ? original\0\
+              2 C. N... 100644 100644 100644 h1 h1 C100 copy\0? original\0? loose.txt\0",
+        );
+        assert_eq!(st.tracked_uncommitted, ["? original", "copy"]);
+        assert!(st.sources.is_empty());
+        assert_eq!(st.untracked, ["loose.txt"]);
     }
 
     #[test]
