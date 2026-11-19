@@ -53,19 +53,21 @@ mkdir -p "$bin_dir"
 scratch=$(mktemp -d "${bin_dir%/}/.milo.XXXXXXXX")
 trap 'rm -rf "$scratch"' 0
 trap 'exit 1' HUP INT TERM
+staged=$scratch/milo
 
 curl --disable --proto '=https' --proto-redir '=https' -fsSL \
-    -o "$scratch/$asset" "$release/$asset" ||
+    -o "$staged" "$release/$asset" ||
     fail "Could not download $asset for Milo $version."
-actual=$(shasum -a 256 < "$scratch/$asset")
+actual=$(shasum -a 256 < "$staged")
 [ "${actual%% *}" = "$expected" ] || fail "SHA-256 checksum mismatch for $asset. Milo was not installed."
 
 check_destination
-if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$scratch/$asset" "$binary"; then
+if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$staged" "$binary"; then
     printf 'milo is already installed at %s. Nothing to do.\n' "$binary"
 else
-    chmod 755 "$scratch/$asset"
-    /bin/mv -fh "$scratch/$asset" "$binary"
+    chmod 755 "$staged"
+    # Directory form appends "milo" once without following a final symlink.
+    /bin/mv -f "$staged" "${bin_dir%/}/"
     printf 'Installed milo %s at %s.\n' "$version" "$binary"
 fi
 
