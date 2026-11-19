@@ -76,7 +76,8 @@ Declare the module in `src/main.rs`. Add the command to `Command`, the argument 
 The two Lua templates are in `src/setup/`. `layout.rs` adds the choices and
 proportions above the actions in `rex.lua`, and the path to that file above
 the handler in `listener.lua`. `rex_files.rs` asks Rex to check changed
-generated files before writing settings.
+generated files before writing settings. The listener snapshots existing rails
+after Rex attaches, without replacing a baseline already captured from an event.
 
 `setup/profiles.rs` stores rail geometry separately from those integration files.
 Persist roles, side, order and proportions, never Rex block IDs. A trial is the

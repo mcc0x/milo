@@ -538,8 +538,14 @@ fn listener_prefix(rex_file: &Path) -> String {
 pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
     text.strip_prefix(&listener_prefix(rex_file)).is_some_and(|body| {
         body == LISTENER
-            || [0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a]
-                .contains(&fingerprint(body))
+            || [
+                0x9a38_08cb_8bb7_54d8,
+                0x18ff_d6b9_f7bd_6f63,
+                0x3af5_6341_9c89_8eb8,
+                0x6814_92ce_bca8_054a,
+                0x1ed2_af59_4c5b_4bf4,
+            ]
+            .contains(&fingerprint(body))
     })
 }
 

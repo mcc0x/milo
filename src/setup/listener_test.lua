@@ -1,5 +1,5 @@
 -- Run with Lua 5.1 against listener.lua from a saved layout with new shell tabs on.
-local handlers, timers, splits, windows, processes = {}
+local handlers, timers, splits, windows, processes = {}, {}, {}, {}, {}
 local saves, revision = {}, 1
 local function terminal(method, args)
   assert(args.session_id == "project")
@@ -7,25 +7,29 @@ local function terminal(method, args)
   assert(method == "process")
   return processes[args.block_id]
 end
-local remembered, on_profile, executable
+local remembered, on_profile, executable, attached
 rex = {
   on = function(event, fn) handlers[event] = fn end,
   sleep = function() error("a starting shell held up the listener") end,
   after = function(wait, fn)
-    assert(wait == 0.05 or wait == 0.2)
+    assert(wait == 0 or wait == 0.05 or wait == 0.2)
     local cancelled
     timers[#timers + 1] = function() if not cancelled then fn() end end
     return { cancel = function() cancelled = true end }
   end,
   session = {
     view = function(args)
+      assert(attached, "cannot read a baseline before attach_all")
       assert(args.session_id == "project")
       return { windows = windows, revision = revision }
     end,
     new_split = function(args) table.insert(splits, args); return {} end,
   },
   call = function(method, args)
-    if method == "session.list" then return { sessions = {{ session_id = "project" }} } end
+    if method == "session.list" then
+      assert(attached, "cannot read a baseline before attach_all")
+      return { sessions = {{ session_id = "project" }} }
+    end
     return terminal(method:match("%.([^.]*)$"), args)
   end,
   exec = function(argv)
@@ -45,7 +49,15 @@ rex = {
     vertical = function(ratio, a, b) return { a, b, ratio = ratio } end,
   },
 }
-assert(loadfile(assert(arg[1])))()
+local function boot(listener, before_baseline)
+  attached = false
+  local first = #timers + 1
+  assert(listener)()
+  attached = true
+  if before_baseline then before_baseline() end
+  table.remove(timers, first)()
+end
+boot(loadfile(assert(arg[1])))
 local function tab(id, ...)
   local blocks = {}
   for _, block in ipairs({...}) do blocks[#blocks + 1] = { block_id = block, creator_name = "com.superlogical.terminal" } end
@@ -142,11 +154,30 @@ local function changed()
   handlers.session_view_changed({ session_id = "project" }, { revision = revision })
 end
 
+-- An open rail can be resized on the first event after attach. If an event
+-- already seeded a baseline, the startup timer must not replace it.
+for _, event_first in ipairs({false, true}) do
+  processes = {}
+  windows = { rail("startup", .2, .8, executable) }
+  local split = windows[1].layers[1].layout.split
+  boot(loadfile(arg[1]), function()
+    if event_first then
+      changed()
+      split.ratio = .3
+    end
+  end)
+  split.ratio = .3
+  changed()
+  table.remove(timers, 1)()
+  assert(#saves == 1 and saves[1][4]:match("^v1 l 0%.200000 ") and saves[1][5]:match("^v1 l 0%.300000 "))
+  saves, remembered = {}, nil
+end
+
 -- Startup, focus, other tabs' initial rails, and replacing or moving split trees
 -- establish baselines but never save. A foreign process cannot pose as a Milo pane.
 processes = {}
 windows = { rail("live", .2, .8, executable), rail("foreign", .2, .8, "/bin/zsh") }
-assert(loadfile(arg[1]))()
+boot(loadfile(arg[1]))
 changed()
 windows[3] = rail("another", .3, .9, executable)
 windows[4] = rail("trial", .2, .8, executable)
@@ -184,7 +215,7 @@ assert(#splits == 1 and math.abs(splits[1].layout.ratio - .6) < .000001 and #sav
 if arg[2] then
   local original_loadfile = loadfile
   loadfile = function() return original_loadfile(arg[2]) end
-  assert(original_loadfile(arg[1]))()
+  boot(original_loadfile(arg[1]))
   local actions, launches, exec = {}, 0, rex.exec
   rex.action = function(action) actions[action.name] = action.run end
   rex.exec = setmetatable({ start = function() launches = launches + 1 end }, {

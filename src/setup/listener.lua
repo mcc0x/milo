@@ -63,10 +63,6 @@ local function observe(session_id, revision)
   end
 end
 
--- A reload must not turn the sizes of already-open tabs into project settings.
-local listed = rex.call("session.list")
-for _, session in ipairs(listed and listed.sessions or {}) do observe(session.session_id) end
-
 rex.on("session_view_changed", function(ctx, event) observe(ctx.session_id, event.revision) end)
 rex.on("window_closed", function(_, event) if pending[event.window_id] then flush() end end)
 rex.on("session_destroyed", function(_, event)
@@ -138,5 +134,16 @@ rex.on("session_created", function(_, event)
   if not view then return end
   for _, window in ipairs(view.windows) do
     arrange_shell(session_id, window.window_id, 9)
+  end
+end)
+
+-- `rex do --all` attaches after top-level Lua returns, so block queries
+-- used by snapshot cannot establish a baseline until the listener runs.
+rex.after(0, function()
+  local listed = rex.call("session.list")
+  for _, session in ipairs(listed and listed.sessions or {}) do
+    local id = session.session_id
+    -- A view event can already have captured this session's earlier state.
+    if not sessions[id] then observe(id) end
   end
 end)
