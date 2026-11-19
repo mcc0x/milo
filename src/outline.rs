@@ -71,11 +71,13 @@ pub struct Outline {
 impl Outline {
     #[cfg(test)]
     pub(crate) fn new(repo: Repo, inside_rex: bool) -> Self {
-        Self::build(repo, inside_rex, &Preferences::default(), false)
+        Self::build(repo, inside_rex, &Preferences::default(), false, None)
     }
 
     pub fn with_preferences(repo: Repo, inside_rex: bool, prefs: &Preferences) -> Self {
-        Self::build(repo, inside_rex, prefs, !cfg!(test))
+        let remember = !cfg!(test);
+        let fold_store = if remember && repo.git { FoldStore::for_worktree(&repo.root) } else { None };
+        Self::build(repo, inside_rex, prefs, remember, fold_store)
     }
 
     pub fn into_peek(mut self) -> Self {
@@ -83,9 +85,7 @@ impl Outline {
         self
     }
 
-    fn build(repo: Repo, inside_rex: bool, prefs: &Preferences, remember: bool) -> Self {
-        let remember = remember && repo.git;
-        let fold_store = if remember { FoldStore::for_worktree(&repo.root) } else { None };
+    fn build(repo: Repo, inside_rex: bool, prefs: &Preferences, remember: bool, fold_store: Option<FoldStore>) -> Self {
         let folds =
             fold_store.as_ref().and_then(|store| store.load().ok()).map_or_else(Folds::default, Folds::remembered);
         let pending_only = repo.git && prefs.changes_only;
@@ -151,12 +151,7 @@ impl Outline {
         self.untracked.retain_details(&self.pending, &mut files);
         let files = std::mem::replace(&mut self.pending, files);
         self.tree.rebuild(tracked, &self.pending);
-        let exists = |path: &str| self.tree.has_folder(path);
-        if self.folds.prune(exists)
-            && let Some(store) = &self.fold_store
-        {
-            let _ = store.prune(exists);
-        }
+        self.folds.prune(|path| self.tree.has_folder(path));
         self.update_recent();
         self.relayout(selected);
         Some(files)
@@ -696,6 +691,40 @@ mod tests {
         let rows = draw(&mut o, 40, 12).text();
         assert!(rows.iter().any(|row| row.contains("▸ src 2")), "{rows:?}");
         assert!(!rows.iter().any(|row| row.contains("main.rs") || row.contains("util.rs")), "{rows:?}");
+    }
+
+    #[test]
+    fn remembered_folds_survive_a_branch_round_trip_and_pane_restart() {
+        let f = Fixture::new();
+        f.write("src/main.rs", "fn main() {}\n");
+        f.commit("base");
+        f.git(&["branch", "without-deep"]);
+        f.write("src/deep/util.rs", "fn util() {}\n");
+        f.commit("add deep folder");
+
+        let state = Fixture::folder();
+        let store = || FoldStore::in_state_dir(&state.root, &f.root);
+        let open = || Outline::build(Repo::open(&f.root).unwrap(), false, &Preferences::default(), false, Some(store()));
+        let mut outline = open();
+        outline.sel = outline.tree.row_of("src/").unwrap();
+        outline.key(Key::Right);
+        outline.sel = outline.tree.row_of("src/deep/").unwrap();
+        outline.key(Key::Right);
+        assert!(outline.tree.row_of("src/deep/util.rs").is_some());
+
+        f.git(&["switch", "without-deep"]);
+        assert!(outline.check());
+        assert!(!outline.tree.has_folder("src/deep/"));
+        assert_eq!(store().load().unwrap().get("src/deep/"), Some(&true));
+        let mut restarted_while_absent = open();
+        assert!(!restarted_while_absent.tree.has_folder("src/deep/"));
+
+        f.git(&["switch", "main"]);
+        for pane in [&mut outline, &mut restarted_while_absent] {
+            assert!(pane.check());
+            assert!(pane.tree.row_of("src/deep/util.rs").is_some());
+        }
+        assert!(open().tree.row_of("src/deep/util.rs").is_some());
     }
 
     #[test]

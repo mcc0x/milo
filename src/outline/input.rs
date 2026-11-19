@@ -139,13 +139,16 @@ impl Outline {
     }
 
     fn set_open(&mut self, path: Rc<str>, open: bool) {
-        self.folds.set(&path, open);
+        let mut remembered = false;
         if self.folds.remember(&path)
             && let Some(store) = &self.fold_store
-            && store.set(&path, open).is_err()
         {
-            self.say("Could not save folder choice");
+            match store.set(&path, open) {
+                Ok(()) => remembered = true,
+                Err(_) => self.say("Could not save folder choice"),
+            }
         }
+        self.folds.set(&path, open, remembered);
         self.refold(Some(path));
     }
 

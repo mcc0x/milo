@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::{fs_ops, paths};
 
 const PREFERENCES_LIMIT: u64 = 1 << 16;
+const FOLDS_LIMIT: u64 = 4 << 20;
 
 pub use crate::git::worktree;
 
@@ -331,40 +332,40 @@ pub struct FoldStore(PathBuf);
 
 impl FoldStore {
     pub fn for_worktree(root: &Path) -> Option<Self> {
-        Some(Self(paths::state_dir()?.join("worktrees").join(format!("{:016x}.folds", worktree_key(root)))))
+        Some(Self::in_state_dir(&paths::state_dir()?, root))
+    }
+
+    pub(crate) fn in_state_dir(dir: &Path, root: &Path) -> Self {
+        Self(dir.join("worktrees").join(format!("{:016x}.folds", worktree_key(root))))
     }
 
     pub fn load(&self) -> io::Result<BTreeMap<String, bool>> {
-        Ok(read(&self.0, 4 << 20)?.map_or_else(BTreeMap::new, |text| decode_folds(&text)))
+        Ok(read(&self.0, FOLDS_LIMIT)?.map_or_else(BTreeMap::new, |text| decode_folds(&text)))
     }
 
     /// Merge with choices made by other panes instead of replacing their snapshot.
     pub fn set(&self, path: &str, open: bool) -> io::Result<()> {
-        self.update(|folds| folds.insert(path.to_owned(), open) != Some(open))
-    }
-
-    pub fn prune(&self, exists: impl Fn(&str) -> bool) -> io::Result<()> {
-        self.update(|folds| {
-            let before = folds.len();
-            folds.retain(|path, _| exists(path));
-            before != folds.len()
-        })
-    }
-
-    fn update(&self, update: impl FnOnce(&mut BTreeMap<String, bool>) -> bool) -> io::Result<()> {
         locked(&self.0, |dir| {
             let mut folds = self.load()?;
-            if update(&mut folds) {
-                replace(dir, &self.0, &encode_folds(&folds))?;
+            match folds.get_mut(path) {
+                Some(choice) if *choice == open => return Ok(()),
+                Some(choice) => *choice = open,
+                None => {
+                    folds.insert(path.to_owned(), open);
+                }
             }
-            Ok(())
+            replace(dir, &self.0, &encode_folds(&folds)?)
         })
     }
 }
 
 // Folder names can contain newlines, tabs or spaces; each byte is written as hex.
-fn encode_folds(folds: &BTreeMap<String, bool>) -> String {
-    let mut text = String::new();
+fn encode_folds(folds: &BTreeMap<String, bool>) -> io::Result<String> {
+    let size = folds.keys().map(|name| 2 * name.len() + 2).sum::<usize>();
+    if size as u64 > FOLDS_LIMIT {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "folder choices would exceed their size limit"));
+    }
+    let mut text = String::with_capacity(size);
     for (name, &open) in folds {
         text.push(if open { '+' } else { '-' });
         for byte in name.bytes() {
@@ -372,7 +373,7 @@ fn encode_folds(folds: &BTreeMap<String, bool>) -> String {
         }
         text.push('\n');
     }
-    text
+    Ok(text)
 }
 
 fn decode_folds(text: &str) -> BTreeMap<String, bool> {
@@ -474,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_state_round_trips_names_and_prunes_only_absent_folders() {
+    fn folder_state_merges_choices_and_round_trips_names() {
         let f = Fixture::folder();
         let path = f.root.join("state/folds");
         let a = FoldStore(path.clone());
@@ -482,7 +483,18 @@ mod tests {
         a.set("docs/", false).unwrap();
         b.set("a\n猫/", true).unwrap();
         assert_eq!(a.load().unwrap(), BTreeMap::from([("a\n猫/".into(), true), ("docs/".into(), false)]));
-        a.prune(|folder| folder == "a\n猫/").unwrap();
-        assert_eq!(b.load().unwrap(), BTreeMap::from([("a\n猫/".into(), true)]));
+    }
+
+    #[test]
+    fn a_full_folder_store_keeps_existing_choices() {
+        let f = Fixture::folder();
+        let store = FoldStore(f.root.join("folds"));
+        let original = format!("+{}2f\n", "61".repeat(usize::try_from(FOLDS_LIMIT / 2).unwrap() - 2));
+        fs::write(&store.0, &original).unwrap();
+
+        let err = store.set("fresh/", false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(&store.0).unwrap(), original);
+        assert_eq!(store.load().unwrap().len(), 1);
     }
 }

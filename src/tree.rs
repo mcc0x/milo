@@ -112,30 +112,40 @@ pub fn folders_above(path: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+struct FoldChoice {
+    open: bool,
+    // Navigation and unsaved changes can override this for the current visit.
+    remembered: Option<bool>,
+}
+
 /// Choices for folder paths (ending in `/`) override the default.
 #[derive(Default)]
 pub struct Folds {
-    choice: HashMap<String, bool>,
+    choice: HashMap<String, FoldChoice>,
     /// Automatic suggestions last for this visit, but are not remembered.
     suggested: HashSet<String>,
     /// The choices to restore when the default goes back to closed.
-    before_all: Option<HashMap<String, bool>>,
+    before_all: Option<HashMap<String, FoldChoice>>,
 }
 
 impl Folds {
     pub fn remembered(choice: BTreeMap<String, bool>) -> Self {
-        Self { choice: choice.into_iter().collect(), ..Self::default() }
+        let choice = choice.into_iter().map(|(path, open)| (path, FoldChoice { open, remembered: Some(open) }));
+        Self { choice: choice.collect(), ..Self::default() }
     }
 
     pub fn is_open(&self, path: &str) -> bool {
-        self.choice.get(path).copied().unwrap_or_else(|| self.all() || self.suggested.contains(path))
+        self.choice.get(path).map_or_else(|| self.all() || self.suggested.contains(path), |choice| choice.open)
     }
 
-    pub fn set(&mut self, path: &str, open: bool) {
+    pub fn set(&mut self, path: &str, open: bool, remembered: bool) {
         if let Some(choice) = self.choice.get_mut(path) {
-            *choice = open;
+            choice.open = open;
+            if remembered {
+                choice.remembered = Some(open);
+            }
         } else {
-            self.choice.insert(path.to_owned(), open);
+            self.choice.insert(path.to_owned(), FoldChoice { open, remembered: remembered.then_some(open) });
         }
     }
 
@@ -144,14 +154,21 @@ impl Folds {
         !self.before_all.as_ref().is_some_and(|before| before.contains_key(path))
     }
 
-    pub fn prune(&mut self, exists: impl Fn(&str) -> bool) -> bool {
-        let before = self.choice.len() + self.before_all.as_ref().map_or(0, HashMap::len);
-        self.choice.retain(|path, _| exists(path));
-        if let Some(saved) = &mut self.before_all {
-            saved.retain(|path, _| exists(path));
+    /// Forget transient folds for missing folders, not choices saved for the worktree.
+    pub fn prune(&mut self, exists: impl Fn(&str) -> bool) {
+        for choices in std::iter::once(&mut self.choice).chain(self.before_all.iter_mut()) {
+            choices.retain(|path, choice| {
+                if choice.remembered == Some(choice.open) || exists(path) {
+                    true
+                } else if let Some(open) = choice.remembered {
+                    choice.open = open;
+                    true
+                } else {
+                    false
+                }
+            });
         }
         self.suggested.retain(|path| exists(path));
-        before != self.choice.len() + self.before_all.as_ref().map_or(0, HashMap::len)
     }
 
     /// Opens a folder unless the user has already decided about it.
@@ -166,7 +183,7 @@ impl Folds {
         let mut opened = false;
         for dir in folders_above(path) {
             opened |= !self.is_open(dir);
-            self.set(dir, true);
+            self.set(dir, true, false);
         }
         opened
     }
@@ -543,7 +560,7 @@ mod tests {
     #[test]
     fn opening_everything_can_be_undone() {
         let mut folds = Folds::default();
-        folds.set("src", false);
+        folds.set("src", false, false);
         folds.suggest("src");
         folds.suggest("docs");
         assert!(!folds.is_open("src") && folds.is_open("docs") && !folds.is_open("other"));
@@ -551,5 +568,24 @@ mod tests {
         assert!(folds.is_open("src") && folds.is_open("other"));
         folds.toggle_all();
         assert!(!folds.is_open("src") && folds.is_open("docs") && !folds.is_open("other"));
+    }
+
+    #[test]
+    fn absent_folders_lose_transient_folds_but_keep_remembered_choices() {
+        let mut folds = Folds::remembered(BTreeMap::from([("src/".into(), false)]));
+        folds.open_above("src/file");
+        folds.set("docs/", true, true);
+        folds.suggest("work/");
+        folds.set("tmp/", true, false);
+        assert!(folds.is_open("src/"));
+
+        folds.toggle_all();
+        folds.prune(|_| false);
+        folds.toggle_all();
+        folds.suggest("src/");
+        assert!(!folds.is_open("src/"));
+        assert!(folds.is_open("docs/"));
+        assert!(!folds.is_open("work/"));
+        assert!(!folds.is_open("tmp/"));
     }
 }
