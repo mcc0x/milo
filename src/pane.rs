@@ -249,10 +249,13 @@ pub(super) fn watch_pane(pane: &mut dyn Pane, check_on_open: bool) -> (Watcher, 
     let mut pace = watch_idle(&watcher, check_on_open).map(|idle| Pace::new(idle, Instant::now()));
     if check_on_open {
         check_watched_pane(pane, &mut watcher, &mut pace, true);
-    } else if let Some(timing) = &mut pace
-        && pane.git_busy()
-    {
-        timing.block_on_git(Instant::now());
+    } else if let Some(timing) = &mut pace {
+        // The first snapshot predates the watcher. Look again soon even if
+        // edits in that gap left no notification.
+        timing.report_change();
+        if pane.git_busy() {
+            timing.block_on_git(Instant::now());
+        }
     }
     (watcher, pace)
 }
@@ -489,9 +492,6 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                 External::Redraw => redraw = true,
                 External::NewScope => {
                     (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
-                    if !check_on_open && let Some(pace) = &mut pace {
-                        pace.report_change();
-                    }
                     help = help.map(|_| pane.help());
                     redraw = true;
                 }
@@ -721,6 +721,26 @@ mod tests {
         pace.finish_look(unlocked, unlocked, true);
         assert!(!pace.waiting_for_git());
         assert_eq!(pace.until_look(unlocked), WATCHED);
+    }
+
+    #[test]
+    fn the_first_snapshot_gets_a_prompt_look_under_the_new_watcher() {
+        let f = fixture::Fixture::new();
+        f.write("source.rs", "first\n");
+        f.commit("first");
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
+
+        // This change precedes the watcher's event stream.
+        f.write("source.rs", "first\nsecond\n");
+        let (mut watcher, mut pace) = watch_pane(&mut pane, false);
+        let timing = pace.as_ref().unwrap();
+        assert!(timing.until_look(Instant::now() + MIN_LOOK_INTERVAL).is_zero());
+        assert!(check_watched_pane(&mut pane, &mut watcher, &mut pace, false));
+        assert!(!pace.as_ref().unwrap().reported, "the startup look should return to idle pacing");
+
+        let mut screen = Screen::sized(80, 12);
+        pane.draw(&mut screen);
+        assert!(screen.text().iter().any(|row| row.contains("source.rs") && row.ends_with("+1")));
     }
 
     #[cfg(target_os = "macos")]
