@@ -108,12 +108,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
         let dirty = self.dirty();
         if s.h == 1 {
-            self.heading(s, dirty);
+            if self.panel == Panel::Diagnostics {
+                self.draw_diagnostics(s, 0, 1);
+            } else {
+                self.heading(s, dirty);
+            }
             return;
         }
         self.visible.current = true;
         self.visible.footer = self.footer(s);
         let end = self.notice(s);
+        if end == 1 && self.panel == Panel::Diagnostics {
+            self.draw_diagnostics(s, 0, end);
+            return;
+        }
         if end == 1 && !self.rows().is_empty() {
             self.draw_rows(s, 0, end, s.w.min(54));
             return;
@@ -470,7 +478,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn draw_diagnostics(&mut self, s: &mut Screen, y: usize, end: usize) {
         let width = s.w.saturating_sub(3).max(1);
-        let text = if self.health.is_empty() { "No diagnostics were returned." } else { self.health.as_str() };
+        let text = if self.diagnostics.checking() {
+            super::doctor::CHECKING
+        } else if self.health.is_empty() {
+            "No diagnostics were returned."
+        } else {
+            self.health.as_str()
+        };
         let lines = wrap(text, width);
         let len = lines.clone().count();
         let shown = end.saturating_sub(y);

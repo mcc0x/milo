@@ -21,11 +21,12 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
 use std::ops::Range;
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
 use crate::help::{self, Page};
 use crate::keys::{ConfirmClick, Key};
-use crate::pane::{After, Pane};
+use crate::pane::{After, External, Pane};
 use crate::preferences::{IconMode, Preferences, ProjectMode, Source};
 use crate::screen::{Screen, Style};
 use crate::ui::{DEL, FAINT};
@@ -170,6 +171,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     exit_from: Option<(Panel, usize)>,
     visible: draw::Visible,
     modal_click: ConfirmClick,
+    diagnostics: doctor::Checks,
     health: String,
     health_top: usize,
     icon_override: Option<IconMode>,
@@ -202,6 +204,10 @@ impl Setup {
         }
         setup
     }
+
+    pub(crate) fn swap_diagnostics(&mut self, checks: &mut doctor::Checks) {
+        std::mem::swap(&mut self.diagnostics, checks);
+    }
 }
 
 impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
@@ -229,6 +235,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             exit_from: None,
             visible: draw::Visible::default(),
             modal_click: ConfirmClick::default(),
+            diagnostics: doctor::Checks::default(),
             health: String::new(),
             health_top: 0,
             icon_override: None,
@@ -296,11 +303,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn select_panel(&mut self, panel: Panel, selected: usize) {
+        let previous = self.panel;
+        if previous == Panel::Diagnostics && panel != previous {
+            self.diagnostics.discard();
+        }
         self.panel = panel;
         self.selected = selected.min(self.rows().len().saturating_sub(1));
         self.visible = draw::Visible::default();
         self.modal_click.clear();
         self.message = None;
+        if panel == Panel::Diagnostics && panel != previous {
+            self.refresh_health();
+        }
     }
 
     fn back(&mut self) {
@@ -378,6 +392,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             return After::Stay;
         }
         self.clear_notice();
+        self.diagnostics.discard();
         After::Leave
     }
 
@@ -529,10 +544,17 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn refresh_health(&mut self) {
-        self.health =
-            self.store().map_or_else(str::to_owned, |store| match doctor::report_for(store, self.root.as_deref()) {
-                Ok(report) | Err(report) => report,
-            });
+        if self.diagnostics.checking() {
+            return;
+        }
+        let store = self.store.clone();
+        let root = self.root.clone();
+        if let Err(error) = self.diagnostics.start(move || {
+            let store = store.ok_or_else(|| "Could not find your settings folders.".to_owned())?;
+            doctor::report_for(&store, root.as_deref())
+        }) {
+            self.health = error;
+        }
         self.health_top = 0;
     }
 
@@ -739,10 +761,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                         };
                         self.select_panel(panel, 0);
                     }
-                    Row::Diagnostics => {
-                        self.refresh_health();
-                        self.select_panel(Panel::Diagnostics, 0);
-                    }
+                    Row::Diagnostics => self.select_panel(Panel::Diagnostics, 0),
                     Row::Repair => self.select_panel(Panel::Confirm(Confirm::Repair), 0),
                     Row::Remove => self.select_panel(Panel::Confirm(Confirm::Remove), 0),
                     _ => self.change_pref(row),
@@ -776,6 +795,21 @@ fn cycle(value: &mut String, options: &[&str]) {
 impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
     fn draw(&mut self, s: &mut Screen) {
         self.draw_setup(s);
+    }
+
+    fn external_fd(&self) -> Option<RawFd> {
+        self.diagnostics.fd()
+    }
+
+    fn check_external(&mut self) -> External {
+        match self.diagnostics.collect() {
+            Some(Ok(report) | Err(report)) => {
+                self.health = report;
+                self.health_top = 0;
+                External::Redraw
+            }
+            None => External::Unchanged,
+        }
     }
 
     fn tracks_hover(&self) -> bool {

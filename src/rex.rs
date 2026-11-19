@@ -7,20 +7,18 @@ use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::term;
+
+const PROBE_WAIT: Duration = Duration::from_secs(3);
 
 /// Inspect the server catalog, not the foreground app. Doctor must not start a server.
 pub(crate) fn layout_available() -> Option<bool> {
-    let result = Command::new("rex")
-        .args(["--autostart=false", "actions", "--json"])
-        .env_remove("REX_CLIENT")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !result.status.success() {
-        return None;
-    }
-    let [actions] = crate::json::Value::parse(&result.stdout)?.fields(["actions"]);
+    let mut command = Command::new("rex");
+    command.args(["--autostart=false", "--timeout", "3s", "actions", "--json"]).env_remove("REX_CLIENT");
+    let output = probe_output(&mut command, PROBE_WAIT)?;
+    let [actions] = crate::json::Value::parse(&output)?.fields(["actions"]);
     Some(
         actions?
             .elements()?
@@ -62,6 +60,64 @@ pub(crate) fn script(
     let mut text = String::from_utf8(output.stdout).ok()?;
     text.truncate(text.trim_end().len());
     Some(text)
+}
+
+/// Doctor's read-only script has a local deadline as well as Rex's request
+/// timeout. Passing Lua as an argument keeps stdin from blocking the probe.
+pub(crate) fn diagnostic_script(target: &Target, lua: &str, caller: &str) -> Option<String> {
+    let mut command = Command::new("rex");
+    command
+        .args(["--autostart=false", "--timeout", "3s", "do", "-e", lua, "-s"])
+        .arg(&target.session)
+        .arg("-b")
+        .arg(&target.block)
+        .args(["milo_operation=doctor", caller]);
+    let mut text = String::from_utf8(probe_output(&mut command, PROBE_WAIT)?).ok()?;
+    text.truncate(text.trim_end().len());
+    Some(text)
+}
+
+fn probe_output(command: &mut Command, wait: Duration) -> Option<Vec<u8>> {
+    const LIMIT: usize = 1 << 20;
+    let deadline = Instant::now() + wait;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let result = (|| {
+        let mut stdout = child.stdout.take()?;
+        let mut poll = [libc::pollfd { fd: stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let mut output = Vec::new();
+        let mut chunk = [0; 8192];
+        loop {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            match term::wait_ready(&mut poll, term::milliseconds(left)) {
+                0 => return None,
+                n if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+                n if n < 0 => return None,
+                _ => {}
+            }
+            match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) if output.len() + n <= LIMIT => output.extend_from_slice(&chunk[..n]),
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                _ => return None,
+            }
+        }
+        // A child can close stdout before it has finished.
+        loop {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            if let Some(status) = child.try_wait().ok()? {
+                return Some((status, output));
+            }
+            std::thread::sleep(left.min(Duration::from_millis(1)));
+        }
+    })();
+    match result {
+        Some((status, output)) => status.success().then_some(output),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
 }
 
 /// Setup reports its own messages, not process output that can contain paths or settings.
@@ -283,8 +339,22 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, ShellChange, json, reader_command};
+    use super::{Frame, ShellChange, json, probe_output, reader_command};
     use std::path::Path;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn diagnostic_processes_have_a_deadline_even_if_they_close_stdout() {
+        let mut fast = Command::new("printf");
+        fast.arg("catalog");
+        assert_eq!(probe_output(&mut fast, Duration::from_secs(5)).unwrap(), b"catalog");
+        for script in ["exec sleep 2", "exec >/dev/null; exec sleep 2"] {
+            let mut slow = Command::new("sh");
+            slow.args(["-c", script]);
+            assert!(probe_output(&mut slow, Duration::from_millis(50)).is_none());
+        }
+    }
 
     #[test]
     fn strings_are_escaped_for_json() {

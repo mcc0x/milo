@@ -731,8 +731,11 @@ fn diagnostics_refresh_scroll_and_return_by_click() {
     let rows = frame(&mut pane, 75, 8);
     assert_eq!(pane.key(click_label(&rows, "Read diagnostics")), After::Stay);
     assert_eq!(pane.panel, Panel::Diagnostics);
-    let report = pane.health.clone();
-    assert!(report.contains("Could not find your settings folders"));
+    let rows = frame(&mut pane, 75, 8);
+    assert!(rows.iter().any(|row| row.contains(doctor::CHECKING)));
+    doctor::wait_ready(pane.external_fd());
+    assert!(matches!(pane.check_external(), External::Redraw));
+    assert!(pane.health.contains("Could not find your settings folders"));
 
     pane.health = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9".into();
     let rows = frame(&mut pane, 75, 8);
@@ -741,10 +744,56 @@ fn diagnostics_refresh_scroll_and_return_by_click() {
     let rows = frame(&mut pane, 75, 8);
     assert_eq!(pane.key(click_at(&rows, 7, "r refresh")), After::Stay);
     assert_eq!(pane.health_top, 0);
-    assert_eq!(pane.health, report);
+    assert!(pane.diagnostics.checking());
     let rows = frame(&mut pane, 75, 8);
+    assert!(rows.iter().any(|row| row.contains(doctor::CHECKING)));
     assert_eq!(pane.key(click_at(&rows, 7, "Esc back")), After::Stay);
     assert_eq!(pane.panel, Panel::Health);
+    doctor::wait_ready(pane.external_fd());
+    assert!(matches!(pane.check_external(), External::Unchanged));
+    assert!(pane.health.ends_with("Line 9"));
+}
+
+#[test]
+fn home_doctor_and_settings_share_the_diagnostic_worker() {
+    let Some(_) = isolated_settings("setup::tests::home_doctor_and_settings_share_the_diagnostic_worker") else {
+        return;
+    };
+    let mut home = crate::home::Home::new();
+    let rows = frame(&mut home, 64, 12);
+    assert_eq!(home.key(click_label(&rows, "Doctor")), After::Stay);
+    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains(doctor::CHECKING)));
+    let abandoned = home.external_fd();
+    assert!(abandoned.is_some());
+    assert_eq!(home.key(Key::Esc), After::Stay);
+    let rows = frame(&mut home, 64, 12);
+    assert_eq!(home.key(click_label(&rows, "Settings")), After::Stay);
+    assert_eq!(home.external_fd(), abandoned);
+
+    assert_eq!(home.key(Key::Char('4')), After::Stay);
+    let rows = frame(&mut home, 64, 12);
+    assert_eq!(home.key(click_label(&rows, "Read diagnostics")), After::Stay);
+    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains(doctor::CHECKING)));
+    assert_eq!(home.external_fd(), abandoned, "wait for the old worker instead of spawning another");
+    doctor::wait_ready(home.external_fd());
+    assert!(matches!(home.check_external(), External::Unchanged));
+    doctor::wait_ready(home.external_fd());
+    assert!(matches!(home.check_external(), External::Redraw));
+    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains("Worktree: none detected")));
+
+    assert_eq!(home.key(Key::Char('r')), After::Stay);
+    let abandoned = home.external_fd();
+    assert!(abandoned.is_some());
+    assert_eq!(home.key(Key::Esc), After::Stay);
+    assert_eq!(home.key(Key::Esc), After::Stay);
+    let rows = frame(&mut home, 64, 12);
+    assert_eq!(home.key(click_label(&rows, "Doctor")), After::Stay);
+    assert_eq!(home.external_fd(), abandoned);
+    doctor::wait_ready(home.external_fd());
+    assert!(matches!(home.check_external(), External::Unchanged));
+    doctor::wait_ready(home.external_fd());
+    assert!(matches!(home.check_external(), External::Redraw));
+    assert!(frame(&mut home, 64, 12).iter().any(|row| row.contains("Worktree: none detected")));
 }
 
 #[test]

@@ -3,7 +3,11 @@
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
+use std::io::{self, PipeReader};
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
 use super::claude::Claude;
 use super::install::{Saved, Store, read};
@@ -12,6 +16,85 @@ use super::profiles::Scope;
 use super::{lock, rex_files};
 use crate::preferences::{IconMode, Preferences, Source, worktree};
 use crate::{rex, usage};
+
+pub(crate) const TITLE: &str = "Milo doctor";
+pub(crate) const CHECKING: &str = "Checking…";
+
+type Report = Result<String, String>;
+type Probe = Box<dyn FnOnce() -> Report + Send>;
+
+/// The terminal owns one worker across Home and Settings. When a view leaves,
+/// keep its worker until it finishes but discard its result. At most one new
+/// request can wait behind it, and leaving again cancels that queued request.
+#[derive(Default)]
+pub(crate) struct Checks {
+    job: Option<Job>,
+    next: Option<Probe>,
+}
+
+struct Job {
+    ready: PipeReader,
+    result: Receiver<Report>,
+    wanted: bool,
+}
+
+impl Checks {
+    pub(crate) fn checking(&self) -> bool {
+        self.next.is_some() || self.job.as_ref().is_some_and(|job| job.wanted)
+    }
+
+    pub(crate) fn start(&mut self, probe: impl FnOnce() -> Report + Send + 'static) -> Result<(), String> {
+        if self.checking() {
+            return Ok(());
+        }
+        if self.job.is_some() {
+            self.next = Some(Box::new(probe));
+            return Ok(());
+        }
+        self.launch(probe)
+    }
+
+    fn launch(&mut self, probe: impl FnOnce() -> Report + Send + 'static) -> Result<(), String> {
+        let start = |err| format!("Could not start diagnostics: {err}");
+        let (ready, done) = io::pipe().map_err(start)?;
+        let (send, result) = mpsc::sync_channel(1);
+        let _ = thread::Builder::new()
+            .spawn(move || {
+                let _ = send.send(probe());
+                // Closing the writer wakes the event loop even if the probe failed.
+                drop(done);
+            })
+            .map_err(start)?;
+        self.job = Some(Job { ready, result, wanted: true });
+        Ok(())
+    }
+
+    pub(crate) fn discard(&mut self) {
+        self.next = None;
+        if let Some(job) = &mut self.job {
+            job.wanted = false;
+        }
+    }
+
+    pub(crate) fn fd(&self) -> Option<RawFd> {
+        self.job.as_ref().map(|job| job.ready.as_raw_fd())
+    }
+
+    pub(crate) fn collect(&mut self) -> Option<Report> {
+        let job = self.job.as_ref()?;
+        let result = match job.result.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err("Diagnostics ended unexpectedly.".into()),
+        };
+        let wanted = job.wanted;
+        self.job = None;
+        if let Some(probe) = self.next.take() {
+            return self.launch(probe).err().map(Err);
+        }
+        wanted.then_some(result)
+    }
+}
 
 fn store() -> Result<Store, String> {
     Store::real().ok_or_else(|| "Could not locate your settings folders. Check HOME and XDG_CONFIG_HOME.".into())
@@ -24,7 +107,8 @@ pub(crate) fn report() -> Result<String, String> {
 }
 
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {
-    let mut out = String::from("Milo doctor\n");
+    let mut out = String::from(TITLE);
+    out.push('\n');
     if let Some(path) = root {
         writeln!(out, "Worktree: {path:?}").unwrap();
     } else {
@@ -149,7 +233,7 @@ impl LiveSidebar {
         };
         let caller = format!("caller={block}");
         let lua = probe_lua(saved, executable);
-        rex::script(Some(&target), &target.session, &lua, ["milo_operation=doctor", &caller])
+        rex::diagnostic_script(&target, &lua, &caller)
             .as_deref()
             .and_then(Self::parse)
             .unwrap_or(Self::NotObserved("could not read this Rex tab"))
@@ -355,8 +439,60 @@ fn check_listener(result: Saved) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(crate) fn wait_ready(fd: Option<RawFd>) {
+    let mut poll =
+        [libc::pollfd { fd: fd.expect("diagnostics should have a wake pipe"), events: libc::POLLIN, revents: 0 }];
+    assert_eq!(crate::term::wait_ready(&mut poll, 5_000), 1, "diagnostics did not complete");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_a_discarded_diagnostic_runs_only_the_latest_request() {
+        let mut checks = Checks::default();
+        let (release, gate) = mpsc::channel();
+        checks
+            .start(move || {
+                gate.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+                Ok("abandoned".into())
+            })
+            .unwrap();
+        checks.discard();
+        assert!(!checks.checking());
+
+        let (cancelled, was_cancelled) = mpsc::channel();
+        checks
+            .start(move || {
+                cancelled.send(()).unwrap();
+                Ok(String::new())
+            })
+            .unwrap();
+        checks.discard();
+        assert_eq!(was_cancelled.try_recv(), Err(TryRecvError::Disconnected));
+
+        let (started, did_start) = mpsc::channel();
+        checks
+            .start(move || {
+                started.send(()).unwrap();
+                Ok("fresh".into())
+            })
+            .unwrap();
+        checks.start(|| panic!("refresh should reuse the queued check")).unwrap();
+        assert!(checks.checking());
+        assert_eq!(did_start.try_recv(), Err(TryRecvError::Empty));
+        assert!(checks.collect().is_none());
+
+        release.send(()).unwrap();
+        wait_ready(checks.fd());
+        assert!(checks.collect().is_none(), "the previous screen's result must not be shown");
+        wait_ready(checks.fd());
+        assert_eq!(checks.collect(), Some(Ok("fresh".into())));
+        assert!(did_start.try_recv().is_ok());
+        assert!(!checks.checking());
+        assert!(checks.fd().is_none());
+    }
 
     fn sidebar(saved: &Layout, scope: Scope, response: &str) -> String {
         let mut report = String::new();

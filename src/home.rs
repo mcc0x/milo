@@ -3,10 +3,11 @@
 mod mascot;
 
 use std::ops::Range;
+use std::os::fd::RawFd;
 
 use crate::help::{self, HintHits, Page};
 use crate::keys::Key;
-use crate::pane::{After, Pane};
+use crate::pane::{After, External, Pane};
 use crate::screen::{self, Screen, Style};
 use crate::setup::{Setup, doctor, wrap};
 use crate::ui::{self, DEL, FAINT, HEADING};
@@ -36,6 +37,7 @@ pub(crate) struct Home {
     picker: Picker,
     footer: HintHits<'static>,
     transition_click: crate::keys::ConfirmClick,
+    diagnostics: doctor::Checks,
 }
 
 enum View {
@@ -53,6 +55,7 @@ impl Home {
             picker: Picker::default(),
             footer: HintHits::default(),
             transition_click: Default::default(),
+            diagnostics: doctor::Checks::default(),
         }
     }
 
@@ -155,7 +158,7 @@ impl Pane for Home {
                     self.footer = help::draw_hint(s, "Enter open", &["↑↓ move"], "q quit");
                 }
             }
-            View::Report(report) => self.footer = report.draw(s),
+            View::Report(report) => self.footer = report.draw(s, self.diagnostics.checking()),
             View::Confirm { selected } => {
                 self.picker = draw_confirm(s, body, *selected);
                 if footer {
@@ -163,6 +166,26 @@ impl Pane for Home {
                 }
             }
             View::Settings(_) => unreachable!("settings draws its own frame"),
+        }
+    }
+
+    fn external_fd(&self) -> Option<RawFd> {
+        match &self.view {
+            View::Settings(setup) => setup.external_fd(),
+            _ => self.diagnostics.fd(),
+        }
+    }
+
+    fn check_external(&mut self) -> External {
+        if let View::Settings(setup) = &mut self.view {
+            return setup.check_external();
+        }
+        match (self.diagnostics.collect(), &mut self.view) {
+            (Some(result), View::Report(report)) => {
+                *report = Report::new(doctor::TITLE, result);
+                External::Redraw
+            }
+            _ => External::Unchanged,
         }
     }
 
@@ -225,17 +248,30 @@ impl Pane for Home {
         match &mut self.view {
             View::Menu if back => After::Leave,
             View::Menu if choose => match self.selected {
-                0 => self.show_guarded(View::Settings(Box::new(Setup::open())), click),
-                1 => self.show(View::Report(Report::new("Milo doctor", doctor::report()))),
+                0 => {
+                    let mut setup = Box::new(Setup::open());
+                    setup.swap_diagnostics(&mut self.diagnostics);
+                    self.show_guarded(View::Settings(setup), click)
+                }
+                1 => {
+                    let result = self.diagnostics.start(doctor::report).map(|()| String::new());
+                    self.show(View::Report(Report::new(doctor::TITLE, result)))
+                }
                 2 => self.show_guarded(View::Confirm { selected: 0 }, click),
                 _ => unreachable!("selection stays within the menu"),
             },
             View::Menu => move_selection(&mut self.selected, MENU.len(), key),
             View::Settings(setup) => match setup.key(key) {
-                After::Leave => self.show_guarded(View::Menu, click),
+                After::Leave => {
+                    setup.swap_diagnostics(&mut self.diagnostics);
+                    self.show_guarded(View::Menu, click)
+                }
                 after => after,
             },
-            View::Report(_) if back => self.show(View::Menu),
+            View::Report(_) if back => {
+                self.diagnostics.discard();
+                self.show(View::Menu)
+            }
             View::Report(report) => report.scroll(key),
             View::Confirm { selected: 1 } if choose => {
                 self.show(View::Report(Report::new("Uninstall Milo", crate::uninstall::run())))
@@ -355,17 +391,18 @@ impl Report {
         Self { title, text, failed, top: 0, last: 0, shown: 0 }
     }
 
-    fn draw(&mut self, s: &mut Screen) -> HintHits<'static> {
+    fn draw(&mut self, s: &mut Screen, checking: bool) -> HintHits<'static> {
         let x = usize::from(s.w >= 3);
         let width = s.w - 2 * x;
         let footer = s.h > 1;
         let y = usize::from(s.h > 2);
+        let text = if checking { doctor::CHECKING } else { &self.text };
         let text = if y > 0 {
             let style = if self.failed { DEL.bold() } else { HEADING };
             s.put_fit(x, 0, width, self.title, style);
-            self.text.strip_prefix(self.title).and_then(|text| text.strip_prefix('\n')).unwrap_or(&self.text)
+            text.strip_prefix(self.title).and_then(|text| text.strip_prefix('\n')).unwrap_or(text)
         } else {
-            &self.text
+            text
         };
         let lines = wrap(text, width);
         let len = lines.clone().count();

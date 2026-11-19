@@ -26,6 +26,7 @@ pub(super) enum Saved {
 }
 
 /// Keeps the user settings and milo's files together for one setup transaction.
+#[derive(Clone)]
 pub(super) struct Store {
     pub init: PathBuf,
     pub config: PathBuf,
