@@ -1,6 +1,6 @@
 # Usage limits
 
-`milo usage` shows how much of a reported limit is **left**, not how much has been used. In a narrow rail, read the most constrained window first, with its provider, time window, remaining allowance and reset time in text. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a rail too.
+`milo usage` shows how much of a reported limit is **left**, not how much has been used. The two-row rail gives each provider one line for its most constrained window. When there's room, it adds the reset countdown for a recent reading or when an older reading was last seen. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a taller rail too.
 
 A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%. Run `milo doctor` to see which local source supplied each provider's reading.
 

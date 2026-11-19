@@ -312,6 +312,13 @@ struct Report<'a> {
     hint: Option<Hint>,
 }
 
+/// Timing is optional on a one-line summary, but an old reading still needs a label.
+enum SummaryEnd {
+    Plain,
+    Left(Option<i64>),
+    Last(Option<i64>),
+}
+
 impl<'a> Report<'a> {
     /// Leave out unreported windows; a dash stands for the whole missing report.
     fn new(tool: Tool, report: Option<(&'a Limits, Source)>, missing: Hint, now: i64) -> Self {
@@ -341,22 +348,29 @@ impl<'a> Report<'a> {
         self.metrics().reduce(|a, b| if tighter(b, a) { b } else { a }).unwrap_or(&self.first)
     }
 
-    fn summary(&self, screen: &mut Screen, area: Area, activity: impl FnOnce() -> Activity) {
+    fn summary(&self, screen: &mut Screen, area: Area, inline_detail: bool, activity: impl FnOnce() -> Activity) {
         let metric = self.limiting();
         let mut line = 1;
         if let Some(hint) = &self.hint {
-            self.summary_line(screen, area, "", hint.state, "", FAINT);
+            self.summary_line(screen, area, "", hint.state, SummaryEnd::Plain, FAINT);
             area.note(screen, line, hint.next.unwrap_or_else(|| self.tool.open()));
             line += 1;
         } else if matches!(metric.when, When::Elapsed) {
             let value = if area.w >= 17 { "reset elapsed" } else { "elapsed" };
-            self.summary_line(screen, area, &metric.label, value, "", FAINT);
+            self.summary_line(screen, area, &metric.label, value, SummaryEnd::Plain, FAINT);
             area.note(screen, line, self.tool.open());
             line += 1;
         } else {
             let age_below = area.h > 1 && area.w >= "Last reported".len();
-            let last = if metric.age.is_some() && !age_below { " last" } else { "" };
-            self.summary_line(screen, area, &metric.label, metric.number(), last, metric.colour());
+            let end = if let Some(age) = metric.age.filter(|_| !age_below) {
+                SummaryEnd::Last(inline_detail.then_some(age))
+            } else {
+                SummaryEnd::Left(match metric.when {
+                    When::Running(seconds) if inline_detail => Some(seconds),
+                    _ => None,
+                })
+            };
+            self.summary_line(screen, area, &metric.label, metric.number(), end, metric.colour());
             if let Some(age) = metric.age.filter(|_| age_below) {
                 let age = compact_time(age);
                 let text = if age.len() + 18 <= area.w {
@@ -389,17 +403,33 @@ impl<'a> Report<'a> {
         }
     }
 
-    fn summary_line(&self, screen: &mut Screen, area: Area, label: &str, value: &str, state: &str, style: Style) {
-        let left = if state.is_empty() && value.ends_with('%') { " left" } else { "" };
-        let suffix = if state.is_empty() { left } else { state };
+    fn summary_line(&self, screen: &mut Screen, area: Area, label: &str, value: &str, end: SummaryEnd, style: Style) {
+        let (required, fallback, detail) = match end {
+            SummaryEnd::Plain => ("", "", None),
+            SummaryEnd::Left(reset) => ("", " left", reset.map(|seconds| (" left · resets ", seconds, ""))),
+            SummaryEnd::Last(age) => (" last", " last", age.map(|seconds| (" · seen ", seconds, " ago"))),
+        };
+        let names = self.tool.names();
+        let full = |name: &str| name.len() + 1 + label.len() + 3 + value.len();
+        // Timing never displaces the provider, window, or figure.
+        let detail = detail.and_then(|(before, seconds, after)| {
+            let room = area.w.checked_sub(full(names[0]) + str_width(before) + after.len())?;
+            if room < 2 {
+                return None;
+            }
+            let time = compact_time(seconds);
+            (time.len() <= room).then_some((before, time, after))
+        });
+        let (before, time, after) =
+            detail.as_ref().map_or((fallback, "", ""), |(before, time, after)| (*before, time.as_str(), *after));
+        let suffix_width = str_width(before) + time.len() + after.len();
         let mut writer = RowWriter { screen, x: area.x, y: area.y, left: area.w };
-        for name in self.tool.names() {
+        for name in names {
             let short_label = label.strip_suffix(" week").unwrap_or(label);
             let short_label = if short_label.len() > 7 { "model" } else { short_label };
-            let full = name.len() + 1 + label.len() + 3 + value.len() + suffix.len();
-            let label = if full <= area.w { label } else { short_label };
-            let show_label = !label.is_empty() && name.len() + 2 + label.len() + value.len() + state.len() <= area.w;
-            if name.len() + 1 + value.len() + state.len() > area.w {
+            let label = if full(name) + suffix_width <= area.w { label } else { short_label };
+            let show_label = !label.is_empty() && name.len() + 2 + label.len() + value.len() + required.len() <= area.w;
+            if name.len() + 1 + value.len() + required.len() > area.w {
                 continue;
             }
             writer.add(name, self.tool.colour().bold());
@@ -407,16 +437,20 @@ impl<'a> Report<'a> {
                 writer.add(" ", FAINT);
                 writer.add(label, FAINT);
             }
-            let gap = if writer.left >= 3 + value.len() + suffix.len() { " · " } else { " " };
+            let gap = if writer.left >= 3 + value.len() + suffix_width { " · " } else { " " };
             writer.add(gap, FAINT);
             writer.add(value, style.bold());
-            if suffix.len() <= writer.left {
-                writer.add(suffix, FAINT);
+            if suffix_width <= writer.left {
+                writer.add(before, FAINT);
+                if !time.is_empty() {
+                    writer.add(time, FAINT);
+                    writer.add(after, FAINT);
+                }
             }
             return;
         }
         // A tiny pane cannot always say what an old figure means.
-        let value = if !state.is_empty() || str_width(value) > area.w { "—" } else { value };
+        let value = if !required.is_empty() || str_width(value) > area.w { "—" } else { value };
         writer.add(value, style);
     }
 
@@ -473,7 +507,7 @@ impl<'a> Report<'a> {
         }
         if area.w < 30 {
             if area.h == LARGE_ROWS {
-                return self.summary(screen, area, activity);
+                return self.summary(screen, area, false, activity);
             }
             return self.compact(screen, area, activity);
         }
@@ -759,7 +793,7 @@ fn stacked(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: imp
 fn text_first(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
     if area.h == 1 {
         let i = usize::from(tighter(reports[1].limiting(), reports[0].limiting()));
-        return reports[i].summary(screen, area, activity);
+        return reports[i].summary(screen, area, false, activity);
     }
     let rule = usize::from(area.h >= 5);
     let upper_h = (area.h - rule) / 2;
@@ -770,8 +804,9 @@ fn text_first(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: 
     }
     let upper = Area { h: upper_h, ..area };
     let lower = Area { y: upper_h + rule, h: area.h - upper_h - rule, ..area };
-    reports[0].summary(screen, upper, Activity::default);
-    reports[1].summary(screen, lower, activity);
+    let inline_detail = area.h == 2;
+    reports[0].summary(screen, upper, inline_detail, Activity::default);
+    reports[1].summary(screen, lower, inline_detail, activity);
 }
 
 /// Choose a grid that leaves room for a useful figure at each supported size.

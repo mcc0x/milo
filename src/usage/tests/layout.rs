@@ -302,16 +302,43 @@ fn a_two_row_pane_shows_both_providers_and_their_tightest_remaining_capacity() {
     let f = Fixture::folder();
     example_limits(&f, Some(NOW), Some(NOW), NOW + 38 * MINUTE, NOW);
     let mut usage = open(&f, NOW).with_large_figures(true);
-    for width in [22, 100] {
+    let compact = ["Codex week · 26% left", "Claude week · 8% left"];
+    let detailed = ["Codex week · 26% left · resets 2d", "Claude week · 8% left · resets 2d"];
+    for (width, expected) in [(22, compact), (34, compact), (35, detailed), (100, detailed)] {
         let mut screen = Screen::sized(width, 2);
         screen.set_pictures(true);
         usage.draw(&mut screen);
         assert!(screen.picture_at().is_none());
-        assert_eq!(
-            screen.text().iter().map(|row| row.trim()).collect::<Vec<_>>(),
-            ["Codex week · 26% left", "Claude week · 8% left"],
-        );
+        assert_eq!(screen.text().iter().map(|row| row.trim()).collect::<Vec<_>>(), expected,);
     }
+}
+
+#[test]
+fn the_two_row_rail_shows_when_old_readings_were_seen_without_implying_a_fresh_reset() {
+    let f = Fixture::folder();
+    example_limits(&f, Some(NOW), Some(NOW), NOW + 38 * MINUTE, NOW);
+    let mut usage = open(&f, NOW + 6 * HOUR);
+    assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 26% last", "Claude week · 8% last"]);
+
+    let rows = frame(&mut usage, 36, 2);
+    assert_eq!(
+        rows.iter().map(|row| row.trim()).collect::<Vec<_>>(),
+        ["Codex week · 26% · seen 6h ago", "Claude week · 8% · seen 6h ago"],
+    );
+}
+
+#[test]
+fn the_two_row_rail_does_not_guess_missing_or_elapsed_reset_times() {
+    let f = Fixture::folder();
+    let codex = r#"{"used_percent":35,"window_minutes":300}"#;
+    write(&f, CODEX, &codex_snapshot(&format!("{}Z", iso(NOW)), codex, "null"), NOW);
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":30,"resets_at":{NOW}}}}}"#), NOW);
+    let rows = frame(&mut open(&f, NOW), 100, 2);
+    assert_eq!(
+        rows.iter().map(|row| row.trim()).collect::<Vec<_>>(),
+        ["Codex 5h · 65% left", "Claude 5h · reset elapsed"],
+    );
 }
 
 #[test]
