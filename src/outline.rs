@@ -12,6 +12,7 @@ use crate::git::{Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
+use crate::preferences::{FoldStore, IconMode, Preferences};
 use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::{Screen, Style};
 use crate::tree::{Folds, Tree, folders_above};
@@ -36,6 +37,13 @@ pub struct Outline {
     /// Measured once per row layout, and only when there is room for details.
     change_columns: Option<ChangeColumns>,
     folds: Folds,
+    fold_store: Option<FoldStore>,
+    icons: IconMode,
+    static_marks: bool,
+    text_git_marks: bool,
+    follow_activity: bool,
+    remember: bool,
+    peek: bool,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
     attention: Attention,
@@ -58,17 +66,44 @@ pub struct Outline {
 }
 
 impl Outline {
-    pub fn new(repo: Repo, inside_rex: bool) -> Outline {
+    #[cfg(test)]
+    pub(crate) fn new(repo: Repo, inside_rex: bool) -> Self {
+        Self::build(repo, inside_rex, &Preferences::default(), false)
+    }
+
+    pub fn with_preferences(repo: Repo, inside_rex: bool, prefs: &Preferences) -> Self {
+        Self::build(repo, inside_rex, prefs, !cfg!(test))
+    }
+
+    pub fn into_peek(mut self) -> Self {
+        self.peek = true;
+        self
+    }
+
+    fn build(repo: Repo, inside_rex: bool, prefs: &Preferences, remember: bool) -> Self {
+        let remember = remember && repo.git;
+        let fold_store = if remember { FoldStore::for_worktree(&repo.root) } else { None };
+        let folds =
+            fold_store.as_ref().and_then(|store| store.load().ok()).map_or_else(Folds::default, Folds::remembered);
+        let pending_only = repo.git && prefs.changes_only;
+        let icons = if cfg!(test) { prefs.icons } else { prefs.icons.effective() };
         let mut outline = Outline {
             repo,
             pending: Vec::new(),
             listing: walk::Listing::default(),
             tree: Tree::default(),
             change_columns: None,
-            folds: Folds::default(),
+            folds,
+            fold_store,
+            icons,
+            static_marks: prefs.static_marks,
+            text_git_marks: prefs.text_git_marks,
+            follow_activity: prefs.follow_activity,
+            remember,
+            peek: false,
             recent: Vec::new(),
             attention: Attention::new(Instant::now()),
-            pending_only: false,
+            pending_only,
             sel: 0,
             top: 0,
             by_click: false,
@@ -110,6 +145,12 @@ impl Outline {
         let tracked = self.repo.tracked()?;
         let files = std::mem::replace(&mut self.pending, files);
         self.tree.rebuild(tracked, &self.pending);
+        let exists = |path: &str| self.tree.has_folder(path);
+        if self.folds.prune(exists)
+            && let Some(store) = &self.fold_store
+        {
+            let _ = store.prune(exists);
+        }
         self.update_recent();
         self.relayout(selected);
         Some(files)
@@ -136,7 +177,7 @@ impl Outline {
     fn reload(&mut self) {
         let Some(old) = self.load() else { return };
         let now = Instant::now();
-        let following = self.attention.following(now);
+        let following = self.follow_activity && self.attention.following(now);
         let newest = self.mark_files(&old, now).filter(|_| following).map(str::to_owned);
         if let Some(newest) = newest {
             self.follow(&newest);
@@ -263,7 +304,7 @@ impl Pane for Outline {
             return None;
         }
         let now = Instant::now();
-        let mark = self.attention.next_mark_frame(now);
+        let mark = self.attention.next_mark_frame(now, self.static_marks);
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
         [mark, note].into_iter().flatten().min()
     }
@@ -289,10 +330,17 @@ impl Pane for Outline {
                 sample("docs 3  ", Style::PLAIN, "3 changed"),
                 sample("+2      ", ADD, "lines added"),
                 sample("−1      ", DEL, "lines removed"),
-                sample("● ○     ", Style::PLAIN.bold(), "being written"),
+                sample(if self.static_marks { "•       " } else { "● ○     " }, Style::PLAIN.bold(), "being written"),
                 sample("•       ", Style::PLAIN, "just changed"),
                 HelpRow::new(),
             ]);
+            if self.text_git_marks {
+                rows.extend([
+                    sample("M A D R U", Style::PLAIN, "edit/new/delete/move/conflict"),
+                    sample("C P      ", Style::PLAIN, "to commit / to push"),
+                    HelpRow::new(),
+                ]);
+            }
         }
         rows.extend([
             heading("Tree keys"),
@@ -510,6 +558,32 @@ mod tests {
         assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
         let at = o.note.as_ref().unwrap().1;
         assert_eq!(draw_at(&mut o, 65, 12, at).text()[11].trim_start(), "following util.rs");
+    }
+
+    #[test]
+    fn outline_preferences_keep_selection_and_render_static_git_marks() {
+        let f = project();
+        let mut o = Outline::with_preferences(
+            Repo::open(&f.root).unwrap(),
+            false,
+            &Preferences {
+                icons: IconMode::Off,
+                static_marks: true,
+                text_git_marks: true,
+                follow_activity: false,
+                changes_only: true,
+                ..Preferences::default()
+            },
+        );
+        o.key(Key::Focus(false));
+        let before = o.selected_path().unwrap();
+        f.write("src/deep/util.rs", "fn util() { more(); }\n");
+        assert!(o.check());
+        assert_eq!(o.selected_path().as_deref(), Some(before.as_ref()));
+        let rows = draw(&mut o, 35, 12).text();
+        let row = file_row(&rows, "util.rs");
+        assert!(row.starts_with('•') && row.contains("M C util.rs"), "{row}");
+        assert!(!rows.iter().any(|row| row.contains('▾') || row.contains("README.md")), "{rows:?}");
     }
 
     #[test]

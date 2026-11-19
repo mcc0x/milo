@@ -246,6 +246,13 @@ struct GitDirs {
     common: Option<PathBuf>,
 }
 
+/// Find just the worktree identity, without loading project state.
+pub fn worktree(dir: &Path) -> Option<PathBuf> {
+    let output = run::limited_output(dir, &[], &["rev-parse", "--show-toplevel"], 1 << 16).ok()?;
+    let root = PathBuf::from(OsStr::from_bytes(output.strip_suffix(b"\n")?));
+    root.is_absolute().then_some(root)
+}
+
 fn git_dirs(dir: &Path) -> Option<GitDirs> {
     let ask = |args: &[&str]| run::output(dir, &[], args);
     let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));

@@ -54,22 +54,19 @@ fn size_classes_keep_the_primary_figures_in_both_panels() {
     let codex = ("73%", " █  ▄▄▛%");
     let claude = ("48%", "  █ ▜▄▛%");
     let dash = ("—", "—");
-    let full = ("100%", "▄█▄ ▜▄▛ ▜▄▛%");
     for (name, codex_at, claude_at, reset_at, left, right) in [
         ("both", Some(now), Some(now), next, codex, claude),
         ("Codex only", Some(now), None, next, codex, dash),
         ("Claude only", None, Some(now), next, dash, claude),
         ("neither", None, None, next, dash, dash),
-        ("reset", Some(now - HOUR), Some(now - HOUR), now, full, full),
-        ("old", Some(now - 10 * DAY), Some(now - 3 * DAY), next, codex, claude),
     ] {
         let f = Fixture::folder();
         example_limits(&f, codex_at, claude_at, reset_at, now);
         if name != "neither" {
             write(&f, CLAUDE, &assistant(now - MINUTE, 12_000, 900, 100), now);
         }
-        let mut usage = open(&f, now);
-        for (w, h) in [(140, 5), (100, 2), (100, 1), (36, 12), (30, 8), (12, 2), (6, 1)] {
+        let mut usage = open(&f, now).with_large_figures(true);
+        for (w, h) in [(140, 5), (100, 2), (100, 1), (36, 12)] {
             let rows = frame(&mut usage, w, h);
             assert_figures(&rows, w, left, right);
         }
@@ -106,7 +103,7 @@ fn frame_rows_are_the_same_in_all_data_states() {
     for (codex, claude) in [(true, true), (true, false), (false, true), (false, false)] {
         let f = Fixture::folder();
         example_limits(&f, codex.then_some(now), claude.then_some(now), now + HOUR, now);
-        let mut usage = open(&f, now);
+        let mut usage = open(&f, now).with_large_figures(true);
         let rows = frame(&mut usage, 140, 5);
         assert!(rows.iter().all(|row| row.chars().nth(69) == Some('│')));
         assert!(!rows[0].split_once('│').unwrap().0.trim().is_empty());
@@ -155,7 +152,7 @@ fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
 #[test]
 fn a_narrow_column_has_one_large_figure_and_a_row_of_words_for_each_window() {
     let f = Fixture::folder();
-    let mut usage = open(&f, NOW);
+    let mut usage = open(&f, NOW).with_large_figures(true);
     let window = |percent| Window { minutes: 10_080, percent, resets: Some(NOW + DAY), observed: NOW };
     usage.claude.native = Some(Reading {
         at: Timestamp::seconds(NOW),
@@ -170,11 +167,11 @@ fn a_narrow_column_has_one_large_figure_and_a_row_of_words_for_each_window() {
 }
 
 #[test]
-fn a_tiny_frame_keeps_an_intact_primary_figure() {
+fn a_tiny_frame_keeps_an_intact_figure_for_the_tightest_limit() {
     let f = with_limits();
     let mut usage = open(&f, NOW);
-    assert_eq!(frame(&mut usage, 6, 1), ["Cx 77%"]);
-    assert_eq!(frame(&mut usage, 12, 2), ["Codex 77%", "Claude 77%"]);
+    assert_eq!(frame(&mut usage, 6, 1), ["Cl 39%"]);
+    assert_eq!(frame(&mut usage, 12, 2), ["Codex 77%", "Claude 39%"]);
     for w in 0..=48 {
         for h in 0..=8 {
             frame(&mut usage, w, h);
@@ -195,7 +192,7 @@ fn stacked_marks_are_the_same_size_though_one_half_is_a_row_taller() {
     let now = local_noon();
     let f = Fixture::folder();
     example_limits(&f, Some(now), Some(now), now + HOUR, now);
-    let mut usage = open(&f, now);
+    let mut usage = open(&f, now).with_large_figures(true);
     // Twelve rows less the rule leave five above and six below.
     let mut screen = Screen::sized(36, 12);
     screen.set_pictures(true);
@@ -217,7 +214,7 @@ fn activity_follows_the_hint_and_never_sits_under_a_window_like_its_caption() {
     // With a row to spare it has that row to itself.
     let rows = frame(&mut open(&f, now), 140, 6);
     let below: Vec<&str> = rows[4..].iter().map(|row| row.split_once('│').unwrap().1.trim()).collect();
-    assert_eq!(below, ["no saved limits found", "13k tokens today"]);
+    assert_eq!(below, ["no saved limits found · Run milo setup", "13k tokens today"]);
 }
 
 #[test]
@@ -227,12 +224,18 @@ fn an_old_reading_says_so_once_and_each_window_keeps_its_reset_time() {
     let then = now - 6 * HOUR + 5 * MINUTE;
     example_limits(&f, Some(then), None, now + 2 * HOUR, now);
     let mut usage = open(&f, now);
-    for (w, h, age) in [(140, 5, "5 h 55 m ago"), (36, 12, "6 h ago")] {
-        let codex = frame(&mut usage, w, h)[..5].join("\n");
-        assert_eq!(codex.matches("ago").count(), 1, "{codex}");
-        assert!(codex.contains(age), "{codex}");
-        assert!(codex.contains("left") && codex.contains("2 h") && codex.contains("2 d"), "{codex}");
-    }
+    let wide = frame(&mut usage, 140, 5)[..5]
+        .iter()
+        .map(|line| line.split_once('│').unwrap().0)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(wide.matches("5 h 55 m ago").count(), 1, "{wide}");
+    assert_eq!(wide.matches("last reported").count(), 2, "{wide}");
+    assert!(wide.contains("2 h") && wide.contains("2 d"), "{wide}");
+
+    let narrow = frame(&mut usage, 36, 12)[..5].join("\n");
+    assert!(narrow.contains("week · 26% left") && narrow.contains("Last reported 5h55m ago"), "{narrow}");
+    assert!(narrow.contains("Resets in 2d") && narrow.contains("Open Codex"), "{narrow}");
 }
 
 #[test]
@@ -243,7 +246,9 @@ fn a_millisecond_reset_has_the_same_countdown_as_seconds() {
     let mut usage = open(&f, NOW);
     assert_eq!(frame(&mut usage, 140, 3)[2].matches("resets in 2 h").count(), 2);
     usage.fixed_now = Some(reset);
-    assert_eq!(frame(&mut usage, 140, 3)[1].matches("100%").count(), 2);
+    let rows = frame(&mut usage, 140, 3);
+    assert!(!rows[1].contains("100%"));
+    assert_eq!(rows[2].matches("Reset elapsed").count(), 2);
 }
 
 #[test]
@@ -259,7 +264,7 @@ fn a_reading_shows_its_age_at_five_minutes_but_not_one_second_earlier() {
 fn a_lone_figure_has_room_for_its_reset_caption() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 23, NOW + 2 * HOUR + 10 * MINUTE, "null"), NOW);
-    let rows = frame(&mut open(&f, NOW), 28, 12);
+    let rows = frame(&mut open(&f, NOW).with_large_figures(true), 28, 12);
     assert_eq!(rows[3].trim(), "of week left · 2 h 10 m");
 }
 
@@ -272,4 +277,60 @@ fn the_key_hints_fit_below_the_figures_where_there_is_room() {
     }
     assert_eq!(frame(&mut usage, 10, 20)[19], " ? help");
     assert!(!frame(&mut usage, 140, 5)[4].contains("? help"));
+}
+
+#[test]
+fn the_default_rail_uses_only_text_and_surfaces_the_tightest_window_for_each_tool() {
+    let f = Fixture::folder();
+    example_limits(&f, Some(NOW), Some(NOW), NOW + 38 * MINUTE, NOW);
+    let mut usage = open(&f, NOW);
+    let mut screen = Screen::sized(22, 10);
+    screen.set_pictures(true);
+    usage.draw(&mut screen);
+    assert!(screen.picture_at().is_none());
+    let rows = screen.text();
+    assert_eq!(rows[0], "Codex week · 26% left");
+    assert_eq!(rows[1], "Resets in 2d");
+    assert_eq!(rows[5], "Claude week · 8% left");
+    assert_eq!(rows[6], "Resets in 2d");
+    assert!(!rows.join("\n").contains("73%"));
+
+    let five_hour = codex_window(88, 300, NOW + 38 * MINUTE);
+    let week = codex_window(20, 10_080, NOW + DAY);
+    write(&f, CODEX, &codex_snapshot(&format!("{}Z", iso(NOW)), &five_hour, &week), NOW + 1);
+    assert!(usage.check());
+    let rows = frame(&mut usage, 21, 4);
+    assert_eq!(&rows[..2], ["Codex 5h · 12% left", "Resets in 38m"]);
+}
+
+#[test]
+fn elapsed_and_missing_limits_give_different_next_steps_without_guessing_percentages() {
+    let f = Fixture::folder();
+    write(&f, CODEX, &codex(NOW, 80, NOW + MINUTE, "null"), NOW);
+    let mut usage = open(&f, NOW + MINUTE);
+    let rows = frame(&mut usage, 22, 6);
+    assert_eq!(rows[0], "Codex · reset elapsed");
+    assert_eq!(rows[1], "Open Codex");
+    assert_eq!(rows[3], "Claude · no source");
+    assert_eq!(rows[4], "Run milo setup");
+    assert!(!rows.join("\n").contains('%'));
+
+    let exhausted = codex_window(100, 300, NOW + MINUTE);
+    let active = codex_window(20, 10_080, NOW + DAY);
+    write(&f, CODEX, &codex_snapshot(&format!("{}Z", iso(NOW)), &exhausted, &active), NOW);
+    assert!(usage.check());
+    assert_eq!(frame(&mut usage, 22, 6)[0], "Codex week · 80% left");
+}
+
+#[test]
+fn a_short_stale_summary_is_labeled_even_without_a_spare_line() {
+    let f = Fixture::folder();
+    write(&f, CODEX, &codex(NOW, 80, NOW + DAY, "null"), NOW);
+    let mut usage = open(&f, NOW + AGE_NOTE - 1);
+    assert_eq!(usage.next_frame(), Some(Duration::from_secs(1)));
+    assert_eq!(frame(&mut usage, 22, 1), ["Codex week · 20% left"]);
+    usage.fixed_now = Some(NOW + AGE_NOTE);
+    assert_eq!(frame(&mut usage, 22, 1), ["Codex week · 20% last"]);
+    assert_eq!(frame(&mut usage, 12, 6)[0], "Cx 20% last");
+    assert!(!frame(&mut usage, 6, 1)[0].contains('%'));
 }

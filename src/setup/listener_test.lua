@@ -6,6 +6,7 @@ local function terminal(method, args)
   assert(method == "process")
   return processes[args.block_id]
 end
+local remembered, on_profile
 rex = {
   on = function(event, fn) handlers[event] = fn end,
   sleep = function() error("a starting shell held up the listener") end,
@@ -15,6 +16,11 @@ rex = {
     new_split = function(args) table.insert(splits, args); return {} end,
   },
   call = function(method, args) return terminal(method:match("%.([^.]*)$"), args) end,
+  exec = function(argv)
+    assert(argv[2] == "layout-profile" and argv[3] == "read" and argv[4] == "/my project")
+    if on_profile then on_profile() end
+    return { ok = true, stdout = remembered or "" }
+  end,
   block = { call = function(_, method, args) args.session_id = "project"; return terminal(method, args) end },
   layout = {
     block = function(args) return args end,
@@ -43,7 +49,10 @@ assert(#splits == 1 and splits[1].anchor_id == "quick" and splits[1].side == "be
 -- The usage takes its rows from the foot of the column, below the outline and history.
 local column = splits[1].layout
 assert(column[1][1].options.cwd == "/my project" and column[1][2].label == "milo:history")
-assert(column[2].label == "milo:usage" and column.ratio == 0.8 and splits[1].ratio == 0.20)
+assert(column[2].label == "milo:usage" and math.abs(column.ratio - 0.8) < 0.000001 and splits[1].ratio == 0.20)
+assert(not splits[1].focus)
+assert(column[1][1].options.command[3] == "--shell" and column[1][1].options.command[4] == "quick")
+assert(column[2].options.command[3] == nil)
 processes.slow = project
 table.remove(timers, 1)()
 assert(#splits == 2 and splits[2].anchor_id == "slow")
@@ -55,6 +64,23 @@ processes = { first = project }
 handlers.session_created({}, { session = { session_id = "project" } })
 assert(#splits == 1 and splits[1].anchor_id == "first")
 windows = { tab("slow", "slow"), tab("quick", "quick"), tab("command", "command") }
+
+-- A remembered profile takes precedence on a new shell tab, including right
+-- placement, top-to-bottom order and shares rather than legacy Usage rows.
+splits = {}
+remembered = "v1 r 0.28 0.70 10 uho 011 0 300000 700000"
+processes.quick = project
+created("quick")
+assert(#splits == 1 and splits[1].side == "after" and math.abs(splits[1].ratio - 0.72) < 0.000001)
+assert(splits[1].layout[1].label == "milo:usage" and splits[1].layout[2].label == "milo:history")
+assert(math.abs(splits[1].layout.ratio - 0.7) < 0.000001)
+
+-- A split created during profile lookup wins even if the tab was pristine when the event arrived.
+splits = {}
+on_profile = function() windows[2] = tab("quick", "quick", "user split") end
+created("quick")
+assert(#splits == 0)
+on_profile, remembered = nil, nil
 
 -- A shell split by the user while waiting must not get Milo panes.
 timers, splits, processes = {}, {}, {}

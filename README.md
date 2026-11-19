@@ -31,7 +31,9 @@ curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1
 
 The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
 
-In [Rex](https://www.superlogical.com/rex), run `milo setup` to choose your panes. Check **On save:** and press `s` to save. Turn on **Arrange new shell tabs** to use the layout in new shell tabs and new sessions.
+The install commands above install **v0.1.0**. To try the workspace preferences described here before the next release, build this checkout with `cargo build` and run `./target/debug/milo setup` inside Rex.
+
+Choose a tree or a project sidebar, try it in this tab, then save it as your default or just for this Git worktree. If the tab is already arranged the way you like, use **Milo: Remember This Layout…**. New shell tabs use saved layouts when **Arrange new shell tabs** is enabled. Command tabs and tabs with their own layouts are left alone.
 
 You can also run each pane on its own.
 
@@ -76,6 +78,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID]` | File reader |
 | `milo setup` | Setup screen |
+| `milo doctor` | Read-only preference and integration report |
 
 `PATH` defaults to the current directory. Bare `milo` opens the outline and can offer setup the first time in Rex. Use `milo --help` for all commands or `?` for help when a pane has room.
 

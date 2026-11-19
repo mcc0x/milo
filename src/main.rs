@@ -14,6 +14,7 @@ mod outline;
 mod pane;
 mod paths;
 mod picture;
+mod preferences;
 mod read;
 mod reader;
 mod rex;
@@ -28,6 +29,7 @@ mod walk;
 mod watch;
 mod when;
 mod width;
+mod workflow;
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -46,6 +48,8 @@ Usage: milo outline [PATH]
        milo history [PATH]
        milo usage
        milo setup
+       milo doctor
+       milo setup --repair | --remove
        milo view FILE [--commit ID]
        milo [PATH]
        milo listen [--stop]
@@ -55,6 +59,7 @@ Usage: milo outline [PATH]
 PATH defaults to the current directory. Bare milo [PATH] opens the outline.
 Inside Rex, a bare milo offers setup the first time if no layout is installed.
 milo setup saves a Rex layout and can enable Claude Code usage limits.
+milo doctor explains local preferences, integration health and usage sources.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -111,8 +116,8 @@ shows a picture as a picture where the terminal can draw one.
 Use milo view FILE --commit ID to see the file as of that commit, not as
 it is now. ID is a full or abbreviated Git commit ID in hex.
 
-Icons use a Nerd Font by default. Set MILO_ICONS=plain for ordinary
-symbols or MILO_ICONS=off to hide icons.
+Choose icons in setup, or override them for one launch with MILO_ICONS=plain
+or MILO_ICONS=off.
 
 https://usemilo.net
 ";
@@ -123,7 +128,12 @@ fn command_help(name: &str) -> Option<&'static str> {
         "history" => "Usage: milo history [PATH]\n\nBrowse recent commits. PATH defaults to the current directory.",
         "usage" => "Usage: milo usage\n\nSee usage and limits for Claude and Codex.",
         "view" => "Usage: milo view FILE [--commit ID]\n\nRead a file now or as it was at a Git commit.",
-        "setup" => "Usage: milo setup\n\nSet up or remove milo's Rex layout and Claude Code integration.",
+        "setup" => {
+            "Usage: milo setup\n       milo setup --repair | --remove\n\nPreview and save Milo preferences, repair managed integrations or remove them."
+        }
+        "doctor" => {
+            "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
+        }
         "listen" => "Usage: milo listen [--stop]\n\nStart or stop applying the milo layout to new Rex tabs.",
         "claude-status" => "Usage: milo claude-status\n\nRead usage from Claude Code's status line input.",
         _ => return None,
@@ -161,10 +171,16 @@ fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
 enum Command<'a> {
     Outline(Option<&'a OsStr>),
     History(Option<&'a OsStr>),
+    ShellOutline(&'a OsStr),
+    ShellHistory(&'a OsStr),
+    PeekOutline(&'a OsStr),
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Path(&'a OsStr),
     Usage,
     Setup { offered: bool },
+    Doctor,
+    Repair,
+    Remove,
     Listen(bool),
     ClaudeStatus,
     Help(&'static str),
@@ -178,10 +194,31 @@ fn command<'a>(
     rest: &'a [OsString],
     offer_setup: impl FnOnce() -> bool,
 ) -> Result<Command<'a>, String> {
+    let name = first.and_then(OsStr::to_str);
+    let option = second.and_then(OsStr::to_str);
+    if matches!(
+        (name, option),
+        (Some("outline" | "history"), Some("--shell")) | (Some("outline"), Some("--peek-origin"))
+    ) {
+        let [block] = rest else { return Err("expected a Rex block ID".into()) };
+        let valid = block
+            .to_str()
+            .and_then(|id| id.strip_prefix("block:"))
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
+        if !valid {
+            return Err("expected a Rex block ID".into());
+        }
+        return Ok(if option == Some("--peek-origin") {
+            Command::PeekOutline(block)
+        } else if name == Some("history") {
+            Command::ShellHistory(block)
+        } else {
+            Command::ShellOutline(block)
+        });
+    }
     if !rest.is_empty() && first != Some(OsStr::new("view")) {
         return Err("too many arguments; see milo --help".to_string());
     }
-    let name = first.and_then(OsStr::to_str);
     if rest.is_empty()
         && second.is_some_and(|arg| arg == "--help" || arg == "-h")
         && let Some(help) = name.and_then(command_help)
@@ -203,12 +240,15 @@ fn command<'a>(
         }
         (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID]".to_string()),
         (Some("setup"), None) => Command::Setup { offered: false },
+        (Some("doctor"), None) => Command::Doctor,
+        (Some("setup"), Some(flag)) if flag == "--repair" => Command::Repair,
+        (Some("setup"), Some(flag)) if flag == "--remove" => Command::Remove,
         (Some("usage"), None) => Command::Usage,
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
         (Some("claude-status"), None) => Command::ClaudeStatus,
-        (Some("setup" | "usage" | "claude-status"), Some(_)) => {
+        (Some("setup" | "usage" | "claude-status" | "doctor"), Some(_)) => {
             return Err("unexpected argument; see milo --help".to_string());
         }
         (Some("-h" | "--help"), None) => Command::Help(USAGE),
@@ -230,8 +270,23 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
             open_outline(Some(path)).map_err(|why| format!("{why}; see milo --help for commands"))
         }),
+        Command::ShellOutline(shell) => {
+            run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), outline)))
+        }
         Command::History(path) => {
-            run(Start::Reading(project_path(path)), &|| Ok(Box::new(History::new(open_repo(path)?, rex::inside()))))
+            run(Start::Reading(project_path(path)), &|| Ok(workflow::project(open_repo(path)?, None, history)))
+        }
+        Command::ShellHistory(shell) => {
+            run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), history)))
+        }
+        Command::PeekOutline(origin) => {
+            let result = run(Start::Reading(Path::new(".")), &|| {
+                Ok(workflow::project(open_repo(None)?, None, |repo, prefs| {
+                    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek())
+                }))
+            });
+            setup::return_from_peek(origin);
+            result
         }
         Command::View { file, commit } => run(Start::Reading(file_dir(Path::new(file))), &|| {
             let path = Path::new(file);
@@ -242,7 +297,14 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             };
             Ok(Box::new(reader))
         }),
-        Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
+        Command::Usage => run(Start::Check, &|| {
+            let root = preferences::worktree(Path::new("."));
+            let prefs = preferences::Preferences::load(root.as_deref()).unwrap_or_default();
+            Ok(Box::new(usage::Usage::open().with_large_figures(prefs.usage_large_figures)))
+        }),
+        Command::Doctor => print_report(setup::doctor::report()),
+        Command::Repair => print_report(setup::doctor::repair()),
+        Command::Remove => print_report(setup::doctor::remove()),
         Command::Setup { offered } => {
             let start = if offered { Start::Offer(|| open_outline(None)) } else { Start::Loaded };
             run(start, &|| Ok(Box::new(setup::Setup::open(offered))))
@@ -260,13 +322,33 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
     }
 }
 
+fn print_report(report: Result<String, String>) -> Result<(), String> {
+    println!("{}", report?);
+    Ok(())
+}
+
 fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
-    Ok(Box::new(Outline::new(open_repo(path)?, rex::inside())))
+    Ok(workflow::project(open_repo(path)?, None, outline))
+}
+
+fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
+    Box::new(Outline::with_preferences(repo, rex::inside(), prefs))
+}
+
+fn history(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
+    Box::new(
+        History::new(repo, rex::inside())
+            .with_follow_new(prefs.history_follow_new)
+            .with_appearance(prefs.icons.effective(), prefs.text_git_marks),
+    )
 }
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
+    if first.as_deref() == Some(OsStr::new("layout-profile")) {
+        exit(setup::layout_profile(&args.collect::<Vec<_>>()));
+    }
     let second = args.next();
     let rest: Vec<_> = args.collect();
     let command =

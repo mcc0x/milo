@@ -182,7 +182,7 @@ impl Reader {
         let room = if right == s.w - 1 { right } else { right.saturating_sub(2) };
         let mut x = 1;
         if room > 10 {
-            x += ui::icon(s, x, 0, room - x, icons::file(name));
+            x += ui::icon(s, x, 0, room - x, icons::file(self.icons, name));
         }
         x += s.put_middle(x, 0, room.saturating_sub(x), name, Style::PLAIN.bold());
         s.put_fit(x + 2, 0, room.saturating_sub(x + 2), dir, FAINT);

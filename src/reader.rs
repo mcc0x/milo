@@ -15,6 +15,7 @@ use crate::help::{self, Page};
 use crate::keys::{Direction, Key};
 use crate::pane::{After, Pane};
 use crate::picture::Picture;
+use crate::preferences::{IconMode, Preferences};
 use crate::rex;
 use crate::screen::{Screen, Style};
 use crate::syntax::{Lang, Span, State};
@@ -29,6 +30,7 @@ pub struct Reader {
     source: Source,
     /// The name git uses, relative to the repository root.
     path: String,
+    icons: IconMode,
     /// What happened to the working file.
     kind: Kind,
     body: Body,
@@ -183,10 +185,11 @@ impl Text {
 }
 
 impl Reader {
-    fn new(path: String, source: Source) -> Self {
+    fn new(path: String, source: Source, icons: IconMode) -> Self {
         Self {
             source,
             path,
+            icons,
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
             spans: Vec::new(),
@@ -194,6 +197,13 @@ impl Reader {
             pan: 0,
             rows: 0,
         }
+    }
+
+    fn icons_for(repo: &Repo) -> IconMode {
+        if cfg!(test) {
+            return Preferences::default().icons;
+        }
+        Preferences::load(repo.git.then_some(repo.root.as_path())).unwrap_or_default().icons.effective()
     }
 
     fn reveal_first_change(&mut self) {

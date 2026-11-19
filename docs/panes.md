@@ -12,6 +12,8 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | History | 3 rows or fewer | Recent commits without the heading, dots or divider |
 | History | 52 columns and 8 rows or more | A row of dots when there is more than one commit |
 | History | Narrow | A shorter summary, such as `↑2` for two commits to push or `no tracking` for a branch that does not track a remote branch |
+| History | Narrow and focused | The selected commit's subject wraps so you can read it without widening the rail |
+| Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
@@ -24,6 +26,8 @@ A shallow clone has only part of the project's history. Milo lists the commits G
 ## Reading files
 
 Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader, leaving the original pane in place. Elsewhere the reader takes over that pane; `q` brings you back.
+
+For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
 `milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
 

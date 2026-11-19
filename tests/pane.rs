@@ -302,3 +302,24 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
         assert_eq!(String::from_utf8(output.stderr).unwrap(), message);
     }
 }
+
+#[test]
+fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
+    let project = Project::new();
+    let settings = project.0.join(".claude/settings.json");
+    fs::create_dir(settings.parent().unwrap()).unwrap();
+    let original = br#"{"statusLine":{"type":"command","command":"mine"}}"#;
+    fs::write(&settings, original).unwrap();
+    for args in [&["doctor"][..], &["setup", "--remove"]] {
+        let out = project
+            .command(env!("CARGO_BIN_EXE_milo"))
+            .env_remove("REX_CONFIG")
+            .env("PI_CODING_AGENT_DIR", project.0.join("agent"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(!project.0.join("config").exists() && !project.0.join("state").exists());
+        assert_eq!(fs::read(&settings).unwrap(), original);
+    }
+}

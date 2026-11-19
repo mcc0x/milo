@@ -459,6 +459,8 @@ mod omp_limits {
         let mut usage = unopened(&f, NOW);
         usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
         wait_for(|| usage.check());
+        assert_eq!(usage.codex.reported().unwrap().1.label(), "OMP usage database");
+        assert_eq!(usage.claude.reported().unwrap().1.label(), "OMP usage database");
         let codex = usage.codex.latest().unwrap().windows.base;
         let claude = usage.claude.latest().unwrap().windows.base;
         assert!(codex[0].is_none() && codex[1].unwrap().percent == 1.0);
@@ -468,6 +470,8 @@ mod omp_limits {
         write(&f, CODEX, &rollout, NOW + 1);
         claude_report(&state, r#"{"seven_day":{"used_percentage":62,"resets_at":1795219200}}"#, NOW);
         assert!(usage.check());
+        assert_eq!(usage.codex.reported().unwrap().1.label(), "Codex session log");
+        assert_eq!(usage.claude.reported().unwrap().1.label(), "Milo Claude status line");
         let codex = usage.codex.latest().unwrap().windows.base;
         let claude = usage.claude.latest().unwrap().windows.base;
         assert!(codex.into_iter().flatten().any(|window| window.percent == 45.0));
@@ -495,6 +499,7 @@ mod omp_limits {
         usage.claude_config = Some(config.clone());
         write(&f, ".claude.json", &content("fixture-current"), NOW);
         assert!(usage.check());
+        assert_eq!(usage.claude.reported().unwrap().1.label(), "Claude Code usage cache");
         let windows = usage.claude.latest().unwrap().windows.base;
         assert!(windows[0].is_none() && windows[1].unwrap().percent == 18.0);
         assert_eq!(windows[1].unwrap().resets, Some(reset));

@@ -1,14 +1,36 @@
 //! Calls Rex for floating readers, setup, and the new-tab listener.
 
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Read as _, Write as _};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 fn rex(args: &[&str]) -> Option<String> {
     let out = Command::new("rex").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Inspect the server catalog, not the foreground app. Doctor must not start a server.
+pub(crate) fn layout_available() -> Option<bool> {
+    let result = Command::new("rex")
+        .args(["--autostart=false", "actions", "--json"])
+        .env_remove("REX_CLIENT")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !result.status.success() {
+        return None;
+    }
+    let [actions] = crate::json::Value::parse(&result.stdout)?.fields(["actions"]);
+    Some(
+        actions?
+            .elements()?
+            .any(|action| action.fields(["name"])[0].is_some_and(|name| name.is("milo_remember_layout"))),
+    )
 }
 
 /// The shell that opened setup, even if focus has moved somewhere else.
@@ -21,6 +43,30 @@ impl Target {
     pub fn current() -> Option<Self> {
         Some(Self { session: std::env::var_os("REX_SESSION")?, block: std::env::var_os("REX_BLOCK")? })
     }
+}
+
+/// Run a noninteractive local Lua script against an existing Rex session.
+pub(crate) fn script(
+    target: Option<&Target>,
+    session: &OsStr,
+    lua: &str,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+) -> Option<String> {
+    let mut command = Command::new("rex");
+    command.args(["--autostart=false", "--timeout", "3s", "do", "-", "-s"]).arg(session);
+    if let Some(target) = target {
+        command.arg("-b").arg(&target.block);
+    }
+    let mut child =
+        command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let written = child.stdin.take().is_some_and(|mut pipe| pipe.write_all(lua.as_bytes()).is_ok());
+    let output = child.wait_with_output().ok()?;
+    if !written || !output.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8(output.stdout).ok()?;
+    text.truncate(text.trim_end().len());
+    Some(text)
 }
 
 /// Setup reports its own messages, not process output that can contain paths or settings.
@@ -144,15 +190,158 @@ fn reader_command(exe: &Path, file: &Path, commit: Option<&str>) -> String {
     format!("[{},\"view\",{}{args}]", json(&exe.to_string_lossy()), json(&file.to_string_lossy()))
 }
 
+/// A local Rex script watches the selected shell without periodic CLI calls.
+pub struct ShellObserver {
+    child: Child,
+    output: ChildStdout,
+    frame: Frame,
+}
+
+pub enum ShellChange {
+    Unchanged,
+    Directory(PathBuf),
+    Unreported,
+    Closed,
+}
+
+impl ShellObserver {
+    pub fn start(anchor: &OsStr) -> Option<Self> {
+        let target = Target::current()?;
+        let anchor = exact_block(anchor)?;
+        let pane = exact_block(&target.block)?;
+        let args = format!(r#"{{"anchor":{},"pane":{}}}"#, json(anchor), json(pane));
+        let mut child = Command::new("rex")
+            .args(["--autostart=false", "do", "--session"])
+            .arg(target.session)
+            .args(["--fail-fast", "--args", &args, "-e", include_str!("rex_shell.lua")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let output = child.stdout.take().expect("observer stdout was piped");
+        let observer = Self { child, output, frame: Frame::default() };
+        // SAFETY: The file descriptor is an open, privately owned pipe read end.
+        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        (nonblocking == 0).then_some(observer)
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.output.as_raw_fd()
+    }
+
+    pub fn read(&mut self) -> ShellChange {
+        let mut bytes = [0; 8192];
+        match self.output.read(&mut bytes) {
+            Ok(0) => ShellChange::Closed,
+            Ok(n) => self.frame.read(&bytes[..n]),
+            Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {
+                ShellChange::Unchanged
+            }
+            Err(_) => ShellChange::Closed,
+        }
+    }
+}
+
+impl Drop for ShellObserver {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Use real block IDs, never CLI labels, positions or suffixes.
+fn exact_block(id: &OsStr) -> Option<&str> {
+    let id = id.to_str()?;
+    let suffix = id.strip_prefix("block:")?;
+    (suffix.len() == 36 && suffix.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then_some(id)
+}
+
+#[derive(Default)]
+struct Frame {
+    line: Vec<u8>,
+    oversized: bool,
+}
+
+impl Frame {
+    fn read(&mut self, mut bytes: &[u8]) -> ShellChange {
+        const LINE_LIMIT: usize = b"milo-cwd ".len() + 2 * 16384;
+        let mut latest = ShellChange::Unchanged;
+        while !bytes.is_empty() {
+            let newline = bytes.iter().position(|&b| b == b'\n');
+            let fragment = &bytes[..newline.unwrap_or(bytes.len())];
+            self.oversized |= self.line.len() + fragment.len() > LINE_LIMIT;
+            if !self.oversized {
+                self.line.extend_from_slice(fragment);
+            }
+            let Some(end) = newline else { break };
+            if !self.oversized
+                && let Some(update) = decode_change(&self.line)
+            {
+                latest = update;
+            }
+            self.line.clear();
+            self.oversized = false;
+            bytes = &bytes[end + 1..];
+        }
+        latest
+    }
+}
+
+fn decode_change(line: &[u8]) -> Option<ShellChange> {
+    let code = line.strip_prefix(b"milo-cwd ")?;
+    if code == b"-" {
+        return Some(ShellChange::Unreported);
+    }
+    if !code.len().is_multiple_of(2) || !code.starts_with(b"2f") {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(code.len() / 2);
+    let hex = |b| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    };
+    for pair in code.as_chunks::<2>().0 {
+        let byte = hex(pair[0])? * 16 + hex(pair[1])?;
+        if byte == 0 {
+            return None;
+        }
+        bytes.push(byte);
+    }
+    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(bytes))))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{field, json, reader_command};
+    use super::{Frame, ShellChange, field, json, reader_command};
     use std::path::Path;
 
     #[test]
     fn strings_are_escaped_for_json() {
         assert_eq!(json(r#"a "b" \c"#), r#""a \"b\" \\c""#);
         assert_eq!(json("tab\there"), "\"tab\\u0009here\"");
+    }
+
+    #[test]
+    fn shell_frames_keep_paths_verbatim_and_ignore_non_protocol_output() {
+        let mut decoder = Frame::default();
+        assert!(matches!(decoder.read(b"listening: Rex\nmilo-cwd 2f6"), ShellChange::Unchanged));
+        assert!(matches!(
+            decoder.read(b"10a62\nunrelated output\n"),
+            ShellChange::Directory(path) if path == Path::new("/a\nb"),
+        ));
+        assert!(matches!(decoder.read(b"milo-cwd -\n"), ShellChange::Unreported));
+    }
+
+    #[test]
+    fn an_oversized_observer_line_cannot_hide_the_next_valid_frame() {
+        let mut decoder = Frame::default();
+        let data = [b'x'; 8192];
+        for _ in 0..8 {
+            assert!(matches!(decoder.read(&data), ShellChange::Unchanged));
+        }
+        assert!(matches!(decoder.read(b"\nmilo-cwd -\n"), ShellChange::Unreported));
     }
 
     #[test]

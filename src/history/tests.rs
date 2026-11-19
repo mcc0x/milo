@@ -566,3 +566,97 @@ fn a_plain_folder_says_it_is_not_a_git_project() {
     assert!(history.check());
     assert_eq!(draw(&mut history, 40, 3).text(), [" Not a Git project.", "", ""]);
 }
+
+#[test]
+fn a_narrow_focus_peek_wraps_the_subject_and_restores_the_same_list_on_blur() {
+    let f = Fixture::new();
+    let subject = "fix: preserve 界é input across narrow rails";
+    commit(&f, subject);
+    for i in 1..=9 {
+        commit(&f, &format!("newer {i}"));
+    }
+    let mut history = open(&f);
+    draw(&mut history, 21, 8);
+    history.key(Key::End);
+    history.key(Key::Focus(false));
+    let before = draw(&mut history, 21, 8).text();
+    assert!(before.iter().any(|line| line.contains("fix: preserve")) && !before.join("\n").contains("narrow rails"));
+
+    assert_eq!(history.key(Key::Focus(true)), After::Stay);
+    let focused = draw(&mut history, 21, 8);
+    assert!(active_row(&focused, "fix: preserve"));
+    let rows = focused.text();
+    let start = rows.iter().position(|row| row.contains('↳')).unwrap();
+    let detail =
+        rows[start..].iter().map(|row| row.trim().trim_start_matches('↳').trim()).collect::<Vec<_>>().join(" ");
+    assert_eq!(detail, subject);
+    history.key(Key::Click(4, start));
+    assert_eq!(history.open_index(), None);
+
+    history.key(Key::Focus(false));
+    assert_eq!(draw(&mut history, 21, 8).text(), before);
+}
+
+#[test]
+fn new_commits_only_take_the_selection_when_following_at_the_tip() {
+    let f = Fixture::new();
+    for i in 0..8 {
+        commit(&f, &format!("older {i}"));
+    }
+    commit(&f, "first tip");
+    let mut parked = open(&f);
+    let mut following = open(&f).with_follow_new(true);
+    let before = draw(&mut parked, 21, 5).text();
+
+    commit(&f, "second tip");
+    assert!(parked.check() && following.check());
+    assert_eq!(draw(&mut parked, 21, 5).text(), before);
+    assert!(active_row(&draw(&mut following, 21, 5), "second tip"));
+
+    following.key(Key::Enter);
+    commit(&f, "third tip");
+    assert!(following.check());
+    assert!(active_row(&draw(&mut following, 21, 5), "second tip"));
+    assert_eq!(following.open_index(), Some(1));
+
+    following.key(Key::Home);
+    commit(&f, "fourth tip");
+    assert!(following.check());
+    assert!(active_row(&draw(&mut following, 21, 5), "fourth tip"));
+}
+
+#[test]
+fn history_uses_text_git_marks_and_respects_the_file_icon_preference() {
+    let f = Fixture::new();
+    commit(&f, "pushed commit");
+    f.push();
+    f.write("page.txt", "committed text\n");
+    f.commit("local commit");
+    f.write("pending.txt", "work in progress\n");
+    let mut history = open(&f).with_appearance(IconMode::Off, true);
+    draw(&mut history, 40, 8);
+    history.key(Key::Enter);
+    let rows = draw(&mut history, 40, 8).text();
+    assert!(row(&rows, "to commit").starts_with(" C"));
+    assert!(row(&rows, "local commit").starts_with(" P"));
+    assert!(row(&rows, "pushed commit").starts_with(" ="));
+    assert!(row(&rows, "page.txt").starts_with("   │ page.txt"));
+}
+
+#[test]
+fn an_oversized_subject_can_be_paged_without_moving_the_commit_cursor() {
+    let f = Fixture::new();
+    commit(&f, "first chapter second chapter final chapter");
+    let mut history = open(&f);
+    let screen = draw(&mut history, 21, 4);
+    assert!(screen.text()[3].contains("↳ first chapter") && screen.text()[3].ends_with('→'));
+
+    for (key, tail) in
+        [(Key::Right, "second chapter"), (Key::Char('l'), "final chapter"), (Key::Right, "first chapter")]
+    {
+        assert_eq!(history.key(key), After::Stay);
+        let screen = draw(&mut history, 21, 4);
+        assert!(screen.text()[3].contains(&format!("↳ {tail}")));
+        assert!(active_row(&screen, "first chapter"));
+    }
+}

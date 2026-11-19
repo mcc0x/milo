@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::keys::Direction::{Next, Previous};
 use crate::keys::{DOUBLE_CLICK, Key};
 use crate::pane::{After, Pane};
+use crate::preferences::Preferences;
 
 use super::Outline;
 use super::draw::margin;
@@ -32,7 +33,7 @@ impl Outline {
                 after => after,
             };
         }
-        if key == Key::Char('q') {
+        if key == Key::Char('q') || self.peek && key == Key::Esc {
             return After::Leave;
         }
         let by_click = self.by_click;
@@ -79,6 +80,9 @@ impl Outline {
             }
             Key::Char('c') if self.repo.git => {
                 self.pending_only = !self.pending_only;
+                if self.remember && Preferences::set_changes_only(&self.repo.root, self.pending_only).is_err() {
+                    self.say("Could not save changes-only preference");
+                }
                 self.relayout(self.selected_path());
             }
             Key::Char('n' | 'N') => {
@@ -133,6 +137,12 @@ impl Outline {
 
     fn set_open(&mut self, path: Rc<str>, open: bool) {
         self.folds.set(&path, open);
+        if self.folds.remember(&path)
+            && let Some(store) = &self.fold_store
+            && store.set(&path, open).is_err()
+        {
+            self.say("Could not save folder choice");
+        }
         self.refold(Some(path));
     }
 

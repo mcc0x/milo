@@ -86,12 +86,12 @@ impl Attention {
         self.marks.retain(|_, mark| mark.until > now);
     }
 
-    pub(super) fn next_mark_frame(&self, now: Instant) -> Option<Duration> {
+    pub(super) fn next_mark_frame(&self, now: Instant, static_marks: bool) -> Option<Duration> {
         self.marks
             .values()
             .map(|mark| {
                 let left = mark.until.saturating_duration_since(now);
-                if now.saturating_duration_since(mark.at) < LIVE { left.min(PULSE) } else { left }
+                if !static_marks && now.saturating_duration_since(mark.at) < LIVE { left.min(PULSE) } else { left }
             })
             .min()
     }
@@ -168,9 +168,11 @@ mod tests {
         let mut attention = Attention::new(at);
         attention.mark("a", at);
         let almost = at + Duration::from_secs(299);
-        assert_eq!(attention.next_mark_frame(almost), Some(Duration::from_secs(1)));
+        assert_eq!(attention.next_mark_frame(at, false), Some(PULSE));
+        assert_eq!(attention.next_mark_frame(at, true), Some(UNSEEN));
+        assert_eq!(attention.next_mark_frame(almost, false), Some(Duration::from_secs(1)));
         attention.used(at + Duration::from_secs(298));
-        assert_eq!(attention.next_mark_frame(almost), Some(Duration::from_secs(1)));
+        assert_eq!(attention.next_mark_frame(almost, false), Some(Duration::from_secs(1)));
         attention.expire_marks(at + Duration::from_secs(300));
         assert_eq!(attention.marked_at("a", false), None);
     }

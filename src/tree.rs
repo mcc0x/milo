@@ -1,7 +1,7 @@
 //! Builds the file tree, counts pending files and lays out rows using folder folds.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::git::{Kind, PendingFile};
@@ -103,13 +103,19 @@ pub fn folders_above(path: &str) -> impl Iterator<Item = &str> {
 #[derive(Default)]
 pub struct Folds {
     choice: HashMap<String, bool>,
+    /// Automatic suggestions last for this visit, but are not remembered.
+    suggested: HashSet<String>,
     /// The choices to restore when the default goes back to closed.
     before_all: Option<HashMap<String, bool>>,
 }
 
 impl Folds {
+    pub fn remembered(choice: BTreeMap<String, bool>) -> Self {
+        Self { choice: choice.into_iter().collect(), ..Self::default() }
+    }
+
     pub fn is_open(&self, path: &str) -> bool {
-        self.choice.get(path).copied().unwrap_or_else(|| self.all())
+        self.choice.get(path).copied().unwrap_or_else(|| self.all() || self.suggested.contains(path))
     }
 
     pub fn set(&mut self, path: &str, open: bool) {
@@ -120,10 +126,25 @@ impl Folds {
         }
     }
 
+    /// "Open all" is temporary and cannot overwrite the choices it will restore.
+    pub fn remember(&self, path: &str) -> bool {
+        !self.before_all.as_ref().is_some_and(|before| before.contains_key(path))
+    }
+
+    pub fn prune(&mut self, exists: impl Fn(&str) -> bool) -> bool {
+        let before = self.choice.len() + self.before_all.as_ref().map_or(0, HashMap::len);
+        self.choice.retain(|path, _| exists(path));
+        if let Some(saved) = &mut self.before_all {
+            saved.retain(|path, _| exists(path));
+        }
+        self.suggested.retain(|path| exists(path));
+        before != self.choice.len() + self.before_all.as_ref().map_or(0, HashMap::len)
+    }
+
     /// Opens a folder unless the user has already decided about it.
     pub fn suggest(&mut self, path: &str) {
-        if !self.choice.contains_key(path) {
-            self.choice.insert(path.to_string(), true);
+        if !self.suggested.contains(path) {
+            self.suggested.insert(path.to_owned());
         }
     }
 
@@ -285,6 +306,11 @@ impl Tree {
     pub fn row_of(&self, path: &str) -> Option<usize> {
         let node = *self.index.get(path)?;
         self.rows.iter().position(|r| r.node == node)
+    }
+
+    /// The index contains folders even when hidden by a fold or change filter.
+    pub fn has_folder(&self, path: &str) -> bool {
+        self.index.get(path).is_some_and(|&id| self.node(id).dir)
     }
 
     /// The row of the folder that row `i` is in, if it is in one.

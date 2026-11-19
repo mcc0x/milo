@@ -8,15 +8,21 @@ use super::{FILE_PREVIEW, History, TimelineRow};
 
 impl History {
     pub(super) fn input(&mut self, key: Key, now: Instant) -> After {
-        if matches!(key, Key::Focus(_)) {
-            return After::Ignored;
-        }
         let unclicked = !matches!(key, Key::Click(..)) && self.clicked.take().is_some();
         let cleared = self.read_error.take().is_some();
         match key {
             Key::Click(x, y) => self.click(x, y, now),
             Key::Enter => self.enter(),
             Key::Left | Key::Char('h') => self.left(),
+            Key::Right | Key::Char('l') => {
+                if let Some(detail) = &mut self.detail
+                    && detail.next != detail.start
+                {
+                    detail.start = detail.next;
+                } else if !unclicked && !cleared {
+                    return After::Ignored;
+                }
+            }
             Key::Char('r') => self.load(),
             _ => {
                 if let Some(delta) = key.rows(self.shown) {
@@ -86,7 +92,7 @@ impl History {
             self.clicked = None;
             return;
         };
-        let at = self.top + offset;
+        let at = painted.top + offset;
         let Some(&row) = self.rows.get(at).filter(|row| x < painted.width && row.selectable()) else {
             self.clicked = None;
             return;

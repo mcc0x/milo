@@ -17,8 +17,6 @@ use self::figure::Figure;
 use super::{AGE_NOTE, Activity, CodexSessions, Limits, Usage, Window};
 
 const SIDE_BY_SIDE: usize = 64;
-// Two short names, two four-character figures and the rule.
-const ONE_LINE_SPLIT: usize = 15;
 const LARGE_ROWS: usize = 3;
 const TILE: &str = "██";
 
@@ -38,6 +36,13 @@ impl Tool {
         match self {
             Self::Codex => ["Codex", "Cx", "X"],
             Self::Claude => ["Claude", "Cl", "C"],
+        }
+    }
+
+    fn open(self) -> &'static str {
+        match self {
+            Self::Codex => "Open Codex",
+            Self::Claude => "Open Claude Code",
         }
     }
 
@@ -70,8 +75,8 @@ pub(super) fn mark_placements(screen: &Screen) -> impl Iterator<Item = (usize, u
 /// What the small line under a figure says about its window.
 #[derive(Clone, Copy)]
 enum When {
-    /// The window has started over since the figure was reported.
-    Reset,
+    /// The reported reset passed; no subsequent value has been observed.
+    Elapsed,
     /// Seconds until the window starts over.
     Running(i64),
     Unknown,
@@ -81,7 +86,7 @@ impl When {
     /// Says that the figure is what is left, and when there is room, when it starts over.
     fn draw(self, screen: &mut Screen, area: Area, row: usize) {
         match self {
-            Self::Reset => area.note(screen, row, if area.w >= 12 { "left · reset" } else { "left" }),
+            Self::Elapsed => area.note(screen, row, if area.w >= 13 { "Reset elapsed" } else { "elapsed" }),
             Self::Running(seconds) => {
                 let time = when::duration(seconds, Detail::Exact);
                 if time.len() + 17 <= area.w {
@@ -92,7 +97,9 @@ impl When {
                     area.note(screen, row, "left");
                 }
             }
-            Self::Unknown => area.note(screen, row, "left"),
+            Self::Unknown => {
+                area.note(screen, row, if area.w >= 18 { "Reset time unknown" } else { "left" });
+            }
         }
     }
 }
@@ -102,14 +109,14 @@ struct Metric<'a> {
     label: Cow<'a, str>,
     number: Option<Figure>,
     when: When,
+    used: f64,
     /// Seconds since the figure was reported, once that is worth saying:
     /// one a few minutes old is as good as current.
     age: Option<i64>,
 }
 
 impl Metric<'_> {
-    /// A known, elapsed window is back at zero even before another report arrives.
-    fn limit(mut window: Window, now: i64) -> Self {
+    fn limit(window: Window, now: i64) -> Self {
         let age = now.saturating_sub(window.observed);
         let label = match window.minutes {
             10_080 => "week".into(),
@@ -119,18 +126,23 @@ impl Metric<'_> {
             n if n.is_multiple_of(60) => format!("{}h", n / 60).into(),
             n => format!("{n}m").into(),
         };
-        let (when, age) = if window.is_reset(now) {
-            window.percent = 0.0;
-            (When::Reset, None)
+        let elapsed = window.is_reset(now);
+        let when = if elapsed {
+            When::Elapsed
         } else {
-            let when = window.resets.map_or(When::Unknown, |at| When::Running(at.saturating_sub(now)));
-            (when, (age >= AGE_NOTE).then_some(age))
+            window.resets.map_or(When::Unknown, |at| When::Running(at.saturating_sub(now)))
         };
-        Self { label, number: Some(Figure::new(window.number(), window.percent)), when, age }
+        Self {
+            label,
+            number: (!elapsed).then(|| Figure::new(window.number(), window.percent)),
+            when,
+            age: (!elapsed && age >= AGE_NOTE).then_some(age),
+            used: window.percent,
+        }
     }
 
     fn missing(label: &'static str) -> Self {
-        Self { label: label.into(), number: None, when: When::Unknown, age: None }
+        Self { label: label.into(), number: None, when: When::Unknown, age: None, used: 0.0 }
     }
 
     fn number(&self) -> &str {
@@ -145,16 +157,26 @@ impl Metric<'_> {
         self.number.map_or(FAINT, Figure::style)
     }
 
+    fn inline_value(&self) -> &str {
+        if matches!(self.when, When::Elapsed) { "elapsed" } else { self.number() }
+    }
+
     fn inline_width(&self) -> usize {
-        self.label.len() + 1 + self.number_width()
+        self.label.len() + 1 + self.inline_value().len() + 5 * usize::from(self.age.is_some())
     }
 
     fn inline(&self, row: &mut RowWriter<'_>, label: bool) {
         if label {
             row.add(&self.label, FAINT);
             row.add(" ", FAINT);
+            row.add(self.inline_value(), self.colour().bold());
+            if self.age.is_some() {
+                row.add(" last", FAINT);
+            }
+        } else {
+            // Never show a stale or elapsed value with no room for its state.
+            row.add(if self.age.is_some() { "—" } else { self.number() }, self.colour().bold());
         }
-        row.add(self.number(), self.colour().bold());
     }
 
     /// Columns the figure needs when drawn large on this screen.
@@ -168,9 +190,22 @@ impl Metric<'_> {
 
     /// Stay legible when either images or large text glyphs do not fit.
     fn panel(&self, screen: &mut Screen, area: Area, rows: Chart, slot: usize) {
-        area.note(screen, rows.label, &self.label);
+        if self.age.is_some() {
+            let suffix = if self.label.len() + 16 <= area.w { " · last reported" } else { " last" };
+            if self.label.len() + suffix.len() <= area.w {
+                let mut writer = RowWriter { screen, x: area.x, y: area.y + rows.label, left: area.w };
+                writer.add(&self.label, FAINT);
+                writer.add(suffix, FAINT);
+            } else {
+                area.note(screen, rows.label, "Last");
+            }
+        } else {
+            area.note(screen, rows.label, &self.label);
+        }
         self.figure(screen, area, area.y + rows.label + 1, rows.large, slot);
-        self.when.draw(screen, area, rows.note);
+        if self.number.is_some() || matches!(self.when, When::Elapsed) {
+            self.when.draw(screen, area, rows.note);
+        }
     }
 
     /// The figure as a picture, as block digits, or as plain text in the middle of their rows.
@@ -192,13 +227,19 @@ impl Metric<'_> {
     /// One row of words under a lone large figure, such as “of week left”,
     /// then the reading's age if it is old, or else when the window starts over.
     fn caption(&self, screen: &mut Screen, area: Area, row: usize) {
+        if matches!(self.when, When::Elapsed) {
+            return self.when.draw(screen, area, row);
+        }
         let (lead, detail) = match (self.age, self.when) {
             (Some(age), _) => ("", Some(format!("{} ago", when::duration(age, Detail::Rounded)))),
-            (None, When::Reset) => ("", Some("reset".into())),
+            (None, When::Elapsed) => unreachable!("elapsed is handled above"),
             (None, When::Running(seconds)) => ("resets in ", Some(when::duration(seconds, Detail::Exact))),
             (None, When::Unknown) => ("", None),
         };
         let words = self.label.len() + 8;
+        if self.age.is_some() && detail.as_ref().is_some_and(|detail| words + 3 + detail.len() > area.w) {
+            return area.note(screen, row, "Last reported");
+        }
         if words > area.w {
             return area.note(screen, row, &self.label);
         }
@@ -219,7 +260,7 @@ impl Metric<'_> {
     fn row(&self, screen: &mut Screen, area: Area, row: usize) {
         let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
         self.inline(&mut writer, true);
-        if self.inline_width() + 5 <= area.w {
+        if self.number.is_some() && self.age.is_none() && self.inline_width() + 5 <= area.w {
             writer.add(" left", FAINT);
         }
     }
@@ -229,13 +270,26 @@ impl Metric<'_> {
 struct Hint {
     full: &'static str,
     short: &'static str,
+    state: &'static str,
+    next: Option<&'static str>,
 }
 
 impl Hint {
-    const NO_SESSIONS: Self = Self { full: "no sessions found", short: "no sessions" };
-    const NO_SAVED_LIMITS: Self = Self { full: "no saved limits found", short: "no saved limits" };
-    const NO_LIMITS: Self = Self { full: "no limits to show", short: "no limits" };
-    const UNREADABLE: Self = Self { full: "could not read sessions", short: "could not read" };
+    const NO_SESSIONS: Self =
+        Self { full: "no sessions found", short: "no sessions", state: "no source", next: Some("Run Codex") };
+    const NO_SAVED_LIMITS: Self = Self {
+        full: "no saved limits found",
+        short: "no saved limits",
+        state: "no source",
+        next: Some("Run milo setup"),
+    };
+    const NO_LIMITS: Self = Self { full: "no limits to show", short: "no limits", state: "no limits", next: None };
+    const UNREADABLE: Self = Self {
+        full: "could not read sessions",
+        short: "could not read",
+        state: "cannot read",
+        next: Some("Check session access"),
+    };
 
     /// Draws the hint, with `also` after it on the same row when both fit.
     fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<&str>) {
@@ -276,8 +330,92 @@ impl<'a> Report<'a> {
         Self { tool, first, extra: [figures.next(), figures.next()], hint }
     }
 
-    fn has_number(&self) -> bool {
-        self.first.number.is_some()
+    fn metrics(&self) -> impl Iterator<Item = &Metric<'a>> + Clone {
+        std::iter::once(&self.first).chain(self.extra.iter().flatten())
+    }
+
+    /// Expired windows cannot block work now. Use the least remaining limit among the rest.
+    fn limiting(&self) -> &Metric<'a> {
+        self.metrics().reduce(|a, b| if tighter(b, a) { b } else { a }).unwrap_or(&self.first)
+    }
+
+    fn summary(&self, screen: &mut Screen, area: Area, activity: impl FnOnce() -> Activity) {
+        let metric = self.limiting();
+        let mut line = 1;
+        if let Some(hint) = &self.hint {
+            self.summary_line(screen, area, "", hint.state, "", FAINT);
+            area.note(screen, line, hint.next.unwrap_or_else(|| self.tool.open()));
+            line += 1;
+        } else if matches!(metric.when, When::Elapsed) {
+            let value = if area.w >= 17 { "reset elapsed" } else { "elapsed" };
+            self.summary_line(screen, area, &metric.label, value, "", FAINT);
+            area.note(screen, line, self.tool.open());
+            line += 1;
+        } else {
+            let age_below = area.h > 1 && area.w >= "Last reported".len();
+            let last = if metric.age.is_some() && !age_below { " last" } else { "" };
+            self.summary_line(screen, area, &metric.label, metric.number(), last, metric.colour());
+            if let Some(age) = metric.age.filter(|_| age_below) {
+                let age = compact_time(age);
+                let text = if age.len() + 18 <= area.w {
+                    format!("Last reported {age} ago")
+                } else if age.len() + 13 <= area.w {
+                    format!("Reported {age} ago")
+                } else {
+                    "Last reported".into()
+                };
+                area.note(screen, line, &text);
+                line += 1;
+            }
+            if line < area.h {
+                match metric.when {
+                    When::Running(seconds) => area.note(screen, line, &format!("Resets in {}", compact_time(seconds))),
+                    When::Unknown => area.note(screen, line, "Reset time unknown"),
+                    When::Elapsed => unreachable!("elapsed handled separately"),
+                }
+                line += 1;
+            }
+            if line < area.h && metric.age.is_some() {
+                area.note(screen, line, self.tool.open());
+                line += 1;
+            }
+        }
+        if line < area.h
+            && let Some(activity) = activity_text(activity())
+        {
+            area.note(screen, line, &activity);
+        }
+    }
+
+    fn summary_line(&self, screen: &mut Screen, area: Area, label: &str, value: &str, state: &str, style: Style) {
+        let left = if state.is_empty() && value.ends_with('%') { " left" } else { "" };
+        let suffix = if state.is_empty() { left } else { state };
+        let mut writer = RowWriter { screen, x: area.x, y: area.y, left: area.w };
+        for name in self.tool.names() {
+            let short_label = label.strip_suffix(" week").unwrap_or(label);
+            let short_label = if short_label.len() > 7 { "model" } else { short_label };
+            let full = name.len() + 1 + label.len() + 3 + value.len() + suffix.len();
+            let label = if full <= area.w { label } else { short_label };
+            let show_label = !label.is_empty() && name.len() + 2 + label.len() + value.len() + state.len() <= area.w;
+            if name.len() + 1 + value.len() + state.len() > area.w {
+                continue;
+            }
+            writer.add(name, self.tool.colour().bold());
+            if show_label {
+                writer.add(" ", FAINT);
+                writer.add(label, FAINT);
+            }
+            let gap = if writer.left >= 3 + value.len() + suffix.len() { " · " } else { " " };
+            writer.add(gap, FAINT);
+            writer.add(value, style.bold());
+            if suffix.len() <= writer.left {
+                writer.add(suffix, FAINT);
+            }
+            return;
+        }
+        // A tiny pane cannot always say what an old figure means.
+        let value = if !state.is_empty() || str_width(value) > area.w { "—" } else { value };
+        writer.add(value, style);
     }
 
     /// Shorten the name and labels before giving up a reported figure.
@@ -320,7 +458,7 @@ impl<'a> Report<'a> {
             row.add("  ", FAINT);
             metric.inline(&mut row, true);
         }
-        if self.has_number() && used + 3 * usize::from(tile) + 5 <= area.w {
+        if self.first.number.is_some() && self.first.age.is_none() && used + 3 * usize::from(tile) + 5 <= area.w {
             row.add(" left", FAINT);
         }
     }
@@ -332,6 +470,9 @@ impl<'a> Report<'a> {
             return self.inline(screen, area);
         }
         if area.w < 30 {
+            if area.h == LARGE_ROWS {
+                return self.summary(screen, area, activity);
+            }
             return self.compact(screen, area, activity);
         }
         let chart = Chart::new(area.h);
@@ -342,7 +483,7 @@ impl<'a> Report<'a> {
         let beneath = self.mark(screen, mark, (4 * mark.h + 2) / 5, text_row);
         let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
         let (mut count, gap) = self.figure_grid(figures.w);
-        let all = || std::iter::once(&self.first).chain(self.extra.iter().flatten());
+        let all = || self.metrics();
         // Large figures too wide to sit side by side: the first keeps the
         // width, and the others follow below it as text.
         if chart.large && count > 1 {
@@ -389,10 +530,19 @@ impl<'a> Report<'a> {
         let spare = row < area.h;
         let activity = (spare || self.hint.is_some()).then(|| activity_text(activity())).flatten();
         if let Some(hint) = &self.hint {
-            hint.draw(screen, figures, chart.note, activity.as_deref().filter(|_| !spare));
+            let next = hint.next.unwrap_or_else(|| self.tool.open());
+            hint.draw(screen, figures, chart.note, activity.as_deref().filter(|_| !spare).or(Some(next)));
         }
-        if spare && let Some(activity) = activity {
-            figures.note(screen, row, &activity);
+        if spare {
+            if let Some(activity) = activity {
+                figures.note(screen, row, &activity);
+                row += 1;
+            }
+            if self.hint.is_none()
+                && self.metrics().any(|metric| metric.age.is_some() || matches!(metric.when, When::Elapsed))
+            {
+                figures.note(screen, row, self.tool.open());
+            }
         }
     }
 
@@ -429,7 +579,7 @@ impl<'a> Report<'a> {
         let mut row = LARGE_ROWS;
         if row < area.h {
             match &self.hint {
-                Some(hint) => hint.draw(screen, area, row, None),
+                Some(hint) => hint.draw(screen, area, row, hint.next.or(Some(self.tool.open()))),
                 None => self.first.caption(screen, area, row),
             }
             row += 1;
@@ -439,6 +589,13 @@ impl<'a> Report<'a> {
                 break;
             }
             metric.row(screen, area, row);
+            row += 1;
+        }
+        if row < area.h
+            && self.hint.is_none()
+            && self.metrics().any(|metric| metric.age.is_some() || matches!(metric.when, When::Elapsed))
+        {
+            area.note(screen, row, self.tool.open());
             row += 1;
         }
         if row < area.h
@@ -465,6 +622,24 @@ impl<'a> Report<'a> {
             text_row + 1
         }
     }
+}
+
+fn tighter(a: &Metric<'_>, b: &Metric<'_>) -> bool {
+    let rank =
+        |metric: &Metric<'_>| if metric.number.is_some() { 2 } else { u8::from(matches!(metric.when, When::Elapsed)) };
+    let seconds = |metric: &Metric<'_>| match metric.when {
+        When::Running(seconds) => seconds,
+        _ => i64::MAX,
+    };
+    let a_rank = rank(a);
+    let b_rank = rank(b);
+    a_rank.cmp(&b_rank).then_with(|| a.used.total_cmp(&b.used)).then_with(|| seconds(b).cmp(&seconds(a))).is_gt()
+}
+
+fn compact_time(seconds: i64) -> String {
+    let mut time = when::duration(seconds, Detail::Exact);
+    time.retain(|c| c != ' ');
+    time
 }
 
 /// Leaves a row for a caption, and one more for activity when it fits.
@@ -507,7 +682,7 @@ impl Area {
 
     /// Leave off an explanation rather than show a misleading fragment.
     fn note(self, screen: &mut Screen, row: usize, text: &str) {
-        if str_width(text) <= self.w {
+        if row < self.h && str_width(text) <= self.w {
             screen.put(self.x, self.y + row, self.w, text, FAINT);
         }
     }
@@ -578,6 +753,25 @@ fn stacked(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: imp
     reports[1].panel(screen, lower, marks, activity);
 }
 
+/// On a sidebar, names and the most limiting window come before decoration.
+fn text_first(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
+    if area.h == 1 {
+        let i = usize::from(tighter(reports[1].limiting(), reports[0].limiting()));
+        return reports[i].summary(screen, area, activity);
+    }
+    let rule = usize::from(area.h >= 5);
+    let upper_h = (area.h - rule) / 2;
+    if rule != 0 {
+        for x in area.x..area.x + area.w {
+            screen.put(x, upper_h, 1, "─", FAINT);
+        }
+    }
+    let upper = Area { h: upper_h, ..area };
+    let lower = Area { y: upper_h + rule, h: area.h - upper_h - rule, ..area };
+    reports[0].summary(screen, upper, Activity::default);
+    reports[1].summary(screen, lower, activity);
+}
+
 /// Choose a grid that leaves room for a useful figure at each supported size.
 pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     screen.clear();
@@ -596,12 +790,13 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     ];
     let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
     // Leave the captions and activity their rows in a compact pane.
+    let text = w < SIDE_BY_SIDE && (!usage.large_figures || w < 19 || h < 9);
     let footer = w >= 8 && h >= if split { 7 } else { 14 };
     let area = Area { x: 0, y: 0, w, h: h - usize::from(footer) };
     let activity = || usage.claude.activity(today, now);
-    if h == 1 && w < ONE_LINE_SPLIT {
-        let tool = usize::from(!reports[0].has_number() && reports[1].has_number());
-        reports[tool].inline(screen, area);
+    if text {
+        let pad = usize::from(area.w >= 24);
+        text_first(screen, Area { x: pad, w: area.w - 2 * pad, ..area }, &reports, activity);
     } else if split {
         side_by_side(screen, area, &reports, activity);
     } else {

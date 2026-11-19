@@ -113,12 +113,12 @@ impl Session {
         Ok(session)
     }
 
-    pub fn wait(&self, timeout_ms: i32, extra: Option<RawFd>) -> Wait {
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, extra, false)
+    pub fn wait(&self, timeout_ms: i32, watch: Option<RawFd>, external: Option<RawFd>) -> Wait {
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [watch, external], false)
     }
 
     pub fn wait_for_open(&self, timeout_ms: i32, done: RawFd) -> Wait {
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, Some(done), true)
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [Some(done), None], true)
     }
 
     /// Make progress while the terminal is reading, but let a signal interrupt backpressure.
@@ -225,6 +225,23 @@ fn terminal_output(fd: RawFd) -> io::Result<File> {
     OpenOptions::new().write(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(name)
 }
 
+/// Report a setup error without claiming the shell's root activity record or
+/// waiting on a stalled terminal. The setup screen carries the actual error.
+pub(crate) fn setup_status(failed: bool) {
+    let stdout = io::stdout();
+    if crate::rex::inside()
+        && stdout.is_terminal()
+        && let Ok(mut out) = terminal_output(stdout.as_raw_fd())
+    {
+        let record: &[u8] = if failed {
+            b"\x1b]7501;id=milo/setup:state=error:app=milo:title=TWlsbyBzZXR1cA==\x1b\\"
+        } else {
+            b"\x1b]7501;id=milo/setup:state=clear\x1b\\"
+        };
+        let _ = out.write(record);
+    }
+}
+
 fn listen() -> io::Result<PipeReader> {
     let (reader, writer) = io::pipe()?;
     // A signal just before a wait must still wake it, without ever
@@ -247,6 +264,7 @@ pub enum Wait {
     Input,
     /// The extra descriptor became readable.
     Woken,
+    External,
     Timeout,
     Interrupted,
     Closed,
@@ -257,13 +275,14 @@ fn drain_signal(mut reader: &PipeReader) {
     while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
 }
 
-/// Waits for input, a signal, the extra descriptor or a timeout.
+/// Waits for input, a signal, a watcher, an external source or a timeout.
 /// Signals always take priority; loading also prioritizes completion over keystrokes.
-fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: Option<RawFd>, opening: bool) -> Wait {
+fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: [Option<RawFd>; 2], opening: bool) -> Wait {
     let mut fds = [
         libc::pollfd { fd: keyboard, events: libc::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
-        libc::pollfd { fd: extra.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: extra[0].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: extra[1].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
     ];
     let ready = wait_ready(&mut fds, timeout_ms);
@@ -271,7 +290,7 @@ fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: Option
         Wait::Timeout
     } else if ready < 0 {
         if io::Error::last_os_error().kind() == ErrorKind::Interrupted { Wait::Interrupted } else { Wait::Closed }
-    } else if fds[2].revents != 0 {
+    } else if fds[3].revents != 0 {
         drain_signal(signal);
         Wait::Interrupted
     } else if opening && fds[1].revents != 0 {
@@ -280,6 +299,8 @@ fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: Option
         Wait::Input
     } else if fds[0].revents != 0 {
         Wait::Closed
+    } else if fds[2].revents != 0 {
+        Wait::External
     } else {
         Wait::Woken
     }
@@ -312,7 +333,7 @@ mod tests {
         let (extra, writer) = io::pipe().unwrap();
         let extra = Some(extra.as_raw_fd());
         let (signal, _signal_writer) = io::pipe().unwrap();
-        let wait = |opening| wait_for(keyboard.as_raw_fd(), &signal, 0, extra, opening);
+        let wait = |opening| wait_for(keyboard.as_raw_fd(), &signal, 0, [extra, None], opening);
         assert!(matches!(wait(false), Wait::Timeout));
 
         wake(writer.as_raw_fd());
@@ -321,6 +342,25 @@ mod tests {
         wake(input.as_raw_fd());
         assert!(matches!(wait(false), Wait::Input));
         assert!(matches!(wait(true), Wait::Woken));
+    }
+
+    #[test]
+    fn observer_updates_and_end_of_stream_wake_the_pane() {
+        let (keyboard, input) = io::pipe().unwrap();
+        let (watch, changed) = io::pipe().unwrap();
+        let (observer, update) = io::pipe().unwrap();
+        let (signal, _signal_writer) = io::pipe().unwrap();
+        let wait =
+            || wait_for(keyboard.as_raw_fd(), &signal, 0, [Some(watch.as_raw_fd()), Some(observer.as_raw_fd())], false);
+        wake(changed.as_raw_fd());
+        assert!(matches!(wait(), Wait::Woken));
+        wake(update.as_raw_fd());
+        assert!(matches!(wait(), Wait::External));
+        (&observer).read_exact(&mut [0]).unwrap();
+        drop(update);
+        assert!(matches!(wait(), Wait::External));
+        wake(input.as_raw_fd());
+        assert!(matches!(wait(), Wait::Input));
     }
 
     fn modes(terminal: &File) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {

@@ -4,8 +4,8 @@ local terminal = "com.superlogical.terminal"
 local function single_pane(session_id, window_id)
   local view = rex.session.view{ session_id = session_id }
   if not view then return end
-  for _, window in ipairs(view.windows) do
-    if window.window_id == window_id and #window.layers == 1 then
+  for _, window in ipairs(view.windows or {}) do
+    if window.window_id == window_id and not window.zoomed_block_id and #window.layers == 1 then
       local layer = window.layers[1]
       if layer.kind == "tiled" and #layer.blocks == 1 then
         local block = layer.blocks[1]
@@ -35,7 +35,14 @@ local function arrange_shell(session_id, window_id, retries)
   if not load_layout then return end
   local ok, arrange = pcall(load_layout, "listener")
   if ok and arrange then
-    pcall(arrange, { session_id = session_id, block_id = block }, process)
+    pcall(arrange, { session_id = session_id, block_id = block }, process, function(cwd)
+      -- Looking up the profile can yield. A user split or a command started
+      -- in the meantime must still win over automatic arrangement.
+      if single_pane(session_id, window_id) ~= block then return false end
+      local current = rex.call(terminal .. ".process", { session_id = session_id, block_id = block })
+      local foreground = current and current.foreground
+      return foreground and foreground.argv0 and foreground.argv0:sub(1, 1) == "-" and foreground.cwd == cwd
+    end)
   end
 end
 

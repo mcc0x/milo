@@ -54,8 +54,20 @@ impl Store {
         if layout.is_none() && claude.is_none() {
             return Ok(Saved::Ready);
         }
+        self.save_with(layout, claude, run, |_| Ok(()))
+    }
+
+    /// Plan Milo-only preferences under the same lock and roll them back with Rex settings.
+    pub(super) fn save_with(
+        &self,
+        layout: Option<&Layout>,
+        claude: Option<bool>,
+        run: &RunRex<'_>,
+        extra: impl FnOnce(&mut Vec<files::Change>) -> Result<(), &'static str>,
+    ) -> Result<Saved, &'static str> {
         let _lock = lock::setup(&self.state)?;
         let mut changes = Vec::new();
+        extra(&mut changes)?;
         let new_tabs = layout.is_some_and(|layout| layout.new_tabs);
         let rex = layout.map(|layout| self.plan_rex(layout, &mut changes, run)).transpose()?;
         let pending_path = self.state.join(RELOAD_PENDING);
@@ -117,13 +129,11 @@ fn call<const N: usize>(run: &RunRex<'_>, args: [&str; N]) -> bool {
 mod tests {
     use super::super::claude::{Claude, OWN_CLAUDE};
     use super::super::files::Change;
-    use super::super::layout::{GENERATED, TabPane, WIDTHS, lua_path, rex_lua};
+    use super::super::layout::{GENERATED, TabPane, WIDTHS, rex_lua};
     use super::super::rex_files::{MANAGED, OFFERED, executable, loader, managed};
     use super::*;
     use crate::fixture::Fixture;
-    use crate::rex;
     use std::cell::RefCell;
-    use std::ffi::OsString;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
     use std::rc::Rc;
@@ -258,30 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unsaved_layout_can_be_tried_in_its_own_block_without_installing() {
-        let fixture = Fixture::folder();
-        let store = store(&fixture);
-        let target = rex::Target { session: "session:test".into(), block: "block:test".into() };
-        let command = Rc::new(RefCell::new(Vec::new()));
-        let record = Rc::clone(&command);
-        store
-            .arrange(&Layout::default(), &target, &move |args| {
-                assert!(fs::read_to_string(args[1]).unwrap().contains("name = \"milo_layout\""));
-                *record.borrow_mut() = args.iter().map(|arg| arg.to_os_string()).collect();
-                true
-            })
-            .unwrap();
-        let args = command.borrow();
-        assert_eq!(args[0], "do");
-        assert_eq!(
-            args[2..],
-            ["--action", "milo_layout", "-s", "session:test", "-b", "block:test"].map(OsString::from)
-        );
-        assert!(!Path::new(&args[1]).exists());
-        assert!(!store.init.exists() && !store.config.exists());
-    }
-
-    #[test]
     fn setup_removes_only_the_claude_status_line_it_installed() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
@@ -327,20 +313,6 @@ mod tests {
         assert_eq!(fs::read_link(&store.claude).unwrap(), Path::new("dotfiles/claude.json"));
         assert_eq!(fs::read(init).unwrap(), b"-- Keep Rex settings\n");
         assert_eq!(fs::read(claude).unwrap(), b"{\"keep\":1}\n");
-    }
-
-    #[test]
-    fn generated_lua_uses_the_canonical_running_executable_for_panes_and_listener() {
-        let fixture = Fixture::folder();
-        let store = store(&fixture);
-        let layout = Layout { new_tabs: true, ..Layout::default() };
-        assert_eq!(store.save(Some(&layout), None, &|_| true).unwrap(), Saved::ListenerDidNotStart);
-        let lua = fs::read_to_string(store.rex_file()).unwrap();
-        let executable = fs::canonicalize(env::current_exe().unwrap()).unwrap();
-        assert!(executable.is_absolute());
-        assert!(lua.contains(&format!("local milo = {}\n", lua_path(&executable))));
-        assert!(lua.contains("command = { milo, name }"));
-        assert!(lua.contains("rex.exec.start({ milo, \"listen\" }"));
     }
 
     #[test]

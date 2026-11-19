@@ -12,6 +12,7 @@ use crate::git::{Commit, HistoryVersion, PendingFile, Repo};
 use crate::help::Page;
 use crate::keys::Key;
 use crate::pane::{After, Pane};
+use crate::preferences::IconMode;
 use crate::reader::{OpenReader, Reader};
 use crate::screen::Screen;
 use crate::watch::Scope;
@@ -50,6 +51,13 @@ impl TimelineRow {
 struct Painted {
     width: usize,
     body_top: usize,
+    top: usize,
+}
+
+struct Detail {
+    commit: usize,
+    start: usize,
+    next: usize,
 }
 
 struct OpenCommit {
@@ -71,6 +79,11 @@ pub struct History {
     /// The last row clicked and when, to tell a double click.
     clicked: Option<(TimelineRow, Instant)>,
     compact: bool,
+    focused: bool,
+    detail: Option<Detail>,
+    follow_new: bool,
+    icons: IconMode,
+    text_git_marks: bool,
     opener: OpenReader,
     reading: Option<Reader>,
     read_error: Option<&'static str>,
@@ -91,12 +104,28 @@ impl History {
             painted: None,
             clicked: None,
             compact: false,
+            focused: !inside_rex,
+            detail: None,
+            follow_new: false,
+            icons: if cfg!(test) { IconMode::Plain } else { IconMode::Nerd },
+            text_git_marks: false,
             opener: OpenReader::new(inside_rex),
             reading: None,
             read_error: None,
         };
         history.load();
         history
+    }
+
+    pub fn with_follow_new(mut self, follow: bool) -> Self {
+        self.follow_new = follow;
+        self
+    }
+
+    pub fn with_appearance(mut self, icons: IconMode, text_git_marks: bool) -> Self {
+        self.icons = icons;
+        self.text_git_marks = text_git_marks;
+        self
     }
 
     fn load(&mut self) {
@@ -114,20 +143,21 @@ impl History {
             self.replace_commits(commits, selected, uncommitted);
         } else if self.uncommitted != uncommitted {
             self.uncommitted = uncommitted;
-            self.build_rows(selected);
+            self.rebuild_in_place(selected);
         }
     }
 
     /// Remembers the open commit and the cursor by hash when commits move.
     fn replace_commits(&mut self, commits: Vec<Commit>, selected: Option<TimelineRow>, uncommitted: usize) {
+        self.detail = None;
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
         let open = self
             .open
             .as_ref()
             .and_then(|open| Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files }));
+        let follow = self.follow_new && selected == Some(TimelineRow::Commit(0)) && self.open_index() != Some(0);
         let selected = match selected {
-            // At the newest commit, follow new arrivals unless its files are open.
-            Some(TimelineRow::Commit(0)) if self.open_index() != Some(0) => TimelineRow::Commit(0),
+            Some(TimelineRow::Commit(0)) if follow => TimelineRow::Commit(0),
             Some(TimelineRow::Commit(i)) => TimelineRow::Commit(remap(i).unwrap_or(0)),
             Some(row @ (TimelineRow::File(_) | TimelineRow::More)) if open.is_some() => row,
             _ => TimelineRow::Commit(0),
@@ -142,7 +172,12 @@ impl History {
         self.clicked = None;
         self.open = open;
         self.uncommitted = uncommitted;
-        self.build_rows(Some(selected));
+        if follow {
+            self.top = 0;
+            self.build_rows(Some(selected));
+        } else {
+            self.rebuild_in_place(Some(selected));
+        }
     }
 
     fn selected(&self) -> Option<TimelineRow> {
@@ -155,6 +190,12 @@ impl History {
 
     fn open_files(&self) -> Option<&[PendingFile]> {
         self.entries[self.open_index()?].files.as_deref()
+    }
+
+    fn rebuild_in_place(&mut self, selected: Option<TimelineRow>) {
+        let offset = self.cursor.saturating_sub(self.top);
+        self.build_rows(selected);
+        self.top = self.cursor.saturating_sub(offset);
     }
 
     fn build_rows(&mut self, selected: Option<TimelineRow>) {
@@ -233,6 +274,15 @@ impl Pane for History {
     }
 
     fn key(&mut self, key: Key) -> After {
+        if let Key::Focus(focused) = key {
+            if focused == self.focused {
+                return After::Ignored;
+            }
+            self.focused = focused;
+            self.clicked = None;
+            self.detail = None;
+            return After::Stay;
+        }
         if let Some(reader) = &mut self.reading {
             match reader.key(key) {
                 After::Leave => {
@@ -244,7 +294,11 @@ impl Pane for History {
         } else if key == Key::Char('q') {
             After::Leave
         } else {
-            self.input(key, Instant::now())
+            let after = self.input(key, Instant::now());
+            if after == After::Stay && !matches!(key, Key::WheelUp | Key::WheelDown) {
+                self.focused = true;
+            }
+            after
         }
     }
 

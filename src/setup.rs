@@ -1,563 +1,750 @@
-//! Choose the panes around a Rex tab, and opt in to Claude Code's usage limits.
+//! Preview, try, remember and maintain Milo's pane setup.
 
 mod claude;
+pub(crate) mod doctor;
+mod draw;
 mod files;
 mod install;
 mod layout;
 mod lock;
+mod preview;
+mod profiles;
 mod rex_files;
 mod settings;
 
+pub use profiles::{layout_profile, return_from_peek};
+
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
-use crate::screen::{self, Screen, Style, Wash};
-use crate::ui::{self, ADD, DEL, FAINT, HEADING};
-use crate::width::char_width;
+use crate::preferences::{IconMode, Preferences, ProjectMode, Source};
+use crate::screen::{Screen, Style};
+use crate::ui::{DEL, FAINT};
 use crate::{paths, rex};
 use claude::Claude;
 use install::{Saved, Store};
-use layout::{Layout, TabPane};
+use layout::{Layout, Side, TabPane};
+use profiles::Scope;
 
-/// Identify a choice independently of its position or the text that fits on screen.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Choice {
-    Pane(TabPane),
-    Width,
-    NewTabs,
-    ClaudeLimits,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Panel {
+    Layout,
+    Tune,
+    Appearance,
+    Workflow,
+    Health,
+    Diagnostics,
+    Save(SaveKind),
+    Confirm(Confirm),
 }
 
-impl Choice {
-    const ALL: [Self; 6] = [
-        Self::Pane(TabPane::Outline),
-        Self::Pane(TabPane::History),
-        Self::Pane(TabPane::Usage),
-        Self::Width,
-        Self::NewTabs,
-        Self::ClaudeLimits,
-    ];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveKind {
+    Layout,
+    Appearance,
+    Workflow,
+}
 
-    /// Shorten the labels so a 28-column pane still has room for all three columns.
-    fn labels(self, compact: bool) -> (&'static str, &'static str) {
-        match (self, compact) {
-            (Self::Pane(TabPane::Outline), false) => ("Outline", "Files on the left"),
-            (Self::Pane(TabPane::History), false) => ("History", "Commits on the left"),
-            (Self::Pane(TabPane::Usage), false) => ("Usage", "Limits on the left"),
-            (Self::Width, false) => ("Column width", "Left side of the tab"),
-            (Self::NewTabs, false) => ("Arrange new shell tabs", "New sessions too; skips commands"),
-            (Self::ClaudeLimits, false) => ("Show Claude Code limits", "For the usage pane"),
-            (Self::Pane(TabPane::Outline), true) => ("Outline", "Files"),
-            (Self::Pane(TabPane::History), true) => ("History", "Git"),
-            (Self::Pane(TabPane::Usage), true) => ("Usage", "Limits"),
-            (Self::Width, true) => ("Column width", "Left"),
-            (Self::NewTabs, true) => ("Shell tabs", "Auto"),
-            (Self::ClaudeLimits, true) => ("Claude limits", "Usage"),
+impl SaveKind {
+    fn panel(self) -> Panel {
+        match self {
+            Self::Layout => Panel::Layout,
+            Self::Appearance => Panel::Appearance,
+            Self::Workflow => Panel::Workflow,
         }
     }
 }
 
-enum Installed {
-    Unreadable,
-    Absent,
-    Active(Layout),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirm {
+    UseGlobal,
+    UseGlobalPrefs(SaveKind),
+    Repair,
+    Remove,
 }
 
-/// Holds unsaved choices separately from what is already installed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Tree,
+    Sidebar,
+    Capture,
+    Tune,
+    Try,
+    Undo,
+    SaveLayout,
+    UseGlobal,
+    Pane(TabPane),
+    Side,
+    Width,
+    Order(usize),
+    OutlineShare,
+    UsageRows,
+    AutoArrange,
+    Back,
+    Icons,
+    Activity,
+    GitMarks,
+    UsageStyle,
+    FollowProject,
+    FollowActivity,
+    ChangesOnly,
+    HistoryFollow,
+    ClaudeLimits,
+    SaveClaude,
+    SavePrefs,
+    UseGlobalPrefs,
+    Diagnostics,
+    Repair,
+    Remove,
+    SaveGlobal,
+    SaveWorktree,
+    Cancel,
+    Continue,
+}
+
+const LAYOUT: &[Row] =
+    &[Row::Tree, Row::Sidebar, Row::Capture, Row::Tune, Row::Try, Row::Undo, Row::SaveLayout, Row::UseGlobal];
+const TUNE: &[Row] = &[
+    Row::Pane(TabPane::Outline),
+    Row::Pane(TabPane::History),
+    Row::Pane(TabPane::Usage),
+    Row::Side,
+    Row::Width,
+    Row::Order(0),
+    Row::Order(1),
+    Row::Order(2),
+    Row::OutlineShare,
+    Row::UsageRows,
+    Row::AutoArrange,
+    Row::Back,
+];
+const WORKFLOW: &[Row] = &[
+    Row::FollowProject,
+    Row::FollowActivity,
+    Row::ChangesOnly,
+    Row::HistoryFollow,
+    Row::SavePrefs,
+    Row::UseGlobalPrefs,
+    Row::ClaudeLimits,
+    Row::SaveClaude,
+];
+
+/// The draft is never written when navigating, capturing or trying a layout.
 pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     store: Option<Store>,
     inside: bool,
     offered: bool,
     target: Option<rex::Target>,
+    root: Option<PathBuf>,
     run: R,
     layout: Layout,
-    installed: Installed,
+    saved: Option<Layout>,
+    scope: Scope,
+    installed: bool,
+    trial: Option<(profiles::Trial, Layout)>,
+    tab_size: Option<(usize, usize)>,
+    prefs: Preferences,
+    saved_prefs: Option<Preferences>,
+    prefs_scope: Source,
     claude: Claude,
     show_limits: bool,
-    selected: Choice,
-    message: Option<(&'static str, Style)>,
+    panel: Panel,
+    selected: usize,
+    visible: draw::Visible,
+    health: String,
+    health_top: usize,
+    icon_override: Option<IconMode>,
+    message: Option<(Cow<'static, str>, Style)>,
+    real: bool,
+    status_failed: bool,
 }
 
 impl Setup {
     pub fn open(offered: bool) -> Self {
-        let mut setup = Self::new(Store::real(), rex::inside(), rex::Target::current(), rex::run);
+        let inside = rex::inside();
+        let target = rex::Target::current();
+        let store = Store::real();
+        // For scoped settings use the caller's shell, never the focused pane.
+        let (root, tab_size) = if inside {
+            store.as_ref().zip(target.as_ref()).map_or((None, None), |(store, target)| store.tab_context(target))
+        } else {
+            (crate::preferences::worktree(Path::new(".")), None)
+        };
+        let mut setup = Self::new(store, inside, target, root, rex::run);
+        setup.tab_size = tab_size;
+        setup.icon_override = IconMode::environment();
+        if let Err(why) = setup.reload_prefs() {
+            setup.report(Err(why));
+        }
         setup.offered = offered;
+        setup.real = true;
+        if setup.message.as_ref().is_some_and(|(_, style)| *style == DEL.bold()) {
+            setup.failure_status(true);
+        }
         setup
     }
 }
 
 impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
-    /// Start from installed choices without reading Rex's files outside Rex.
-    fn new(store: Option<Store>, inside: bool, target: Option<rex::Target>, run: R) -> Self {
-        let mut message = None;
-        let mut layout = Layout::default();
-        let mut installed = Installed::Unreadable;
-        if inside && let Some(store) = &store {
-            match store.layout() {
-                Ok((saved, active)) => {
-                    installed = if active { Installed::Active(saved.clone()) } else { Installed::Absent };
-                    layout = saved;
-                    if store.rex_reload_pending() {
-                        message = Some(("Rex still needs to reload. Check your choices, then press s.", FAINT));
-                    }
-                }
-                Err(why) => message = Some((why, Style::PLAIN.bold())),
-            }
-        }
+    fn new(store: Option<Store>, inside: bool, target: Option<rex::Target>, root: Option<PathBuf>, run: R) -> Self {
         let claude = store.as_ref().map_or(Claude::Invalid, Store::claude);
-        Self {
+        let mut setup = Self {
             store,
             inside,
             offered: false,
             target,
+            root,
             run,
-            layout,
-            installed,
+            layout: Layout::default(),
+            saved: None,
+            scope: Scope::Global,
+            installed: false,
+            trial: None,
+            tab_size: None,
+            prefs: Preferences::default(),
+            saved_prefs: None,
+            prefs_scope: Source::Default,
             claude,
             show_limits: claude == Claude::On,
-            selected: if inside { Choice::Pane(TabPane::Outline) } else { Choice::ClaudeLimits },
-            message,
-        }
-    }
-
-    /// Only a successful save makes the current choices the new baseline.
-    fn save(&mut self) -> Result<&'static str, &'static str> {
-        let Some(store) = &self.store else { return Err("Could not find your settings folders.") };
-        let limits = self.limit_change();
-        let remove = !self.layout.enabled() && matches!(self.installed, Installed::Active(_));
-        let saved = store.save(self.inside.then_some(&self.layout), limits, &self.run)?;
-        if self.inside {
-            self.installed =
-                if self.layout.enabled() { Installed::Active(self.layout.clone()) } else { Installed::Absent };
-        }
-        self.claude = store.claude();
-        self.show_limits = self.claude == Claude::On;
-        Ok(match saved {
-            Saved::ListenerDidNotStart => "Saved, but new tabs won't be arranged. Save again to retry.",
-            Saved::ListenerDidNotStop if remove => "Removed milo from Rex, but could not stop arranging new tabs.",
-            Saved::ListenerDidNotStop => "Saved, but could not stop arranging new tabs.",
-            Saved::Ready if remove && limits.is_some() => "Removed milo from Rex. Saved Claude Code choices.",
-            Saved::Ready if remove => "Removed milo from Rex.",
-            Saved::Ready if self.inside && self.layout.enabled() && limits.is_some() => {
-                "Saved Rex and Claude Code choices."
+            panel: if inside { Panel::Layout } else { Panel::Workflow },
+            selected: 0,
+            visible: draw::Visible::default(),
+            health: String::new(),
+            health_top: 0,
+            icon_override: None,
+            message: None,
+            real: false,
+            status_failed: false,
+        };
+        if inside {
+            match setup.reload_layout() {
+                Ok(()) if setup.store.as_ref().is_some_and(Store::rex_reload_pending) => {
+                    setup.report(Err("Rex still needs to reload. Open Health to repair the integration."));
+                }
+                Ok(()) => {}
+                Err(why) => {
+                    setup.report(Err(why));
+                }
             }
-            Saved::Ready if self.inside && self.layout.enabled() => "Saved Rex layout choices.",
-            Saved::Ready if limits.is_some() => "Saved Claude Code choices.",
-            Saved::Ready => "No changes to save.",
-        })
-    }
-
-    /// Leave Claude's file alone if the existing choice is unchanged or not ours.
-    fn limit_change(&self) -> Option<bool> {
-        (self.claude.editable() && self.show_limits != (self.claude == Claude::On)).then_some(self.show_limits)
-    }
-
-    /// Try the draft in this tab without saving or touching other tabs.
-    fn arrange(&self) -> Result<(), &'static str> {
-        let Some(store) = &self.store else { return Err("Could not find your settings folders.") };
-        let Some(target) = &self.target else { return Err("Could not find this Rex pane.") };
-        store.arrange(&self.layout, target, &self.run)
-    }
-
-    /// Rex choices are irrelevant outside Rex; Claude limits work in either place.
-    fn choices(&self) -> &'static [Choice] {
-        if self.inside { &Choice::ALL } else { &[Choice::ClaudeLimits] }
-    }
-
-    fn selection(&self) -> usize {
-        self.choices().iter().position(|&choice| choice == self.selected).expect("selected choice is visible")
-    }
-
-    /// Keep the cursor on the first or last choice rather than wrapping.
-    fn move_selection(&mut self, by: isize) {
-        let choices = self.choices();
-        self.selected = choices[self.selection().saturating_add_signed(by).min(choices.len() - 1)];
-    }
-
-    fn toggle(&mut self) {
-        match self.selected {
-            Choice::Pane(pane) => self.layout.toggle(pane),
-            Choice::Width => self.layout.next_width(),
-            Choice::NewTabs => self.layout.new_tabs = !self.layout.new_tabs,
-            Choice::ClaudeLimits if self.claude.editable() => self.show_limits = !self.show_limits,
-            Choice::ClaudeLimits => {}
+            setup.selected = match setup.layout.panes {
+                [true, false, false] => 0, // Just the tree
+                [true, true, true] => 1,   // Project sidebar
+                _ => 3,                    // Customize panes
+            };
         }
+        setup
+    }
+
+    fn reload_layout(&mut self) -> Result<(), &'static str> {
+        let (layout, installed, scope) = self.store()?.layout_for(self.root.as_deref())?;
+        self.saved = Some(layout.clone());
+        self.layout = layout;
+        self.installed = installed;
+        self.scope = scope;
+        Ok(())
+    }
+
+    fn store(&self) -> Result<&Store, &'static str> {
+        self.store.as_ref().ok_or("Could not find your settings folders.")
+    }
+
+    fn target(&self) -> Result<&rex::Target, &'static str> {
+        self.target.as_ref().ok_or("Could not find this Rex pane.")
+    }
+
+    fn rows(&self) -> &'static [Row] {
+        match self.panel {
+            Panel::Layout if !self.inside => &[],
+            Panel::Layout => LAYOUT,
+            Panel::Tune => TUNE,
+            Panel::Appearance => {
+                &[Row::Icons, Row::Activity, Row::GitMarks, Row::UsageStyle, Row::SavePrefs, Row::UseGlobalPrefs]
+            }
+            Panel::Workflow => WORKFLOW,
+            Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
+            Panel::Diagnostics => &[],
+            Panel::Save(_) if self.root.is_some() => &[Row::Cancel, Row::SaveGlobal, Row::SaveWorktree],
+            Panel::Save(_) => &[Row::Cancel, Row::SaveGlobal],
+            Panel::Confirm(_) => &[Row::Cancel, Row::Continue],
+        }
+    }
+
+    fn select_panel(&mut self, panel: Panel, selected: usize) {
+        self.panel = panel;
+        self.selected = selected;
+        self.visible = draw::Visible::default();
         self.message = None;
     }
 
-    /// Keep the mark, label, value and explanation aligned even on the narrow layout.
-    fn choice(&self, s: &mut Screen, choice: Choice, y: usize, width: usize) {
-        let toggle = |enabled| (if enabled { "On" } else { "Off" }, Some(enabled));
-        let (status, enabled) = match choice {
-            Choice::Pane(pane) => toggle(self.layout.chosen(pane)),
-            Choice::Width => (self.layout.width_name(), None),
-            Choice::NewTabs => toggle(self.layout.new_tabs),
-            Choice::ClaudeLimits if self.claude == Claude::NotOwned => toggle(true),
-            Choice::ClaudeLimits if !self.claude.editable() => ("—", None),
-            Choice::ClaudeLimits => toggle(self.show_limits),
+    fn back(&mut self) {
+        let (panel, selected) = match self.panel {
+            Panel::Tune => (Panel::Layout, 3),
+            Panel::Save(kind) => (kind.panel(), if kind == SaveKind::Layout { 6 } else { 4 }),
+            Panel::Confirm(Confirm::UseGlobal) => (Panel::Layout, 7),
+            Panel::Confirm(Confirm::UseGlobalPrefs(kind)) => (kind.panel(), 5),
+            Panel::Confirm(Confirm::Repair) => (Panel::Health, 1),
+            Panel::Confirm(Confirm::Remove) => (Panel::Health, 2),
+            Panel::Diagnostics => (Panel::Health, 0),
+            _ => (Panel::Layout, 0),
         };
-        // A filled or hollow mark and a word say the same as the colour.
-        let colour = match enabled {
-            Some(true) => ADD,
-            Some(false) => FAINT,
-            None if choice == Choice::Width => Style::fg(screen::CYAN),
-            None => FAINT,
+        self.select_panel(panel, selected);
+    }
+
+    fn next_panel(&mut self) {
+        let next = match self.panel {
+            Panel::Layout | Panel::Tune => Panel::Appearance,
+            Panel::Appearance => Panel::Workflow,
+            Panel::Workflow => Panel::Health,
+            Panel::Health | Panel::Diagnostics => Panel::Layout,
+            Panel::Save(_) | Panel::Confirm(_) => return,
         };
-        let selected = choice == self.selected;
-        let weight = |style: Style| if selected { style.bold() } else { style };
-        let compact = width < 49;
-        let (value, explanation) =
-            if compact { (16.min(width.saturating_sub(status.len().min(6))), 23) } else { (28, 36) };
-        let (name, detail) = choice.labels(compact);
-        if selected {
-            s.put(0, y, 1, "›", Style::fg(screen::CYAN).bold());
+        self.select_panel(next, 0);
+    }
+
+    fn save_layout(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
+        if self.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
+            self.undo()?;
         }
-        let name_at = if compact { 2 } else { 4 };
-        if let Some(enabled) = enabled.filter(|_| !compact) {
-            s.put(2, y, 1, if enabled { "●" } else { "○" }, colour);
+        let auto_changed = self.saved.as_ref().is_some_and(|saved| saved.new_tabs != self.layout.new_tabs);
+        let draft_auto = self.layout.new_tabs;
+        let saved = self.store()?.save_for(&self.layout, scope, self.root.as_deref(), None, &self.run)?;
+        self.reload_layout()?;
+        if self.trial.as_ref().is_some_and(|(_, tried)| same_geometry(tried, &self.layout)) {
+            self.trial = None;
         }
-        s.put_fit(name_at, y, value.min(width).saturating_sub(name_at + 1), name, weight(Style::PLAIN));
-        s.put_fit(value, y, width.saturating_sub(value).min(6), status, weight(colour));
-        s.put_fit(explanation, y, width.saturating_sub(explanation), detail, FAINT);
-        if selected && !compact {
-            s.wash(0, y, width, Wash::Bar);
+        if scope == Scope::Worktree && auto_changed {
+            self.layout.new_tabs = draft_auto;
+        }
+        self.back();
+        match saved {
+            Saved::ListenerDidNotStart => Err("Saved, but auto-arrange did not start. Open Health to repair it."),
+            Saved::ListenerDidNotStop => Err("Saved, but auto-arrange did not stop. Open Health to repair it."),
+            Saved::Ready if scope == Scope::Worktree && auto_changed => {
+                Ok("Saved this worktree's layout. Save globally to change auto-arrange.")
+            }
+            Saved::Ready if scope == Scope::Worktree => Ok("Saved this worktree's layout."),
+            Saved::Ready if self.scope == Scope::Worktree => {
+                Ok("Saved the global default. This worktree still uses its own layout.")
+            }
+            Saved::Ready => Ok("Saved the global default."),
         }
     }
 
-    fn footer(&self, s: &mut Screen) {
-        if s.w < 17 {
-            if s.w >= 8 {
-                s.put(1, s.h - 1, s.w - 1, if self.offered { "q next" } else { "q quit" }, FAINT);
-            }
-            return;
-        }
-        let last = if self.offered { "q next · ? help" } else { "q quit · ? help" };
-        let (first, keys): (&str, &[&str]) = if !self.can_save() {
-            ("", &[])
-        } else if s.w < 40 {
-            ("s save", if self.inside { &["a try"] } else { &["Space"] })
-        } else if self.inside {
-            ("↑↓ move", &["Space change", "a try", "s save"])
-        } else {
-            ("Space change", &["s save"])
-        };
-        help::draw_hint(s, first, keys, last);
+    fn reload_prefs(&mut self) -> Result<(), &'static str> {
+        let (prefs, source) = Preferences::resolve(self.root.as_deref())
+            .map_err(|_| "Could not read Milo's pane preferences. They were left alone.")?;
+        self.saved_prefs = Some(prefs);
+        self.prefs = prefs;
+        self.prefs_scope = source;
+        Ok(())
     }
 
-    /// Scroll only the choices, leaving the instructions and footer in place when possible.
-    fn draw_choices(&self, s: &mut Screen, end: usize) {
-        let (status, instructions): (&str, &[&str]) = if self.inside {
-            let status = match self.installed {
-                Installed::Active(_) => "Rex layout installed",
-                Installed::Absent => "Rex: not set up yet",
-                Installed::Unreadable => "Could not read Rex settings",
-            };
-            (status, &[])
-        } else {
-            const OUTSIDE: &str = "Open setup in Rex to arrange tabs.";
-            const PANES: &str = "Panes work anywhere: milo outline, milo history, milo usage.";
-            let instructions: &[&str] = if s.w > PANES.len() {
-                &[OUTSIDE, PANES]
-            } else {
-                &[OUTSIDE, "Panes work anywhere:", "milo outline", "milo history", "milo usage"]
-            };
-            (if self.claude == Claude::Off { "Not set up yet" } else { "" }, instructions)
+    fn save_prefs(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
+        let root = match scope {
+            Scope::Global => None,
+            Scope::Worktree => Some(self.root.as_deref().ok_or("This tab is not in a Git worktree.")?),
         };
-        // A wide pane says whether Rex is set up beside the title.
-        let beside_title = self.inside && s.w >= 49;
-        if beside_title {
-            let (mark, colour) = match self.installed {
-                Installed::Active(_) => ("●", ADD),
-                Installed::Absent => ("○", Style::fg(screen::YELLOW)),
-                Installed::Unreadable => ("●", DEL),
-            };
-            s.put(11, 0, 3, " · ", FAINT);
-            s.put(14, 0, 1, mark, colour);
-            s.put(16, 0, s.w - 16, status, FAINT);
-        }
-        let mut top = 1;
-        if end > 4 {
-            if self.offered {
-                s.put_fit(1, top, s.w - 1, "Set up panes for Rex tabs.", FAINT);
-                top += 1;
+        self.prefs.save(root).map_err(|_| "Could not save Milo's pane preferences.")?;
+        self.reload_prefs()?;
+        self.back();
+        Ok(match (scope, &self.prefs_scope) {
+            (Scope::Worktree, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
+            (Scope::Global, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
+            (Scope::Global, _) => "Saved global pane preferences. Reopen panes to apply.",
+        })
+    }
+
+    fn use_global_prefs(&mut self) -> Result<&'static str, &'static str> {
+        let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
+        Preferences::clear(root).map_err(|_| "Could not clear this worktree's pane preferences.")?;
+        self.reload_prefs()?;
+        self.back();
+        Ok("This worktree now uses global pane preferences. Reopen panes to apply.")
+    }
+
+    fn change_pref(&mut self, row: Row) {
+        match row {
+            Row::Icons => {
+                self.prefs.icons = match self.prefs.icons {
+                    IconMode::Nerd => IconMode::Plain,
+                    IconMode::Plain => IconMode::Off,
+                    IconMode::Off => IconMode::Nerd,
+                };
             }
-            if !beside_title && !status.is_empty() {
-                s.put_fit(1, top, s.w - 1, status, FAINT);
-                top += 1;
+            Row::Activity => self.prefs.static_marks = !self.prefs.static_marks,
+            Row::GitMarks => self.prefs.text_git_marks = !self.prefs.text_git_marks,
+            Row::UsageStyle => self.prefs.usage_large_figures = !self.prefs.usage_large_figures,
+            Row::FollowProject => {
+                self.prefs.project_mode = match self.prefs.project_mode {
+                    ProjectMode::Follow => ProjectMode::Pin,
+                    ProjectMode::Pin => ProjectMode::Follow,
+                };
             }
-            let width = s.w - 1;
-            let lines = instructions.iter().flat_map(|text| wrap(text, width)).take(end - top - 1);
-            for text in lines {
-                s.put(1, top, width, text, FAINT);
-                top += 1;
-            }
-        } else if !beside_title && s.w >= 49 {
-            let status = instructions.first().copied().unwrap_or(status);
-            s.put(11, 0, 3, " · ", FAINT);
-            s.put(14, 0, s.w - 14, status, FAINT);
-        }
-        let choices = self.choices();
-        let plan = self.save_plan();
-        let steps = plan.iter().flatten().count();
-        // With room for everything, the choices stand in two headed groups
-        // and each part of the screen has a blank row above it.
-        let (panes, options) = choices.split_at(choices.len().min(4));
-        let roomy = beside_title && !options.is_empty() && end >= top + 18 + if steps > 0 { steps + 2 } else { 0 };
-        let mut next;
-        if roomy {
-            next = top;
-            for (heading, group) in [("Panes", panes), ("Options", options)] {
-                ui::section_heading(s, next + 1, s.w - 1, heading);
-                next += 2;
-                for &choice in group {
-                    self.choice(s, choice, next, s.w);
-                    next += 1;
-                }
-            }
-            next += usize::from(steps > 0);
-        } else {
-            let shown = end.saturating_sub(top).min(choices.len());
-            let skip = self.selection().saturating_sub(shown.saturating_sub(1));
-            next = top + shown;
-            for (row, &choice) in choices[skip..skip + shown].iter().enumerate() {
-                self.choice(s, choice, top + row, s.w);
-            }
-        }
-        if next < end && steps > 0 {
-            next = Self::draw_save_plan(s, &plan, next, end);
-        }
-        let issue = match self.claude {
-            Claude::Foreign => "Milo will leave your Claude Code status line alone.",
-            Claude::NotOwned => "You already have Milo on the Claude Code status line.",
-            Claude::Invalid => "Could not read Claude Code settings. Milo will leave them alone.",
-            Claude::On | Claude::Off => "",
-        };
-        for text in wrap(issue, s.w - 1) {
-            if next >= end {
-                break;
-            }
-            s.put(1, next, s.w - 1, text, FAINT);
-            next += 1;
-        }
-        if self.inside && s.w >= 36 && end >= next + 8 {
-            let selected = if let Choice::Pane(pane) = self.selected { Some(pane) } else { None };
-            sketch(s, 2, next + 1, &self.layout, selected);
+            Row::FollowActivity => self.prefs.follow_activity = !self.prefs.follow_activity,
+            Row::ChangesOnly => self.prefs.changes_only = !self.prefs.changes_only,
+            Row::HistoryFollow => self.prefs.history_follow_new = !self.prefs.history_follow_new,
+            _ => unreachable!("only preferences are changed here"),
         }
     }
 
-    /// What saving would change in Rex, in its new tabs and in Claude Code:
-    /// actual file changes, not just which toggles are on.
-    fn save_plan(&self) -> [Option<Step>; 3] {
-        let add = |text| Some(("+", ADD, text));
-        let remove = |text| Some(("−", DEL, text));
-        let saved = if let Installed::Active(layout) = &self.installed { Some(layout) } else { None };
-        let rex = if !self.inside {
-            None
-        } else if self.layout.enabled() {
-            match saved {
-                None => add("Add Milo actions to Rex."),
-                Some(layout) if layout != &self.layout => {
-                    Some(("~", Style::fg(screen::YELLOW), "Update the Rex layout."))
-                }
-                Some(_) => None,
-            }
-        } else if saved.is_some() {
-            remove("Remove Milo actions from Rex.")
-        } else {
-            None
-        };
-        let listener = match (saved.is_some_and(|layout| layout.new_tabs), self.layout.new_tabs) {
-            (false, true) => add("Arrange new shell tabs."),
-            (true, false) => remove("Stop arranging new shell tabs."),
-            _ => None,
-        };
-        let claude = match self.limit_change() {
-            Some(true) => add("Add milo to Claude Code's status line."),
-            Some(false) => remove("Take milo off Claude Code's status line."),
-            None => None,
-        };
-        [rex, listener, claude]
+    fn refresh_health(&mut self) {
+        self.health =
+            self.store().map_or_else(str::to_owned, |store| match doctor::report_for(store, self.root.as_deref()) {
+                Ok(report) | Err(report) => report,
+            });
+        self.health_top = 0;
     }
 
-    /// Each step has its sign in the margin; a long one wraps under its own words.
-    fn draw_save_plan(s: &mut Screen, plan: &[Option<Step>; 3], mut y: usize, end: usize) -> usize {
-        s.put(1, y, s.w - 1, "On save:", HEADING);
-        y += 1;
-        let width = s.w.saturating_sub(3);
-        for (sign, colour, text) in plan.iter().flatten() {
-            for (row, line) in wrap(text, width).enumerate() {
-                if y == end {
-                    return y;
+    fn maintain(&mut self, remove: bool) -> bool {
+        let result = if remove { doctor::remove() } else { doctor::repair() };
+        if result.is_ok() {
+            if self.inside {
+                self.saved = None;
+                if let Err(why) = self.reload_layout() {
+                    self.back();
+                    return self.report(Err(why));
                 }
-                if row == 0 {
-                    s.put(1, y, 1, sign, *colour);
-                }
-                s.put(3, y, width, line, FAINT);
-                y += 1;
             }
+            self.claude = self.store.as_ref().map_or(Claude::Invalid, Store::claude);
+            self.show_limits = self.claude == Claude::On;
+            self.back();
         }
-        y
+        self.report_text(result.map(Cow::Owned).map_err(Cow::Owned))
+    }
+
+    fn save_claude(&mut self) -> Result<&'static str, &'static str> {
+        if !self.claude.editable() {
+            return Err("Milo will leave this Claude Code status line alone.");
+        }
+        if self.show_limits == (self.claude == Claude::On) {
+            return Ok("No Claude Code changes to save.");
+        }
+        self.store()?.save(None, Some(self.show_limits), &self.run)?;
+        self.claude = self.store()?.claude();
+        self.show_limits = self.claude == Claude::On;
+        Ok("Saved Claude Code choices.")
+    }
+
+    fn use_global(&mut self) -> Result<&'static str, &'static str> {
+        let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
+        self.store()?.use_global(root)?;
+        self.reload_layout()?;
+        self.back();
+        Ok("This worktree now uses the global default.")
+    }
+
+    fn preset(&mut self, tree: bool) {
+        let mut layout = Layout { new_tabs: self.layout.new_tabs, ..Layout::default() };
+        if tree {
+            layout.panes = [true, false, false];
+        }
+        self.layout = layout;
+    }
+
+    fn capture(&mut self) -> Result<&'static str, &'static str> {
+        if self.trial.is_some() {
+            return Err("Undo the current trial before capturing this tab.");
+        }
+        let store = self.store()?;
+        let target = self.target()?;
+        let mut layout = store.capture(target)?;
+        let size = store.tab_size(target);
+        layout.new_tabs = self.layout.new_tabs;
+        self.layout = layout;
+        self.tab_size = size.or(self.tab_size);
+        Ok("Captured Milo panes from this tab. Nothing was saved.")
+    }
+
+    fn refresh_preview(&mut self) -> Result<&'static str, &'static str> {
+        self.tab_size = self.store()?.tab_size(self.target()?);
+        if self.tab_size.is_some() {
+            Ok("Preview updated to this tab's current size.")
+        } else {
+            Err("Rex did not report tab dimensions; the preview shows estimated proportions.")
+        }
+    }
+
+    fn try_layout(&mut self) -> Result<&'static str, &'static str> {
+        if self.trial.is_some() {
+            return Err("Undo the current trial before trying another layout.");
+        }
+        if !self.layout.panes.contains(&true) {
+            return Err("There are no Milo panes to try.");
+        }
+        let trial = self.store()?.trial(&self.layout, self.target()?)?;
+        let temporary = trial.temporary();
+        self.trial = Some((trial, self.layout.clone()));
+        Ok(if temporary {
+            "Previewing a temporary rail. Press u to undo. Existing panes are untouched."
+        } else {
+            "Trying this layout. Press u to undo. Nothing was saved."
+        })
+    }
+
+    fn undo(&mut self) -> Result<&'static str, &'static str> {
+        let Some((trial, _)) = &self.trial else { return Err("There is no trial to undo.") };
+        trial.undo()?;
+        self.trial = None;
+        Ok("Trial undone. No settings changed.")
+    }
+
+    fn disabled(&self, row: Row) -> bool {
+        match row {
+            Row::Capture => self.target.is_none() || self.trial.is_some(),
+            Row::Try => self.target.is_none() || self.trial.is_some() || !self.layout.panes.contains(&true),
+            Row::Undo => self.trial.is_none(),
+            Row::UseGlobal => self.scope != Scope::Worktree,
+            Row::UseGlobalPrefs => self.prefs_scope != Source::Worktree,
+            Row::SaveLayout => self.saved.is_none(),
+            Row::SavePrefs => self.saved_prefs.is_none(),
+            Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
+            Row::Repair | Row::Remove => self.trial.is_some(),
+            _ => false,
+        }
+    }
+
+    fn activate(&mut self, row: Row) -> bool {
+        if self.disabled(row) {
+            return false;
+        }
+        let result = match row {
+            Row::Capture => self.capture(),
+            Row::Try => self.try_layout(),
+            Row::Undo => self.undo(),
+            Row::SaveClaude => self.save_claude(),
+            Row::SaveGlobal | Row::SaveWorktree => {
+                let Panel::Save(kind) = self.panel else { return false };
+                let scope = if row == Row::SaveGlobal { Scope::Global } else { Scope::Worktree };
+                if kind == SaveKind::Layout { self.save_layout(scope) } else { self.save_prefs(scope) }
+            }
+            Row::Continue => match self.panel {
+                Panel::Confirm(Confirm::UseGlobal) => self.use_global(),
+                Panel::Confirm(Confirm::UseGlobalPrefs(_)) => self.use_global_prefs(),
+                Panel::Confirm(Confirm::Repair) => return self.maintain(false),
+                Panel::Confirm(Confirm::Remove) => return self.maintain(true),
+                _ => return false,
+            },
+            _ => {
+                self.message = None;
+                if !matches!(
+                    row,
+                    Row::Tune
+                        | Row::SaveLayout
+                        | Row::UseGlobal
+                        | Row::SavePrefs
+                        | Row::UseGlobalPrefs
+                        | Row::Back
+                        | Row::Cancel
+                        | Row::Diagnostics
+                        | Row::Repair
+                        | Row::Remove
+                ) {
+                    self.failure_status(false);
+                }
+                match row {
+                    Row::Tree => self.preset(true),
+                    Row::Sidebar => self.preset(false),
+                    Row::Tune => self.select_panel(Panel::Tune, 0),
+                    Row::SaveLayout => self.select_panel(Panel::Save(SaveKind::Layout), 0),
+                    Row::UseGlobal => self.select_panel(Panel::Confirm(Confirm::UseGlobal), 0),
+                    Row::Pane(pane) => self.layout.toggle(pane),
+                    Row::Side => {
+                        self.layout.geometry.side = match self.layout.geometry.side {
+                            Side::Left => Side::Right,
+                            Side::Right => Side::Left,
+                        };
+                    }
+                    Row::Width => self.layout.next_width(),
+                    Row::Order(index) => {
+                        let order = &mut self.layout.geometry.order;
+                        let next = TabPane::ALL[(order[index] as usize + 1) % TabPane::ALL.len()];
+                        let other = order.iter().position(|&pane| pane == next).expect("order includes every pane");
+                        order.swap(index, other);
+                    }
+                    Row::OutlineShare => {
+                        cycle(&mut self.layout.outline_share, &["0.50", "0.60", "0.70", "0.80"]);
+                        self.layout.geometry.shares = None;
+                    }
+                    Row::UsageRows => {
+                        cycle(&mut self.layout.usage_rows, &["6", "10", "14", "18"]);
+                        self.layout.geometry.shares = None;
+                    }
+                    Row::AutoArrange => self.layout.new_tabs = !self.layout.new_tabs,
+                    Row::Back | Row::Cancel => self.back(),
+                    Row::ClaudeLimits => self.show_limits = !self.show_limits,
+                    Row::SavePrefs | Row::UseGlobalPrefs => {
+                        let kind =
+                            if self.panel == Panel::Appearance { SaveKind::Appearance } else { SaveKind::Workflow };
+                        let panel = if row == Row::SavePrefs {
+                            Panel::Save(kind)
+                        } else {
+                            Panel::Confirm(Confirm::UseGlobalPrefs(kind))
+                        };
+                        self.select_panel(panel, 0);
+                    }
+                    Row::Diagnostics => {
+                        self.refresh_health();
+                        self.select_panel(Panel::Diagnostics, 0);
+                    }
+                    Row::Repair => self.select_panel(Panel::Confirm(Confirm::Repair), 0),
+                    Row::Remove => self.select_panel(Panel::Confirm(Confirm::Remove), 0),
+                    _ => self.change_pref(row),
+                }
+                return true;
+            }
+        };
+        self.report(result)
     }
 }
 
-/// Wrap setup notices without allocating or cutting key words off a narrow pane.
-fn wrap(mut text: &str, width: usize) -> impl Iterator<Item = &str> + Clone {
-    std::iter::from_fn(move || {
-        if text.is_empty() {
-            return None;
-        }
-        let mut end = text.len();
-        let mut columns = 0;
-        let mut space = None;
-        for (i, ch) in text.char_indices() {
-            columns += char_width(ch);
-            if columns > width {
-                end = if ch == ' ' { i } else { space.unwrap_or(i) };
-                break;
-            }
-            if ch == ' ' {
-                space = Some(i);
-            }
-        }
-        let (line, rest) = text.split_at(end);
-        text = rest.trim_start();
-        Some(line)
-    })
+fn same_geometry(first: &Layout, second: &Layout) -> bool {
+    first.panes == second.panes
+        && first.width == second.width
+        && first.geometry == second.geometry
+        && first.outline_share == second.outline_share
+        && first.usage_rows == second.usage_rows
 }
 
-/// One thing saving would do: its sign, the sign's colour, and the words.
-type Step = (&'static str, Style, &'static str);
-
-/// A seven-row sketch. Each room can be read without the explanations beside
-/// it, and the pane the cursor is on stands out in its room.
-fn sketch(s: &mut Screen, x: usize, y: usize, layout: &Layout, selected: Option<TabPane>) {
-    const LINE: &str = "───────────────────────────────";
-    const INTERIOR: usize = 31;
-    let chosen = TabPane::ALL.map(|pane| layout.chosen(pane));
-    let count = chosen.iter().filter(|&&pane| pane).count();
-    let left = count > 0;
-    let column = layout.sketch_width();
-    let joint = if left { 1 + column } else { 0 };
-    let right = INTERIOR + 1;
-    let mut draw = |x0, row, text| {
-        s.put(x + x0, y + row, INTERIOR + 2 - x0, text, FAINT);
-    };
-    for (row, first, last, split) in [(0, "┌", "┐", "┬"), (6, "└", "┘", "┴")] {
-        draw(0, row, first);
-        draw(1, row, LINE);
-        draw(right, row, last);
-        if left {
-            draw(joint, row, split);
-        }
-    }
-    for row in 1..6 {
-        draw(0, row, "│");
-        draw(right, row, "│");
-        if left {
-            draw(joint, row, "│");
-        }
-    }
-    // One pane sits in the middle of the column; more are spread down it.
-    let (first, step) = match count {
-        1 => (3, 0),
-        2 => (2, 3),
-        _ => (1, 2),
-    };
-    let names = ["Outline", "History", "Usage"].into_iter().zip(TabPane::ALL).zip(chosen);
-    let mut standing_out = None;
-    for (i, (name, pane)) in names.filter_map(|(room, on)| on.then_some(room)).enumerate() {
-        let row = first + i * step;
-        draw(2, row, name);
-        if selected == Some(pane) {
-            standing_out = Some((row, name));
-        }
-        if i + 1 < count {
-            // Two panes leave a blank row above the rule so the first stays centred.
-            let rule = if count == 2 { 4 } else { row + 1 };
-            draw(0, rule, "├");
-            draw(1, rule, &LINE[..3 * column]);
-            draw(joint, rule, "┤");
-        }
-    }
-    draw(joint + 2, 3, "Your work");
-    if let Some((row, name)) = standing_out {
-        s.put(x + 2, y + row, name.len(), name, HEADING);
-    }
+fn cycle(value: &mut String, options: &[&str]) {
+    let next = options.iter().skip_while(|&&option| option != value.as_str()).nth(1).unwrap_or(&options[0]);
+    value.clear();
+    value.push_str(next);
 }
 
 impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
     fn draw(&mut self, s: &mut Screen) {
-        s.clear();
-        if s.w < 4 || s.h == 0 {
-            return;
-        }
-        ui::section_heading(s, 0, s.w - 1, "Milo setup");
-        if s.h == 1 {
-            return;
-        }
-        let mut end = s.h - 1;
-        if let Some((text, style)) = self.message {
-            let rows = wrap(text, s.w - 1).take(end.saturating_sub(2));
-            end -= rows.clone().count();
-            for (row, text) in rows.enumerate() {
-                s.put(1, end + row, s.w - 1, text, style);
-            }
-        }
-        self.draw_choices(s, end);
-        self.footer(s);
+        self.draw_setup(s);
     }
 
     fn help(&self) -> Page {
         use help::{heading, key};
-        let mut rows = vec![heading("Setup keys")];
-        if self.can_save() {
-            rows.push(key("Space", "change (Enter)"));
-        }
+        let mut rows = vec![
+            heading("Setup keys"),
+            key("↑↓    ", "move (k j)"),
+            key("Enter ", "choose or change"),
+            key("1 2 3 4", "switch sections"),
+            key("Tab   ", "next section"),
+        ];
         if self.inside {
-            rows.extend([key("↑↓   ", "move (k j)"), key("a    ", "try in this tab")]);
+            rows.extend([key("a     ", "try in this tab"), key("u     ", "undo trial")]);
         }
-        if self.can_save() {
-            rows.push(key("s    ", "save choices"));
-        }
-        rows.push(key("q    ", if self.offered { "open outline" } else { "quit" }));
+        rows.extend([
+            key("s     ", "choose where to save"),
+            key("r     ", "refresh preview/report"),
+            key("Esc   ", "back"),
+            key("q     ", if self.offered { "open outline" } else { "quit" }),
+        ]);
         Page::new(rows)
     }
 
     fn key(&mut self, key: Key) -> After {
-        match key {
-            Key::Up | Key::Char('k') if self.inside => self.move_selection(-1),
-            Key::Down | Key::Char('j') if self.inside => self.move_selection(1),
-            Key::Enter | Key::Char(' ') if self.selected != Choice::ClaudeLimits || self.claude.editable() => {
-                self.toggle();
+        let modal = matches!(self.panel, Panel::Save(_) | Panel::Confirm(_));
+        if let Some(rows) = key.rows(self.visible.len) {
+            if self.panel == Panel::Diagnostics {
+                self.health_top = self.health_top.saturating_add_signed(rows);
+            } else {
+                self.selected = self.selected.saturating_add_signed(rows).min(self.rows().len().saturating_sub(1));
             }
-            Key::Char('a') if self.inside => {
-                let tried = self.arrange().map(|()| "Tried in this tab. Press s to save your choices.");
-                self.report(tried);
-            }
-            Key::Char('s') if self.can_save() => {
-                let saved = self.save();
-                self.report(saved);
-            }
-            Key::Char('q') | Key::Esc => return After::Leave,
-            _ => return After::Ignored,
+            return After::Stay;
         }
-        After::Stay
+        let action = match key {
+            Key::Enter | Key::Char(' ') => self.rows().get(self.selected).copied(),
+            Key::Click(x, y) => {
+                if let Some(index) = self.visible.index_at(x, y) {
+                    self.selected = index;
+                    return After::Stay;
+                }
+                None
+            }
+            Key::Ctrl(b'i') if !modal => {
+                self.next_panel();
+                return After::Stay;
+            }
+            Key::Char(digit @ '1'..='4') if !modal => {
+                let panel =
+                    [Panel::Layout, Panel::Appearance, Panel::Workflow, Panel::Health][usize::from(digit as u8 - b'1')];
+                self.select_panel(panel, 0);
+                return After::Stay;
+            }
+            Key::Char('a') if self.inside && matches!(self.panel, Panel::Layout | Panel::Tune) => {
+                let result = self.try_layout();
+                self.report(result);
+                return After::Stay;
+            }
+            Key::Char('u') if self.inside && !modal => Some(Row::Undo),
+            Key::Char('r') if self.panel == Panel::Diagnostics => {
+                self.refresh_health();
+                return After::Stay;
+            }
+            Key::Char('r') if self.inside && matches!(self.panel, Panel::Layout | Panel::Tune) => {
+                let result = self.refresh_preview();
+                self.report(result);
+                return After::Stay;
+            }
+            Key::Char('s') => match self.panel {
+                Panel::Layout | Panel::Tune if self.inside => Some(Row::SaveLayout),
+                Panel::Appearance | Panel::Workflow => Some(Row::SavePrefs),
+                _ => None,
+            },
+            Key::Esc if modal || matches!(self.panel, Panel::Tune | Panel::Diagnostics) => {
+                self.back();
+                return After::Stay;
+            }
+            Key::Char('q') | Key::Esc => {
+                if self.trial.is_some()
+                    && let Err(why) = self.undo()
+                {
+                    self.report(Err(why));
+                    return After::Stay;
+                }
+                self.clear_notice();
+                return After::Leave;
+            }
+            _ => None,
+        };
+        if action.is_some_and(|row| self.activate(row)) { After::Stay } else { After::Ignored }
     }
 }
 
 impl<R> Setup<R> {
-    fn can_save(&self) -> bool {
-        self.inside || self.claude.editable()
+    fn failure_status(&mut self, failed: bool) {
+        if self.real && self.inside && failed != self.status_failed {
+            crate::term::setup_status(failed);
+            self.status_failed = failed;
+        }
     }
 
-    fn report(&mut self, result: Result<&'static str, &'static str>) {
+    fn clear_notice(&mut self) {
+        self.message = None;
+        self.failure_status(false);
+    }
+
+    fn report(&mut self, result: Result<&'static str, &'static str>) -> bool {
+        self.report_text(result.map(Cow::Borrowed).map_err(Cow::Borrowed))
+    }
+
+    fn report_text(&mut self, result: Result<Cow<'static, str>, Cow<'static, str>>) -> bool {
+        self.failure_status(result.is_err());
         self.message = Some(match result {
             Ok(message) => (message, FAINT),
-            Err(why) => (why, Style::PLAIN.bold()),
+            Err(why) => (why, DEL.bold()),
         });
+        true
+    }
+}
+
+impl<R> Drop for Setup<R> {
+    fn drop(&mut self) {
+        if let Some((trial, _)) = &self.trial {
+            // Ctrl-C and a disconnected terminal bypass Pane::key.
+            let _ = trial.undo();
+        }
+        self.failure_status(false);
     }
 }
 
@@ -592,172 +779,4 @@ pub fn listen(stop: bool) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fixture::Fixture;
-    use std::fs;
-
-    fn store(fixture: &Fixture) -> Store {
-        Store {
-            init: fixture.root.join("init.lua"),
-            config: fixture.root.join("config"),
-            state: fixture.root.join("state"),
-            claude: fixture.root.join("settings.json"),
-        }
-    }
-
-    fn frame(pane: &mut dyn Pane, width: usize, height: usize) -> Vec<String> {
-        let mut s = Screen::sized(width, height);
-        pane.draw(&mut s);
-        s.text()
-    }
-
-    #[test]
-    fn the_screen_sketch_tracks_panes_and_column_width() {
-        let f = Fixture::folder();
-        let mut pane = Setup::new(Some(store(&f)), true, None, |_| panic!("drawing needs no Rex"));
-        let before = frame(&mut pane, 64, 24);
-        for (label, _) in Choice::ALL.map(|choice| choice.labels(false)) {
-            assert!(before[..11].iter().any(|row| row.contains(label)));
-        }
-        for label in ["Outline", "History", "Usage", "Your work"] {
-            assert!(before[12..].iter().any(|row| row.contains(label)));
-        }
-        assert_eq!(pane.key(Key::Char(' ')), After::Stay);
-        let after = frame(&mut pane, 64, 24);
-        assert!(!after[12..].iter().any(|row| row.contains("Outline")));
-        assert!(after[12..].iter().any(|row| row.contains("History")));
-        for _ in 0..3 {
-            pane.key(Key::Down);
-        }
-        pane.key(Key::Enter);
-        let wider = frame(&mut pane, 64, 24);
-        assert!(wider[6].contains("Medium"));
-        assert_ne!(after[16], wider[16]);
-    }
-
-    #[test]
-    fn a_small_pane_drops_the_sketch_and_keeps_the_cursor_visible() {
-        let f = Fixture::folder();
-        let mut pane = Setup::new(Some(store(&f)), true, None, |_| panic!("drawing needs no Rex"));
-        for _ in 0..4 {
-            pane.key(Key::Char('j'));
-        }
-        let rows = frame(&mut pane, 28, 5);
-        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains("Shell tabs")));
-        assert!(!rows.iter().any(|row| row.contains('┌')));
-        assert_eq!(rows[4].trim(), "s save · q quit · ? help");
-    }
-
-    #[test]
-    fn a_short_setup_screen_still_shows_whether_rex_is_set_up() {
-        let f = Fixture::folder();
-        let mut pane = Setup::new(Some(store(&f)), true, None, |_| true);
-        assert!(frame(&mut pane, 140, 5)[0].contains("Rex: not set up yet"));
-        pane.key(Key::Char('s'));
-        let rows = frame(&mut pane, 140, 5);
-        assert!(rows[0].contains("Rex layout installed"));
-        assert!(rows[3].contains("Saved Rex layout choices."));
-    }
-
-    #[test]
-    fn outside_rex_only_claude_settings_can_be_changed() {
-        let f = Fixture::folder();
-        let store = store(&f);
-        let mut pane = Setup::new(Some(store), false, None, |_| panic!("outside Rex"));
-        let rows = frame(&mut pane, 75, 10);
-        assert!(rows[1].contains("Not set up yet"));
-        assert!(rows[2].contains("Open setup in Rex to arrange tabs"));
-        assert!(rows[3].contains("milo outline, milo history, milo usage"));
-        assert!(rows[4].contains("Show Claude Code limits"));
-        assert!(!rows.iter().any(|row| row.contains("Arrange new shell tabs")));
-        let compact = frame(&mut pane, 28, 20);
-        let words = compact.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ");
-        assert!(words.contains("Open setup in Rex to arrange tabs."));
-        for tool in ["milo outline", "milo history", "milo usage"] {
-            assert!(compact.iter().any(|row| row.trim() == tool));
-        }
-        assert!(words.contains("Claude limits Off"));
-        pane.key(Key::Enter);
-        pane.key(Key::Char('s'));
-        assert!(fs::read_to_string(f.root.join("settings.json")).unwrap().contains("milo claude-status"));
-        assert!(!f.root.join("init.lua").exists());
-        assert_eq!(frame(&mut pane, 75, 10)[8].trim(), "Saved Claude Code choices.");
-    }
-
-    #[test]
-    fn a_foreign_status_line_is_explained_and_cannot_be_toggled() {
-        let f = Fixture::folder();
-        let store = store(&f);
-        let original = r#"{"statusLine":{"type":"command","command":"another-program"}}"#;
-        fs::write(&store.claude, original).unwrap();
-        let mut pane = Setup::new(Some(store), false, None, |_| panic!("outside Rex"));
-        let rows = frame(&mut pane, 78, 10);
-        assert!(rows.iter().any(|row| row.contains("Milo will leave your Claude Code status line alone")));
-        assert!(!rows[9].contains("save"));
-        assert_eq!(pane.key(Key::Enter), After::Ignored);
-        pane.key(Key::Char('s'));
-        assert_eq!(fs::read_to_string(f.root.join("settings.json")).unwrap(), original);
-    }
-
-    #[test]
-    fn the_save_plan_and_footer_stay_visible_after_trying_at_28_columns() {
-        let f = Fixture::folder();
-        let target = rex::Target { session: "session:test".into(), block: "block:test".into() };
-        let mut pane = Setup::new(Some(store(&f)), true, Some(target), |args| args[0] == "do");
-        pane.offered = true;
-        for _ in 0..4 {
-            pane.key(Key::Down);
-        }
-        pane.key(Key::Enter);
-        pane.key(Key::Down);
-        pane.key(Key::Enter);
-        assert_eq!(pane.key(Key::Char('a')), After::Stay);
-        let rows = frame(&mut pane, 28, 20);
-        let words = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ");
-        for text in [
-            "Set up panes for Rex tabs.",
-            "not set up yet",
-            "Add Milo actions to Rex.",
-            "Arrange new shell tabs.",
-            "Add milo to Claude Code's status line.",
-            "Tried in this tab. Press s to save your choices.",
-        ] {
-            assert!(words.contains(text), "{text:?} missing from {rows:?}");
-        }
-        assert_eq!(rows[19].trim(), "s save · q next · ? help");
-        assert!(!f.root.join("init.lua").exists());
-    }
-
-    #[test]
-    fn save_and_removal_report_on_a_row_of_their_own() {
-        let f = Fixture::folder();
-        let mut pane = Setup::new(Some(store(&f)), true, None, |_| true);
-        assert_eq!(pane.key(Key::Char('s')), After::Stay);
-        let rows = frame(&mut pane, 80, 24);
-        assert_eq!(rows[22].trim(), "Saved Rex layout choices.");
-        assert!(rows[23].ends_with("q quit · ? help"));
-        assert_eq!(rows[3].chars().nth(28), Some('O'));
-        assert_eq!(rows[6].chars().nth(28), Some('T'));
-        for _ in 0..3 {
-            pane.key(Key::Enter);
-            pane.key(Key::Down);
-        }
-        let rows = frame(&mut pane, 80, 24);
-        assert!(rows.iter().any(|row| row.contains("Remove Milo actions from Rex.")));
-        assert_eq!(pane.key(Key::Char('s')), After::Stay);
-        let rows = frame(&mut pane, 80, 24);
-        assert_eq!(rows[22].trim(), "Removed milo from Rex.");
-        assert!(rows[23].ends_with("q quit · ? help"));
-    }
-
-    #[test]
-    fn ten_columns_show_the_toggle_and_a_way_out_even_after_an_error() {
-        let f = Fixture::folder();
-        let mut pane = Setup::new(Some(store(&f)), true, None, |_| false);
-        pane.key(Key::Char('a'));
-        let rows = frame(&mut pane, 10, 5);
-        assert!(rows.iter().any(|row| row.starts_with('›') && row.ends_with("On")));
-        assert_eq!(rows[4].trim(), "q quit");
-    }
-}
+mod tests;

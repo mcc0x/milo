@@ -99,8 +99,8 @@ fn codex_shows_reset_when_the_time_passes_without_an_append() {
     usage.fixed_now = Some(NOW + 5);
     assert_eq!(usage.next_frame(), Some(Duration::from_secs(60)));
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].contains("100%") && !rows[1].contains("23%"));
-    assert!(rows[2].split('│').next().unwrap().contains("reset"));
+    assert!(!rows[1].contains("100%") && !rows[1].contains("23%"));
+    assert!(rows[2].split('│').next().unwrap().contains("Reset elapsed"));
 }
 
 #[test]
@@ -148,11 +148,11 @@ fn no_codex_sessions_and_sessions_without_limits_have_different_notes() {
     let f = Fixture::folder();
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
-    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no sessions found");
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no sessions found · Run Codex");
     write(&f, CODEX, "{}\n", NOW);
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
-    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no limits to show");
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no limits to show · Open Codex");
 }
 
 #[test]

@@ -185,6 +185,25 @@ impl Reading {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Source {
+    CodexSession,
+    ClaudeStatus,
+    ClaudeCache,
+    Omp,
+}
+
+impl Source {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CodexSession => "Codex session log",
+            Self::ClaudeStatus => "Milo Claude status line",
+            Self::ClaudeCache => "Claude Code usage cache",
+            Self::Omp => "OMP usage database",
+        }
+    }
+}
+
 /// Remember the file version so an unchanged transcript does not need another read.
 struct CodexFile {
     version: FileVersion,
@@ -276,8 +295,16 @@ impl Codex {
     }
 
     /// Different sources can describe the same account, not separate limits to add.
+    fn reported(&self) -> Option<(&Reading, Source)> {
+        self.files
+            .values()
+            .filter_map(|file| file.reading.as_ref().map(|r| (r, Source::CodexSession)))
+            .chain(self.omp.iter().map(|r| (r, Source::Omp)))
+            .max_by_key(|(r, _)| r.at)
+    }
+
     fn latest(&self) -> Option<&Reading> {
-        self.files.values().filter_map(|file| file.reading.as_ref()).chain(self.omp.as_ref()).max_by_key(|r| r.at)
+        self.reported().map(|(reading, _)| reading)
     }
 }
 
@@ -484,8 +511,15 @@ struct Activity {
 }
 
 impl Claude {
+    fn reported(&self) -> Option<(&Reading, Source)> {
+        [(&self.status, Source::ClaudeStatus), (&self.native, Source::ClaudeCache), (&self.omp, Source::Omp)]
+            .into_iter()
+            .filter_map(|(reading, source)| Some((reading.as_ref()?, source)))
+            .max_by_key(|(reading, _)| reading.at)
+    }
+
     fn latest(&self) -> Option<&Reading> {
-        [&self.status, &self.native, &self.omp].into_iter().flatten().max_by_key(|reading| reading.at)
+        self.reported().map(|(reading, _)| reading)
     }
 
     /// Merge duplicate IDs once per changed scan instead of on every redraw.
@@ -586,6 +620,7 @@ pub struct Usage {
     codex: Codex,
     claude: Claude,
     today: Today,
+    large_figures: bool,
     #[cfg(test)]
     fixed_now: Option<i64>,
     #[cfg(test)]
@@ -595,12 +630,21 @@ pub struct Usage {
 impl Usage {
     pub fn open() -> Self {
         let home = paths::home();
-        let codex = home.as_ref().map(|p| p.join(".codex/sessions"));
-        let claude = home.as_ref().map(|p| p.join(".claude/projects"));
-        let state = paths::state_dir();
-        let mut usage = Self::from_dirs(codex, claude, state, when::now());
-        usage.claude_config = home.as_ref().map(|p| p.join(".claude.json"));
+        let mut usage = Self::for_home(home.as_deref(), when::now());
         usage.omp = omp::Poll::new(omp::database(home.as_deref()), omp::QUERY_WAIT);
+        usage
+    }
+
+    pub fn with_large_figures(mut self, large: bool) -> Self {
+        self.large_figures = large;
+        self
+    }
+
+    fn for_home(home: Option<&Path>, now: i64) -> Self {
+        let codex = home.map(|p| p.join(".codex/sessions"));
+        let claude = home.map(|p| p.join(".claude/projects"));
+        let mut usage = Self::from_dirs(codex, claude, paths::state_dir(), now);
+        usage.claude_config = home.map(|p| p.join(".claude.json"));
         usage
     }
 
@@ -615,6 +659,7 @@ impl Usage {
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
+            large_figures: false,
             #[cfg(test)]
             fixed_now: Some(now),
             #[cfg(test)]
@@ -636,15 +681,25 @@ impl Usage {
             self.codex.omp = reports.codex;
             self.claude.omp = reports.claude;
         }
-        let cutoff = self.today.since(now);
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
+        self.check_limits(now, &mut codex_budget, &mut claude_budget);
+        let cutoff = self.today.since(now);
+        let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, &mut claude_budget);
+        #[cfg(test)]
+        {
+            self.bytes_read = codex_budget.read + claude_budget.read;
+        }
+        claude && !self.omp.pending()
+    }
+
+    fn check_limits(&mut self, now: i64, codex_budget: &mut Budget, claude_budget: &mut Budget) {
         if let Some(path) = &self.limits_file {
             files::read_cached(
                 path,
                 &mut self.claude.saved_version,
                 &mut self.claude.status,
-                &mut claude_budget,
+                claude_budget,
                 status::saved,
             );
         }
@@ -653,18 +708,28 @@ impl Usage {
                 path,
                 &mut self.claude.native_version,
                 &mut self.claude.native,
-                &mut claude_budget,
+                claude_budget,
                 |file, version, budget| status::native(file, version, budget, now),
             );
         }
-        self.codex.check(self.codex_dir.as_deref(), now, &mut codex_budget);
-        let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, &mut claude_budget);
-        #[cfg(test)]
-        {
-            self.bytes_read = codex_budget.read + claude_budget.read;
-        }
-        claude && !self.omp.pending()
+        self.codex.check(self.codex_dir.as_deref(), now, codex_budget);
     }
+}
+
+/// A bounded, read-only probe for doctor. Activity transcripts are not needed.
+pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
+    let now = when::now();
+    let home = paths::home();
+    let mut usage = Usage::for_home(home.as_deref(), now);
+    if let Some(reports) = omp::database(home.as_deref()).and_then(|path| omp::read(&path, now, omp::QUERY_WAIT)) {
+        usage.codex.omp = reports.codex;
+        usage.claude.omp = reports.claude;
+    }
+    usage.check_limits(now, &mut Budget::new(CODEX_BYTES), &mut Budget::new(CLAUDE_BYTES));
+    [
+        ("Codex", usage.codex.reported().map(|(_, source)| source.label())),
+        ("Claude", usage.claude.reported().map(|(_, source)| source.label())),
+    ]
 }
 
 impl Pane for Usage {
@@ -704,7 +769,7 @@ impl Pane for Usage {
         After::Stay
     }
 
-    /// Redraw at a reset even if none of the provider files has changed.
+    /// Redraw when a report gets old or its known reset elapses, even without new data.
     fn next_frame(&self) -> Option<Duration> {
         let now = self.now();
         let earliest = self
@@ -712,8 +777,11 @@ impl Pane for Usage {
             .latest()
             .into_iter()
             .chain(self.claude.latest())
-            .flat_map(|reading| reading.windows.windows().filter_map(|window| window.resets))
-            .filter(|&reset| reset > now)
+            .flat_map(|reading| reading.windows.windows())
+            .filter(|window| !window.is_reset(now))
+            .flat_map(|window| [window.resets, Some(window.observed.saturating_add(AGE_NOTE))])
+            .flatten()
+            .filter(|&change| change > now)
             .min();
         let wait = earliest.map_or(MINUTE, |ts| ts.saturating_sub(now).min(MINUTE));
         Some(Duration::from_secs(u64::try_from(wait).unwrap_or(60)))
@@ -728,12 +796,11 @@ fn help_rows() -> Vec<help::HelpRow> {
     use help::{HelpRow, heading, key, note};
     vec![
         heading("Usage limits"),
-        note("Figures show the percent"),
-        note("left in each window."),
-        note("From the newest local"),
-        note("report for each tool."),
-        note("Past its reset, a window"),
-        note("is back at 100%."),
+        note("Figures come from the"),
+        note("tool's last report."),
+        note("An elapsed reset is not"),
+        note("a new reading."),
+        note("Open the tool to update."),
         HelpRow::new(),
         heading("Claude Code"),
         note("Tokens today show local"),

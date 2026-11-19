@@ -9,14 +9,16 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 - Run `command -v milo` and `milo --version` in the environment where the pane
   will run. A version confirms the binary is available, not that Rex is set up.
-- In the intended Rex environment, check `rex actions` without `-C` or
-  `REX_CLIENT`. Look for `milo_layout` (Milo: Arrange This Tab) in the server's
-  action list. There is no milo setup status flag.
-- If the user wants to configure milo, open `milo setup` inside Rex. Let them
-  choose panes, **Arrange new shell tabs** and **Show Claude Code limits**.
-  `a` tries this tab without saving. Review **On save:** before pressing `s`.
-  To remove the Rex setup, turn off all three panes and **Arrange new shell
-  tabs**, then press `s`. The Claude Code choice can be turned off separately.
+- In this checkout, `milo doctor` explains effective preferences, integration
+  health and usage sources without changing anything. For an older installed
+  binary, check `milo --help`; `rex actions` (without `-C` or `REX_CLIENT`)
+  lists server actions such as `milo_layout`.
+- Open `milo setup` for interactive configuration. Trying a layout is not
+  permission to save it. Distinguish the global default from the override for
+  this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
+  `milo_peek_outline` opens a temporary floating outline instead of docking it.
+- Use `milo setup --repair` or `--remove` only when asked to change the
+  integration. Do not change Rex's global theme, font or keyboard shortcuts.
 
 ## Commands
 

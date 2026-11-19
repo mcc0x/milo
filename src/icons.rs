@@ -4,20 +4,7 @@
 //! name beside it carries that. The default set uses Nerd Font glyphs.
 //! `MILO_ICONS=plain` uses ordinary symbols; `off` or `none` hides them.
 
-use std::sync::LazyLock;
-
-enum Set {
-    Nerd,
-    Plain,
-    Off,
-}
-
-static SET: LazyLock<Set> = LazyLock::new(|| match std::env::var("MILO_ICONS").as_deref() {
-    _ if cfg!(test) => Set::Plain,
-    Ok("plain") => Set::Plain,
-    Ok("off" | "none") => Set::Off,
-    _ => Set::Nerd,
-});
+use crate::preferences::IconMode;
 
 #[derive(Clone, Copy)]
 pub struct Icon {
@@ -28,24 +15,23 @@ pub struct Icon {
 
 const FOLDER: u8 = 75;
 
-pub fn dir(open: bool) -> Icon {
-    let glyph = match (&*SET, open) {
-        (Set::Nerd, true) => "\u{f07c}",
-        (Set::Nerd, false) => "\u{f07b}",
-        (Set::Plain, true) => "▾",
-        (Set::Plain, false) => "▸",
-        (Set::Off, _) => "",
+pub fn dir(mode: IconMode, open: bool) -> Icon {
+    let glyph = match (mode, open) {
+        (IconMode::Nerd, true) => "\u{f07c}",
+        (IconMode::Nerd, false) => "\u{f07b}",
+        (IconMode::Plain, true) => "▾",
+        (IconMode::Plain, false) => "▸",
+        (IconMode::Off, _) => "",
     };
     Icon { glyph, colour: FOLDER }
 }
 
-pub fn file(name: &str) -> Icon {
+pub fn file(mode: IconMode, name: &str) -> Icon {
+    if mode == IconMode::Off {
+        return Icon { glyph: "", colour: 0 };
+    }
     let (glyph, colour) = kind(name);
-    let glyph = match &*SET {
-        Set::Nerd => glyph,
-        Set::Plain => "•",
-        Set::Off => "",
-    };
+    let glyph = if mode == IconMode::Plain { "•" } else { glyph };
     Icon { glyph, colour }
 }
 

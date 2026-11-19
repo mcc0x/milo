@@ -72,7 +72,7 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
 
     usage.fixed_now = Some(reset);
     let rows = frame(&mut usage, 140, 3);
-    assert!(rows[1].contains("100%") && rows[2].contains("reset"));
+    assert!(!rows[1].contains("100%") && rows[2].contains("Reset elapsed"));
     let next = reset + 5 * HOUR;
     claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":5,"resets_at":{next}}}}}"#), reset);
     claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":95,"resets_at":{reset}}}}}"#), reset);
@@ -196,7 +196,7 @@ fn a_newer_empty_claude_reading_explains_why_no_figures_are_shown() {
         let rows = frame(&mut usage, 140, 3);
         let claude = |row: usize| rows[row].split_once('│').unwrap().1;
         assert!(!claude(1).contains('%'));
-        assert_eq!(claude(2).trim(), "no limits to show");
+        assert_eq!(claude(2).trim(), "no limits to show · Open Claude Code");
     }
 }
 
@@ -207,4 +207,11 @@ fn the_status_model_keeps_wide_letters_and_accents_without_overrunning_the_line(
     let mut output = Vec::new();
     assert_eq!(status::run(input.as_bytes(), &mut output, None, NOW), 0);
     assert_eq!(String::from_utf8(output).unwrap(), format!("Cafe\u{0301} {}\n", "界".repeat(17)));
+}
+
+#[test]
+fn claude_status_does_not_describe_an_elapsed_reset_as_a_fresh_limit() {
+    let mut output = Vec::new();
+    assert_eq!(status::run(STATUS, &mut output, None, 1_795_110_000), 0);
+    assert_eq!(output, b"5h reset elapsed \xc2\xb7 week 39% left\n");
 }

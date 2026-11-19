@@ -39,6 +39,7 @@ Click a folder to open or close it, click a file to select it, or double-click a
 | --- | --- |
 | `Enter` | Show or hide a commit's files, show the rest of a long file list, or read the selected file |
 | Left or `h` | From a file, return to its commit; from an open commit, close its file list |
+| Right or `l` | Read the next part of a long subject in the narrow focused History pane |
 | `r` | Reload |
 | `q` | Quit |
 
@@ -55,11 +56,13 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 
 ### Usage and setup
 
-In usage, `r` checks local data again without bypassing the [oh-my-pi read interval](usage.md#where-the-figures-come-from), and `q` quits. In setup, `Enter` or `Space` changes a choice and `s` saves. In Rex, Up / Down or `k` / `j` move between choices, and `a` tries the layout in this tab without saving. `q` or `Esc` leaves setup; if bare `milo` offered setup, these keys open the outline instead.
+In Usage, `r` checks local data without bypassing the [oh-my-pi read interval](usage.md#where-the-figures-come-from), and `q` quits. In setup, use `1`–`4` or `Tab` for Layout, Appearance, Workflow and Health. Up / Down or `k` / `j` selects a row; `Enter` or `Space` activates it. In Layout, `a` tries the current draft and `u` undoes the trial. `s` asks **where** to save; choose the scope and confirm. `Esc` backs out of a confirmation without saving.
 
 ## Colours and marks
 
 In a Git outline, **bold** means changes to commit and regular coloured names mean changes to push. Plain names have no changes marked.
+
+If color or font weight is hard to distinguish, enable text change marks in setup. For a still outline while tools write files, choose static activity marks. Neither option changes the terminal's appearance for other programs.
 
 | Colour | Change |
 | --- | --- |
@@ -78,6 +81,8 @@ In a Git outline, **bold** means changes to commit and regular coloured names me
 | `○5 ↑2` in a narrow outline | Five files to commit and two to push |
 
 When focus is elsewhere, the outline can follow the file being written (for example, `following tides.ts`). It does not move the cursor while you use it or reopen a folder you closed.
+
+Following file activity and following a shell are different choices. File activity moves the outline selection within a project; shell following changes the project shown by an attached pane. Pin a pane's project if you want to keep reading it while the shell moves elsewhere.
 
 In history, a hollow dot means uncommitted work. With a remote branch to compare against, a bold dot marks a commit not on that branch, and a faint dot marks one already on it. A regular dot means there is no comparison. The heading says `no branch tracked` if the current branch does not track a remote branch; that does not mean there are no commits to push. A `•` beside a commit means it arrived while the pane was open. Open a commit to see what changed in each file, in the same colours as the outline.
 

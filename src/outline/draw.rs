@@ -235,8 +235,12 @@ impl Outline {
     fn draw_name(&self, s: &mut Screen, y: usize, columns: std::ops::Range<usize>, node: &Node, open: bool) {
         let (mut x, right) = (columns.start, columns.end);
         let name = node.name();
-        let icon = if node.dir { icons::dir(open) } else { icons::file(name) };
-        x += ui::icon(s, x, y, right.saturating_sub(x), icon);
+        if self.text_git_marks {
+            x += ui::git_mark(s, x, y, right.saturating_sub(x), node.kind, node.uncommitted);
+        }
+        let icon = if node.dir { icons::dir(self.icons, open) } else { icons::file(self.icons, name) };
+        let room = right.saturating_sub(x);
+        x += ui::icon(s, x, y, if self.text_git_marks && room < 4 { 0 } else { room }, icon);
         let colour = ui::kind_style(node.kind);
         let style = if node.uncommitted {
             colour.bold()
@@ -262,6 +266,10 @@ impl Outline {
 
     fn draw_mark(&self, s: &mut Screen, y: usize, node: &Node, open: bool, now: Instant) {
         let Some(at) = self.attention.marked_at(&node.path, node.dir && !open) else { return };
+        if self.static_marks {
+            s.put(0, y, 1, "•", ui::kind_style(node.kind));
+            return;
+        }
         let age = now.saturating_duration_since(at);
         let live = age < LIVE;
         let glyph = match (live, age.as_millis() / PULSE.as_millis() % 2) {
@@ -296,7 +304,7 @@ impl Outline {
                 break;
             }
             for (row, &i) in column.iter().enumerate() {
-                ui::file_name(s, x + 1, y0 + row, width - 2, &files[i]);
+                ui::file_name(s, x + 1, y0 + row, width - 2, &files[i], self.icons, self.text_git_marks);
             }
             x += width;
             shown += column.len();

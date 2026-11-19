@@ -1,10 +1,11 @@
 use crate::git::{Commit, PendingFile};
 use crate::help::{self, Page};
 use crate::pane::Pane;
+use crate::preferences::IconMode;
 use crate::screen::{self, Screen, Style, Wash};
 use crate::ui::{self, FAINT};
 use crate::when;
-use crate::width::str_width;
+use crate::width::{char_width, str_width};
 
 use super::{Entry, FILE_PREVIEW, History, Painted, TimelineRow, crosses_remote};
 
@@ -12,6 +13,8 @@ const HEADING_ROWS: usize = 4;
 const DOT_ROWS: usize = 8;
 const DOT_COLS: usize = 52;
 const HINT_ROWS: usize = 12;
+const DETAIL_COLS: usize = 28;
+const DETAIL_ROWS: usize = 6;
 
 impl History {
     pub(super) fn help_page() -> Page {
@@ -19,9 +22,9 @@ impl History {
 
         Page::new(vec![
             heading("Commits"),
-            sample("○", Style::PLAIN.bold(), "files to commit"),
-            sample("●", Style::PLAIN.bold(), "a commit to push"),
-            sample("●", FAINT, "already pushed"),
+            sample("○ C", Style::PLAIN.bold(), "files to commit"),
+            sample("● P", Style::PLAIN.bold(), "a commit to push"),
+            sample("● =", FAINT, "already pushed"),
             sample("●", Style::PLAIN, "no comparison"),
             sample("•", Style::PLAIN.bold(), "just arrived"),
             sample("+2", ui::ADD, "lines added"),
@@ -37,12 +40,15 @@ impl History {
             key("Enter", "show all"),
             key("Enter", "read"),
             key("← h  ", "parent or close"),
+            key("→ l  ", "more of subject"),
             key("r    ", "reload"),
             key("q    ", "quit"),
             HelpRow::new(),
             note("Click to select a file."),
             note("Double-click to read."),
             note("Click to toggle files."),
+            note("Focus a narrow pane"),
+            note("to see the full subject."),
         ])
     }
 
@@ -67,21 +73,66 @@ impl History {
         }
         if self.compact != compact {
             self.compact = compact;
-            self.build_rows(self.selected());
+            self.rebuild_in_place(self.selected());
         }
         let dots = s.h >= DOT_ROWS && s.w >= DOT_COLS && self.entries.len() > 1;
         let hint = s.h >= HINT_ROWS || (s.h > 1 && self.read_error.is_some());
         let body_top = usize::from(!compact) + usize::from(dots);
         self.shown = s.h - body_top - usize::from(hint);
         self.keep_cursor_in_view();
+        let previous_detail = self.detail.take();
+        let mut detail = [""; DETAIL_ROWS];
+        let mut remaining = "";
+        let mut detail_rows = 0;
+        if self.focused && s.w <= DETAIL_COLS && self.shown > 1 {
+            let commit = match self.selected() {
+                Some(TimelineRow::Commit(i)) => Some(i),
+                Some(TimelineRow::File(_) | TimelineRow::More) => self.open_index(),
+                _ => None,
+            };
+            if let Some(i) = commit {
+                let subject = &self.entries[i].commit.subject;
+                let start = previous_detail.filter(|detail| detail.commit == i).map_or(0, |detail| detail.start);
+                let (first, rest) = wrap_line(&subject[start..], s.w - 4);
+                if start != 0 || !rest.is_empty() {
+                    detail[0] = first;
+                    detail_rows = 1;
+                    remaining = rest;
+                    let room = (self.shown / 2).min(DETAIL_ROWS);
+                    for line in &mut detail[1..room] {
+                        if remaining.is_empty() {
+                            break;
+                        }
+                        (*line, remaining) = wrap_line(remaining, s.w - 4);
+                        detail_rows += 1;
+                    }
+                    let next = if remaining.is_empty() { 0 } else { subject.len() - remaining.len() };
+                    self.detail = Some(super::Detail { commit: i, start, next });
+                }
+            }
+        }
+        self.shown -= detail_rows;
+        // A detail peek may hide rows but must not move the underlying list.
+        let top = self.top.max((self.cursor + 1).saturating_sub(self.shown));
         if !compact {
             self.draw_heading(s);
         }
         if dots {
             self.draw_dots(s);
         }
-        self.draw_body(s, body_top);
-        self.painted = Some(Painted { width: s.w, body_top });
+        self.draw_body(s, body_top, top);
+        self.painted = Some(Painted { width: s.w, body_top, top });
+        let bottom = body_top + self.shown;
+        for (i, line) in detail.into_iter().take(detail_rows).enumerate() {
+            let y = bottom + i;
+            if i == 0 {
+                s.put(1, y, 1, "↳", FAINT);
+            }
+            s.put(3, y, s.w - 4, line, Style::PLAIN);
+            if i + 1 == detail_rows && !remaining.is_empty() {
+                s.put(s.w - 1, y, 1, "→", FAINT);
+            }
+        }
         if hint {
             self.draw_hint(s);
         }
@@ -140,7 +191,7 @@ impl History {
         let step = if spaced { 2 } else { 1 };
         let mut x = 1;
         if self.uncommitted > 0 {
-            s.put(x, 1, 1, "○", Style::PLAIN.bold());
+            s.put(x, 1, 1, self.uncommitted_mark(), Style::PLAIN.bold());
             x += step;
         }
         let mut before = None;
@@ -156,9 +207,21 @@ impl History {
             if x >= right {
                 break;
             }
-            s.put(x, 1, 1, "●", self.dot_style(commit));
+            s.put(x, 1, 1, self.commit_mark(commit), self.dot_style(commit));
             x += step;
             before = Some(commit);
+        }
+    }
+
+    fn uncommitted_mark(&self) -> &'static str {
+        if self.text_git_marks { "C" } else { "○" }
+    }
+
+    fn commit_mark(&self, commit: &Commit) -> &'static str {
+        match (self.text_git_marks, self.repo.remote(), commit.unpushed) {
+            (true, Some(_), true) => "P",
+            (true, Some(_), false) => "=",
+            _ => "●",
         }
     }
 
@@ -180,25 +243,27 @@ impl History {
         }
     }
 
-    fn draw_body(&self, s: &mut Screen, body_top: usize) {
+    fn draw_body(&self, s: &mut Screen, body_top: usize, top: usize) {
         let mut ages = Ages::default();
         let open_files = self.open_files();
         let files = open_files.unwrap_or_default();
         let right = s.w - 1;
-        for (i, row) in self.rows.iter().enumerate().skip(self.top).take(self.shown) {
-            let y = body_top + i - self.top;
+        for (i, row) in self.rows.iter().enumerate().skip(top).take(self.shown) {
+            let y = body_top + i - top;
             match *row {
                 TimelineRow::Uncommitted => self.draw_uncommitted(s, y),
                 TimelineRow::Divider => self.draw_divider(s, y),
                 TimelineRow::Commit(index) => {
-                    let end = if self.open_index() == Some(index) {
+                    let end = if s.w <= DETAIL_COLS {
+                        right
+                    } else if self.open_index() == Some(index) {
                         open_files.map_or(right, |files| file_count(s, y, files.len()))
                     } else {
                         ages.draw(s, y, self.entries[index].commit.time)
                     };
                     self.draw_commit(s, y, end, index);
                 }
-                TimelineRow::File(index) => draw_file(s, y, &files[index]),
+                TimelineRow::File(index) => draw_file(s, y, &files[index], self.icons),
                 TimelineRow::More => {
                     draw_more(s, y, files.len() - FILE_PREVIEW);
                 }
@@ -210,13 +275,13 @@ impl History {
                 s.wash(0, y, right, Wash::Bar);
             }
         }
-        ui::thumb(s, right, body_top, self.shown, self.rows.len(), self.top);
+        ui::thumb(s, right, body_top, self.shown, self.rows.len(), top);
     }
 
     fn draw_uncommitted(&self, s: &mut Screen, y: usize) {
         let word = if self.uncommitted == 1 { "file" } else { "files" };
         let bold = Style::PLAIN.bold();
-        s.put(1, y, 1, "○", bold);
+        s.put(1, y, 1, self.uncommitted_mark(), bold);
         s.put_fit(3, y, s.w - 4, &format!("{} {word} to commit", self.uncommitted), bold);
     }
 
@@ -226,7 +291,7 @@ impl History {
         if *fresh {
             s.put(0, y, 1, "•", bold);
         }
-        s.put(1, y, 1, "●", self.dot_style(commit));
+        s.put(1, y, 1, self.commit_mark(commit), self.dot_style(commit));
         if self.open_index() == Some(i) {
             s.put(2, y, 1, "▾", FAINT);
         }
@@ -262,6 +327,23 @@ impl History {
     }
 }
 
+/// Break at a word when possible; a long token still makes progress in terminal cells.
+fn wrap_line(text: &str, width: usize) -> (&str, &str) {
+    let mut used = 0;
+    let mut space = None;
+    for (i, ch) in text.char_indices() {
+        if i > 0 && ch.is_whitespace() {
+            space = Some(i);
+        }
+        used += char_width(ch);
+        if used > width {
+            let end = space.unwrap_or(i);
+            return (&text[..end], text[end..].trim_start());
+        }
+    }
+    (text, "")
+}
+
 /// Leaves the age blank when it would repeat the one above.
 #[derive(Default)]
 struct Ages {
@@ -273,7 +355,7 @@ struct Ages {
 impl Ages {
     fn draw(&mut self, s: &mut Screen, y: usize, time: i64) -> usize {
         let right = s.w - 1;
-        if s.w < 24 || self.time == Some(time) {
+        if self.time == Some(time) {
             return right;
         }
         self.time = Some(time);
@@ -320,7 +402,7 @@ fn file_count(s: &mut Screen, y: usize, files: usize) -> usize {
     right - count_right(s, y, count.into(), suffix, FAINT) - 1
 }
 
-fn draw_file(s: &mut Screen, y: usize, file: &PendingFile) {
+fn draw_file(s: &mut Screen, y: usize, file: &PendingFile, icons: IconMode) {
     let right = s.w - 1;
     let size = ui::size_width(file.add, file.del);
     let word = ui::kind_word(file.kind);
@@ -336,7 +418,7 @@ fn draw_file(s: &mut Screen, y: usize, file: &PendingFile) {
         right
     };
     s.put(3, y, 1, "│", FAINT);
-    ui::file_name(s, left, y, name_end - left, file);
+    ui::file_name(s, left, y, name_end - left, file, icons, false);
 }
 
 /// A leading `scope: ` is dimmed so the rest of the subject stands out.

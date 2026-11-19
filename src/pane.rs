@@ -1,7 +1,7 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -21,6 +21,13 @@ pub enum After {
     Leave,
 }
 
+/// A pane can observe an external source independently of the project file watcher.
+pub enum External {
+    Unchanged,
+    Redraw,
+    NewScope,
+}
+
 /// One screen in the terminal. The loop owns input, redraws and when to check.
 pub trait Pane {
     fn draw(&mut self, screen: &mut Screen);
@@ -33,6 +40,14 @@ pub trait Pane {
     /// Takes in changes from outside. False asks the loop to check again soon.
     fn check(&mut self) -> bool {
         true
+    }
+
+    fn external_fd(&self) -> Option<RawFd> {
+        None
+    }
+
+    fn check_external(&mut self) -> External {
+        External::Unchanged
     }
 
     /// How long the frame stays right when nothing happens.
@@ -208,7 +223,7 @@ fn with_loading<T>(
             while !term::TERMINATED.load(Ordering::Relaxed) {
                 let timeout = if painted { -1 } else { milliseconds(delay.saturating_duration_since(Instant::now())) };
                 match terminal.wait_for_open(timeout, ready.as_raw_fd()) {
-                    Wait::Woken => return,
+                    Wait::Woken | Wait::External => return,
                     Wait::Closed => break,
                     Wait::Timeout => {
                         let (w, h) = terminal.size();
@@ -303,7 +318,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
             .chain(frame_due.map(|due: Instant| due.saturating_duration_since(now)))
             .min();
         let timeout_ms = wait.map_or(-1, milliseconds);
-        match terminal.wait(timeout_ms, watcher.fd()) {
+        match terminal.wait(timeout_ms, watcher.fd(), pane.external_fd()) {
             Wait::Input => {
                 input.receive(&mut terminal.keyboard, &mut keys);
                 for key in keys.drain(..) {
@@ -340,6 +355,17 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                     pace.report_change();
                 }
             }
+            Wait::External => match pane.check_external() {
+                External::Unchanged => {}
+                External::Redraw => redraw = true,
+                External::NewScope => {
+                    let (next_watcher, idle) = watch_pane(pane.as_ref(), check_on_open);
+                    watcher = next_watcher;
+                    pace = idle.map(|idle| Pace::for_pane(pane.as_mut(), idle, check_on_open));
+                    help = help.map(|_| pane.help());
+                    redraw = true;
+                }
+            },
             Wait::Timeout | Wait::Interrupted => {}
             Wait::Closed => return Ok(()),
         }

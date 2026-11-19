@@ -15,6 +15,13 @@ const OLD_START_LISTENER: &str = "\n-- During a syntax check or a one-off layout
 const ACTIONS: &str = include_str!("actions.lua");
 const LISTENER: &str = include_str!("listener.lua");
 
+pub(super) fn probe_lua(layout: &Layout, executable: &Path) -> String {
+    let mut lua = actions_prefix(layout, &lua_path(executable));
+    writeln!(lua, "local trial_profile = {}", lua_string(layout.rail_code().as_bytes())).expect("writing to a string");
+    lua.push_str(ACTIONS);
+    lua
+}
+
 /// Match whole shipped templates, including the last one, without keeping a
 /// second copy of the old Lua or treating any custom code as ours.
 fn fingerprint(text: &str) -> u64 {
@@ -49,12 +56,13 @@ impl Declarations<'_> {
             outline_share: outline_share.into(),
             usage_rows: rows.into(),
             new_tabs: new_tabs.parse().ok()?,
+            geometry: Geometry::default(),
             panes,
         })
     }
 }
 /// Named panes keep Lua and the on-screen choices in the same order.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TabPane {
     Outline,
     History,
@@ -73,18 +81,38 @@ impl TabPane {
     }
 }
 
-/// The label, Lua proportion and preview width of a preset belong together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Side {
+    #[default]
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Geometry {
+    pub side: Side,
+    pub order: [TabPane; 3],
+    /// Per role, in millionths of the entire rail height.
+    pub shares: Option<[u32; 3]>,
+}
+
+impl Default for Geometry {
+    fn default() -> Self {
+        Self { side: Side::Left, order: TabPane::ALL, shares: None }
+    }
+}
+
+/// A width preset pairs its display name and exact Lua proportion.
 #[derive(Clone, Copy)]
 pub(super) struct Width {
     name: &'static str,
     pub proportion: &'static str,
-    sketch: usize,
 }
 
 pub(super) const WIDTHS: [Width; 3] = [
-    Width { name: "Thin", proportion: "0.20", sketch: 9 },
-    Width { name: "Medium", proportion: "0.30", sketch: 12 },
-    Width { name: "Wide", proportion: "0.38", sketch: 15 },
+    Width { name: "Thin", proportion: "0.20" },
+    Width { name: "Medium", proportion: "0.30" },
+    Width { name: "Wide", proportion: "0.38" },
 ];
 
 /// Display names are fixed; a proportion set by hand is kept until the user changes it here.
@@ -95,6 +123,7 @@ pub(super) struct Layout {
     pub width: String,
     pub outline_share: String,
     pub usage_rows: String,
+    pub geometry: Geometry,
 }
 
 impl Default for Layout {
@@ -105,6 +134,7 @@ impl Default for Layout {
             width: WIDTHS[0].proportion.into(),
             outline_share: "0.70".into(),
             usage_rows: "10".into(),
+            geometry: Geometry::default(),
         }
     }
 }
@@ -128,11 +158,6 @@ impl Layout {
         self.preset().map_or("Custom", |width| width.name)
     }
 
-    /// A hand-edited width still gets a readable preview.
-    pub fn sketch_width(&self) -> usize {
-        self.preset().map_or(12, |width| width.sketch)
-    }
-
     fn preset(&self) -> Option<Width> {
         WIDTHS.into_iter().find(|width| width.proportion == self.width)
     }
@@ -144,10 +169,103 @@ impl Layout {
         self.width.push_str(next.proportion);
     }
 
+    /// No Rex IDs or executable data belong in a remembered rail.
+    pub(super) fn rail_code(&self) -> String {
+        let mut code = format!(
+            "v1 {} {} {} {} ",
+            if self.geometry.side == Side::Left { "l" } else { "r" },
+            self.width,
+            self.outline_share,
+            self.usage_rows,
+        );
+        for pane in self.geometry.order {
+            code.push(match pane {
+                TabPane::Outline => 'o',
+                TabPane::History => 'h',
+                TabPane::Usage => 'u',
+            });
+        }
+        code.push(' ');
+        for enabled in self.panes {
+            code.push(if enabled { '1' } else { '0' });
+        }
+        if let Some([outline, history, usage]) = self.geometry.shares {
+            write!(code, " {outline} {history} {usage}").expect("writing to a string");
+        }
+        code
+    }
+
+    pub(super) fn parse_rail(code: &str) -> Option<Self> {
+        let mut fields = code.split_ascii_whitespace();
+        if fields.next()? != "v1" {
+            return None;
+        }
+        let side = match fields.next()? {
+            "l" => Side::Left,
+            "r" => Side::Right,
+            _ => return None,
+        };
+        let width = ratio(fields.next()?)?.into();
+        let outline_share = ratio(fields.next()?)?.into();
+        let usage_rows = fields.next()?;
+        if usage_rows.parse::<u32>().ok()? == 0 {
+            return None;
+        }
+        let mut order = TabPane::ALL;
+        let mut seen = [false; 3];
+        let [a, b, c] = *fields.next()?.as_bytes() else { return None };
+        for (pane, letter) in order.iter_mut().zip([a, b, c]) {
+            *pane = match letter {
+                b'o' => TabPane::Outline,
+                b'h' => TabPane::History,
+                b'u' => TabPane::Usage,
+                _ => return None,
+            };
+            if std::mem::replace(&mut seen[*pane as usize], true) {
+                return None;
+            }
+        }
+        let mut panes = [false; 3];
+        let [a, b, c] = *fields.next()?.as_bytes() else { return None };
+        for (enabled, byte) in panes.iter_mut().zip([a, b, c]) {
+            *enabled = match byte {
+                b'0' => false,
+                b'1' => true,
+                _ => return None,
+            };
+        }
+        let shares = if let Some(outline) = fields.next() {
+            let shares = [
+                outline.parse::<u32>().ok()?,
+                fields.next()?.parse::<u32>().ok()?,
+                fields.next()?.parse::<u32>().ok()?,
+            ];
+            if shares.iter().any(|&share| share > 1_000_000) || shares == [0; 3] {
+                return None;
+            }
+            Some(shares)
+        } else {
+            None
+        };
+        fields.next().is_none().then(|| Self {
+            width,
+            outline_share,
+            usage_rows: usage_rows.into(),
+            panes,
+            new_tabs: false,
+            geometry: Geometry { side, order, shares },
+        })
+    }
+
     /// Read the layout values without rewriting the rest of the user's Lua.
     pub(super) fn parse(text: &str) -> Option<Self> {
         declarations(text)?.layout()
     }
+}
+
+fn ratio(value: &str) -> Option<&str> {
+    let number = value.parse::<f64>().ok()?;
+    (0.0 < number && number < 1.0).then_some(value)
 }
 
 fn declarations(text: &str) -> Option<Declarations<'_>> {
@@ -256,8 +374,12 @@ fn long_bracket(text: &str, bracket: char) -> Option<(usize, &str)> {
 
 /// A path in a Lua 5.1 string, even if some of its bytes are not UTF-8.
 pub(super) fn lua_path(path: &Path) -> String {
+    lua_string(path.as_os_str().as_encoded_bytes())
+}
+
+fn lua_string(bytes: &[u8]) -> String {
     let mut literal = String::from("\"");
-    for &byte in path.as_os_str().as_encoded_bytes() {
+    for &byte in bytes {
         match byte {
             b'"' | b'\\' => literal.extend(['\\', char::from(byte)]),
             b' '..=b'~' => literal.push(char::from(byte)),
@@ -344,6 +466,10 @@ pub(super) fn owns_actions(text: &str) -> bool {
     })
 }
 
+pub(super) fn launcher_matches(text: &str, executable: &Path) -> Option<bool> {
+    declarations(text)?.executable.map(|value| value == lua_path(executable))
+}
+
 fn shipped_actions(text: &str, layout: &Layout, exe: &str) -> bool {
     let prefix = actions_prefix(layout, exe);
     let Some(mut body) = text.strip_prefix(&prefix) else { return false };
@@ -353,7 +479,8 @@ fn shipped_actions(text: &str, layout: &Layout, exe: &str) -> bool {
         };
         body = code;
     }
-    body == ACTIONS || [0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f].contains(&fingerprint(body))
+    body == ACTIONS
+        || [0x97cf_a17d_8775_e350, 0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f].contains(&fingerprint(body))
 }
 
 /// The installed and temporary layouts must run exactly the same actions.
@@ -399,6 +526,7 @@ fn listener_prefix(rex_file: &Path) -> String {
 
 pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
     text.strip_prefix(&listener_prefix(rex_file)).is_some_and(|body| {
-        body == LISTENER || [0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8].contains(&fingerprint(body))
+        body == LISTENER
+            || [0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8].contains(&fingerprint(body))
     })
 }

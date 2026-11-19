@@ -30,9 +30,7 @@ if [ "${1-}" = --uninstall ]; then
         printf 'No milo binary at %s. Nothing to do.\n' "$binary"
     fi
     printf '%s\n' 'Rex and Claude Code settings were not changed.' \
-        'To remove your Rex layout, run milo setup inside Rex while milo is installed.' \
-        'Turn off Outline, History, Usage and Arrange new shell tabs, then press s.' \
-        'To remove milo from the Claude Code status line, turn off Show Claude Code limits and press s.'
+        'To disconnect a remaining managed integration, run cargo run -- setup --remove in this checkout.'
     exit 0
 fi
 

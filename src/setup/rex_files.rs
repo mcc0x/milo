@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use super::files::{self, Change, Image, staged};
 use super::install::{RunRex, Store, read, settings_path};
 use super::layout::{Layout, listener_lua, lua_path, owns_actions, owns_listener, rex_lua, update_actions};
-use crate::rex;
 const CREATED: &[u8] = b"-- Managed by milo setup. Milo created this file.";
 pub(super) const MANAGED: &[u8] = b"-- Managed by milo setup.";
 pub(super) const OFFERED: &str = "setup-offered";
@@ -63,7 +62,7 @@ impl Store {
         Ok((Layout { panes: [!disabled; 3], ..Layout::default() }, active))
     }
 
-    fn has_layout(&self) -> Result<bool, &'static str> {
+    pub(super) fn has_layout(&self) -> Result<bool, &'static str> {
         let path = settings_path(&self.init)?;
         read_init_prefix(&path, &loader(&self.rex_file()))
             .map_err(|_| "Could not read Rex settings. No files were changed.")
@@ -163,27 +162,6 @@ impl Store {
         }
         Ok(lua.into_bytes())
     }
-
-    /// Try these exact choices in the current tab without installing or reloading.
-    pub fn arrange(&self, layout: &Layout, target: &rex::Target, run: &RunRex<'_>) -> Result<(), &'static str> {
-        check_config_dir(&self.config)?;
-        if !layout.panes.contains(&true) {
-            return Err("Choose at least one pane first.");
-        }
-        let lua = rex_lua(layout, &executable()?);
-        let temp = staged(&self.config, lua.as_bytes()).map_err(|_| "Could not prepare the Rex layout.")?;
-        let done = run(&[
-            OsStr::new("do"),
-            temp.path().as_os_str(),
-            OsStr::new("--action"),
-            OsStr::new("milo_layout"),
-            OsStr::new("-s"),
-            &target.session,
-            OsStr::new("-b"),
-            &target.block,
-        ]);
-        if done { Ok(()) } else { Err("Could not arrange this tab.") }
-    }
 }
 
 pub(super) fn check_config_dir(path: &Path) -> Result<(), &'static str> {
@@ -211,9 +189,25 @@ fn read_init_prefix(path: &Path, load: &str) -> io::Result<bool> {
     Ok(managed(&prefix, load).is_some())
 }
 
-/// Rex uses the same binary as setup, even if milo was invoked via a link.
+/// Keep Homebrew's version-independent launcher when it points to this exact binary.
 pub(super) fn executable() -> Result<PathBuf, &'static str> {
-    env::current_exe().and_then(fs::canonicalize).map_err(|_| "Could not find the full path to milo.")
+    let path = env::current_exe().and_then(fs::canonicalize).map_err(|_| "Could not find the full path to milo.")?;
+    Ok(brew_launcher(&path).unwrap_or(path))
+}
+
+fn brew_launcher(path: &Path) -> Option<PathBuf> {
+    let bin = path.parent()?;
+    let formula = bin.parent()?.parent()?;
+    let cellar = formula.parent()?;
+    if path.file_name()? != "milo"
+        || bin.file_name()? != "bin"
+        || formula.file_name()? != "milo"
+        || cellar.file_name()? != "Cellar"
+    {
+        return None;
+    }
+    let stable = cellar.parent()?.join("opt/milo/bin/milo");
+    (fs::canonicalize(&stable).ok()? == path).then_some(stable)
 }
 
 /// The managed block must be found in LF or CRLF files without changing other bytes.
@@ -290,4 +284,27 @@ fn insert_loader(bytes: &[u8], start: usize, load: &str, created: bool) -> Resul
     };
     let comment = if created { CREATED } else { MANAGED };
     Ok([&bytes[..start], comment, newline, load.as_bytes(), newline, &bytes[start..]].concat())
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn only_use_the_stable_brew_link_for_the_running_installation() {
+        let scratch = crate::fixture::Fixture::folder();
+        let prefix = scratch.root.canonicalize().unwrap();
+        let cellar = prefix.join("Cellar/milo");
+        let old = cellar.join("1/bin/milo");
+        let current = cellar.join("2/bin/milo");
+        for path in [&old, &current] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, []).unwrap();
+        }
+        fs::create_dir(prefix.join("opt")).unwrap();
+        symlink("../Cellar/milo/2", prefix.join("opt/milo")).unwrap();
+        assert_eq!(brew_launcher(&current), Some(prefix.join("opt/milo/bin/milo")));
+        assert_eq!(brew_launcher(&old), None);
+    }
 }

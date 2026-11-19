@@ -2,6 +2,7 @@
 
 use crate::git::{Kind, PendingFile};
 use crate::icons::{self, Icon};
+use crate::preferences::IconMode;
 use crate::screen::{self, Screen, Style};
 use crate::when::Age;
 use crate::width::str_width;
@@ -111,12 +112,33 @@ pub fn icon(s: &mut Screen, x: usize, y: usize, max_w: usize, icon: Icon) -> usi
     2
 }
 
+/// Plain letters encode both the Git change and whether it needs committing or pushing.
+pub fn git_mark(s: &mut Screen, x: usize, y: usize, room: usize, kind: Kind, uncommitted: bool) -> usize {
+    let change = match kind {
+        Kind::None => return 0,
+        Kind::Modified => "M",
+        Kind::Added | Kind::Untracked => "A",
+        Kind::Deleted => "D",
+        Kind::Renamed => "R",
+        Kind::Conflict => "U",
+    };
+    if room < 5 {
+        return 0;
+    }
+    s.put(x, y, 1, change, Style::PLAIN);
+    s.put(x + 2, y, 1, if uncommitted { "C" } else { "P" }, Style::PLAIN);
+    4
+}
+
 /// "name parent/dir": the file name first, so it survives a narrow column.
-pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &PendingFile) {
+pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &PendingFile, icons: IconMode, text: bool) {
     let st = kind_style(f.kind);
     let st = if f.unpushed { st } else { st.bold() };
     let (dir, name) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
-    let mut used = icon(s, x, y, max_w, icons::file(name));
+    let mut used = if text { git_mark(s, x, y, max_w, f.kind, !f.unpushed) } else { 0 };
+    if used == 0 || max_w - used >= 4 {
+        used += icon(s, x + used, y, max_w - used, icons::file(icons, name));
+    }
     used += s.put_middle(x + used, y, max_w - used, name, st);
     if !dir.is_empty() && used + 2 < max_w {
         s.put_fit(x + used + 1, y, max_w - used - 1, dir, FAINT);

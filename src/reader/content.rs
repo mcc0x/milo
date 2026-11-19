@@ -59,7 +59,8 @@ impl Reader {
     pub fn open(file: &Path) -> Option<Self> {
         let Location { mut repo, absolute, path } = Location::find(file)?;
         repo.only(&path);
-        let mut reader = Self::new(path, Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None })));
+        let icons = Self::icons_for(&repo);
+        let mut reader = Self::new(path, Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None })), icons);
         reader.load();
         reader.reveal_first_change();
         Some(reader)
@@ -87,7 +88,7 @@ impl Reader {
 
     pub(super) fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {
         let short_id = hash[..hash.len().min(7)].to_string();
-        let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time });
+        let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time }, Self::icons_for(repo));
         reader.body = Body::from_lines(committed_lines(repo, path, hash, file), syntax::for_file(path));
         reader.reveal_first_change();
         reader

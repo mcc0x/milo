@@ -102,16 +102,23 @@ fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
     if let Some(limits) = limits.filter(|v| v.object()) {
         let windows = windows(limits, |value, minutes| window(value, minutes, Observed::Now(now)));
         let [five, week] = windows;
-        let label = |w: Window| if w.is_reset(now) { "reset" } else { w.number() };
+        let label = |w: Window| if w.is_reset(now) { ("reset elapsed", "") } else { (w.number(), " left") };
         if (five.is_some() || week.is_some())
             && let Some(path) = path
         {
             let _ = save(path, now, windows);
         }
         match (five, week) {
-            (Some(a), Some(b)) => return Some(format!("5h {} · week {} left", label(a), label(b))),
-            (Some(a), None) => return Some(format!("5h {} left", label(a))),
-            (None, Some(b)) => return Some(format!("week {} left", label(b))),
+            (Some(a), Some(b)) if a.is_reset(now) || b.is_reset(now) => {
+                let ((a, a_end), (b, b_end)) = (label(a), label(b));
+                return Some(format!("5h {a}{a_end} · week {b}{b_end}"));
+            }
+            (Some(a), Some(b)) => return Some(format!("5h {} · week {} left", a.number(), b.number())),
+            (Some(w), None) | (None, Some(w)) => {
+                let name = if five.is_some() { "5h" } else { "week" };
+                let (value, end) = label(w);
+                return Some(format!("{name} {value}{end}"));
+            }
             (None, None) => {}
         }
     }

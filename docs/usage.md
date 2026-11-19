@@ -1,6 +1,8 @@
 # Usage limits
 
-`milo usage` shows how much of each limit is **left**, not how much has been used. For example, `5h 69%` means 69% of the five-hour window is left. Claude Code's status line says the same: `5h 69% · week 42% left`. Milo shows only the windows reported for the account. When there is room, it also shows their reset times, the age of the reading and any limit for a model's week, such as `Opus week` as a third figure. In a narrow pane the first window keeps the large figure and the others follow below it as text. After a window's reset time it shows `100%` and, when there is room, `reset` until a new reading arrives. A dash means a tool has no figure to show, not that nothing is left.
+`milo usage` shows how much of a reported limit is **left**, not how much has been used. In a narrow rail, read the most constrained window first, with its provider, time window, remaining allowance and reset time in text. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a rail too.
+
+A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%. Run `milo doctor` to see which local source supplied each provider's reading.
 
 ## Where the figures come from
 

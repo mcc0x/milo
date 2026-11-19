@@ -78,6 +78,13 @@ proportions above the actions in `rex.lua`, and the path to that file above
 the handler in `listener.lua`. `rex_files.rs` asks Rex to check changed
 generated files before writing settings.
 
+`setup/profiles.rs` stores rail geometry separately from those integration files.
+Persist roles, side, order and proportions, never Rex block IDs. A trial is the
+exception: its IDs are transient and are the only blocks its undo may close.
+`preferences.rs` resolves pane settings outside the repository, per worktree
+over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
+explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
+
 Run `cargo test setup::` for generation, screen and installation tests. The
 tests use throwaway settings and a stand-in for Rex. To check a generated
 file with Rex itself, run `MILO_CHECKING_REX=1 rex config check /path/to/copy.lua`
