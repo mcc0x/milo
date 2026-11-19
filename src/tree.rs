@@ -31,7 +31,7 @@ pub struct Node {
     pub pending: u32,
     /// This file or a file beneath this folder is uncommitted.
     pub uncommitted: bool,
-    /// Keeps a path that is both uncommitted and unpushed from counting twice.
+    /// Keeps a path with multiple pending entries from counting twice.
     counted: bool,
 }
 
@@ -292,8 +292,18 @@ impl Tree {
     }
 
     /// Updates one count without rebuilding the layout or resumming other children.
-    pub(crate) fn update_untracked(&mut self, file: &PendingFile, before: (u32, bool), mut update: impl FnMut(&Node)) {
+    pub(crate) fn update_untracked(
+        &mut self,
+        index: usize,
+        file: &PendingFile,
+        before: (u32, bool),
+        mut update: impl FnMut(&Node),
+    ) {
         let Some(&id) = self.index.get(file.path.as_str()) else { return };
+        // Only the first pending entry for this path contributed to these totals.
+        if self.node(id).untracked_index() != Some(index) {
+            return;
+        }
         let (old_add, old_uncounted) = before;
         let mut i = id;
         loop {

@@ -234,7 +234,7 @@ impl Outline {
     }
 
     fn update_untracked_size(&mut self, i: usize, before: (u32, bool)) {
-        self.tree.update_untracked(&self.pending[i], before, |node| {
+        self.tree.update_untracked(i, &self.pending[i], before, |node| {
             if let Some(columns) = &mut self.change_columns {
                 columns.include_size(node);
             }
@@ -271,6 +271,58 @@ fn count_lines(path: &Path, limit: u64) -> Option<u32> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use crate::git::Repo;
+    use crate::tree::{Node, Tree};
+
+    #[test]
+    fn editing_an_untracked_path_also_listed_as_deleted_matches_rebuild() {
+        const OVERLAP: &str = "src/overlap.txt";
+        const ORDINARY: &str = "src/ordinary.txt";
+        let f = Fixture::new();
+        f.git(&["commit", "--allow-empty", "-m", "base"]);
+        f.write(OVERLAP, "one\ntwo\n");
+        f.commit("track overlap");
+        f.git(&["switch", "-c", "work", "HEAD^"]);
+        for path in [OVERLAP, ORDINARY] {
+            f.write(path, "one\ntwo\n");
+        }
+
+        let mut outline = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let (mut attempts, mut bytes) = (FILES_PER_FRAME, BYTES_PER_FRAME);
+        for i in outline.untracked.files.clone() {
+            assert!(outline.count_untracked(i, &mut attempts, &mut bytes));
+        }
+
+        // Move HEAD without updating the index: Git now reports OVERLAP twice.
+        f.git(&["update-ref", "HEAD", "refs/heads/main"]);
+        outline.load().unwrap();
+        let deleted = &outline.pending[0];
+        assert_eq!((deleted.path.as_str(), deleted.kind), (OVERLAP, Kind::Deleted));
+        assert_eq!(outline.untracked.files.len(), 2);
+        for file in &outline.pending[outline.untracked.files.clone()] {
+            assert_eq!((file.add, file.lines_pending), (2, false));
+            f.write(&file.path, "one\ntwo\nthree\n");
+        }
+        outline.check_untracked(Instant::now());
+        assert!(outline.pending[outline.untracked.files.clone()].iter().all(|f| f.lines_pending));
+
+        let mut rebuilt = Tree::default();
+        rebuilt.rebuild(outline.repo.tracked().unwrap(), &outline.pending);
+        rebuilt.layout(|_| true, false);
+        let counts = |node: &Node| (node.kind, node.add, node.del, node.uncounted);
+        assert_eq!(counts(outline.tree.node(0)), counts(rebuilt.node(0)));
+        for path in ["src/", OVERLAP, ORDINARY] {
+            let actual = outline.tree.row(outline.tree.row_of(path).unwrap()).unwrap();
+            let expected = rebuilt.row(rebuilt.row_of(path).unwrap()).unwrap();
+            assert_eq!(counts(actual), counts(expected), "{path}");
         }
     }
 }
