@@ -61,10 +61,13 @@ impl Picture {
 
     fn decode_with(bytes: Vec<u8>, path: &Path, deadline: Duration) -> Result<Self, Vec<u8>> {
         let size = png_size(&bytes);
-        if let Some((width, height)) = size
-            && width.max(height) <= LONGEST_SIDE
-        {
-            return Ok(Self::with_size(bytes.into(), width, height));
+        if let Some((width, height)) = size {
+            if !png_has_image_data(&bytes) {
+                return Err(bytes);
+            }
+            if width.max(height) <= LONGEST_SIDE {
+                return Ok(Self::with_size(bytes.into(), width, height));
+            }
         }
         convert(&bytes, path, size, deadline)
             .and_then(|png| Self::png(png.into()))
@@ -137,7 +140,24 @@ fn png_size(png: &[u8]) -> Option<(u32, u32)> {
     let field = |at: usize| Some(u32::from_be_bytes(header.get(at..at + 4)?.try_into().ok()?));
     // The first chunk is the header: its length and name, then the two sizes.
     let (width, height) = (field(8)?, field(12)?);
-    (header.get(4..8)? == b"IHDR" && width > 0 && height > 0).then_some((width, height))
+    (header.get(..8)? == b"\0\0\0\rIHDR" && width > 0 && height > 0).then_some((width, height))
+}
+
+/// Checks that a file reaches IEND with image data, without decoding its pixels.
+fn png_has_image_data(png: &[u8]) -> bool {
+    let Some(mut chunks) = png.get(33..) else { return false }; // signature + IHDR
+    let mut has_data = false;
+    while let Some(([a, b, c, d, kind @ ..], body)) = chunks.split_first_chunk::<8>() {
+        let len = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
+        let Some(rest) = body.get(len..).and_then(|tail| tail.get(4..)) else { return false }; // CRC
+        match kind {
+            b"IDAT" => has_data |= len != 0,
+            b"IEND" => return has_data && len == 0,
+            _ => {}
+        }
+        chunks = rest;
+    }
+    false
 }
 
 /// Find the JPEG frame header without decoding or scanning the image data.
@@ -251,12 +271,45 @@ fn append_base64(data: &[u8], out: &mut Vec<u8>) {
 
 #[cfg(test)]
 impl Picture {
-    /// The start of a PNG that declares this size: enough to be taken for
-    /// a picture, which is as far as milo itself ever reads one.
+    /// A black, one-bit grayscale PNG, with uncompressed DEFLATE blocks.
     pub fn sample_png(width: u32, height: u32) -> Vec<u8> {
-        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-        png.extend(width.to_be_bytes());
-        png.extend(height.to_be_bytes());
+        fn chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            png.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            let start = png.len();
+            png.extend_from_slice(kind);
+            png.extend_from_slice(data);
+            let mut crc = !0u32;
+            for &byte in &png[start..] {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ if crc & 1 == 0 { 0 } else { 0xedb8_8320 };
+                }
+            }
+            png.extend_from_slice(&(!crc).to_be_bytes());
+        }
+
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut header = [0; 13];
+        header[..4].copy_from_slice(&width.to_be_bytes());
+        header[4..8].copy_from_slice(&height.to_be_bytes());
+        header[8] = 1;
+        chunk(&mut png, b"IHDR", &header);
+
+        // Each scanline starts with a zero filter byte, then zero pixels.
+        let mut remaining = height as usize * (1 + width.div_ceil(8) as usize);
+        let adler = u32::try_from(remaining % 65521).unwrap() << 16 | 1;
+        let mut data = vec![0x78, 0x01];
+        while remaining > 0 {
+            let len = u16::try_from(remaining.min(usize::from(u16::MAX))).unwrap();
+            remaining -= usize::from(len);
+            data.push(u8::from(remaining == 0));
+            data.extend_from_slice(&len.to_le_bytes());
+            data.extend_from_slice(&(!len).to_le_bytes());
+            data.resize(data.len() + usize::from(len), 0);
+        }
+        data.extend_from_slice(&adler.to_be_bytes());
+        chunk(&mut png, b"IDAT", &data);
+        chunk(&mut png, b"IEND", &[]);
         png
     }
 
@@ -297,6 +350,17 @@ mod tests {
         assert_eq!(png_size(&png), Some((300, 200)));
         assert_eq!(png_size(&png[..20]), None);
         assert_eq!(png_size(b"GIF89a, not a PNG at all"), None);
+    }
+
+    #[test]
+    fn a_truncated_png_returns_its_original_bytes_instead_of_a_picture() {
+        let png = Picture::sample_png(8, 8);
+        let path = Path::new("partial.png");
+        for end in [24, png.len() - 13, png.len() - 1] {
+            let bytes = png[..end].to_vec();
+            assert_eq!(Picture::decode(bytes.clone(), path).err(), Some(bytes));
+        }
+        assert!(Picture::decode(png, path).is_ok());
     }
 
     #[cfg(target_os = "macos")]
