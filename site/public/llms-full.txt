@@ -227,6 +227,8 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 | Usage | Narrow | Text prioritizes the limiting window instead of squeezing the wide figures into the rail |
 | Reader | 2 rows | The filename and one line of content; keyboard hints return at 3 rows |
 
+In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer.
+
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
 
 If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.
@@ -242,12 +244,13 @@ A shallow clone has only part of the project's history. Milo lists the commits G
 ## Reading files
 
 Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader, leaving the original pane in place. Elsewhere the reader takes over that pane; `q` brings you back.
+History catches up with repository changes when you return from a file, keeping that file selected if it is still in the timeline.
 
 On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](https://www.superlogical.com/rex/docs/reference/ios-settings#setting-keyboard-open-keyboard-manually) to browse without raising the keyboard. Tap a folder to expand it, tap a file to select it, and double-tap to open it. This setting affects **all** terminal panes on that iPhone, not just Outline. Tap the keyboard button to type in a shell. If the keyboard reopens when you return to a terminal, turn off **Keep Keyboard Open** in the same settings.
 
 For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
-`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Milo ignores `.` components and repeated slashes in committed file paths, but rejects `..` components. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
 
 The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, shell, JSON, YAML and TOML. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
 
@@ -370,6 +373,8 @@ A reset time is a prediction from the last report, not a new measurement. Once i
 | Claude Code | Its own saved limits in `~/.claude.json`, or limits sent through the status line if you turn it on in setup. |
 
 For each tool, milo uses the newest report it can read. When there is room, it also shows **tokens today** from Claude Code's local session files under `~/.claude/projects`. This is local activity since midnight, not a limit. It counts new input, output and cache writes, not cache reads. A `+` after the number means the total may be incomplete.
+
+Milo checks the tails of recent Codex logs, then resumes near the previous end as those logs grow. Ordinary session activity does not clear the last limit report. A new or replaced log, a truncation, or a large burst of new data calls for another bounded tail check.
 
 Milo labels reports as older after five minutes, or ten minutes for oh-my-pi to allow for its provider refresh cadence. This uses the time the provider's window was last observed, not the time Milo read the file.
 
