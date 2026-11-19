@@ -13,6 +13,7 @@ use super::claude::{Claude, OWN_CLAUDE};
 use super::install::{RunRex, Saved, Store, read};
 use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
 use super::profiles::Scope;
+use super::rex_files::LISTENER_STATE_MISMATCH;
 use super::{lock, rex_files};
 use crate::git::discover_worktree;
 use crate::preferences::{IconMode, Preferences, Source};
@@ -189,17 +190,22 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
         out.push_str("Rex reload: pending; run milo setup --repair.\n");
     }
     let expected = layout.map(|(_, active, _)| active).ok();
+    let listener = if store.listener_state_matches() == Ok(false) {
+        Err(LISTENER_STATE_MISMATCH)
+    } else {
+        lock::running(&store.state).map_err(|_| "unknown; check access to Milo's state directory")
+    };
     writeln!(
         out,
         "Layout listener: {}",
-        match (lock::running(&store.state), expected) {
+        match (listener, expected) {
             (Ok(true), Some(true)) => "running",
             (Ok(false), Some(false)) => "off",
             (Ok(false), Some(true)) => "not running; run milo setup --repair",
             (Ok(true), Some(false)) => "running unexpectedly; run milo listen --stop",
             (Ok(true), None) => "running; expected state unknown because the Rex layout could not be read",
             (Ok(false), None) => "not running; expected state unknown because the Rex layout could not be read",
-            (Err(_), _) => "unknown; check access to Milo's state directory",
+            (Err(why), _) => why,
         }
     )
     .unwrap();
@@ -211,7 +217,11 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
             out.push_str("managed by Milo, but uses an old launcher; turn limits off and back on in setup.\n");
         }
         Claude::On => out.push_str("managed by Milo\n"),
-        Claude::Foreign | Claude::NotOwned => out.push_str("user-managed; left alone\n"),
+        Claude::Foreign => out.push_str("user-managed; left alone\n"),
+        Claude::NotOwned => out.push_str(concat!(
+            "no matching ownership note; left alone. ",
+            "If Milo was installed with a different XDG_STATE_HOME, rerun with that value.\n",
+        )),
         Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => writeln!(
             out,
             "unknown; check the Claude Code ownership note in Milo's state directory ({:?})",
@@ -391,6 +401,9 @@ fn on(value: bool) -> &'static str {
 
 pub(crate) fn repair() -> Result<String, String> {
     let store = store()?;
+    if !store.listener_state_matches()? {
+        return Err(LISTENER_STATE_MISMATCH.into());
+    }
     if !store.has_layout()? && !store.rex_reload_pending() {
         return Err("No managed Rex integration to repair. Run milo setup inside Rex first.".into());
     }
@@ -439,6 +452,9 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
         || store.listener_file().try_exists().map_err(|e| e.to_string())?
         || store.rex_reload_pending()
         || lock::running(&store.state).map_err(|e| e.to_string())?;
+    if rex && !store.listener_state_matches()? {
+        return Err(LISTENER_STATE_MISMATCH.into());
+    }
     let claude = match store.claude() {
         Claude::On => Some(false),
         Claude::Invalid => {
@@ -452,7 +468,14 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
             }
             None
         }
-        Claude::Off | Claude::Foreign | Claude::NotOwned => None,
+        Claude::NotOwned => {
+            return Err(concat!(
+                "Could not verify ownership of the Milo command in Claude Code settings. ",
+                "Rerun with the original XDG_STATE_HOME or remove the status line in Claude Code yourself.",
+            )
+            .into());
+        }
+        Claude::Off | Claude::Foreign => None,
     };
     if !rex && claude.is_none() {
         return Ok("No managed integration to remove. Preferences and user settings were left alone.".into());
@@ -543,6 +566,42 @@ mod tests {
             store.state
         )));
         assert!(!report.contains("unreadable; check Claude settings"));
+    }
+
+    #[test]
+    fn removal_and_repair_save_refuse_to_switch_state_directories() {
+        let fixture = Fixture::folder();
+        let installed = fixture_store(&fixture);
+        installed.save(Some(&Layout::default()), Some(true), &|_| true).unwrap();
+        let elsewhere = Store { state: fixture.root.join("elsewhere/milo"), ..installed.clone() };
+        let not_rex = |_: &[&OsStr]| panic!("the XDG mismatch must be detected before invoking Rex");
+
+        assert_eq!(remove_from(&elsewhere, &not_rex).unwrap_err(), LISTENER_STATE_MISMATCH);
+        assert_eq!(
+            elsewhere.save_with(Some(&Layout::default()), None, &not_rex, |_| Ok(())).unwrap_err(),
+            LISTENER_STATE_MISMATCH,
+        );
+        assert!(!elsewhere.state.parent().unwrap().exists());
+        assert!(installed.has_layout().unwrap() && installed.listener_file().exists());
+        assert!(installed.claude() == Claude::On);
+        remove_from(&installed, &|_| true).unwrap();
+        assert!(!installed.has_layout().unwrap() && !installed.listener_file().exists());
+        assert!(installed.claude() == Claude::Off);
+    }
+
+    #[test]
+    fn removal_reports_the_missing_note_for_a_claude_only_installation() {
+        let fixture = Fixture::folder();
+        let installed = fixture_store(&fixture);
+        let not_rex = |_: &[&OsStr]| panic!("Claude settings do not need Rex");
+        installed.save(None, Some(true), &not_rex).unwrap();
+        let elsewhere = Store { state: fixture.root.join("elsewhere/milo"), ..installed.clone() };
+
+        let error = remove_from(&elsewhere, &not_rex).unwrap_err();
+        assert!(error.contains("original XDG_STATE_HOME"), "{error}");
+        let report = report_for(&elsewhere, None).unwrap();
+        assert!(report.contains("no matching ownership note"), "{report}");
+        assert!(installed.claude() == Claude::On);
     }
 
     #[test]

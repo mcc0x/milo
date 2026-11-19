@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use super::files::{self, Image};
 use super::layout::Layout;
 use super::lock;
+use super::rex_files::LISTENER_STATE_MISMATCH;
 use crate::paths;
 
 const RELOAD: [&str; 2] = ["config", "reload"];
@@ -90,6 +91,9 @@ impl Store {
         reload_optional: bool,
         extra: impl FnOnce(&mut Vec<files::Change>) -> Result<(), &'static str>,
     ) -> Result<SaveOutcome, &'static str> {
+        if layout.is_some() && !self.listener_state_matches()? {
+            return Err(LISTENER_STATE_MISMATCH);
+        }
         let _lock = lock::setup(&self.state)?;
         let mut changes = Vec::new();
         extra(&mut changes)?;
@@ -186,12 +190,14 @@ mod tests {
     #[test]
     fn generated_actions_use_only_the_chosen_panes_for_the_layout() {
         let executable = executable().unwrap();
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
         for width in WIDTHS.map(|width| width.proportion) {
             for mask in 0..8 {
                 for new_tabs in [false, true] {
                     let panes = std::array::from_fn(|i| mask & (1 << i) != 0);
                     let layout = Layout { width: width.into(), panes, new_tabs, ..Layout::default() };
-                    let lua = rex_lua(&layout, &executable);
+                    let lua = rex_lua(&layout, &executable, store.listener_env());
                     let (_, choices) = lua.split_once("local chosen = {\n").unwrap();
                     let (choices, _) = choices.split_once("}\n").unwrap();
                     for (name, chosen) in TabPane::ALL.map(TabPane::name).into_iter().zip(panes) {
@@ -527,7 +533,7 @@ mod tests {
         fs::write(store.state.join(RELOAD_PENDING), []).unwrap();
         fs::create_dir(&store.config).unwrap();
         let layout = Layout { panes: [true, false, true], width: "0.30".into(), ..Layout::default() };
-        fs::write(store.rex_file(), rex_lua(&layout, &executable().unwrap())).unwrap();
+        fs::write(store.rex_file(), rex_lua(&layout, &executable().unwrap(), store.listener_env())).unwrap();
         let (reopened, active) = store.layout().unwrap();
         assert!(!active && reopened == layout);
         store.save(Some(&reopened), None, &|_| true).unwrap();
@@ -632,16 +638,15 @@ mod tests {
     }
 
     #[test]
-    fn an_old_unconditional_launcher_followed_by_user_code_is_left_alone() {
+    fn an_unconditional_launcher_followed_by_user_code_is_left_alone() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
         let layout = Layout { new_tabs: true, ..Layout::default() };
         fs::write(&store.init, format!("{}\n{}\n", std::str::from_utf8(MANAGED).unwrap(), loader(&store.rex_file())))
             .unwrap();
         fs::create_dir(&store.config).unwrap();
-        let original = rex_lua(&layout, &executable().unwrap())
-            .replace("if arrange_new_tabs and not rex.args", "if not rex.args")
-            + "-- Keep my notes here.\n";
+        let original =
+            rex_lua(&layout, &executable().unwrap(), store.listener_env()) + "-- Keep my notes here.\n";
         fs::write(store.rex_file(), &original).unwrap();
         let result = store.save(Some(&Layout::default()), None, &|_| panic!("can't safely turn off the old launcher"));
         assert!(result.unwrap_err().contains("Your file was left alone."));

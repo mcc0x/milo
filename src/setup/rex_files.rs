@@ -10,10 +10,15 @@ use std::path::{Path, PathBuf};
 
 use super::files::{self, Change, Image, staged};
 use super::install::{RunRex, Store, read, settings_path};
-use super::layout::{Layout, listener_lua, lua_path, owns_actions, owns_listener, rex_lua, update_actions};
+use super::layout::{
+    Layout, ListenerEnv, listener_lua, listener_state_matches, lua_path, owns_actions, owns_listener, rex_lua,
+    update_actions,
+};
 const CREATED: &[u8] = b"-- Managed by milo setup. Milo created this file.";
 pub(super) const MANAGED: &[u8] = b"-- Managed by milo setup.";
 pub(super) const LAYOUT_DISABLED: &str = "layout-disabled";
+pub(super) const LISTENER_STATE_MISMATCH: &str =
+    "Milo's Rex listener was installed with a different XDG_STATE_HOME. Rerun with the original XDG_STATE_HOME.";
 
 impl Store {
     pub(super) fn rex_file(&self) -> PathBuf {
@@ -48,6 +53,22 @@ impl Store {
         let path = settings_path(&self.init)?;
         read_init_prefix(&path, &loader(&self.rex_file()))
             .map_err(|_| "Could not read Rex settings. No files were changed.")
+    }
+
+    pub(super) fn listener_env(&self) -> ListenerEnv<'_> {
+        ListenerEnv {
+            config_home: self.config.parent().unwrap_or(Path::new(".")),
+            state_home: self.state.parent().unwrap_or(Path::new(".")),
+        }
+    }
+
+    pub(super) fn listener_state_matches(&self) -> Result<bool, &'static str> {
+        check_config_dir(&self.config)?;
+        let actions = read(&self.rex_file())?;
+        Ok(actions
+            .as_ref()
+            .and_then(|file| std::str::from_utf8(&file.bytes).ok())
+            .is_none_or(|text| listener_state_matches(text, self.listener_env().state_home)))
     }
 
     /// Check generated files before the shared installer touches user settings.
@@ -89,12 +110,13 @@ impl Store {
     ) -> Result<(), &'static str> {
         let before = read(path)?;
         let executable = executable()?;
+        let env = self.listener_env();
         let after = if let Some(file) = &before {
             let text = std::str::from_utf8(&file.bytes).ok();
-            text.and_then(|text| update_actions(text, layout, &executable))
+            text.and_then(|text| update_actions(text, layout, &executable, env))
                 .ok_or("Could not update milo's Rex file (rex.lua). Your file was left alone.")?
         } else {
-            Some(rex_lua(layout, &executable))
+            Some(rex_lua(layout, &executable, env))
         };
         if let Some(lua) = after {
             changes.extend(Change::new(path.into(), before, Some(self.checked(lua, run)?)));

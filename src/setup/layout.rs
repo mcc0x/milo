@@ -13,6 +13,19 @@ const START_LISTENER: &str = "\n-- During a syntax check or a one-off layout, do
 const OLD_START_LISTENER: &str = "\n-- During a syntax check or a one-off layout, do not start a listener.\n\
     if not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then\n  \
     rex.exec.start({ milo, \"listen\" }, { detach = true })\nend\n";
+
+const LISTENER_COMMENT: &str = "-- During a syntax check or a one-off layout, do not start a listener.";
+const LISTENER_GUARD: &str = "if not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then";
+const CHOSEN_LISTENER_GUARD: &str = "if arrange_new_tabs and not rex.args and not os.getenv(\"MILO_CHECKING_REX\") then";
+const LISTENER_CALL: &str = "  rex.exec.start({ milo, \"listen\" }, { detach = true, env = { XDG_CONFIG_HOME = ";
+const LISTENER_STATE_ARG: &str = ", XDG_STATE_HOME = ";
+const LISTENER_CALL_END: &str = " } })";
+
+#[derive(Clone, Copy)]
+pub(super) struct ListenerEnv<'a> {
+    pub config_home: &'a Path,
+    pub state_home: &'a Path,
+}
 const ACTIONS: &str = include_str!("actions.lua");
 const LISTENER: &str = include_str!("listener.lua");
 // Older binaries shipped a ten-row default; later templates must not
@@ -408,14 +421,29 @@ fn lua_string(bytes: &[u8]) -> String {
 }
 
 /// Edit just the layout values of a hand-edited file; its action code and comments stay put.
-pub(super) fn update_actions(text: &str, layout: &Layout, executable: &Path) -> Option<Option<String>> {
+pub(super) fn update_actions(
+    text: &str,
+    layout: &Layout,
+    executable: &Path,
+    env: ListenerEnv<'_>,
+) -> Option<Option<String>> {
     let fields = declarations(text)?;
     let old = fields.layout()?;
     if fields.executable.is_some_and(|previous| shipped_actions(text, &old, previous)) {
-        let generated = rex_lua(layout, executable);
+        let generated = rex_lua(layout, executable, env);
         return Some((generated != text).then_some(generated));
     }
-    if old == *layout {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let with_newlines = |footer: &'static str| {
+        if newline == "\n" { Cow::Borrowed(footer) } else { Cow::Owned(footer.replace('\n', newline)) }
+    };
+    let legacy = [
+        (with_newlines(OLD_START_LISTENER), LISTENER_GUARD),
+        (with_newlines(START_LISTENER), CHOSEN_LISTENER_GUARD),
+    ];
+    let legacy_suffix =
+        legacy.iter().find_map(|(footer, guard)| text.ends_with(footer.as_ref()).then_some((footer.len(), *guard)));
+    if old == *layout && legacy_suffix.is_none() {
         return Some(None);
     }
 
@@ -436,7 +464,6 @@ pub(super) fn update_actions(text: &str, layout: &Layout, executable: &Path) -> 
     for (before, after) in fields.values.into_iter().zip(values) {
         replace(before, after);
     }
-    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut added = String::new();
     for (pane, before) in TabPane::ALL.into_iter().zip(fields.panes) {
         let chosen = layout.chosen(pane);
@@ -457,22 +484,22 @@ pub(super) fn update_actions(text: &str, layout: &Layout, executable: &Path) -> 
         updated.replace_range(range, &value);
     }
     if old.new_tabs != layout.new_tabs {
-        let with_newlines = |footer: &'static str| {
-            if newline == "\n" { Cow::Borrowed(footer) } else { Cow::Owned(footer.replace('\n', newline)) }
-        };
-        let old_footer = with_newlines(OLD_START_LISTENER);
-        if updated.ends_with(old_footer.as_ref()) {
-            updated.truncate(updated.len() - old_footer.len());
-        } else if updated.contains(old_footer.as_ref()) {
-            // The old launcher ignored the choice; it can't safely be edited inside custom Lua.
+        if let Some((len, _)) = legacy_suffix {
+            updated.truncate(updated.len() - len);
+        } else if let Some(body) = strip_scoped_footer(&updated, newline) {
+            updated.truncate(body.len());
+        } else if legacy.iter().any(|(footer, _)| updated.contains(footer.as_ref()))
+            || updated.lines().any(|line| launcher_state(line).is_some())
+        {
+            // Do not rewrite a launcher buried in custom code.
             return None;
         }
-        let footer = with_newlines(START_LISTENER);
-        if layout.new_tabs && !updated.contains(footer.as_ref()) {
-            updated.push_str(&footer);
-        } else if !layout.new_tabs && updated.ends_with(footer.as_ref()) {
-            updated.truncate(updated.len() - footer.len());
+        if layout.new_tabs {
+            push_listener(&mut updated, env, newline, CHOSEN_LISTENER_GUARD);
         }
+    } else if let Some((len, guard)) = legacy_suffix {
+        updated.truncate(updated.len() - len);
+        push_listener(&mut updated, env, newline, guard);
     }
     Some(Some(updated))
 }
@@ -493,7 +520,10 @@ fn shipped_actions(text: &str, layout: &Layout, exe: &str) -> bool {
 
 fn shipped_action_body<'a>(text: &'a str, layout: &Layout, exe: &str) -> Option<&'a str> {
     let tail = text.strip_prefix(&actions_prefix(layout, exe))?;
-    let body = tail.strip_suffix(OLD_START_LISTENER).or_else(|| tail.strip_suffix(START_LISTENER)).unwrap_or(tail);
+    let body = strip_scoped_footer(tail, "\n")
+        .or_else(|| tail.strip_suffix(OLD_START_LISTENER))
+        .or_else(|| tail.strip_suffix(START_LISTENER))
+        .unwrap_or(tail);
     let owns = body == ACTIONS || {
         let hash = fingerprint(body);
         TEN_ROW_ACTIONS.contains(&hash) || TWO_ROW_ACTIONS.contains(&hash)
@@ -502,13 +532,49 @@ fn shipped_action_body<'a>(text: &'a str, layout: &Layout, exe: &str) -> Option<
 }
 
 /// The installed and temporary layouts must run exactly the same actions.
-pub(super) fn rex_lua(layout: &Layout, executable: &Path) -> String {
+pub(super) fn rex_lua(layout: &Layout, executable: &Path, env: ListenerEnv<'_>) -> String {
     let mut lua = actions_prefix(layout, &lua_path(executable));
     lua.push_str(ACTIONS);
     if layout.enabled() {
-        lua.push_str(OLD_START_LISTENER);
+        push_listener(&mut lua, env, "\n", LISTENER_GUARD);
     }
     lua
+}
+
+fn push_listener(lua: &mut String, env: ListenerEnv<'_>, nl: &str, guard: &str) {
+    let config = lua_path(env.config_home);
+    let state = lua_path(env.state_home);
+    write!(
+        lua,
+        "{nl}{LISTENER_COMMENT}{nl}{guard}{nl}{LISTENER_CALL}{config}{LISTENER_STATE_ARG}{state}{LISTENER_CALL_END}{nl}end{nl}",
+    )
+    .expect("writing to a string");
+}
+
+fn launcher_state(call: &str) -> Option<&str> {
+    let args = call.strip_prefix(LISTENER_CALL)?.strip_suffix(LISTENER_CALL_END)?;
+    let state = args.get(lua_string_end(args)?..)?.strip_prefix(LISTENER_STATE_ARG)?;
+    (lua_string_end(state) == Some(state.len())).then_some(state)
+}
+
+/// Compare the generated environment without using paths found in the user's Lua.
+pub(super) fn listener_state_matches(text: &str, state_home: &Path) -> bool {
+    let mut lines = text.lines();
+    if lines.next().is_none_or(|line| line.trim_end() != GENERATED.trim_end()) {
+        return true;
+    }
+    let mut launchers = lines.filter_map(launcher_state);
+    let Some(first) = launchers.next() else { return true };
+    let expected = lua_path(state_home);
+    first == expected && launchers.all(|state| state == expected)
+}
+
+fn strip_scoped_footer<'a>(text: &'a str, nl: &str) -> Option<&'a str> {
+    let (text, call) = text.strip_suffix(nl)?.strip_suffix("end")?.strip_suffix(nl)?.rsplit_once(nl)?;
+    launcher_state(call)?;
+    let (text, guard) = text.rsplit_once(nl)?;
+    let (body, comment) = text.rsplit_once(nl)?;
+    (matches!(guard, LISTENER_GUARD | CHOSEN_LISTENER_GUARD) && comment == LISTENER_COMMENT).then_some(body)
 }
 
 fn actions_prefix(layout: &Layout, executable: &str) -> String {
@@ -557,6 +623,35 @@ pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
 mod tests {
     use super::*;
 
+    const CONFIG_HOME: &str = "/fixture/config home";
+    const STATE_HOME: &str = "/fixture/state'home";
+
+    fn environment() -> ListenerEnv<'static> {
+        ListenerEnv { config_home: Path::new(CONFIG_HOME), state_home: Path::new(STATE_HOME) }
+    }
+
+    #[test]
+    fn shipped_launcher_pins_the_install_paths_and_detects_state_mismatch() {
+        let text = rex_lua(&Layout::default(), Path::new("/fixture/bin/milo"), environment());
+        assert!(text.contains(&format!(
+            "env = {{ XDG_CONFIG_HOME = \"{CONFIG_HOME}\", XDG_STATE_HOME = \"{STATE_HOME}\" }}"
+        )));
+        assert!(owns_actions(&text));
+        assert!(listener_state_matches(&text, Path::new(STATE_HOME)));
+        let edited = text.replace('\n', "\r\n") + "\r\n-- keep my comments\r\n";
+        assert!(!listener_state_matches(&edited, Path::new("/other/state")));
+        let old = strip_scoped_footer(&text, "\n").unwrap().to_owned() + OLD_START_LISTENER;
+        assert!(owns_actions(&old));
+        let same_layout = Layout::default();
+        let executable = Path::new("/fixture/bin/milo");
+        let customized = |lua: &str| lua.replace("-- Terminal rows", "-- My custom comment.\n-- Terminal rows");
+        assert_eq!(update_actions(&old, &same_layout, executable, environment()), Some(Some(text.clone())));
+        assert_eq!(
+            update_actions(&customized(&old), &same_layout, executable, environment()),
+            Some(Some(customized(&text))),
+        );
+    }
+
     #[test]
     #[ignore = "requires Lua 5.1; run by the Rex fixtures CI job"]
     fn rex_lua_fixtures() {
@@ -566,10 +661,31 @@ mod tests {
         let disabled = f.root.join("disabled.lua");
         let listener = f.root.join("listener.lua");
         let layout = Layout::default();
-        std::fs::write(&disabled, rex_lua(&layout, executable)).unwrap();
-        std::fs::write(&actions, rex_lua(&Layout { new_tabs: true, ..layout }, executable)).unwrap();
+        std::fs::write(&disabled, rex_lua(&layout, executable, environment())).unwrap();
+        std::fs::write(&actions, rex_lua(&Layout { new_tabs: true, ..layout }, executable, environment())).unwrap();
         std::fs::write(&listener, listener_lua(&actions)).unwrap();
         let lua = std::env::var_os("LUA51").unwrap_or_else(|| "lua5.1".into());
+        let check_environment = format!(
+            "local started = false
+             rex = {{ action = function() end, exec = {{ start = function(argv, opts)
+               assert(argv[1] == '/fixture/bin/milo' and argv[2] == 'listen' and opts.detach)
+               assert(opts.env.XDG_CONFIG_HOME == {} and opts.env.XDG_STATE_HOME == {})
+               started = true
+             end }} }}
+             dofile({})
+             assert(started)",
+            lua_path(Path::new(CONFIG_HOME)),
+            lua_path(Path::new(STATE_HOME)),
+            lua_path(&actions),
+        );
+        assert!(
+            std::process::Command::new(&lua)
+                .env_remove("MILO_CHECKING_REX")
+                .args(["-e", &check_environment])
+                .status()
+                .expect("install Lua 5.1 or set LUA51 to its executable")
+                .success()
+        );
         let run = |script: &str, files: &[&Path]| {
             let status = std::process::Command::new(&lua)
                 .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/setup"))
@@ -588,7 +704,7 @@ mod tests {
     #[test]
     fn explicit_ten_row_settings_are_not_legacy_defaults() {
         let layout = Layout { usage_rows: "10".into(), ..Layout::default() };
-        let current = rex_lua(&layout, Path::new("/milo"));
+        let current = rex_lua(&layout, Path::new("/milo"), environment());
         assert_eq!(Layout::parse(&current).unwrap().usage_rows, "10");
         let customized = current.replace("local usage_rows = 10", "local usage_rows = 10 -- Keep this height");
         assert_eq!(Layout::parse(&customized).unwrap().usage_rows, "10");

@@ -512,7 +512,8 @@ mod tests {
         let root = fixture.root.join("project");
         let default = Layout::default();
         std::fs::create_dir(&store.config).unwrap();
-        std::fs::write(store.rex_file(), super::super::layout::rex_lua(&default, Path::new("/bin/milo"))).unwrap();
+        let lua = super::super::layout::rex_lua(&default, Path::new("/bin/milo"), store.listener_env());
+        std::fs::write(store.rex_file(), lua).unwrap();
         let before = Layout::parse_rail("v1 l .2 .7 10 uho 101 800000 0 200000").unwrap();
         let after = Layout::parse_rail("v1 l .33 .7 10 uho 101 900000 0 100000").unwrap();
 
