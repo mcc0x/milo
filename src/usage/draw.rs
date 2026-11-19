@@ -14,7 +14,7 @@ use crate::when::{self, Detail};
 use crate::width::str_width;
 
 use self::figure::Figure;
-use super::{AGE_NOTE, Activity, CodexSessions, Limits, Usage, Window};
+use super::{Activity, CodexSessions, Limits, Source, Usage, Window};
 
 const SIDE_BY_SIDE: usize = 64;
 const LARGE_ROWS: usize = 3;
@@ -116,8 +116,7 @@ struct Metric<'a> {
 }
 
 impl Metric<'_> {
-    fn limit(window: Window, now: i64) -> Self {
-        let age = now.saturating_sub(window.observed);
+    fn limit(window: Window, now: i64, source: Source) -> Self {
         let label = match window.minutes {
             10_080 => "week".into(),
             300 => "5h".into(),
@@ -136,7 +135,7 @@ impl Metric<'_> {
             label,
             number: (!elapsed).then(|| Figure::new(window.number(), window.percent)),
             when,
-            age: (!elapsed && age >= AGE_NOTE).then_some(age),
+            age: (!elapsed && now >= window.stale_at(source)).then(|| now.saturating_sub(window.observed)),
             used: window.percent,
         }
     }
@@ -315,17 +314,20 @@ struct Report<'a> {
 
 impl<'a> Report<'a> {
     /// Leave out unreported windows; a dash stands for the whole missing report.
-    fn new(tool: Tool, limits: Option<&'a Limits>, missing: Hint, now: i64) -> Self {
-        let base = limits.into_iter().flat_map(|limits| limits.base.into_iter().flatten());
-        let model = limits.and_then(|limits| limits.model_week.as_ref()).map(|model| {
-            let mut metric = Metric::limit(model.window, now);
+    fn new(tool: Tool, report: Option<(&'a Limits, Source)>, missing: Hint, now: i64) -> Self {
+        let Some((limits, source)) = report else {
+            return Self { tool, first: Metric::missing("limits"), extra: [None, None], hint: Some(missing) };
+        };
+        let base = limits.base.into_iter().flatten().map(|window| Metric::limit(window, now, source));
+        let model = limits.model_week.as_ref().map(|model| {
+            let mut metric = Metric::limit(model.window, now, source);
             metric.label = model.caption().into();
             metric
         });
-        let mut figures = base.map(|window| Metric::limit(window, now)).chain(model);
+        let mut figures = base.chain(model);
         let (first, hint) = match figures.next() {
             Some(first) => (first, None),
-            None => (Metric::missing("limits"), Some(if limits.is_some() { Hint::NO_LIMITS } else { missing })),
+            None => (Metric::missing("limits"), Some(Hint::NO_LIMITS)),
         };
         Self { tool, first, extra: [figures.next(), figures.next()], hint }
     }
@@ -785,8 +787,13 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         CodexSessions::Unreadable => Hint::UNREADABLE,
     };
     let reports = [
-        Report::new(Tool::Codex, usage.codex.latest().map(|reading| &reading.windows), missing, now),
-        Report::new(Tool::Claude, usage.claude.latest().map(|reading| &reading.windows), Hint::NO_SAVED_LIMITS, now),
+        Report::new(Tool::Codex, usage.codex.reported().map(|(r, source)| (&r.windows, source)), missing, now),
+        Report::new(
+            Tool::Claude,
+            usage.claude.reported().map(|(r, source)| (&r.windows, source)),
+            Hint::NO_SAVED_LIMITS,
+            now,
+        ),
     ];
     let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
     // At two rows, give each provider a full line for its tightest limit.
@@ -814,7 +821,7 @@ mod tests {
     use super::*;
 
     fn labels(limits: Option<&Limits>) -> Vec<String> {
-        let report = Report::new(Tool::Claude, limits, Hint::NO_SAVED_LIMITS, 1000);
+        let report = Report::new(Tool::Claude, limits.map(|l| (l, Source::Omp)), Hint::NO_SAVED_LIMITS, 1000);
         std::iter::once(&report.first)
             .chain(report.extra.iter().flatten())
             .map(|metric| metric.label.to_string())

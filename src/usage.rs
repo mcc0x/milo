@@ -24,7 +24,6 @@ use crate::{paths, when};
 use self::files::{Budget, FileVersion, Reverse, Sessions, Stream, Tree};
 use self::time::Timestamp;
 
-const AGE_NOTE: i64 = 5 * MINUTE;
 const CLOCK_SKEW: i64 = 5 * MINUTE;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const CODEX_BYTES: u64 = files::CODEX_FILES as u64 * TAIL_BYTES;
@@ -76,6 +75,10 @@ impl Window {
 
     fn is_reset(self, now: i64) -> bool {
         self.resets.is_some_and(|reset| reset <= now)
+    }
+
+    fn stale_at(self, source: Source) -> i64 {
+        self.observed.saturating_add(source.fresh_for())
     }
 
     /// Codex reports percentages and durations under different names from Claude.
@@ -202,6 +205,14 @@ impl Source {
             Self::Omp => "OMP usage database",
         }
     }
+
+    fn fresh_for(self) -> i64 {
+        match self {
+            // OMP itself can go about six minutes between provider fetches.
+            Self::Omp => 10 * MINUTE,
+            Self::CodexSession | Self::ClaudeStatus | Self::ClaudeCache => 5 * MINUTE,
+        }
+    }
 }
 
 /// Remember the file version so an unchanged transcript does not need another read.
@@ -301,10 +312,6 @@ impl Codex {
             .filter_map(|file| file.reading.as_ref().map(|r| (r, Source::CodexSession)))
             .chain(self.omp.iter().map(|r| (r, Source::Omp)))
             .max_by_key(|(r, _)| r.at)
-    }
-
-    fn latest(&self) -> Option<&Reading> {
-        self.reported().map(|(reading, _)| reading)
     }
 }
 
@@ -516,10 +523,6 @@ impl Claude {
             .into_iter()
             .filter_map(|(reading, source)| Some((reading.as_ref()?, source)))
             .max_by_key(|(reading, _)| reading.at)
-    }
-
-    fn latest(&self) -> Option<&Reading> {
-        self.reported().map(|(reading, _)| reading)
     }
 
     /// Merge duplicate IDs once per changed scan instead of on every redraw.
@@ -774,12 +777,12 @@ impl Pane for Usage {
         let now = self.now();
         let earliest = self
             .codex
-            .latest()
+            .reported()
             .into_iter()
-            .chain(self.claude.latest())
-            .flat_map(|reading| reading.windows.windows())
-            .filter(|window| !window.is_reset(now))
-            .flat_map(|window| [window.resets, Some(window.observed.saturating_add(AGE_NOTE))])
+            .chain(self.claude.reported())
+            .flat_map(|(reading, source)| reading.windows.windows().map(move |window| (window, source)))
+            .filter(|(window, _)| !window.is_reset(now))
+            .flat_map(|(window, source)| [window.resets, Some(window.stale_at(source))])
             .flatten()
             .filter(|&change| change > now)
             .min();

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::fs_ops::{self, Temp};
 use crate::json::Value;
+use crate::when::MINUTE;
 use crate::width::char_width;
 
 use super::files::{self, Budget, FileVersion};
@@ -154,29 +155,40 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
 
 /// Merge under the directory lock so two status invocations cannot lose a window.
 fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
-    let previous = fs_ops::open_read(path)
-        .ok()
-        .and_then(|file| {
-            let version = FileVersion::opened(&file)?;
-            saved(file, version, &mut Budget::new(MAX_SAVED + 1))
-        })
-        .map(|reading| reading.windows.base)
-        .unwrap_or_default();
-    let merged = std::array::from_fn(|i| newer(previous[i], windows[i]));
-    if merged == previous {
+    let previous = fs_ops::open_read(path).ok().and_then(|file| {
+        let version = FileVersion::opened(&file)?;
+        saved(file, version, &mut Budget::new(MAX_SAVED + 1))
+    });
+    let base = previous.map_or([None; 2], |reading| reading.windows.base);
+    let merged = std::array::from_fn(|i| newer(base[i], windows[i]));
+    if merged == base {
         return Ok(());
     }
-    write_limits(path, dir, now, merged)
+    let at = previous.map_or(now, |reading| now.max(reading.at.seconds));
+    write_limits(path, dir, at, merged)
 }
 
 /// An older or smaller report must not roll back a known nondecreasing window.
 fn newer(previous: Option<Window>, incoming: Option<Window>) -> Option<Window> {
-    if let (Some(old), Some(new)) = (previous, incoming)
-        && (old.resets > new.resets || old.resets == new.resets && old.percent >= new.percent)
-    {
+    let (Some(old), Some(new)) = (previous, incoming) else {
+        return incoming.or(previous);
+    };
+    if new.observed < old.observed || new.resets < old.resets {
         return previous;
     }
-    incoming.or(previous)
+    if new.resets == old.resets {
+        match new.percent.total_cmp(&old.percent) {
+            std::cmp::Ordering::Less => return previous,
+            // Identical reports confirm the reading without replacing the file on every status call.
+            std::cmp::Ordering::Equal
+                if new.is_reset(new.observed) || new.observed.saturating_sub(old.observed) < MINUTE =>
+            {
+                return previous;
+            }
+            _ => {}
+        }
+    }
+    incoming
 }
 
 /// A replacement makes the next read see both windows from the same save.

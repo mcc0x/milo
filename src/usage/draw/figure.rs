@@ -151,10 +151,10 @@ thread_local! {
 mod tests {
     use super::*;
     use crate::usage::draw::{Chart, Hint, Metric, Report, Tool};
-    use crate::usage::{Activity, Window};
+    use crate::usage::{Activity, Source, Window};
 
     fn metric(percent: f64) -> Metric<'static> {
-        Metric::limit(Window { minutes: 300, percent, resets: None, observed: 0 }, 0)
+        Metric::limit(Window { minutes: 300, percent, resets: None, observed: 0 }, 0, Source::CodexSession)
     }
 
     #[test]

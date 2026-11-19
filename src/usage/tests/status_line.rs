@@ -60,10 +60,6 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
     // Keeping the higher, older figures keeps their age too.
     assert_eq!(rows[2].matches("2 h ago").count(), 1);
 
-    let before = fs::read(&path).unwrap();
-    claude_report(&path, &format!(r#"{{"five_hour":{{"used_percentage":85,"resets_at":{reset}}}}}"#), NOW);
-    assert_eq!(fs::read(&path).unwrap(), before);
-
     claude_report(&path, &format!(r#"{{"seven_day":{{"used_percentage":55,"resets_at":{week}}}}}"#), NOW);
     assert!(usage.check());
     let rows = frame(&mut usage, 140, 3);
@@ -80,6 +76,56 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
     let rows = frame(&mut usage, 140, 3);
     let figures: Vec<&str> = rows[1].split_whitespace().collect();
     assert!(figures.contains(&"95%") && !figures.contains(&"5%"));
+}
+
+#[test]
+fn identical_status_reports_advance_only_supplied_windows_at_most_once_a_minute() {
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    status::run(STATUS, Vec::new(), Some(&path), NOW);
+    let original = fs::read(&path).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    let five_hour = r#"{"five_hour":{"used_percentage":23,"resets_at":1795110000}}"#;
+
+    claude_report(&path, five_hour, NOW + MINUTE - 1);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+
+    let next = NOW + MINUTE;
+    claude_report(&path, five_hour, next);
+    let updated = fs::read(&path).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    claude_report(&path, five_hour, next + 1);
+    assert_eq!(fs::read(&path).unwrap(), updated);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+
+    let usage = open(&f, next + 1);
+    let (report, _) = usage.claude.reported().unwrap();
+    assert_eq!(report.at.seconds, next);
+    let [five, week] = report.windows.base;
+    assert_eq!(five.unwrap().observed, next);
+    assert_eq!(week.unwrap().observed, NOW);
+}
+
+#[test]
+fn old_and_elapsed_status_reports_cannot_freshen_or_replace_a_saved_window() {
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    let reset = NOW + 2 * MINUTE;
+    let report = |used, reset| format!(r#"{{"five_hour":{{"used_percentage":{used},"resets_at":{reset}}}}}"#);
+    claude_report(&path, &report(30, reset), NOW);
+    let original = fs::read(&path).unwrap();
+    for (used, incoming_reset, at) in [(40, reset, NOW - 1), (10, reset + HOUR, NOW - 1), (30, reset, reset)] {
+        claude_report(&path, &report(used, incoming_reset), at);
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    // A late partial report may fill an empty slot but must not make the reading older.
+    claude_report(&path, r#"{"seven_day":{"used_percentage":55,"resets_at":1795219200}}"#, NOW - 1);
+    let usage = open(&f, NOW);
+    let (report, _) = usage.claude.reported().unwrap();
+    assert_eq!(report.at.seconds, NOW);
+    assert_eq!(report.windows.base[1].unwrap().observed, NOW - 1);
 }
 
 #[test]

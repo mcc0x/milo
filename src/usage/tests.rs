@@ -461,8 +461,8 @@ mod omp_limits {
         wait_for(|| usage.check());
         assert_eq!(usage.codex.reported().unwrap().1.label(), "OMP usage database");
         assert_eq!(usage.claude.reported().unwrap().1.label(), "OMP usage database");
-        let codex = usage.codex.latest().unwrap().windows.base;
-        let claude = usage.claude.latest().unwrap().windows.base;
+        let codex = usage.codex.reported().unwrap().0.windows.base;
+        let claude = usage.claude.reported().unwrap().0.windows.base;
         assert!(codex[0].is_none() && codex[1].unwrap().percent == 1.0);
         assert!(claude[0].is_none() && claude[1].unwrap().percent == 27.0);
 
@@ -472,8 +472,8 @@ mod omp_limits {
         assert!(usage.check());
         assert_eq!(usage.codex.reported().unwrap().1.label(), "Codex session log");
         assert_eq!(usage.claude.reported().unwrap().1.label(), "Milo Claude status line");
-        let codex = usage.codex.latest().unwrap().windows.base;
-        let claude = usage.claude.latest().unwrap().windows.base;
+        let codex = usage.codex.reported().unwrap().0.windows.base;
+        let claude = usage.claude.reported().unwrap().0.windows.base;
         assert!(codex.into_iter().flatten().any(|window| window.percent == 45.0));
         assert!(codex.into_iter().flatten().any(|window| window.percent == 9.0));
         assert!(claude[0].unwrap().percent == 23.0 && claude[1].unwrap().percent == 62.0);
@@ -500,17 +500,17 @@ mod omp_limits {
         write(&f, ".claude.json", &content("fixture-current"), NOW);
         assert!(usage.check());
         assert_eq!(usage.claude.reported().unwrap().1.label(), "Claude Code usage cache");
-        let windows = usage.claude.latest().unwrap().windows.base;
+        let windows = usage.claude.reported().unwrap().0.windows.base;
         assert!(windows[0].is_none() && windows[1].unwrap().percent == 18.0);
         assert_eq!(windows[1].unwrap().resets, Some(reset));
         write(&f, ".claude.json", &content("fixture-other"), NOW + 1);
         assert!(usage.check());
-        assert_eq!(usage.claude.latest().unwrap().windows.base[1].unwrap().percent, 61.0);
+        assert_eq!(usage.claude.reported().unwrap().0.windows.base[1].unwrap().percent, 61.0);
         write(&f, ".claude.json", &content("fixture-current"), NOW + 2);
         OpenOptions::new().write(true).open(config).unwrap().set_len(6 * 1024 * 1024).unwrap();
         assert!(usage.check());
         assert_eq!(usage.bytes_read, 0);
-        assert_eq!(usage.claude.latest().unwrap().windows.base[1].unwrap().percent, 61.0);
+        assert_eq!(usage.claude.reported().unwrap().0.windows.base[1].unwrap().percent, 61.0);
     }
 
     #[test]

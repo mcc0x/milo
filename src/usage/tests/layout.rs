@@ -258,6 +258,27 @@ fn a_reading_shows_its_age_at_five_minutes_but_not_one_second_earlier() {
 }
 
 #[test]
+fn health_of_an_omp_report_follows_its_own_cadence() {
+    let f = Fixture::folder();
+    let reset = NOW + HOUR;
+    write(&f, CODEX, &codex(NOW, 80, reset, "null"), NOW);
+    let mut usage = open(&f, NOW + 10 * MINUTE - 1);
+    usage.claude.omp = Some(Reading {
+        at: Timestamp::seconds(NOW + 30),
+        windows: Limits::new([Some(Window { minutes: 300, percent: 50.0, resets: Some(reset), observed: NOW }), None]),
+    });
+    assert_eq!(usage.next_frame(), Some(Duration::from_secs(1)));
+    let rows = frame(&mut usage, 140, 3);
+    let (codex, claude) = rows[0].split_once('│').unwrap();
+    assert!(codex.contains("last reported") && !claude.contains("last reported"));
+
+    usage.fixed_now = Some(NOW + 10 * MINUTE);
+    let rows = frame(&mut usage, 140, 3);
+    let (_, claude) = rows[2].split_once('│').unwrap();
+    assert!(claude.contains("10 m ago"));
+}
+
+#[test]
 fn a_lone_figure_has_room_for_its_reset_caption() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 23, NOW + 2 * HOUR + 10 * MINUTE, "null"), NOW);
@@ -340,10 +361,10 @@ fn elapsed_and_missing_limits_give_different_next_steps_without_guessing_percent
 fn a_short_stale_summary_is_labeled_even_without_a_spare_line() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 80, NOW + DAY, "null"), NOW);
-    let mut usage = open(&f, NOW + AGE_NOTE - 1);
+    let mut usage = open(&f, NOW + 5 * MINUTE - 1);
     assert_eq!(usage.next_frame(), Some(Duration::from_secs(1)));
     assert_eq!(frame(&mut usage, 22, 1), ["Codex week · 20% left"]);
-    usage.fixed_now = Some(NOW + AGE_NOTE);
+    usage.fixed_now = Some(NOW + 5 * MINUTE);
     assert_eq!(frame(&mut usage, 22, 1), ["Codex week · 20% last"]);
     assert_eq!(frame(&mut usage, 12, 6)[0], "Cx 20% last");
     assert!(!frame(&mut usage, 6, 1)[0].contains('%'));
