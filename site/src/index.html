@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#eceafb">
+    <title>milo — Terminal panes beside your work</title>
+    <meta name="description" content="See your changed files, recent commits, and coding tool limits beside your shell in Rex.">
+    <link rel="canonical" href="https://usemilo.net/">
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon.png">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://usemilo.net/">
+    <meta property="og:title" content="milo — Terminal panes beside your work">
+    <meta property="og:description" content="See your changed files, recent commits, and coding tool limits beside your shell in Rex.">
+    <meta property="og:image" content="https://usemilo.net/milo-preview.jpg">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Milo, a blue cat, beside the words ‘Terminal panes beside your work.’">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="milo — Terminal panes beside your work">
+    <meta name="twitter:description" content="See your changed files, recent commits, and coding tool limits beside your shell in Rex.">
+    <meta name="twitter:image" content="https://usemilo.net/milo-preview.jpg">
+    <meta name="twitter:image:alt" content="Milo, a blue cat, beside the words ‘Terminal panes beside your work.’">
+    <link rel="preload" href="./fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="./fonts/terminal-symbols.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="./fonts/terminal-figures.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./main.ts"></script>
+  </head>
+  <body>
+    <main>
+      <section class="hero" aria-label="Milo terminal demo">
+        <div class="demo-head">
+          <div class="pane-tabs" role="tablist" aria-label="Look closer at a pane">
+            <button type="button" role="tab" id="outline-tab" aria-selected="false" aria-controls="outline-panel">Outline</button>
+            <button type="button" role="tab" id="history-tab" aria-selected="false" aria-controls="history-panel" tabindex="-1">History</button>
+            <button type="button" role="tab" id="usage-tab" aria-selected="false" aria-controls="usage-panel" tabindex="-1">Usage</button>
+            <button type="button" role="tab" id="reader-tab" aria-selected="false" aria-controls="reader-panel" tabindex="-1">Reader</button>
+            <button type="button" role="tab" id="agent-tab" aria-selected="false" aria-controls="agent-panel" tabindex="-1">Agent</button>
+          </div>
+          <div class="pane-notes">
+            <p id="pane-hint">Four panes sit beside your shell.<br>Choose one to look closer.</p>
+            <p role="tabpanel" id="outline-panel" aria-labelledby="outline-tab" tabindex="0" hidden>See files change in the project tree.<br>Know what to commit and what to push.</p>
+            <p role="tabpanel" id="history-panel" aria-labelledby="history-tab" tabindex="0" hidden>See recent commits and what’s left to push.<br>Open a commit to see its files.</p>
+            <p role="tabpanel" id="usage-panel" aria-labelledby="usage-tab" tabindex="0" hidden>See your Codex and Claude Code usage.<br>Check when each limit resets.</p>
+            <p role="tabpanel" id="reader-panel" aria-labelledby="reader-tab" tabindex="0" hidden>See what was added or removed.<br>Read a file as it was at a commit.</p>
+            <p role="tabpanel" id="agent-panel" aria-labelledby="agent-tab" tabindex="0" hidden>Keep using your coding agent in the shell.<br>See what changes in the panes beside it.</p>
+          </div>
+        </div>
+        <div class="stage">
+          <picture class="mascot">
+            <source srcset="./images/milo.webp" type="image/webp">
+            <img src="./images/milo.png" width="479" height="508" alt="" fetchpriority="high">
+          </picture>
+          <div class="terminal" id="demo" data-view="whole">
+            <div class="terminal-bar">
+              <div class="window-lights" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span class="terminal-tab">tidebook</span>
+              <span class="terminal-tab is-idle" aria-hidden="true">notes</span>
+              <span class="terminal-app">Rex</span>
+            </div>
+            <div class="terminal-panes">
+              <section class="term-pane outline" id="outline-pane" data-pane="outline" aria-label="Outline"></section>
+              <section class="term-pane history" id="history-pane" data-pane="history" aria-label="History"></section>
+              <section class="term-pane usage" id="usage-pane" data-pane="usage" aria-label="Usage">
+                <div class="usage-tool">
+                  <div class="usage-mark"><img src="./images/codex.png" width="192" height="192" alt="Codex"><span id="codex-age"></span></div>
+                  <div class="usage-limit"><span>5h</span><strong id="codex-five"></strong><span>in 2 h 38 m</span></div>
+                  <div class="usage-limit"><span>week</span><strong id="codex-week"></strong><span>resets in 2 d</span></div>
+                </div>
+                <div class="usage-tool">
+                  <div class="usage-mark"><img src="./images/claude.png" width="192" height="192" alt="Claude Code"><span id="claude-age"></span></div>
+                  <div class="usage-limit"><span>5h</span><strong id="claude-five"></strong><span>in 1 h 58 m</span></div>
+                  <div class="usage-limit"><span>week</span><strong id="claude-week"></strong><span>resets in 2 d</span></div>
+                  <span class="usage-activity">186k tokens today</span>
+                </div>
+              </section>
+              <section class="term-pane agent" id="agent-pane" data-pane="agent" aria-label="Coding agent">
+                <div class="agent-session">
+                  <p class="agent-step agent-request" data-step="prompt"><b>You</b><br><span id="agent-request-text"></span></p>
+                  <div class="agent-step" data-step="plan">
+                    <p><b>Agent</b><br>I’ll add wind speed in km/h and check the forecast output.</p>
+                  </div>
+                  <div class="agent-step" data-step="edit">
+                    <p class="agent-tool">┌ <b>Edit</b> <span>src/weather.ts</span> <span id="agent-tally"></span></p>
+                    <div class="agent-diff" id="agent-diff"></div>
+                  </div>
+                  <div class="agent-step" data-step="test">
+                    <p class="agent-tool">┌ <b>Run</b> <span>bun test tests/weather.test.ts</span></p>
+                    <p class="agent-result">└ <span class="term-green">✓</span> 1 passed · 0 failed</p>
+                  </div>
+                  <div class="agent-step" data-step="commit">
+                    <p class="agent-tool">┌ <b>Commit</b> <span>src/weather.ts</span></p>
+                    <p class="agent-result">└ <span class="term-green" id="agent-commit-id"></span> <span id="agent-commit-title"></span></p>
+                  </div>
+                </div>
+                <div class="agent-composer" aria-hidden="true">
+                  <span class="composer-prompt">›</span>
+                  <span class="composer-text" id="composer-text"></span><i class="composer-caret"></i>
+                  <span class="agent-status" id="agent-status" data-state="idle"></span>
+                </div>
+              </section>
+              <section class="reader" id="reader-pane" aria-label="File reader" hidden>
+                <div class="reader-bar">
+                  <span>Reader</span>
+                  <button type="button" id="close-reader" aria-label="Close reader">×</button>
+                </div>
+                <div class="reader-content" id="reader-content"></div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="intro" aria-labelledby="title">
+        <h1 id="title">milo</h1>
+        <p class="description">See your changed files, recent commits, and coding tool limits beside your shell in Rex.</p>
+        <div class="install">
+          <code id="install-command">git clone https://github.com/mcc0x/milo.git &amp;&amp; cd milo &amp;&amp; sh install.sh</code>
+          <button id="copy-command" type="button" aria-describedby="install-command">Copy</button>
+        </div>
+        <p class="repository-note" id="repository-note">The GitHub repository and docs are private for now.</p>
+        <p id="copy-feedback" class="visually-hidden" role="status"></p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <a href="/LICENSE">MIT licence</a>
+    </footer>
+  </body>
+</html>

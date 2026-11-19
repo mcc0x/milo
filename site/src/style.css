@@ -1,0 +1,123 @@
+@import './terminal.css';
+
+@font-face {
+  font-family: Bricolage;
+  src: url('./fonts/bricolage-grotesque-latin.woff2') format('woff2');
+  font-weight: 400 800;
+  font-display: optional;
+}
+
+:root {
+  color-scheme: light;
+  --page: #eceafb;
+  --surface: #f9f8ff;
+  --ink: #1b2466;
+  --secondary: #464b73;
+  --blue: #2a89fb;
+  --sky: #80dafc;
+  --edge: #cecae8;
+  --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 400 1rem/1.5 Bricolage, system-ui, sans-serif;
+}
+
+h1, h2, p { margin: 0; }
+
+:focus-visible {
+  outline: 3px solid var(--ink);
+  outline-offset: 4px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.intro {
+  width: min(calc(100% - 2rem), 48rem);
+  margin: clamp(2.1rem, 5vw, 3.875rem) auto 0;
+  text-align: center;
+}
+
+h1 {
+  font-size: clamp(4.75rem, 11vw, 7.25rem);
+  line-height: .91;
+  font-weight: 780;
+  letter-spacing: -.022em;
+  padding-right: .022em;
+}
+
+.description {
+  max-width: 33ch;
+  margin: .9rem auto 0;
+  color: var(--ink);
+  font-weight: 500;
+  font-size: clamp(1.15rem, 2.6vw, 1.5rem);
+  line-height: 1.28;
+  text-wrap: balance;
+}
+
+.install {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 1.6rem auto 0;
+  padding: .4rem .4rem .4rem .95rem;
+  border: 1px solid var(--edge);
+  border-radius: .625rem;
+  background: var(--surface);
+  text-align: left;
+}
+
+.install code {
+  min-width: 0;
+  font: 400 clamp(.75rem, 1.8vw, .875rem)/1.55 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.install button {
+  flex: 0 0 5rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 1px solid var(--blue);
+  border-radius: .35rem;
+  background: #d9e8ff;
+  color: var(--ink);
+  cursor: pointer;
+  font: 700 .9375rem/1 Bricolage, system-ui, sans-serif;
+}
+
+.install button:active { background: #c2dcff; }
+.repository-note { margin-top: .65rem; color: var(--secondary); font-size: .875rem; }
+
+.footer {
+  width: min(calc(100% - 3rem), 46rem);
+  margin: 3rem auto 0;
+  padding: 1.15rem 0 1.9rem;
+  border-top: 1px solid var(--edge);
+  text-align: center;
+}
+
+.footer a { color: var(--secondary); text-underline-offset: .22em; text-decoration-thickness: 1px; font-size: .9375rem; }
+
+@media (max-width: 24rem) {
+  .install { gap: .4rem; }
+  .install code { font-size: .71875rem; }
+  .install button { flex-basis: 4.25rem; }
+}
