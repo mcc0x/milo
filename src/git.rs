@@ -966,6 +966,26 @@ mod tests {
     }
 
     #[test]
+    fn a_working_file_diff_keeps_distant_context() {
+        let f = Fixture::new();
+        const CONTEXT_LINES: usize = 1_000_002;
+        let mut file = String::with_capacity(2 * CONTEXT_LINES + "before\ntail\n".len());
+        file.push_str("before\n");
+        for _ in 0..CONTEXT_LINES {
+            file.push_str("0\n");
+        }
+        file.push_str("tail\n");
+        f.write("page.txt", &file);
+        f.commit("add long file");
+        file.replace_range(.."before".len(), "after");
+        f.write("page.txt", &file);
+
+        let repo = read_repo(&f);
+        let patch = repo.file_diff("page.txt", None).unwrap();
+        assert!(patch.ends_with(b" tail\n"), "distant unchanged lines were omitted");
+    }
+
+    #[test]
     fn filters_with_equals_in_their_name_are_disabled_even_if_added_later() {
         let f = Fixture::new();
         f.write(".gitattributes", "*.txt filter=plain=text\n");

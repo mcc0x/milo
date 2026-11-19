@@ -47,8 +47,11 @@ pub(super) fn working_diff(
     path: &str,
     from: Option<&str>,
 ) -> Result<Vec<u8>, OutputError> {
-    let mut cmd = command(root, guard, &["diff", against, "-M", "--unified=1000000", "--"]);
-    cmd.env_remove("GIT_LITERAL_PATHSPECS").args(from.into_iter().chain(std::iter::once(path)).map(exact_pathspec));
+    let mut cmd = command(root, guard, &["diff", against, "-M"]);
+    cmd.args(WHOLE_FILE)
+        .arg("--")
+        .env_remove("GIT_LITERAL_PATHSPECS")
+        .args(from.into_iter().chain(std::iter::once(path)).map(exact_pathspec));
     checked_output(cmd, DIFF_LIMIT)
 }
 
