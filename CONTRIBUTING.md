@@ -37,6 +37,8 @@ Then run the program and look at what you changed. Text checks cannot tell you w
 
 When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
 
+The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
+
 ## Tagging a release
 
 Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. On an arm64 macOS runner, GitHub Actions runs `sh tests/install.sh` and `cargo test --release --locked`, then drives the browser editor of a release build in Chromium with `tests/web-smoke.cjs`. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.

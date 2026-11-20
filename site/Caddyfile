@@ -11,8 +11,8 @@
 		X-Content-Type-Options nosniff
 		-Server
 	}
-	# Vite puts content-hashed files in /assets.
-	header /assets/* {
+	# Next.js names every file under /_next/static by its content or its build.
+	header /_next/static/* {
 		Cache-Control "public, max-age=31536000, immutable"
 		match status 2xx 304
 	}
