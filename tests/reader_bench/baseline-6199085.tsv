@@ -1,0 +1,38 @@
+# base revision: 6199085e313bd4d24faee40d2f2badd265658c96
+# timed checkout: b6abb2fed501cbaa2b3d978c548a85f678e82b92
+# Apple M5 Pro; Darwin 27.2.0 arm64; rustc 1.100.0 (0ef1bc386 2026-11-09) (Homebrew)
+# milo reader bench: 160x50 terminal, 10 runs, microseconds
+# macos aarch64; timed: milo 0.1.3
+# base: milo 0.1.3
+# near-limit-diff: a diff of 8130651 bytes; the reader loads up to 8388608
+# near-limit-commit: a diff of 8130651 bytes; the reader loads up to 8388608
+scenario	measure	samples	median	min	max	syntax	base_median	base_syntax	ratio
+small-file	first-paint	10	36267	32341	45198	yes	39669	yes	0.91
+long-lines	first-paint	10	46583	44741	52892	yes	47930	yes	0.97
+long-lines	pan	400	334	236	1024	yes	333	yes	1.00
+long-lines	line	400	220	196	363	yes	219	yes	1.00
+long-lines	page	80	287	254	494	yes	286	yes	1.00
+multiline-rust	first-paint	10	41048	35996	46560	yes	40158	yes	1.02
+multiline-rust	page	300	71	54	156	yes	72	yes	0.99
+multiline-rust	line	400	57	45	161	yes	59	yes	0.97
+multiline-rust	bottom	100	70	59	101	yes	71	yes	0.99
+multiline-python	first-paint	10	30675	27906	32463	yes	31492	yes	0.97
+multiline-python	page	300	64	55	158	yes	65	yes	0.99
+multiline-python	line	400	51	44	66	yes	50	yes	1.02
+multiline-python	bottom	100	65	59	84	yes	63	yes	1.03
+multiline-lua	first-paint	10	28587	27636	32599	no	29417	no	0.97
+multiline-lua	page	300	81	65	187	no	81	no	1.00
+multiline-lua	line	400	49	40	199	no	49	no	1.00
+multiline-lua	bottom	100	83	60	111	no	82	no	1.01
+near-limit-diff	first-paint	10	134097	129087	150433	yes	130591	yes	1.03
+near-limit-diff	change	300	83	70	221	yes	86	yes	0.97
+near-limit-diff	page	300	104	84	244	yes	105	yes	0.98
+near-limit-diff	bottom	100	129	85	400	yes	131	yes	0.99
+near-limit-commit	first-paint	10	89136	80789	104793	yes	88447	yes	1.01
+near-limit-commit	change	300	86	64	545	yes	84	yes	1.03
+near-limit-commit	page	300	108	76	194	yes	104	yes	1.03
+near-limit-commit	bottom	100	128	102	196	yes	127	yes	1.00
+long-line-diff	first-paint	10	49024	47766	55608	yes	50275	yes	0.98
+long-line-diff	change	200	170	156	304	yes	171	yes	0.99
+long-line-diff	pan	400	486	397	687	yes	479	yes	1.02
+long-line-diff	line	400	366	321	510	yes	368	yes	0.99
