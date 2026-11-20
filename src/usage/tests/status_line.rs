@@ -205,6 +205,37 @@ fn claude_status_prints_the_limits_even_when_the_save_cannot_be_made() {
 }
 
 #[test]
+fn claude_status_prints_its_line_without_waiting_for_a_held_save_lock() {
+    use std::sync::mpsc;
+
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    assert_eq!(status::run(STATUS, Vec::new(), Some(&path), NOW - MINUTE), 0);
+    let before = fs::read(&path).unwrap();
+    let run = || {
+        let path = path.clone();
+        let (send, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            let report = br#"{"rate_limits":{"seven_day":{"used_percentage":70,"resets_at":1795219200}}}"#;
+            let mut line = Vec::new();
+            let code = status::run(report, &mut line, Some(&path), NOW);
+            let _ = send.send((code, String::from_utf8(line).unwrap()));
+        });
+        done.recv_timeout(TEST_WAIT).expect("the status line waited for another program's lock")
+    };
+
+    // Another status call that has stalled while saving holds this lock.
+    let stalled = fs_ops::open_dir(path.parent().unwrap()).unwrap();
+    stalled.lock().unwrap();
+    assert_eq!(run(), (0, "week 30% left\n".into()));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    stalled.unlock().unwrap();
+
+    assert_eq!(run(), (0, "week 30% left\n".into()));
+    assert_eq!(frame(&mut open(&f, NOW), 22, 2)[1], "Claude week · 30% left");
+}
+
+#[test]
 fn claude_status_prints_a_plain_line_when_its_input_remains_open() {
     use std::sync::mpsc;
 

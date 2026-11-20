@@ -1,6 +1,6 @@
 //! Captures the optional Claude Code limits supplied to its status line.
 
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -20,6 +20,8 @@ const MAX_INPUT: usize = 1024 * 1024;
 const MAX_SAVED: u64 = 4096;
 const MAX_CONFIG: u64 = 4 * 1024 * 1024;
 pub(super) const INPUT_WAIT: Duration = Duration::from_millis(250);
+/// Another status call holds the lock only while it saves its own report.
+const LOCK_WAIT: Duration = Duration::from_millis(100);
 const WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 
 /// A saved window can be older than the file if a later report omitted it.
@@ -148,7 +150,19 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     // The file is replaced on each save, so take the lock on its directory.
     let lock = fs_ops::open_dir(dir)?;
-    lock.lock()?;
+    let deadline = Instant::now() + LOCK_WAIT;
+    // A holder that has stalled must not keep Claude waiting for its status
+    // line. Skipping this save loses nothing the next report will not bring.
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(TryLockError::WouldBlock) => return Err(io::ErrorKind::WouldBlock.into()),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
     let done = merge_save(path, dir, now, windows);
     done.and(lock.unlock())
 }
