@@ -61,6 +61,10 @@ impl FileVersion {
     pub(super) fn same_file(self, other: Self) -> bool {
         self.device == other.device && self.inode == other.inode
     }
+
+    pub(super) fn modified_second(self) -> i128 {
+        self.modified.0
+    }
 }
 
 /// Whole-file snapshots also detect in-place rewrites that preserve size and mtime.
@@ -185,7 +189,7 @@ impl Tree {
     fn includes(&self, version: FileVersion) -> bool {
         match *self {
             Self::Codex => true,
-            Self::Claude { since } => version.modified.0 >= i128::from(since),
+            Self::Claude { since } => version.modified_second() >= i128::from(since),
         }
     }
 

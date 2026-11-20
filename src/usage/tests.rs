@@ -194,10 +194,42 @@ fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
     fs::remove_dir(f.root.join("codex")).unwrap();
     check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
     assert_eq!(pace.as_ref().unwrap().idle(), Duration::from_secs(2));
-    write(&f, CODEX, &codex(now, 61, now + HOUR, "null"), now);
+    write(&f, CODEX, &codex(now, 61, now + HOUR, "null"), now - HOUR);
     check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
     assert!(frame(&mut usage, 100, 2)[0].contains("39%"));
     assert_eq!(pace.as_ref().unwrap().idle(), covered, "recreated roots are watched again when supported");
+}
+
+#[test]
+fn a_recent_codex_rollout_polls_without_notifications_or_discovery() {
+    let f = Fixture::folder();
+    let now = when::now();
+    fs::create_dir_all(f.root.join("claude")).unwrap();
+    fs::create_dir_all(f.root.join(STATE)).unwrap();
+    write(&f, CODEX, "", now);
+    let mut writer = OpenOptions::new().append(true).open(f.root.join(CODEX)).unwrap();
+    let mut usage = unopened(&f, now);
+    let (mut watcher, mut pace) = watch_pane(&mut usage, true);
+    let covered = if watcher.fd().is_some() { WATCHED } else { Duration::from_secs(2) };
+    assert_eq!(watcher.scope().roots.len(), 3);
+    assert!(!watcher.scope().complete);
+    assert_eq!(pace.as_ref().unwrap().idle(), Duration::from_secs(2));
+    assert!(usage.codex.reported().is_none());
+
+    let latest = codex(now, 64, now + DAY, "null");
+    writer.write_all(latest.as_bytes()).unwrap();
+    write(&f, OTHER_CODEX, &codex(now + 1, 82, now + DAY, "null"), now);
+    check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
+    assert_eq!(usage.bytes_read, latest.len() as u64);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+    assert_eq!(pace.as_ref().unwrap().idle(), Duration::from_secs(2));
+    drop(writer);
+
+    usage.fixed_now = Some(now + CODEX_LIVE + MINUTE);
+    check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
+    assert!(watcher.scope().complete);
+    assert_eq!(pace.as_ref().unwrap().idle(), covered);
+    assert_eq!(usage.bytes_read, 0);
 }
 
 #[test]
@@ -206,7 +238,7 @@ fn notification_bursts_refresh_known_files_before_discovering_new_sessions() {
     let now = local_noon();
     let clock = Instant::now();
     fs::create_dir_all(f.root.join(STATE)).unwrap();
-    write(&f, CODEX, &codex(now - 2, 23, now + DAY, "null"), now - 2);
+    write(&f, CODEX, &codex(now - 2, 23, now + DAY, "null"), now - HOUR);
     write(&f, CLAUDE, &assistant(now - 2, 1000, 0, 0), now - 2);
     let mut usage = unopened(&f, now);
     assert!(usage.refresh(now, clock, false));
@@ -214,12 +246,12 @@ fn notification_bursts_refresh_known_files_before_discovering_new_sessions() {
 
     let latest = codex(now - 1, 64, now + DAY, "null");
     let extra = assistant(now - 1, 2000, 0, 0);
-    for (path, line) in [(CODEX, &latest), (CLAUDE, &extra)] {
+    for (path, line, modified) in [(CODEX, &latest, now - HOUR + 1), (CLAUDE, &extra, now)] {
         let mut file = OpenOptions::new().append(true).open(f.root.join(path)).unwrap();
         file.write_all(line.as_bytes()).unwrap();
-        file.set_modified(mtime(now)).unwrap();
+        file.set_modified(mtime(modified)).unwrap();
     }
-    write(&f, "codex/2026/11/19/rollout-new.jsonl", &codex(now, 82, now + DAY, "null"), now);
+    write(&f, "codex/2026/11/19/rollout-new.jsonl", &codex(now, 82, now + DAY, "null"), now - HOUR + 2);
     write(&f, "claude/other/new.jsonl", &assistant(now, 4000, 0, 0), now);
 
     usage.filesystem_changed();
@@ -257,7 +289,7 @@ fn quick_idle_looks_do_not_walk_the_other_store_while_a_root_is_missing() {
         assert_eq!(usage.bytes_read, 0);
         assert_eq!(activity(&usage).today, 1000);
     }
-    write(&f, CODEX, &codex(now, 61, now + DAY, "null"), now);
+    write(&f, CODEX, &codex(now, 61, now + DAY, "null"), now - HOUR);
     assert!(usage.refresh(now, clock + Duration::from_secs(8), false));
     assert!(frame(&mut usage, 100, 2)[0].contains("39%"));
     assert!(usage.watch_scope().complete);

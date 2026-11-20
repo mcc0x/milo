@@ -26,6 +26,7 @@ use self::files::{Budget, FileVersion, Reverse, SessionFile, SessionRoot, Sessio
 use self::time::Timestamp;
 
 const CLOCK_SKEW: i64 = 5 * MINUTE;
+const CODEX_LIVE: i64 = 5 * MINUTE;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const CODEX_BYTES: u64 = files::CODEX_FILES as u64 * TAIL_BYTES;
 const CLAUDE_BYTES: u64 = 64 * 1024 * 1024;
@@ -317,6 +318,12 @@ impl Codex {
                 self.sessions = CodexSessions::Unreadable;
             }
         }
+    }
+
+    fn has_recent_rollout(&self, now: i64) -> bool {
+        let now = i128::from(now);
+        let recent = now - i128::from(CODEX_LIVE)..=now + i128::from(CLOCK_SKEW);
+        self.files.entries.iter().any(|file| recent.contains(&file.version.modified_second()))
     }
 
     /// Different sources can describe the same account, not separate limits to add.
@@ -797,8 +804,10 @@ impl Pane for Usage {
         let paths =
             [self.codex_dir.as_deref(), self.claude_dir.as_deref(), self.limits_file.as_deref().and_then(Path::parent)];
         let mut roots = Vec::new();
-        // Deferred discovery needs another look even if no more events arrive.
-        let mut complete = !self.codex.files.pending() && !self.claude.files.pending();
+        // FSEvents can miss appends to Codex's held-open rollout. Keep the
+        // watcher, but poll known paths while a writer has been active recently.
+        let mut complete =
+            !self.codex.files.pending() && !self.claude.files.pending() && !self.codex.has_recent_rollout(self.now());
         for path in paths.into_iter().flatten() {
             if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
                 roots.push(path.to_owned());
