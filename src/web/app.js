@@ -647,8 +647,11 @@ function healthView() {
     if (result.note) status.append(node('p', '', result.note));
     section.append(status);
   }
-  section.append(button(checking ? 'Checking…' : result ? 'Run again' : 'Run check', 'secondary', 'doctor',
-    () => command('doctor'), checking || paused || running));
+  const run = button(checking ? 'Checking…' : result ? 'Run again' : 'Run check', 'secondary', 'doctor',
+    () => { if (!checking) command('doctor'); }, !checking && (paused || running));
+  // Keep the pending control focusable so render can preserve keyboard ownership.
+  if (checking) run.setAttribute('aria-disabled', 'true');
+  section.append(run);
   return [section];
 }
 
