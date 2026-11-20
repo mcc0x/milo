@@ -47,6 +47,8 @@ The frame closes up around what is shown:
 
 For each tool, milo uses the newest report it can read. When there is room, it also shows **tokens today** from Claude Code's local session files under `~/.claude/projects`. This is local activity since midnight, not a limit. It counts new input, output and cache writes, not cache reads. A `+` after the number means the total may be incomplete.
 
+A report dated more than five minutes ahead of this machine's clock is not used, whichever source it came from. Otherwise one report written while a clock was wrong would outrank every later one. Milo shows the newest of the remaining sources instead. For the status-line save, the next report from Claude Code replaces the misdated file.
+
 Milo checks the tails of recent Codex logs, then resumes near the previous end as those logs grow. Ordinary session activity does not clear the last limit report. A new or replaced log, a truncation, or a large burst of new data calls for another bounded tail check.
 
 While a Codex log has been active in the last five minutes, Milo checks known logs about every two seconds, even if the writer keeps the file open. With a native watcher, Milo groups notifications so it doesn’t walk the session directories on every write. Without a watcher, it looks for new Codex and Claude Code sessions on the roughly two-second fallback checks. Press `r` to check immediately.

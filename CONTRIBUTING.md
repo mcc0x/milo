@@ -90,6 +90,14 @@ exception: its IDs are transient and are the only blocks its undo may close.
 over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
 explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
 
+An installation keeps the Lua files it was saved with until its next save, and
+a save replaces only files it recognises as Milo's. Before changing
+`actions.lua` or `listener.lua`, add the fingerprint (`fingerprint` in
+`layout.rs`, the 64-bit FNV-1a of the file) of the version being replaced to
+the list beside it, or installations holding that version are told their file
+was left alone. `listener_0_1_2.lua` is the listener of releases 0.1.1 and
+0.1.2, kept so that a test can save over it.
+
 `titles.rs` names tabs and sessions for the listener and the session action,
 and keeps the titles Milo set by Rex window ID in the state folder. A title
 may use folder names and an agent's process name. Never read a terminal's
@@ -115,7 +123,27 @@ file with Rex itself, run `MILO_CHECKING_REX=1 rex config check /path/to/copy.lu
 on a scratch copy. The flag prevents the actions file starting a listener
 during the check. Check both files and try the pane choices. Only try a
 reload or the actions on a disposable Rex configuration and session, never
-as part of the automated tests.
+as part of `cargo test`.
+
+With Rex installed, `cargo test --test rex_lab -- --ignored --nocapture` does
+that for you. It starts a Rex server of its own in a throwaway folder, with its
+own home, settings, state and socket. There it saves a layout and follows two
+Git worktrees through new tabs, divider drags, renamed tabs and sessions, and a
+restart of the server. Every `rex` the test runs names that socket and cannot
+start another server, and it checks that the lab's terminals and listener use
+the lab's home and server too, so the Rex you are working in is never asked
+anything. On macOS a shell tab runs under `login`, which hands it your home
+again, so the lab sets `ZDOTDIR` and checks that each shell read the lab's
+startup file and not yours. That file makes the shell copy itself a few times
+as it starts, which is what prompts and plugins do to a shell while its new
+tab is being arranged. Set `MILO_TEST_REX` if `rex` is not on your path. The test prints
+whether the restarted server ran Milo again in the panes it restored; that is
+Rex's choice. Where it restored shells instead, the test rebuilds one such rail
+with the two actions `docs/setup.md` gives for that, and sees its drags
+remembered again. A new shell tab that does not get its rail fails the test: none
+is opened in its place. That holds for the tabs the test opens one at a time
+and for those it opens back to back, four with no pause between them, three
+times over.
 
 ### Adding a usage source
 
@@ -132,6 +160,21 @@ Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for lang
 3. Add a test with a few idiomatic lines and the classes you expect.
 
 The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly.
+
+### Checking failures and speed
+
+`src/usage/tests/failures.rs` breaks each local usage source in five ways: missing, rotated, locked, stale, and written in a shape Milo does not know. The pane may then show only a figure the source reported, marked as old once it is; a source that cannot be read is unknown. A new source goes through the same five tests with its own files, using the helpers there.
+
+`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame that shows the file and the frame after each key, through a real terminal:
+
+```sh
+cargo test --release --locked --test reader_bench -- --ignored --nocapture
+sh tests/reader-compare.sh REVISION > report.tsv    # this checkout beside that revision
+```
+
+`tests/reader-compare.sh` exports the revision, builds it in a temporary folder and times both builds turn about, so the two columns come from the same machine in the same minutes. Compare ratios, not times from different machines or days. `tests/reader_bench/baseline-6199085.tsv` is such a report for the revision in its name; its header names the machine. Set `MILO_BENCH_MAX_RATIO=1.25` to fail the run when a median is more than a quarter slower than the base's and the difference is more than noise: half a millisecond for a first frame, twenty microseconds for a key.
+
+`tests/reader_bench.rs` and `tests/rex_lab.rs` use only what a built Milo offers from outside: its commands, what it draws in a terminal and, in the lab, the requests its browser editor accepts. So they can check a build they were not compiled with: set `MILO_TEST_BINARY` to a Milo built from another branch. Where a check depends on a feature that only some builds have, ask the build rather than the branch. The reader report's `syntax` column, for instance, says whether each build coloured each file as code, so a file in a language one build knows and the other does not is timed as code for the first and as plain text for the second.
 
 ## Commit messages
 
@@ -187,6 +230,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
 | `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
 | `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs and titles unnamed ones. |
+| `src/setup/listener_0_1_2.lua` | Keeps the listener of releases 0.1.1 and 0.1.2 for the test that saves over it. |
 | `src/setup/listener_test.lua` | Checks the new-tab, new-session and tab-title handlers with a stand-in for Rex. |
 | `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
@@ -219,6 +263,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
+| `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
 | `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
 | `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
@@ -233,4 +278,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |
+| `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
+| `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
+| `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
+| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server. |
+| `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
+| `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
 | `tests/web-smoke.cjs` | Saves layout and usage tool choices in the browser editor of a built binary in Chromium, then closes it. |

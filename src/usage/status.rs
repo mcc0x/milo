@@ -1,6 +1,6 @@
 //! Captures the optional Claude Code limits supplied to its status line.
 
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -20,6 +20,8 @@ const MAX_INPUT: usize = 1024 * 1024;
 const MAX_SAVED: u64 = 4096;
 const MAX_CONFIG: u64 = 4 * 1024 * 1024;
 pub(super) const INPUT_WAIT: Duration = Duration::from_millis(250);
+/// Another status call holds the lock only while it saves its own report.
+const LOCK_WAIT: Duration = Duration::from_millis(100);
 const WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 
 /// A saved window can be older than the file if a later report omitted it.
@@ -49,10 +51,13 @@ fn window(value: Option<Value<'_>>, minutes: u64, observed: Observed) -> Option<
 }
 
 /// The status helper's own cache can preserve windows from different reports.
-pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
+/// A save dated beyond the allowed clock difference is not a reading: being
+/// the newest, it would outrank every report that follows it.
+pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget, now: i64) -> Option<Reading> {
     let bytes = files::read_small(file, version, MAX_SAVED, budget)?;
     let [saved_at, rate_limits] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits"]);
     let at = saved_at?.integer()?;
+    (at <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
     let base = windows(rate_limits?, |value, minutes| window(value, minutes, Observed::Saved(at)));
     base.iter().any(Option::is_some).then_some(Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) })
 }
@@ -148,16 +153,29 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     // The file is replaced on each save, so take the lock on its directory.
     let lock = fs_ops::open_dir(dir)?;
-    lock.lock()?;
+    let deadline = Instant::now() + LOCK_WAIT;
+    // A holder that has stalled must not keep Claude waiting for its status
+    // line. Skipping this save loses nothing the next report will not bring.
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(TryLockError::WouldBlock) => return Err(io::ErrorKind::WouldBlock.into()),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
     let done = merge_save(path, dir, now, windows);
     done.and(lock.unlock())
 }
 
 /// Merge under the directory lock so two status invocations cannot lose a window.
+/// A save that is not a reading is replaced, not merged, so its date goes with it.
 fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     let previous = fs_ops::open_read(path).ok().and_then(|file| {
         let version = FileVersion::opened(&file)?;
-        saved(file, version, &mut Budget::new(MAX_SAVED + 1))
+        saved(file, version, &mut Budget::new(MAX_SAVED + 1), now)
     });
     let base = previous.map_or([None; 2], |reading| reading.windows.base);
     let merged = std::array::from_fn(|i| newer(base[i], windows[i]));

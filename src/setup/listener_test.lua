@@ -251,6 +251,49 @@ processes.slow, sizes.slow = project, measured
 emit("terminal.size_changed", "slow")
 assert(#splits == 0)
 
+-- A terminal starts as a copy of the Rex server. A measurement that arrives
+-- while that copy is in the foreground has met no command: the tab is arranged
+-- once its shell appears, and left alone if the copy becomes a command instead.
+local starting = {
+  child = { pid = 7, name = "rex", path = "/opt/rex" },
+  foreground = { pid = 7, name = "rex", argv0 = "/opt/rex", path = "/opt/rex" },
+}
+processes.slow = starting
+created("slow")
+emit("terminal.size_changed", "slow")
+assert(#splits == 0)
+processes.slow = project
+emit("terminal.process_changed", "slow")
+assert(#splits == 1 and splits[1].anchor_id == "slow")
+splits, processes.slow = {}, starting
+created("slow")
+processes.slow = { child = { pid = 7, name = "build", path = "/bin/build" }, foreground = { pid = 7, argv0 = "build" } }
+emit("terminal.process_changed", "slow")
+processes.slow = project
+emit("terminal.process_changed", "slow")
+assert(#splits == 0)
+
+-- A shell copies itself as it starts and as it draws its prompt. A copy in the
+-- foreground is the same shell, whether it is met before or after the shell
+-- itself, and with or without the ancestors Rex leaves out when one has just
+-- exited. A login shell that another program started in the tab is not.
+local login = { pid = 1, path = "/usr/bin/login" }
+local own = { pid = 2, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" }
+local copy = { pid = 4, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" }
+local at_prompt = { child = login, foreground = own, ancestors = { login } }
+local nested = { { pid = 3, argv0 = "su", path = "/usr/bin/su" }, own, login }
+for _, case in ipairs({
+  { at_prompt, { child = login, foreground = copy, ancestors = { own, login } }, 1 },
+  { { child = login, foreground = copy }, at_prompt, 1 },
+  { at_prompt, { child = login, foreground = copy, ancestors = nested }, 0 },
+}) do
+  splits, processes.slow, sizes.slow = {}, case[1], { rows = 24 }
+  created("slow")
+  processes.slow, sizes.slow = case[2], measured
+  emit("terminal.size_changed", "slow")
+  assert(#splits == case[3])
+end
+
 -- Close and exit events remove outstanding work, including keep-open terminals.
 for _, event in ipairs({ "block_closed", "terminal.child_exited", "window_closed", "session_destroyed" }) do
   processes.slow = nil
@@ -572,3 +615,21 @@ choose("tab_titles = true\n")
 front("there", shell_in("/my project"))
 assert(there.label == "project" and titling.asks == asks + 3)
 assert(os.remove(choice))
+
+-- A new tab is arranged and titled by the same events, each from what it
+-- knows of the tab's shell. While the terminal is still a copy of the Rex
+-- server the tab gets neither a rail nor a title. Its shell then brings the
+-- title, and a copy of that shell in front when the tab is measured does not
+-- cost the tab its rail or change its title.
+local fresh = titled_tab(11, nil, "fresh")
+titling.grounds, titling.relabels, splits, remembered = nil, {}, {}, nil
+windows, processes, sizes = { fresh }, { fresh = starting }, { fresh = { rows = 24 } }
+changed()
+created(fresh.window_id)
+assert(#splits == 0 and fresh.label == "Window 0000000b")
+front("fresh", at_prompt)
+assert(#splits == 0 and fresh.label == "project")
+processes.fresh, sizes.fresh = { child = login, foreground = copy }, measured
+emit("terminal.size_changed", "fresh")
+assert(#splits == 1 and splits[1].anchor_id == "fresh")
+assert(fresh.label == "project" and #titling.relabels == 1 and titling.claims[fresh.window_id] == "project")
