@@ -6,7 +6,7 @@
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#d8e7fe">
   <title>Milo settings</title>
-  <link rel="icon" href="/milo.webp" type="image/webp">
+  <link rel="icon" type="image/png" sizes="48x48" href="/favicon.png">
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
 </head>
@@ -37,27 +37,28 @@
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/><path d="M6 12h3l2-4 3 8 2-4h2"/></svg>
         Health<span class="nav-draft" hidden></span>
       </button>
+    </nav>
+
+    <main class="editor-main">
+      <div class="editor-meta">
       <div id="context" class="context"></div>
       <div class="session-meta">
         <span id="version" class="version" hidden></span>
         <span id="connection" class="connection" data-state="opening">Connecting</span>
       </div>
-    </nav>
-
-    <main class="editor-main">
+      </div>
       <header class="section-header">
         <h1 id="section-title" tabindex="-1">Layout</h1>
         <p id="section-description"></p>
       </header>
-      <div class="notice" id="error-box" hidden>
-        <div id="error" role="alert"></div>
+      <div id="error-box" hidden>
+        <p id="error"></p>
         <div class="button-row" id="error-actions" hidden>
           <button class="button secondary" id="retry" type="button">Retry edit</button>
           <button class="button text-button" id="drop-edit" type="button">Drop this edit</button>
           <button class="button text-button" id="reconnect" type="button">Reconnect</button>
         </div>
       </div>
-      <div id="message" class="notice" role="status" hidden></div>
       <div id="workspace" class="workspace">
         <aside class="preview" id="preview" aria-labelledby="preview-title">
           <div class="preview-heading">
@@ -108,5 +109,9 @@
       <button id="confirm-do" class="button danger" type="button"></button>
     </div>
   </dialog>
+  <div class="toast-stack">
+    <div class="toast" id="message" role="status" aria-atomic="true"></div>
+    <div class="toast toast-error" id="alert-toast" role="alert" aria-atomic="true"></div>
+  </div>
 </body>
 </html>

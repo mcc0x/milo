@@ -329,6 +329,7 @@ fn respond(route: Route, body: &[u8], editor: &mut Editor) -> Response {
         Route::Script => asset(Asset::Script),
         Route::Style => asset(Asset::Style),
         Route::Mascot => asset(Asset::Mascot),
+        Route::Favicon => Response::asset("image/png", include_bytes!("web/favicon.png")),
         #[cfg(feature = "web-dev")]
         Route::DevScript => Response::asset("text/javascript; charset=utf-8", include_bytes!("web/dev.js")),
         #[cfg(feature = "web-dev")]

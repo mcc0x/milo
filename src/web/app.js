@@ -96,6 +96,16 @@ async function api(path, method = 'GET', payload) {
   return response.status === 204 ? null : response.json();
 }
 
+let toastTimer;
+function notify(text, error = false) {
+  if (!text) return;
+  clearTimeout(toastTimer);
+  const toast = byId(error ? 'alert-toast' : 'message');
+  byId(error ? 'message' : 'alert-toast').textContent = '';
+  toast.textContent = text;
+  toastTimer = setTimeout(() => { toast.textContent = ''; }, 3000);
+}
+
 async function drain() {
   if (running || paused || !queue.length || closing || ended) return;
   running = true;
@@ -103,9 +113,11 @@ async function drain() {
     const {pending, ...action} = queue[0];
     try {
       state = await api('/api/action', 'POST', {...action, version: state.version});
+      if (state.message) notify(state.message.text, state.message.error);
       queue.splice(0, 1 + (pending ?? 0));
     } catch (error) {
       localError = error.message;
+      notify(localError, true);
       if (action.action !== 'set') queue.shift();
       // Do not run a queued save or capture after an earlier edit failed.
       for (let i = queue.length - 1; i >= 0; i--) {
@@ -141,8 +153,11 @@ async function connect(retryEdits = false) {
     }
     byId('editor').hidden = byId('actionbar').hidden = false;
     byId('opening').hidden = true;
+    if (localError) notify(localError, true);
+    else if (latest.message) notify(latest.message.text, latest.message.error);
   } catch (error) {
     localError = error.message;
+    notify(localError, true);
     byId('opening-message').textContent = error.message;
     byId('open-retry').hidden = !token;
   } finally {
@@ -185,6 +200,7 @@ async function closeSession() {
     byId('closed').querySelector('h1').focus();
   } catch (error) {
     localError = error.message;
+    notify(localError, true);
   } finally {
     closing = false;
     updateChrome();
@@ -223,16 +239,13 @@ function updateChrome() {
   }
   if (!state) return;
   const error = localError || (state.message?.error ? state.message.text : '');
-  byId('error-box').hidden = !error;
+  byId('error-box').hidden = !error || (!paused && !localError);
   if (byId('error').textContent !== error) byId('error').textContent = error;
   byId('error-actions').hidden = !paused && !localError;
   byId('retry').hidden = byId('drop-edit').hidden = !paused;
   byId('reconnect').hidden = !localError || paused;
   byId('reconnect').textContent = connected ? 'Refresh editor state' : 'Reconnect';
   byId('retry').disabled = byId('drop-edit').disabled = byId('reconnect').disabled = running || closing;
-  const message = !localError && !state.message?.error ? state.message?.text || '' : '';
-  byId('message').hidden = !message;
-  if (byId('message').textContent !== message) byId('message').textContent = message;
   const dirty = Object.values(state.groups).filter(group => group.dirty).length;
   const status = byId('draft-status');
   status.dataset.dirty = String(needsWarning);
