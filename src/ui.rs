@@ -2,6 +2,7 @@
 
 use crate::git::{Kind, PendingFile};
 use crate::icons::{self, Icon};
+use crate::keys::Key;
 use crate::preferences::IconMode;
 use crate::screen::{self, Screen, Style};
 use crate::when::Age;
@@ -144,6 +145,22 @@ pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &PendingFi
     used += s.put_middle(x + used, y, max_w - used, name, st);
     if !dir.is_empty() && used + 2 < max_w {
         s.put_fit(x + used + 1, y, max_w - used - 1, dir, FAINT);
+    }
+}
+
+/// Keeps the selected row visible without scrolling past the last full page.
+pub(crate) fn selection_start(selected: usize, total: usize, shown: usize) -> usize {
+    selected.saturating_sub(shown.saturating_sub(1)).min(total.saturating_sub(shown))
+}
+
+/// A wheel tick moves up to three rows, but never skips a compact page of choices.
+pub(crate) fn selection_delta(key: Key, shown: usize) -> Option<isize> {
+    let rows = key.rows(shown)?;
+    if matches!(key, Key::WheelUp | Key::WheelDown) {
+        let step = shown.clamp(1, 3).cast_signed();
+        Some(rows.clamp(-step, step))
+    } else {
+        Some(rows)
     }
 }
 

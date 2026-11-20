@@ -6,13 +6,11 @@ use super::claude::ClaudeSnapshot;
 use super::*;
 use crate::json::{self, Value};
 use crate::menubar;
-use crate::preferences::{PreferenceSnapshot, Show};
+use crate::preferences::Show;
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
 const UNAVAILABLE: &str = "That choice is unavailable in this Settings session.";
 const LOST_TAB: &str = "The original Rex tab is no longer available. Reopen Settings in the tab you want to change.";
-const PREFS_CHANGED: &str = "Milo's pane preferences changed. Reopen Settings before saving again.";
-const PREFS_READ: &str = "Could not read Milo's pane preferences. They were left alone.";
 
 impl Display for doctor::Health {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -27,7 +25,6 @@ impl Display for doctor::Health {
 
 pub(crate) struct Editor {
     setup: Setup,
-    preferences: Option<PreferenceSnapshot>,
     claude: Option<ClaudeSnapshot>,
     doctor: Option<doctor::Health>,
     version: u64,
@@ -71,23 +68,10 @@ impl Editor {
             setup.report(Err(LOST_TAB));
         }
         let directory = std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned());
-        let mut editor = Self { setup, preferences: None, claude, doctor: None, version: 1, directory };
-        if let Err(why) = editor.load_preferences() {
-            editor.setup.report(Err(why));
+        if let Err(why) = setup.reload_prefs() {
+            setup.report(Err(why));
         }
-        editor
-    }
-
-    fn load_preferences(&mut self) -> Result<(), &'static str> {
-        self.preferences = None;
-        self.setup.saved_prefs = None;
-        let snapshot = PreferenceSnapshot::load(&self.setup.store()?.config, self.setup.root.as_deref())
-            .map_err(|_| PREFS_READ)?;
-        self.setup.prefs = snapshot.prefs;
-        self.setup.saved_prefs = Some(snapshot.prefs);
-        self.setup.prefs_scope = snapshot.source;
-        self.preferences = Some(snapshot);
-        Ok(())
+        Self { setup, claude, doctor: None, version: 1, directory }
     }
 
     fn load_account(&mut self) {
@@ -116,7 +100,7 @@ impl Editor {
         let layout_editable = self.layout_editable();
         let layout_save = layout_editable && (!setup.inside || self.live());
         let global_readable = setup.saved_global.as_ref().is_none_or(Result::is_ok);
-        let preferences_editable = self.preferences.is_some();
+        let preferences_editable = setup.saved_prefs.is_some();
         let account_editable = setup.claude.editable() && self.claude.is_some();
         (
             GroupState {
@@ -129,7 +113,7 @@ impl Editor {
                 save_account: false,
             },
             GroupState {
-                scope: match setup.prefs_scope {
+                scope: match setup.prefs_scope() {
                     Source::Default => "default",
                     Source::Global => "global",
                     Source::Worktree => "worktree",
@@ -138,7 +122,7 @@ impl Editor {
                 editable: preferences_editable,
                 save_global: preferences_editable,
                 save_worktree: preferences_editable && setup.root.is_some(),
-                inherit: preferences_editable && setup.prefs_scope == Source::Worktree,
+                inherit: preferences_editable && setup.prefs_scope() == Source::Worktree,
                 save_account: false,
             },
             GroupState {
@@ -326,9 +310,9 @@ impl Editor {
             }
         }
         if matches!(group, Group::Preferences | Group::All)
-            && let Some(saved) = setup.saved_prefs
+            && let Some(saved) = &setup.saved_prefs
         {
-            setup.prefs = saved;
+            setup.prefs = saved.prefs;
         }
         if matches!(group, Group::Account | Group::All) {
             setup.show_limits = setup.claude == Claude::On;
@@ -377,14 +361,12 @@ impl Editor {
     }
 
     fn save_preferences(&mut self, local: bool) -> Result<Notice, &'static str> {
-        let setup = &self.setup;
-        if !setup.prefs_dirty() {
+        if !self.setup.prefs_dirty() {
             return Ok(Ok("No pane preference changes to save."));
         }
-        let snapshot = self.preferences.as_ref().ok_or(UNAVAILABLE)?;
-        snapshot.save(setup.prefs, &setup.store()?.config, setup.root.as_deref(), local).map_err(prefs_error)?;
+        self.setup.persist_prefs(if local { Scope::Worktree } else { Scope::Global })?;
         self.doctor = None;
-        Ok(self.load_preferences().map(|()| match (local, self.setup.prefs_scope) {
+        Ok(self.setup.reload_prefs().map(|()| match (local, self.setup.prefs_scope()) {
             (true, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
             (false, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
             (false, _) => "Saved global pane preferences. Reopen panes to apply.",
@@ -392,12 +374,9 @@ impl Editor {
     }
 
     fn inherit_preferences(&mut self) -> Result<Notice, &'static str> {
-        let setup = &self.setup;
-        let snapshot = self.preferences.as_ref().ok_or(UNAVAILABLE)?;
-        let root = setup.root.as_deref().ok_or(UNAVAILABLE)?;
-        snapshot.inherit(&setup.store()?.config, root).map_err(prefs_error)?;
+        self.setup.clear_prefs_override()?;
         self.doctor = None;
-        Ok(self.load_preferences().map(|()| "This worktree now uses global pane preferences. Reopen panes to apply."))
+        Ok(self.setup.reload_prefs().map(|()| "This worktree now uses global pane preferences. Reopen panes to apply."))
     }
 
     fn save_account(&mut self) -> Result<Notice, &'static str> {
@@ -423,10 +402,6 @@ fn account_at(store: Option<&Store>) -> (Claude, Option<ClaudeSnapshot>) {
     store
         .and_then(|store| store.claude_snapshot().ok())
         .map_or((Claude::Invalid, None), |(status, snapshot)| (status, Some(snapshot)))
-}
-
-fn prefs_error(error: io::Error) -> &'static str {
-    if error.kind() == io::ErrorKind::Interrupted { PREFS_CHANGED } else { "Could not save Milo's pane preferences." }
 }
 
 #[derive(Clone, Copy)]
@@ -946,7 +921,7 @@ mod tests {
         set(&mut first, "appearance.icons", "\"off\"");
         set(&mut first, "workflow.project_mode", "\"pin\"");
         action(&mut first, r#""action":"save","group":"preferences","scope":"worktree""#).unwrap();
-        assert_eq!(first.setup.prefs_scope, Source::Worktree);
+        assert_eq!(first.setup.prefs_scope(), Source::Worktree);
         assert!(!first.setup.prefs_dirty());
 
         set(&mut stale, "appearance.static_marks", "true");
@@ -964,7 +939,7 @@ mod tests {
         assert!(kept.prefs.changes_only);
 
         action(&mut newer, r#""action":"inherit","group":"preferences""#).unwrap();
-        assert_eq!(newer.setup.prefs_scope, Source::Default);
+        assert_eq!(newer.setup.prefs_scope(), Source::Default);
         assert_eq!(newer.setup.prefs, Preferences::default());
     }
 

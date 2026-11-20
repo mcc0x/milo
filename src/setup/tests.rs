@@ -166,6 +166,7 @@ fn dirty_exit_keeps_the_editor_by_default_and_can_discard_by_click() {
 fn dirty_settings_from_home_asks_before_returning() {
     let Some(_) = isolated_settings("setup::tests::dirty_settings_from_home_asks_before_returning") else { return };
     let mut home = crate::home::Home::new();
+    assert_eq!(home.key(Key::Down), After::Stay);
     assert_eq!(home.key(Key::Enter), After::Stay);
     home.key(Key::Char('2'));
     let rows = frame(&mut home, 80, 18);
@@ -204,8 +205,8 @@ fn exit_save_scopes_preferences_then_saves_claude() {
         return;
     };
     let f = Fixture::folder();
-    let mut pane = Setup::new(Some(store(&f)), false, None, Some(root.join("worktree")), |_| panic!("outside Rex"));
-    pane.reload_prefs().unwrap();
+    let store = Store { config: root.join("milo"), ..store(&f) };
+    let mut pane = Setup::new(Some(store), false, None, Some(root.join("worktree")), |_| panic!("outside Rex"));
     pane.key(Key::Char('2'));
     choose(&mut pane, Row::Activity);
     pane.key(Key::Char('3'));
@@ -234,8 +235,9 @@ fn exit_save_scopes_preferences_then_saves_claude() {
 }
 
 #[test]
-fn global_preference_save_does_not_copy_worktree_or_stale_values() {
-    let Some(root) = isolated_settings("setup::tests::global_preference_save_does_not_copy_worktree_or_stale_values")
+fn global_preference_save_rejects_stale_edits_and_does_not_copy_worktree_settings() {
+    let Some(root) =
+        isolated_settings("setup::tests::global_preference_save_rejects_stale_edits_and_does_not_copy_worktree_settings")
     else {
         return;
     };
@@ -244,11 +246,23 @@ fn global_preference_save_does_not_copy_worktree_or_stale_values() {
     let global = root.join("milo/preferences.conf");
     fs::write(&global, "icons = nerd\nchanges_only = false\n").unwrap();
 
-    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
-    pane.reload_prefs().unwrap();
+    let store = Store::real().unwrap();
+    let mut pane = Setup::new(Some(store.clone()), false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
     choose(&mut pane, Row::HistoryFollow);
     choose(&mut pane, Row::FollowProject);
-    fs::write(&global, "icons = off\nchanges_only = false\nfollow_activity = false\n").unwrap();
+    pane.key(Key::Char('2'));
+    choose(&mut pane, Row::Icons);
+    let newer = "icons = off\nchanges_only = false\nfollow_activity = false\n";
+    fs::write(&global, newer).unwrap();
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+    assert_eq!(pane.message.as_ref().unwrap().0, PREFS_CHANGED);
+    assert!(pane.prefs_dirty());
+    assert_eq!(fs::read_to_string(&global).unwrap(), newer);
+
+    let mut pane = Setup::new(Some(store), false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    choose(&mut pane, Row::HistoryFollow);
+    choose(&mut pane, Row::FollowProject);
     pane.key(Key::Char('s'));
     assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
 
@@ -275,8 +289,7 @@ fn usage_tool_choices_cycle_in_appearance_and_save_to_the_chosen_scope() {
         return;
     };
     let worktree = root.join("worktree");
-    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
-    pane.reload_prefs().unwrap();
+    let mut pane = Setup::new(Store::real(), false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
     pane.key(Key::Char('2'));
     let rows = frame(&mut pane, 80, 24);
     for label in ["Codex usage", "Claude Code usage", "OpenCode usage"] {
@@ -324,14 +337,14 @@ fn worktree_preference_save_keeps_other_fields_inherited_or_overridden() {
     let global_before = "icons = off\nchanges_only = false\n";
     fs::write(&global, global_before).unwrap();
 
-    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
-    pane.reload_prefs().unwrap();
+    let mut pane = Setup::new(Store::real(), false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
     pane.key(Key::Char('s'));
     assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
     assert!(!config.join("worktrees").exists(), "saving no edits creates no override");
 
-    choose(&mut pane, Row::HistoryFollow);
     Preferences::set_changes_only(&worktree, false).unwrap();
+    let mut pane = Setup::new(Store::real(), false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    choose(&mut pane, Row::HistoryFollow);
     pane.key(Key::Char('s'));
     assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
     assert_eq!(fs::read_to_string(&global).unwrap(), global_before);
@@ -343,6 +356,31 @@ fn worktree_preference_save_keeps_other_fields_inherited_or_overridden() {
         Preferences::resolve(Some(&worktree)).unwrap(),
         (Preferences { history_follow_new: true, ..expected }, Source::Worktree),
     );
+}
+
+#[test]
+fn stale_terminal_preference_inheritance_keeps_the_newer_worktree_layer() {
+    let f = Fixture::folder();
+    let store = store(&f);
+    let root = Some(f.root.join("checkout"));
+    let no_rex = |_: &[&OsStr]| panic!("preferences do not call Rex");
+    let mut newer = Setup::new(Some(store.clone()), false, None, root.clone(), no_rex);
+    choose(&mut newer, Row::HistoryFollow);
+    newer.key(Key::Char('s'));
+    assert_eq!(choose(&mut newer, Row::SaveWorktree), After::Stay);
+    assert_eq!(newer.prefs_scope(), Source::Worktree);
+
+    let mut stale = Setup::new(Some(store.clone()), false, None, root.clone(), no_rex);
+    choose(&mut newer, Row::ChangesOnly);
+    newer.key(Key::Char('s'));
+    assert_eq!(choose(&mut newer, Row::SaveWorktree), After::Stay);
+
+    assert_eq!(choose(&mut stale, Row::UseGlobalPrefs), After::Stay);
+    assert_eq!(choose(&mut stale, Row::Continue), After::Stay);
+    assert_eq!(stale.message.as_ref().unwrap().0, PREFS_CHANGED);
+    let (kept, scope) = Preferences::resolve_in(&store.config, root.as_deref()).unwrap();
+    assert_eq!(scope, Source::Worktree);
+    assert!(kept.history_follow_new && kept.changes_only);
 }
 
 #[test]
@@ -366,12 +404,73 @@ fn exit_layout_save_reports_failure_and_requires_global_scope_for_auto_arrange()
 
     choose(&mut pane, Row::Side);
     choose(&mut pane, Row::AutoArrange);
+    assert_eq!(pane.key(Key::Char('s')), After::Stay);
+    assert!(!pane.rows().contains(&Row::SaveWorktree), "a manual save cannot create an unrelated layout override");
+    assert_eq!(pane.key(Key::Esc), After::Stay);
     pane.key(Key::Char('q'));
     choose(&mut pane, Row::SaveAndExit);
     let scope = frame(&mut pane, 80, 18);
     assert!(scope.iter().any(|row| row.contains("Auto-arrange needs a global save")));
     assert!(!pane.rows().contains(&Row::SaveWorktree));
     assert!(pane.rows().contains(&Row::SaveGlobal));
+}
+
+#[test]
+fn repeating_the_worktree_save_click_cannot_save_auto_arrange_globally() {
+    const THIS_TEST: &str = "setup::tests::repeating_the_worktree_save_click_cannot_save_auto_arrange_globally";
+    const LISTENER_STATE: &str = "MILO_TEST_SCOPE_LISTENER_STATE";
+    if let Some(state) = std::env::var_os(LISTENER_STATE) {
+        let state = Path::new(&state);
+        lock::listen(state, &state.with_file_name("config").join("listener.lua")).unwrap();
+        return;
+    }
+
+    let f = Fixture::folder();
+    // Rex reload has to establish a process-owned listener lock. A fake
+    // successful exit code alone leaves the editor on the warning screen.
+    f.write("rex", "#!/bin/sh\nexec /bin/sleep 30\n");
+    fs::set_permissions(f.root.join("rex"), fs::Permissions::from_mode(0o700)).unwrap();
+    let store = store(&f);
+    let state = store.state.clone();
+    let listener = std::cell::RefCell::new(None);
+    let run = |args: &[&OsStr]| {
+        if args == ["config", "reload"] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", THIS_TEST])
+                .env(LISTENER_STATE, &state)
+                .env("PATH", &f.root)
+                .spawn()
+                .unwrap();
+            if !(0..5).any(|_| lock::wait_running(&state).unwrap()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the fixture listener did not start");
+            }
+            *listener.borrow_mut() = Some(child);
+        }
+        true
+    };
+    let mut pane = Setup::new(Some(store), true, None, Some(f.root.clone()), run);
+    choose(&mut pane, Row::Tree);
+    choose(&mut pane, Row::Tune);
+    choose(&mut pane, Row::AutoArrange);
+    pane.key(Key::Char('q'));
+    assert_eq!(choose(&mut pane, Row::SaveAndExit), After::Stay);
+    assert_eq!(pane.key(Key::End), After::Stay);
+
+    let rows = frame(&mut pane, 32, 4);
+    let worktree = click_label(&rows, "For this worktree");
+    let saved = pane.key(worktree);
+    let mut child = listener.borrow_mut().take().expect("the save reloaded Rex");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(saved, After::Stay);
+    assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    let rows = frame(&mut pane, 32, 4);
+    assert_eq!(click_label(&rows, "As global default"), worktree);
+    assert_eq!(pane.key(worktree), After::Ignored);
+    assert!(pane.auto_arrange_dirty());
+    assert!(!pane.saved.as_ref().unwrap().new_tabs);
 }
 
 #[test]
@@ -461,6 +560,27 @@ fn short_pane_keeps_the_chosen_row_and_a_way_back() {
     assert!(rows[4].contains("Esc back"));
     assert_eq!(pane.key(Key::Esc), After::Stay);
     assert_eq!(pane.panel, Panel::Layout);
+}
+
+#[test]
+fn one_row_settings_keeps_the_selected_control_visible_and_clickable() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("draft changes do not call Rex"));
+    pane.key(Key::Char('2'));
+    let rows = frame(&mut pane, 42, 1);
+    assert!(rows[0].starts_with('›') && rows[0].contains("Icons"));
+    assert_eq!(pane.key(Key::Up), After::Ignored);
+    assert!(pane.hover_span(2, 0).is_some(), "a no-op move keeps the current hit target");
+    assert_eq!(pane.key(Key::WheelDown), After::Stay);
+    let rows = frame(&mut pane, 42, 1);
+    assert!(rows[0].starts_with('›') && rows[0].contains("Activity"));
+    assert_eq!(pane.key(click_at(&rows, 0, "Activity marks")), After::Stay);
+    assert!(pane.prefs.static_marks);
+
+    for width in 1..=3 {
+        let rows = frame(&mut pane, width, 1);
+        assert!(rows[0].contains('M'), "the narrow Motion label stays identifiable: {rows:?}");
+    }
 }
 
 #[test]
@@ -627,6 +747,28 @@ fn worktree_scope_and_inheritance_only_change_after_explicit_confirmation() {
     assert_eq!(pane.panel, Panel::Layout);
     assert!(pane.selected_row() == Some(Row::Tune));
     assert_eq!(pane.layout.panes, [true, true, true]);
+    assert!(pane.layout.new_tabs, "inheriting the pane arrangement does not discard the global draft switch");
+}
+
+#[test]
+fn stale_terminal_layout_inheritance_keeps_the_newer_worktree_profile() {
+    let f = Fixture::folder();
+    let store = store(&f);
+    let root = f.root.join("checkout");
+    let run = |_: &[&OsStr]| true;
+    let tree = layout_preset(true, false);
+    store.save_for(&tree, Scope::Worktree, Some(&root), None, &run).unwrap();
+    let mut pane = Setup::new(Some(store.clone()), true, None, Some(root.clone()), run);
+    assert!(pane.layout == tree);
+
+    let sidebar = layout_preset(false, false);
+    store.save_for(&sidebar, Scope::Worktree, Some(&root), None, &run).unwrap();
+    assert_eq!(choose(&mut pane, Row::UseGlobal), After::Stay);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert!(pane.message.as_ref().unwrap().0.starts_with("The saved Milo layout changed."));
+    let (saved, _, scope) = store.layout_for(Some(&root)).unwrap();
+    assert!(saved == sidebar);
+    assert_eq!(scope, Scope::Worktree);
 }
 
 #[test]
@@ -636,7 +778,7 @@ fn preference_prompts_return_to_the_clicked_control_in_each_section() {
         return;
     };
     let worktree = root.join("worktree");
-    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    let mut pane = Setup::new(Store::real(), false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
     const SAVE: &str = "Save pane preferences for";
     const INHERIT: &str = "Use global pane preferences";
     for (tab, section, change) in
@@ -656,7 +798,7 @@ fn preference_prompts_return_to_the_clicked_control_in_each_section() {
         assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
         assert_eq!(pane.panel, section);
         assert!(pane.selected_row() == Some(Row::SavePrefs));
-        assert_eq!(pane.prefs_scope, Source::Worktree);
+        assert_eq!(pane.prefs_scope(), Source::Worktree);
 
         let rows = frame(&mut pane, 80, 24);
         assert_eq!(pane.key(click_label(&rows, INHERIT)), After::Stay);
@@ -669,7 +811,7 @@ fn preference_prompts_return_to_the_clicked_control_in_each_section() {
         assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
         assert_eq!(pane.panel, section);
         assert!(pane.selected_row() == Some(Row::UseGlobalPrefs));
-        assert_eq!(pane.prefs_scope, Source::Default);
+        assert_eq!(pane.prefs_scope(), Source::Default);
     }
 }
 
@@ -845,6 +987,28 @@ fn no_target_cannot_try_and_health_removal_is_not_the_default_action() {
 }
 
 #[test]
+fn integration_maintenance_cannot_discard_unsaved_layout_or_claude_choices() {
+    let Some(_) =
+        isolated_settings("setup::tests::integration_maintenance_cannot_discard_unsaved_layout_or_claude_choices")
+    else {
+        return;
+    };
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| panic!("draft changes do not call Rex"));
+    choose(&mut pane, Row::Tree);
+    pane.key(Key::Char('3'));
+    choose(&mut pane, Row::ClaudeLimits);
+    pane.key(Key::Char('4'));
+    for row in [Row::Repair, Row::Remove] {
+        assert_eq!(choose(&mut pane, row), After::Stay);
+        assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+        assert_eq!(pane.message.as_ref().unwrap().0, MAINTENANCE_DRAFT);
+        assert!(pane.layout_dirty() && pane.claude_dirty());
+        assert_eq!(pane.key(Key::Esc), After::Stay);
+    }
+}
+
+#[test]
 fn a_narrow_notice_does_not_hide_the_control_or_exit() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| false);
@@ -1004,6 +1168,9 @@ fn diagnostics_refresh_scroll_and_return_by_click() {
     let rows = frame(&mut pane, 75, 8);
     assert_eq!(pane.key(click_at(&rows, 7, "↓ down")), After::Stay);
     assert_eq!(pane.health_top, 1);
+    assert_eq!(pane.key(Key::End), After::Stay);
+    assert_eq!(pane.health_top, pane.visible.scroll_limit);
+    assert_eq!(pane.key(Key::Down), After::Ignored);
     let rows = frame(&mut pane, 75, 8);
     assert_eq!(pane.key(click_at(&rows, 7, "r refresh")), After::Stay);
     assert_eq!(pane.health_top, 0);

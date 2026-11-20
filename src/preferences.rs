@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -240,14 +241,13 @@ impl PreferenceSnapshot {
         let path = config_file(dir, destination);
         // For a worktree, lock its inherited global layer before locking the
         // destination. Global and keyboard writes use the same directory locks.
-        let save = || prefs.save_in(self.prefs, &path, || self.check(dir, root));
-        if local { locked(&config_file(dir, None), |_| save()) } else { save() }
+        let _global = if local { Some(lock_directory(dir)?) } else { None };
+        prefs.save_in(self.prefs, &path, || self.check(dir, root))
     }
 
     pub(crate) fn inherit(&self, dir: &Path, root: &Path) -> io::Result<()> {
-        let global = config_file(dir, None);
-        let worktree = config_file(dir, Some(root));
-        locked(&global, |_| remove_layer(&worktree, || self.check(dir, Some(root))))
+        let _global = lock_directory(dir)?;
+        remove_layer(&config_file(dir, Some(root)), || self.check(dir, Some(root)))
     }
 }
 
@@ -334,12 +334,6 @@ impl Preferences {
         Ok(())
     }
 
-    /// Apply only the edits made since the editor loaded its resolved preferences.
-    pub fn save_changes(&self, before: Self, worktree: Option<&Path>) -> io::Result<()> {
-        let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
-        self.save_in(before, &config_file(&dir, worktree), || Ok(()))
-    }
-
     fn save_in(&self, before: Self, path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
         let boolean = |old, new| (old != new).then(|| bool_value(new));
         let tool = |tool: UsageTool| {
@@ -377,11 +371,6 @@ impl Preferences {
         update(&config_file(&dir, None), &[("icons", Some(icons.value()))])
     }
 
-    pub fn clear(worktree: &Path) -> io::Result<()> {
-        let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
-        remove_layer(&config_file(&dir, Some(worktree)), || Ok(()))
-    }
-
     /// The keyboard toggle overrides just this setting, leaving inherited choices inherited.
     pub fn set_changes_only(worktree: &Path, value: bool) -> io::Result<()> {
         let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
@@ -389,6 +378,7 @@ impl Preferences {
     }
 
     fn set_changes_only_in(dir: &Path, worktree: &Path, value: bool) -> io::Result<()> {
+        let _global = lock_directory(dir)?;
         update(&config_file(dir, Some(worktree)), &[("changes_only", Some(bool_value(value)))])
     }
 }
@@ -436,33 +426,37 @@ fn update_guarded(
         if text.len() as u64 > PREFERENCES_LIMIT {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "preferences file would exceed its size limit"));
         }
-        check_writable(path)?;
         replace(dir, path, &text)
     })
 }
 
 fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-    if !path.parent().is_some_and(Path::exists) {
-        return check();
+    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let lock = match fs_ops::open_dir(dir) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return check(),
+        Err(e) => return Err(e),
+    };
+    lock.lock()?;
+    check()?;
+    if writable_mode(path)?.is_none() {
+        return Ok(());
     }
-    locked(path, |_| {
-        check()?;
-        check_writable(path)?;
-        match fs::remove_file(path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
-        }
-    })
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
-fn check_writable(path: &Path) -> io::Result<()> {
+fn writable_mode(path: &Path) -> io::Result<Option<u32>> {
     // Renaming or unlinking an existing file only requires a writable directory.
     match fs::symlink_metadata(path) {
+        Ok(info) if !info.is_file() => Err(io::ErrorKind::InvalidInput.into()),
         Ok(info) if info.permissions().readonly() => {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is read-only", path.display())))
         }
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(info) => Ok(Some(info.permissions().mode() & 0o7777)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -506,21 +500,30 @@ pub(crate) fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
 
 pub(crate) fn locked<T>(path: &Path, save: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let _lock = lock_directory(dir)?;
+    save(dir)
+}
+
+fn lock_directory(dir: &Path) -> io::Result<fs::File> {
     fs::create_dir_all(dir)?;
     // Lock the directory because the files themselves are atomically replaced.
     let lock = fs_ops::open_dir(dir)?;
     lock.lock()?;
-    save(dir)
+    Ok(lock)
 }
 
 pub(crate) fn replace(dir: &Path, path: &Path, text: &str) -> io::Result<()> {
     static SERIAL: AtomicU32 = AtomicU32::new(0);
+    let mode = writable_mode(path)?;
     let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(
         ".milo-prefs-{}-{}",
         std::process::id(),
         SERIAL.fetch_add(1, Ordering::Relaxed),
     )))?;
     file.write_all(text.as_bytes())?;
+    if let Some(mode) = mode {
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
     drop(file);
     temp.replace(path)
 }
@@ -596,7 +599,6 @@ fn decode_folds(text: &str) -> BTreeMap<String, bool> {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
-    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn usage_tool_choices_save_only_what_changed_and_files_without_them_stay_automatic() {
@@ -739,6 +741,29 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(fs::read_to_string(&local).unwrap(), local_text);
         assert!(fs::metadata(&local).unwrap().permissions().readonly());
+    }
+
+    #[test]
+    fn updating_preferences_preserves_existing_permissions() {
+        let f = Fixture::folder();
+        let path = config_file(&f.root, None);
+        fs::write(&path, "icons = off\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        update(&path, &[("changes_only", Some("true"))]).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn removing_an_override_reports_an_unusable_parent_directory() {
+        let f = Fixture::folder();
+        let parent = f.root.join("not-a-directory");
+        fs::write(&parent, "Keep this").unwrap();
+        let path = config_file(&parent, Some(&f.root));
+
+        let error = remove_layer(&path, || Ok(())).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(fs::read_to_string(parent).unwrap(), "Keep this");
     }
 
     #[test]

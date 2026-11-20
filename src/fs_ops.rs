@@ -1,7 +1,9 @@
 //! Opens untrusted files without following their final link and stages atomic replacements.
 
+use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +17,18 @@ pub fn open_read(path: &Path) -> io::Result<File> {
 
 pub fn open_dir(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).custom_flags(READ_FLAGS | libc::O_DIRECTORY).open(path)
+}
+
+/// Open a fixed child name through an already-open directory, not its path.
+pub(crate) fn open_at(dir: &File, name: &CStr, flags: libc::c_int, mode: libc::c_uint) -> io::Result<File> {
+    // SAFETY: Both the directory descriptor and NUL-terminated name remain valid during the call.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | READ_FLAGS, mode) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: A successful open returns a new, owned descriptor.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
 }
 
 /// A private sibling file keeps readers from seeing a half-written replacement.
@@ -42,5 +56,26 @@ impl Drop for Temp {
         if !self.0.as_os_str().is_empty() {
             let _ = fs::remove_file(&self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn opening_a_child_uses_the_held_directory_after_a_rename() {
+        let fixture = Fixture::folder();
+        let original = fixture.root.join("original");
+        let moved = fixture.root.join("moved");
+        fs::create_dir(&original).unwrap();
+        let directory = open_dir(&original).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        fs::create_dir(&original).unwrap();
+
+        open_at(&directory, c"child", libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600).unwrap();
+        assert!(moved.join("child").is_file());
+        assert!(!original.join("child").exists());
     }
 }

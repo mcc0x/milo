@@ -11,7 +11,7 @@ use crate::keys::{ConfirmClick, Key};
 use crate::pane::{After, Pane};
 use crate::preferences::{IconMode, Preferences};
 use crate::screen::{CYAN, Screen, Style};
-use crate::ui::{DEL, FAINT, HEADING};
+use crate::ui::{self, DEL, FAINT, HEADING};
 use crate::{fs_ops, home, paths, rex};
 
 use super::claude::OWN_CLAUDE;
@@ -130,22 +130,31 @@ enum Action {
     Done,
 }
 
-type OptionRow = (&'static str, &'static str, Action);
-const SKIP: OptionRow = ("Skip setup", "Keep settings as they are.", Action::Skip);
-const REX_INTRO: &[OptionRow] = &[("Continue", "Choose a layout for Rex.", Action::Choose), SKIP];
-const ICONS_INTRO: &[OptionRow] = &[("Continue", "Choose icons for your terminal.", Action::Choose), SKIP];
+type OptionRow = (&'static str, Option<&'static str>, &'static str, Action);
+const SKIP: OptionRow = ("Skip setup", None, "Keep settings as they are.", Action::Skip);
+const REX_INTRO: &[OptionRow] = &[("Continue", None, "Choose a layout for Rex.", Action::Choose), SKIP];
+const ICONS_INTRO: &[OptionRow] = &[("Continue", None, "Choose icons for your terminal.", Action::Choose), SKIP];
 const LAYOUTS: &[OptionRow] = &[
-    ("Save tree layout", "Just the file tree beside your shell.", Action::Layout { tree: true }),
-    ("Save project sidebar", "Files, commits and usage beside your shell.", Action::Layout { tree: false }),
+    ("Save tree layout", Some("Tree layout"), "Just the file tree beside your shell.", Action::Layout { tree: true }),
+    (
+        "Save project sidebar",
+        Some("Project sidebar"),
+        "Files, commits and usage beside your shell.",
+        Action::Layout { tree: false },
+    ),
     SKIP,
 ];
 const ICONS: &[OptionRow] = &[
-    ("Save Nerd Font icons", "Use symbols from a Nerd Font.", Action::Icons(IconMode::Nerd)),
-    ("Save plain icons", "Use symbols most terminals can show.", Action::Icons(IconMode::Plain)),
+    ("Save Nerd Font icons", Some("Nerd Font"), "Use symbols from a Nerd Font.", Action::Icons(IconMode::Nerd)),
+    ("Save plain icons", Some("Plain icons"), "Use symbols most terminals can show.", Action::Icons(IconMode::Plain)),
     SKIP,
 ];
-const DONE: &[OptionRow] = &[("Continue", "", Action::Done)];
+const DONE: &[OptionRow] = &[("Continue", None, "", Action::Done)];
 const CHOOSE_HINT: &str = "Enter choose";
+
+fn option_label((label, compact, ..): &OptionRow, room: usize) -> &'static str {
+    if label.len() <= room { label } else { compact.unwrap_or(label) }
+}
 
 struct HitRows {
     x: usize,
@@ -166,14 +175,15 @@ impl HitRows {
             return None;
         }
         let index = self.start + row;
-        let (label, detail, _) = rows[index];
+        let item = &rows[index];
         let label_line = y.is_multiple_of(self.stride);
         if label_line && self.indent != 0 && x == self.x && self.selected == index {
             return Some((index, x..x + 1));
         }
-        let text = if label_line { label } else { detail };
+        let room = self.w - self.indent;
+        let text = if label_line { option_label(item, room) } else { item.2 };
         let start = self.x + self.indent;
-        let span = start..start + text.len().min(self.w - self.indent);
+        let span = start..start + text.len().min(room);
         span.contains(&x).then_some((index, span))
     }
 }
@@ -252,6 +262,8 @@ impl Welcome {
 
     fn error(&mut self, error: String) -> After {
         self.notice = Some(error);
+        self.hit = None;
+        self.footer = HintHits::default();
         After::Stay
     }
 
@@ -325,7 +337,7 @@ impl Welcome {
 
     fn picker(&mut self, s: &mut Screen, x: usize, y: usize, w: usize, h: usize) {
         let rows = self.rows();
-        let heading = usize::from(h > 1);
+        let heading = usize::from(h > rows.len());
         let stride = if h >= rows.len() * 2 + 5 && w >= 26 { 2 } else { 1 };
         let notice_room = (h - heading).saturating_sub(rows.len()).min(4);
         let notice = wrap(self.notice.as_deref().unwrap_or(""), w).take(notice_room);
@@ -345,18 +357,24 @@ impl Welcome {
             s.put(x, top + heading + i, w, line, FAINT);
         }
         let first = top + heading + description_h + gap;
-        let start = (self.selected + 1).saturating_sub(count);
-        let indent = if w >= 3 { 2 } else { 0 };
-        for (i, (label, detail, _)) in rows[start..start + count].iter().enumerate() {
+        let start = ui::selection_start(self.selected, rows.len(), count);
+        let indent = if w >= 6 { 2 } else { 0 };
+        let room = w - indent;
+        for (i, item) in rows[start..start + count].iter().enumerate() {
             let row = first + i * stride;
             let selected = start + i == self.selected;
-            let style = if selected { HEADING } else { Style::PLAIN };
+            let style = if !selected { Style::PLAIN } else if indent == 0 { HEADING.reverse() } else { HEADING };
             if selected && indent > 0 {
                 s.put(x, row, indent, "›", Style::fg(CYAN).bold());
             }
-            s.put_fit(x + indent, row, w - indent, label, style);
+            let label = option_label(item, room);
+            if room == 1 {
+                s.put(x + indent, row, room, label, style);
+            } else {
+                s.put_fit(x + indent, row, room, label, style);
+            }
             if stride > 1 {
-                s.put_fit(x + indent, row + 1, w - indent, detail, FAINT);
+                s.put_fit(x + indent, row + 1, room, item.2, FAINT);
             }
         }
         for (i, line) in notice.enumerate() {
@@ -460,7 +478,8 @@ impl Pane for Welcome {
         } else {
             (key, None)
         };
-        if let Some(delta) = key.rows(rows.len()) {
+        let shown = self.hit.as_ref().map_or(0, |hit| hit.count);
+        if let Some(delta) = ui::selection_delta(key, shown) {
             let selected = self.selected.saturating_add_signed(delta).min(rows.len() - 1);
             if selected != self.selected {
                 self.selected = selected;
@@ -471,7 +490,7 @@ impl Pane for Welcome {
         match key {
             Key::Enter | Key::Char(' ') => {
                 let step = self.step;
-                let after = self.act(rows[self.selected].2);
+                let after = self.act(rows[self.selected].3);
                 if step == Step::Intro && self.step == Step::Choose && let Some((x, y)) = click {
                     self.confirm_click.opened(x, y);
                 }
@@ -525,8 +544,8 @@ mod tests {
 
         let mut narrow = Screen::sized(6, 1);
         welcome.draw(&mut narrow);
-        assert_eq!(narrow.text(), [" › C…"]);
-        assert_eq!(welcome.hover_span(4, 0), Some(3..5));
+        assert_eq!(narrow.text(), [" Con…"]);
+        assert_eq!(welcome.hover_span(4, 0), Some(1..5));
         assert_eq!(welcome.hover_span(5, 0), None);
     }
 
@@ -547,6 +566,29 @@ mod tests {
             assert!(frame.iter().any(|line| line.contains(selected)));
             assert_eq!(frame, fresh.text());
         }
+    }
+
+    #[test]
+    fn welcome_keeps_earlier_choices_visible_and_uses_distinct_labels_in_a_rail() {
+        let fixture = Fixture::folder();
+        let mut welcome = Welcome::new(Mode::Icons(fixture.root.join("state")));
+        assert_eq!(welcome.key(Key::Enter), After::Stay);
+        assert_eq!(welcome.key(Key::End), After::Stay);
+        let mut rail = Screen::sized(15, 5);
+        welcome.draw(&mut rail);
+        let rows = rail.text();
+        for label in ["Nerd Font", "Plain icons", "› Skip setup"] {
+            assert!(rows.iter().any(|row| row.contains(label)), "{rows:?}");
+        }
+        let Key::Click(x, y) = click_on(&rail, "Plain icons") else { unreachable!() };
+        assert_eq!(welcome.hover_span(x, y), Some(x..x + "Plain icons".len()));
+
+        let mut tiny = Screen::sized(1, 1);
+        welcome.draw(&mut tiny);
+        assert_eq!(tiny.text(), ["S"]);
+        assert_eq!(welcome.key(Key::WheelUp), After::Stay);
+        welcome.draw(&mut tiny);
+        assert_eq!(tiny.text(), ["P"]);
     }
 
     #[test]

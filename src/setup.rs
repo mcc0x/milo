@@ -29,14 +29,20 @@ use crate::help::{self, Page};
 use crate::keys::{ConfirmClick, Key};
 use crate::menubar::{self, Action as MenuAction};
 use crate::pane::{After, External, Pane};
-use crate::preferences::{IconMode, Preferences, ProjectMode, Source, UsageTool};
+use crate::preferences::{IconMode, PreferenceSnapshot, Preferences, ProjectMode, Source, UsageTool};
 use crate::screen::{Screen, Style};
-use crate::ui::{DEL, FAINT};
+use crate::ui::{self, DEL, FAINT};
 use crate::{paths, rex};
 use claude::Claude;
 use install::{Saved, Store};
 use layout::{Layout, Side, TabPane};
 use profiles::Scope;
+
+const PREFS_CHANGED: &str = "Milo's pane preferences changed. Reopen Settings before saving again.";
+const PREFS_READ: &str = "Could not read Milo's pane preferences. They were left alone.";
+const PREFS_SAVE: &str = "Could not save Milo's pane preferences.";
+const PREFS_INHERIT: &str = "Could not clear this worktree's pane preferences.";
+const MAINTENANCE_DRAFT: &str = "Save or discard the layout and Claude Code edits before changing the integration.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
@@ -173,8 +179,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     trial: Option<(profiles::Trial, Layout)>,
     tab_size: Option<(usize, usize)>,
     prefs: Preferences,
-    saved_prefs: Option<Preferences>,
-    prefs_scope: Source,
+    saved_prefs: Option<PreferenceSnapshot>,
     claude: Claude,
     show_limits: bool,
     menu_installed: Option<bool>,
@@ -208,10 +213,6 @@ impl Setup {
         setup.tab_size = tab_size;
         setup.menu_installed = menubar::installed();
         setup.icon_override = IconMode::environment();
-        if let Err(why) = setup.reload_prefs() {
-            setup.saved_prefs = None;
-            setup.report(Err(why));
-        }
         setup.real = true;
         if setup.message.as_ref().is_some_and(|(_, style)| *style == DEL.bold()) {
             setup.failure_status(true);
@@ -227,7 +228,11 @@ impl Setup {
 impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn new(store: Option<Store>, inside: bool, target: Option<rex::Target>, root: Option<PathBuf>, run: R) -> Self {
         let claude = store.as_ref().map_or(Claude::Invalid, Store::claude);
-        Self::new_with_claude(store, inside, target, root, run, claude)
+        let mut setup = Self::new_with_claude(store, inside, target, root, run, claude);
+        if let Err(why) = setup.reload_prefs() {
+            setup.report(Err(why));
+        }
+        setup
     }
 
     fn new_with_claude(
@@ -253,8 +258,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             trial: None,
             tab_size: None,
             prefs: Preferences::default(),
-            saved_prefs: Some(Preferences::default()),
-            prefs_scope: Source::Default,
+            saved_prefs: None,
             claude,
             show_limits: claude == Claude::On,
             menu_installed: None,
@@ -336,7 +340,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
             Panel::Diagnostics => &[],
             Panel::Save(kind)
-                if self.root.is_some() && !(kind == SaveKind::Layout && self.exiting_with_only_auto_arrange()) =>
+                if self.root.is_some() && !(kind == SaveKind::Layout && self.only_auto_arrange_dirty()) =>
             {
                 &[Row::Cancel, Row::SaveGlobal, Row::SaveWorktree]
             }
@@ -409,16 +413,16 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.saved.as_ref().is_some_and(|saved| saved.new_tabs != self.layout.new_tabs)
     }
 
-    fn exiting_with_only_auto_arrange(&self) -> bool {
-        self.exit_from.is_some() && self.only_auto_arrange_dirty()
-    }
-
     fn only_auto_arrange_dirty(&self) -> bool {
         self.auto_arrange_dirty() && self.saved.as_ref().is_some_and(|saved| same_geometry(saved, &self.layout))
     }
 
+    fn prefs_scope(&self) -> Source {
+        self.saved_prefs.as_ref().map_or(Source::Default, |saved| saved.source)
+    }
+
     fn prefs_dirty(&self) -> bool {
-        self.saved_prefs.is_some_and(|saved| saved != self.prefs)
+        self.saved_prefs.as_ref().is_some_and(|saved| saved.prefs != self.prefs)
     }
 
     fn claude_dirty(&self) -> bool {
@@ -482,8 +486,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             // Some integration errors are reported after the file was saved.
             // Don't offer that scope again if its draft is already saved.
             let still_dirty = if kind == SaveKind::Layout { self.layout_dirty() } else { self.prefs_dirty() };
-            let layout_saved =
-                kind == SaveKind::Layout && scope == Scope::Worktree && self.exiting_with_only_auto_arrange();
+            let layout_saved = kind == SaveKind::Layout && scope == Scope::Worktree && self.only_auto_arrange_dirty();
             if !still_dirty || layout_saved {
                 self.back();
             }
@@ -583,27 +586,34 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn reload_prefs(&mut self) -> Result<(), &'static str> {
-        let (prefs, source) = Preferences::resolve(self.root.as_deref())
-            .map_err(|_| "Could not read Milo's pane preferences. They were left alone.")?;
-        self.saved_prefs = Some(prefs);
-        self.prefs = prefs;
-        self.prefs_scope = source;
+        self.saved_prefs = None;
+        let store = self.store()?;
+        let snapshot = PreferenceSnapshot::load(&store.config, self.root.as_deref()).map_err(|_| PREFS_READ)?;
+        self.prefs = snapshot.prefs;
+        self.saved_prefs = Some(snapshot);
         Ok(())
     }
 
+    fn persist_prefs(&self, scope: Scope) -> Result<(), &'static str> {
+        let snapshot = self.saved_prefs.as_ref().ok_or(PREFS_SAVE)?;
+        snapshot
+            .save(self.prefs, &self.store()?.config, self.root.as_deref(), scope == Scope::Worktree)
+            .map_err(|error| prefs_write_error(error, PREFS_SAVE))
+    }
+
+    fn clear_prefs_override(&self) -> Result<(), &'static str> {
+        let snapshot = self.saved_prefs.as_ref().ok_or(PREFS_INHERIT)?;
+        let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
+        snapshot.inherit(&self.store()?.config, root).map_err(|error| prefs_write_error(error, PREFS_INHERIT))
+    }
+
     fn save_prefs(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
-        const SAVE_FAILED: &str = "Could not save Milo's pane preferences.";
-        let before = self.saved_prefs.ok_or(SAVE_FAILED)?;
-        let root = match scope {
-            Scope::Global => None,
-            Scope::Worktree => Some(self.root.as_deref().ok_or("This tab is not in a Git worktree.")?),
-        };
-        self.prefs.save_changes(before, root).map_err(|_| SAVE_FAILED)?;
+        self.persist_prefs(scope)?;
         self.reload_prefs()?;
         if self.exit_from.is_none() {
             self.back();
         }
-        Ok(match (scope, &self.prefs_scope) {
+        Ok(match (scope, self.prefs_scope()) {
             (Scope::Worktree, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
             (Scope::Global, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
             (Scope::Global, _) => "Saved global pane preferences. Reopen panes to apply.",
@@ -611,8 +621,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn use_global_prefs(&mut self) -> Result<&'static str, &'static str> {
-        let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
-        Preferences::clear(root).map_err(|_| "Could not clear this worktree's pane preferences.")?;
+        self.clear_prefs_override()?;
         self.reload_prefs()?;
         self.back();
         Ok("This worktree now uses global pane preferences. Reopen panes to apply.")
@@ -661,6 +670,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn maintain(&mut self, remove: bool) {
+        if self.layout_dirty() || self.claude_dirty() {
+            self.report(Err(MAINTENANCE_DRAFT));
+            return;
+        }
         let result = if remove { doctor::remove() } else { doctor::repair() };
         if result.is_ok() {
             if self.inside {
@@ -707,8 +720,16 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn use_global(&mut self) -> Result<&'static str, &'static str> {
         let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
-        self.store()?.use_global(root)?;
-        self.reload_layout()?;
+        let saved = self.saved.as_ref().ok_or("Reopen Settings before changing the layout.")?;
+        self.store()?.inherit_draft(root, saved)?;
+        let auto_arrange = self.auto_arrange_dirty().then_some(self.layout.new_tabs);
+        if let Err(why) = self.reload_layout() {
+            self.saved = None;
+            return Err(why);
+        }
+        if let Some(auto_arrange) = auto_arrange {
+            self.layout.new_tabs = auto_arrange;
+        }
         self.back();
         Ok("This worktree now uses the global default.")
     }
@@ -771,7 +792,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Capture => self.saved.is_none() || self.target.is_none() || self.trial.is_some(),
             Row::Undo => self.trial.is_none(),
             Row::UseGlobal => self.scope != Scope::Worktree,
-            Row::UseGlobalPrefs => self.prefs_scope != Source::Worktree,
+            Row::UseGlobalPrefs => self.prefs_scope() != Source::Worktree,
             Row::SaveLayout
             | Row::Tree
             | Row::Sidebar
@@ -913,6 +934,10 @@ fn same_geometry(first: &Layout, second: &Layout) -> bool {
         && first.usage_rows == second.usage_rows
 }
 
+fn prefs_write_error(error: io::Error, fallback: &'static str) -> &'static str {
+    if error.kind() == io::ErrorKind::Interrupted { PREFS_CHANGED } else { fallback }
+}
+
 fn layout_preset(tree: bool, new_tabs: bool) -> Layout {
     Layout { panes: [true, !tree, !tree], new_tabs, ..Layout::default() }
 }
@@ -997,7 +1022,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             self.select_panel(panel, None);
             return After::Stay;
         }
-        let panel = self.panel;
         let after = if let Some(key) = self.visible.footer_at(x, y) {
             if key == Key::Char('?') { After::Help } else { self.input(key) }
         } else {
@@ -1012,7 +1036,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             self.selected = index;
             self.activate(row)
         };
-        if self.panel != panel && self.panel.modal() {
+        // A worktree save can redraw the same save panel with a global choice in its place.
+        if after == After::Stay && self.panel.modal() {
             self.modal_click.opened(x, y);
         }
         after
@@ -1020,18 +1045,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn input(&mut self, key: Key) -> After {
         let modal = self.panel.modal();
-        if let Some(rows) = key.rows(self.visible.len) {
-            let rows = if matches!(key, Key::WheelUp | Key::WheelDown) {
-                let page = self.visible.len.clamp(1, 3).cast_signed();
-                rows.clamp(-page, page)
+        if let Some(rows) = ui::selection_delta(key, self.visible.len) {
+            let (current, limit) = if self.panel == Panel::Diagnostics {
+                (&mut self.health_top, self.visible.scroll_limit)
             } else {
-                rows
+                let limit = self.rows().len().saturating_sub(1);
+                (&mut self.selected, limit)
             };
-            if self.panel == Panel::Diagnostics {
-                self.health_top = self.health_top.saturating_add_signed(rows);
-            } else {
-                self.selected = self.selected.saturating_add_signed(rows).min(self.rows().len().saturating_sub(1));
+            let next = current.saturating_add_signed(rows).min(limit);
+            if next == *current {
+                return After::Ignored;
             }
+            *current = next;
             return After::Stay;
         }
         let action = match key {

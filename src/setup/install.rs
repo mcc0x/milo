@@ -132,11 +132,13 @@ impl Store {
             call(run, RELOAD);
         }
         installed?;
-        if (rex_changed || pending.is_some()) && !reload_failed && fs::remove_file(pending_path).is_err() {
-            return Err(RELOAD_REMINDER_NOT_CLEARED);
-        }
         let stop_failed =
             (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err());
+        if !reload_failed && (rex_changed || pending.is_some()) {
+            let reminder = pending.unwrap_or_else(|| Image { bytes: Vec::new(), mode: 0o600 });
+            let clear = files::Change::new(pending_path, Some(reminder), None);
+            files::install(clear.as_slice(), || true).map_err(|_| RELOAD_REMINDER_NOT_CLEARED)?;
+        }
         let listener = if stop_failed {
             Saved::ListenerDidNotStop
         } else if watch_layout && !lock::wait_running(&self.state).unwrap_or(false) {
@@ -532,6 +534,23 @@ mod tests {
         assert!(called.into_inner());
         assert!(!note.exists());
         assert!(fs::read_to_string(&store.init).unwrap().ends_with("-- Keep my settings"));
+    }
+
+    #[test]
+    fn a_reload_does_not_remove_a_reminder_edited_while_rex_was_running() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let note = store.state.join(RELOAD_PENDING);
+        let result = store.save(Some(&Layout::default()), None, &|args| {
+            if args == RELOAD.map(OsStr::new) {
+                fs::write(&note, "Keep this note").unwrap();
+            }
+            true
+        });
+
+        assert_eq!(result.unwrap_err(), RELOAD_REMINDER_NOT_CLEARED);
+        assert_eq!(fs::read_to_string(note).unwrap(), "Keep this note");
+        assert!(store.has_layout().unwrap());
     }
 
     #[test]

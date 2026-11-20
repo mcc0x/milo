@@ -1,43 +1,38 @@
 //! Process-owned file locks are not inherited by children. The setup lock
 //! lasts through a save; the listener lock stays open when milo becomes Rex.
 
-use std::fs::{self, File, OpenOptions};
+use std::ffi::CStr;
+use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const LISTENER_LOCK: &str = "listener.lock";
+use crate::fs_ops;
+
+const LISTENER_LOCK: &CStr = c"listener.lock";
 /// How long a listener asked to stop is given to wind down.
 const WIND_DOWN: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(10);
 
 /// Never resolve a link while opening a lock that may name a process.
-fn open(path: &Path, create: bool) -> io::Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(create)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
+fn open(dir: &File, name: &CStr, flags: libc::c_int) -> io::Result<File> {
+    let file = fs_ops::open_at(dir, name, flags, 0o600)?;
     if !file.metadata()?.is_file() {
         return Err(ErrorKind::InvalidInput.into());
     }
     Ok(file)
 }
 
-fn create(dir: &Path, name: &str) -> io::Result<File> {
+fn create(dir: &Path, name: &CStr) -> io::Result<File> {
     fs::create_dir_all(dir)?;
-    let _directory = crate::fs_ops::open_dir(dir)?;
-    open(&dir.join(name), true)
+    open(&fs_ops::open_dir(dir)?, name, libc::O_RDWR | libc::O_CREAT)
 }
 
 /// Keep the marker in place so every setup locks the same file.
 pub(super) fn setup(dir: &Path) -> Result<File, &'static str> {
     fn acquire(dir: &Path) -> io::Result<Option<File>> {
-        let lock = create(dir, "setup.lock")?;
+        let lock = create(dir, c"setup.lock")?;
         Ok(take(&lock)?.then_some(lock))
     }
     match acquire(dir) {
@@ -88,7 +83,7 @@ fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
 }
 
 fn existing(dir: &Path) -> io::Result<Option<File>> {
-    match crate::fs_ops::open_dir(dir).and_then(|_| open(&dir.join(LISTENER_LOCK), false)) {
+    match fs_ops::open_dir(dir).and_then(|directory| open(&directory, LISTENER_LOCK, libc::O_RDONLY)) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -191,7 +186,12 @@ mod tests {
     #[test]
     fn a_lock_nobody_holds_names_no_process() {
         let f = Fixture::folder();
-        let lock = open(&f.root.join(LISTENER_LOCK), true).unwrap();
+        create(&f.root, LISTENER_LOCK).unwrap();
+        let lock = existing(&f.root).unwrap().unwrap();
+        // SAFETY: Asking for file status flags does not access user memory.
+        let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
         assert_eq!(holder(&lock).unwrap(), None);
         stop(&f.root).unwrap();
     }

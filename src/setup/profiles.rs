@@ -211,15 +211,15 @@ impl Store {
                 );
             }
             let profile = location.load()?;
+            let (mut legacy, _) = self.layout()?;
             if let Some(expected) = expected {
-                let (mut legacy, _) = self.layout()?;
                 check_draft(&self.config, scope, profile.as_ref(), &legacy, root, expected)?;
-                // The state lock is acquired inside save_with; don't publish a
-                // fallback that changed between planning and taking that lock.
-                prepare_fallback(&mut legacy);
-                if legacy != fallback {
-                    return Err(PROFILE_CHANGED);
-                }
+            }
+            // The state lock is acquired inside save_with; don't publish a
+            // fallback that changed between planning and taking that lock.
+            prepare_fallback(&mut legacy);
+            if legacy != fallback {
+                return Err(PROFILE_CHANGED);
             }
             changes.extend(location.change(profile.map(|(_, image)| image), Some(layout)));
             Ok(())
@@ -258,10 +258,6 @@ impl Store {
         // Don't delete a usable override only to expose a broken global layer.
         Location::new(&self.config, None)?.load()?;
         files::install(location.change(Some(previous), None).as_slice(), || true)
-    }
-
-    pub fn use_global(&self, root: &Path) -> Result<(), &'static str> {
-        update(&self.config, Scope::Worktree, Some(root), None)
     }
 
     pub fn tab_context(&self, target: &rex::Target) -> (Option<PathBuf>, Option<(usize, usize)>) {
@@ -471,6 +467,10 @@ fn update(config: &Path, scope: Scope, root: Option<&Path>, layout: Option<&Layo
     let _profiles = location.lock()?;
     let mut changes = Vec::new();
     location.plan(layout, &mut changes)?;
+    if scope == Scope::Worktree && layout.is_none() && !changes.is_empty() {
+        // Keep a usable override when the requested fallback cannot be read.
+        Location::new(config, None)?.load()?;
+    }
     files::install(&changes, || true)
 }
 
@@ -618,8 +618,24 @@ mod tests {
         assert!(a_layout.0 == project);
         assert_eq!(a_layout.1, Scope::Worktree);
         assert_eq!(selected(&store.config, Some(&b)).unwrap().unwrap().1, Scope::Global);
-        store.use_global(&a).unwrap();
+        store.inherit_draft(&a, &a_layout.0).unwrap();
         assert_eq!(selected(&store.config, Some(&a)).unwrap().unwrap().1, Scope::Global);
+    }
+
+    #[test]
+    fn resetting_a_worktree_to_a_broken_global_profile_preserves_its_layout() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        let root = fixture.root.join("project");
+        let project = Layout::parse_rail("v1 r .231 .7 10 uho 011 0 417000 583000").unwrap();
+        update(&store.config, Scope::Worktree, Some(&root), Some(&project)).unwrap();
+        let global = Location::new(&store.config, None).unwrap();
+        std::fs::write(global.path, "not a layout profile").unwrap();
+
+        assert_eq!(update(&store.config, Scope::Worktree, Some(&root), None), Err(BAD_PROFILE));
+        let (layout, scope) = selected(&store.config, Some(&root)).unwrap().unwrap();
+        assert!(layout == project);
+        assert_eq!(scope, Scope::Worktree);
     }
 
     #[test]
@@ -649,7 +665,7 @@ mod tests {
         assert_eq!(resized.width, width.width);
         assert_eq!(resized.geometry.shares, height.geometry.shares);
         assert!(selected(&store.config, Some(&b)).unwrap().unwrap().0 == global);
-        store.use_global(&a).unwrap();
+        update(&store.config, Scope::Worktree, Some(&a), None).unwrap();
         assert!(selected(&store.config, Some(&a)).unwrap().unwrap().0 == global);
     }
 

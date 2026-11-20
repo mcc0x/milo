@@ -33,7 +33,8 @@ const LISTENER: &str = include_str!("listener.lua");
 // mistake a hand-edited ten-row setting for that old default.
 const TEN_ROW_ACTIONS: [u64; 4] =
     [0x97cf_a17d_8775_e350, 0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f, 0x1d1f_8dd4_6b14_c588];
-const TWO_ROW_ACTIONS: [u64; 3] = [0x5b89_2e57_9222_edf1, 0xe209_f094_9daa_1761, 0x87e4_ca78_9f5c_8cc4];
+const TWO_ROW_ACTIONS: [u64; 4] =
+    [0x5b89_2e57_9222_edf1, 0xe209_f094_9daa_1761, 0x87e4_ca78_9f5c_8cc4, 0x362f_dbba_f3ce_0622];
 
 pub(super) fn probe_lua(layout: &Layout, executable: &Path) -> String {
     let mut lua = actions_prefix(layout, &lua_path(executable));
@@ -437,11 +438,11 @@ pub(super) fn update_actions(
     let with_newlines = |footer: &'static str| {
         if newline == "\n" { Cow::Borrowed(footer) } else { Cow::Owned(footer.replace('\n', newline)) }
     };
-    let legacy =
-        [(with_newlines(OLD_START_LISTENER), LISTENER_GUARD), (with_newlines(START_LISTENER), CHOSEN_LISTENER_GUARD)];
-    let legacy_suffix =
-        legacy.iter().find_map(|(footer, guard)| text.ends_with(footer.as_ref()).then_some((footer.len(), *guard)));
-    if old == *layout && legacy_suffix.is_none() {
+    let legacy = [with_newlines(OLD_START_LISTENER), with_newlines(START_LISTENER)];
+    let legacy_suffix = legacy.iter().find(|footer| text.ends_with(footer.as_ref())).map(|footer| footer.len());
+    let scoped = scoped_footer(text, newline).map(|(body, guard)| (text.len() - body.len(), guard));
+    let migrate = legacy_suffix.or_else(|| scoped.filter(|&(_, guard)| guard != LISTENER_GUARD).map(|(len, _)| len));
+    if old == *layout && migrate.is_none() {
         return Some(None);
     }
 
@@ -481,23 +482,20 @@ pub(super) fn update_actions(
     for (range, value) in edits.into_iter().rev() {
         updated.replace_range(range, &value);
     }
-    if old.new_tabs != layout.new_tabs {
-        if let Some((len, _)) = legacy_suffix {
-            updated.truncate(updated.len() - len);
-        } else if let Some((body, _)) = scoped_footer(&updated, newline) {
-            updated.truncate(body.len());
-        } else if legacy.iter().any(|(footer, _)| updated.contains(footer.as_ref()))
-            || updated.lines().any(|line| launcher_state(line).is_some())
-        {
-            // Do not rewrite a launcher buried in custom code.
-            return None;
-        }
-        if layout.new_tabs {
-            push_listener(&mut updated, env, newline, CHOSEN_LISTENER_GUARD);
-        }
-    } else if let Some((len, guard)) = legacy_suffix {
+    let mode_changed = old.new_tabs != layout.new_tabs;
+    let footer = if mode_changed { legacy_suffix.or(scoped.map(|(len, _)| len)) } else { migrate };
+    if let Some(len) = footer {
         updated.truncate(updated.len() - len);
-        push_listener(&mut updated, env, newline, guard);
+    } else if mode_changed
+        && (legacy.iter().any(|footer| updated.contains(footer.as_ref()))
+            || updated.lines().any(|line| launcher_state(line).is_some()))
+    {
+        // Do not rewrite a launcher buried in custom code.
+        return None;
+    }
+    // The listener also watches titles and dividers when auto-arrange is off.
+    if layout.enabled() && (mode_changed || footer.is_some()) {
+        push_listener(&mut updated, env, newline, LISTENER_GUARD);
     }
     Some(Some(updated))
 }
@@ -642,7 +640,7 @@ pub(super) fn listener_template_current(text: &str, rex_file: &Path) -> Option<b
     [
         0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a,
         0x1ed2_af59_4c5b_4bf4, 0x7b13_2b45_6752_1e02, 0x3f33_9081_87e5_4505, 0x9a88_3230_71bd_27e5,
-        0x3160_d88f_3615_347e, 0x9f96_0222_5e5f_6597, 0xf4de_b493_7bc8_8ba9,
+        0x3160_d88f_3615_347e, 0x9f96_0222_5e5f_6597, 0xf4de_b493_7bc8_8ba9, 0x6ec5_21ea_7c2f_0e7f,
     ]
     .contains(&fingerprint(body))
     .then_some(false)
@@ -681,6 +679,21 @@ mod tests {
             update_actions(&customized(&old), &same_layout, executable, environment()),
             Some(Some(customized(&text))),
         );
+    }
+
+    #[test]
+    fn customized_layout_keeps_the_listener_when_auto_arrange_is_turned_off() {
+        let executable = Path::new("/fixture/bin/milo");
+        let old = Layout { new_tabs: true, ..Layout::default() };
+        let draft = Layout::default();
+        let text = rex_lua(&old, executable, environment()).replace("-- Terminal rows", "-- My comment\n-- Terminal rows");
+        let updated = update_actions(&text, &draft, executable, environment()).unwrap().unwrap();
+        assert!(Layout::parse(&updated).is_some_and(|layout| layout == draft));
+        assert!(updated.contains("-- My comment\n"));
+        assert_eq!(scoped_footer(&updated, "\n").unwrap().1, LISTENER_GUARD);
+
+        let legacy = updated.replace(LISTENER_GUARD, CHOSEN_LISTENER_GUARD);
+        assert_eq!(update_actions(&legacy, &draft, executable, environment()), Some(Some(updated)));
     }
 
     #[test]

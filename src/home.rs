@@ -22,6 +22,7 @@ const MENU_WIDTH: usize = "Uninstall Menu App".len() + 2;
 const APP_ROW: usize = 3;
 const INSTALL_MENU: &[&str] = &menu_with_app("Install Menu App");
 const REMOVE_MENU: &[&str] = &menu_with_app("Uninstall Menu App");
+const COMPACT_REMOVE_MENU: &[&str] = &menu_with_app("Remove Menu App");
 
 const fn menu_with_app(label: &str) -> [&str; 5] {
     [MENU[0], MENU[1], MENU[2], label, MENU[APP_ROW]]
@@ -85,10 +86,11 @@ impl Home {
         }
     }
 
-    fn labels(&self) -> &'static [&'static str] {
+    fn labels(&self, width: usize) -> &'static [&'static str] {
         match self.menu_app {
             None => MENU,
             Some(false) => INSTALL_MENU,
+            Some(true) if width < MENU_WIDTH => COMPACT_REMOVE_MENU,
             Some(true) => REMOVE_MENU,
         }
     }
@@ -148,7 +150,7 @@ impl Home {
         if let Some((key, _)) = self.footer_hit(x, y) {
             return Some(key);
         }
-        let menu = self.labels();
+        let menu = self.labels(self.picker.width);
         let (selected, labels) = match &mut self.view {
             View::Menu => (&mut self.selected, menu),
             View::Confirm { removal, selected } => (selected, removal.choices()),
@@ -161,8 +163,8 @@ impl Home {
 
     fn draw_menu(&mut self, s: &mut Screen, body: usize) {
         const GAP: usize = 5;
-        let labels = self.labels();
-        let menu_width = MENU_WIDTH.max(labels[APP_ROW].len() + 2);
+        let labels = self.labels(s.w);
+        let menu_width = MENU_WIDTH;
         let width = s.w.saturating_sub(menu_width + GAP + 2);
         if let Some(art) = Sprite::fit(width, body.saturating_sub(2)).filter(|_| width >= BRAND_WIDTH) {
             let brand_width = art.width().max(BRAND_WIDTH);
@@ -208,7 +210,11 @@ impl Pane for Home {
             self.picker = Picker::default();
             return;
         }
-        let rows = if matches!(self.view, View::Menu) { self.labels().len() } else { MENU.len() };
+        let rows = match self.view {
+            View::Menu => self.labels(s.w).len(),
+            View::Confirm { removal, .. } => removal.choices().len(),
+            _ => 0,
+        };
         let footer = s.h > rows;
         let body = s.h - usize::from(footer);
         match &mut self.view {
@@ -256,7 +262,7 @@ impl Pane for Home {
     fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
         let row = match &self.view {
             View::Settings(setup) => return setup.hover_span(x, y),
-            View::Menu => self.picker.row_at(x, y, self.labels()),
+            View::Menu => self.picker.row_at(x, y, self.labels(self.picker.width)),
             View::Confirm { removal, .. } => self.picker.row_at(x, y, removal.choices()),
             View::Report(_) => None,
         };
@@ -319,19 +325,21 @@ impl Pane for Home {
                 }
                 2 => {
                     let result = self.diagnostics.start(doctor::report).map(|()| String::new());
-                    self.show(View::Report(Report::new(doctor::TITLE, result)))
+                    self.show_guarded(View::Report(Report::new(doctor::TITLE, result)), click)
                 }
                 APP_ROW if self.menu_app == Some(false) => self.show_guarded(
                     View::Report(Report::new("Install Milo Usage", menubar::run(MenuAppAction::Install))),
                     click,
                 ),
                 APP_ROW if self.menu_app == Some(true) => self.confirm_removal(Removal::MenuApp, click),
-                index if index == self.labels().len() - 1 => self.confirm_removal(Removal::Milo, click),
+                index if index == self.labels(self.picker.width).len() - 1 => {
+                    self.confirm_removal(Removal::Milo, click)
+                }
                 _ => unreachable!("selection stays within the menu"),
             },
             View::Menu => {
-                let count = self.labels().len();
-                move_selection(&mut self.selected, count, key)
+                let count = self.labels(self.picker.width).len();
+                move_selection(&mut self.selected, count, self.picker.len, key)
             }
             View::Settings(setup) => match setup.key(key) {
                 After::Leave => {
@@ -353,8 +361,10 @@ impl Pane for Home {
                 };
                 self.show_guarded(View::Report(Report::new(title, result)), click)
             }
-            View::Confirm { .. } if back || choose => self.show(View::Menu),
-            View::Confirm { removal, selected } => move_selection(selected, removal.choices().len(), key),
+            View::Confirm { .. } if back || choose => self.show_guarded(View::Menu, click),
+            View::Confirm { removal, selected } => {
+                move_selection(selected, removal.choices().len(), self.picker.len, key)
+            }
         }
     }
 }
@@ -389,7 +399,7 @@ impl Picker {
         selected: usize,
     ) -> Self {
         let len = rows.min(labels.len());
-        let first = selected.saturating_sub(len.saturating_sub(1));
+        let first = ui::selection_start(selected, labels.len(), len);
         let step = if rows >= 2 * labels.len() - 1 { 2 } else { 1 };
         let marker = if width >= labels.iter().map(|label| label.len()).max().unwrap_or(0) + 2 { 2 } else { 0 };
         for (i, &label) in labels.iter().enumerate().skip(first).take(len) {
@@ -423,8 +433,8 @@ impl Picker {
     }
 }
 
-fn move_selection(selected: &mut usize, count: usize, key: Key) -> After {
-    if let Some(rows) = key.rows(count) {
+fn move_selection(selected: &mut usize, count: usize, shown: usize, key: Key) -> After {
+    if let Some(rows) = ui::selection_delta(key, shown) {
         let next = selected.saturating_add_signed(rows).min(count - 1);
         if next != *selected {
             *selected = next;
@@ -644,12 +654,25 @@ mod tests {
         home.draw(&mut screen);
         assert_eq!(screen.text(), ["Open Web"]);
         assert_eq!(home.key(Key::Enter), After::OpenWeb);
-        assert_eq!(home.key(Key::Down), After::Stay);
+        assert_eq!(home.key(Key::WheelDown), After::Stay);
         home.draw(&mut screen);
         assert_eq!(screen.text(), ["Settings"]);
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut screen);
         assert_eq!(screen.text(), ["Uninstall"]);
+    }
+
+    #[test]
+    fn moving_to_the_last_choice_keeps_other_visible_choices_clickable() {
+        let mut home = Home::with_menu_app(None);
+        let mut wide = Screen::sized(60, 20);
+        assert_eq!(home.key(Key::End), After::Stay);
+        home.draw(&mut wide);
+        let lines = wide.text();
+        for &label in MENU {
+            assert!(lines.iter().any(|line| line.contains(label)), "{lines:?}");
+        }
+        assert_eq!(home.key(click_on(&wide, "Open Web Menu")), After::OpenWeb);
     }
 
     #[test]
@@ -684,7 +707,7 @@ mod tests {
         assert_eq!(tiny.text(), ["Uninstall"]);
         assert_eq!(home.key(Key::Up), After::Stay);
         home.draw(&mut tiny);
-        assert_eq!(tiny.text(), ["Uninstall"]);
+        assert_eq!(tiny.text(), ["Remove Me"]);
 
         // Click inside both the menu item and the Cancel button drawn in its place.
         let open = Key::Click(1, 0);
@@ -693,6 +716,13 @@ mod tests {
         assert_eq!(tiny.text(), [" Cancel"]);
         assert_eq!(home.key(open), After::Ignored);
         assert!(matches!(home.view, View::Confirm { removal: Removal::MenuApp, selected: 0 }));
+
+        let cancel = Key::Click(2, 0);
+        assert_eq!(home.key(cancel), After::Stay);
+        home.draw(&mut tiny);
+        assert_eq!(home.key(cancel), After::Ignored);
+        assert!(matches!(home.view, View::Menu));
+        assert_eq!(home.key(Key::Enter), After::Stay);
 
         let mut wide = Screen::sized(60, 20);
         home.draw(&mut wide);

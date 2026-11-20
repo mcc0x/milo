@@ -46,6 +46,7 @@ pub(super) struct Visible {
     first: usize,
     y: usize,
     pub(super) len: usize,
+    pub(super) scroll_limit: usize,
     rows: [RowHit; TUNE.len()],
     tab_y: usize,
     tabs: [Range<usize>; SECTIONS.len()],
@@ -103,14 +104,17 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     pub(super) fn draw_setup(&mut self, s: &mut Screen) {
         s.clear();
         self.visible = Visible::default();
-        if s.w < 4 || s.h == 0 {
+        if s.w == 0 || s.h == 0 {
             return;
         }
         let dirty = self.dirty();
-        if s.h == 1 {
+        if s.h == 1 || s.w < 4 {
             if self.panel == Panel::Diagnostics {
-                self.draw_diagnostics(s, 0, 1);
-            } else {
+                self.draw_diagnostics(s, 0, s.h);
+            } else if !self.rows().is_empty() {
+                self.visible.current = true;
+                self.draw_rows(s, 0, s.h, s.w.min(54));
+            } else if s.w >= 4 {
                 self.heading(s, dirty);
             }
             return;
@@ -308,7 +312,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 }
             }
             Panel::Appearance | Panel::Workflow if self.saved_prefs.is_none() => "Preferences not loaded",
-            Panel::Appearance | Panel::Workflow => match self.prefs_scope {
+            Panel::Appearance | Panel::Workflow => match self.prefs_scope() {
                 Source::Default => "Built-in defaults",
                 Source::Global => "Global preferences",
                 Source::Worktree => "Worktree preferences",
@@ -323,7 +327,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             let used = s.put(at, y, scope.len(), scope, FAINT);
             let at = at + used + 2;
             let scoped_to_worktree = matches!(self.panel, Panel::Layout | Panel::Tune) && self.scope == Scope::Worktree
-                || matches!(self.panel, Panel::Appearance | Panel::Workflow) && self.prefs_scope == Source::Worktree;
+                || matches!(self.panel, Panel::Appearance | Panel::Workflow) && self.prefs_scope() == Source::Worktree;
             if scoped_to_worktree
                 && let Some(name) = self.root.as_deref().and_then(|root| root.file_name()).and_then(OsStr::to_str)
             {
@@ -348,7 +352,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Health => "Inspect settings without changing them. Repair or remove only Milo's integration.",
             Panel::Diagnostics => return None,
             Panel::Exit => "Save before leaving?",
-            Panel::Save(SaveKind::Layout) if self.exiting_with_only_auto_arrange() => {
+            Panel::Save(SaveKind::Layout) if self.only_auto_arrange_dirty() => {
                 "Auto-arrange needs a global save."
             }
             Panel::Save(SaveKind::Layout) => {
@@ -356,7 +360,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             }
             Panel::Save(_) => "On save: remember these appearance and workflow choices. Reopen Milo panes to apply.",
             Panel::Confirm(Confirm::UseGlobal) => {
-                "Remove this worktree's saved layout override and discard the layout draft. The global default takes over."
+                "Remove this worktree's saved layout override and discard its pane arrangement draft."
             }
             Panel::Confirm(Confirm::UseGlobalPrefs(_)) => {
                 "Remove this worktree's appearance and workflow override and discard the preference draft."
@@ -426,9 +430,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn draw_rows(&mut self, s: &mut Screen, y: usize, end: usize, width: usize) {
         let rows = self.rows();
         let len = end.saturating_sub(y).min(rows.len());
-        let first = self.selected.saturating_sub(len.saturating_sub(1)).min(rows.len() - len);
-        let draw_width = width - 1;
-        let left = if width < 8 { 1 } else { 2 };
+        let first = ui::selection_start(self.selected, rows.len(), len);
+        let has_gutter = width >= 4;
+        let draw_width = width - usize::from(has_gutter);
+        let left = match width {
+            1 => 0,
+            2..=7 => 1,
+            _ => 2,
+        };
         let narrow = width < NARROW;
         self.visible.first = first;
         self.visible.y = y;
@@ -438,13 +447,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             let cell = self.cell(row);
             let selected = first + i == self.selected;
             let disabled = self.disabled(row);
-            if selected {
+            let marker = selected && left != 0;
+            if marker {
                 s.put(0, row_y, 1, "›", if disabled { FAINT } else { ACCENT.bold() });
             }
             let name_style = if disabled {
                 FAINT
             } else if selected {
-                HEADING
+                if marker { HEADING } else { HEADING.reverse() }
             } else {
                 Style::PLAIN
             };
@@ -461,7 +471,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 let start = draw_width - room;
                 let label_room = start - left - gap * usize::from(room > 0);
                 let label = cell.row_label(narrow, label_room);
-                let label_width = s.put_fit(left, row_y, label_room, label, name_style);
+                let label_width = control_label(s, left, row_y, label_room, label, name_style);
                 let value_style = if disabled { FAINT } else { style };
                 let value_width = if room == 0 {
                     0
@@ -470,19 +480,23 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 } else {
                     s.put_fit(start, row_y, room, value, value_style)
                 };
-                RowHit { marker: selected, label: left..left + label_width, value: start..start + value_width }
+                RowHit { marker, label: left..left + label_width, value: start..start + value_width }
             } else {
                 let room = draw_width - left;
-                let used = s.put_fit(left, row_y, room, cell.row_label(narrow, room), name_style);
-                RowHit { marker: selected, label: left..left + used, ..RowHit::default() }
+                let used = control_label(s, left, row_y, room, cell.row_label(narrow, room), name_style);
+                RowHit { marker, label: left..left + used, ..RowHit::default() }
             };
             self.visible.rows[i] = hit;
         }
-        ui::thumb(s, draw_width, y, len, rows.len(), first);
+        if has_gutter {
+            ui::thumb(s, draw_width, y, len, rows.len(), first);
+        }
     }
 
     fn draw_diagnostics(&mut self, s: &mut Screen, y: usize, end: usize) {
-        let width = s.w.saturating_sub(3).max(1);
+        let left = usize::from(s.w >= 3);
+        let gutter = usize::from(s.w >= 4);
+        let width = if gutter != 0 { s.w - 3 } else { s.w - left };
         let text = if self.diagnostics.checking() {
             super::doctor::CHECKING
         } else if self.health.is_empty() {
@@ -493,12 +507,15 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let lines = wrap(text, width);
         let len = lines.clone().count();
         let shown = end.saturating_sub(y);
-        self.health_top = self.health_top.min(len.saturating_sub(shown));
+        self.visible.scroll_limit = len.saturating_sub(shown);
+        self.health_top = self.health_top.min(self.visible.scroll_limit);
         for (i, line) in lines.skip(self.health_top).take(shown).enumerate() {
-            s.put(1, y + i, width, line, Style::PLAIN);
+            s.put(left, y + i, width, line, Style::PLAIN);
         }
         self.visible.len = shown;
-        ui::thumb(s, s.w - 1, y, shown, len, self.health_top);
+        if gutter != 0 {
+            ui::thumb(s, s.w - 1, y, shown, len, self.health_top);
+        }
     }
 
     fn appearance_sample(&self, s: &mut Screen, y: usize) {
@@ -556,7 +573,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             }
             Row::SaveGlobal
                 if matches!(self.panel, Panel::Save(SaveKind::Appearance | SaveKind::Workflow))
-                    && self.prefs_scope == Source::Worktree =>
+                    && self.prefs_scope() == Source::Worktree =>
             {
                 "Updates global preferences without changing this worktree's override."
             }
@@ -826,6 +843,10 @@ impl Panel {
     }
 }
 
+fn control_label(s: &mut Screen, x: usize, y: usize, width: usize, text: &str, style: Style) -> usize {
+    if width == 1 { s.put(x, y, width, text, style) } else { s.put_fit(x, y, width, text, style) }
+}
+
 #[derive(Clone, Copy)]
 struct Cell<'a> {
     label: &'static str,
@@ -895,7 +916,7 @@ fn tabs(s: &mut Screen, columns: Range<usize>, y: usize, active: usize) -> [Rang
     };
     std::array::from_fn(|index| {
         let text = labels[index];
-        let style = if index == active { ACCENT.bold() } else { FAINT };
+        let style = if index == active { HEADING.reverse() } else { FAINT };
         let start = x;
         let used = s.put(x, y, text.len(), text, style);
         x += used + gap;
