@@ -1,7 +1,7 @@
 //! Decodes keys, mouse events, focus and other terminal replies from input.
 
 use std::fs::File;
-use std::io::{ErrorKind, Read};
+use std::io::{self, ErrorKind, Read};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -123,17 +123,14 @@ impl Input {
             };
             read_input = true;
             self.feed(&buf[..n], keys);
-            if self.pending.is_empty() {
+            if self.pending.is_empty() || self.discard.is_some() {
                 if n < buf.len() && self.paste_end.is_none() {
                     return;
                 }
                 deadline = None;
             } else {
-                let now = Instant::now();
-                let until = *deadline.get_or_insert(now + SEQUENCE_WAIT);
-                let timeout = milliseconds(until.saturating_duration_since(now));
-                let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-                if now >= until || wait_ready(&mut fds, timeout) <= 0 {
+                let until = *deadline.get_or_insert_with(|| Instant::now() + SEQUENCE_WAIT);
+                if !wait_for_sequence(keyboard, until) {
                     break;
                 }
             }
@@ -180,6 +177,20 @@ impl Input {
                 keys.push(Key::Esc);
             }
             self.pending.clear();
+        }
+    }
+}
+
+fn wait_for_sequence(keyboard: &File, until: Instant) -> bool {
+    let mut fds = [libc::pollfd { fd: keyboard.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+    loop {
+        let wait = until.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            return false;
+        }
+        match wait_ready(&mut fds, milliseconds(wait)) {
+            n if n < 0 && io::Error::last_os_error().kind() == ErrorKind::Interrupted => continue,
+            n => return n > 0,
         }
     }
 }
@@ -260,6 +271,18 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
                 [0x1b, ..] => (None, rest),
                 [b'O', 0x1b, ..] => (None, &rest[1..]),
                 [b'O', final_byte, tail @ ..] => (csi(&[], *final_byte), tail),
+                [b'[', b'M', report @ ..] => {
+                    // Terminals without SGR mouse mode append three raw bytes to CSI M.
+                    if let Some(i) = report.iter().take(3).position(|&byte| byte < b' ') {
+                        bytes = &report[i..];
+                        continue;
+                    }
+                    let Some(&[button, x, y]) = report.first_chunk::<3>() else { return bytes };
+                    let key = x.checked_sub(33).zip(y.checked_sub(33)).and_then(|(x, y)| {
+                        mouse_key(usize::from(button - 32), usize::from(x), usize::from(y))
+                    });
+                    (key, &report[3..])
+                }
                 [_, body @ ..] => {
                     let Some(sequence) = Sequence::of(rest) else {
                         // Alt-modified key: drop it rather than act on the bare key.
@@ -280,7 +303,7 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
                             (_, 0x18 | 0x1a) => None,
                             (Sequence::Osc, _) => background_reply(answer).map(Key::Background),
                             (Sequence::Apc, _) if answer.starts_with(b"Gi=31;") => {
-                                Some(Key::Pictures(answer.ends_with(b";OK")))
+                                Some(Key::Pictures(answer == b"Gi=31;OK"))
                             }
                             _ => None,
                         }
@@ -323,18 +346,25 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
     }
 }
 
+fn mouse_key(button: usize, x: usize, y: usize) -> Option<Key> {
+    // Ignore modifier bits, but never treat motion or an extended button as a press.
+    match button & !(4 | 8 | 16) {
+        64 => Some(Key::WheelUp),
+        65 => Some(Key::WheelDown),
+        0 => Some(Key::Click(x, y)),
+        35 => Some(Key::Hover(x, y)),
+        _ => None,
+    }
+}
+
 fn csi(params: &[u8], fin: u8) -> Option<Key> {
     if let Some(mouse) = params.strip_prefix(b"<") {
+        if fin != b'M' {
+            return None;
+        }
         let mut it = std::str::from_utf8(mouse).ok()?.split(';').map(|p| p.parse::<usize>().ok());
         let (btn, x, y) = (it.next()??, it.next()??.checked_sub(1)?, it.next()??.checked_sub(1)?);
-        // Ignore modifier bits, but never treat motion or an extended button as a press.
-        return match (fin, btn & !(4 | 8 | 16)) {
-            (b'M', 64) => Some(Key::WheelUp),
-            (b'M', 65) => Some(Key::WheelDown),
-            (b'M', 0) => Some(Key::Click(x, y)),
-            (b'M', 35) => Some(Key::Hover(x, y)),
-            _ => None,
-        };
+        return if it.next().is_none() { mouse_key(btn, x, y) } else { None };
     }
     Some(match fin {
         b'A' => Key::Up,
@@ -343,12 +373,15 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
         b'D' => Key::Left,
         b'H' => Key::Home,
         b'F' => Key::End,
-        b'I' => Key::Focus(true),
-        b'O' => Key::Focus(false),
+        b'I' if params.is_empty() => Key::Focus(true),
+        b'O' if params.is_empty() => Key::Focus(false),
         // "6;height;width t": the size of one cell in pixels.
         b't' => {
             let mut parts = std::str::from_utf8(params.strip_prefix(b"6;")?).ok()?.split(';');
             let (height, width) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+            if parts.next().is_some() {
+                return None;
+            }
             Key::CellSize(width, height)
         }
         // The terminal describing itself: asked for last, so it ends the answers.
@@ -428,6 +461,7 @@ mod tests {
         assert_eq!(keys("é".as_bytes()), [Key::Char('é')]);
         assert_eq!(keys(b"\x1b"), [Key::Esc]);
         assert_eq!(keys(b"\x1b[I\x1b[O"), [Key::Focus(true), Key::Focus(false)]);
+        assert_eq!(keys(b"\x1b[1I\x1b[1O"), []);
     }
 
     #[test]
@@ -437,6 +471,8 @@ mod tests {
             [Key::Char('j'), Key::Pictures(true), Key::Char('k'), Key::CellSize(8, 16), Key::Answered, Key::Char('l')]
         );
         assert_eq!(keys(b"\x1b_Gi=31;ENOTSUPPORTED\x1b\\"), [Key::Pictures(false)]);
+        assert_eq!(keys(b"\x1b_Gi=31;Error: expected ;OK\x1b\\"), [Key::Pictures(false)]);
+        assert_eq!(keys(b"\x1b[6;16;8;9t"), []);
     }
 
     #[test]
@@ -447,6 +483,18 @@ mod tests {
         assert_eq!(keys(b"\x1b[<35;8;3Mj\x1b[<35;2;1M"), [Key::Hover(7, 2), Key::Char('j'), Key::Hover(1, 0)]);
         assert_eq!(keys(b"\x1b[<32;8;3M\x1b[<128;8;3M"), []);
         assert_eq!(keys(b"\x1b[<64;1;1M\x1b[<65;1;1M"), [Key::WheelUp, Key::WheelDown]);
+        assert_eq!(keys(b"\x1b[<0;8;3;9M"), []);
+    }
+
+    #[test]
+    fn a_split_legacy_mouse_report_preserves_its_coordinates() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        for part in [b"\x1b[M ".as_slice(), b"q", b"kk"] {
+            input.feed(part, &mut keys);
+            input.finish(&mut keys);
+        }
+        assert_eq!(keys, [Key::Click(80, 74), Key::Char('k')]);
     }
 
     #[test]
