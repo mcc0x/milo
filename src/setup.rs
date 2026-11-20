@@ -617,7 +617,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let root = self.root.clone();
         if let Err(error) = self.diagnostics.start(move || {
             let store = store.ok_or_else(|| "Could not find your settings folders.".to_owned())?;
-            doctor::report_for(&store, root.as_deref())
+            doctor::full_report(&store, root.as_deref())
         }) {
             self.health = error;
         }

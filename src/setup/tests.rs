@@ -47,6 +47,8 @@ fn isolated_settings(name: &str) -> Option<PathBuf> {
         .env(ROOT, &f.root)
         .env("HOME", &f.root)
         .env("XDG_STATE_HOME", f.root.join("state"))
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("OPENCODE_DB")
         .env_remove("REX_SESSION")
         .env_remove("REX_BLOCK")
         .env("XDG_CONFIG_HOME", &f.root)

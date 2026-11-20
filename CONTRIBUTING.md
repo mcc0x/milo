@@ -101,6 +101,10 @@ during the check. Check both files and try the pane choices. Only try a
 reload or the actions on a disposable Rex configuration and session, never
 as part of the automated tests.
 
+### Adding a usage source
+
+[Usage sources](docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
+
 ### Adding a language to the reader
 
 Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings whose closing marks depend on the opener. Adding a language normally means changing only the tables:
@@ -175,7 +179,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/term.rs` | Sets and restores terminal modes and waits for events. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
-| `src/usage.rs` | Collects the latest limits and today's Claude Code activity. |
+| `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity. |
 | `src/usage/draw.rs` | Lays out usage figures, reset times, and hints. |
 | `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
@@ -189,12 +193,15 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
+| `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
+| `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
+| `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
 | `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |

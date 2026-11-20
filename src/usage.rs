@@ -1,8 +1,9 @@
-//! Shows the last reported usage limits and today's local Claude Code activity.
+//! Shows the last reported usage limits and today's local Claude Code and OpenCode activity.
 
 mod draw;
 mod files;
 mod omp;
+mod opencode;
 mod sqlite;
 mod status;
 mod time;
@@ -638,6 +639,36 @@ impl Today {
     }
 }
 
+/// What OpenCode recorded locally, read off the pane loop like OMP's reports.
+struct OpenCode {
+    poll: sqlite::Poll<opencode::Report>,
+    report: opencode::Report,
+}
+
+impl OpenCode {
+    fn new(path: Option<PathBuf>, wait: Duration) -> Self {
+        Self { poll: opencode::poll(path, wait), report: opencode::Report::default() }
+    }
+
+    /// A background result only needs a new frame when it changes the report.
+    fn collect(&mut self) -> bool {
+        let Some(Some(report)) = self.poll.collect() else { return false };
+        let changed = self.report != report;
+        self.report = report;
+        changed
+    }
+
+    /// Totals stand only for the local day they were read for, and only when something was used.
+    fn today(&self, today: i64) -> Option<&opencode::Activity> {
+        match &self.report {
+            opencode::Report::Today(activity) if activity.since == today && activity.tokens.fresh() > 0 => {
+                Some(activity)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Uses the installed providers' directories; tests supply their own directories and time.
 pub struct Usage {
     codex_dir: Option<PathBuf>,
@@ -645,6 +676,7 @@ pub struct Usage {
     limits_file: Option<PathBuf>,
     claude_config: Option<PathBuf>,
     omp: sqlite::Poll<omp::Reports>,
+    opencode: OpenCode,
     codex: Codex,
     claude: Claude,
     today: Today,
@@ -664,6 +696,7 @@ impl Usage {
         let mut usage = Self::for_home(home.as_deref(), when::now()).with_large_figures(prefs.usage_large_figures);
         usage.preference_note = note;
         usage.omp = omp::poll(omp::database(home.as_deref()), sqlite::QUERY_WAIT);
+        usage.opencode = OpenCode::new(opencode::database(home.as_deref()), sqlite::QUERY_WAIT);
         usage
     }
 
@@ -688,6 +721,7 @@ impl Usage {
             limits_file: state.map(|dir| dir.join(SAVED_LIMITS)),
             claude_config: None,
             omp: omp::poll(None, sqlite::QUERY_WAIT),
+            opencode: OpenCode::new(None, sqlite::QUERY_WAIT),
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
@@ -711,10 +745,13 @@ impl Usage {
     /// Give each provider its own I/O allowance so one busy log cannot starve the other.
     fn refresh(&mut self, now: i64, clock: Instant, manual: bool) -> bool {
         self.collect_omp();
+        self.opencode.collect();
         if manual {
             self.omp.reload(now, clock);
+            self.opencode.poll.reload(now, clock);
         } else {
             self.omp.start(now, clock);
+            self.opencode.poll.start(now, clock);
         }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
@@ -782,6 +819,15 @@ pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
     ]
 }
 
+/// The same bounded, read-only probe for OpenCode, in words for doctor.
+pub fn opencode_source() -> Vec<String> {
+    let now = when::now();
+    let path = opencode::database(paths::home().as_deref());
+    let report =
+        path.as_deref().map_or(opencode::Report::Missing, |path| opencode::read(path, now, sqlite::QUERY_WAIT));
+    report.describe(path.as_deref(), now)
+}
+
 impl Pane for Usage {
     fn notice(&self) -> Option<&'static str> {
         self.preference_note
@@ -805,12 +851,15 @@ impl Pane for Usage {
         self.claude.files.changed();
     }
 
+    /// One job is watched at a time. A finished job's descriptor stays
+    /// readable, so the other is picked up as soon as the first is collected.
     fn external_fd(&self) -> Option<RawFd> {
-        self.omp.fd()
+        self.omp.fd().or_else(|| self.opencode.poll.fd())
     }
 
     fn check_external(&mut self) -> External {
-        if self.collect_omp() { External::Redraw } else { External::Unchanged }
+        let omp = self.collect_omp();
+        if self.opencode.collect() || omp { External::Redraw } else { External::Unchanged }
     }
 
     fn draw(&mut self, screen: &mut Screen) {
@@ -886,6 +935,13 @@ fn help_rows() -> Vec<help::HelpRow> {
         note("activity, not a limit."),
         note("Setup can add a status"),
         note("line to collect limits."),
+        HelpRow::new(),
+        heading("OpenCode"),
+        note("Tokens today come from"),
+        note("its local database."),
+        note("Cost is its estimate."),
+        note("It saves no limits."),
+        HelpRow::new(),
         key("r", "reload"),
         key("q", "quit"),
     ]

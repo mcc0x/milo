@@ -3,12 +3,14 @@
 mod activity;
 mod codex;
 mod layout;
+mod opencode_activity;
 mod status_line;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, symlink};
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
@@ -383,6 +385,21 @@ fn malformed_enormous_and_deeply_nested_lines_are_skipped() {
     assert!(rows[1].contains("77%") && rows[3].contains("1.2k tokens today"));
 }
 
+/// Fixture databases are made with the same sqlite3 the readers run.
+fn sqlite_installed() -> bool {
+    let installed = Command::new(sqlite::executable()).arg("-version").output().is_ok();
+    if !installed {
+        eprintln!("skipping database fixture: sqlite3 is not installed");
+    }
+    installed
+}
+
+fn exec(path: &Path, sql: &str) {
+    let result =
+        Command::new(sqlite::executable()).args(["-batch", "-init", "/dev/null"]).arg(path).arg(sql).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+}
+
 mod omp_limits {
     use std::process::{Command, Stdio};
 
@@ -396,23 +413,12 @@ mod omp_limits {
     ";
 
     fn sqlite(f: &Fixture) -> Option<PathBuf> {
-        if Command::new(sqlite::executable()).arg("-version").output().is_err() {
-            eprintln!("skipping OMP fixture: sqlite3 is not installed");
+        if !sqlite_installed() {
             return None;
         }
         let path = f.root.join("agent.db");
         exec(&path, SCHEMA);
         Some(path)
-    }
-
-    fn exec(path: &Path, sql: &str) {
-        let result = Command::new(sqlite::executable())
-            .args(["-batch", "-init", "/dev/null"])
-            .arg(path)
-            .arg(sql)
-            .output()
-            .unwrap();
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
     fn report(path: &Path, key: &str, provider: &str, ms: i64, limits: &str) {
@@ -800,6 +806,26 @@ mod omp_limits {
         assert!(read(start).claude.is_some());
         fs::remove_file(path).unwrap();
         assert!(read(start + Duration::from_secs(20)).claude.is_none());
+    }
+
+    #[test]
+    fn omp_and_opencode_reads_started_together_both_reach_the_pane() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = local_noon();
+        let week = window("anthropic:7d", "0.27", (now + DAY) * 1000, 10_080, "null");
+        report(&path, "claude", "anthropic", now * 1000, &format!("[{week}]"));
+        let db = opencode_activity::busy_day(&f, opencode_activity::RELEASES[3], now);
+        let mut usage = unopened(&f, now);
+        usage.omp = omp::poll(Some(path), TEST_WAIT);
+        usage.opencode = OpenCode::new(Some(db.path.clone()), TEST_WAIT);
+
+        usage.check();
+        assert!(usage.omp.fd().is_some() && usage.opencode.poll.fd().is_some());
+        opencode_activity::settle(&mut usage);
+        let rows = frame(&mut usage, 100, 9);
+        let claude = rows.iter().any(|row| row.contains("left · resets in 1 d"));
+        assert!(claude && rows[7].contains("OpenCode · 1.5k"), "{rows:?}");
     }
 }
 

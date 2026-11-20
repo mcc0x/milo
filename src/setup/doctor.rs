@@ -125,7 +125,18 @@ fn store() -> Result<Store, String> {
 }
 
 pub(crate) fn report() -> Result<String, String> {
-    report_for(&store()?, None)
+    full_report(&store()?, None)
+}
+
+/// The report someone reads: the installation's health, then what OpenCode
+/// saved. That probe opens a database, so health checks alone do not run it.
+pub(super) fn full_report(store: &Store, root: Option<&Path>) -> Result<String, String> {
+    let mut report = report_for(store, root)?;
+    for line in usage::opencode_source() {
+        report.push('\n');
+        report.push_str(&line);
+    }
+    Ok(report)
 }
 
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {

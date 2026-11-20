@@ -1,4 +1,5 @@
 //! Gives both tools the same frame, with less detail when the pane is small.
+//! Activity a harness recorded gets a row of its own beneath them.
 
 mod digits;
 mod figure;
@@ -14,11 +15,12 @@ use crate::when::{self, Detail};
 use crate::width::str_width;
 
 use self::figure::Figure;
-use super::{Activity, CodexSessions, Limits, Source, Usage, Window};
+use super::{Activity, CodexSessions, Limits, Source, Usage, Window, opencode};
 
 const SIDE_BY_SIDE: usize = 64;
 const LARGE_ROWS: usize = 3;
 const TILE: &str = "██";
+const OPENCODE: &str = "OpenCode";
 
 #[derive(Clone, Copy)]
 enum Tool {
@@ -784,6 +786,17 @@ fn tokens(tokens: u64) -> String {
     if fraction == 0 || whole >= 100 { format!("{whole}{suffix}") } else { format!("{whole}.{fraction}{suffix}") }
 }
 
+/// What OpenCode recorded today after its name, in the longest wording that fits.
+fn opencode_text(activity: &opencode::Activity, width: usize) -> Option<String> {
+    let used = tokens(activity.tokens.fresh());
+    let cost = activity.cost.and_then(opencode::Cost::text);
+    let priced = cost.map(|cost| format!(" · {used} tokens today · {cost} est."));
+    [priced, Some(format!(" · {used} tokens today")), Some(format!(" {used} tokens"))]
+        .into_iter()
+        .flatten()
+        .find(|text| OPENCODE.len() + str_width(text) <= width)
+}
+
 fn side_by_side(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
     let (left, right) = area.split(1);
     for row in area.y..area.y + area.h {
@@ -860,7 +873,17 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     // Leave the captions and activity their rows in a taller compact pane.
     let text = h == 2 || w < SIDE_BY_SIDE && (!usage.large_figures || w < 19 || h < 9);
     let footer = w >= 8 && h >= if split { 7 } else { 14 };
-    let area = Area { x: 0, y: 0, w, h: h - usize::from(footer) };
+    // Harness activity is not a provider's limit, so it sits apart from both
+    // panels, above the key hints and in line with them. It waits for a pane
+    // two rows taller than the hints need, so that a panel with three windows
+    // still has a row for today's tokens.
+    let line = Area { x: 1, y: h.saturating_sub(2), w: w.saturating_sub(2), h: 1 };
+    let harness = usage
+        .opencode
+        .today(today)
+        .filter(|_| w >= 8 && h >= if split { 9 } else { 16 })
+        .and_then(|activity| opencode_text(activity, line.w));
+    let area = Area { x: 0, y: 0, w, h: h - usize::from(footer) - usize::from(harness.is_some()) };
     let activity = || usage.claude.activity(today, now);
     if text {
         let pad = usize::from(area.w >= 24);
@@ -869,6 +892,11 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         side_by_side(screen, area, &reports, activity);
     } else {
         stacked(screen, area, &reports, activity);
+    }
+    if let Some(text) = harness {
+        let mut row = RowWriter { screen, x: line.x, y: line.y, left: line.w };
+        row.add(OPENCODE, Style::PLAIN.bold());
+        row.add(&text, FAINT);
     }
     if footer {
         help::draw_hint(screen, "r reload", &["q quit"], "? help");
