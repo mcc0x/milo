@@ -615,3 +615,21 @@ choose("tab_titles = true\n")
 front("there", shell_in("/my project"))
 assert(there.label == "project" and titling.asks == asks + 3)
 assert(os.remove(choice))
+
+-- A new tab is arranged and titled by the same events, each from what it
+-- knows of the tab's shell. While the terminal is still a copy of the Rex
+-- server the tab gets neither a rail nor a title. Its shell then brings the
+-- title, and a copy of that shell in front when the tab is measured does not
+-- cost the tab its rail or change its title.
+local fresh = titled_tab(11, nil, "fresh")
+titling.grounds, titling.relabels, splits, remembered = nil, {}, {}, nil
+windows, processes, sizes = { fresh }, { fresh = starting }, { fresh = { rows = 24 } }
+changed()
+created(fresh.window_id)
+assert(#splits == 0 and fresh.label == "Window 0000000b")
+front("fresh", at_prompt)
+assert(#splits == 0 and fresh.label == "project")
+processes.fresh, sizes.fresh = { child = login, foreground = copy }, measured
+emit("terminal.size_changed", "fresh")
+assert(#splits == 1 and splits[1].anchor_id == "fresh")
+assert(fresh.label == "project" and #titling.relabels == 1 and titling.claims[fresh.window_id] == "project")
