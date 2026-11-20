@@ -64,6 +64,31 @@
 .caption[data-tone='omp'] strong, .caption[data-tone='history'] strong { color: #594276; }
 .caption[data-tone='usage'] strong, .caption[data-tone='reader'] strong { color: #20584e; }
 
+.demo-panes:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+  margin-block-end: .45rem;
+}
+.demo-panes button {
+  flex: 1 0 auto;
+  min-block-size: 44px;
+  padding-inline: .35rem;
+  border: 1px solid #ffffffa8;
+  border-radius: .45rem;
+  background: #ffffff63;
+  color: var(--ink);
+  font: 650 .8125rem/1.2 Bricolage, system-ui, sans-serif;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.demo-panes button:hover { background: #ffffffa8; }
+.demo-panes button[aria-pressed='true'] {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: white;
+}
+
 /* Geometry and chrome follow the tidebook window in docs/img/tab.png. */
 .terminal {
   pointer-events: none;
@@ -303,8 +328,8 @@
 .reader-content .term-hint { margin-top: .5em; }
 
 #demo[data-paused] * { animation-play-state: paused; }
-.terminal[data-still] :is(.term-lit, .reader) { animation: none; }
-.terminal[data-still] .term-pane { transition: none; }
+.terminal[data-still] :is(.term-lit, .reader, .rex-tab-new) { animation: none; }
+.terminal[data-still] :is(.term-pane, .shell-prompt) { transition: none; }
 
 @media (min-width: 45.001rem) and (max-width: 62rem) {
   .term-hint { font-size: .84em; }

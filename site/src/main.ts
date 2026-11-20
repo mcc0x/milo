@@ -6,7 +6,15 @@ const reader = element('reader-pane');
 const caption = element('caption');
 const composer = element('composer-text');
 const playback = document.querySelector<HTMLButtonElement>('#demo-playback')!;
+const stillCaption = element('demo-still-caption');
+const panePicker = element('demo-panes');
+const paneOptions = panePicker.querySelectorAll('button');
+const demoLabel = demo.getAttribute('aria-label')!;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const phone = matchMedia('(max-width: 45rem)');
+// Use representative scenes, not every beat of the animated timeline.
+const paneSnapshots = ['test', 'edit', 'read', 'commit', 'usage'].map(phase => scene.find(step => step.phase === phase)!);
+let paneSnapshot = paneSnapshots[0];
 // How long the shell fades before the scene starts again; matches the CSS transition.
 const fade = 320;
 let activeHarness = 0;
@@ -23,15 +31,16 @@ function show({ phase, focus, say }: typeof scene[number]) {
   demo.dataset.view = focus ?? 'whole';
   reader.hidden = focus !== 'reader';
   renderFrame(frameAt(phase, harness.id));
+  const label = panePicker.hidden ? caption : stillCaption;
   const words = say.replace('{agent}', harness.name);
-  if (caption.dataset.says !== words) {
-    caption.dataset.says = words;
+  if (label.dataset.says !== words) {
+    label.dataset.says = words;
     const [before, emphasis, after] = words.split('**');
     const strong = document.createElement('strong');
     strong.textContent = emphasis;
-    caption.dataset.tone = focus === 'agent' ? harness.id : focus ?? 'whole';
-    caption.replaceChildren(before, strong, after);
-    if (!reduceMotion.matches) {
+    label.dataset.tone = focus === 'agent' ? harness.id : focus ?? 'whole';
+    label.replaceChildren(before, strong, after);
+    if (!('still' in demo.dataset)) {
       caption.animate([{ opacity: 0, translate: '0 .35em' }, { opacity: 1, translate: '0 0' }], { duration: 340, easing: 'ease-out' });
     }
   }
@@ -63,13 +72,22 @@ function beginLoop() {
   show(scene[0]);
 }
 
+function showPaneSnapshot() {
+  for (const option of paneOptions) {
+    option.setAttribute('aria-pressed', String(option.value === paneSnapshot.focus));
+  }
+  demo.setAttribute('aria-label', `A Rex window showing the ${paneSnapshot.focus} pane`);
+  show(paneSnapshot);
+}
+
 function showStill() {
   demo.dataset.still = '';
   demo.classList.remove('scene-out');
   for (const animation of caption.getAnimations()) animation.cancel();
   suspendedAnimations.length = 0;
   renderHarness(harnesses[activeHarness]);
-  show(still);
+  if (panePicker.hidden) show(still);
+  else showPaneSnapshot();
 }
 
 function scheduleCue() {
@@ -93,7 +111,6 @@ function syncPlayback() {
       startedAt = undefined;
       clearTimeout(timer);
     }
-    if (reduceMotion.matches && !('still' in demo.dataset)) showStill();
     if ('paused' in demo.dataset) return;
     demo.dataset.paused = '';
     // CSS holds the keyframes (including any created by a responsive layout
@@ -124,16 +141,34 @@ playback.addEventListener('click', () => {
   userPaused = !userPaused;
   syncPlayback();
 });
-reduceMotion.addEventListener('change', syncPlayback);
+for (const option of paneOptions) {
+  option.addEventListener('click', () => {
+    if (option.value === paneSnapshot.focus) return;
+    paneSnapshot = paneSnapshots.find(step => step.focus === option.value)!;
+    showPaneSnapshot();
+  });
+}
+
+function syncMotionPreference() {
+  const wasManual = !panePicker.hidden;
+  const manual = reduceMotion.matches && phone.matches;
+  panePicker.hidden = stillCaption.hidden = !manual;
+  playback.hidden = manual;
+  if (manual) demo.setAttribute('aria-describedby', stillCaption.id);
+  else if (wasManual) {
+    demo.removeAttribute('aria-describedby');
+    demo.setAttribute('aria-label', demoLabel);
+  }
+  if (reduceMotion.matches || (wasManual && (userPaused || document.hidden))) showStill();
+  syncPlayback();
+}
+
+reduceMotion.addEventListener('change', syncMotionPreference);
+phone.addEventListener('change', syncMotionPreference);
 document.addEventListener('visibilitychange', syncPlayback);
 
-if (reduceMotion.matches) {
-  // A visitor who asks for less motion sees the complete demo without a loop.
-  showStill();
-} else {
-  beginLoop();
-}
-syncPlayback();
+if (!reduceMotion.matches) beginLoop();
+syncMotionPreference();
 
 const button = document.querySelector<HTMLButtonElement>('#copy-command')!;
 const command = document.querySelector<HTMLElement>('#install-command')!;

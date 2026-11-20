@@ -53,7 +53,13 @@
           <p id="copy-feedback" class="visually-hidden" role="status"></p>
         </div>
 
-        <!-- A demo that plays by itself; its label says what it shows. -->
+        <div class="demo-panes" id="demo-panes" role="group" aria-label="Demo panes" hidden>
+          <button type="button" value="agent" aria-controls="demo" aria-pressed="true">Agent</button>
+          <button type="button" value="outline" aria-controls="demo" aria-pressed="false">Outline</button>
+          <button type="button" value="reader" aria-controls="demo" aria-pressed="false">Reader</button>
+          <button type="button" value="history" aria-controls="demo" aria-pressed="false">History</button>
+          <button type="button" value="usage" aria-controls="demo" aria-pressed="false">Usage</button>
+        </div>
         <div class="terminal" id="demo" data-view="whole" data-still role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work">
           <div class="rex-titlebar">
             <span class="window-lights"><i></i><i></i><i></i></span>
@@ -97,6 +103,7 @@
         </div>
         <div class="demo-footer">
           <button class="caption-toggle" id="demo-playback" type="button" aria-controls="demo" aria-label="Pause demo" aria-pressed="false" title="Pause demo"><span class="caption" id="caption" aria-hidden="true"></span></button>
+          <p class="caption" id="demo-still-caption" role="status" hidden></p>
         </div>
         <div class="hero-index">
           <div><h2 id="pane-list">Panes</h2>
