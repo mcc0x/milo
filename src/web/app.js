@@ -856,7 +856,7 @@ for (const tab of navButtons) {
     if (menu) menu.open = false;
     page = tab.dataset.page;
     render();
-    byId('settings-panel').parentElement.scrollTop = 0;
+    byId('settings-panel').scrollTop = 0;
     byId('settings-panel').focus({preventScroll: true});
   });
 }
