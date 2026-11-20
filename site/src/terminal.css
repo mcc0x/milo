@@ -119,10 +119,28 @@
   color: var(--term-text);
   font-weight: 600;
 }
+.terminal[data-shell] .rex-tab:not(.rex-tab-new) {
+  margin-inline-end: 0;
+  border-bottom-color: var(--term-line);
+  background: transparent;
+  color: var(--term-muted);
+}
+.rex-tab-new {
+  margin-inline-start: -1.3rem;
+  animation: tab-in .24s ease-out both;
+}
+@keyframes tab-in { from { opacity: 0; translate: -.3rem 0; } }
 .window-lights { display: flex; gap: .5rem; }
 .window-lights i { width: .75rem; height: .75rem; border-radius: 50%; background: #ff5f57; }
 .window-lights i:nth-child(2) { background: #febc2e; }
 .window-lights i:nth-child(3) { background: #28c840; }
+
+/* Both tabs and the phone layout use the same remembered divider position. */
+@property --usage-extra {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
 
 .terminal-panes {
   --usage-height: 2rem;
@@ -130,8 +148,12 @@
   display: grid;
   isolation: isolate;
   grid-template-columns: max(38%, calc(41ch + 2 * var(--pane-x))) minmax(0, 1fr);
-  grid-template-rows: var(--usage-height) auto calc(var(--line) * 13 + 2 * var(--pane-y));
+  grid-template-rows: calc(var(--usage-height) + var(--usage-extra, 0px)) auto calc(var(--line) * 13 + 2 * var(--pane-y));
   grid-template-areas: 'outline usage' 'outline agent' 'history agent';
+}
+.terminal[data-expanded] .terminal-panes { --usage-extra: 3rem; }
+.terminal:not([data-still]) .terminal-panes {
+  transition: --usage-extra .62s cubic-bezier(.25, .7, .25, 1);
 }
 
 .term-pane {
@@ -142,8 +164,39 @@
 }
 .outline { grid-area: outline; border-inline-end: 1px solid var(--term-line); }
 .history { grid-area: history; border-inline-end: 1px solid var(--term-line); border-top: 1px solid var(--term-line); }
-.usage { grid-area: usage; }
+.usage { grid-area: usage; position: relative; overflow: hidden; }
 .agent { grid-area: agent; border-top: 1px solid var(--term-line); overflow: hidden; }
+.usage-reset { display: none; }
+.terminal[data-expanded] .usage-strip { height: auto; align-items: start; padding-block: .5rem; }
+.terminal[data-expanded] .usage-strip > span {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: .35rem .45rem;
+}
+.terminal[data-expanded] .usage-reset { display: block; grid-column: 1 / -1; }
+.terminal[data-resized][data-view='usage'] .usage::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  width: 2rem;
+  height: 3px;
+  margin: auto;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.shell-pane {
+  display: none;
+  grid-area: agent;
+  contain: size;
+  border-top: 1px solid var(--term-line);
+  background: var(--term-bg);
+  padding: .9rem var(--pane-x);
+}
+.terminal[data-shell] .agent { display: none; }
+.terminal[data-shell] .shell-pane { display: flex; }
+.shell-prompt { transition: opacity .32s ease; }
+.scene-out .shell-prompt { opacity: 0; }
 .pane-head {
   display: flex;
   flex: none;
@@ -266,6 +319,7 @@
   .demo-footer:has(.demo-playback:not([hidden])) .caption { text-align: start; }
   .demo-footer .demo-playback { grid-column: 2; }
   .terminal { --pane-x: .65rem; --line: 1.45em; display: block; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
+  .terminal[data-shell] .rex-tab { padding-inline: .85rem; }
   .terminal-panes {
     --phone-pane-height: max(22rem, calc(var(--head) + var(--line) * 18 + var(--pane-y)));
     display: flex;
@@ -273,10 +327,20 @@
     min-height: var(--phone-pane-height);
   }
   .term-pane { display: none; min-height: inherit; border: 0; }
-  .terminal .usage { display: flex; order: -1; min-height: 0; border-bottom: 1px solid var(--term-line); }
+  .terminal .usage {
+    display: flex;
+    order: -1;
+    block-size: calc(var(--usage-height) + var(--usage-extra, 0px) + 1px);
+    min-height: 0;
+    border-bottom: 1px solid var(--term-line);
+  }
   .terminal[data-view='reader'] .outline, .terminal[data-view='outline'] .outline,
   .terminal[data-view='history'] .history, .terminal[data-view='usage'] .agent,
-  .terminal[data-view='whole'] .agent, .terminal[data-view='agent'] .agent { display: flex; }
+  .terminal[data-view='whole']:not([data-shell]) .agent, .terminal[data-view='agent'] .agent { display: flex; }
+  .terminal:is([data-expanded], [data-resized]) :is(.agent, .shell-pane) {
+    block-size: calc(var(--phone-pane-height) - var(--usage-extra, 0px));
+    min-height: 0;
+  }
   .term-project { gap: 1.2ch; }
   .term-hint { font-size: .9em; }
   .history { --line: 1.58rem; }

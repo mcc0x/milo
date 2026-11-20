@@ -1,4 +1,4 @@
-import { frameAt, harnesses, loopLength, request, scene, typing } from './scene';
+import { frameAt, harnesses, loopLength, request, scene, still, typing } from './scene';
 import { element, renderFrame, renderHarness } from './terminal';
 
 const demo = element('demo');
@@ -7,7 +7,7 @@ const caption = element('caption');
 const composer = element('composer-text');
 const playback = document.querySelector<HTMLButtonElement>('#demo-playback')!;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
-// How long the agent's side fades before the scene starts again; matches the CSS transition.
+// How long the shell fades before the scene starts again; matches the CSS transition.
 const fade = 320;
 let activeHarness = 0;
 let userPaused = false;
@@ -63,6 +63,15 @@ function beginLoop() {
   show(scene[0]);
 }
 
+function showStill() {
+  demo.dataset.still = '';
+  demo.classList.remove('scene-out');
+  for (const animation of caption.getAnimations()) animation.cancel();
+  suspendedAnimations.length = 0;
+  renderHarness(harnesses[activeHarness]);
+  show(still);
+}
+
 function scheduleCue() {
   if (startedAt === undefined) return;
   const cue = cues[nextCue];
@@ -84,6 +93,7 @@ function syncPlayback() {
       startedAt = undefined;
       clearTimeout(timer);
     }
+    if (reduceMotion.matches && !('still' in demo.dataset)) showStill();
     if ('paused' in demo.dataset) return;
     demo.dataset.paused = '';
     // CSS holds the keyframes (including any created by a responsive layout
@@ -119,8 +129,7 @@ document.addEventListener('visibilitychange', syncPlayback);
 
 if (reduceMotion.matches) {
   // A visitor who asks for less motion sees the complete demo without a loop.
-  renderHarness(harnesses[activeHarness]);
-  show(scene[scene.length - 1]);
+  showStill();
 } else {
   beginLoop();
 }

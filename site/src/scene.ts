@@ -23,6 +23,8 @@ export const harnesses = [
 // file; the agent commits, then the history gains the commit. `focus` is the
 // pane the window draws the eye to. Each caption emphasizes one phrase;
 // {agent} stands for the harness in this pass.
+export const still = { at: 16200, phase: 'rest', focus: null, say: 'All of it stays in view, **beside your work**.' } as const;
+
 export const scene = [
   { at: 0, phase: 'compose', focus: 'agent', say: 'You ask **{agent}**, as usual.' },
   { at: 2000, phase: 'prompt', focus: 'agent', say: 'You ask **{agent}**, as usual.' },
@@ -33,14 +35,16 @@ export const scene = [
   { at: 12000, phase: 'test', focus: 'agent', say: '**{agent}** runs the forecast test.' },
   { at: 13500, phase: 'committing', focus: 'agent', say: 'It **commits the change**.' },
   { at: 14300, phase: 'commit', focus: 'history', say: 'History gains **the new commit**.' },
+  still,
   { at: 17300, phase: 'usage', focus: 'usage', say: 'Usage shows **how much is left** for the five-hour window.' },
-  { at: 20300, phase: 'rest', focus: null, say: 'All of it stays in view, **beside your work**.' },
+  { at: 19900, phase: 'resize', focus: 'usage', say: 'Make Usage smaller. **Milo remembers.**' },
+  { at: 22000, phase: 'new-tab', focus: null, say: 'New tab. **Same layout.**' },
 ] as const satisfies readonly { at: number; phase: string; focus: Pane | null; say: `${string}**${string}**${string}` }[];
 
 // When typing starts and how long it takes, inside the compose step.
 export const typing = { start: 400, length: 1300 };
 // The finished state is held, then the scene starts again.
-export const loopLength = 24200;
+export const loopLength = 25200;
 
 export type Phase = typeof scene[number]['phase'];
 export type Frame = {
@@ -108,8 +112,7 @@ const order = scene.map(step => step.phase);
 // These are the latest local reports for each provider, not totals for the edit.
 const usageReports = { codex: 17, claude: 31 };
 
-function usageAt(phase: Phase, harness: typeof harnesses[number]['id']): Frame['usage'] {
-  if (phase !== 'usage' && phase !== 'rest') return usageReports;
+function usageAfter(harness: typeof harnesses[number]['id']): Frame['usage'] {
   // omp is running a Codex model in this scene, so its report goes under Codex.
   const provider = harness === 'claude' ? 'claude' : 'codex';
   return { ...usageReports, [provider]: usageReports[provider] - 2 };
@@ -127,6 +130,6 @@ export function frameAt(phase: Phase, harness: typeof harnesses[number]['id']): 
     toCommit: files.filter(file => file.pending === 'commit').length,
     toPush: files.filter(file => file.pending === 'push').length,
     ahead: committed ? [newCommit, ...ahead] : ahead,
-    usage: usageAt(phase, harness),
+    usage: reached('usage') ? usageAfter(harness) : usageReports,
   };
 }

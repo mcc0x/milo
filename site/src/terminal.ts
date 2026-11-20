@@ -3,6 +3,7 @@ import './agent.css';
 import './usage.css';
 
 export const element = (id: string) => document.getElementById(id)!;
+const demo = element('demo');
 const outline = element('outline-pane');
 const history = element('history-pane');
 const reader = element('reader-content');
@@ -30,6 +31,23 @@ function row(className: string, ...contents: (string | Node)[]) {
   div.className = `term-line ${className}`;
   div.append(...contents);
   return div;
+}
+
+const originalTab = demo.querySelector('.rex-tab')!;
+const shellTab = span('zsh', 'rex-tab rex-tab-new');
+shellTab.hidden = true;
+originalTab.after(shellTab);
+
+const shellPane = document.createElement('div');
+shellPane.className = 'term-pane shell-pane';
+shellPane.append(row('shell-prompt', 'tidebook ', span('main', 'term-blue'), ' › ', span('', 'composer-caret')));
+agentPane.after(shellPane);
+
+for (const [provider, countdown] of [['codex', '38m'], ['claude', '1h 24m']]) {
+  const detail = document.createElement('small');
+  detail.className = 'usage-reset term-muted';
+  detail.textContent = `Resets in ${countdown}`;
+  element(`${provider}-usage`).after(detail);
 }
 
 const symbols = {
@@ -160,6 +178,7 @@ function renderReader(edited: boolean) {
 
 const order = scene.map(step => step.phase);
 const finish = order.indexOf('commit');
+const resize = order.indexOf('resize');
 
 function agentLine(kind: string, glyph: string, ...contents: (string | Node)[]) {
   const body = span('');
@@ -249,6 +268,11 @@ export function renderFrame(frame: Frame) {
   renderHistory(frame);
   renderUsage(frame);
   const stage = order.indexOf(frame.phase);
+  const newTab = frame.phase === 'new-tab';
+  demo.toggleAttribute('data-expanded', frame.phase === 'usage');
+  demo.toggleAttribute('data-resized', stage >= resize);
+  demo.toggleAttribute('data-shell', newTab);
+  shellTab.hidden = !newTab;
   renderReader(stage >= order.indexOf('edit'));
   for (const { at, node } of agentSteps) {
     const hidden = stage < at;

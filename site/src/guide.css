@@ -1,0 +1,14 @@
+.hero .demo-footer { margin-bottom: 0; }
+.hero-index { display: grid; grid-template-columns: auto auto; justify-content: space-between; gap: clamp(2rem, 6vw, 5rem); margin-top: 1rem; }
+.hero-index > :last-child h2 { text-align: right; }
+.hero-index h2 { margin: 0 0 .35rem; font-size: .8rem; font-weight: 550; color: var(--secondary); }
+.hero-index ul { display: grid; grid-template-columns: repeat(2, max-content); gap: .35rem 1.15rem; padding: 0; margin: 0; list-style: none; }
+.hero-index li { display: flex; align-items: center; gap: .35rem; font-size: .9rem; font-weight: 620; }
+.hero-index :is(svg,img) { width: 1.15rem; height: 1.15rem; object-fit: contain; }
+.hero-index svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.omp-icon { background: #262b38; border-radius: .3rem; padding: 2px; }
+.site-footer { align-items: center; flex-wrap: wrap; gap: 0 1rem; padding: .25rem .75rem 1rem; }
+@media (max-width: 32rem) {
+  .hero-index { gap: 1.25rem; }
+  .hero-index ul { grid-template-columns: 1fr; }
+}
