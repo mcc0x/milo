@@ -449,9 +449,17 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(modes(&keyboard), before);
-        let mut output = [0; 512];
-        let n = master.read(&mut output).unwrap();
-        assert!(output[..n].starts_with(ENTER) && output[..n].ends_with(LEAVE));
+        // The PTY may deliver the enter and leave sequences in separate reads.
+        let mut output = [0; ENTER.len() + LEAVE.len()];
+        let mut at = 0;
+        while at < output.len() {
+            let mut ready = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            assert!(wait_ready(&mut ready, 1000) > 0, "missing terminal output after {at} bytes");
+            let n = master.read(&mut output[at..]).unwrap();
+            assert_ne!(n, 0);
+            at += n;
+        }
+        assert!(output.starts_with(ENTER) && output.ends_with(LEAVE));
     }
 
     #[test]
