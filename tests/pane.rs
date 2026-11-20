@@ -494,8 +494,11 @@ fn the_reader_renders_invisible_git_edits_in_working_files_and_commits() {
     fs::write(&path, "\tindent\nsame a\nline ending\r\nsame b\ncafe!\nsame c\nhidden!\nsame d\ncode=1\n").unwrap();
     project.git(&["add", "."]);
     project.git(&["commit", "-qm", "before"]);
-    fs::write(&path, "    indent\nsame a\nline ending\nsame b\ncafe\u{301}!\nsame c\nhidden\u{200b}!\nsame d\ncode=2\n")
-        .unwrap();
+    fs::write(
+        &path,
+        "    indent\nsame a\nline ending\nsame b\ncafe\u{301}!\nsame c\nhidden\u{200b}!\nsame d\ncode=2\n",
+    )
+    .unwrap();
 
     let check = |args: &[&str]| {
         let mut command = project.command(env!("CARGO_BIN_EXE_milo"));

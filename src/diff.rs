@@ -381,7 +381,10 @@ mod tests {
     #[test]
     fn line_endings_are_explained_only_when_they_change() {
         let lines = parse(b"@@ -1,2 +1,2 @@\n context\r\n-copy\r\n+copy\n").lines;
-        assert_eq!(shape(&lines), [(LineKind::Same, 1, "context"), (LineKind::Del, 2, "copy"), (LineKind::Add, 2, "copy")]);
+        assert_eq!(
+            shape(&lines),
+            [(LineKind::Same, 1, "context"), (LineKind::Del, 2, "copy"), (LineKind::Add, 2, "copy")]
+        );
         assert!(lines[0].annotation.is_empty());
         assert_eq!(lines[1].annotation, " [CRLF]");
         assert_eq!(lines[2].annotation, " [LF]");
