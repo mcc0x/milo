@@ -28,7 +28,7 @@ pub fn menu_stream() -> io::Result<()> {
         if request.is_some() && let Some(tools) = global_tools(config) {
             usage.apply_menu_tools(home, tools);
         }
-        usage.refresh(usage.now(), Instant::now(), request.unwrap_or(false));
+        let settled = usage.refresh(usage.now(), Instant::now(), request.unwrap_or(false));
         // The pane repaints when its SQLite jobs finish. Here a complete refresh
         // is one line, so collect both bounded reads before publishing it.
         while let Some(fd) = usage.external_fd() {
@@ -37,7 +37,10 @@ pub fn menu_stream() -> io::Result<()> {
         }
         // Publish reset and freshness changes on the same boundary as the pane,
         // even if the usual poll is later.
-        let wait = INTERVAL.min(usage.next_frame().unwrap_or(INTERVAL));
+        // A busy transcript can span several bounded reads. Don't wait a full
+        // idle interval between batches, or a partial daily total lingers.
+        let interval = if settled { INTERVAL } else { Duration::from_secs(1) };
+        let wait = interval.min(usage.next_frame().unwrap_or(interval));
         usage.menu_snapshot(line);
         Ok(wait)
     })
