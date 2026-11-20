@@ -468,6 +468,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo usage` | Shows available local usage limits and, when there is room, Claude Code activity. |
 | `milo view FILE [--commit ID]` | Opens the read-only reader. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
+| `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
 | `milo listen [--stop]` | Starts or stops layout memory and automatic new-tab arrangement; normally managed by setup. |
 | `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
 
@@ -497,6 +498,8 @@ opens a floating reader.
 
 - Do not edit the user's Rex or Claude Code configuration directly. Use
   `milo setup` and save only with the user's approval.
+- Do not paste the private URL printed by `milo web` into chats, logs or issues:
+  it includes the session key. For local use, let Milo open the browser.
 - Do not run full-screen panes in your own non-interactive shell. They need
   an interactive terminal. If you cannot target the user's terminal, give
   the user the command to run instead.
