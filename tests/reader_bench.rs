@@ -177,6 +177,7 @@ impl Project {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("TERM", "xterm-256color")
+            .env_remove("MILO_ICONS")
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK");
         for name in [
