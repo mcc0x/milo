@@ -144,7 +144,8 @@ impl Figure {
 thread_local! {
     // One ID per displayed window: two equal figures may still be placed at
     // different cells. When a reading changes only that window is replaced.
-    static IMAGES: RefCell<[Option<(Figure, bool, Picture)>; 5]> = const { RefCell::new([const { None }; 5]) };
+    static IMAGES: RefCell<[Option<(Figure, bool, Picture)>; 2 * super::FIGURES_PER_TOOL]> =
+        const { RefCell::new([const { None }; 2 * super::FIGURES_PER_TOOL]) };
 }
 
 #[cfg(test)]

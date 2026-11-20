@@ -147,6 +147,36 @@ fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
 }
 
 #[test]
+fn each_figure_keeps_its_own_picture_in_a_wide_two_provider_frame() {
+    let f = Fixture::folder();
+    let mut usage = open(&f, NOW);
+    let window = |minutes, percent| Window { minutes, percent, resets: Some(NOW + HOUR), observed: NOW };
+    let reading = |five, week, model| Reading {
+        at: Timestamp::seconds(NOW),
+        windows: Limits {
+            base: [Some(window(300, five)), Some(window(10_080, week))],
+            model_week: ModelWeek::new("opus", window(10_080, model)),
+        },
+    };
+    usage.claude.omp = Some(reading(56.0, 67.0, 78.0));
+    let mut screen = Screen::sized(180, 5);
+    screen.set_pictures(true);
+    screen.set_cell_size(9, 18);
+
+    // Codex's third figure used to reuse Claude's first slot. Equal figures
+    // hid one placement; different figures replaced both images every frame.
+    for model in [56.0, 45.0] {
+        usage.codex.omp = Some(reading(12.0, 34.0, model));
+        usage.draw(&mut screen);
+        assert_eq!(screen.picture_placements().filter(|(x, ..)| *x < 89).count(), 4);
+        assert_eq!(screen.picture_placements().filter(|(x, ..)| *x > 89).count(), 4);
+        assert!(!screen.emitted().is_empty());
+        usage.draw(&mut screen);
+        assert!(screen.emitted().is_empty(), "unchanged figures must not retransmit their pictures");
+    }
+}
+
+#[test]
 fn a_narrow_column_has_one_large_figure_and_a_row_of_words_for_each_window() {
     let f = Fixture::folder();
     let mut usage = open(&f, NOW).with_large_figures(true);

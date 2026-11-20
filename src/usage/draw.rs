@@ -22,6 +22,7 @@ use super::{Activity, CodexSessions, Limits, Source, Usage, Window, opencode};
 
 const SIDE_BY_SIDE: usize = 64;
 const LARGE_ROWS: usize = 3;
+const FIGURES_PER_TOOL: usize = 3;
 const TILE: &str = "██";
 const NO_USAGE: [&str; 2] = ["No usage to show yet", "No usage yet"];
 /// A lone panel keeps its windows together rather than spreading them over a wide pane.
@@ -59,6 +60,13 @@ impl Tool {
             Self::Codex => 36,
             Self::Claude => 173,
         })
+    }
+
+    fn first_figure_slot(self) -> usize {
+        match self {
+            Self::Codex => 0,
+            Self::Claude => FIGURES_PER_TOOL,
+        }
     }
 
     /// Share each logo across frames instead of building a fresh image.
@@ -605,10 +613,7 @@ impl<'a> Report<'a> {
                 if exact.len() <= column.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
             column.note(screen, chart.note, &text);
         }
-        let slot = match self.tool {
-            Tool::Codex => 0,
-            Tool::Claude => 2,
-        };
+        let slot = self.tool.first_figure_slot();
         let width = figures.w - (count - 1) * gap;
         for (i, metric) in metrics.enumerate() {
             let start = width * i / count;
@@ -672,11 +677,13 @@ impl<'a> Report<'a> {
         // A mark three rows tall is six columns across; its name in words needs nine.
         let lane = if screen.pictures() == Some(true) { 8 } else { 10 };
         self.mark(screen, Area { w: lane - 1, h: LARGE_ROWS, ..area }, LARGE_ROWS, 1);
-        let slot = match self.tool {
-            Tool::Codex => 0,
-            Tool::Claude => 2,
-        };
-        self.first.figure(screen, Area { x: area.x + lane, w: area.w - lane, ..area }, area.y, true, slot);
+        self.first.figure(
+            screen,
+            Area { x: area.x + lane, w: area.w - lane, ..area },
+            area.y,
+            true,
+            self.tool.first_figure_slot(),
+        );
         let mut row = LARGE_ROWS;
         if row < area.h {
             match &self.hint {
