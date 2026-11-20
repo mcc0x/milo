@@ -308,7 +308,32 @@ function setting(field, title, detail, type, options = {}) {
   const label = node('label', 'setting-label', title);
   const explanation = node('span', 'setting-detail', detail);
   const wrap = node('div', 'setting-input');
-  const control = node(type === 'select' ? 'select' : 'input');
+  if (type === 'select') {
+    const value = lookup(state, field);
+    const choices = node('fieldset', 'choice-strip');
+    choices.disabled = Boolean(options.disabled);
+    choices.append(node('legend', 'sr-only', title));
+    for (const [key, text] of options.choices) {
+      const choice = node('label');
+      const radio = node('input');
+      radio.type = 'radio';
+      radio.name = field;
+      radio.id = `field-${field}-${key}`;
+      radio.checked = key === String(value);
+      radio.addEventListener('change', () => edit(field, typeof value === 'boolean' ? key === 'true' : key));
+      choice.append(radio, node('span', '', text));
+      choices.append(choice);
+    }
+    info.append(node('span', 'setting-label', title));
+    if (detail) {
+      explanation.id = `${field}-detail`;
+      choices.setAttribute('aria-describedby', explanation.id);
+      info.append(explanation);
+    }
+    row.append(info, choices);
+    return row;
+  }
+  const control = node('input');
   const id = `field-${field}`;
   const value = lookup(state, field);
   control.id = label.htmlFor = id;
@@ -320,13 +345,6 @@ function setting(field, title, detail, type, options = {}) {
     control.className = 'switch';
     control.setAttribute('role', 'switch');
     control.checked = value;
-  } else if (type === 'select') {
-    for (const [choice, name] of options.choices) {
-      const option = node('option', '', name);
-      option.value = choice;
-      control.append(option);
-    }
-    control.value = String(value);
   } else {
     control.type = 'number';
     control.min = options.min;
@@ -344,8 +362,7 @@ function setting(field, title, detail, type, options = {}) {
   }
   function apply() {
     if (!control.reportValidity()) return;
-    const next = type === 'switch' ? control.checked : type === 'select' ?
-      (typeof value === 'boolean' ? control.value === 'true' : control.value) : control.valueAsNumber / (options.unit ? 100 : 1);
+    const next = type === 'switch' ? control.checked : control.valueAsNumber / (options.unit ? 100 : 1);
     if (type === 'number') control.dataset.initial = control.value;
     edit(field, next);
   }
@@ -476,26 +493,15 @@ function panePicker(editable) {
 }
 
 function layoutView() {
-  const {layout, groups, capabilities} = state;
+  const {groups, capabilities} = state;
   const disabled = !groups.layout.editable;
-  const presets = node('div', 'presets');
-  for (const [preset, label] of [['tree', 'Just the tree'], ['sidebar', 'Project sidebar']]) {
-    presets.append(button(label, 'secondary', `preset-${preset}`, () => command('preset', {preset}), disabled || paused));
-  }
   const options = {disabled, min: 0.000001, max: 99.999999, step: 'any', unit: '%'};
-  const controls = [panePicker(!disabled), presets,
+  const controls = [panePicker(!disabled),
     setting('layout.side', 'Rail side', '', 'select', {disabled, choices: [['left', 'Left'], ['right', 'Right']]}),
     setting('layout.width', 'Rail width', 'Percentage of the tab.', 'number', options),
-    setting('layout.outline_share', 'Outline share', 'Relative to History. Resets custom heights.', 'number', options),
-    setting('layout.usage_rows', 'Usage rows', 'Resets custom heights.', 'number',
+    setting('layout.usage_rows', 'Usage height', 'Rows. Changing this restores automatic pane heights.', 'number',
       {disabled, min: 1, max: 4294967295, step: 1}),
   ];
-  if (layout.ratios) {
-    const custom = node('div', 'presets');
-    custom.append(node('p', 'setting-detail', 'The preview is using custom pane heights.'),
-      button('Reset heights', 'text-button', 'reset-heights', () => edit('layout.ratios', null), disabled));
-    controls.push(custom);
-  }
   if (capabilities.auto_arrange) {
     controls.push(setting('layout.auto_arrange', 'Arrange new shell tabs', 'This switch is global. New command tabs and tabs with an existing layout are skipped.', 'switch'));
   }
@@ -744,6 +750,9 @@ function renderPreview() {
   }
 
   const secondary = [];
+  if (editable && layout.ratios) {
+    secondary.push(button('Use automatic heights', 'text-button', 'reset-heights', () => edit('layout.ratios', null), paused));
+  }
   if (showLayout && trial && capabilities.undo) {
     secondary.push(button('Undo trial', 'text-button', 'undo-layout', () => command('undo'), paused));
   } else if (showLayout && capabilities.try) {
