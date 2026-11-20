@@ -78,6 +78,8 @@ pub struct History {
     repo: Repo,
     version: Option<HistoryVersion>,
     entries: Vec<Entry>,
+    /// First row of the all-pushed suffix, if there are commits on both sides.
+    remote_boundary: Option<usize>,
     uncommitted: usize,
     open: Option<OpenCommit>,
     rows: Vec<TimelineRow>,
@@ -104,6 +106,7 @@ impl History {
             repo: repo.for_history(),
             version: None,
             entries: Vec::new(),
+            remote_boundary: None,
             uncommitted: 0,
             open: None,
             rows: Vec::new(),
@@ -187,6 +190,7 @@ impl History {
             Some(row @ (TimelineRow::File(_) | TimelineRow::More)) if open.is_some() => row,
             _ => TimelineRow::Commit(0),
         };
+        self.remote_boundary = commits.iter().rposition(|c| c.unpushed).map(|i| i + 1).filter(|&i| i < commits.len());
         let mut before: HashMap<_, _> = self.entries.drain(..).map(|e| (e.commit.hash, (e.fresh, e.files))).collect();
         // Detached checkouts share Git's "(detached)" label, not a branch timeline.
         let branch = self.repo.branch();
@@ -233,7 +237,7 @@ impl History {
             self.rows.push(TimelineRow::Uncommitted);
         }
         for (i, entry) in self.entries.iter().enumerate() {
-            if !self.compact && i > 0 && crosses_remote(&self.entries[i - 1].commit, &entry.commit) {
+            if !self.compact && self.remote_boundary == Some(i) {
                 self.rows.push(TimelineRow::Divider);
             }
             self.rows.push(TimelineRow::Commit(i));
@@ -350,9 +354,4 @@ impl Pane for History {
     fn draw(&mut self, s: &mut Screen) {
         self.draw_contents(s);
     }
-}
-
-/// Adjacent commits on different sides of the comparison branch need a divider.
-fn crosses_remote(before: &Commit, c: &Commit) -> bool {
-    before.unpushed && !c.unpushed
 }

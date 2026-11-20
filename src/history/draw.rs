@@ -7,7 +7,7 @@ use crate::ui::{self, FAINT};
 use crate::when;
 use crate::width::{char_width, str_width};
 
-use super::{Entry, FILE_PREVIEW, History, Painted, TimelineRow, crosses_remote};
+use super::{Entry, FILE_PREVIEW, History, Painted, TimelineRow};
 
 const HEADING_ROWS: usize = 4;
 const DOT_ROWS: usize = 8;
@@ -198,22 +198,21 @@ impl History {
         let right = s.w - 1;
         let cells = self.entries.len() + usize::from(self.uncommitted > 0);
         // If even the dots alone would not fit with spaces, don't count the gaps.
-        let gap_width = |pair: &[Entry]| {
-            let (before, after) = (&pair[0].commit, &pair[1].commit);
-            2 * usize::from(crosses_remote(before, after)) + usize::from(before.day != after.day)
+        let spaced = cells * 2 < right && {
+            let days = self.entries.windows(2).filter(|pair| pair[0].commit.day != pair[1].commit.day).count();
+            cells * 2 + days + 2 * usize::from(self.remote_boundary.is_some()) < right
         };
-        let spaced = cells * 2 < right && cells * 2 + self.entries.windows(2).map(gap_width).sum::<usize>() < right;
         let step = if spaced { 2 } else { 1 };
         let mut x = 1;
         if self.uncommitted > 0 {
             s.put(x, 1, 1, self.uncommitted_mark(), Style::PLAIN.bold());
             x += step;
         }
-        let mut before = None;
-        for entry in &self.entries {
+        let mut before: Option<&Commit> = None;
+        for (i, entry) in self.entries.iter().enumerate() {
             let commit = &entry.commit;
             if let Some(prev) = before {
-                if crosses_remote(prev, commit) && x < right {
+                if self.remote_boundary == Some(i) && x < right {
                     s.put(x, 1, 1, "│", FAINT);
                     x += step;
                 }

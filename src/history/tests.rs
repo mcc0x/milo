@@ -118,6 +118,37 @@ fn uncommitted_then_unpushed_then_the_remote_boundary() {
 }
 
 #[test]
+fn a_merge_shows_one_remote_boundary_after_the_last_local_commit() {
+    let f = Fixture::new();
+    commit(&f, "shared base");
+    f.git(&["branch", "local"]);
+    let dated = |day: &str, subject: &str| {
+        let mut git = std::process::Command::new("git");
+        crate::fixture::isolate_git(&mut git);
+        assert!(
+            git.current_dir(&f.root)
+                .env("GIT_COMMITTER_DATE", day)
+                .args(["commit", "-q", "--allow-empty", "-m", subject])
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    dated("2001-02-05T00:00:00Z", "remote work");
+    f.push();
+    f.git(&["switch", "-q", "local"]);
+    f.git(&["branch", "--set-upstream-to=origin/main"]);
+    dated("2001-02-04T00:00:00Z", "local work");
+    f.git(&["merge", "-q", "--no-ff", "-m", "merge upstream", "main"]);
+    let rows = draw(&mut open(&f), 65, 12).text();
+    let position = |text: &str| rows.iter().position(|r| r.contains(text)).unwrap();
+    assert!(position("remote work") < position("local work"), "{rows:?}");
+    assert!(position("local work") < position("── on origin/main"), "{rows:?}");
+    assert!(position("── on origin/main") < position("shared base"), "{rows:?}");
+    assert_eq!(rows[1].matches('│').count(), 1, "{rows:?}");
+}
+
+#[test]
 fn the_remote_boundary_is_a_rule_and_does_not_take_the_cursor() {
     let f = Fixture::new();
     commit(&f, "on main");
