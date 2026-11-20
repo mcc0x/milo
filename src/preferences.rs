@@ -436,6 +436,7 @@ fn update_guarded(
         if text.len() as u64 > PREFERENCES_LIMIT {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "preferences file would exceed its size limit"));
         }
+        check_writable(path)?;
         replace(dir, path, &text)
     })
 }
@@ -446,11 +447,24 @@ fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Resu
     }
     locked(path, |_| {
         check()?;
+        check_writable(path)?;
         match fs::remove_file(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             result => result,
         }
     })
+}
+
+fn check_writable(path: &Path) -> io::Result<()> {
+    // Renaming or unlinking an existing file only requires a writable directory.
+    match fs::symlink_metadata(path) {
+        Ok(info) if info.permissions().readonly() => {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is read-only", path.display())))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn config_file(dir: &Path, worktree: Option<&Path>) -> PathBuf {
@@ -582,6 +596,7 @@ fn decode_folds(text: &str) -> BTreeMap<String, bool> {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn usage_tool_choices_save_only_what_changed_and_files_without_them_stay_automatic() {
@@ -695,6 +710,35 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(&file).unwrap(), original);
         assert_eq!(Preferences::resolve_in(&f.root, Some(&root)).unwrap(), expected);
+    }
+
+    #[test]
+    fn read_only_preference_layers_can_be_inherited_but_not_replaced_or_removed() {
+        let f = Fixture::folder();
+        let root = f.root.join("checkout");
+        let [global, local] = layers(&f.root, &root);
+        let global_text = "icons = off\n";
+        fs::write(&global, global_text).unwrap();
+        let snapshot = PreferenceSnapshot::load(&f.root, Some(&root)).unwrap();
+        let draft = Preferences { changes_only: true, ..snapshot.prefs };
+        fs::set_permissions(&global, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let err = snapshot.save(draft, &f.root, Some(&root), false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
+        assert!(fs::metadata(&global).unwrap().permissions().readonly());
+        snapshot.save(draft, &f.root, Some(&root), true).unwrap();
+
+        let snapshot = PreferenceSnapshot::load(&f.root, Some(&root)).unwrap();
+        let local_text = "changes_only = true\n";
+        assert_eq!(snapshot.prefs, draft);
+        fs::set_permissions(&local, fs::Permissions::from_mode(0o444)).unwrap();
+        let err = Preferences::set_changes_only_in(&f.root, &root, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let err = snapshot.inherit(&f.root, &root).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&local).unwrap(), local_text);
+        assert!(fs::metadata(&local).unwrap().permissions().readonly());
     }
 
     #[test]
