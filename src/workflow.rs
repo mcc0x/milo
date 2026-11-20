@@ -181,7 +181,7 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
             }
             ShellChange::Unchanged => External::Unchanged,
         };
-        if promoted && matches!(update, External::Unchanged) { External::Redraw } else { update }
+        if promoted { External::NewScope } else { update }
     }
 
     fn next_frame(&self) -> Option<Duration> {
