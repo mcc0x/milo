@@ -4,7 +4,7 @@
 
 ## Install
 
-The v0.1.3 prebuilt release is for Apple Silicon macOS. Use Homebrew:
+The v0.1.4 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -13,7 +13,7 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.3/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.4/install.sh &&
   sh milo-install.sh
 ```
 
@@ -87,7 +87,7 @@ Run `milo web` from the project you want to configure, or choose **Open Web Menu
 
 ![The local editor showing pane order, rail side, width and Usage height for an example worktree](img/web-settings.webp)
 
-On macOS, the optional [Milo menu app](usage.md#macos-menu-bar-local-build) also opens this editor from **Settings…**. To configure a particular worktree, run `milo web` from that project.
+On macOS, the optional [Milo menu app](usage.md#macos-menu-bar) also opens this editor from **Settings…**. To configure a particular worktree, run `milo web` from that project.
 
 The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
 

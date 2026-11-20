@@ -13,7 +13,7 @@
 
 ## Install
 
-The v0.1.3 release is available for Apple Silicon Macs. Install it with Homebrew:
+The v0.1.4 release is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -22,7 +22,7 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.3/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.4/install.sh &&
   sh milo-install.sh
 ```
 
@@ -68,7 +68,7 @@ Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside 
 
 <p align="center"><img src="docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
-The menu app is a **source-build preview** for macOS 13 or later; it is not in the v0.1.3 Homebrew or release binary. See [build and install the menu app](docs/usage.md#macos-menu-bar-local-build).
+On an Apple Silicon Mac running macOS 13 or later, run `milo menubar install`. The Homebrew and release binaries include the app; it only runs if you install it. See [menu bar setup and removal](docs/usage.md#macos-menu-bar).
 
 ## Reader
 

@@ -75,9 +75,11 @@ jobs:
           cargo test --release --locked
       - name: Smoke-test packaged settings in Chromium
         run: |
-          cargo build --release --locked --no-default-features --bin milo
+          sh macos/build-menu.sh --release
+          test ! -e target/local-menu/Milo.app/Contents/Resources/ProfilePaths.plist
+          sh tests/menubar.sh
           smoke_dir="$RUNNER_TEMP/milo-web-smoke"
           npm install --prefix "$smoke_dir" --no-save --no-audit --no-fund --ignore-scripts playwright-core@1.65.1
           export PLAYWRIGHT_BROWSERS_PATH="$smoke_dir/browsers"
           node "$smoke_dir/node_modules/playwright-core/cli.js" install --only-shell chromium
-          NODE_PATH="$smoke_dir/node_modules" node tests/web-smoke.cjs target/release/milo
+          NODE_PATH="$smoke_dir/node_modules" node tests/web-smoke.cjs target/local-menu/milo

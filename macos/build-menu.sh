@@ -1,6 +1,11 @@
 #!/bin/sh
 # Build a self-contained, ad-hoc signed macOS app. Does not install or launch it.
 set -eu
+case "${1-}:$#" in
+    :0) portable=false ;;
+    --release:1) portable=true ;;
+    *) echo 'Usage: sh macos/build-menu.sh [--release]' >&2; exit 2 ;;
+esac
 [ "$(uname -s)" = Darwin ] || { echo 'The menu app requires macOS.' >&2; exit 1; }
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)
 arch=$(uname -m)
@@ -33,6 +38,7 @@ version=$("$resources/Tools/milo" --version)
 /usr/bin/plutil -insert CFBundleShortVersionString -string "${version#milo }" "$app/Contents/Info.plist"
 # Finder and login items do not inherit a shell's exported provider paths. Keep
 # only the supported paths in this local bundle, not tokens or logs. Never ship it.
+if [ "$portable" = false ]; then
 python3 - "$resources/ProfilePaths.plist" <<'PY'
 import os, plistlib, sys
 keys = ('CODEX_HOME','CLAUDE_CONFIG_DIR','PI_CODING_AGENT_DIR','OPENCODE_DB','XDG_CONFIG_HOME','XDG_STATE_HOME','XDG_DATA_HOME')
@@ -43,6 +49,7 @@ for key in ('CODEX_HOME','CLAUDE_CONFIG_DIR','PI_CODING_AGENT_DIR'):
 with open(sys.argv[1], 'wb') as stream:
     plistlib.dump(values, stream)
 PY
+fi
 codesign --force --sign - "$resources/Tools/milo"
 codesign --force --sign - "$app"
 codesign --verify --strict "$resources/Tools/milo"
