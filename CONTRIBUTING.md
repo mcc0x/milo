@@ -90,6 +90,22 @@ exception: its IDs are transient and are the only blocks its undo may close.
 over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
 explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
 
+`titles.rs` names tabs and sessions for the listener and the session action,
+and keeps the titles Milo set by Rex window ID in the state folder. A title
+may use folder names and an agent's process name. Never read a terminal's
+title, screen or status text for it, and never replace a label that is neither
+Rex's default nor Milo's own. Only `milo_name_session` names a session, and
+only the one it is run in: never rename, create or switch a session from the
+listener or as a side effect of another action.
+
+The listener keeps the answers of `milo tab-title title` by directory, so that
+most events start no process. Each answer lists its grounds, the files that
+decide it, and is reused while they read the same: a project's two preference
+files, or outside a project the places where a repository could appear. When
+neither says enough, as when Git could not run, list none and the listener
+asks again. The listener opens every file listed, so never list a path that
+another user could create.
+
 Run `cargo test setup::` for generation, screen and installation tests. The
 tests use throwaway settings and a stand-in for Rex. With Lua 5.1 installed,
 run `cargo test --locked --bin milo rex_lua_fixtures -- --ignored` for the
@@ -159,13 +175,13 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
-| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
 | `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
 | `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
-| `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs. |
-| `src/setup/listener_test.lua` | Checks the new-tab and new-session handlers with a stand-in for Rex. |
+| `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs and titles unnamed ones. |
+| `src/setup/listener_test.lua` | Checks the new-tab, new-session and tab-title handlers with a stand-in for Rex. |
 | `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
@@ -174,6 +190,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/syntax/delimiters.rs` | Handles string and comment closers that depend on their openers. |
 | `src/syntax/langs.rs` | Defines language rules and maps them to file names and extensions. |
 | `src/term.rs` | Sets and restores terminal modes and waits for events. |
+| `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
 | `src/usage.rs` | Collects the latest limits and today's Claude Code activity. |

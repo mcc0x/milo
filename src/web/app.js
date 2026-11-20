@@ -715,6 +715,7 @@ function workflowView() {
     setting('workflow.changes_only', 'Outline starts with', '', 'select',
       {disabled, choices: [['false', 'All files'], ['true', 'Changes only']]}),
     setting('workflow.history_follow_new', 'Follow new commits', 'Only while History is at the top.', 'switch', {disabled}),
+    setting('workflow.tab_titles', 'Title Rex tabs', 'Unnamed tabs only: project, worktree and agent.', 'switch', {disabled}),
   ]), groupCard('account', 'Claude Code', '', [
     setting('account.claude_limits', 'Show Claude Code limits', state.account.claude_status, 'switch', {disabled: !account.editable}),
   ])];

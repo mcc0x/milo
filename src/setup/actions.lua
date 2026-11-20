@@ -423,6 +423,110 @@ if ... == "listener" then
   end
 
   local memory = { snapshot = snapshot, directories = directories, save = save }
+
+  -- Tab titles come from process names and directories only. A terminal's
+  -- title, screen and status text can hold a prompt, so none of them is read.
+  local agents = { claude = true, codex = true, omp = true }
+  local function agent_of(process)
+    for _, field in ipairs{ "name", "argv0", "invoked_path" } do
+      local value = process and process[field]
+      local name = type(value) == "string" and value:match("[^/]+$")
+      if name and agents[name] then return name end
+    end
+  end
+
+  local function pane_facts(process)
+    if not process then return {} end
+    local foreground, child = process.foreground, process.child
+    local agent = agent_of(foreground)
+    for _, parent in ipairs(process.ancestors or {}) do agent = agent or agent_of(parent) end
+    local cwd = shell_cwd(process) or foreground and foreground.cwd or child and child.cwd
+    if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then cwd = nil end
+    return { cwd = cwd, agent = agent or agent_of(child) }
+  end
+
+  local function title_exec(argv)
+    local result = profile_exec(argv, 3)
+    return result and result.ok and result.stdout
+  end
+
+  -- What a file holds now: its bytes, "" for an empty one or a folder, and
+  -- false for one that is not there.
+  local function reading(path)
+    local file = io.open(path, "r")
+    if not file then return false end
+    -- Far more than Milo accepts in a preference file, so any two it would read differ here.
+    local text = file:read(1048576)
+    file:close()
+    return text or ""
+  end
+
+  -- Milo's answers by directory, so that a change it has already answered
+  -- for starts neither Milo nor Git. An answer names its grounds, the files
+  -- it depends on, and stands while they read the same. One without grounds
+  -- is not kept.
+  local answers, kept = {}, 0
+  local function stands(answer)
+    for path, text in pairs(answer.grounds) do
+      if reading(path) ~= text then return false end
+    end
+    return true
+  end
+
+  local function same_files(one, other)
+    for path in pairs(one) do
+      if other[path] == nil then return false end
+    end
+    for path in pairs(other) do
+      if one[path] == nil then return false end
+    end
+    return true
+  end
+
+  local function ask(cwd, agent)
+    local answer = answers[cwd]
+    if answer and not stands(answer) then answers[cwd], kept, answer = nil, kept - 1, nil end
+    local who = agent or ""
+    local known = answer and (answer.untitled and "" or answer.titles[who])
+    if known then return known end
+    local reply = title_exec{ milo, "tab-title", "title", cwd, agent }
+    local title, rest = (reply or ""):match("^=([^\r\n]*)(.*)")
+    if not title then return end
+    local grounds = {}
+    for path in rest:gmatch("[^\r\n]+") do grounds[path] = reading(path) end
+    if not next(grounds) then return title end
+    -- For the same files, keep the earlier readings: they were taken before Milo read them.
+    if not (answer and same_files(answer.grounds, grounds)) then
+      if answer then kept = kept - 1 end
+      -- A listener can outlive many folders. Start again rather than grow without end.
+      if kept >= 256 then answers, kept = {}, 0 end
+      answer = { grounds = grounds, titles = {} }
+      answers[cwd], kept = answer, kept + 1
+    end
+    -- Without a title, titles are off here or this is no project, whoever runs in it.
+    if title == "" then answer.untitled = true else answer.titles[who] = title end
+    return title
+  end
+
+  memory.titles = {
+    facts = pane_facts,
+    -- The label a tab should show, where "" is Rex's own. Nil if Milo could not say.
+    ask = ask,
+    -- The titles Milo set and still stands by, by window ID. They outlive this listener.
+    owned = function()
+      local claims = {}
+      for id, title in (title_exec{ milo, "tab-title", "owned" } or ""):gmatch("(window:[%x-]+)\t([^\n]+)") do
+        claims[id] = title
+      end
+      return claims
+    end,
+    claim = function(window_id, title) title_exec{ milo, "tab-title", "claim", window_id, title } end,
+    forget = function(ids)
+      local argv = { milo, "tab-title", "forget" }
+      for _, id in ipairs(ids) do argv[#argv + 1] = id end
+      title_exec(argv)
+    end,
+  }
   if arrange_new_tabs then
     local function uses_rows(selected)
       local wanted = selected.wanted
@@ -696,6 +800,24 @@ rex.action{ name = "milo_reset_layout", title = "Milo: Reset Saved Layout…", a
   run = function(ctx, args) return remember(ctx, args or {}, true) end }
 rex.action{ name = "milo_peek_outline", title = "Milo: Peek Outline", run = function(ctx) peek(ctx, false) end }
 rex.action{ name = "milo_close_peek", title = "Milo: Dismiss Outline Peek", run = function(ctx) peek(ctx, true) end }
+
+-- The only place Milo names a session: the one this action was run in, and
+-- only when someone runs it. It makes no session and shows none.
+local function name_session(ctx)
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local _, cwd = anchor(ctx, window, true)
+  if not cwd then raise("no_shell") end
+  local reply = profile_exec({ milo, "tab-title", "name", cwd }, 3)
+  local label = (reply and reply.ok and reply.stdout or ""):match("^([^\n]+)\n$")
+  if not label then
+    raise(reply and reply.stderr and reply.stderr:match("[^\r\n]+") or "Could not name this session.")
+  end
+  local named, err = rex.session.set_label{ session_id = ctx.session_id, label = label }
+  if not named then raise(err or "Rex could not rename this session.") end
+  return "Named this session " .. label .. "."
+end
+rex.action{ name = "milo_name_session", title = "Milo: Name Session from This Project", run = name_session }
 rex.action{
   name = "milo_close", title = "Milo: Close Panes in This Tab",
   run = function(ctx)
