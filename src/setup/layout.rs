@@ -613,6 +613,7 @@ pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
             || [
                 0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a,
                 0x1ed2_af59_4c5b_4bf4, 0x7b13_2b45_6752_1e02, 0x3f33_9081_87e5_4505, 0x9a88_3230_71bd_27e5,
+                0x3160_d88f_3615_347e,
             ]
             .contains(&fingerprint(body))
     })

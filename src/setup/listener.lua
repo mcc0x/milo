@@ -95,16 +95,27 @@ local function login_shell(process)
   return name and name:sub(1, 1) == "-" and process.path ~= "/usr/bin/login"
 end
 
--- A shell copies itself to run parts of its startup and its prompt. A copy
--- in the foreground is still the tab's shell, which is the outermost of them.
-local function front_shell(process)
-  local shell = process.foreground
+-- The tab's shell is the login shell its terminal started: under
+-- /usr/bin/login on macOS, or as the terminal's own process. A shell copies
+-- itself to run parts of its startup and its prompt, and a copy in the
+-- foreground is still that shell. Rex leaves the ancestors out when one has
+-- just exited, so a copy can arrive without them. A login shell that another
+-- program started in the tab is not the tab's.
+local function own_shell(process)
+  local shell, child = process.foreground, process.child
   if not login_shell(shell) then return end
+  local above
   for _, parent in ipairs(process.ancestors or {}) do
+    above = parent
     if not login_shell(parent) or parent.path ~= shell.path then break end
-    shell = parent
+    shell, above = parent, nil
   end
-  return shell
+  if not child then return shell end
+  if child.path == "/usr/bin/login" then
+    if not above or above.pid == child.pid then return shell end
+  elseif not above and login_shell(child) and child.path == shell.path then
+    return shell
+  end
 end
 
 local function shell(tab)
@@ -113,11 +124,10 @@ local function shell(tab)
   if type(process.last_exit) == "table" then return nil, true end
   local foreground = process.foreground
   if not (foreground and foreground.argv0) then return end
-  local front = front_shell(process)
-  if front then
-    if tab.shell and tab.shell.pid ~= front.pid then return nil, true end
-    tab.shell = front
-    return front
+  local own = own_shell(process)
+  if own then
+    tab.shell = own
+    return own
   end
   local child = process.child
   -- A terminal's process is a copy of the Rex server until it becomes login,

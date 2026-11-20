@@ -231,19 +231,24 @@ emit("terminal.process_changed", "slow")
 assert(#splits == 0)
 
 -- A shell copies itself as it starts and as it draws its prompt. A copy in the
--- foreground when the measurement arrives is the same shell. A login shell
--- that another program started in the tab is not.
+-- foreground is the same shell, whether it is met before or after the shell
+-- itself, and with or without the ancestors Rex leaves out when one has just
+-- exited. A login shell that another program started in the tab is not.
 local login = { pid = 1, path = "/usr/bin/login" }
 local own = { pid = 2, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" }
-local function copy(pid) return { pid = pid, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" } end
-for _, other in ipairs({ false, true }) do
-  splits, sizes.slow = {}, { rows = 24 }
-  processes.slow = { child = login, foreground = own, ancestors = { login } }
+local copy = { pid = 4, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" }
+local at_prompt = { child = login, foreground = own, ancestors = { login } }
+local nested = { { pid = 3, argv0 = "su", path = "/usr/bin/su" }, own, login }
+for _, case in ipairs({
+  { at_prompt, { child = login, foreground = copy, ancestors = { own, login } }, 1 },
+  { { child = login, foreground = copy }, at_prompt, 1 },
+  { at_prompt, { child = login, foreground = copy, ancestors = nested }, 0 },
+}) do
+  splits, processes.slow, sizes.slow = {}, case[1], { rows = 24 }
   created("slow")
-  local between = other and { { pid = 3, argv0 = "su", path = "/usr/bin/su" }, own, login } or { own, login }
-  processes.slow, sizes.slow = { child = login, foreground = copy(4), ancestors = between }, measured
+  processes.slow, sizes.slow = case[2], measured
   emit("terminal.size_changed", "slow")
-  assert(#splits == (other and 0 or 1))
+  assert(#splits == case[3])
 end
 
 -- Close and exit events remove outstanding work, including keep-open terminals.
