@@ -44,9 +44,10 @@ local function sample(process, report)
   if report and type(report.pwd) == "string" and report.pwd ~= "" and same_process(report.owner, shell) then
     reporter = report.owner
   end
-  -- Use the shell's actual absolute cwd, not an OSC 7 URI which could
-  -- designate a remote host. No shell-owned report means this is pinned.
-  emit(reporter and shell.cwd)
+  -- A known local shell in the terminal's process tree has its own cwd
+  -- even when the prompt never emits a directory report. Never substitute
+  -- the foreground app's cwd or a path from an OSC 7 URI.
+  emit(shell and (reporter or shell_names[shell.name]) and shell.cwd)
 end
 
 rex.on("terminal.pwd_changed", function(ctx, event)
