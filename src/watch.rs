@@ -592,7 +592,7 @@ mod filter_tests {
         let main = Repo::open(&f.root).unwrap().watch_scope();
         let mut repo = Repo::open(&root).unwrap();
         let linked = repo.watch_scope();
-        assert_eq!(main.roots, [f.root.clone()]);
+        assert_eq!(main.roots.as_slice(), std::slice::from_ref(&f.root));
         assert_eq!(linked.roots, [root.clone(), common.clone()]);
         assert!(main.ignored.needs_paths() && linked.ignored.needs_paths());
 
