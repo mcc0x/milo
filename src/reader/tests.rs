@@ -216,6 +216,11 @@ fn unknown_extensions_and_conflicting_shebangs_do_not_colour_code() {
         ("page.rs", "#!/usr/bin/env -S python3 -u\nreturn True", false),
         ("other.rs", "#!/usr/bin/ruby\nreturn true", false),
         ("page.py", "#!/usr/bin/env -S python3 -u\nreturn True", true),
+        ("page.ts", "#!/usr/bin/env tsx\nreturn true", true),
+        ("other.ts", "#!/usr/bin/env -S ts-node --esm\nreturn true", true),
+        ("page.mjs", "#!/usr/bin/env zx\nreturn true", true),
+        ("page.sh", "#!/bin/dash\nif true; then exit; fi", true),
+        ("script.rs", "#!/usr/bin/env cargo\nfn main() {}", true),
     ] {
         f.write(name, source);
         let mut reader = Reader::open(&f.root.join(name)).unwrap();

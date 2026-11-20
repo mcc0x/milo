@@ -270,11 +270,11 @@ impl Lang {
         let program = program.rsplit('/').next().unwrap_or("");
         let program = if program == "env" { words.find(|word| !word.starts_with('-')).unwrap_or("") } else { program };
         let languages: &[_] = match program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
-            "bash" | "sh" | "zsh" => &[&SHELL],
+            "ash" | "bash" | "dash" | "ksh" | "sh" | "zsh" => &[&SHELL],
             "python" | "pypy" | "uv" => &[&PYTHON],
-            "bun" | "deno" | "node" | "nodejs" => &[&JAVASCRIPT, &TYPESCRIPT, &JSX, &TSX],
+            "bun" | "deno" | "node" | "nodejs" | "ts-node" | "tsx" | "zx" => &[&JAVASCRIPT, &TYPESCRIPT, &JSX, &TSX],
             "php" => &[&PHP],
-            "rust-script" => &[&RUST],
+            "cargo" | "rust-script" => &[&RUST],
             _ => return false,
         };
         languages.iter().any(|&lang| std::ptr::eq(self, lang))
