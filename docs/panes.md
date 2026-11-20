@@ -50,7 +50,7 @@ On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](htt
 
 For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
-`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Milo ignores `.` components and repeated slashes in committed file paths, but rejects `..` components. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+`milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. Give the file's path as it was in that commit, relative to your current directory or as an absolute path. For example, from `src`, use `milo view main.rs --commit ID`. Milo ignores `.` components and repeated slashes, but rejects `..`. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
 
 Committed-file lookup requires a UTF-8 path. A working file with a non-UTF-8 name can still be read directly, without a Git diff.
 

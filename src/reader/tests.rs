@@ -80,11 +80,13 @@ fn committed_file_paths_normalize_dot_components_and_repeated_slashes() {
     repo.read();
     let commits = repo.history(1).unwrap();
     let id = CommitId::parse(&commits[0].hash).unwrap();
-    fs::remove_dir_all(f.root.join("sub")).unwrap();
+    let sub = f.root.join("sub");
+    fs::remove_dir_all(sub.join("deep")).unwrap();
     let absolute = f.root.join("sub//deep/./page.txt");
 
     for (cwd, path) in [
         (f.root.as_path(), Path::new("./sub//./deep///page.txt")),
+        (sub.as_path(), Path::new("deep/page.txt")),
         (f.root.as_path(), absolute.as_path()),
         (f.root.parent().unwrap(), absolute.as_path()),
     ] {
