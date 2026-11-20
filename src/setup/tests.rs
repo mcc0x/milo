@@ -166,8 +166,8 @@ fn dirty_exit_keeps_the_editor_by_default_and_can_discard_by_click() {
 fn dirty_settings_from_home_asks_before_returning() {
     let Some(_) = isolated_settings("setup::tests::dirty_settings_from_home_asks_before_returning") else { return };
     let mut home = crate::home::Home::new();
-    assert_eq!(home.key(Key::Down), After::Stay);
-    assert_eq!(home.key(Key::Enter), After::Stay);
+    let rows = frame(&mut home, 80, 18);
+    assert_eq!(home.key(click_label(&rows, "Terminal settings")), After::Stay);
     home.key(Key::Char('2'));
     let rows = frame(&mut home, 80, 18);
     assert_eq!(home.key(click_label(&rows, "Activity marks")), After::Stay);
@@ -179,7 +179,7 @@ fn dirty_settings_from_home_asks_before_returning() {
     let prompt = frame(&mut home, 80, 18);
     assert_eq!(home.key(click_label(&prompt, "Discard")), After::Stay);
     let menu = frame(&mut home, 80, 18);
-    assert!(menu.iter().any(|row| row.contains("Settings")));
+    assert!(menu.iter().any(|row| row.contains("Terminal settings")));
     assert!(menu.iter().any(|row| row.contains("Uninstall")));
     assert_eq!(Preferences::resolve(None).unwrap().1, Source::Default);
 }
@@ -321,6 +321,46 @@ fn usage_tool_choices_cycle_in_appearance_and_save_to_the_chosen_scope() {
     assert_eq!((choices(local), source), ([Show::Always, Show::Auto, Show::Auto], Source::Worktree));
     assert_eq!(choices(Preferences::resolve(None).unwrap().0), [Show::Auto, Show::Auto, Show::Hide]);
     assert!(!pane.prefs_dirty());
+}
+
+#[test]
+fn terminal_save_feedback_names_the_scope_and_reports_the_effect() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, Some(f.root.join("checkout")), |_| panic!("outside Rex"));
+
+    choose(&mut pane, Row::ChangesOnly);
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    assert_eq!(pane.message.as_ref().unwrap().0, "Saved pane preferences for “checkout”. Reopen panes to apply.");
+    let rows = frame(&mut pane, 24, 16);
+    assert!(rows.iter().any(|row| row.contains("“checkout”")));
+    assert!(rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ").contains(REOPEN_PANES));
+
+    choose(&mut pane, Row::ChangesOnly);
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+    assert_eq!(pane.message.as_ref().unwrap().0, "Saved global pane preferences. “checkout” keeps its preferences.");
+
+    choose(&mut pane, Row::TabTitles);
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+    assert_eq!(
+        pane.message.as_ref().unwrap().0,
+        "Saved global pane preferences. Milo uses the title setting when naming Rex tabs.",
+    );
+
+    choose(&mut pane, Row::UseGlobalPrefs);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert_eq!(pane.message.as_ref().unwrap().0, "“checkout” now uses global pane preferences. Reopen panes to apply.");
+
+    for effect in ["enabled", "disabled"] {
+        choose(&mut pane, Row::ClaudeLimits);
+        assert_eq!(choose(&mut pane, Row::SaveClaude), After::Stay);
+        assert_eq!(
+            pane.message.as_ref().unwrap().0,
+            format!("Saved Claude Code account settings. Milo's status line is {effect}."),
+        );
+    }
 }
 
 #[test]
@@ -466,6 +506,7 @@ fn repeating_the_worktree_save_click_cannot_save_auto_arrange_globally() {
     child.wait().unwrap();
     assert_eq!(saved, After::Stay);
     assert_eq!(pane.panel, Panel::Save(SaveKind::Layout));
+    assert!(pane.message.as_ref().unwrap().0.contains("Auto-arrange still needs a global save."));
     let rows = frame(&mut pane, 32, 4);
     assert_eq!(click_label(&rows, "As global default"), worktree);
     assert_eq!(pane.key(worktree), After::Ignored);
@@ -1209,7 +1250,7 @@ fn home_doctor_and_settings_share_the_diagnostic_worker() {
     assert!(abandoned.is_some());
     assert_eq!(home.key(Key::Esc), After::Stay);
     let rows = frame(&mut home, 64, 12);
-    assert_eq!(home.key(click_label(&rows, "Settings")), After::Stay);
+    assert_eq!(home.key(click_label(&rows, "Terminal settings")), After::Stay);
     assert_eq!(home.external_fd(), abandoned);
 
     assert_eq!(home.key(Key::Char('4')), After::Stay);

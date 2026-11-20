@@ -28,6 +28,8 @@ pub(crate) struct Editor {
     claude: Option<ClaudeSnapshot>,
     doctor: Option<doctor::Health>,
     version: u64,
+    // A local-only browser edit can dismiss this save without hiding a later reminder.
+    reopen_panes: Option<u64>,
     directory: Option<String>,
 }
 
@@ -71,7 +73,7 @@ impl Editor {
         if let Err(why) = setup.reload_prefs() {
             setup.report(Err(why));
         }
-        Self { setup, claude, doctor: None, version: 1, directory }
+        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory }
     }
 
     fn load_account(&mut self) {
@@ -213,6 +215,12 @@ impl Editor {
         } else {
             out.push_str("null");
         }
+        out.push_str(",\"reopen_panes\":");
+        if let Some(version) = self.reopen_panes {
+            write!(out, "{{\"version\":{version},\"text\":{}}}", Quoted(REOPEN_PANES)).expect("writing to a string");
+        } else {
+            out.push_str("null");
+        }
         out.push('}');
         out
     }
@@ -225,13 +233,13 @@ impl Editor {
         let message = self.apply(action)?;
         self.setup.message = None;
         if let Some(message) = message {
-            self.setup.report_text(message);
+            self.setup.report_text(message.map_err(Cow::Borrowed));
         }
         self.version += 1;
         Ok(self.state())
     }
 
-    fn apply(&mut self, action: Action) -> Result<Option<Notice<Cow<'static, str>>>, String> {
+    fn apply(&mut self, action: Action) -> Result<Option<SaveNotice>, String> {
         let (layout, preferences, account) = self.groups();
         let notice = match action {
             Action::Set(edit) => {
@@ -245,11 +253,13 @@ impl Editor {
                     return Err(UNAVAILABLE.into());
                 }
                 edit.apply(&mut self.setup);
+                self.reopen_panes = None;
                 None
             }
             Action::Discard(group) => {
                 self.discard(group)?;
-                Some(Ok("Draft changes discarded. Saved settings were left alone."))
+                self.reopen_panes = None;
+                Some(Ok("Draft changes discarded. Saved settings were left alone.".into()))
             }
             Action::Save(Group::Layout, WriteScope::Global) if layout.save_global => {
                 Some(self.save_layout(Scope::Global)?)
@@ -258,30 +268,33 @@ impl Editor {
                 Some(self.save_layout(Scope::Worktree)?)
             }
             Action::Save(Group::Preferences, WriteScope::Global) if preferences.save_global => {
-                Some(self.save_preferences(false)?)
+                Some(self.save_preferences(Scope::Global)?)
             }
             Action::Save(Group::Preferences, WriteScope::Worktree) if preferences.save_worktree => {
-                Some(self.save_preferences(true)?)
+                Some(self.save_preferences(Scope::Worktree)?)
             }
             Action::Save(Group::Account, WriteScope::Account) if account.save_account => Some(self.save_account()?),
             Action::Inherit(Group::Layout) if layout.inherit => Some(self.inherit_layout()?),
             Action::Inherit(Group::Preferences) if preferences.inherit => Some(self.inherit_preferences()?),
             Action::Capture if self.live() && layout.editable && self.setup.trial.is_none() => {
-                Some(Ok(self.setup.capture()?))
+                let message = self.setup.capture()?;
+                self.reopen_panes = None;
+                Some(Ok(message.into()))
             }
             Action::Try if self.live() && layout.editable => {
                 self.setup.try_layout()?;
                 self.doctor = None;
-                Some(Ok(if self.setup.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
+                let message = if self.setup.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
                     "Previewing a temporary rail in the original Rex tab. Existing panes are untouched."
                 } else {
                     "Trying this layout in the original Rex tab. Nothing was saved."
-                }))
+                };
+                Some(Ok(message.into()))
             }
             Action::Undo if self.setup.trial.is_some() => {
                 let message = self.setup.undo()?;
                 self.doctor = None;
-                Some(Ok(message))
+                Some(Ok(message.into()))
             }
             Action::Doctor => {
                 self.doctor = None;
@@ -292,11 +305,11 @@ impl Editor {
             }
             Action::Menubar(action) if menubar::installed().is_some() => {
                 // Install also opens an existing app, replacing it only when the bundled copy differs.
-                return menubar::run(action).map(|text| Some(Ok(Cow::Owned(text))));
+                return menubar::run(action).map(|text| Some(Ok(text.into())));
             }
             _ => return Err(UNAVAILABLE.into()),
         };
-        Ok(notice.map(|message| message.map(Cow::Borrowed).map_err(Cow::Borrowed)))
+        Ok(notice)
     }
 
     fn discard(&mut self, group: Group) -> Result<(), &'static str> {
@@ -321,83 +334,61 @@ impl Editor {
         Ok(())
     }
 
-    fn save_layout(&mut self, scope: Scope) -> Result<Notice, &'static str> {
+    fn save_layout(&mut self, scope: Scope) -> Result<SaveNotice, &'static str> {
         let inside = self.setup.inside;
         if inside {
             self.require_tab()?;
         } else if !self.setup.layout_dirty() {
-            return Ok(Ok("No layout changes to save."));
+            return Ok(Ok("No layout changes to save.".into()));
         }
         let notice = self.setup.persist_layout(scope, inside)?;
         self.doctor = None;
-        Ok(if inside {
-            notice
-        } else {
-            notice.map(|_| match (scope, self.setup.scope) {
-                (Scope::Worktree, _) => "Saved this worktree's layout without changing Rex integration.",
-                (Scope::Global, Scope::Worktree) => "Saved the global layout. This worktree still uses its own layout.",
-                (Scope::Global, _) => "Saved the global layout without changing Rex integration.",
-            })
-        })
+        Ok(notice)
     }
 
-    fn inherit_layout(&mut self) -> Result<Notice, &'static str> {
+    fn inherit_layout(&mut self) -> Result<SaveNotice, &'static str> {
         if self.setup.inside {
             self.require_tab()?;
         }
-        let setup = &mut self.setup;
-        let saved = setup.saved.as_ref().ok_or(UNAVAILABLE)?;
-        let root = setup.root.as_deref().ok_or(UNAVAILABLE)?;
-        setup.store()?.inherit_draft(root, saved)?;
+        let notice = self.setup.inherit_layout()?;
         self.doctor = None;
-        let auto = setup.auto_arrange_dirty().then_some(setup.layout.new_tabs);
-        if let Err(why) = setup.reload_layout() {
-            setup.saved = None;
-            return Ok(Err(why));
-        }
-        if let Some(auto) = auto {
-            setup.layout.new_tabs = auto;
-        }
-        Ok(Ok("This worktree now uses the global layout."))
+        Ok(notice)
     }
 
-    fn save_preferences(&mut self, local: bool) -> Result<Notice, &'static str> {
+    fn save_preferences(&mut self, scope: Scope) -> Result<SaveNotice, &'static str> {
         if !self.setup.prefs_dirty() {
-            return Ok(Ok("No pane preference changes to save."));
+            return Ok(Ok(NO_PREFS_CHANGES.into()));
         }
-        self.setup.persist_prefs(if local { Scope::Worktree } else { Scope::Global })?;
-        self.doctor = None;
-        Ok(self.setup.reload_prefs().map(|()| match (local, self.setup.prefs_scope()) {
-            (true, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
-            (false, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
-            (false, _) => "Saved global pane preferences. Reopen panes to apply.",
-        }))
+        let result = self.setup.persist_prefs(scope)?;
+        Ok(self.finish_preferences(result))
     }
 
-    fn inherit_preferences(&mut self) -> Result<Notice, &'static str> {
-        self.setup.clear_prefs_override()?;
-        self.doctor = None;
-        Ok(self.setup.reload_prefs().map(|()| "This worktree now uses global pane preferences. Reopen panes to apply."))
+    fn inherit_preferences(&mut self) -> Result<SaveNotice, &'static str> {
+        let result = self.setup.inherit_prefs()?;
+        Ok(self.finish_preferences(result))
     }
 
-    fn save_account(&mut self) -> Result<Notice, &'static str> {
+    fn finish_preferences(&mut self, result: PreferenceSave) -> SaveNotice {
+        self.doctor = None;
+        self.reopen_panes = None;
+        result.map(|feedback| {
+            self.reopen_panes = feedback.reopen.then_some(self.version + 1);
+            feedback.text
+        })
+    }
+
+    fn save_account(&mut self) -> Result<SaveNotice, &'static str> {
         let setup = &self.setup;
         if !setup.claude_dirty() {
-            return Ok(Ok("No Claude Code changes to save."));
+            return Ok(Ok("No Claude Code changes to save.".into()));
         }
         let expected = self.claude.as_ref().ok_or(UNAVAILABLE)?;
         setup.store()?.save_claude_draft(setup.show_limits, expected)?;
         self.doctor = None;
         self.load_account();
-        if self.claude.is_some() {
-            Ok(Ok("Saved Claude Code choices."))
-        } else {
-            Ok(Err("Saved, but could not read Claude Code settings."))
-        }
+        Ok(self.setup.claude_save_feedback().map(Cow::Borrowed))
     }
 }
-
-type Notice<T = &'static str> = Result<T, T>;
 
 fn account_at(store: Option<&Store>) -> (Claude, Option<ClaudeSnapshot>) {
     store
@@ -749,6 +740,20 @@ mod tests {
         json.fields([name])[0].unwrap()
     }
 
+    fn assert_feedback(json: &str, text: &str, reopen: bool) {
+        let state = Value::parse(json.as_bytes()).unwrap();
+        let message = field(state, "message");
+        assert!(field(message, "text").is(text), "{json}");
+        assert_eq!(field(message, "error").boolean(), Some(false));
+        let instruction = field(state, "reopen_panes");
+        if reopen {
+            assert!(field(instruction, "text").is(REOPEN_PANES));
+            assert_eq!(field(instruction, "version").unsigned(), field(state, "version").unsigned());
+        } else {
+            assert!(instruction.null(), "{json}");
+        }
+    }
+
     #[test]
     fn menu_app_status_and_actions_respect_availability_and_draft_version() {
         let f = Fixture::folder();
@@ -809,7 +814,8 @@ mod tests {
         assert_eq!(triplet(field(layout, "ratios"), Value::unsigned), Some([750_000, 0, 250_000]));
         assert!(!store.config.exists());
 
-        action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
+        let saved = action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
+        assert_feedback(&saved, "Saved layout for “it's a \"worktree\"”. Rex integration unchanged.", false);
         let (remembered, installed, scope) = store.layout_for(Some(&root)).unwrap();
         assert_eq!(scope, Scope::Worktree);
         assert!(!installed);
@@ -947,6 +953,42 @@ mod tests {
     }
 
     #[test]
+    fn pane_reopen_reminder_is_only_set_when_effective_pane_preferences_change() {
+        let f = Fixture::folder();
+        let root = f.root.join("checkout");
+        let mut editor = outside(fixture_store(&f), Some(&root));
+        let save_global = r#""action":"save","group":"preferences","scope":"global""#;
+        let save_worktree = r#""action":"save","group":"preferences","scope":"worktree""#;
+
+        assert_feedback(&action(&mut editor, save_worktree).unwrap(), NO_PREFS_CHANGES, false);
+        set(&mut editor, "workflow.changes_only", "true");
+        let saved = action(&mut editor, save_worktree).unwrap();
+        assert_feedback(&saved, "Saved pane preferences for “checkout”. Reopen panes to apply.", true);
+
+        let version = editor.version();
+        let checked = action(&mut editor, r#""action":"doctor""#).unwrap();
+        let checked = Value::parse(checked.as_bytes()).unwrap();
+        assert!(field(checked, "message").null());
+        assert_eq!(field(field(checked, "reopen_panes"), "version").unsigned(), Some(version));
+
+        let edited = set(&mut editor, "workflow.tab_titles", "true");
+        assert!(field(Value::parse(edited.as_bytes()).unwrap(), "reopen_panes").null());
+        let saved = action(&mut editor, save_global).unwrap();
+        assert_feedback(&saved, "Saved global pane preferences. Milo uses the title setting when naming Rex tabs.", false);
+
+        set(&mut editor, "workflow.history_follow_new", "true");
+        let saved = action(&mut editor, save_global).unwrap();
+        assert_feedback(&saved, "Saved global pane preferences. Reopen panes to apply.", true);
+
+        set(&mut editor, "workflow.changes_only", "false");
+        let saved = action(&mut editor, save_global).unwrap();
+        assert_feedback(&saved, "Saved global pane preferences. “checkout” keeps its preferences.", false);
+
+        let inherited = action(&mut editor, r#""action":"inherit","group":"preferences""#).unwrap();
+        assert_feedback(&inherited, "“checkout” now uses global pane preferences. Reopen panes to apply.", true);
+    }
+
+    #[test]
     fn usage_tool_choices_are_reported_edited_and_saved_with_the_other_preferences() {
         let f = Fixture::folder();
         let store = fixture_store(&f);
@@ -1012,7 +1054,8 @@ mod tests {
         assert!(action(&mut readonly, r#""action":"set","field":"account.claude_limits","value":true"#).is_err());
 
         fs::remove_file(&store.claude).unwrap();
-        action(&mut editor, r#""action":"save","group":"account","scope":"account""#).unwrap();
+        let saved = action(&mut editor, r#""action":"save","group":"account","scope":"account""#).unwrap();
+        assert_feedback(&saved, "Saved Claude Code account settings. Milo's status line is enabled.", false);
         assert!(store.claude() == Claude::On);
         assert!(editor.setup.prefs_dirty());
         assert!(!store.config.exists() && !store.init.exists());

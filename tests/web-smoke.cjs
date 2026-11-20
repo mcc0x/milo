@@ -5,7 +5,7 @@ const {execFileSync, spawn} = require('node:child_process');
 const {once} = require('node:events');
 const {mkdir, mkdtemp, readFile, rm} = require('node:fs/promises');
 const {tmpdir} = require('node:os');
-const {join, resolve} = require('node:path');
+const {basename, join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
 const {setTimeout: delay} = require('node:timers/promises');
 const {chromium} = require('playwright-core');
@@ -18,6 +18,7 @@ const button = (page, name) => page.getByRole('button', {name, exact: true});
 const dialog = (page, name) => page.getByRole('dialog', {name, exact: true});
 const number = (page, name) => page.getByRole('spinbutton', {name, exact: true});
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
+const reopenNote = page => page.getByRole('contentinfo').getByText('Reopen panes to apply.', {exact: true});
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, tool, name) =>
@@ -56,7 +57,7 @@ async function openEditor(context, url) {
   return page;
 }
 
-async function saveNumbers(page) {
+async function saveNumbers(page, cwd) {
   const save = button(page, 'Save');
   const choices = dialog(page, 'Save changes');
   for (const [name, value] of edits) {
@@ -72,6 +73,8 @@ async function saveNumbers(page) {
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await button(choices, 'Save for this worktree').click();
     await status(page, clean).waitFor({state: 'attached'});
+    await status(page, `Saved layout for “${basename(cwd)}”. Rex integration unchanged.`).waitFor();
+    assert.equal(await reopenNote(page).count(), 0, 'layout saves do not ask to reopen panes');
     assert.equal(await field.inputValue(), value, name);
     console.log(`${name}: saved on the first click`);
   }
@@ -93,6 +96,12 @@ async function chooseUsageTools(page, binary, cwd, env) {
   await button(page, 'Save').click();
   await button(dialog(page, 'Save changes'), 'Save as global default').click();
   await status(page, clean).waitFor({state: 'attached'});
+  const saved = status(page, 'Saved global pane preferences. Reopen panes to apply.');
+  await saved.waitFor();
+  await reopenNote(page).waitFor();
+  await page.clock.fastForward(3001);
+  await saved.waitFor({state: 'hidden'});
+  await reopenNote(page).waitFor();
   assert.equal(await readFile(preferences, 'utf8'), 'usage_claude = always\nusage_opencode = hide\n');
   assert(await usageChoice(page, 'Codex', 'Auto').isChecked(), 'Codex was left on Auto');
   // What the panes read is what the controls saved, and a hidden tool is not looked for.
@@ -100,6 +109,22 @@ async function chooseUsageTools(page, binary, cwd, env) {
   assert.match(doctor, /^ {2}Usage tools: Claude Code always shown; OpenCode hidden; others automatic$/m);
   assert.match(doctor, /^Claude Code limits: no local report; /m);
   assert.doesNotMatch(doctor, /^(Codex limits|OpenCode activity|Usage tools: none)/m);
+  await section(page, 'Layout').click();
+  await reopenNote(page).waitFor();
+  const width = number(page, 'Rail width');
+  const before = await width.inputValue();
+  await width.fill('');
+  await reopenNote(page).waitFor({state: 'hidden'});
+  await width.fill(before);
+  assert.equal(await reopenNote(page).count(), 0, 'undoing browser-only input does not revive the instruction');
+
+  await section(page, 'Workflow').click();
+  await page.getByRole('switch', {name: 'Title Rex tabs', exact: true}).check();
+  await status(page, dirty).waitFor({state: 'attached'});
+  await button(page, 'Save').click();
+  await button(dialog(page, 'Save changes'), 'Save as global default').click();
+  await status(page, 'Saved global pane preferences. Milo uses the title setting when naming Rex tabs.').waitFor();
+  assert.equal(await reopenNote(page).count(), 0, 'title-only saves do not ask to reopen panes');
   await section(page, 'Layout').click();
   console.log('Usage tools: three choices saved globally and read back by doctor');
 }
@@ -359,7 +384,8 @@ async function main() {
       const page = await openEditor(desktop, url);
       const dev = await page.request.get(new URL('/dev/version', url).href);
       assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
-      await saveNumbers(page);
+      await page.clock.install();
+      await saveNumbers(page, cwd);
       await chooseUsageTools(page, binary, cwd, env);
       await manageMenuApp(page, url, env);
       await movePaneDuringPendingEdit(page);

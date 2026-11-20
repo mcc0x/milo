@@ -43,6 +43,21 @@ const PREFS_READ: &str = "Could not read Milo's pane preferences. They were left
 const PREFS_SAVE: &str = "Could not save Milo's pane preferences.";
 const PREFS_INHERIT: &str = "Could not clear this worktree's pane preferences.";
 const MAINTENANCE_DRAFT: &str = "Save or discard the layout and Claude Code edits before changing the integration.";
+const REOPEN_PANES: &str = "Reopen panes to apply.";
+const NO_PREFS_CHANGES: &str = "No pane preference changes to save.";
+
+type SaveNotice = Result<Cow<'static, str>, &'static str>;
+type PreferenceSave = Result<PreferenceFeedback, &'static str>;
+
+enum PreferenceChange {
+    Save(Scope),
+    Inherit,
+}
+
+struct PreferenceFeedback {
+    text: Cow<'static, str>,
+    reopen: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
@@ -486,7 +501,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let result = if kind == SaveKind::Layout { self.save_layout(scope) } else { self.save_prefs(scope) };
         if self.exit_from.is_some() {
             if result.is_ok() {
-                return self.save_and_exit();
+                let after = self.save_and_exit();
+                if after == After::Stay && self.panel != Panel::Exit {
+                    self.report_text(result.map_err(Cow::Borrowed));
+                }
+                return after;
             }
             // Some integration errors are reported after the file was saved.
             // Don't offer that scope again if its draft is already saved.
@@ -496,11 +515,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 self.back();
             }
         }
-        self.report(result);
+        self.report_text(result.map_err(Cow::Borrowed));
         After::Stay
     }
 
-    fn save_layout(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
+    fn save_layout(&mut self, scope: Scope) -> SaveNotice {
         if self.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
             self.undo()?;
         }
@@ -517,16 +536,17 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         &mut self,
         scope: Scope,
         integrate_rex: bool,
-    ) -> Result<Result<&'static str, &'static str>, &'static str> {
+    ) -> Result<SaveNotice, &'static str> {
         let auto_changed = self.auto_arrange_dirty();
         let draft_auto = self.layout.new_tabs;
         let before = self.saved.as_ref().ok_or("Reopen Settings before saving the layout.")?;
+        let only_auto = auto_changed && same_geometry(before, &self.layout);
         let expected = match (scope, &self.saved_global) {
             (Scope::Global, Some(global)) => (global.as_ref().map_err(|&why| why)?, Scope::Global),
             _ => (before, self.scope),
         };
         let global;
-        let layout = if scope == Scope::Global && self.only_auto_arrange_dirty() && self.scope == Scope::Worktree {
+        let layout = if scope == Scope::Global && only_auto && self.scope == Scope::Worktree {
             // Do not promote the worktree layout just to save the global switch.
             global = Layout { new_tabs: draft_auto, ..expected.0.clone() };
             &global
@@ -547,17 +567,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         } else {
             (store.save_offline_draft(layout, expected, scope, self.root.as_deref())?, None)
         };
-        let result =
-            self.finish_layout_save(saved, scope, (scope == Scope::Worktree && auto_changed).then_some(draft_auto));
-        Ok(result.and_then(|message| warning.map_or(Ok(message), Err)))
+        let remaining_auto = (scope == Scope::Worktree && auto_changed).then_some(draft_auto);
+        let result = self.finish_layout_save(saved, remaining_auto).and_then(|()| warning.map_or(Ok(()), Err));
+        Ok(result.map(|()| self.layout_save_feedback(scope, integrate_rex, only_auto, auto_changed)))
     }
 
-    fn finish_layout_save(
-        &mut self,
-        saved: Saved,
-        scope: Scope,
-        remaining_auto: Option<bool>,
-    ) -> Result<&'static str, &'static str> {
+    fn finish_layout_save(&mut self, saved: Saved, remaining_auto: Option<bool>) -> Result<(), &'static str> {
         if let Err(why) = self.reload_layout() {
             self.saved = None;
             return Err(why);
@@ -579,15 +594,66 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Err("Saved, but the layout listener did not start. Open Health to repair it.")
             }
             Saved::ListenerDidNotStop => Err("Saved, but the layout listener did not stop. Open Health to repair it."),
-            Saved::Ready if remaining_auto.is_some() => {
-                Ok("Saved this worktree's layout. Save globally to change auto-arrange.")
-            }
-            Saved::Ready if scope == Scope::Worktree => Ok("Saved this worktree's layout."),
-            Saved::Ready if self.scope == Scope::Worktree => {
-                Ok("Saved the global default. This worktree still uses its own layout.")
-            }
-            Saved::Ready => Ok("Saved the global default."),
+            Saved::Ready => Ok(()),
         }
+    }
+
+    fn layout_save_feedback(
+        &self,
+        scope: Scope,
+        integrate_rex: bool,
+        only_auto: bool,
+        auto_changed: bool,
+    ) -> Cow<'static, str> {
+        let auto_effect = if self.layout.new_tabs {
+            "New tabs will be arranged automatically."
+        } else {
+            "New tabs won't be arranged automatically."
+        };
+        if only_auto && scope == Scope::Global {
+            return format!("Saved global auto-arrange. {auto_effect}").into();
+        }
+        let mut message = match (scope, self.scope, integrate_rex) {
+            (Scope::Worktree, _, _) => {
+                let worktree = self.worktree_subject("this worktree");
+                let effect = if auto_changed {
+                    "Auto-arrange still needs a global save."
+                } else if integrate_rex {
+                    "Used when arranging its tabs."
+                } else {
+                    "Rex integration unchanged."
+                };
+                format!("Saved layout for {worktree}. {effect}").into()
+            }
+            (Scope::Global, Scope::Worktree, _) => {
+                let worktree = self.worktree_subject("This worktree");
+                format!("Saved the global default. {worktree} keeps its layout.").into()
+            }
+            (Scope::Global, _, true) => {
+                Cow::Borrowed("Saved the global default. Used when arranging tabs without an override.")
+            }
+            (Scope::Global, _, false) => Cow::Borrowed("Saved the global default layout. Rex integration unchanged."),
+        };
+        if scope == Scope::Global && auto_changed {
+            let message = message.to_mut();
+            message.push(' ');
+            message.push_str(auto_effect);
+        }
+        message
+    }
+
+    fn worktree_name(&self) -> Option<&str> {
+        let name = self.root.as_deref()?.file_name()?.to_str()?;
+        // Do not let a directory name inject control characters or reorder its status text.
+        (!name.chars().any(|ch| {
+            ch.is_control()
+                || matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        }))
+        .then_some(name)
+    }
+
+    fn worktree_subject(&self, fallback: &'static str) -> WorktreeName<'_> {
+        WorktreeName(self.worktree_name(), fallback)
     }
 
     fn reload_prefs(&mut self) -> Result<(), &'static str> {
@@ -599,37 +665,63 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         Ok(())
     }
 
-    fn persist_prefs(&self, scope: Scope) -> Result<(), &'static str> {
+    fn persist_prefs(&mut self, scope: Scope) -> Result<PreferenceSave, &'static str> {
         let snapshot = self.saved_prefs.as_ref().ok_or(PREFS_SAVE)?;
+        let before = snapshot.prefs;
         snapshot
             .save(self.prefs, &self.store()?.config, self.root.as_deref(), scope == Scope::Worktree)
-            .map_err(|error| prefs_write_error(error, PREFS_SAVE))
+            .map_err(|error| prefs_write_error(error, PREFS_SAVE))?;
+        Ok(self.reload_prefs().map(|()| self.preference_feedback(before, PreferenceChange::Save(scope))))
     }
 
-    fn clear_prefs_override(&self) -> Result<(), &'static str> {
+    fn inherit_prefs(&mut self) -> Result<PreferenceSave, &'static str> {
         let snapshot = self.saved_prefs.as_ref().ok_or(PREFS_INHERIT)?;
+        let before = snapshot.prefs;
         let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
-        snapshot.inherit(&self.store()?.config, root).map_err(|error| prefs_write_error(error, PREFS_INHERIT))
+        snapshot.inherit(&self.store()?.config, root).map_err(|error| prefs_write_error(error, PREFS_INHERIT))?;
+        Ok(self.reload_prefs().map(|()| self.preference_feedback(before, PreferenceChange::Inherit)))
     }
 
-    fn save_prefs(&mut self, scope: Scope) -> Result<&'static str, &'static str> {
-        self.persist_prefs(scope)?;
-        self.reload_prefs()?;
+    fn preference_feedback(&self, before: Preferences, change: PreferenceChange) -> PreferenceFeedback {
+        let titles_changed = before.tab_titles != self.prefs.tab_titles;
+        let reopen = (Preferences { tab_titles: self.prefs.tab_titles, ..before }) != self.prefs;
+        let effect = if reopen {
+            REOPEN_PANES
+        } else if titles_changed {
+            "Milo uses the title setting when naming Rex tabs."
+        } else {
+            "Pane behavior is unchanged."
+        };
+        let text = match change {
+            PreferenceChange::Save(Scope::Global) if before == self.prefs && self.prefs_scope() == Source::Worktree => {
+                let worktree = self.worktree_subject("This worktree");
+                format!("Saved global pane preferences. {worktree} keeps its preferences.")
+            }
+            PreferenceChange::Save(Scope::Global) => format!("Saved global pane preferences. {effect}"),
+            PreferenceChange::Save(Scope::Worktree) => {
+                let worktree = self.worktree_subject("this worktree");
+                format!("Saved pane preferences for {worktree}. {effect}")
+            }
+            PreferenceChange::Inherit => {
+                let worktree = self.worktree_subject("This worktree");
+                format!("{worktree} now uses global pane preferences. {effect}")
+            }
+        };
+        PreferenceFeedback { text: text.into(), reopen }
+    }
+
+    fn save_prefs(&mut self, scope: Scope) -> SaveNotice {
+        let message = if self.prefs_dirty() { self.persist_prefs(scope)??.text } else { NO_PREFS_CHANGES.into() };
         if self.exit_from.is_none() {
             self.back();
         }
-        Ok(match (scope, self.prefs_scope()) {
-            (Scope::Worktree, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
-            (Scope::Global, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
-            (Scope::Global, _) => "Saved global pane preferences. Reopen panes to apply.",
-        })
+        Ok(message)
     }
 
-    fn use_global_prefs(&mut self) -> Result<&'static str, &'static str> {
-        self.clear_prefs_override()?;
-        self.reload_prefs()?;
+    fn use_global_prefs(&mut self) -> SaveNotice {
+        let feedback = self.inherit_prefs()??;
         self.back();
-        Ok("This worktree now uses global pane preferences. Reopen panes to apply.")
+        Ok(feedback.text)
     }
 
     fn change_pref(&mut self, row: Row) {
@@ -706,7 +798,15 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.store()?.save(None, Some(self.show_limits), &self.run)?;
         self.claude = self.store()?.claude();
         self.show_limits = self.claude == Claude::On;
-        Ok("Saved Claude Code choices.")
+        self.claude_save_feedback()
+    }
+
+    fn claude_save_feedback(&self) -> Result<&'static str, &'static str> {
+        match self.claude {
+            Claude::On => Ok("Saved Claude Code account settings. Milo's status line is enabled."),
+            Claude::Off => Ok("Saved Claude Code account settings. Milo's status line is disabled."),
+            _ => Err("Saved Claude Code account settings, but could not confirm Milo's status line."),
+        }
     }
 
     fn change_menu_app(&mut self, action: MenuAction) {
@@ -715,29 +815,28 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.menu_installed = menubar::installed();
         let row = if !install && self.menu_installed == Some(true) { Row::RemoveMenuBar } else { Row::MenuBar };
         self.select_panel(Panel::Workflow, Some(row));
-        self.report_text(
-            result
-                .map(|message| {
-                    if install { Cow::Borrowed("Milo is installed and open.") } else { Cow::Owned(message) }
-                })
-                .map_err(|why| Cow::Owned(format!("Milo: {why}"))),
-        );
+        self.report_text(result.map(Cow::Owned).map_err(|why| Cow::Owned(format!("Milo: {why}"))));
     }
 
-    fn use_global(&mut self) -> Result<&'static str, &'static str> {
+    fn use_global(&mut self) -> SaveNotice {
+        let message = self.inherit_layout()??;
+        self.back();
+        Ok(message)
+    }
+
+    fn inherit_layout(&mut self) -> Result<SaveNotice, &'static str> {
         let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
         let saved = self.saved.as_ref().ok_or("Reopen Settings before changing the layout.")?;
         self.store()?.inherit_draft(root, saved)?;
         let auto_arrange = self.auto_arrange_dirty().then_some(self.layout.new_tabs);
         if let Err(why) = self.reload_layout() {
             self.saved = None;
-            return Err(why);
+            return Ok(Err(why));
         }
         if let Some(auto_arrange) = auto_arrange {
             self.layout.new_tabs = auto_arrange;
         }
-        self.back();
-        Ok("This worktree now uses the global default.")
+        Ok(Ok(format!("{} now uses the global default layout.", self.worktree_subject("This worktree")).into()))
     }
 
     fn preset(&mut self, tree: bool) {
@@ -831,9 +930,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             return After::Ignored;
         }
         let result = match row {
-            Row::Capture => self.capture(),
-            Row::Undo => self.undo(),
-            Row::SaveClaude => self.save_claude(),
+            Row::Capture => self.capture().map(Cow::Borrowed),
+            Row::Undo => self.undo().map(Cow::Borrowed),
+            Row::SaveClaude => self.save_claude().map(Cow::Borrowed),
             Row::MenuBar if self.menu_installed.is_some() => {
                 self.change_menu_app(MenuAction::Install);
                 return After::Stay;
@@ -928,8 +1027,19 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 return After::Stay;
             }
         };
-        self.report(result);
+        self.report_text(result.map_err(Cow::Borrowed));
         After::Stay
+    }
+}
+
+struct WorktreeName<'a>(Option<&'a str>, &'static str);
+
+impl std::fmt::Display for WorktreeName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(name) => write!(f, "“{name}”"),
+            None => f.write_str(self.1),
+        }
     }
 }
 

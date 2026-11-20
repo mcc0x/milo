@@ -239,6 +239,7 @@ h1, h2, h3, p, figure { margin: 0; }
 }
 .session-info { min-width: 0; display: grid; }
 .session-info .connection { font-size: .68rem; color: var(--muted); }
+.reopen-panes { font-size: .75rem; font-weight: 620; line-height: 1.3; overflow-wrap: anywhere; }
 .actionbar img { flex: none; }
 .context-worktree { font-family: var(--mono); }
 #save-groups h3 { margin: 1rem 0 .4rem; font-size: .9rem; }

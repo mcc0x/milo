@@ -20,6 +20,7 @@ let ended = false;
 let connected = false;
 let localError = '';
 let operationWarning = '';
+let dismissedReopen;
 let confirmAction;
 let warned = false;
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
@@ -344,6 +345,12 @@ function updateChrome() {
     warned = needsWarning;
   }
   if (!state) return;
+  const reopen = state.reopen_panes;
+  if (reopen && (numericDrafts.size || queue.some(item => item.action === 'set'))) dismissedReopen = reopen.version;
+  const reopenNote = byId('reopen-panes');
+  const instruction = reopen && reopen.version !== dismissedReopen ? reopen.text : '';
+  reopenNote.hidden = !instruction;
+  if (reopenNote.textContent !== instruction) reopenNote.textContent = instruction;
   const error = localError || operationWarning;
   byId('error-box').hidden = !error;
   if (byId('error').textContent !== error) byId('error').textContent = error;

@@ -207,6 +207,8 @@ The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to
 
 Layout edits stay in a draft until you save. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default. Appearance and workflow use the same preference files as terminal Settings; Claude Code choices apply to the active profile. Outside Rex you can still edit and save settings.
 
+After saving, the confirmation names the destination: global defaults, the current worktree, or the active Claude profile. If open panes still use the old preferences, the browser keeps **Reopen panes to apply** in the footer after the confirmation fades. Editing again clears the reminder.
+
 Terminal Settings and the browser editor check for intervening changes before saving preferences or removing a worktree override. If another editor saved first, reopen the settings and review the current values rather than overwriting them. In terminal Settings, save or discard layout and Claude drafts before repairing or removing integrations.
 
 In **Health**, run a check of saved settings and the live layout. If the original Rex tab is no longer available, Health warns unless it finds a more serious issue. Saving settings or changing the live layout clears the old result; run the check again for an updated verdict.

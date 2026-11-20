@@ -274,7 +274,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let end = s.h - 1;
         let Some((text, style)) = self.message.as_ref() else { return end };
         let width = s.w.saturating_sub(2).max(1);
-        let lines = wrap(text, width).take((s.h / 3).min(end.saturating_sub(2)));
+        // Leave room for both choices when a successful save opened the next scope prompt.
+        let minimum = if self.panel.modal() && *style == FAINT { 3 } else { 2 };
+        let lines = wrap(text, width).take((s.h / 3).min(end.saturating_sub(minimum)));
         let top = end - lines.clone().count();
         for (i, line) in lines.enumerate() {
             s.put(1, top + i, width, line, *style);
@@ -328,9 +330,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             let at = at + used + 2;
             let scoped_to_worktree = matches!(self.panel, Panel::Layout | Panel::Tune) && self.scope == Scope::Worktree
                 || matches!(self.panel, Panel::Appearance | Panel::Workflow) && self.prefs_scope() == Source::Worktree;
-            if scoped_to_worktree
-                && let Some(name) = self.root.as_deref().and_then(|root| root.file_name()).and_then(OsStr::to_str)
-            {
+            if scoped_to_worktree && let Some(name) = self.worktree_name() {
                 s.put_fit(at, y, s.w.saturating_sub(at + 1), name, FAINT);
             }
         }
@@ -358,7 +358,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Save(SaveKind::Layout) => {
                 "On save: install or update Milo's Rex actions. Auto-arrange changes only with a global save."
             }
-            Panel::Save(_) => "On save: remember these appearance and workflow choices. Reopen Milo panes to apply.",
+            Panel::Save(_) => "Save these appearance and workflow choices at the selected scope.",
             Panel::Confirm(Confirm::UseGlobal) => {
                 "Remove this worktree's saved layout override and discard its pane arrangement draft."
             }
