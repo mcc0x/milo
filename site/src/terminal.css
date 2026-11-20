@@ -81,11 +81,15 @@
 .caption[data-tone='omp'] strong, .caption[data-tone='history'] strong { color: #594276; }
 .caption[data-tone='usage'] strong, .caption[data-tone='reader'] strong { color: #20584e; }
 
-.demo-panes:not([hidden]) {
-  display: flex;
+.demo-panes {
   flex-wrap: wrap;
   gap: .25rem;
   margin-block-end: .45rem;
+}
+.demo-panes:not([hidden]) { display: flex; }
+/* The picker's place is kept while the script that shows it loads. */
+@media (scripting: enabled) and (prefers-reduced-motion: reduce) and (max-width: 45rem) {
+  .demo-panes[hidden] { display: flex; visibility: hidden; }
 }
 .demo-panes button {
   flex: 1 0 auto;
@@ -202,8 +206,16 @@
   color: var(--term-muted);
   text-align: center;
 }
+/* The id outranks the phone rules that choose which pane to show, so the
+   window is the same height before and after the script draws it. */
 .terminal[data-ready] .demo-fallback,
-.terminal:not([data-ready]) .terminal-panes > :not(.demo-fallback) { display: none; }
+#demo:not([data-ready]) .terminal-panes > :not(.demo-fallback) { display: none; }
+/* The page is painted before its script arrives. Say that the preview needs
+   JavaScript only where there is none, or when the script is long overdue. */
+@media (scripting: enabled) {
+  .terminal:not([data-ready]) .demo-fallback { animation: fallback-overdue 0s 5s backwards; }
+}
+@keyframes fallback-overdue { from { visibility: hidden; } }
 .terminal[data-expanded] .terminal-panes { --usage-extra: 3rem; }
 .terminal:not([data-still]) .terminal-panes {
   transition: --usage-extra .62s cubic-bezier(.25, .7, .25, 1);
