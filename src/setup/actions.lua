@@ -22,6 +22,7 @@ end
 local errors = {
   mixed = "Milo panes must share one side rail, separate from other panes.",
   no_rail = "Add Milo panes in a side rail before remembering this layout.",
+  no_project = "Open a shell in a Git project first.",
   no_shell = "Focus the shell Milo should use, then try again.",
   no_tab = "Could not find this Rex tab.",
   zoomed = "Unzoom the tab first.",
@@ -423,6 +424,55 @@ if ... == "listener" then
   end
 
   local memory = { snapshot = snapshot, directories = directories, save = save }
+
+  -- Tab titles come from process names and directories only. A terminal's
+  -- title, screen and status text can hold a prompt, so none of them is read.
+  local agents = { claude = true, codex = true, omp = true }
+  local function agent_of(process)
+    for _, field in ipairs{ "name", "argv0", "invoked_path" } do
+      local value = process and process[field]
+      local name = type(value) == "string" and value:match("[^/]+$")
+      if name and agents[name] then return name end
+    end
+  end
+
+  local function pane_facts(process)
+    if not process then return {} end
+    local foreground, child = process.foreground, process.child
+    local agent = agent_of(foreground)
+    for _, parent in ipairs(process.ancestors or {}) do agent = agent or agent_of(parent) end
+    local cwd = shell_cwd(process) or foreground and foreground.cwd or child and child.cwd
+    if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then cwd = nil end
+    return { cwd = cwd, agent = agent or agent_of(child) }
+  end
+
+  local function title_exec(argv)
+    local result = profile_exec(argv, 3)
+    return result and result.ok and result.stdout
+  end
+
+  memory.titles = {
+    facts = pane_facts,
+    -- The label a tab should show, where "" is Rex's own. Nil if Milo could not say.
+    ask = function(cwd, agent)
+      local reply = title_exec{ milo, "tab-title", "title", cwd, agent }
+      return reply and reply:match("^=([^\r\n]*)")
+    end,
+    -- The titles Milo set and still stands by, by window ID. They outlive this listener.
+    owned = function()
+      local claims = {}
+      for id, title in (title_exec{ milo, "tab-title", "owned" } or ""):gmatch("(window:[%x-]+)\t([^\n]+)") do
+        claims[id] = title
+      end
+      return claims
+    end,
+    claim = function(window_id, title) title_exec{ milo, "tab-title", "claim", window_id, title } end,
+    forget = function(ids)
+      local argv = { milo, "tab-title", "forget" }
+      for _, id in ipairs(ids) do argv[#argv + 1] = id end
+      title_exec(argv)
+    end,
+  }
   if arrange_new_tabs then
     local function uses_rows(selected)
       local wanted = selected.wanted
@@ -696,6 +746,29 @@ rex.action{ name = "milo_reset_layout", title = "Milo: Reset Saved Layout…", a
   run = function(ctx, args) return remember(ctx, args or {}, true) end }
 rex.action{ name = "milo_peek_outline", title = "Milo: Peek Outline", run = function(ctx) peek(ctx, false) end }
 rex.action{ name = "milo_close_peek", title = "Milo: Dismiss Outline Peek", run = function(ctx) peek(ctx, true) end }
+
+-- The only place Milo names a session, and only one this action has just made.
+local function session_from_project(ctx)
+  local window = tab(ctx)
+  if not window then raise("no_tab") end
+  local _, cwd = anchor(ctx, window, true)
+  if not cwd then raise("no_shell") end
+  local reply = profile_exec({ milo, "tab-title", "name", cwd }, 3)
+  local label, root = (reply and reply.ok and reply.stdout or ""):match("^([^\n]+)\n(/[^\n]*)\n$")
+  if not label then raise("no_project") end
+  local made, err = rex.call("session.create", { label = label, initial_windows = {
+    { layout = rex.layout.block{ flavor = terminal .. ".shell", options = { cwd = root } } },
+  } })
+  if not made or not made.session_id then raise(err or "Rex could not create the session.") end
+  -- Show it in the app the action was chosen in. From the CLI no app chose
+  -- it, and Rex reports an undelivered client action as the action failing.
+  if ctx.origin == "palette" or ctx.origin == "key" then
+    pcall(function() rex.client.queue("session.select", { session_id = made.session_id }) end)
+  end
+  return "Created the " .. label .. " session."
+end
+rex.action{ name = "milo_session_from_project", title = "Milo: New Session from This Project",
+  run = session_from_project }
 rex.action{
   name = "milo_close", title = "Milo: Close Panes in This Tab",
   run = function(ctx)

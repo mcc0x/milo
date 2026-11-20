@@ -311,8 +311,13 @@ impl Drop for ShellObserver {
 
 /// Use real block IDs, never CLI labels, positions or suffixes.
 fn exact_block(id: &OsStr) -> Option<&str> {
+    exact_id(id, "block:")
+}
+
+/// A whole Rex ID of the given kind, such as `window:` followed by its UUID.
+pub(crate) fn exact_id<'a>(id: &'a OsStr, kind: &str) -> Option<&'a str> {
     let id = id.to_str()?;
-    let suffix = id.strip_prefix("block:")?;
+    let suffix = id.strip_prefix(kind)?;
     (suffix.len() == 36 && suffix.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then_some(id)
 }
 

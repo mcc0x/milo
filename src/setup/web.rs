@@ -201,7 +201,7 @@ impl Editor {
             "\"layout\":{{\"panes\":{{\"outline\":{},\"history\":{},\"usage\":{}}},\"side\":\"{}\",\"width\":{},",
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
             "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{}}},",
-            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{}}},",
+            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
             "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"auto_arrange\":{}}},",
@@ -212,7 +212,7 @@ impl Editor {
             layout.usage_rows.parse::<u32>().unwrap_or(super::layout::DEFAULT_USAGE_ROWS),
             Optional(layout.geometry.shares.map(Ratios)), layout.new_tabs,
             icons, prefs.static_marks, prefs.text_git_marks, prefs.usage_large_figures,
-            project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new,
+            project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
             Optional(self.doctor.as_ref()),
@@ -519,6 +519,7 @@ enum Edit {
     FollowActivity(bool),
     ChangesOnly(bool),
     HistoryFollowNew(bool),
+    TabTitles(bool),
     ClaudeLimits(bool),
 }
 
@@ -566,6 +567,7 @@ impl Edit {
             "workflow.follow_activity" => Self::FollowActivity(value.boolean()?),
             "workflow.changes_only" => Self::ChangesOnly(value.boolean()?),
             "workflow.history_follow_new" => Self::HistoryFollowNew(value.boolean()?),
+            "workflow.tab_titles" => Self::TabTitles(value.boolean()?),
             "account.claude_limits" => Self::ClaudeLimits(value.boolean()?),
             field => Self::Pane(pane_named(field.strip_prefix("layout.panes.")?)?, value.boolean()?),
         })
@@ -609,6 +611,7 @@ impl Edit {
             Self::FollowActivity(on) => prefs.follow_activity = on,
             Self::ChangesOnly(on) => prefs.changes_only = on,
             Self::HistoryFollowNew(on) => prefs.history_follow_new = on,
+            Self::TabTitles(on) => prefs.tab_titles = on,
             Self::ClaudeLimits(on) => setup.show_limits = on,
         }
     }

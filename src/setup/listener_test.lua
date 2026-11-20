@@ -2,14 +2,40 @@
 local handlers, timers, splits, windows, processes = {}, {}, {}, {}, {}
 local saves, revision = {}, 1
 local measured = { rows = 50, owner = "app", desired = {{ client_id = "app", rows = 50 }} }
-local sizes = {}
+local sizes, process_reads = {}, 0
 local function terminal(method, args)
   assert(args.session_id == "project")
   if method == "size" then return sizes[args.block_id] or measured end
   assert(method == "process")
+  process_reads = process_reads + 1
   return processes[args.block_id]
 end
 local remembered, on_profile, executable, attached
+-- A stand-in for `milo tab-title`, which names a project from its directory.
+local titling = { on = false, claims = {}, asks = 0, forgotten = {}, relabels = {},
+  names = { ["/my project"] = "project", ["/other"] = "other/feature" } }
+local function tab_title(argv)
+  if argv[3] == "owned" then
+    local lines = {}
+    for id, title in pairs(titling.claims) do lines[#lines + 1] = id .. "\t" .. title .. "\n" end
+    return { ok = true, stdout = table.concat(lines) }
+  elseif argv[3] == "forget" then
+    if titling.forgetting then titling.forgetting() end
+    for i = 4, #argv do titling.claims[argv[i]], titling.forgotten[argv[i]] = nil, true end
+    return { ok = true, stdout = "" }
+  elseif argv[3] == "claim" then
+    assert(#argv == 5 and argv[5] ~= "")
+    titling.claims[argv[4]], titling.claimed = argv[5], (titling.claimed or 0) + 1
+    return { ok = true, stdout = "" }
+  end
+  assert(argv[3] == "title" and #argv <= 5)
+  titling.asks = titling.asks + 1
+  if titling.during then titling.during() end
+  if titling.broken then return { ok = false, stdout = "" } end
+  local title = titling.on and titling.names[argv[4]] or ""
+  if title ~= "" and argv[5] then title = title .. " · " .. argv[5] end
+  return { ok = true, stdout = "=" .. title .. "\n" }
+end
 rex = {
   on = function(event, fn) handlers[event] = fn end,
   sleep = function() error("a starting shell held up the listener") end,
@@ -31,6 +57,21 @@ rex = {
       return { windows = windows, revision = revision }
     end,
     new_split = function(args) table.insert(splits, args); return {} end,
+    set_window_label = function(args)
+      assert(args.session_id == "project")
+      if args.label == titling.refused then
+        titling.refusals = (titling.refusals or 0) + 1
+        return nil, "bad_request"
+      end
+      for _, window in ipairs(windows) do
+        if window.window_id == args.window_id then
+          window.label = args.label ~= "" and args.label or "Window " .. args.window_id:sub(-8)
+          titling.relabels[#titling.relabels + 1] = window.label
+          return { revision = revision }
+        end
+      end
+    end,
+    set_label = function() error("the listener must never name a session") end,
   },
   call = function(method, args)
     if method == "session.list" then
@@ -41,6 +82,7 @@ rex = {
   end,
   exec = function(argv)
     executable = argv[1]
+    if argv[2] == "tab-title" then return tab_title(argv) end
     if argv[3] == "resize" then
       assert(argv[2] == "layout-profile" and argv[6] == "/my project" and #argv == 6)
       saves[#saves + 1], remembered = argv, argv[5]
@@ -319,3 +361,187 @@ if arg[2] then
   assert(#saves == 2 and saves[2][5]:match("^v1 l 0%.360000 "))
   loadfile = original_loadfile
 end
+
+-- Tab titles. The stand-in terminal answers only `size` and `process`, so a
+-- listener that read a terminal's title, screen or status would fail here.
+local function titled_tab(n, label, ...)
+  local window = tab(string.format("window:00000000-0000-0000-0000-%012x", n), ...)
+  window.label = label or string.format("Window %08x", n)
+  return window
+end
+local function shell_in(cwd, agent)
+  local zsh = { argv0 = "-zsh", name = "zsh", cwd = cwd }
+  if not agent then return { foreground = zsh } end
+  return { foreground = { argv0 = agent, name = agent, cwd = cwd }, ancestors = { zsh } }
+end
+local function front(block, process)
+  processes[block] = process
+  handlers["terminal.process_changed"]({ session_id = "project", block_id = block },
+    { block_id = block, foreground = process.foreground, ancestors = process.ancestors })
+end
+local function moved(block, cwd)
+  processes[block] = shell_in(cwd)
+  emit("terminal.pwd_changed", block)
+end
+
+-- Until titles are chosen, Milo asks once and leaves the tab as Rex labelled it.
+local one = titled_tab(1, nil, "one")
+windows, processes, timers, splits = { one }, { one = shell_in("/my project") }, {}, {}
+boot(loadfile(arg[1]))
+assert(titling.asks == 1 and #titling.relabels == 0 and not next(titling.claims))
+
+-- Once chosen, the title follows the project and the agent in front, and
+-- nothing is asked again while both stay the same. A process change carries
+-- what Milo needs, so the terminal is not asked about it either.
+titling.on = true
+local reads = process_reads
+front("one", shell_in("/my project", "claude"))
+assert(one.label == "project · claude" and titling.claims[one.window_id] == one.label)
+changed()
+front("one", shell_in("/my project", "claude"))
+assert(titling.asks == 2 and #titling.relabels == 1 and titling.claimed == 1 and process_reads == reads)
+front("one", shell_in("/my project"))
+assert(one.label == "project")
+moved("one", "/other")
+assert(one.label == "other/feature")
+
+-- Outside a project the tab gets Rex's label back and Milo remembers nothing.
+moved("one", "/tmp")
+assert(one.label == "Window 00000001" and not titling.claims[one.window_id])
+moved("one", "/my project")
+changed()
+assert(one.label == "project")
+
+-- A name chosen by someone else ends Milo's part: no title, no question.
+one.label = "notes"
+changed()
+assert(titling.forgotten[one.window_id] and not titling.claims[one.window_id])
+local asks = titling.asks
+front("one", shell_in("/my project", "codex"))
+moved("one", "/other")
+assert(one.label == "notes" and titling.asks == asks)
+
+-- Clearing that name hands the tab back.
+one.label = "Window 00000001"
+changed()
+assert(one.label == "other/feature")
+
+-- If Milo cannot answer, the title it set earlier stays.
+titling.broken = true
+moved("one", "/tmp")
+assert(one.label == "other/feature")
+titling.broken = nil
+
+-- A rename that lands while Milo is answering is kept.
+titling.during = function() titling.during, one.label = nil, "mine" end
+moved("one", "/my project")
+assert(one.label == "mine" and not titling.claims[one.window_id])
+one.label = "Window 00000001"
+changed()
+front("one", shell_in("/my project", "omp"))
+assert(one.label == "project · omp")
+
+-- So is a name chosen while Milo is busy with another tab, though the view
+-- Milo is working from still shows that tab without one.
+local busy = titled_tab(8, nil, "busy")
+processes.busy, windows[2] = shell_in("/other"), busy
+changed()
+assert(busy.label == "other/feature")
+one.label, busy.label = "build", "Window 00000008"
+titling.forgetting = function() titling.forgetting, busy.label = nil, "mine" end
+changed()
+assert(one.label == "build" and busy.label == "mine")
+one.label, windows[2] = "Window 00000001", nil
+changed()
+assert(one.label == "project · omp")
+
+-- A tab that closes while Milo is answering is left as it was.
+titling.during, titling.relabels = function() titling.during, windows = nil, {} end, {}
+moved("one", "/other")
+windows = { one }
+assert(#titling.relabels == 0 and titling.claims[one.window_id] == "project · omp")
+
+-- A moment without a known directory does not take the title away.
+processes.one = { foreground = { argv0 = "login", name = "login" } }
+emit("terminal.process_changed", "one")
+assert(one.label == "project · omp")
+
+-- A label Rex refuses is tried once, not on every later event.
+titling.refused = "other/feature"
+moved("one", "/other")
+changed()
+changed()
+assert(one.label == "project · omp" and titling.refusals == 1 and titling.claims[one.window_id] == one.label)
+front("one", shell_in("/other", "omp"))
+assert(one.label == "other/feature · omp")
+
+-- An agent in any shell of the tab names its own project. Milo's panes are not shells.
+local two = titled_tab(2, nil, "left", "right", "rail")
+two.layers[1].blocks[3].label = "milo:outline"
+processes.left, processes.right = shell_in("/tmp"), shell_in("/other", "claude")
+processes.rail = shell_in("/my project", "codex")
+windows[2] = two
+changed()
+assert(two.label == "other/feature · claude")
+
+-- A shell moved to another tab takes its agent along, and is read afresh on its return.
+local three = titled_tab(7, nil, "spare")
+processes.spare = shell_in("/tmp")
+table.insert(three.layers[1].blocks, table.remove(two.layers[1].blocks, 2))
+windows[3] = three
+changed()
+assert(two.label == "Window 00000002" and three.label == "other/feature · claude")
+front("right", shell_in("/other"))
+assert(three.label == "Window 00000007")
+table.insert(two.layers[1].blocks, 2, table.remove(three.layers[1].blocks, 2))
+changed()
+assert(two.label == "Window 00000002")
+front("right", shell_in("/other", "codex"))
+assert(two.label == "other/feature · codex")
+front("right", shell_in("/other"))
+windows[3] = nil
+changed()
+assert(two.label == "Window 00000002")
+
+-- Closing a tab forgets the title Milo gave it, and asks nothing about one it never titled.
+windows[2], titling.forgotten = nil, {}
+changed()
+assert(not next(titling.forgotten))
+processes.right = shell_in("/other", "claude")
+windows[2] = two
+changed()
+assert(two.label == "other/feature · claude")
+windows[2] = nil
+changed()
+assert(titling.forgotten[two.window_id] and titling.claims[one.window_id])
+
+-- A new session's first tab is titled too, though no view event announces it.
+local first = titled_tab(6, nil, "first")
+windows, processes = { first }, { first = shell_in("/my project") }
+handlers.session_destroyed({}, { session_id = "project" })
+handlers.session_created({}, { session = { session_id = "project" } })
+assert(first.label == "project")
+
+-- A restarted listener goes on titling only the tabs that still carry the
+-- title Milo set. A changed one is left alone, like one Milo never titled.
+local kept, renamed, foreign = titled_tab(3, "project", "kept"), titled_tab(4, "renamed", "renamed"),
+  titled_tab(5, "project", "foreign")
+titling.claims = { [kept.window_id] = "project", [renamed.window_id] = "project" }
+windows, titling.relabels, asks = { kept, renamed, foreign }, {}, titling.asks
+processes = { kept = shell_in("/my project", "omp"), renamed = shell_in("/my project", "omp"),
+  foreign = shell_in("/my project", "omp") }
+boot(loadfile(arg[1]))
+assert(kept.label == "project · omp" and renamed.label == "renamed" and foreign.label == "project")
+assert(#titling.relabels == 1 and titling.asks == asks + 1 and not titling.claims[renamed.window_id])
+
+-- Turning titles off gives a tab Rex's label back the next time it changes.
+titling.on = false
+front("kept", shell_in("/my project"))
+assert(kept.label == "Window 00000003" and not next(titling.claims))
+
+-- A destroyed session takes its remembered titles with it.
+titling.on = true
+front("kept", shell_in("/my project", "claude"))
+assert(titling.claims[kept.window_id] == "project · claude")
+handlers.session_destroyed({}, { session_id = "project" })
+assert(not next(titling.claims))

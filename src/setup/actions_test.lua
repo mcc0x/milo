@@ -28,10 +28,12 @@ local ctx = { session_id = "session:1", block_id = shell.block_id }
 local actions, commands, closed, focus, floats, splits = {}, {}, {}, {}, {}, {}
 local sizes, profile_reply = {}, { stdout = "", ok = true }
 local relabeled = {}
+local created, title_reply, create_reply = {}, { ok = true, stdout = "" }, { session_id = "session:new" }
 rex = {
   action = function(action) actions[action.name] = action.run end,
   exec = function(argv)
     commands[#commands + 1] = argv
+    if argv[2] == "tab-title" then return title_reply end
     return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
@@ -44,6 +46,11 @@ rex = {
     elseif name == "block.close" then
       assert(args.keep_last)
       closed[#closed + 1] = args.block_id
+    elseif name == "session.create" then
+      created[#created + 1] = args
+      return create_reply
+    elseif name == "session.set_label" then
+      error("an action renamed a session")
     end
     return {}
   end,
@@ -246,3 +253,65 @@ sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50,
   desired = {{ client_id = "client:one", rows = 50 }} }
 assert(apply(function() return true end) and #splits == split_count + 1)
 near(1 - splits[#splits].layout.ratio, 4 / 50)
+
+-- An agent is recognised by its process name alone, also behind a path or under
+-- a command it started. The project is the shell's directory, not an editor's.
+local facts = listener.titles.facts
+local zsh = { argv0 = "-zsh", name = "zsh", cwd = "/my project" }
+local seen = facts{ foreground = { name = "2.1.0", argv0 = "claude", cwd = "/elsewhere" }, ancestors = { zsh } }
+assert(seen.agent == "claude" and seen.cwd == "/my project")
+assert(facts{ foreground = { name = "node", invoked_path = "/opt/bin/codex", cwd = "/work" } }.agent == "codex")
+seen = facts{ foreground = { name = "git", argv0 = "git", cwd = "/work" },
+  ancestors = { { name = "omp", argv0 = "/bin/omp" }, zsh } }
+assert(seen.agent == "omp" and seen.cwd == "/my project")
+seen = facts{ child = { name = "omp", argv0 = "omp", cwd = "/work" } }
+assert(seen.agent == "omp" and seen.cwd == "/work")
+seen = facts{ foreground = { name = "claude-notes", argv0 = "vim claude", cwd = "relative" } }
+assert(not seen.agent and not seen.cwd and not next(facts(nil)))
+
+-- Milo is asked with a directory and an agent's name. Anything but a title means it could not say.
+title_reply.stdout = "=milo · claude\n"
+assert(listener.titles.ask("/my project", "claude") == "milo · claude")
+argv = commands[#commands]
+assert(argv[2] == "tab-title" and argv[3] == "title" and argv[4] == "/my project" and argv[5] == "claude" and #argv == 5)
+title_reply.stdout = "=\n"
+assert(listener.titles.ask("/tmp") == "" and #commands[#commands] == 4)
+title_reply.stdout = "milo\n"
+assert(listener.titles.ask("/tmp") == nil)
+title_reply.ok, title_reply.stdout = false, "=milo\n"
+assert(not listener.titles.ask("/tmp") and not next(listener.titles.owned()))
+title_reply.ok, title_reply.stdout = true, "window:0a-1\tmilo\nnoise\nwindow:0b-2\tmilo/rex · omp\n"
+local owned = listener.titles.owned()
+assert(owned["window:0a-1"] == "milo" and owned["window:0b-2"] == "milo/rex · omp" and not owned.noise)
+listener.titles.forget{ "window:0a-1", "window:0b-2" }
+argv = commands[#commands]
+assert(argv[3] == "forget" and argv[4] == "window:0a-1" and argv[5] == "window:0b-2" and #argv == 5)
+
+-- The explicit action makes a session named for the shell's project and opened
+-- at its root. The stand-in refuses to rename a session, and the action never asks.
+tiled.layout, tiled.blocks = leaf(shell), { shell }
+title_reply.stdout = "milo/rex-titles\n/work/milo rex\n"
+local shown, app = {}, { session_id = ctx.session_id, block_id = ctx.block_id, client_id = "client:app", origin = "palette" }
+rex.client = { queue = function(name, args) shown[#shown + 1] = { name, args.session_id } end }
+assert(actions.milo_session_from_project(app):match("milo/rex%-titles"))
+argv = commands[#commands]
+assert(argv[2] == "tab-title" and argv[3] == "name" and argv[4] == "/my project" and #argv == 4)
+assert(#created == 1 and created[1].label == "milo/rex-titles" and #created[1].initial_windows == 1)
+local first = created[1].initial_windows[1].layout
+assert(first.flavor == terminal .. ".shell" and first.options.cwd == "/work/milo rex" and not first.options.command)
+assert(#shown == 1 and shown[1][1] == "session.select" and shown[1][2] == "session:new")
+
+-- The CLI is a client too, but not one that can show a session.
+actions.milo_session_from_project{ session_id = ctx.session_id, block_id = ctx.block_id, client_id = "client:cli", origin = "api" }
+assert(#created == 2 and #shown == 1)
+rex.client = { queue = function() error("no client") end }
+actions.milo_session_from_project(app)
+assert(#created == 3)
+
+-- Outside a Git project, or when Rex refuses, the action says so.
+title_reply.ok = false
+ok, why = pcall(actions.milo_session_from_project, ctx)
+assert(not ok and why:match("Git project") and #created == 3)
+title_reply.ok, create_reply = true, nil
+ok, why = pcall(actions.milo_session_from_project, ctx)
+assert(not ok and why:match("could not create"))

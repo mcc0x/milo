@@ -193,6 +193,7 @@ fn report_with_worktree(
             )
             .unwrap();
             writeln!(out, "  Narrow usage: {}", if p.usage_large_figures { "large figures" } else { "text" }).unwrap();
+            writeln!(out, "  Rex tab titles: {}", on(p.tab_titles)).unwrap();
         }
         Err(e) => {
             health.issue("Milo could not read your pane preferences.");
