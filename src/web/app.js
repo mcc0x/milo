@@ -8,6 +8,8 @@ const groupLabels = {layout: 'layout', preferences: 'pane preferences', account:
 const navButtons = [...document.querySelectorAll('[data-page]')];
 const queue = [];
 const numericDrafts = new Map();
+const heldDrafts = new Set();
+let panelPress = false;
 let saveRequested = false;
 let page = 'layout';
 let state;
@@ -97,9 +99,9 @@ function enqueue(action) {
   if (!paused) localError = '';
   const checking = action.action === 'doctor';
   if (checking) byId('health-status').textContent = 'Checking health…';
-  else updateChrome();
   void drain();
   if (checking) render();
+  else updateChrome();
 }
 
 async function api(path, method = 'GET', payload) {
@@ -210,6 +212,7 @@ async function connect(retryEdits = false) {
       localError = 'Reconnected. An edit is still waiting to be applied.';
     }
     byId('editor').hidden = byId('actionbar').hidden = false;
+    byId('operation-status').textContent = operationWarning;
     focusOpenedSettings = document.activeElement === openingMessage;
     byId('opening').hidden = true;
     if (localError) notify(localError, true);
@@ -395,7 +398,9 @@ function render() {
   }
   const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, health: healthView};
   const panel = byId('settings-panel');
+  const openMenu = panel.querySelector('.action-menu[open] > summary')?.id;
   panel.replaceChildren(...views[page]());
+  if (openMenu && byId(openMenu)) byId(openMenu).parentElement.open = true;
   panel.setAttribute('aria-labelledby', panel.querySelector('h2').id);
   updateChrome();
   if (focusId && (!focus.isConnected || (focus.type === 'number' && focus !== document.activeElement))) {
@@ -484,7 +489,11 @@ function setting(field, title, detail, type, options = {}) {
         saveRequested = false;
         updateChrome();
       });
-      control.addEventListener('change', () => applyNumericDraft(field));
+      control.addEventListener('change', () => {
+        // Redrawing the panel under a held pointer would cancel the click on the pressed control.
+        if (panelPress) heldDrafts.add(field);
+        else applyNumericDraft(field);
+      });
       control.addEventListener('keydown', event => {
         if (event.key === 'Enter' && !event.isComposing) {
           event.preventDefault();
@@ -757,8 +766,26 @@ function layoutActions() {
   return actions;
 }
 
+byId('settings-panel').addEventListener('pointerdown', event => {
+  if (event.button === 0) panelPress = true;
+}, {capture: true});
+for (const type of ['pointerup', 'pointercancel', 'contextmenu', 'blur']) {
+  window.addEventListener(type, () => {
+    if (!panelPress) return;
+    // The timer runs after the click that this release dispatches.
+    setTimeout(() => {
+      panelPress = false;
+      for (const field of heldDrafts) applyNumericDraft(field);
+      heldDrafts.clear();
+    });
+  });
+}
 for (const tab of navButtons) {
   tab.addEventListener('click', () => {
+    // An invalid number left behind on Layout would disable Save with no visible reason.
+    if (tab.dataset.page !== page && !applyNumericDrafts()) return;
+    const menu = document.querySelector('.action-menu[open]');
+    if (menu) menu.open = false;
     page = tab.dataset.page;
     render();
     byId('settings-panel').parentElement.scrollTop = 0;

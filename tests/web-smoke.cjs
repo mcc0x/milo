@@ -73,6 +73,32 @@ async function saveNumbers(page) {
   }
 }
 
+async function pressAfterNumberEdit(page) {
+  const field = number(page, 'Rail width');
+  const right = page.getByRole('radio', {name: 'Right', exact: true});
+  await field.fill('');
+  await field.pressSequentially('41');
+  const box = await right.boundingBox();
+  assert(box, 'Rail side is on screen');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // Hold long enough for an eager draft update to redraw the panel under the pointer.
+  await delay(250);
+  await page.mouse.up();
+  await page.getByRole('radio', {name: 'Right', exact: true, checked: true}).waitFor({state: 'attached'});
+  await status(page, dirty).waitFor({state: 'attached'});
+  assert.equal(await field.inputValue(), '41', 'the blurred Rail width reached the draft');
+  console.log('Rail side: the first press after a number edit was not lost');
+
+  await field.fill('');
+  await button(page, 'Appearance').click();
+  assert.equal(await page.getByRole('heading', {name: 'Panes', exact: true}).count(), 1,
+    'an invalid number keeps Layout open');
+  assert(await field.evaluate(input => input === document.activeElement && !input.validity.valid),
+    'the invalid Rail width is focused');
+  console.log('Invalid number: leaving Layout pointed back at the field');
+}
+
 async function rejectStaleDone(context, current, url) {
   const confirmation = dialog(current, 'Close the dashboard?');
   await button(current, 'Done').click();
@@ -146,6 +172,7 @@ async function main() {
       const dev = await page.request.get(new URL('/dev/version', url).href);
       assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
       await saveNumbers(page);
+      await pressAfterNumberEdit(page);
       await page.close();
     });
     await withMilo(binary, cwd, env, async (url, exited) => {
