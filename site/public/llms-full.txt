@@ -176,7 +176,7 @@ Turn on **Title Rex tabs** under **Workflow** to name tabs that nobody has named
 
 Milo titles a tab only while its label is Rex's own, such as `Window 89abcdef`, or the title Milo set last. Rename a tab yourself, in the app or with `rex window rename`, and Milo stops titling it. Clear the name to hand the tab back. Milo remembers the titles it set by Rex window ID in its state folder, so a name you chose is still respected after Rex or Milo's listener restarts.
 
-A change to the setting reaches new tabs at once, and an open tab the next time its shell changes directory or an agent starts or stops in it. Turning titles off gives a tab Rex's label back at that point. Agents are recognised by the name of their program: one started under another name, such as `node`, is not shown.
+New tabs use the current title setting. For an open tab with file-backed preferences, the listener picks up an edit on the next shell or tab-layout event, without polling. Otherwise the title is reconsidered when the directory or foreground agent changes. Turning titles off returns the tab to Rex's label. Agents are recognised by their program name: one started under another name, such as `node`, is not shown.
 
 The listener starts Milo to ask about a directory once, and with titles on once more for each agent that runs there. After that it asks again when your global preferences or that worktree's own have changed, or when a folder outside any project has gained a repository. So with titles off, other tabs in a directory and later visits to it normally start no further process. Milo is asked every time about a directory it cannot vouch for: one outside a project with a folder above it that other users can write to, such as `/tmp`, one reached through a link, or one where Git could not run.
 
@@ -191,6 +191,8 @@ Run `milo web` from the project you want to configure, or choose **Open Web Menu
 The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
 
 Layout edits stay in a draft until you save. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default. Appearance and workflow use the same preference files as terminal Settings; Claude Code choices apply to the active profile. Outside Rex you can still edit and save settings.
+
+Terminal Settings and the browser editor check for intervening changes before saving preferences or removing a worktree override. If another editor saved first, reopen the settings and review the current values rather than overwriting them. In terminal Settings, save or discard layout and Claude drafts before repairing or removing integrations.
 
 In **Health**, run a check of saved settings and the live layout. If the original Rex tab is no longer available, Health warns unless it finds a more serious issue. Saving settings or changing the live layout clears the old result; run the check again for an updated verdict.
 
@@ -259,7 +261,7 @@ Choose **Doctor** in Home or **Read diagnostics** in Settings to check the insta
 - **Another setup is saving:** only one setup can save at a time. Wait for it to finish before retrying.
 - **New shell tabs are not arranged:** enable **Arrange new shell tabs** under **Customize panes**, then save globally. The listener is an account setting, not a per-project switch. `milo doctor` checks whether it is actually running.
 - **After Rex restarts, the sidebar shows shell prompts:** Rex preview.21 restores the panes of a sidebar as shells and does not start Milo in them again. In each tab you want back, run **Milo: Close Panes in This Tab**, then **Milo: Arrange This Tab**. The first closes the three restored shells, so finish anything you started in one of them beforehand; the second builds the sidebar again at the sizes remembered for that worktree. **Arrange This Tab** on its own adds nothing while the restored panes are there, since each pane of the sidebar still exists. Until you rebuild it, dragging a restored sidebar's divider is not remembered, and Doctor compares its sizes without noticing that Milo is not running in it. Milo does not rebuild restored tabs for you, and never types into their shells.
-- **A tab is not titled:** `milo doctor` shows whether **Rex tab titles** is on for this worktree and whether the listener is running. The listener runs while the saved layout has at least one pane or arranges new tabs. A tab that has a name of its own is left alone: clear the name in Rex to let Milo title it. A tab that was open when you turned titles on is titled when its shell next changes directory.
+- **A tab is not titled:** `milo doctor` shows whether **Rex tab titles** is on for this worktree and whether the listener is running. The listener runs while the saved layout has at least one pane or arranges new tabs. A tab with a name of its own is left alone: clear the name in Rex to let Milo title it. For an already-open tab, change shell directories to trigger a fresh title check.
 - **Icons appear as boxes:** choose plain symbols or no icons in setup, or override one launch with `MILO_ICONS=plain` or `MILO_ICONS=off`. Choose a Nerd Font in Rex only if you want one for all of your terminals.
 
 ---
@@ -292,7 +294,7 @@ In narrow History, the wrapped subject uses only the room below a clicked row, s
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
 
-In a plain folder, Outline lists the top level and the folders you expand. It shows a partial-listing warning if those folders contain more than 50,000 entries.
+In a plain folder, Outline lists the top level and the folders you expand. A partial-listing warning means Milo reached the 50,000-entry limit or couldn't read every entry. In both plain folders and Git worktrees, Outline warns and omits names that aren't valid UTF-8 rather than showing a name that could open a different file.
 
 If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.
 
@@ -316,6 +318,8 @@ On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](htt
 For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
 `milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Milo ignores `.` components and repeated slashes in committed file paths, but rejects `..` components. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+
+Committed-file lookup requires a UTF-8 path. A working file with a non-UTF-8 name can still be read directly, without a Git diff.
 
 The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, Lua, Swift, SQL, shell, JSON, YAML and TOML by file extension. It colours a file named `Dockerfile`, `Makefile` or `GNUmakefile` in any letter case, and files ending in `.dockerfile` or `.mk`. Working files and files at a commit are recognised the same way. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
 

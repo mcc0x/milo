@@ -24,7 +24,7 @@ In narrow History, the wrapped subject uses only the room below a clicked row, s
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
-In a plain folder, Outline lists the top level and the folders you expand. It shows a partial-listing warning if those folders contain more than 50,000 entries.
+In a plain folder, Outline lists the top level and the folders you expand. A partial-listing warning means Milo reached the 50,000-entry limit or couldn't read every entry. In both plain folders and Git worktrees, Outline warns and omits names that aren't valid UTF-8 rather than showing a name that could open a different file.
 
 If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.
 
@@ -48,6 +48,8 @@ On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](htt
 For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one floating outline per tab. Close the peek with `Esc` or `q` rather than removing a permanent pane.
 
 `milo view FILE` reads a working file. `milo view FILE --commit ID` reads the version from a commit. For the latter, start at the repository root and use the file's path as it was in that commit. Milo ignores `.` components and repeated slashes in committed file paths, but rejects `..` components. Use a full or abbreviated hexadecimal commit ID, not a branch name or `HEAD`.
+
+Committed-file lookup requires a UTF-8 path. A working file with a non-UTF-8 name can still be read directly, without a Git diff.
 
 The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, Lua, Swift, SQL, shell, JSON, YAML and TOML by file extension. It colours a file named `Dockerfile`, `Makefile` or `GNUmakefile` in any letter case, and files ending in `.dockerfile` or `.mk`. Working files and files at a commit are recognised the same way. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
 
