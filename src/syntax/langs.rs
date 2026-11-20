@@ -12,12 +12,12 @@ const PLAIN: Lang = Lang {
     chars: false,
     directives: false,
     names: true,
-    key_end: None,
+    colon_keys: false,
     spaced_comments: false,
     scalars: false,
     jsx: false,
     attributes: false,
-    table_headers: false,
+    toml_keys: false,
     caseless: false,
     leading_keywords: false,
 };
@@ -290,7 +290,7 @@ static JSON: Lang = Lang {
     quotes: &[DOUBLE],
     constants: &["true", "false", "null"],
     names: false,
-    key_end: Some(b':'),
+    colon_keys: true,
     ..PLAIN
 };
 static YAML: Lang = Lang {
@@ -298,7 +298,7 @@ static YAML: Lang = Lang {
     quotes: &[Quote { multiline: true, ..DOUBLE }, Quote { multiline: true, escape: Escape::Doubled, ..SINGLE }],
     constants: &["true", "false", "null", "yes", "no", "on", "off"],
     names: false,
-    key_end: Some(b':'),
+    colon_keys: true,
     spaced_comments: true,
     scalars: true,
     ..PLAIN
@@ -313,8 +313,7 @@ static TOML: Lang = Lang {
     ],
     constants: &["true", "false"],
     names: false,
-    key_end: Some(b'='),
-    table_headers: true,
+    toml_keys: true,
     ..PLAIN
 };
 
@@ -446,6 +445,41 @@ mod tests {
         for name in unknown.into_iter().chain(["v1.rs/README", "Makefile/notes"]) {
             assert!(for_file(name).is_none(), "{name}");
         }
+    }
+
+    #[test]
+    fn toml_keys_allow_quoted_parts_with_brackets_and_dots() {
+        assert_eq!(
+            one(&TOML, r#"server . "has.dot" . 'quoted' = "value" # note"#),
+            [
+                (r#"server . "has.dot" . 'quoted'"#, Class::Key),
+                (r#""value""#, Class::Str),
+                ("# note", Class::Comment),
+            ]
+        );
+        assert_eq!(
+            one(&TOML, r#" [["has\" ]]" . 'also]']] # note"#),
+            [(r#"[["has\" ]]" . 'also]']]"#, Class::Key), ("# note", Class::Comment)]
+        );
+    }
+
+    #[test]
+    fn swift_raw_escapes_do_not_end_single_or_multiline_strings() {
+        let single = r##"#"escaped \#"# text"#"##;
+        assert_eq!(
+            one(&SWIFT, &format!("{single} + 1")),
+            [(single, Class::Str), ("1", Class::Number)]
+        );
+
+        let mut state = State::Code;
+        pieces(&SWIFT, "#\"\"\"", &mut state);
+        let body = r##"  \#"""# still in the string"##;
+        assert_eq!(pieces(&SWIFT, body, &mut state), [(body, Class::Str)]);
+        assert_eq!(
+            pieces(&SWIFT, "\"\"\"#; return nil", &mut state),
+            [("\"\"\"#", Class::Str), ("return", Class::Keyword), ("nil", Class::Number)]
+        );
+        assert_eq!(state, State::Code);
     }
 
     #[test]

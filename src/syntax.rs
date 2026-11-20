@@ -64,8 +64,8 @@ pub struct Lang {
     directives: bool,
     /// Distinguish names that resemble types, calls and constants.
     names: bool,
-    /// The separator after a field name in a data file, if any.
-    key_end: Option<u8>,
+    /// Recognise colon-separated field names in JSON and YAML.
+    colon_keys: bool,
     /// Start line comments only at the start of a line or after whitespace.
     spaced_comments: bool,
     /// Match quotes and named values only where a YAML value can begin.
@@ -74,8 +74,8 @@ pub struct Lang {
     jsx: bool,
     /// Read PHP's `#[` as an attribute opener rather than a comment.
     attributes: bool,
-    /// Colour bracketed TOML headers at the start of a line as keys.
-    table_headers: bool,
+    /// Recognise TOML dotted keys and table headers, which may contain quoted parts.
+    toml_keys: bool,
     /// Match keywords and constants in any letter case.
     caseless: bool,
     /// Reserve keywords only as the first word of a line, after Make's optional `-`.
@@ -306,8 +306,7 @@ impl Lang {
         let close = string_end(b, i + q.open.len(), q);
         let end = close.unwrap_or(b.len());
         if DRAW {
-            let field =
-                close.is_some() && self.key_end == Some(b':') && b[end..].trim_ascii_start().first() == Some(&b':');
+            let field = close.is_some() && self.colon_keys && b[end..].trim_ascii_start().first() == Some(&b':');
             emit((i, end, if field { Class::Key } else { Class::Str }));
         }
         if close.is_none() && q.multiline {
@@ -378,24 +377,53 @@ impl Lang {
                 return end;
             }
         }
-        if self.table_headers && b.get(indent) == Some(&b'[') {
-            let close = if b.get(indent + 1) == Some(&b'[') { "]]" } else { "]" };
-            if let Some(end) = find_end(b, indent + close.len(), close) {
-                emit((indent, end, Class::Key));
-                return end;
-            }
+        if self.toml_keys && let Some(end) = self.toml_key(b, indent) {
+            emit((indent, end, Class::Key));
+            return end;
         }
-        self.key_end.map_or(0, |sep| Self::leading_field(b, indent, sep, emit))
+        if self.colon_keys { Self::leading_field(b, indent, emit) } else { 0 }
     }
 
-    fn leading_field(b: &[u8], indent: usize, sep: u8, emit: &mut impl FnMut(Span)) -> usize {
+    fn toml_key(&self, b: &[u8], indent: usize) -> Option<usize> {
+        let opener = if b[indent..].starts_with(b"[[") { 2 } else { usize::from(b.get(indent) == Some(&b'[')) };
+        let mut at = indent + opener;
+        loop {
+            at = b.len() - b[at..].trim_ascii_start().len();
+            let end = match b.get(at)? {
+                b'\'' | b'"' => {
+                    let q = self.quotes.iter().find(|q| q.open.as_bytes() == &b[at..at + 1])?;
+                    string_end(b, at + 1, q)?
+                }
+                _ => {
+                    let len = b[at..]
+                        .iter()
+                        .take_while(|&&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                        .count();
+                    if len == 0 {
+                        return None;
+                    }
+                    at + len
+                }
+            };
+            let after = b[end..].trim_ascii_start();
+            if after.starts_with(b".") {
+                at = b.len() - after.len() + 1;
+            } else if opener == 0 {
+                return after.starts_with(b"=").then_some(end);
+            } else {
+                return after.starts_with(&b"]]"[..opener]).then_some(b.len() - after.len() + opener);
+            }
+        }
+    }
+
+    fn leading_field(b: &[u8], indent: usize, emit: &mut impl FnMut(Span)) -> usize {
         // "- name: value" in a list is still a field.
         let start = indent + b[indent..].iter().take_while(|&&c| c == b'-' || c == b' ').count();
         let name =
             b[start..].iter().take_while(|&&c| is_word(c) || matches!(c, b'.' | b'-' | b' ' | b'/' | b'$')).count();
         let end = start + b[start..start + name].trim_ascii_end().len();
-        let after = b[start + name..].first() == Some(&sep);
-        let spaced = sep != b':' || b.get(start + name + 1).is_none_or(u8::is_ascii_whitespace);
+        let after = b[start + name..].first() == Some(&b':');
+        let spaced = b.get(start + name + 1).is_none_or(u8::is_ascii_whitespace);
         if end > start && after && spaced {
             emit((start, end, Class::Key));
             return start + name;

@@ -101,7 +101,7 @@ impl Delimiter {
             }
             Self::Template(template) => template.end(b, 0),
             Self::LuaString(level) | Self::LuaComment(level) => lua_end(b, 0, (*level).into()),
-            Self::SwiftRaw(hashes) => swift_end(b, 0, (*hashes).into()),
+            Self::SwiftRaw(hashes) => swift_end(b, 0, (*hashes).into(), 3),
         }
     }
 }
@@ -135,7 +135,7 @@ fn swift_open(b: &[u8], from: usize) -> Option<(Option<usize>, Option<u8>)> {
         return None;
     }
     // A closer on the same line makes one string of it, even when that string starts with two quotes.
-    let end = repeated_end(b, from + hashes + 1, b'"', b'#', hashes);
+    let end = swift_end(b, from + hashes + 1, hashes, 1);
     Some((end, (end.is_none() && quotes == 3).then_some(marks)))
 }
 
@@ -157,16 +157,29 @@ fn lua_end(b: &[u8], from: usize, level: usize) -> Option<usize> {
     None
 }
 
-/// Where three quotes and `hashes` `#` end. Extra quotes before them belong to the string.
-fn swift_end(b: &[u8], from: usize, hashes: usize) -> Option<usize> {
+/// Finds the matching raw Swift closer, skipping escaped characters such as `\#"`.
+fn swift_end(b: &[u8], from: usize, hashes: usize, quotes: usize) -> Option<usize> {
     let mut i = from;
-    while let Some(quotes) = find_end(b, i, "\"\"\"") {
-        let quotes = quotes + b[quotes..].iter().take_while(|&&c| c == b'"').count();
-        let marks = b[quotes..].iter().take(hashes).take_while(|&&c| c == b'#').count();
-        if marks == hashes {
-            return Some(quotes + marks);
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                i += 1;
+                let marks = b[i..].iter().take(hashes).take_while(|&&c| c == b'#').count();
+                i += marks + usize::from(marks == hashes);
+            }
+            b'"' => {
+                let count = b[i..].iter().take_while(|&&c| c == b'"').count();
+                i += count;
+                if count >= quotes {
+                    let marks = b[i..].iter().take(hashes).take_while(|&&c| c == b'#').count();
+                    i += marks;
+                    if marks == hashes {
+                        return Some(i);
+                    }
+                }
+            }
+            _ => i += 1,
         }
-        i = quotes + marks;
     }
     None
 }
