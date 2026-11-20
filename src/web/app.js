@@ -15,6 +15,7 @@ let closing = false;
 let ended = false;
 let connected = false;
 let localError = '';
+let operationWarning = '';
 let confirmAction;
 let warned = false;
 
@@ -60,6 +61,7 @@ function enqueue(action) {
     if (action.action !== 'set' && (paused || queue.some(item => item.action !== 'set'))) return;
     queue.push(action);
   }
+  operationWarning = '';
   if (!paused) localError = '';
   updateChrome();
   void drain();
@@ -102,7 +104,8 @@ async function drain() {
     const {pending, ...action} = queue[0];
     try {
       state = await api('/api/action', 'POST', {...action, version: state.version});
-      if (state.message) notify(state.message.text, state.message.error);
+      if (state.message?.error) operationWarning = state.message.text;
+      else if (state.message) notify(state.message.text);
       queue.splice(0, 1 + (pending ?? 0));
     } catch (error) {
       localError = error.message;
@@ -113,10 +116,6 @@ async function drain() {
       for (let i = queue.length - 1; i >= 0; i--) {
         if (queue[i].action !== 'set') queue.splice(i, 1);
       }
-      paused = queue.length > 0;
-      break;
-    }
-    if (state.message?.error) {
       paused = queue.length > 0;
       break;
     }
@@ -136,6 +135,7 @@ async function connect(retryEdits = false) {
   try {
     const latest = await api('/api/state');
     state = latest;
+    operationWarning = latest.message?.error ? latest.message.text : '';
     if (!paused || retryEdits) {
       paused = false;
     } else {
@@ -144,7 +144,7 @@ async function connect(retryEdits = false) {
     byId('editor').hidden = byId('actionbar').hidden = false;
     byId('opening').hidden = true;
     if (localError) notify(localError, true);
-    else if (latest.message) notify(latest.message.text, latest.message.error);
+    else if (latest.message && !operationWarning) notify(latest.message.text);
   } catch (error) {
     localError = error.message;
     notify(localError, true);
@@ -228,8 +228,8 @@ function updateChrome() {
     warned = needsWarning;
   }
   if (!state) return;
-  const error = localError || (state.message?.error ? state.message.text : '');
-  byId('error-box').hidden = !error || (!paused && !localError);
+  const error = localError || operationWarning;
+  byId('error-box').hidden = !error;
   if (byId('error').textContent !== error) byId('error').textContent = error;
   byId('error-actions').hidden = !paused && !localError;
   byId('retry').hidden = byId('drop-edit').hidden = !paused;
