@@ -28,10 +28,12 @@ local ctx = { session_id = "session:1", block_id = shell.block_id }
 local actions, commands, closed, focus, floats, splits = {}, {}, {}, {}, {}, {}
 local sizes, profile_reply = {}, { stdout = "", ok = true }
 local relabeled = {}
+local named, title_reply, rename_reply, rename_error = {}, { ok = true, stdout = "" }, { revision = 2 }, nil
 rex = {
   action = function(action) actions[action.name] = action.run end,
   exec = function(argv)
     commands[#commands + 1] = argv
+    if argv[2] == "tab-title" then return title_reply end
     return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
@@ -44,6 +46,8 @@ rex = {
     elseif name == "block.close" then
       assert(args.keep_last)
       closed[#closed + 1] = args.block_id
+    elseif name == "session.create" or name == "session.destroy" or name == "session.set_label" then
+      error("an action changed a session through " .. name)
     end
     return {}
   end,
@@ -67,6 +71,10 @@ rex = {
     raise_layer = function() return {} end,
     focus_block = function(args) focus[#focus + 1] = args.block_id; return {} end,
     set_block_label = function(args) relabeled[#relabeled + 1] = args; return {} end,
+    set_label = function(args)
+      named[#named + 1] = args
+      return rename_reply, rename_error
+    end,
   },
   layout = {
     block = function(block) return block end,
@@ -246,3 +254,143 @@ sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50,
   desired = {{ client_id = "client:one", rows = 50 }} }
 assert(apply(function() return true end) and #splits == split_count + 1)
 near(1 - splits[#splits].layout.ratio, 4 / 50)
+
+-- An agent is recognised by its process name alone, also behind a path or under
+-- a command it started. The project is the shell's directory, not an editor's.
+local facts = listener.titles.facts
+local zsh = { argv0 = "-zsh", name = "zsh", cwd = "/my project" }
+local seen = facts{ foreground = { name = "2.1.0", argv0 = "claude", cwd = "/elsewhere" }, ancestors = { zsh } }
+assert(seen.agent == "claude" and seen.cwd == "/my project")
+assert(facts{ foreground = { name = "node", invoked_path = "/opt/bin/codex", cwd = "/work" } }.agent == "codex")
+seen = facts{ foreground = { name = "git", argv0 = "git", cwd = "/work" },
+  ancestors = { { name = "omp", argv0 = "/bin/omp" }, zsh } }
+assert(seen.agent == "omp" and seen.cwd == "/my project")
+seen = facts{ child = { name = "omp", argv0 = "omp", cwd = "/work" } }
+assert(seen.agent == "omp" and seen.cwd == "/work")
+seen = facts{ foreground = { name = "claude-notes", argv0 = "vim claude", cwd = "relative" } }
+assert(not seen.agent and not seen.cwd and not next(facts(nil)))
+
+-- Milo is asked with a directory and an agent's name. Anything but a title means it could not say.
+title_reply.stdout = "=milo · claude\n"
+assert(listener.titles.ask("/my project", "claude") == "milo · claude")
+argv = commands[#commands]
+assert(argv[2] == "tab-title" and argv[3] == "title" and argv[4] == "/my project" and argv[5] == "claude" and #argv == 5)
+title_reply.stdout = "=\n"
+assert(listener.titles.ask("/tmp") == "" and #commands[#commands] == 4)
+title_reply.stdout = "milo\n"
+assert(listener.titles.ask("/tmp") == nil)
+title_reply.ok, title_reply.stdout = false, "=milo\n"
+assert(not listener.titles.ask("/tmp") and not next(listener.titles.owned()))
+title_reply.ok, title_reply.stdout = true, "window:0a-1\tmilo\nnoise\nwindow:0b-2\tmilo/rex · omp\n"
+local owned = listener.titles.owned()
+assert(owned["window:0a-1"] == "milo" and owned["window:0b-2"] == "milo/rex · omp" and not owned.noise)
+listener.titles.forget{ "window:0a-1", "window:0b-2" }
+argv = commands[#commands]
+assert(argv[3] == "forget" and argv[4] == "window:0a-1" and argv[5] == "window:0b-2" and #argv == 5)
+
+-- Milo names the files an answer depends on. While they read the same, the
+-- directory is not asked about again, whichever tab it is in. Without such
+-- files, as above, every question reaches Milo.
+local asked = 0
+for _, command in ipairs(commands) do
+  if command[3] == "title" then asked = asked + 1 end
+end
+-- Whether Milo was started `times` times to answer since the last check.
+local function started(times)
+  local count = 0
+  for _, command in ipairs(commands) do
+    if command[3] == "title" then count = count + 1 end
+  end
+  count, asked = count - asked, count
+  return count == times
+end
+local function write(path, text)
+  local out = assert(io.open(path, "w"))
+  out:write(text)
+  out:close()
+end
+local ask, global, override = listener.titles.ask, os.tmpname(), os.tmpname()
+local grounds = "\n" .. global .. "\n" .. override .. "\n"
+write(global, "")
+os.remove(override)
+title_reply.stdout = "=" .. grounds
+assert(ask("/off") == "" and ask("/off") == "" and ask("/off", "claude") == "" and started(1))
+
+-- A choice saved for one worktree is noticed, in a file that was not there. With
+-- titles on, the answer differs by agent, and each is asked for once.
+write(override, "tab_titles = true\n")
+title_reply.stdout = "=milo" .. grounds
+assert(ask("/off") == "milo" and started(1))
+title_reply.stdout = "=milo · omp" .. grounds
+assert(ask("/off", "omp") == "milo · omp" and started(1))
+assert(ask("/off") == "milo" and ask("/off", "omp") == "milo · omp" and started(0))
+
+-- So is a change to the global choice, and the override being taken away.
+write(global, "tab_titles = false\n")
+title_reply.stdout = "=milo · codex" .. grounds
+assert(ask("/off", "codex") == "milo · codex" and started(1))
+os.remove(override)
+title_reply.stdout = "=" .. grounds
+assert(ask("/off", "codex") == "" and ask("/off") == "" and started(1))
+
+-- An answer Milo could not give is not kept.
+title_reply.ok = false
+assert(ask("/failing") == nil and started(1))
+title_reply.ok = true
+assert(ask("/failing") == "" and ask("/failing") == "" and started(1))
+
+-- Nor is one without grounds, as when Git could not run. It is passed on that
+-- once and takes nothing from what is kept for the directory.
+write(override, "tab_titles = true\n")
+title_reply.stdout = "=milo · omp" .. grounds
+assert(ask("/kept", "omp") == "milo · omp" and started(1))
+title_reply.stdout = "=\n"
+assert(ask("/kept") == "" and started(1))
+assert(ask("/kept", "omp") == "milo · omp" and started(0))
+title_reply.stdout = "=milo" .. grounds
+assert(ask("/kept") == "milo" and started(1))
+
+-- If the directory turns out to depend on other files, as inside a new
+-- repository of its own, what was kept for the old ones goes.
+title_reply.stdout = "=inner · codex\n" .. global .. "\n"
+assert(ask("/kept", "codex") == "inner · codex" and started(1))
+title_reply.stdout = "=inner · omp\n" .. global .. "\n"
+assert(ask("/kept", "omp") == "inner · omp" and started(1))
+assert(ask("/kept", "codex") == "inner · codex" and ask("/kept", "omp") == "inner · omp" and started(0))
+os.remove(override)
+
+-- Outside a project the answer stands until a repository appears, as a folder too.
+title_reply.stdout = "=\n" .. override .. "/HEAD\n" .. override .. "\n"
+assert(ask("/plain") == "" and ask("/plain", "omp") == "" and started(1))
+assert(os.execute("mkdir '" .. override .. "'") == 0)
+assert(ask("/plain") == "" and started(1))
+assert(os.remove(override) and os.remove(global))
+
+-- Nothing above named a session: not another action, nor the part of the listener kept in this file.
+assert(#named == 0)
+
+-- The explicit action names the session it was run in for its shell's project.
+-- It makes no session, and asks no app to show one.
+tiled.layout, tiled.blocks = leaf(shell), { shell }
+title_reply.stdout = "milo/rex-titles\n"
+rex.client = { queue = function() error("the action asked an app to do something") end }
+local app = { session_id = "session:other", block_id = ctx.block_id, client_id = "client:app", origin = "palette" }
+assert(actions.milo_name_session(app) == "Named this session milo/rex-titles.")
+argv = commands[#commands]
+assert(argv[2] == "tab-title" and argv[3] == "name" and argv[4] == "/my project" and #argv == 4)
+assert(#named == 1 and named[1].session_id == "session:other" and named[1].label == "milo/rex-titles")
+actions.milo_name_session(ctx)
+assert(#named == 2 and named[2].session_id == ctx.session_id)
+
+-- Outside a Git project the session keeps its name, and the action passes on Milo's reason.
+title_reply.ok, title_reply.stderr = false, "This shell is not in a Git project.\n"
+ok, why = pcall(actions.milo_name_session, ctx)
+assert(not ok and why == "This shell is not in a Git project." and #named == 2)
+title_reply.ok, title_reply.stdout, title_reply.stderr = true, "two\nnames\n", nil
+ok, why = pcall(actions.milo_name_session, ctx)
+assert(not ok and why == "Could not name this session." and #named == 2)
+
+-- If Rex refuses the name, the action says so.
+title_reply.stdout, rename_reply, rename_error = "milo\n", nil, "not_found"
+ok, why = pcall(actions.milo_name_session, ctx)
+assert(not ok and why == "not_found" and #named == 3)

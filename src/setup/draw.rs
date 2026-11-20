@@ -705,6 +705,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 prefs.history_follow_new,
                 "Keep History at the newest commit while you are at the top.",
             ),
+            Row::TabTitles => Cell::toggle(
+                "Title Rex tabs",
+                "Tab titles",
+                prefs.tab_titles,
+                "Name unnamed tabs for their Git project, worktree and agent.",
+            ),
             Row::ClaudeLimits => {
                 if self.claude.editable() {
                     Cell::toggle(

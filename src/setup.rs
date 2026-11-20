@@ -109,6 +109,7 @@ enum Row {
     FollowActivity,
     ChangesOnly,
     HistoryFollow,
+    TabTitles,
     ClaudeLimits,
     SaveClaude,
     SavePrefs,
@@ -145,6 +146,7 @@ const WORKFLOW: &[Row] = &[
     Row::FollowActivity,
     Row::ChangesOnly,
     Row::HistoryFollow,
+    Row::TabTitles,
     Row::SavePrefs,
     Row::UseGlobalPrefs,
     Row::ClaudeLimits,
@@ -615,6 +617,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::FollowActivity => self.prefs.follow_activity = !self.prefs.follow_activity,
             Row::ChangesOnly => self.prefs.changes_only = !self.prefs.changes_only,
             Row::HistoryFollow => self.prefs.history_follow_new = !self.prefs.history_follow_new,
+            Row::TabTitles => self.prefs.tab_titles = !self.prefs.tab_titles,
             _ => unreachable!("only preferences are changed here"),
         }
     }
@@ -751,7 +754,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             | Row::FollowProject
             | Row::FollowActivity
             | Row::ChangesOnly
-            | Row::HistoryFollow => self.saved_prefs.is_none(),
+            | Row::HistoryFollow
+            | Row::TabTitles => self.saved_prefs.is_none(),
             Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
             Row::Repair | Row::Remove => self.trial.is_some(),
             _ => false,

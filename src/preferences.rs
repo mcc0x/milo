@@ -181,6 +181,8 @@ pub struct Preferences {
     pub history_follow_new: bool,
     pub usage_large_figures: bool,
     pub usage_tools: UsageTools,
+    /// Whether the Rex listener may title tabs that nobody has named.
+    pub tab_titles: bool,
 }
 
 impl Default for Preferences {
@@ -195,6 +197,7 @@ impl Default for Preferences {
             history_follow_new: false,
             usage_large_figures: false,
             usage_tools: UsageTools::default(),
+            tab_titles: false,
         }
     }
 }
@@ -257,7 +260,7 @@ impl Preferences {
         paths::config_dir().map_or_else(|| (Self::default(), None), |dir| Self::for_pane_in(&dir, worktree))
     }
 
-    fn for_pane_in(dir: &Path, worktree: Option<&Path>) -> (Self, Option<&'static str>) {
+    pub(crate) fn for_pane_in(dir: &Path, worktree: Option<&Path>) -> (Self, Option<&'static str>) {
         let Ok((global, _)) = Self::resolve_in(dir, None) else {
             return (Self::default(), Some("milo doctor: global prefs ignored"));
         };
@@ -320,6 +323,7 @@ impl Preferences {
                 }
                 "history_follow_new" => self.history_follow_new = boolean()?,
                 "usage_large_figures" => self.usage_large_figures = boolean()?,
+                "tab_titles" => self.tab_titles = boolean()?,
                 _ => {
                     if let Some(tool) = UsageTool::ALL.into_iter().find(|tool| tool.key() == key) {
                         self.usage_tools[tool] = Show::parse(value).ok_or_else(|| invalid(key))?;
@@ -362,6 +366,7 @@ impl Preferences {
                 tool(UsageTool::Codex),
                 tool(UsageTool::Claude),
                 tool(UsageTool::OpenCode),
+                ("tab_titles", boolean(before.tab_titles, self.tab_titles)),
             ],
             check,
         )
@@ -455,6 +460,11 @@ fn config_file(dir: &Path, worktree: Option<&Path>) -> PathBuf {
     }
 }
 
+/// The files a pane's preferences are read from: the global defaults, then the worktree's own.
+pub(crate) fn layers(dir: &Path, worktree: &Path) -> [PathBuf; 2] {
+    [config_file(dir, None), config_file(dir, Some(worktree))]
+}
+
 /// A stable identifier for the checkout path, not the common git directory.
 fn worktree_key(root: &Path) -> u64 {
     root.as_os_str()
@@ -463,7 +473,7 @@ fn worktree_key(root: &Path) -> u64 {
         .fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
-fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
+pub(crate) fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
     let file = match fs_ops::open_read(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -480,7 +490,7 @@ fn read(path: &Path, limit: u64) -> io::Result<Option<String>> {
     Ok(Some(text))
 }
 
-fn locked<T>(path: &Path, save: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
+pub(crate) fn locked<T>(path: &Path, save: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     // Lock the directory because the files themselves are atomically replaced.
@@ -489,7 +499,7 @@ fn locked<T>(path: &Path, save: impl FnOnce(&Path) -> io::Result<T>) -> io::Resu
     save(dir)
 }
 
-fn replace(dir: &Path, path: &Path, text: &str) -> io::Result<()> {
+pub(crate) fn replace(dir: &Path, path: &Path, text: &str) -> io::Result<()> {
     static SERIAL: AtomicU32 = AtomicU32::new(0);
     let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(
         ".milo-prefs-{}-{}",

@@ -23,6 +23,7 @@ mod screen;
 mod setup;
 mod syntax;
 mod term;
+mod titles;
 mod tree;
 mod ui;
 mod uninstall;
@@ -145,7 +146,9 @@ fn command_help(name: &str) -> Option<&'static str> {
         "doctor" => {
             "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
         }
-        "listen" => "Usage: milo listen [--stop]\n\nStart or stop applying the milo layout to new Rex tabs.",
+        "listen" => {
+            "Usage: milo listen [--stop]\n\nStart or stop the Rex listener that remembers sidebar sizes, arranges new tabs and titles tabs."
+        }
         "claude-status" => "Usage: milo claude-status\n\nRead usage from Claude Code's status line input.",
         _ => return None,
     })
@@ -387,8 +390,12 @@ fn history(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
+    // Two helpers for the installed Rex files. Neither opens a pane.
     if first.as_deref() == Some(OsStr::new("layout-profile")) {
         exit(setup::layout_profile(&args.collect::<Vec<_>>()));
+    }
+    if first.as_deref() == Some(OsStr::new("tab-title")) {
+        exit(titles::command(&args.collect::<Vec<_>>()));
     }
     let second = args.next();
     let rest: Vec<_> = args.collect();
