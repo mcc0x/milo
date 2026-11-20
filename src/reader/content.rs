@@ -252,6 +252,7 @@ impl Reader {
             self.kind = Kind::None;
             self.body = Body::Note(note);
             *last = Some(stamp);
+            self.clear_change();
             return;
         }
         let Some(patch) = patch else {
@@ -265,6 +266,7 @@ impl Reader {
             self.kind = Kind::None;
             self.body = Body::Note(note);
             *last = Some(stamp);
+            self.clear_change();
             return;
         };
         let picture = picture::is_picture(&self.path);
@@ -275,6 +277,7 @@ impl Reader {
             return;
         }
         self.body = working_body(relative, &entry, patch, picture, syntax::for_file(&self.path));
+        self.clear_change();
     }
 }
 

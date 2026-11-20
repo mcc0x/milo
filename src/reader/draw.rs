@@ -1,8 +1,9 @@
 //! Draws the file, its patch marks and its headings.
 
 use std::ops::Range;
+use std::time::Instant;
 
-use super::{Body, Reader, Source};
+use super::{Body, JumpNotice, Reader, Source};
 use crate::diff::{Line, LineKind};
 use crate::git::Kind;
 use crate::icons;
@@ -118,8 +119,11 @@ impl LinePainter<'_> {
 }
 
 impl Reader {
-    pub(super) fn draw_file(&mut self, s: &mut Screen) {
+    pub(super) fn draw_file(&mut self, s: &mut Screen, now: Instant) {
         s.clear();
+        if self.change_notice.is_some_and(|(_, until)| now >= until) {
+            self.change_notice = None;
+        }
         let hint = s.h >= 3;
         self.rows = s.h.saturating_sub(1 + usize::from(hint));
         self.columns = 0;
@@ -127,12 +131,17 @@ impl Reader {
         if s.w == 0 || s.h == 0 {
             return;
         }
-        self.draw_heading(s);
+        let notice = self.change_notice.map(|(notice, _)| notice);
+        self.draw_heading(s, if hint { None } else { notice });
         if self.rows > 0 {
             self.draw_body(s);
         }
         if hint {
-            self.draw_hint(s);
+            if let Some(notice) = notice {
+                draw_change_notice(s, s.h - 1, notice);
+            } else {
+                self.draw_hint(s);
+            }
         }
     }
 
@@ -197,8 +206,12 @@ impl Reader {
     }
 
     /// Keeps the file name ahead of its directory so the name gets the space first.
-    fn draw_heading(&self, s: &mut Screen) {
-        let right = self.draw_details(s);
+    fn draw_heading(&self, s: &mut Screen, notice: Option<JumpNotice>) {
+        let right = if let Some(notice) = notice {
+            draw_change_notice(s, 0, notice)
+        } else {
+            self.draw_details(s)
+        };
         let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
         let room = if right == s.w - 1 { right } else { right.saturating_sub(2) };
         let mut x = 1;
@@ -249,6 +262,49 @@ impl Reader {
         }
         right
     }
+}
+
+/// Uses the right edge of the heading or the left edge of the hint.
+fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> usize {
+    const PREFIX: &str = "Change ";
+    const OF: &str = " of ";
+    const NONE: &str = "No changes";
+    let number_width = |n: usize| n.ilog10() as usize + 1;
+    let (full, numbers) = match notice {
+        JumpNotice::At { number, total } => {
+            let first = number_width(number);
+            let counts = first + OF.len() + number_width(total);
+            (PREFIX.len() + counts, Some((number, total, first, counts)))
+        }
+        JumpNotice::NoChanges => (NONE.len(), None),
+    };
+    let margin = usize::from(s.w >= full + 2);
+    let room = s.w - margin * 2;
+    let width = full.min(room);
+    let x = if y == 0 { s.w - margin - width } else { margin };
+    let st = Style::PLAIN;
+    match numbers {
+        Some((number, total, first, counts)) if counts <= width => {
+            let start = if full <= room { x + s.put(x, y, width, PREFIX, st) } else { x };
+            s.put_number(start + first, y, number as u64, st);
+            s.put(start + first, y, OF.len(), OF, st);
+            s.put_number(start + counts, y, total as u64, st);
+        }
+        Some(_) => {
+            s.put_fit(x, y, width, "Change…", st);
+        }
+        None => {
+            s.put_fit(x, y, width, NONE, st);
+        }
+    }
+    if y != 0 {
+        const HELP: &str = " · ? help";
+        let help_width = str_width(HELP);
+        if width + help_width <= room {
+            s.put(x + width, y, help_width, HELP, FAINT);
+        }
+    }
+    x
 }
 
 fn draw_note(s: &mut Screen, rows: usize, mut note: &str) {

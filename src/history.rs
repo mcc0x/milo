@@ -7,7 +7,7 @@ mod tests;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::git::{Commit, CommitFilesError, DiffFiles, HistoryVersion, Repo};
 use crate::help::Page;
@@ -312,6 +312,10 @@ impl History {
 impl Pane for History {
     fn help(&self) -> Page {
         self.reading.as_ref().map_or_else(Self::help_page, Pane::help)
+    }
+
+    fn next_frame(&self) -> Option<Duration> {
+        self.reading.as_ref().and_then(Pane::next_frame)
     }
 
     fn notice(&self) -> Option<&'static str> {

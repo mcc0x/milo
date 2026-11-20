@@ -274,9 +274,12 @@ fn both_jump_keys_work_in_a_committed_file() {
     let commits = repo.history(1).unwrap();
     let id = CommitId::parse(&commits[0].hash).unwrap();
     let mut reader = Reader::at_commit(&f.root.join("page.txt"), id).unwrap();
-    for (line, key) in [(8, 'n'), (45, 'N'), (8, 'n')] {
+    for (line, key, notice) in [(8, 'n', None), (45, 'N', Some("Change 2 of 2")), (8, 'n', Some("Change 1 of 2"))] {
         let rows = drawn(&mut reader, 45, 12);
         assert!(rows.iter().any(|row| row.contains(&format!("+ row {line} edited"))), "{rows:?}");
+        if let Some(notice) = notice {
+            assert!(rows[11].contains(notice) && rows[11].ends_with("? help"), "{rows:?}");
+        }
         reader.key(Key::Char(key));
     }
 }
@@ -597,18 +600,23 @@ fn opening_and_jumping_to_changes_keeps_the_change_visible_in_a_short_reader() {
     for height in 2..=6 {
         let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
         assert!(drawn(&mut reader, 40, 1)[0].contains("page.txt"));
-        for (key, change) in [
-            (None, "+ first insertion"),
-            (Some('n'), "+ second insertion"),
-            (Some('n'), "+ first insertion"),
-            (Some('N'), "+ second insertion"),
-            (Some('N'), "+ first insertion"),
+        for (key, change, notice) in [
+            (None, "+ first insertion", ""),
+            (Some('n'), "+ second insertion", "Change 2 of 2"),
+            (Some('n'), "+ first insertion", "Change 1 of 2"),
+            (Some('N'), "+ second insertion", "Change 2 of 2"),
+            (Some('N'), "+ first insertion", "Change 1 of 2"),
         ] {
             if let Some(key) = key {
                 assert!(matches!(reader.key(Key::Char(key)), After::Stay));
             }
             let rows = drawn(&mut reader, 40, height);
-            assert!(rows.iter().any(|row| row.contains(change)), "height {height}: {rows:?}");
+            let notice_row = if height == 2 { 0 } else { height - 1 };
+            let end = if height == 2 { height } else { notice_row };
+            assert!(rows[1..end].iter().any(|row| row.contains(change)), "height {height}: {rows:?}");
+            if key.is_some() {
+                assert!(rows[notice_row].contains(notice), "height {height}: {rows:?}");
+            }
         }
     }
 }
@@ -620,11 +628,110 @@ fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
     kinds[10] = LineKind::Add;
     kinds[94] = LineKind::Add;
     kinds[96] = LineKind::Del;
-    use Direction::{Next, Previous};
-    let text = Text::new((1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(), None);
-    for (top, direction, expected) in [(6, Next, 82), (82, Next, 6), (6, Previous, 82), (82, Previous, 6)] {
-        assert_eq!(text.change_top(top, 82, LEAD, direction), Some(expected));
+    let source = Source::Committed { short_id: "123abcd".into(), time: 0 };
+    let mut reader = Reader::new("page.txt".into(), source, Preferences::default().icons, None);
+    reader.body = Body::Text(Text::new(
+        (1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(),
+        None,
+    ));
+    drawn(&mut reader, 40, 20);
+    assert_eq!(reader.top, 6);
+    for (key, top, notice) in [
+        ('n', 82, "Change 2 of 3"),
+        ('n', 82, "Change 3 of 3"),
+        ('n', 6, "Change 1 of 3"),
+        ('N', 82, "Change 3 of 3"),
+        ('N', 82, "Change 2 of 3"),
+        ('N', 6, "Change 1 of 3"),
+    ] {
+        assert_eq!(reader.key(Key::Char(key)), After::Stay);
+        let rows = drawn(&mut reader, 40, 20);
+        assert_eq!(reader.top, top);
+        assert!(rows[19].starts_with(&format!(" {notice}")), "{rows:?}");
     }
+    assert_eq!(reader.key(Key::PgDn), After::Stay);
+    let rows = drawn(&mut reader, 40, 20);
+    assert!(!rows[19].contains("Change "), "{rows:?}");
+    assert_eq!(reader.key(Key::Char('n')), After::Stay);
+    let rows = drawn(&mut reader, 40, 20);
+    assert_eq!(reader.top, 82);
+    assert!(rows[19].contains("Change 2 of 3"), "{rows:?}");
+}
+
+#[test]
+fn no_changes_appears_once_then_restores_the_reader_chrome() {
+    let f = Fixture::folder();
+    f.write("page.txt", "unchanged\n");
+    let start = Instant::now();
+    for height in [2, 5] {
+        let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+        let mut screen = Screen::sized(40, height);
+        reader.draw_file(&mut screen, start);
+        let ordinary = screen.text();
+        let notice_row = if height == 2 { 0 } else { height - 1 };
+        assert_eq!(reader.input(Key::Char('N'), start), After::Stay);
+        let almost_done = start + CHANGE_NOTICE - Duration::from_millis(1);
+        assert_eq!(reader.input(Key::Char('n'), almost_done), After::Ignored);
+        assert!(reader.next_frame().is_some());
+        reader.draw_file(&mut screen, almost_done);
+        let showing = screen.text();
+        assert!(showing[notice_row].contains("No changes"), "{showing:?}");
+        assert_eq!(showing[1], ordinary[1]);
+
+        let expired = start + CHANGE_NOTICE;
+        reader.draw_file(&mut screen, expired);
+        assert_eq!(screen.text(), ordinary);
+        assert_eq!(reader.next_frame(), None);
+        assert_eq!(reader.input(Key::Char('n'), expired), After::Stay);
+    }
+}
+
+#[test]
+fn change_feedback_leaves_horizontal_position_and_clamping_to_the_body() {
+    let f = Fixture::new();
+    let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+    f.write("page.txt", &original);
+    f.commit("original");
+    let edited = original
+        .replace("line 6\n", &format!("first: {}\nline 6\n", "a".repeat(40)))
+        .replace("line 12\n", &format!("second: {}\nline 12\n", "b".repeat(40)))
+        .replace("line 18\n", "short\nline 18\n");
+    f.write("page.txt", &edited);
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    drawn(&mut reader, 24, 2);
+    assert_eq!(reader.key(Key::Right), After::Stay);
+    let before = reader.pan;
+    assert!(before > 0);
+
+    assert_eq!(reader.key(Key::Char('n')), After::Stay);
+    let rows = drawn(&mut reader, 24, 2);
+    assert!(rows[0].ends_with("Change 2 of 3") && rows[1].contains("+‹bbb"), "{rows:?}");
+    assert_eq!(reader.pan, before);
+    assert_eq!(drawn(&mut reader, 8, 2)[0], "2 of 3");
+
+    assert_eq!(reader.key(Key::Char('n')), After::Stay);
+    let rows = drawn(&mut reader, 24, 2);
+    assert!(rows[0].ends_with("Change 3 of 3") && rows[1].contains("+ short"), "{rows:?}");
+    assert_eq!(reader.pan, 0);
+}
+
+#[test]
+fn a_single_change_reports_its_position_without_moving() {
+    let f = Fixture::new();
+    f.write("page.txt", "original\n");
+    f.commit("original");
+    f.write("page.txt", "edited\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    let start = Instant::now();
+    let mut screen = Screen::sized(40, 5);
+    reader.draw_file(&mut screen, start);
+    let ordinary = screen.text();
+    assert_eq!(reader.input(Key::Char('n'), start), After::Stay);
+    reader.draw_file(&mut screen, start);
+    assert!(screen.text()[4].contains("Change 1 of 1"));
+    assert_eq!(&screen.text()[..4], &ordinary[..4]);
+    reader.draw_file(&mut screen, start + CHANGE_NOTICE);
+    assert_eq!(screen.text(), ordinary);
 }
 
 #[test]
@@ -793,12 +900,16 @@ fn the_inline_reader_refreshes_configured_attributes_after_a_notification() {
     outline.key(Key::Enter);
     outline.draw(&mut screen);
     assert_eq!(screen.text()[2], " 1 + edited");
+    assert_eq!(outline.key(Key::Char('n')), After::Stay);
+    outline.draw(&mut screen);
+    assert!(screen.text()[11].contains("Change 1 of 1"));
 
     f.write(".git/custom-attributes", "page.txt -diff\n");
     outline.filesystem_changed();
     assert!(outline.check());
     outline.draw(&mut screen);
     assert_eq!(screen.text()[2].trim_start(), NOT_TEXT);
+    assert!(!screen.text()[11].contains("Change 1 of 1"));
 }
 
 #[test]

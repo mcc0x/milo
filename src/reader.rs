@@ -8,6 +8,7 @@ mod working_path;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::diff::{Line, LineKind};
 use crate::git::{Commit, Kind, PendingFile, Repo};
@@ -24,6 +25,7 @@ use crate::watch::{Ignored, Scope};
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
+const CHANGE_NOTICE: Duration = Duration::from_secs(4);
 
 /// The file open in a pane and the position from which it is shown.
 pub struct Reader {
@@ -40,6 +42,9 @@ pub struct Reader {
     /// Reveal the first change once the viewport has room for the file.
     opening: bool,
     top: usize,
+    /// The current change can share its viewport top with other changes.
+    current_change: Option<usize>,
+    change_notice: Option<(JumpNotice, Instant)>,
     /// Display columns skipped on the left.
     pan: usize,
     /// Rows of content on screen, set by the last draw.
@@ -48,6 +53,12 @@ pub struct Reader {
     columns: usize,
     /// Furthest horizontal offset of the last drawn viewport.
     pan_limit: usize,
+}
+
+#[derive(Clone, Copy)]
+enum JumpNotice {
+    At { number: usize, total: usize },
+    NoChanges,
 }
 
 /// A working file can change; a commit needs only its name and date.
@@ -171,17 +182,6 @@ impl Text {
         }
         Self { lines, lang, starts, changes, digits: last.ilog10() as usize + 1, added, removed }
     }
-
-    /// Finds the next or previous block, wrapping and skipping duplicate viewport positions.
-    fn change_top(&self, top: usize, last: usize, lead: usize, direction: Direction) -> Option<usize> {
-        let at = |&line: &usize| line.saturating_sub(lead).min(last);
-        let changes = &self.changes;
-        match direction {
-            Direction::Next => changes.get(changes.partition_point(|line| at(line) <= top)).or(changes.first()),
-            Direction::Previous => changes[..changes.partition_point(|line| at(line) < top)].last().or(changes.last()),
-        }
-        .map(at)
-    }
 }
 
 impl Reader {
@@ -203,6 +203,8 @@ impl Reader {
             spans: Vec::new(),
             opening: true,
             top: 0,
+            current_change: None,
+            change_notice: None,
             pan: 0,
             rows: 0,
             columns: 0,
@@ -222,6 +224,7 @@ impl Reader {
         if let Body::Text(text) = &self.body
             && let Some(first) = text.changes.first()
         {
+            self.current_change = Some(0);
             self.top = first.saturating_sub(self.lead());
         }
     }
@@ -234,16 +237,53 @@ impl Reader {
         self.body.lines().len().saturating_sub(self.rows.max(1))
     }
 
-    fn scroll(&mut self, delta: isize) {
-        self.top = self.top.saturating_add_signed(delta).min(self.last_top());
+    fn clear_change(&mut self) {
+        self.current_change = None;
+        self.change_notice = None;
     }
 
-    fn jump(&mut self, direction: Direction) {
-        if let Body::Text(text) = &self.body
-            && let Some(top) = text.change_top(self.top, self.last_top(), self.lead(), direction)
-        {
+    fn scroll(&mut self, delta: isize) {
+        let top = self.top.saturating_add_signed(delta).min(self.last_top());
+        if top != self.top {
             self.top = top;
+            self.clear_change();
         }
+    }
+
+    fn jump(&mut self, direction: Direction, now: Instant) -> After {
+        let notice = if let Body::Text(text) = &self.body
+            && !text.changes.is_empty()
+        {
+            let total = text.changes.len();
+            let (lead, last) = (self.lead(), self.last_top());
+            let at = |line: &usize| line.saturating_sub(lead).min(last);
+            let index = match direction {
+                Direction::Next => {
+                    let next = self
+                        .current_change
+                        .map_or_else(|| text.changes.partition_point(|line| at(line) <= self.top), |i| i + 1);
+                    if next == total { 0 } else { next }
+                }
+                Direction::Previous => {
+                    let before =
+                        self.current_change.unwrap_or_else(|| text.changes.partition_point(|line| at(line) < self.top));
+                    before.checked_sub(1).unwrap_or(total - 1)
+                }
+            };
+            self.opening = false;
+            self.current_change = Some(index);
+            self.top = at(&text.changes[index]);
+            JumpNotice::At { number: index + 1, total }
+        } else {
+            if let Some((JumpNotice::NoChanges, until)) = self.change_notice
+                && now < until
+            {
+                return After::Ignored;
+            }
+            JumpNotice::NoChanges
+        };
+        self.change_notice = Some((notice, now + CHANGE_NOTICE));
+        After::Stay
     }
 
     fn pan(&mut self, direction: Direction) {
@@ -330,7 +370,21 @@ impl Pane for Reader {
         true
     }
 
+    fn next_frame(&self) -> Option<Duration> {
+        self.change_notice.map(|(_, until)| until.saturating_duration_since(Instant::now()))
+    }
+
     fn key(&mut self, key: Key) -> After {
+        self.input(key, Instant::now())
+    }
+
+    fn draw(&mut self, s: &mut Screen) {
+        self.draw_file(s, Instant::now());
+    }
+}
+
+impl Reader {
+    fn input(&mut self, key: Key, now: Instant) -> After {
         let key = match key {
             Key::Char(' ') => Key::PgDn,
             Key::Char('b') => Key::PgUp,
@@ -339,8 +393,8 @@ impl Pane for Reader {
         let before = (self.top, self.pan);
         match key {
             Key::Char('q') | Key::Esc => return After::Leave,
-            Key::Char('n') => self.jump(Direction::Next),
-            Key::Char('N') => self.jump(Direction::Previous),
+            Key::Char('n') => return self.jump(Direction::Next, now),
+            Key::Char('N') => return self.jump(Direction::Previous, now),
             Key::Char('l') | Key::Right => self.pan(Direction::Next),
             Key::Char('h') | Key::Left => self.pan(Direction::Previous),
             _ => {
@@ -350,9 +404,5 @@ impl Pane for Reader {
             }
         }
         if (self.top, self.pan) == before { After::Ignored } else { After::Stay }
-    }
-
-    fn draw(&mut self, s: &mut Screen) {
-        self.draw_file(s);
     }
 }

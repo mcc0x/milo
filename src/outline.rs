@@ -409,8 +409,8 @@ impl Pane for Outline {
     fn next_frame(&self) -> Option<Duration> {
         let now = Instant::now();
         let sweep = self.untracked.next_sweep(now);
-        if self.reading.is_some() {
-            return sweep;
+        if let Some(reader) = &self.reading {
+            return [sweep, reader.next_frame()].into_iter().flatten().min();
         }
         let mark = self.attention.next_mark_frame(now, self.static_marks);
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
