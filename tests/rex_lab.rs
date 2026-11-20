@@ -200,7 +200,7 @@ impl Lab {
         // do not depend on the machine. It notes where it found its settings,
         // then copies itself several times over, as prompts and plugins make
         // a shell do while the listener is still arranging its new tab.
-        fs::write(root.join("home/.zshenv"), "unsetopt global_rcs\n").unwrap();
+        fs::write(root.join("home/.zshenv"), "unsetopt global_rcs\nunset HISTFILE\n").unwrap();
         let startup = format!(
             "print -r -- \"$ZDOTDIR\" \"$XDG_CONFIG_HOME\" \"$REX_SERVER\" >>'{}'\n\
              zmodload zsh/zselect && repeat 8 ( zselect -t 1 )\n",
@@ -249,6 +249,7 @@ impl Lab {
             .env("HOME", &home)
             // `login` gives a shell tab the developer's home, but leaves this.
             .env("ZDOTDIR", &home)
+            .env("HISTFILE", home.join("history"))
             .env("TMPDIR", self.root.join("tmp"))
             .env("SHELL", Self::shell())
             .env("TERM", "xterm-256color")
@@ -657,6 +658,37 @@ impl Scene {
         tabs
     }
 
+    /// A bare shell builtin emits no OSC 7, but Rex's shell process cwd
+    /// still drives the Outline as the pane stays open.
+    fn rail_follows_bare_cd(&self, tab: &str) {
+        let Self { lab, first, second, session } = self;
+        let view = lab.check();
+        let tab = view.tab(tab);
+        let outline = tab.pane(RAIL[0]);
+        let shell = &tab.panes.last().unwrap().block;
+        let reported = || lab.rex(&["block", "call", "-s", session, "-b", shell, "pwd"]);
+        let pwd = reported();
+        assert!(!pwd.contains("\"pwd\""), "{pwd}");
+        for (dir, own, other) in [
+            (second, "only-in-second.txt", "only-in-first.txt"),
+            (first, "only-in-first.txt", "only-in-second.txt"),
+        ] {
+            let cwd = format!("cd -- '{}'", dir.display());
+            lab.rex(&["send", "-s", session, "-b", shell, &cwd]);
+            lab.rex(&["send-key", "-s", session, "-b", shell, "enter"]);
+            assert!(
+                soon(|| {
+                    let screen = lab.screen(session, outline);
+                    screen.contains(own) && !screen.contains(other)
+                }),
+                "Outline did not follow {cwd}:\n{}",
+                lab.screen(session, outline)
+            );
+            let pwd = reported();
+            assert!(!pwd.contains("\"pwd\""), "{pwd}");
+        }
+    }
+
     /// Tabs opened one straight after another, as holding down the New Tab
     /// key opens them, each get their own worktree's rail. Each round closes
     /// its tabs, so the next begins as it did.
@@ -793,6 +825,7 @@ impl Scene {
 fn rails_follow_their_worktree_through_new_tabs_resizes_renames_and_a_restart() {
     let mut scene = Scene::start();
     let [one, two] = scene.new_tabs_get_their_worktrees_rail();
+    scene.rail_follows_bare_cd(&one);
     scene.tabs_opened_back_to_back_each_get_their_rail();
     let other_session = scene.a_new_session_gets_a_rail_and_a_command_tab_does_not();
     let wide = scene.a_drag_is_remembered_for_its_worktree(&one);
