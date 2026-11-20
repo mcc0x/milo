@@ -310,8 +310,9 @@ impl Client {
                 Input::Disconnected => return Ok(Progress::Done),
                 Input::Rejected(rejection) => (rejection.response(), false, false),
                 Input::Ready(route, body) => {
-                    let (authenticated, close) = (route.authenticated(), route == Route::Close);
-                    (respond(route, body, editor), authenticated, close)
+                    let authenticated = route.authenticated();
+                    let (response, close) = respond(route, body, editor);
+                    (response, authenticated, close)
                 }
             },
             Exchange::Writing(output) => {
@@ -324,8 +325,8 @@ impl Client {
     }
 }
 
-fn respond(route: Route, body: &[u8], editor: &mut Editor) -> Response {
-    match route {
+fn respond(route: Route, body: &[u8], editor: &mut Editor) -> (Response, bool) {
+    let response = match route {
         Route::Index => asset(Asset::Index),
         Route::Script => asset(Asset::Script),
         Route::Style => asset(Asset::Style),
@@ -339,8 +340,49 @@ fn respond(route: Route, body: &[u8], editor: &mut Editor) -> Response {
         Route::State => Response::json(editor.state()),
         Route::Action => match editor.action(body) {
             Ok(state) => Response::json(state),
-            Err(error) => Response::action_error(&error),
+            Err(error) => Response::bad_request(&error),
         },
-        Route::Close => Response::no_content(),
+        Route::Close => match http::close_version(body) {
+            Some(version) if version == editor.version() => return (Response::no_content(), true),
+            Some(_) => Response::conflict(
+                "The draft changed in another request. Refresh the editor state and review it before trying Done again.",
+            ),
+            None => Response::bad_request("Invalid draft version. Refresh the editor state and try Done again."),
+        },
+    };
+    (response, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    fn close(editor: &mut Editor, body: &[u8], status: &[u8], should_close: bool) -> Vec<u8> {
+        let (mut response, close) = respond(Route::Close, body, editor);
+        let mut wire = Vec::new();
+        while !response.write_to(&mut wire).unwrap() {}
+        assert!(wire.starts_with(status), "{}", String::from_utf8_lossy(&wire));
+        assert_eq!(close, should_close);
+        wire
+    }
+
+    #[test]
+    fn only_the_current_draft_version_can_close_the_session() {
+        let folder = Fixture::folder();
+        let mut editor = Editor::test_outside(&folder);
+        let seen = editor.version();
+        let edit = format!(r#"{{"version":{seen},"action":"set","field":"layout.width","value":0.41}}"#);
+        let newer_draft = editor.action(edit.as_bytes()).unwrap();
+        assert!(newer_draft.contains(r#""dirty":true"#));
+
+        close(&mut editor, b"{}", b"HTTP/1.1 400 Bad Request\r\n", false);
+        let stale = format!(r#"{{"version":{seen}}}"#);
+        let conflict = close(&mut editor, stale.as_bytes(), b"HTTP/1.1 409 Conflict\r\n", false);
+        assert!(String::from_utf8_lossy(&conflict).contains("Refresh the editor state"));
+        assert_eq!(editor.state(), newer_draft);
+
+        let current = format!(r#"{{"version":{}}}"#, editor.version());
+        close(&mut editor, current.as_bytes(), b"HTTP/1.1 204 No Content\r\n", true);
     }
 }

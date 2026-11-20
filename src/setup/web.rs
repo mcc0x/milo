@@ -150,6 +150,10 @@ impl Editor {
         )
     }
 
+    pub(crate) fn version(&self) -> u64 {
+        self.version
+    }
+
     pub(crate) fn state(&self) -> String {
         let setup = &self.setup;
         let layout = &setup.layout;
@@ -725,6 +729,12 @@ mod tests {
         Editor::new(Some(store), false, None, root.map(Path::to_path_buf), None, None, |_| {
             panic!("outside Rex must never run an integration command")
         })
+    }
+
+    impl Editor {
+        pub(crate) fn test_outside(folder: &Fixture) -> Self {
+            outside(fixture_store(folder), None)
+        }
     }
 
     fn action(editor: &mut Editor, fields: &str) -> Result<String, String> {

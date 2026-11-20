@@ -141,15 +141,16 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
     if route.authenticated() && !authorization.is_some_and(|header| same_secret(header, access.bearer)) {
         return Err(Rejection::Unauthorized);
     }
+    let expects_json = matches!(route, Route::Action | Route::Close);
     let body_len = match length {
         Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
             value.parse::<usize>().ok().filter(|&len| len <= MAX_BODY).ok_or(Rejection::BodyTooLarge)?
         }
         Some(_) => return Err(Rejection::BadRequest),
-        None if route == Route::Action => return Err(Rejection::LengthRequired),
+        None if expects_json => return Err(Rejection::LengthRequired),
         None => 0,
     };
-    if route == Route::Action {
+    if expects_json {
         if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json")) {
             return Err(Rejection::UnsupportedMediaType);
         }
@@ -157,6 +158,22 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
         return Err(Rejection::BadRequest);
     }
     Ok((route, body_len))
+}
+
+pub(super) fn close_version(body: &[u8]) -> Option<u64> {
+    let mut version = None;
+    let mut valid = true;
+    crate::json::settings_object(std::str::from_utf8(body).ok()?, |member| {
+        if member.key.is("version") {
+            valid &= version.replace(member.value).is_none();
+        } else {
+            valid = false;
+        }
+    })?;
+    if !valid {
+        return None;
+    }
+    version?.unsigned()
 }
 
 #[derive(Default)]
@@ -278,8 +295,12 @@ impl Response {
         Self::new("204 No Content", None, Cow::Borrowed(b""))
     }
 
-    pub(super) fn action_error(message: &str) -> Self {
+    pub(super) fn bad_request(message: &str) -> Self {
         Self::error("400 Bad Request", message)
+    }
+
+    pub(super) fn conflict(message: &str) -> Self {
+        Self::error("409 Conflict", message)
     }
 
     fn error(status: &str, message: &str) -> Self {
@@ -356,7 +377,8 @@ mod tests {
         }
         assert_eq!(incoming("POST", "/api/close", bearer), Err(Rejection::Forbidden));
         assert_eq!(incoming("POST", "/api/close", "\r\nOrigin: http://127.0.0.1:4321"), Err(Rejection::Unauthorized));
-        assert_eq!(incoming("POST", "/api/close", valid), Ok((Route::Close, 0)));
+        let headers = format!("{valid}\r\nContent-Type: application/json\r\nContent-Length: 13");
+        assert_eq!(incoming("POST", "/api/close", &headers), Ok((Route::Close, 13)));
     }
 
     #[test]
@@ -388,6 +410,29 @@ mod tests {
             incoming("POST", "/api/action", &format!("{valid}{json}\r\nContent-Length: 2")),
             Ok((Route::Action, 2))
         );
+        assert_eq!(incoming("POST", "/api/close", valid), Err(Rejection::LengthRequired));
+        assert_eq!(
+            incoming("POST", "/api/close", &format!("{valid}\r\nContent-Length: 13")),
+            Err(Rejection::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn close_requires_a_single_unsigned_version() {
+        assert_eq!(close_version(br#"{"version":7}"#), Some(7));
+        for body in [
+            "",
+            "{}",
+            r#"{"version":"7"}"#,
+            r#"{"version":7.0}"#,
+            r#"{"version":-1}"#,
+            r#"{"version":18446744073709551616}"#,
+            r#"{"version":7,"version":8}"#,
+            r#"{"version":7,"action":"close"}"#,
+            r#"{"version":7}null"#,
+        ] {
+            assert_eq!(close_version(body.as_bytes()), None, "{body}");
+        }
     }
 
     #[test]
@@ -444,7 +489,7 @@ mod tests {
 
     #[test]
     fn error_and_close_have_restrictive_headers() {
-        let error = Response::action_error("quotes \" backslash \\ newline\n");
+        let error = Response::bad_request("quotes \" backslash \\ newline\n");
         assert_eq!(&*error.body, br#"{"error":"quotes \" backslash \\ newline\u000a"}"#);
         for response in [error, Response::no_content()] {
             assert!(response.header.contains("Cache-Control: no-store\r\n"));
