@@ -122,7 +122,9 @@ startup file and not yours. That file makes the shell copy itself a few times
 as it starts, which is what prompts and plugins do to a shell while its new
 tab is being arranged. Set `MILO_TEST_REX` if `rex` is not on your path. The test prints
 whether the restarted server ran Milo again in the panes it restored; that is
-Rex's choice. A new shell tab that does not get its rail fails the test: none
+Rex's choice. Where it restored shells instead, the test rebuilds one such rail
+with the two actions `docs/setup.md` gives for that, and sees its drags
+remembered again. A new shell tab that does not get its rail fails the test: none
 is opened in its place. That holds for the tabs the test opens one at a time
 and for those it opens back to back, four with no pause between them, three
 times over.

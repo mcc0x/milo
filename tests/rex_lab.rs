@@ -762,6 +762,30 @@ impl Scene {
         lab.check();
         assert_eq!(lab.listeners().len(), 1);
     }
+
+    /// When Rex brings a rail back as shells, arranging the tab adds nothing,
+    /// for every pane of the rail is still there. Closing Milo's panes and
+    /// arranging again is the way back: the rail then runs Milo at the width
+    /// its worktree remembers, and its drags are remembered once more.
+    fn a_restored_rail_of_shells_is_rebuilt_by_closing_and_arranging(&self, restored: &str) {
+        let Self { lab, second, session, .. } = self;
+        let view = lab.view();
+        if view.tab(restored).rail_runs("milo") {
+            return;
+        }
+        let shell = view.tab(restored).panes.last().unwrap().block.clone();
+        let act = |action: &str| lab.rex(&["do", action, "-s", session, "-b", &shell]);
+        act("milo_layout");
+        assert!(lab.view().tab(restored).rail_runs("shell"), "{:?}", lab.view().tab(restored));
+        act("milo_close");
+        assert!(soon(|| lab.view().tab(restored).panes.len() == 1), "{:?}", lab.view().tab(restored));
+        act("milo_layout");
+        lab.get_rails(&[(restored, second)]);
+        assert_eq!(lab.view().tab(restored).left, lab.remembered_width(second));
+        lab.drag_rail(session, lab.view().tab(restored), "0.36");
+        lab.remembers(second, "0.360000");
+        lab.check();
+    }
 }
 
 #[test]
@@ -775,4 +799,5 @@ fn rails_follow_their_worktree_through_new_tabs_resizes_renames_and_a_restart() 
     let before = scene.given_names_are_kept(&wide);
     let [fresh, barrier] = scene.a_restart_brings_everything_back(&before, &other_session);
     scene.a_restored_rail_is_remembered_only_if_milo_runs_in_it(&two, &other_session, [&fresh, &barrier]);
+    scene.a_restored_rail_of_shells_is_rebuilt_by_closing_and_arranging(&two);
 }
