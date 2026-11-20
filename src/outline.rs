@@ -6,6 +6,7 @@ mod input;
 mod untracked;
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,7 @@ use crate::git::{Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
-use crate::preferences::{FoldStore, IconMode, Preferences};
+use crate::preferences::{FoldStore, IconMode, Preferences, ProjectMode};
 use crate::reader::{OpenReader, ReadFile, Reader};
 use crate::screen::{Screen, Style};
 use crate::tree::{Folds, Tree, folders_above};
@@ -46,6 +47,7 @@ pub struct Outline {
     follow_activity: bool,
     remember: bool,
     peek: bool,
+    promotion: Option<(ProjectMode, Option<&'static str>)>,
     /// Pending files, each once, most recently written first.
     recent: Vec<usize>,
     recent_dirty: bool,
@@ -105,6 +107,7 @@ impl Outline {
             follow_activity: prefs.follow_activity,
             remember,
             peek: false,
+            promotion: None,
             recent: Vec::new(),
             recent_dirty: false,
             attention: Attention::new(Instant::now()),
@@ -147,8 +150,9 @@ impl Outline {
             self.refresh_folder(self.selected_path());
             return;
         };
+        let (prefs, notice) = Preferences::for_pane(Some(&repo.root));
+        self.promotion = Some((prefs.project_mode, notice));
         if self.remember {
-            let (prefs, _) = Preferences::for_pane(Some(&repo.root));
             self.icons = prefs.icons.effective();
             self.static_marks = prefs.static_marks;
             self.text_git_marks = prefs.text_git_marks;
@@ -310,6 +314,14 @@ impl Pane for Outline {
 
     fn key(&mut self, key: Key) -> After {
         self.outline_key(key, Instant::now())
+    }
+
+    fn notice(&self) -> Option<&'static str> {
+        self.promotion.and_then(|(_, notice)| notice)
+    }
+
+    fn promoted_worktree(&self) -> Option<(&Path, ProjectMode)> {
+        self.promotion.map(|(mode, _)| (self.repo.root.as_path(), mode))
     }
 
     fn watch_scope(&self) -> Scope {

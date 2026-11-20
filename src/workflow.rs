@@ -90,6 +90,23 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
         External::NewScope
     }
 
+    fn sync_promotion(&mut self) {
+        if self.git {
+            return;
+        }
+        let Some((root, mode)) = self.pane.promoted_worktree() else { return };
+        if self.root != root {
+            root.clone_into(&mut self.root);
+        }
+        self.git = true;
+        // The inner pane now owns the notice from the newly loaded preferences.
+        self.preference_note = None;
+        if mode == ProjectMode::Pin {
+            self.source = None;
+            self.note = None;
+        }
+    }
+
     fn set_note(&mut self, note: Option<&'static str>) -> External {
         if std::mem::replace(&mut self.note, note) == note { External::Unchanged } else { External::Redraw }
     }
@@ -131,7 +148,9 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn check(&mut self) -> bool {
-        self.pane.check()
+        let settled = self.pane.check();
+        self.sync_promotion();
+        settled
     }
 
     fn filesystem_changed(&mut self) {
@@ -143,7 +162,13 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn check_external(&mut self) -> External {
-        match self.source.as_mut().map_or(ShellChange::Unchanged, ShellObserver::read) {
+        // The cwd and filesystem notifications can become ready together. Let
+        // an in-place promotion apply its preferences before following the cwd.
+        let promoted = self.source.is_some() && !self.git && self.root.join(".git").exists() && {
+            self.check();
+            self.git
+        };
+        let update = match self.source.as_mut().map_or(ShellChange::Unchanged, ShellObserver::read) {
             ShellChange::Directory(dir) => self.observe(dir),
             ShellChange::Unreported => self.set_note(Some(NO_CWD)),
             ShellChange::Closed => {
@@ -151,7 +176,8 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
                 self.set_note(Some(NO_CWD))
             }
             ShellChange::Unchanged => External::Unchanged,
-        }
+        };
+        if promoted && matches!(update, External::Unchanged) { External::Redraw } else { update }
     }
 
     fn next_frame(&self) -> Option<Duration> {
@@ -162,7 +188,9 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         if let Key::Focus(focused) = key {
             self.focus = Some(focused);
         }
-        self.pane.key(key)
+        let after = self.pane.key(key);
+        self.sync_promotion();
+        after
     }
 }
 
@@ -208,6 +236,50 @@ mod tests {
         pane.draw(&mut screen);
         assert!(screen.text().iter().any(|row| row.contains("other.rs")));
         assert!(matches!(pane.observe(second.root.clone()), External::Unchanged));
+    }
+
+    #[test]
+    fn first_same_worktree_cwd_after_promotion_keeps_the_selection_and_opener() {
+        let f = Fixture::folder();
+        f.write("sub/kept.txt", "keep\n");
+        let make =
+            |repo, prefs: &Preferences| -> Box<dyn Pane> { Box::new(Outline::with_preferences(repo, true, prefs)) };
+        let repo = Repo::open(&f.root).unwrap();
+        let mut pane = Project {
+            root: repo.root.clone(),
+            git: false,
+            pane: make(repo, &Preferences::default()),
+            make,
+            source: None,
+            last_dir: None,
+            note: None,
+            notice_only: false,
+            preference_note: None,
+            focus: None,
+        };
+        *pane.pane.reader_opener().unwrap() = OpenReader::Floating { block: Some("block:kept".into()) };
+        let mut screen = Screen::sized(60, 8);
+        pane.draw(&mut screen);
+        pane.key(Key::Char('e'));
+        pane.draw(&mut screen);
+        pane.key(Key::Down);
+
+        f.git(&["init", "-q", "--template=", "-b", "main"]);
+        f.commit("first");
+        assert!(pane.check());
+        pane.draw(&mut screen);
+        let before = screen.text();
+        let selected = before.iter().position(|row| row.contains("kept.txt")).unwrap();
+        assert!(screen.bar_at(selected), "{before:?}");
+
+        assert!(matches!(pane.observe(f.root.join("sub")), External::Unchanged));
+        pane.draw(&mut screen);
+        assert_eq!(screen.text(), before);
+        assert!(screen.bar_at(selected));
+        assert!(matches!(
+            pane.pane.reader_opener(),
+            Some(OpenReader::Floating { block: Some(block) }) if block.as_str() == "block:kept"
+        ));
     }
 
     #[test]

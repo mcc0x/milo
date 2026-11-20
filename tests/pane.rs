@@ -381,6 +381,64 @@ fn both_panes_promote_a_plain_folder_while_idle_and_load_worktree_choices() {
 }
 
 #[test]
+fn follow_shell_promotion_applies_worktree_preferences_before_a_cwd_update() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    let observer_pid = project.0.join("observer");
+    let rex = project.0.join("rex");
+    fs::write(
+        &rex,
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$HOME/observer\"\nprintf 'milo-cwd -\\n'\n\
+         while [ -d \"$HOME\" ]; do sleep 0.02; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut paths = vec![project.0.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let path = std::env::join_paths(paths).unwrap();
+
+    let milo = env!("CARGO_BIN_EXE_milo");
+    project.git(&["init", "-q", "--template="]);
+    fs::write(root.join("page.txt"), "content\n").unwrap();
+    project.git(&["add", "page.txt"]);
+    project.git(&["commit", "-qm", "FirstGitCommit"]);
+
+    // Let Outline determine the worktree's preferences path.
+    let mut seed = Terminal::run(project.command(milo).arg("outline"));
+    seed.until("changed only");
+    seed.master.write_all(b"cq").unwrap();
+    assert!(seed.wait_for_exit().success());
+    let worktrees = project.0.join("config/milo/worktrees");
+    let prefs = fs::read_dir(worktrees).unwrap().next().unwrap().unwrap().path();
+
+    let metadata = project.0.join("metadata");
+    for (pane, prefs_text, promoted, observer_running) in [
+        ("outline", "project_mode = pin\n", "all committed", false),
+        ("history", "project_mode = broken\n", "worktree prefs ignored", true),
+    ] {
+        fs::write(&prefs, prefs_text).unwrap();
+        fs::rename(root.join(".git"), &metadata).unwrap();
+        let mut command = project.command(milo);
+        let anchor = "block:11111111-1111-1111-1111-111111111111";
+        command
+            .args([pane, "--shell", anchor])
+            .env("PATH", &path)
+            .env("REX_SESSION", "test")
+            .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222");
+        let mut terminal = Terminal::run(&mut command);
+        terminal.until("Pinned: no shell cwd");
+        let pid: libc::pid_t = fs::read_to_string(&observer_pid).unwrap().trim().parse().unwrap();
+        fs::rename(&metadata, root.join(".git")).unwrap();
+        terminal.until(promoted);
+        // SAFETY: Signal zero checks whether this test's observer exists without sending a signal.
+        assert_eq!(unsafe { libc::kill(pid, 0) } == 0, observer_running, "{pane}");
+        terminal.master.write_all(b"q").unwrap();
+        assert!(terminal.wait_for_exit().success());
+        fs::remove_file(&observer_pid).unwrap();
+    }
+}
+
+#[test]
 fn ctrl_c_during_a_slow_open_restores_the_terminal_without_waiting_for_git() {
     let project = Project::new();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::help::Page;
 use crate::keys::{ConfirmClick, Input, Key};
+use crate::preferences::ProjectMode;
 use crate::reader::OpenReader;
 use crate::screen::{Screen, Style, YELLOW};
 use crate::term::{self, Session, Wait, milliseconds};
@@ -53,6 +54,11 @@ pub trait Pane {
 
     /// The reader opener belongs to the terminal pane, not its current project.
     fn reader_opener(&mut self) -> Option<&mut OpenReader> {
+        None
+    }
+
+    /// The worktree and shell-follow choice adopted when a plain folder became a repository.
+    fn promoted_worktree(&self) -> Option<(&Path, ProjectMode)> {
         None
     }
 
