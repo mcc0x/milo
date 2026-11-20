@@ -125,6 +125,7 @@ private final class Model: ObservableObject {
         return process
     }
 
+    private var handoffs: [URL: BrowserHandoff] = [:]
     // A menu-launched editor belongs to the browser: allow it to finish a removal
     // and keep unsaved drafts when the menu app quits. It has its own idle timeout.
     private var independentSettings = false
@@ -156,7 +157,7 @@ private final class Model: ObservableObject {
         }
         do { try process.run() } catch { settingsError(); return }
         settings = process
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let pipe = output.fileHandleForReading
             defer { try? pipe.close() }
             var data = Data()
@@ -179,7 +180,10 @@ private final class Model: ObservableObject {
     }
 
     private func openBrowser(_ url: URL) {
-        if !NSWorkspace.shared.open(url) { settingsError() }
+        guard let handoff = BrowserHandoff(url), NSWorkspace.shared.open(handoff.file) else { settingsError(); return }
+        let file = handoff.file
+        handoffs[file] = handoff
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.handoffs[file] = nil }
     }
     private func settingsError() {
         let alert = NSAlert()
@@ -193,6 +197,7 @@ private final class Model: ObservableObject {
     }
 
     func quit() {
+        handoffs.removeAll()
         if !independentSettings { stopSettings() }
         stop()
     }

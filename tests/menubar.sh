@@ -11,6 +11,8 @@ codesign --verify --deep --strict -R "$requirement" "$app"
 codesign --verify --strict "$app/Contents/Resources/Tools/milo"
 test ! -e "$app/Contents/Resources/ProfilePaths.plist"
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
+swiftc -swift-version 5 -parse-as-library "$repo/macos/MenuBar/BrowserHandoff.swift" "$repo/tests/menu-handoff.swift" -o "$root/check-handoff"
+"$root/check-handoff"
 export HOME="$root/home"
 apps=$HOME/Applications
 dest="$apps/Milo.app"
