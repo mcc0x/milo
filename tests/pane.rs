@@ -229,9 +229,9 @@ cat >/dev/null
 for last do :; done
 echo "$last" >> "$HOME/opens"
 case $(wc -l < "$HOME/opens" | tr -d ' ') in
-    1) echo block:first ;;
+    1) echo block:11111111-1111-1111-1111-111111111111 ;;
     2) exit 1 ;;
-    *) echo block:next ;;
+    *) echo block:22222222-2222-2222-2222-222222222222 ;;
 esac
 "#,
     )
@@ -249,18 +249,26 @@ esac
     assert!(tty.wait_for_exit().success());
     let requests = fs::read_to_string(project.0.join("opens")).unwrap();
     let retry = requests.lines().nth(2).expect("the third open reached Rex");
-    assert!(retry.contains(r#""previous":"block:first""#), "{retry}");
+    assert!(retry.contains(r#""previous":"block:11111111-1111-1111-1111-111111111111""#), "{retry}");
 }
 
 #[test]
-fn a_slow_open_draws_the_project_name_before_it_has_the_files() {
+fn a_slow_open_reflows_its_loading_frame_without_waiting_for_git() {
     let project = Project::new();
     fs::write(project.0.join("project/page.txt"), "data").unwrap();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
     project.slow_git(&mut command);
-    let mut terminal = Terminal::run(command.arg("outline"));
+    let mut terminal = Terminal::sized(command.arg("outline"), 80, 1);
     terminal.until("Reading…");
-    assert!(terminal.output().contains("project"));
+    assert!(!terminal.output().contains("project"));
+    terminal.bytes.clear();
+    let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: The PTY descriptor and the size record are both live.
+    assert_eq!(unsafe { libc::ioctl(terminal.slave.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) }, 0);
+    // SAFETY: The PTY is not the child's controlling terminal; signal only this child.
+    assert_eq!(unsafe { libc::kill(i32::try_from(terminal.child.id()).unwrap(), libc::SIGWINCH) }, 0);
+    terminal.until("project");
+    terminal.until("Reading…");
     assert!(!terminal.output().contains("page.txt"));
     assert!(!terminal.restored());
     fs::write(project.0.join("go"), "").unwrap();

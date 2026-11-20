@@ -89,6 +89,7 @@ pub struct Watcher {
     listener: Option<Listener>,
     scope: Scope,
     native: Vec<PathBuf>,
+    retry: bool,
 }
 
 struct Listener {
@@ -101,12 +102,14 @@ impl Watcher {
     pub fn new(scope: Scope) -> Watcher {
         let native = native_exclusions(&scope.ignored.dirs, &[]);
         let listener = imp::start(&scope.roots, &native, Arc::clone(&scope.ignored));
-        Watcher { listener, scope, native }
+        let retry = can_retry(&scope, &listener);
+        Watcher { listener, scope, native, retry }
     }
 
     #[cfg(test)]
     pub(super) fn stop_listening(&mut self) {
         self.listener = None;
+        self.retry = false;
     }
 
     pub fn scope(&self) -> &Scope {
@@ -118,12 +121,13 @@ impl Watcher {
     pub fn refresh(&mut self, scope: Scope) -> bool {
         let roots_changed = self.scope.roots != scope.roots;
         let ignored_changed = self.scope.ignored != scope.ignored;
-        if !roots_changed && !ignored_changed {
-            self.scope = scope;
+        let mut restart =
+            roots_changed || self.retry || self.listener.as_ref().is_some_and(|listener| listener.stream.take_root_change());
+        if !restart && !ignored_changed {
+            self.scope.complete = scope.complete;
             return false;
         }
         let was_live = self.listener.is_some();
-        let mut restart = roots_changed;
         if ignored_changed && self.scope.ignored.dirs != scope.ignored.dirs {
             let native = native_exclusions(&scope.ignored.dirs, &self.native);
             restart |= self.native != native;
@@ -132,6 +136,7 @@ impl Watcher {
         if restart {
             // Start listening on the new stream before dropping the old one.
             self.listener = imp::start(&scope.roots, &self.native, Arc::clone(&scope.ignored));
+            self.retry = can_retry(&scope, &self.listener);
         } else if ignored_changed && let Some(listener) = &self.listener {
             listener.stream.set_ignored(Arc::clone(&scope.ignored));
         }
@@ -159,6 +164,10 @@ impl Watcher {
     }
 }
 
+fn can_retry(scope: &Scope, listener: &Option<Listener>) -> bool {
+    cfg!(target_os = "macos") && listener.is_none() && !scope.roots.is_empty()
+}
+
 /// Keep occupied native slots so adding an overflow directory need not restart the stream.
 fn native_exclusions(dirs: &HashSet<PathBuf>, previous: &[PathBuf]) -> Vec<PathBuf> {
     let mut native: Vec<_> = previous.iter().filter(|&path| dirs.contains(path)).cloned().collect();
@@ -183,6 +192,7 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::ptr::{null, null_mut};
     use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{Ignored, Listener};
 
@@ -191,10 +201,13 @@ mod imp {
     const SINCE_NOW: u64 = u64::MAX;
     /// Deliver the first event of a burst at once, not after `LATENCY`.
     const NO_DEFER: u32 = 0x2;
+    /// Report replacement or loss of a watched directory itself or one of its parents.
+    const WATCH_ROOT: u32 = 0x4;
     /// Directory-only notifications cannot identify writes to individual files.
     const FILE_EVENTS: u32 = 0x10;
     const IS_DIR: u32 = 0x0002_0000;
     const UTF8: u32 = 0x0800_0100;
+    const ROOT_CHANGED: u32 = 0x20;
     // Stream-wide flags (dropped/coalesced events, changed roots and mounted volumes)
     // require a check regardless of path. HistoryDone (0x10) isn't a change.
     const RESCAN: u32 = 0xef;
@@ -202,6 +215,7 @@ mod imp {
     struct CallbackState {
         signal: PipeWriter,
         ignored: Mutex<Arc<Ignored>>,
+        root_changed: AtomicBool,
     }
 
     pub(super) struct Stream {
@@ -213,6 +227,10 @@ mod imp {
     impl Stream {
         pub(super) fn set_ignored(&self, ignored: Arc<Ignored>) {
             *self.callback.ignored.lock().unwrap_or_else(PoisonError::into_inner) = ignored;
+        }
+
+        pub(super) fn take_root_change(&self) -> bool {
+            self.callback.root_changed.swap(false, Ordering::Relaxed)
         }
     }
 
@@ -313,31 +331,43 @@ mod imp {
     ) {
         // SAFETY: The context is held by Stream until its serial callback queue is drained.
         let state = unsafe { &*info.cast::<CallbackState>() };
+        if flags.is_null() {
+            crate::term::wake(state.signal.as_raw_fd());
+            return;
+        }
+        // SAFETY: FSEvents supplies one flag per event.
+        let flags = unsafe { std::slice::from_raw_parts(flags, count) };
         let ignored = state.ignored.lock().unwrap_or_else(PoisonError::into_inner);
-        let relevant = if !ignored.needs_paths() || paths.is_null() || flags.is_null() {
-            true
-        } else {
-            // SAFETY: Without UseCFTypes, FSEvents supplies `count` C strings and flags.
-            let paths = unsafe { std::slice::from_raw_parts(paths.cast::<*const libc::c_char>(), count) };
-            // SAFETY: The flags array contains one entry per path.
-            let flags = unsafe { std::slice::from_raw_parts(flags, count) };
-            paths.iter().zip(flags).any(|(&path, &flags)| {
-                if flags & RESCAN != 0 || path.is_null() {
-                    return true;
-                }
-                // SAFETY: FSEvents guarantees the event path is a NUL-terminated string.
-                let path = unsafe { CStr::from_ptr(path) };
-                let path = Path::new(OsStr::from_bytes(path.to_bytes()));
-                ignored.allows(path, flags & IS_DIR != 0)
-            })
-        };
+        // SAFETY: Without UseCFTypes, FSEvents supplies `count` C strings when paths is non-null.
+        let paths = (!paths.is_null() && ignored.needs_paths())
+            .then(|| unsafe { std::slice::from_raw_parts(paths.cast::<*const libc::c_char>(), count) });
+        let mut relevant = paths.is_none();
+        for (i, &flag) in flags.iter().enumerate() {
+            // The root flag can arrive after other relevant events in the batch.
+            if flag & ROOT_CHANGED != 0 {
+                state.root_changed.store(true, Ordering::Relaxed);
+                relevant = true;
+                break;
+            }
+            if let Some(paths) = paths.filter(|_| !relevant) {
+                let path = paths[i];
+                relevant = if flag & RESCAN != 0 || path.is_null() {
+                    true
+                } else {
+                    // SAFETY: FSEvents guarantees the event path is a NUL-terminated string.
+                    let path = unsafe { CStr::from_ptr(path) };
+                    let path = Path::new(OsStr::from_bytes(path.to_bytes()));
+                    ignored.allows(path, flag & IS_DIR != 0)
+                };
+            }
+        }
         if relevant {
             crate::term::wake(state.signal.as_raw_fd());
         }
     }
 
     pub(super) fn start(roots: &[PathBuf], native: &[PathBuf], ignored: Arc<Ignored>) -> Option<Listener> {
-        if roots.is_empty() {
+        if roots.is_empty() || roots.iter().any(|path| !path.is_dir()) {
             return None;
         }
         let (reader, writer) = io::pipe().ok()?;
@@ -347,7 +377,11 @@ mod imp {
                 return None;
             }
         }
-        let callback = Arc::new(CallbackState { signal: writer, ignored: Mutex::new(ignored) });
+        let callback = Arc::new(CallbackState {
+            signal: writer,
+            ignored: Mutex::new(ignored),
+            root_changed: AtomicBool::new(false),
+        });
         let (stream, queue) = start_stream(roots, native, Arc::as_ptr(&callback))?;
         Some(Listener { stream: Stream { stream, queue, callback }, heard: reader })
     }
@@ -394,7 +428,7 @@ mod imp {
         let mut context = Context { version: 0, info, retain: None, release: None, describe: None };
         // SAFETY: paths is a live CFArray. The stream copies the fields of context.
         let stream = unsafe {
-            FSEventStreamCreate(null(), on_event, &mut context, paths, SINCE_NOW, LATENCY, NO_DEFER | FILE_EVENTS)
+            FSEventStreamCreate(null(), on_event, &mut context, paths, SINCE_NOW, LATENCY, NO_DEFER | WATCH_ROOT | FILE_EVENTS)
         };
         // SAFETY: paths was created above and the stream keeps its own paths.
         unsafe { CFRelease(paths) };
@@ -444,6 +478,10 @@ mod imp {
     pub(super) struct Stream;
     impl Stream {
         pub(super) fn set_ignored(&self, _: Arc<Ignored>) {}
+
+        pub(super) fn take_root_change(&self) -> bool {
+            false
+        }
     }
 
     pub(super) fn start(_: &[PathBuf], _: &[PathBuf], _: Arc<Ignored>) -> Option<Listener> {
@@ -710,5 +748,29 @@ mod tests {
         drop(original);
         second.write("new.txt", "recent change\n");
         assert!(changed(&replacement, 30_000), "the next pane should also get live changes");
+    }
+
+    #[test]
+    fn a_removed_watch_root_is_reattached_when_recreated_at_the_same_path() {
+        let f = Fixture::folder();
+        let root = f.root.join("watched");
+        std::fs::create_dir(&root).unwrap();
+        let scope = || Scope { roots: vec![root.clone()], ignored: Arc::default(), complete: true };
+        let mut watcher = Watcher::new(scope());
+        f.write("watched/ready", "ready");
+        assert!(changed(&watcher, 30_000));
+        settle(&watcher);
+
+        std::fs::rename(&root, f.root.join("old")).unwrap();
+        assert!(changed(&watcher, 30_000), "the root's own rename must wake the pane");
+        while !watcher.refresh(scope()) {
+            assert!(changed(&watcher, 30_000), "the root change must invalidate the stream");
+        }
+        assert!(watcher.fd().is_none(), "a missing root cannot provide live coverage");
+
+        std::fs::create_dir(&root).unwrap();
+        assert!(watcher.refresh(scope()), "an unchanged path must be reattached after it returns");
+        f.write("watched/later", "change in the replacement root");
+        assert!(changed(&watcher, 30_000));
     }
 }

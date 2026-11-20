@@ -201,7 +201,10 @@ fn draw_notice(screen: &mut Screen, note: &str, draw: impl FnOnce(&mut Screen)) 
 }
 
 fn draw_git_wait(pane: &mut dyn Pane, screen: &mut Screen) {
-    if screen.h > 0 {
+    if screen.h == 1 {
+        screen.clear();
+        screen.put_fit(0, 0, screen.w, WAITING_FOR_GIT, Style::fg(YELLOW));
+    } else if screen.h > 1 {
         draw_notice(screen, WAITING_FOR_GIT, |screen| draw_pane(pane, screen, None));
     }
 }
@@ -355,26 +358,21 @@ fn with_loading<T>(
     input: &mut Input,
     delay: Duration,
     open: impl FnOnce() -> T,
-) -> T {
-    let Ok((ready, done)) = io::pipe() else { return open() };
-    std::thread::scope(|scope| {
+) -> (T, Option<bool>) {
+    let Ok((ready, done)) = io::pipe() else { return (open(), None) };
+    let mut focused = None;
+    let value = std::thread::scope(|scope| {
+        let focus = &mut focused;
         scope.spawn(move || {
             let delay = Instant::now() + delay;
             let mut painted = false;
             let mut keys = Vec::new();
             while !term::TERMINATED.load(Ordering::Relaxed) {
                 let timeout = if painted { -1 } else { milliseconds(delay.saturating_duration_since(Instant::now())) };
-                match terminal.wait_for_open(timeout, ready.as_raw_fd()) {
+                let check_size = match terminal.wait_for_open(timeout, ready.as_raw_fd()) {
                     Wait::Woken | Wait::External => return,
                     Wait::Closed => break,
-                    Wait::Timeout => {
-                        let (w, h) = terminal.size();
-                        draw_loading(screen, dir, w, h);
-                        if screen.flush(|bytes| terminal.write(bytes)).is_err() {
-                            break;
-                        }
-                        painted = true;
-                    }
+                    Wait::Timeout | Wait::Interrupted => true,
                     Wait::Input => {
                         input.receive(&mut terminal.keyboard, &mut keys);
                         if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
@@ -382,7 +380,11 @@ fn with_loading<T>(
                         }
                         for key in keys.drain(..) {
                             terminal_reply(screen, key);
+                            if let Key::Focus(value) = key {
+                                *focus = Some(value);
+                            }
                         }
+                        !painted
                     }
                     Wait::Interrupted => {}
                 }
@@ -393,7 +395,8 @@ fn with_loading<T>(
         let opened = open();
         drop(done);
         opened
-    })
+    });
+    (value, focused)
 }
 
 pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
@@ -408,26 +411,46 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
     run_entered(start, open, &mut terminal)
 }
 
+enum Exit {
+    Done,
+    OpenWeb,
+}
+
 fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Result<(), String> {
+    let mut screen = Screen::new();
+    let exit = pane_loop(start, open, terminal, &mut screen);
+    screen.release_pictures(|bytes| terminal.finish(bytes));
+    match exit? {
+        Exit::Done => Ok(()),
+        Exit::OpenWeb => {
+            terminal.restore();
+            crate::web::run(true, crate::web::DEFAULT_PORT)
+        }
+    }
+}
+
+fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: &mut Screen) -> Result<Exit, String> {
     let check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
     let mut handoff_click = ConfirmClick::default();
-    let mut screen = Screen::new();
     let mut input = Input::default();
     let load = |open: &Open<'_>| {
         let mut pane = open()?;
         let (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
         Ok::<_, String>((pane, watcher, pace))
     };
-    let opened = match start {
-        Start::Reading(dir) => with_loading(&mut screen, Some(dir), terminal, &mut input, LOADING_DELAY, || load(open)),
-        Start::Check => with_loading(&mut screen, None, terminal, &mut input, LOADING_DELAY, || load(open)),
-        _ => load(open),
+    let (opened, mut focused) = match start {
+        Start::Reading(dir) => with_loading(screen, Some(dir), terminal, &mut input, LOADING_DELAY, || load(open)),
+        Start::Check => with_loading(screen, None, terminal, &mut input, LOADING_DELAY, || load(open)),
+        _ => (load(open), None),
     };
     if term::TERMINATED.load(Ordering::Relaxed) {
-        return Ok(());
+        return Ok(Exit::Done);
     }
     let (mut pane, mut watcher, mut pace) = opened?;
+    if let Some(value) = focused {
+        pane.key(Key::Focus(value));
+    }
     let mut help = None;
     let mut keys = Vec::new();
     let mut redraw = true;
@@ -435,12 +458,15 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
     let mut tracking = false;
     let mut pointer = None;
     let mut highlighted = None;
+    let mut first_frame = true;
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
-        if term::RESIZED.swap(false, Ordering::Relaxed) || screen.w == 0 {
+        let resized = term::RESIZED.swap(false, Ordering::Relaxed);
+        if first_frame || resized {
+            first_frame = false;
             let (w, h) = terminal.size();
             screen.resize_interactive(w, h, Instant::now());
             pointer = None;
-            if !Page::fits(&screen) {
+            if !Page::fits(screen) {
                 help = None;
             }
             redraw = true;
@@ -455,11 +481,13 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                 tracking = want_motion;
             }
             if help.is_none() && pace.as_ref().is_some_and(Pace::waiting_for_git) {
-                draw_git_wait(pane.as_mut(), &mut screen);
+                draw_git_wait(pane.as_mut(), screen);
             } else {
-                draw_pane(pane.as_mut(), &mut screen, help.as_mut());
+                draw_pane(pane.as_mut(), screen, help.as_mut());
             }
-            highlighted = pointer.and_then(|(x, y)| hover_at(pane.as_ref(), help.as_ref(), x, y));
+            highlighted = pointer
+                .filter(|&(_, y)| pane_row_available(screen, &help, &pace, y))
+                .and_then(|(x, y)| hover_at(pane.as_ref(), help.as_ref(), x, y));
             if let Some((y, span)) = &highlighted {
                 screen.underline(*y, span.clone());
             }
@@ -487,9 +515,12 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                 let mut overlay_changed = false;
                 for key in keys.drain(..) {
                     if let Key::Hover(x, y) = key {
-                        if tracking && !overlay_changed {
+                        if tracking && !overlay_changed && pane_row_available(screen, &help, &pace, y) {
                             pointer = Some((x, y));
                             redraw |= hover_at(pane.as_ref(), help.as_ref(), x, y) != highlighted;
+                        } else if !overlay_changed {
+                            pointer = None;
+                            redraw |= highlighted.is_some();
                         }
                         continue;
                     }
@@ -499,21 +530,20 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                     }
                     // Skip stale help targets and the repeated click that left onboarding.
                     if let Key::Click(x, y) = key
-                        && (overlay_changed || handoff_click.is_repeat(x, y))
+                        && (overlay_changed || !pane_row_available(screen, &help, &pace, y) || handoff_click.is_repeat(x, y))
                     {
                         continue;
                     }
+                    if let Key::Focus(value) = key {
+                        focused = Some(value);
+                    }
                     let had_help = help.is_some();
-                    match route_key(pane.as_mut(), &mut screen, &mut help, key) {
+                    match route_key(pane.as_mut(), screen, &mut help, key) {
                         After::Ignored => {}
                         After::Stay => redraw = true,
-                        After::OpenWeb => {
-                            drop(pane);
-                            terminal.restore();
-                            return crate::web::run(true, crate::web::DEFAULT_PORT);
-                        }
+                        After::OpenWeb => return Ok(Exit::OpenWeb),
                         After::Help => {
-                            if Page::fits(&screen) {
+                            if Page::fits(screen) {
                                 help = Some(pane.help());
                                 redraw = true;
                             }
@@ -523,6 +553,10 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                                 && let Some(open) = next.take()
                             {
                                 (pane, watcher, pace) = load(&open)?;
+                                if let Some(value) = focused {
+                                    pane.key(Key::Focus(value));
+                                }
+                                overlay_changed = true;
                                 // The same physical click target may perform another action after onboarding.
                                 if let Key::Click(x, y) = key {
                                     handoff_click.opened(x, y);
@@ -553,8 +587,9 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                     redraw = true;
                 }
             },
+            Wait::Interrupted if term::RESIZED.load(Ordering::Relaxed) => continue,
             Wait::Timeout | Wait::Interrupted => {}
-            Wait::Closed => return Ok(()),
+            Wait::Closed => break,
         }
         if term::TERMINATED.load(Ordering::Relaxed) {
             break;
@@ -565,8 +600,11 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
             redraw |= check_watched_pane(pane.as_mut(), &mut watcher, &mut pace, check_on_open);
         }
     }
-    screen.release_pictures(|bytes| terminal.finish(bytes));
-    Ok(())
+    Ok(Exit::Done)
+}
+
+fn pane_row_available(screen: &Screen, help: &Option<Page>, pace: &Option<Pace>, y: usize) -> bool {
+    y < screen.h && (help.is_some() || y + 1 < screen.h || !pace.as_ref().is_some_and(Pace::waiting_for_git))
 }
 
 #[cfg(test)]
@@ -612,10 +650,66 @@ mod tests {
     fn a_fast_open_does_not_draw_a_loading_frame() {
         let mut screen = Screen::new();
         let (mut terminal, _master, _signals) = Session::test_pty();
-        let value = with_loading(&mut screen, None, &mut terminal, &mut Input::default(), TEST_WAIT, || 42);
-        assert_eq!(value, 42);
+        let result = with_loading(&mut screen, None, &mut terminal, &mut Input::default(), TEST_WAIT, || 42);
+        assert_eq!(result, (42, None));
         assert_eq!((screen.w, screen.h), (0, 0));
         assert!(screen.emitted().is_empty());
+    }
+
+    #[test]
+    fn the_loading_screen_preserves_the_most_recent_focus_report() {
+        let mut screen = Screen::new();
+        let (mut terminal, mut master, _signals) = Session::test_pty();
+        master.write_all(b"\x1b[O\x1b[I").unwrap();
+        let ((), focused) = with_loading(
+            &mut screen,
+            None,
+            &mut terminal,
+            &mut Input::default(),
+            LOADING_DELAY,
+            || {
+                let output = read_until(&mut master, "Reading…");
+                assert!(output.contains("Reading…"), "{output:?}");
+            },
+        );
+        assert_eq!(focused, Some(true));
+    }
+
+    #[test]
+    fn a_hover_report_repaints_the_link_with_an_underline() {
+        struct Link;
+        impl Pane for Link {
+            fn draw(&mut self, screen: &mut Screen) {
+                screen.clear();
+                screen.put(0, 0, screen.w, "link", Style::PLAIN);
+            }
+            fn help(&self) -> Page {
+                Page::new(vec![])
+            }
+            fn tracks_hover(&self) -> bool {
+                true
+            }
+            fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+                (x < 4 && y == 0).then_some(0..4)
+            }
+            fn key(&mut self, key: Key) -> After {
+                if key == Key::Char('q') { After::Leave } else { After::Ignored }
+            }
+        }
+
+        let (mut terminal, mut master, _signals) = Session::test_pty();
+        std::thread::scope(|scope| {
+            let observe = scope.spawn(|| {
+                let before = read_until(&mut master, "link");
+                master.write_all(b"\x1b[<35;2;1M").unwrap();
+                let after = read_until(&mut master, "\x1b[0;4mlink");
+                master.write_all(b"q").unwrap();
+                assert!(before.contains("link") && !before.contains("\x1b[0;4m"), "{before:?}");
+                assert!(after.contains("\x1b[0;4mlink"), "{after:?}");
+            });
+            run_entered(Start::Loaded, &|| Ok(Box::new(Link)), &mut terminal).unwrap();
+            observe.join().unwrap();
+        });
     }
 
     #[test]
