@@ -3,12 +3,15 @@
 use std::borrow::Cow;
 use std::env;
 use std::fs::{self, File, Metadata, Permissions};
-use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::fs_ops::{self, Temp};
+
+/// Setup keeps several snapshots in memory for a transaction and its rollback.
+const SNAPSHOT_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Only the user's settings may be links. Edit their existing target, never
 /// replace the link or create a new file through a dangling link.
@@ -43,26 +46,33 @@ pub(super) fn open(path: &Path) -> io::Result<Option<(File, Metadata)>> {
 
 impl Image {
     pub(super) fn read(path: &Path) -> io::Result<Option<Self>> {
-        let Some((mut file, info)) = open(path)? else { return Ok(None) };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(Some(Self { bytes, mode: info.permissions().mode() & 0o7777 }))
+        let Some((file, info)) = open(path)? else { return Ok(None) };
+        Self::from_open(file, info).map(Some)
+    }
+
+    fn from_open(file: File, info: Metadata) -> io::Result<Self> {
+        let size = usize::try_from(info.len()).map_err(|_| ErrorKind::FileTooLarge)?;
+        if size > SNAPSHOT_LIMIT {
+            return Err(ErrorKind::FileTooLarge.into());
+        }
+        // The file can grow after we read its metadata.
+        let mut bytes = Vec::with_capacity(size);
+        file.take(SNAPSHOT_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > SNAPSHOT_LIMIT {
+            return Err(ErrorKind::FileTooLarge.into());
+        }
+        Ok(Self { bytes, mode: info.permissions().mode() & 0o7777 })
     }
 }
 
 /// Use the same naming for staged Lua and for a settings replacement.
-fn temp(dir: &Path, bytes: &[u8], mode: u32) -> io::Result<Temp> {
+fn temp(dir: &Path, create: impl Fn(PathBuf) -> io::Result<(Temp, File)>) -> io::Result<(Temp, File)> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     for _ in 0..32 {
         let path = dir.join(format!(".milo-{}-{}.lua", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        match Temp::create(path) {
-            Ok((temp, mut file)) => {
-                file.write_all(bytes)?;
-                file.set_permissions(Permissions::from_mode(mode))?;
-                return Ok(temp);
-            }
+        match create(path) {
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+            result => return result,
         }
     }
     Err(ErrorKind::AlreadyExists.into())
@@ -71,8 +81,31 @@ fn temp(dir: &Path, bytes: &[u8], mode: u32) -> io::Result<Temp> {
 /// Validation can outlive the setup process. Keep only an open handle, not
 /// a named Lua file that a killed setup would leave in the user's config.
 pub(super) fn staged(bytes: &[u8]) -> io::Result<File> {
-    let scratch = temp(&env::temp_dir(), bytes, 0o600)?;
-    fs_ops::open_read(scratch.path())
+    let (scratch, mut file) = temp(&env::temp_dir(), Temp::create_read_write)?;
+    scratch.unlink()?;
+    file.write_all(bytes)?;
+    file.set_permissions(Permissions::from_mode(0o600))?;
+    file.rewind()?;
+    Ok(file)
+}
+
+/// Only the explicitly owned directory is private; missing ancestors use normal permissions.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    let result = match builder.create(dir) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if let Some(parent) = dir.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            builder.create(dir)
+        }
+        result => result,
+    };
+    match result {
+        Err(error) if error.kind() == ErrorKind::AlreadyExists && fs::symlink_metadata(dir)?.is_dir() => Ok(()),
+        result => result,
+    }
 }
 
 /// A planned edit carries the old state, so a concurrent edit is not overwritten.
@@ -80,20 +113,34 @@ pub(super) struct Change {
     path: PathBuf,
     before: Option<Image>,
     after: Option<Image>,
+    private_parent: bool,
 }
 
 impl Change {
     pub(super) fn new(path: PathBuf, before: Option<Image>, bytes: Option<Vec<u8>>) -> Option<Self> {
         let after = bytes.map(|bytes| Image { bytes, mode: before.as_ref().map_or(0o600, |file| file.mode) });
-        (after != before).then_some(Self { path, before, after })
+        (after != before).then_some(Self { path, before, after, private_parent: false })
+    }
+
+    pub(super) fn in_private_dir(path: PathBuf, before: Option<Image>, bytes: Option<Vec<u8>>) -> Option<Self> {
+        let mut change = Self::new(path, before, bytes)?;
+        change.private_parent = true;
+        Some(change)
     }
 
     /// Stage before rechecking the old file so the check is close to publication.
     fn replace(&self, expected: &Option<Image>, image: Option<&Image>) -> io::Result<()> {
         let staged = if let Some(image) = image {
             let dir = self.path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-            fs::create_dir_all(dir)?;
-            Some(temp(dir, &image.bytes, image.mode)?)
+            if self.private_parent {
+                create_private_dir(dir)?;
+            } else {
+                fs::create_dir_all(dir)?;
+            }
+            let (staged, mut file) = temp(dir, Temp::create)?;
+            file.write_all(&image.bytes)?;
+            file.set_permissions(Permissions::from_mode(image.mode))?;
+            Some(staged)
         } else {
             None
         };
@@ -103,7 +150,10 @@ impl Change {
             // Publishing a new file must not overwrite a file that just appeared.
             return fs::hard_link(staged.path(), &self.path);
         }
-        if &Image::read(&self.path)? != expected {
+        let current = Image::read(&self.path).map_err(|error| {
+            if error.kind() == ErrorKind::FileTooLarge { ErrorKind::Interrupted.into() } else { error }
+        })?;
+        if &current != expected {
             return Err(ErrorKind::Interrupted.into());
         }
         if let Some(staged) = staged { staged.replace(&self.path) } else { fs::remove_file(&self.path) }
@@ -128,8 +178,14 @@ fn undo(changes: &[Change]) -> bool {
 
 /// Rex must see the new settings before accepting them, but rejection rolls them back.
 pub(super) fn install(changes: &[Change], accept: impl FnOnce() -> bool) -> Result<(), &'static str> {
-    if changes.iter().any(|change| change.before.as_ref().is_some_and(|file| file.mode & 0o222 == 0)) {
-        return Err("A settings file is read-only. No files were changed.");
+    for change in changes {
+        if change.before.as_ref().is_some_and(|file| file.mode & 0o222 == 0) {
+            return Err("A settings file is read-only. No files were changed.");
+        }
+        // Every image we publish must fit in a later snapshot, including on rollback.
+        if change.after.as_ref().is_some_and(|file| file.bytes.len() > SNAPSHOT_LIMIT) {
+            return Err("A settings file would be too large to save. No files were changed.");
+        }
     }
     for (i, change) in changes.iter().enumerate() {
         if let Err(error) = change.replace(&change.before, change.after.as_ref()) {
@@ -150,5 +206,62 @@ pub(super) fn install(changes: &[Change], accept: impl FnOnce() -> bool) -> Resu
         Err("Rex could not reload. Your files were put back.")
     } else {
         Err("Rex could not reload. Could not put every file back.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use std::os::unix::fs::MetadataExt as _;
+
+    #[test]
+    fn staged_lua_is_unlinked_and_readable_from_the_start() {
+        let lua = b"return true\n";
+        let mut file = staged(lua).unwrap();
+        let info = file.metadata().unwrap();
+        assert_eq!(info.nlink(), 0);
+        assert_eq!(info.permissions().mode() & 0o777, 0o600);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, lua);
+    }
+
+    #[test]
+    fn a_snapshot_accepts_the_limit_but_not_more() {
+        let fixture = Fixture::folder();
+        let path = fixture.root.join("init.lua");
+        let writer = File::create(&path).unwrap();
+        writer.set_len(SNAPSHOT_LIMIT as u64).unwrap();
+        assert_eq!(Image::read(&path).unwrap().unwrap().bytes.len(), SNAPSHOT_LIMIT);
+
+        writer.set_len(SNAPSHOT_LIMIT as u64 + 1).unwrap();
+        assert_eq!(Image::read(&path).err().unwrap().kind(), ErrorKind::FileTooLarge);
+    }
+
+    #[test]
+    fn a_snapshot_rejects_growth_after_reading_metadata() {
+        let fixture = Fixture::folder();
+        let path = fixture.root.join("init.lua");
+        let writer = File::create(&path).unwrap();
+        let (file, info) = open(&path).unwrap().unwrap();
+        writer.set_len(SNAPSHOT_LIMIT as u64 + 1).unwrap();
+        assert_eq!(Image::from_open(file, info).err().unwrap().kind(), ErrorKind::FileTooLarge);
+    }
+
+    #[test]
+    fn a_change_that_would_exceed_the_snapshot_limit_leaves_all_files_alone() {
+        let fixture = Fixture::folder();
+        let first = fixture.root.join("first");
+        let second = fixture.root.join("second");
+        let changes = [
+            Change::new(first.clone(), None, Some(b"new".to_vec())).unwrap(),
+            Change::new(second.clone(), None, Some(vec![0; SNAPSHOT_LIMIT + 1])).unwrap(),
+        ];
+        assert_eq!(
+            install(&changes, || panic!("an oversized save reached reload")),
+            Err("A settings file would be too large to save. No files were changed."),
+        );
+        assert!(!first.exists() && !second.exists());
     }
 }

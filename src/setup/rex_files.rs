@@ -121,7 +121,7 @@ impl Store {
             Some(rex_lua(layout, &executable, env))
         };
         if let Some(lua) = after {
-            changes.extend(Change::new(path.into(), before, Some(self.checked(lua, run)?)));
+            changes.extend(Change::in_private_dir(path.into(), before, Some(self.checked(lua, run)?)));
         }
         Ok(())
     }
@@ -138,19 +138,19 @@ impl Store {
                 return Err("Could not update milo's listener file (listener.lua). Your file was left alone.");
             }
         }
-        changes.extend(Change::new(path, before, Some(self.checked(lua, run)?)));
+        changes.extend(Change::in_private_dir(path, before, Some(self.checked(lua, run)?)));
         Ok(())
     }
 
     fn remove_shipped(&self, rex_path: &Path, changes: &mut Vec<Change>) -> Result<(), &'static str> {
         let actions = read(rex_path)?.filter(|file| text_is(file, owns_actions));
         if actions.is_some() {
-            changes.extend(Change::new(rex_path.into(), actions, None));
+            changes.extend(Change::in_private_dir(rex_path.into(), actions, None));
         }
         let path = self.listener_file();
         let listener = read(&path)?.filter(|file| text_is(file, |text| owns_listener(text, rex_path)));
         if listener.is_some() {
-            changes.extend(Change::new(path, listener, None));
+            changes.extend(Change::in_private_dir(path, listener, None));
         }
         Ok(())
     }
@@ -158,6 +158,7 @@ impl Store {
     /// Rex checks a temporary copy so rejecting it leaves the existing layout untouched.
     fn checked(&self, lua: String, run: &RunRex<'_>) -> Result<Vec<u8>, &'static str> {
         let stage = staged(lua.as_bytes()).map_err(|_| "Could not prepare the Rex files.")?;
+        // Let the runner attach the held, unlinked descriptor without resolving the scratch filename.
         let fd = format!("/dev/fd/{}", stage.as_raw_fd());
         if !run(&[OsStr::new("config"), OsStr::new("check"), OsStr::new(&fd)]) {
             return Err("Rex could not check the layout. No files were changed.");
@@ -283,9 +284,51 @@ fn insert_loader(bytes: &[u8], start: usize, load: &str, created: bool) -> Resul
 }
 
 #[cfg(test)]
-mod launcher_tests {
+mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use super::super::files;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    #[test]
+    fn only_the_new_milo_config_directory_is_private() {
+        let fixture = crate::fixture::Fixture::folder();
+        let shared = fixture.root.join("shared");
+        let reference = fixture.root.join("reference");
+        fs::create_dir(&reference).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let store = Store {
+            init: shared.join("rex/init.lua"),
+            config: shared.join("milo"),
+            state: fixture.root.join("state"),
+            claude: fixture.root.join("settings.json"),
+            claude_state: None,
+        };
+        let mut changes = Vec::new();
+        store.plan_rex(&Layout::default(), &mut changes, &|_| true).unwrap();
+        files::install(&changes, || true).unwrap();
+        assert_eq!(mode(&store.config) & 0o077, 0);
+        assert_eq!(mode(&shared), mode(&reference));
+        assert_eq!(mode(&shared.join("rex")), mode(&reference));
+    }
+
+    #[test]
+    fn installing_into_existing_milo_config_preserves_the_directory_mode() {
+        let fixture = crate::fixture::Fixture::folder();
+        let store = Store {
+            init: fixture.root.join("init.lua"),
+            config: fixture.root.join("milo"),
+            state: fixture.root.join("state"),
+            claude: fixture.root.join("settings.json"),
+            claude_state: None,
+        };
+        fs::create_dir(&store.config).unwrap();
+        fs::set_permissions(&store.config, fs::Permissions::from_mode(0o750)).unwrap();
+
+        let mut changes = Vec::new();
+        store.plan_rex(&Layout::default(), &mut changes, &|_| true).unwrap();
+        files::install(&changes, || true).unwrap();
+        assert_eq!(fs::metadata(&store.config).unwrap().permissions().mode() & 0o777, 0o750);
+    }
 
     #[test]
     fn only_use_the_stable_brew_link_for_the_running_installation() {

@@ -36,12 +36,26 @@ pub struct Temp(PathBuf);
 
 impl Temp {
     pub fn create(path: PathBuf) -> io::Result<(Self, File)> {
-        let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        Self::open(path, false)
+    }
+
+    pub(crate) fn create_read_write(path: PathBuf) -> io::Result<(Self, File)> {
+        Self::open(path, true)
+    }
+
+    fn open(path: PathBuf, read: bool) -> io::Result<(Self, File)> {
+        let file = OpenOptions::new().read(read).write(true).create_new(true).mode(0o600).open(&path)?;
         Ok((Self(path), file))
     }
 
     pub fn path(&self) -> &Path {
         &self.0
+    }
+
+    pub(crate) fn unlink(mut self) -> io::Result<()> {
+        fs::remove_file(&self.0)?;
+        self.0.clear();
+        Ok(())
     }
 
     pub fn replace(mut self, path: &Path) -> io::Result<()> {
