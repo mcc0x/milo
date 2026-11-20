@@ -8,9 +8,11 @@ use std::borrow::Cow;
 #[cfg(target_os = "macos")]
 use std::io::Read as _;
 use std::io::Write as _;
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd as _;
 use std::path::Path;
 #[cfg(target_os = "macos")]
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 #[cfg(target_os = "macos")]
@@ -198,21 +200,23 @@ fn convert(bytes: &[u8], path: &Path, size: Option<(u32, u32)>, deadline: Durati
     file.write_all(bytes).ok()?;
     drop(file);
     let (output, _) = Temp::create(dir.join(format!("{prefix}-out.png"))).ok()?;
+    let deadline = Instant::now() + deadline;
 
+    let resize = size.map(|(w, h)| w.max(h) > LONGEST_SIDE).or_else(|| probe_resize(input.path(), deadline));
     let sips = |source: &Path, resize: bool| {
         let mut command = Command::new("/usr/bin/sips");
         if resize {
             command.args(["-Z", &LONGEST_SIDE.to_string()]);
         }
         command.args(["-s", "format", "png"]).arg(source).arg("--out").arg(output.path());
-        finishes(command, deadline)
+        finish(command, Stdio::null(), deadline).is_some()
     };
-    // `-Z` can enlarge a small picture. For unknown formats only resize
-    // after the converted PNG tells us it is too large.
-    if !sips(input.path(), size.is_some_and(|(w, h)| w.max(h) > LONGEST_SIDE)) {
+    // `-Z` can enlarge small pictures. If even sips cannot tell us the
+    // dimensions, keep the plain conversion and check its PNG before resizing.
+    if !sips(input.path(), resize.unwrap_or(false)) {
         return None;
     }
-    if size.is_none() {
+    if resize.is_none() {
         let mut header = [0; 24];
         fs_ops::open_read(output.path()).ok()?.read_exact(&mut header).ok()?;
         let (w, h) = png_size(&header)?;
@@ -226,34 +230,69 @@ fn convert(bytes: &[u8], path: &Path, size: Option<(u32, u32)>, deadline: Durati
     }
 }
 
+/// Ask sips for dimensions without encoding a full-size PNG.
+#[cfg(target_os = "macos")]
+fn probe_resize(source: &Path, deadline: Instant) -> Option<bool> {
+    let mut command = Command::new("/usr/bin/sips");
+    command.args(["-g", "pixelWidth", "-g", "pixelHeight"]).arg(source);
+    let mut stdout = finish(command, Stdio::piped(), deadline)?.stdout?;
+    // The child has exited. Read only what's already in the pipe, even if
+    // another process inherited a writer. Normal output is a path and two lines.
+    let mut len: libc::c_int = 0;
+    // SAFETY: The pipe is live; FIONREAD writes one c_int to len.
+    if unsafe { libc::ioctl(stdout.as_raw_fd(), libc::FIONREAD, &raw mut len) } != 0 {
+        return None;
+    }
+    let mut properties = [0; 2048];
+    let properties = properties.get_mut(..usize::try_from(len).ok()?)?;
+    stdout.read_exact(properties).ok()?;
+    resize_from_properties(properties)
+}
+
+#[cfg(target_os = "macos")]
+fn resize_from_properties(properties: &[u8]) -> Option<bool> {
+    // Ignore the source path, which may itself contain newlines or non-UTF-8 bytes.
+    let mut lines = properties.trim_ascii_end().rsplit(|&byte| byte == b'\n');
+    let dimension = |line: &[u8], key: &[u8]| {
+        let value = line.trim_ascii_start().strip_prefix(key)?.trim_ascii();
+        // SVG and PDF dimensions can be fractional; some formats return <nil>.
+        let pixels = std::str::from_utf8(value).ok()?.parse::<f64>().ok()?;
+        (pixels.is_finite() && pixels > 0.0).then_some(pixels)
+    };
+    let height = dimension(lines.next()?, b"pixelHeight:")?;
+    let width = dimension(lines.next()?, b"pixelWidth:")?;
+    Some(width.max(height) > f64::from(LONGEST_SIDE))
+}
+
 /// Without a converter at hand, only what is already a PNG can be shown.
 #[cfg(not(target_os = "macos"))]
 fn convert(_: &[u8], _: &Path, _: Option<(u32, u32)>, _: Duration) -> Option<Vec<u8>> {
     None
 }
 
-/// Runs a command to its end and says whether it succeeded. One that takes
+/// Runs a command to its end, keeping its stdout handle on success. One that takes
 /// too long, or outlives a request to quit, is stopped: a file made to
 /// stall a converter must not stall milo.
 #[cfg(target_os = "macos")]
-fn finishes(mut command: Command, deadline: Duration) -> bool {
-    let started = Instant::now();
-    let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
-        return false;
-    };
+fn finish(mut command: Command, stdout: Stdio, deadline: Instant) -> Option<Child> {
+    if Instant::now() >= deadline || term::TERMINATED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut child = command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null()).spawn().ok()?;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || term::TERMINATED.load(Ordering::Relaxed) {
+            break;
+        }
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if started.elapsed() < deadline && !term::TERMINATED.load(Ordering::Relaxed) => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
+            Ok(Some(status)) => return status.success().then_some(child),
+            Ok(None) => std::thread::sleep(remaining.min(Duration::from_millis(5))),
+            Err(_) => break,
         }
     }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
 }
 
 /// Standard base64, with padding.
@@ -380,6 +419,42 @@ mod tests {
             let p = Picture::decode_with(data, Path::new(name), Duration::from_secs(120)).unwrap();
             assert_eq!((p.width, p.height), (1, 1), "{name}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sips_properties_handle_fractional_and_unknown_dimensions() {
+        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 20.500\n  pixelHeight: 1600.000\n"), Some(false));
+        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 20.500\n  pixelHeight: 1600.125\n"), Some(true));
+        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 5000\n  pixelHeight: <nil>\n"), None);
+        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: inf\n  pixelHeight: 1\n"), None);
+        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 5000\n  pixelHeight: 0\n"), None);
+        assert_eq!(resize_from_properties(b"/file\n  pixelHeight: 20\n"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn converting_a_large_bmp_keeps_its_proportions_at_the_size_limit() {
+        let (width, height) = (LONGEST_SIDE * 2, 40_u32);
+        // BITMAPFILEHEADER and BITMAPINFOHEADER followed by black 24-bit pixels.
+        // At this width every row is already aligned to four bytes.
+        let pixels = width * height * 3;
+        let mut bmp = vec![0; usize::try_from(54 + pixels).unwrap()];
+        bmp[..2].copy_from_slice(b"BM");
+        for (at, value) in [(2, 54 + pixels), (10, 54), (14, 40), (18, width), (22, height), (34, pixels)] {
+            bmp[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bmp[26..30].copy_from_slice(&[1, 0, 24, 0]); // one plane, 24 bits per pixel
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("milo-test-{}-{id}.bmp", std::process::id()));
+        let (source, mut file) = Temp::create(path).unwrap();
+        file.write_all(&bmp).unwrap();
+        drop(file);
+        let deadline = Duration::from_secs(120);
+        assert_eq!(probe_resize(source.path(), Instant::now() + deadline), Some(true));
+        assert_eq!(probe_resize(source.path(), Instant::now()), None);
+        let picture = Picture::decode_with(bmp, source.path(), deadline).unwrap();
+        assert_eq!((picture.width, picture.height), (LONGEST_SIDE, height / 2));
     }
 
     #[test]
