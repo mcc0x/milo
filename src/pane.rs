@@ -436,7 +436,8 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         Exit::Done => Ok(()),
         Exit::OpenWeb => {
             terminal.restore();
-            crate::web::run(true, crate::web::DEFAULT_PORT)
+            // Home has no port selector; a second worktree needs its own session.
+            crate::web::run(true, 0)
         }
     }
 }
