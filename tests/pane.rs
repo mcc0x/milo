@@ -616,7 +616,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
         (&["--version"][..], concat!("milo ", env!("CARGO_PKG_VERSION"))),
         (&["outline", "--help"][..], "Usage: milo outline [PATH]"),
         (&["history", "--help"][..], "Usage: milo history [PATH]"),
-        (&["usage", "--help"][..], "Usage: milo usage"),
+        (&["usage", "--help"][..], "Usage: milo usage [--menu-stream]"),
         (&["setup", "--help"][..], "Usage: milo setup"),
         (&["view", "--help"][..], "Usage: milo view FILE [--commit ID]"),
         (&["listen", "--help"][..], "Usage: milo listen [--stop]"),
