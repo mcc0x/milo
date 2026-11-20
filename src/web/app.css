@@ -27,7 +27,7 @@ body {
 }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
-button:disabled { cursor: default; opacity: .56; }
+button:disabled, #menubar-action[aria-disabled="true"] { cursor: default; opacity: .56; }
 :focus-visible { outline: 2px solid #315fbc; outline-offset: 3px; }
 h1, h2, h3, p, figure { margin: 0; }
 .frame { width: min(100% - 2.5rem, 76rem); margin-inline: auto; }
@@ -165,7 +165,7 @@ h1, h2, h3, p, figure { margin: 0; }
 .button.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
 .button.primary:hover:not(:disabled) { background: #153b64; }
 .button.secondary { border-color: #acbed6; background: #f6faff; }
-.button.secondary:hover:not(:disabled), .button.text-button:hover:not(:disabled) { background: var(--tint); }
+.button.secondary:hover:not(:disabled, [aria-disabled="true"]), .button.text-button:hover:not(:disabled) { background: var(--tint); }
 .button.text-button { color: var(--blue); }
 .button.danger { background: #a33930; color: #fff; }
 .button.danger:hover:not(:disabled) { background: #872a22; }

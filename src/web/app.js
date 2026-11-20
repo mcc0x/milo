@@ -314,8 +314,12 @@ function renderConnection() {
   connection.textContent = {closed: 'Closed', ready: 'Local session', offline: 'Not connected', opening: 'Connecting'}[status];
 }
 
+function affectsDraft({action}) {
+  return action !== 'doctor' && action !== 'menubar';
+}
+
 function hasUnsavedChanges() {
-  return state.dirty || state.trial || numericDrafts.size > 0 || queue.some(item => item.action !== 'doctor');
+  return state.dirty || state.trial || numericDrafts.size > 0 || queue.some(affectsDraft);
 }
 
 function updateChrome() {
@@ -344,7 +348,7 @@ function updateChrome() {
     group.dirty || (key === 'layout' && numericDrafts.size)).length;
   const status = byId('draft-status');
   status.dataset.dirty = String(needsWarning);
-  const updatingDraft = queue.some(item => item.action !== 'doctor');
+  const updatingDraft = queue.some(affectsDraft);
   const summary = closing ? 'Closing settings…' : paused ? 'Edit not applied' : updatingDraft ? 'Updating draft…' :
     dirty ? `Unsaved changes in ${dirty === 1 ? '1 group' : `${dirty} groups`}` : state.trial ? 'Layout trial active' : 'No unsaved changes';
   if (status.textContent !== summary) status.textContent = summary;
@@ -354,6 +358,14 @@ function updateChrome() {
   byId('save-draft').classList.toggle('primary', saving);
   byId('save-draft').classList.toggle('secondary', !saving);
   byId('done').disabled = running || closing;
+  const menuAction = byId('menubar-action');
+  if (menuAction) {
+    const unavailable = !connected || paused || closing || (running && !queue.length) ||
+      queue.some(item => item.action !== 'set');
+    // Keep focus on the action while the installer runs and the button label changes.
+    if (unavailable) menuAction.setAttribute('aria-disabled', 'true');
+    else menuAction.removeAttribute('aria-disabled');
+  }
 }
 
 function restoreSettingsFocus(target, headingId) {
@@ -718,7 +730,7 @@ function appearanceView() {
 function workflowView() {
   const disabled = !state.groups.preferences.editable;
   const account = state.groups.account;
-  return [groupCard('preferences', 'Pane workflow', '', [
+  const cards = [groupCard('preferences', 'Pane workflow', '', [
     setting('workflow.project_mode', 'Project tracking', '', 'select',
       {disabled, choices: [['follow', 'Follow shell'], ['pin', 'Pin project']]}),
     setting('workflow.follow_activity', 'Follow file edits', 'Temporarily reveal active files.', 'switch', {disabled}),
@@ -729,6 +741,38 @@ function workflowView() {
   ]), groupCard('account', 'Claude Code', '', [
     setting('account.claude_limits', 'Show Claude Code limits', state.account.claude_status, 'switch', {disabled: !account.editable}),
   ])];
+  const installed = state.workflow.menubar_installed;
+  if (installed !== null) cards.push(menuAppCard(installed));
+  return cards;
+}
+
+function menuAppCard(installed) {
+  const card = node('section', 'settings-group');
+  const header = node('header', 'group-header group-titleline');
+  const heading = node('h2', '', 'Menu bar app');
+  heading.id = 'group-menubar';
+  card.setAttribute('aria-labelledby', heading.id);
+  header.append(heading);
+
+  const row = node('div', 'setting');
+  const info = node('div', 'setting-info');
+  const detail = node('span', 'setting-detail',
+    `${installed ? 'Installed' : 'Not installed'}. View usage in your Mac’s menu bar.`);
+  detail.id = 'menubar-detail';
+  info.append(node('span', 'setting-label', 'Milo Usage'), detail);
+  const control = button(installed ? 'Remove Milo Usage…' : 'Install Milo Usage', 'secondary', 'menubar-action', event => {
+    if (event.currentTarget.hasAttribute('aria-disabled')) return;
+    if (!installed) {
+      command('menubar', {value: 'install'});
+      return;
+    }
+    confirm('Remove Milo Usage?', 'This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.',
+      'Remove Milo Usage', () => command('menubar', {value: 'uninstall'}));
+  });
+  control.setAttribute('aria-describedby', detail.id);
+  row.append(info, control);
+  card.append(header, row);
+  return card;
 }
 
 const healthLabels = {good: 'All good', warning: 'Warning', issue: 'Issue found'};

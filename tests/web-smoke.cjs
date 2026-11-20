@@ -1,9 +1,10 @@
 // Run with Node 20+, playwright-core, and either its installed Chromium or CHROME_BIN.
 // Usage: node tests/web-smoke.cjs path/to/packaged/milo
+// Add --menubar with a menu-capable binary in a macOS GUI session to exercise the installer.
 const assert = require('node:assert/strict');
 const {execFileSync, spawn} = require('node:child_process');
 const {once} = require('node:events');
-const {mkdir, mkdtemp, readFile, rm} = require('node:fs/promises');
+const {mkdir, mkdtemp, readFile, rm, stat} = require('node:fs/promises');
 const {tmpdir} = require('node:os');
 const {join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
@@ -102,6 +103,59 @@ async function chooseUsageTools(page, binary, cwd, env) {
   assert.doesNotMatch(doctor, /^(Codex limits|OpenCode activity|Usage tools: none)/m);
   await section(page, 'Layout').click();
   console.log('Usage tools: three choices saved globally and read back by doctor');
+}
+
+async function manageMenuApp(page, url, binary, cwd, env) {
+  await section(page, 'Workflow').click();
+  const menu = page.getByRole('region', {name: 'Menu bar app', exact: true});
+  const response = await page.request.get(new URL('/api/state', url).href, {
+    headers: {Authorization: `Bearer ${new URL(url).hash.slice(1)}`},
+  });
+  assert(response.ok(), 'the editor reports menu app availability');
+  const {workflow} = await response.json();
+  const supported = workflow.menubar_installed !== null;
+  assert.equal(await menu.count(), supported ? 1 : 0, 'the menu app control follows server availability');
+  if (process.argv.includes('--menubar')) {
+    assert.equal(workflow.menubar_installed, false, 'the menu-capable binary starts without an app in the fixture home');
+    const bundle = join(env.HOME, 'Applications', 'Milo Usage.app');
+    const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
+    const previous = await readFile(preferences, 'utf8');
+    const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
+    await pin.click();
+    await status(page, dirty).waitFor({state: 'attached'});
+
+    try {
+      await button(menu, 'Install Milo Usage').click();
+      const remove = button(menu, 'Remove Milo Usage…');
+      await remove.waitFor();
+      assert((await stat(bundle)).isDirectory(), 'the button installed the app');
+      assert(await pin.isChecked(), 'install retained the draft');
+
+      const confirmation = dialog(page, 'Remove Milo Usage?');
+      await remove.click();
+      await button(confirmation, 'Keep editing').click();
+      await confirmation.waitFor({state: 'hidden'});
+      assert((await stat(bundle)).isDirectory(), 'cancel left the app installed');
+      assert(await pin.isChecked(), 'cancel retained the draft');
+
+      await remove.click();
+      await button(confirmation, 'Remove Milo Usage').click();
+      await button(menu, 'Install Milo Usage').waitFor();
+      await assert.rejects(stat(bundle), {code: 'ENOENT'}, 'confirm removed the app');
+      await status(page, dirty).waitFor({state: 'attached'});
+      assert(await pin.isChecked(), 'removal retained the draft');
+      assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app changes did not save the draft');
+    } finally {
+      if (await stat(bundle).then(() => true, e => { if (e.code !== 'ENOENT') throw e; return false; })) {
+        execFileSync(binary, ['menubar', 'uninstall'], {cwd, env});
+      }
+    }
+    await button(page, 'Discard').click();
+    await button(dialog(page, 'Discard all unsaved changes?'), 'Discard changes').click();
+    await status(page, clean).waitFor({state: 'attached'});
+    console.log('Menu app: installed, kept on cancel, and removed without saving or losing the draft');
+  }
+  await section(page, 'Layout').click();
 }
 
 async function usageToolsPersisted(page) {
@@ -214,6 +268,7 @@ async function main() {
       assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
       await saveNumbers(page);
       await chooseUsageTools(page, binary, cwd, env);
+      await manageMenuApp(page, url, binary, cwd, env);
       await pressAfterNumberEdit(page);
       await page.close();
     });

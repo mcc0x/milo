@@ -5,6 +5,7 @@ use std::fmt::{self, Display, Write as _};
 use super::claude::ClaudeSnapshot;
 use super::*;
 use crate::json::{self, Value};
+use crate::menubar;
 use crate::preferences::{PreferenceSnapshot, Show};
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
@@ -203,7 +204,7 @@ impl Editor {
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
             "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{},",
             "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\"}},",
-            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{}}},",
+            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{},\"menubar_installed\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
             "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"auto_arrange\":{}}},",
@@ -216,6 +217,7 @@ impl Editor {
             icons, prefs.static_marks, prefs.text_git_marks, prefs.usage_large_figures,
             usage_codex, usage_claude, usage_opencode,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
+            Optional(menubar::installed()),
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
             Optional(self.doctor.as_ref()),
@@ -238,13 +240,13 @@ impl Editor {
         let message = self.apply(action)?;
         self.setup.message = None;
         if let Some(message) = message {
-            self.setup.report(message);
+            self.setup.report_text(message);
         }
         self.version += 1;
         Ok(self.state())
     }
 
-    fn apply(&mut self, action: Action) -> Result<Option<Notice>, String> {
+    fn apply(&mut self, action: Action) -> Result<Option<Notice<Cow<'static, str>>>, String> {
         let (layout, preferences, account) = self.groups();
         let notice = match action {
             Action::Set(edit) => {
@@ -303,9 +305,12 @@ impl Editor {
                 self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
                 None
             }
+            Action::Menubar(action) if menubar::installed().is_some() => {
+                return menubar::run(action).map(|text| Some(Ok(Cow::Owned(text))));
+            }
             _ => return Err(UNAVAILABLE.into()),
         };
-        Ok(notice)
+        Ok(notice.map(|message| message.map(Cow::Borrowed).map_err(Cow::Borrowed)))
     }
 
     fn discard(&mut self, group: Group) -> Result<(), &'static str> {
@@ -411,7 +416,7 @@ impl Editor {
     }
 }
 
-type Notice = Result<&'static str, &'static str>;
+type Notice<T = &'static str> = Result<T, T>;
 
 fn account_at(store: Option<&Store>) -> (Claude, Option<ClaudeSnapshot>) {
     store
@@ -446,6 +451,7 @@ enum Action {
     Try,
     Undo,
     Doctor,
+    Menubar(menubar::Action),
 }
 
 impl Action {
@@ -481,6 +487,13 @@ impl Action {
                 _ => return None,
             },
             [None, None, Some(group), None] if action.is("discard") => Self::Discard(Group::parse(group)?),
+            [None, Some(value), None, None] if action.is("menubar") => {
+                Self::Menubar(match value.string(9)?.as_ref() {
+                    "install" => menubar::Action::Install,
+                    "uninstall" => menubar::Action::Uninstall,
+                    _ => return None,
+                })
+            }
             [None, None, None, None] => match action.string(7)?.as_ref() {
                 "capture" => Self::Capture,
                 "try" => Self::Try,
@@ -757,6 +770,38 @@ mod tests {
 
     fn field<'a>(json: Value<'a>, name: &str) -> Value<'a> {
         json.fields([name])[0].unwrap()
+    }
+
+    #[test]
+    fn menu_app_status_and_actions_respect_availability_and_draft_version() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        let old_version = editor.version;
+        let before = set(&mut editor, "workflow.project_mode", "\"pin\"");
+        let state = Value::parse(before.as_bytes()).unwrap();
+        let status = field(field(state, "workflow"), "menubar_installed");
+        match menubar::installed() {
+            Some(installed) => assert_eq!(status.boolean(), Some(installed)),
+            None => {
+                assert!(status.null());
+                for operation in ["install", "uninstall"] {
+                    let request = format!(r#""action":"menubar","value":"{operation}""#);
+                    assert_eq!(action(&mut editor, &request).unwrap_err(), UNAVAILABLE);
+                }
+            }
+        }
+        for request in [
+            r#""action":"menubar""#,
+            r#""action":"menubar","value":"toggle""#,
+            r#""action":"menubar","value":true"#,
+            r#""action":"menubar","value":"install","group":"preferences""#,
+        ] {
+            assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION);
+        }
+        let stale = format!(r#"{{"version":{old_version},"action":"menubar","value":"uninstall"}}"#);
+        assert!(editor.action(stale.as_bytes()).unwrap_err().contains("draft changed"));
+        assert_eq!(editor.state(), before);
+        assert!(!editor.setup.store().unwrap().config.exists());
     }
 
     #[test]

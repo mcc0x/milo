@@ -528,6 +528,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Confirm(Confirm::UseGlobal),
         Panel::Confirm(Confirm::Repair),
         Panel::Confirm(Confirm::Remove),
+        Panel::Confirm(Confirm::RemoveMenuBar),
         Panel::Exit,
     ];
     for panel in panels {
@@ -693,6 +694,80 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
     assert_eq!(choose(&mut pane, Row::SaveClaude), After::Stay);
     assert!(store(&f).claude_files().unwrap().launcher_matches());
     assert!(!f.root.join("init.lua").exists());
+}
+
+#[test]
+fn workflow_shows_only_the_available_menu_bar_app_action() {
+    let mut pane = Setup::new(None, false, None, None, |_| panic!("drawing does not call Rex"));
+    let rows = frame(&mut pane, 80, 20);
+    assert!(!rows.iter().any(|row| row.contains("menu bar app")));
+    for (installed, label, short) in [
+        (false, "Install Milo Usage menu bar app", "Install Usage"),
+        (true, "Remove Milo Usage menu bar app…", "Remove Usage…"),
+    ] {
+        pane.menu_installed = Some(installed);
+        pane.select_panel(Panel::Workflow, Some(Row::MenuBar));
+        let rows = frame(&mut pane, 80, 20);
+        assert_eq!(rows.iter().filter(|row| row.contains("Milo Usage menu bar app")).count(), 1);
+        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(label)));
+        let rows = frame(&mut pane, 18, 8);
+        let row = rows.iter().find(|row| row.starts_with('›')).unwrap();
+        assert_eq!(row.trim_start_matches('›').trim_end_matches('▐').trim(), short);
+    }
+}
+
+#[test]
+fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
+    let Some(home) =
+        isolated_settings("setup::tests::menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation")
+    else {
+        return;
+    };
+    let app = home.join("Applications/Milo Usage.app");
+    fs::create_dir_all(app.parent().unwrap()).unwrap();
+    fs::write(&app, "Not a Milo app").unwrap();
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| panic!("menu bar settings do not call Rex"));
+    assert_eq!(choose(&mut pane, Row::Tree), After::Stay);
+    assert_eq!(pane.key(Key::Char('3')), After::Stay);
+    assert_eq!(choose(&mut pane, Row::TabTitles), After::Stay);
+    assert_eq!(choose(&mut pane, Row::ClaudeLimits), After::Stay);
+    assert!(pane.layout_dirty() && pane.prefs_dirty() && pane.claude_dirty());
+    let layout = pane.layout.clone();
+    let prefs = pane.prefs;
+    let show_limits = pane.show_limits;
+
+    pane.menu_installed = Some(false);
+    assert_eq!(choose(&mut pane, Row::MenuBar), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow);
+    assert!(pane.message.as_ref().is_some_and(|(_, style)| *style == DEL.bold()));
+    assert!(!pane.rows().contains(&Row::MenuBar), "refresh hides an unmanageable app");
+
+    pane.menu_installed = Some(true);
+
+    let rows = frame(&mut pane, 80, 20);
+    let remove = click_label(&rows, "Remove Milo Usage menu bar app…");
+    assert_eq!(pane.key(remove), After::Stay);
+    assert_eq!(pane.panel, Panel::Confirm(Confirm::RemoveMenuBar));
+    assert!(pane.selected_row() == Some(Row::Cancel));
+    assert_eq!(pane.key(remove), After::Ignored);
+    let rows = frame(&mut pane, 80, 20);
+    assert!(rows.iter().any(|row| row.contains("The Milo CLI and pane settings stay")));
+    assert_eq!(pane.key(Key::Enter), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow);
+    assert!(pane.selected_row() == Some(Row::MenuBar));
+    assert!(pane.message.is_none());
+
+    assert_eq!(pane.key(Key::Enter), After::Stay);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow);
+    let (message, style) = pane.message.as_ref().unwrap();
+    assert!(message.starts_with("Milo Usage:"), "{message}");
+    assert!(*style == DEL.bold());
+    assert!(!pane.rows().contains(&Row::MenuBar));
+    assert_eq!(fs::read_to_string(&app).unwrap(), "Not a Milo app");
+    assert!(pane.layout == layout && pane.prefs == prefs && pane.show_limits == show_limits);
+    assert!(pane.layout_dirty() && pane.prefs_dirty() && pane.claude_dirty());
 }
 
 #[test]

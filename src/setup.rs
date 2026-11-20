@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crate::help::{self, Page};
 use crate::keys::{ConfirmClick, Key};
+use crate::menubar::{self, Action as MenuAction};
 use crate::pane::{After, External, Pane};
 use crate::preferences::{IconMode, Preferences, ProjectMode, Source, UsageTool};
 use crate::screen::{Screen, Style};
@@ -81,6 +82,7 @@ enum Confirm {
     UseGlobalPrefs(SaveKind),
     Repair,
     Remove,
+    RemoveMenuBar,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,7 +113,6 @@ enum Row {
     HistoryFollow,
     TabTitles,
     ClaudeLimits,
-    #[cfg(all(target_os = "macos", milo_menu_payload))]
     MenuBar,
     SaveClaude,
     SavePrefs,
@@ -153,7 +154,6 @@ const WORKFLOW: &[Row] = &[
     Row::UseGlobalPrefs,
     Row::ClaudeLimits,
     Row::SaveClaude,
-    #[cfg(all(target_os = "macos", milo_menu_payload))]
     Row::MenuBar,
 ];
 
@@ -177,6 +177,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     prefs_scope: Source,
     claude: Claude,
     show_limits: bool,
+    menu_installed: Option<bool>,
     panel: Panel,
     selected: usize,
     save_from: Option<(Panel, Option<Row>)>,
@@ -205,6 +206,7 @@ impl Setup {
         };
         let mut setup = Self::new(store, inside, target, root, rex::run);
         setup.tab_size = tab_size;
+        setup.menu_installed = menubar::installed();
         setup.icon_override = IconMode::environment();
         if let Err(why) = setup.reload_prefs() {
             setup.saved_prefs = None;
@@ -255,6 +257,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             prefs_scope: Source::Default,
             claude,
             show_limits: claude == Claude::On,
+            menu_installed: None,
             panel: if inside { Panel::Layout } else { Panel::Workflow },
             selected: 0,
             save_from: None,
@@ -328,7 +331,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Row::SavePrefs,
                 Row::UseGlobalPrefs,
             ],
-            Panel::Workflow => WORKFLOW,
+            Panel::Workflow if self.menu_installed.is_some() => WORKFLOW,
+            Panel::Workflow => &WORKFLOW[..WORKFLOW.len() - 1],
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
             Panel::Diagnostics => &[],
             Panel::Save(kind)
@@ -379,6 +383,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::UseGlobalPrefs(kind)) => (kind.panel(), Some(Row::UseGlobalPrefs)),
             Panel::Confirm(Confirm::Repair) => (Panel::Health, Some(Row::Repair)),
             Panel::Confirm(Confirm::Remove) => (Panel::Health, Some(Row::Remove)),
+            Panel::Confirm(Confirm::RemoveMenuBar) => (Panel::Workflow, Some(Row::MenuBar)),
             Panel::Diagnostics => (Panel::Health, Some(Row::Diagnostics)),
             _ => (Panel::Layout, None),
         };
@@ -686,6 +691,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         Ok("Saved Claude Code choices.")
     }
 
+    fn change_menu_app(&mut self, action: MenuAction) {
+        let install = action == MenuAction::Install;
+        let result = menubar::run(action);
+        self.menu_installed = menubar::installed();
+        self.select_panel(Panel::Workflow, Some(Row::MenuBar));
+        self.report_text(
+            result
+                .map(|message| {
+                    if install { Cow::Borrowed("Milo Usage is installed and open.") } else { Cow::Owned(message) }
+                })
+                .map_err(|why| Cow::Owned(format!("Milo Usage: {why}"))),
+        );
+    }
+
     fn use_global(&mut self) -> Result<&'static str, &'static str> {
         let root = self.root.as_deref().ok_or("This tab is not in a Git worktree.")?;
         self.store()?.use_global(root)?;
@@ -788,10 +807,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Capture => self.capture(),
             Row::Undo => self.undo(),
             Row::SaveClaude => self.save_claude(),
-            #[cfg(all(target_os = "macos", milo_menu_payload))]
-            Row::MenuBar => crate::menubar::run(crate::menubar::Action::Install)
-                .map(|_| "Milo Usage is open in your menu bar.")
-                .map_err(|_| "Could not open Milo Usage. Run milo menubar install for details."),
+            Row::MenuBar => {
+                match self.menu_installed {
+                    Some(false) => self.change_menu_app(MenuAction::Install),
+                    Some(true) => self.select_panel(Panel::Confirm(Confirm::RemoveMenuBar), None),
+                    None => return After::Ignored,
+                }
+                return After::Stay;
+            }
             Row::SaveAndExit => return self.save_and_exit(),
             Row::Discard => return self.leave(),
             Row::SaveGlobal | Row::SaveWorktree => {
@@ -804,6 +827,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Panel::Confirm(Confirm::UseGlobalPrefs(_)) => self.use_global_prefs(),
                 Panel::Confirm(Confirm::Repair | Confirm::Remove) => {
                     self.maintain(self.panel == Panel::Confirm(Confirm::Remove));
+                    return After::Stay;
+                }
+                Panel::Confirm(Confirm::RemoveMenuBar) => {
+                    self.change_menu_app(MenuAction::Uninstall);
                     return After::Stay;
                 }
                 _ => return After::Ignored,

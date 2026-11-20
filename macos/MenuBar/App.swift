@@ -36,6 +36,18 @@ private final class Model: ObservableObject {
         return process
     }
 
+    // A menu-launched editor belongs to the browser: allow it to finish a removal
+    // and keep unsaved drafts when the menu app quits. It has its own idle timeout.
+    private var independentSettings = false
+    init() {
+        if let path = ProcessInfo.processInfo.environment["MILO_MENU_INSTALLER"],
+           path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path),
+           Bundle.main.bundleURL.standardizedFileURL.path == FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/Milo Usage.app").standardizedFileURL.path {
+            UserDefaults.standard.set(path, forKey: "installerPath")
+        }
+    }
+
     func openSettings() {
         if settings?.isRunning == true {
             if let settingsURL { openBrowser(settingsURL) }
@@ -43,6 +55,13 @@ private final class Model: ObservableObject {
         }
         settingsURL = nil
         guard let process = bundledProcess(["web", "--port", "0", "--no-open"]) else { settingsError(); return }
+        let defaults = UserDefaults.standard
+        independentSettings = false
+        if let path = ProcessInfo.processInfo.environment["MILO_MENU_INSTALLER"] ?? defaults.string(forKey: "installerPath"), path.hasPrefix("/"),
+           FileManager.default.isExecutableFile(atPath: path) {
+            process.executableURL = URL(fileURLWithPath: path)
+            independentSettings = true
+        }
         let output = Pipe()
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
@@ -91,6 +110,11 @@ private final class Model: ObservableObject {
     func stopSettings() {
         if let settings, settings.isRunning { settings.terminate() }
         settings = nil; settingsURL = nil
+    }
+
+    func quit() {
+        if !independentSettings { stopSettings() }
+        stop()
     }
 
     func start() {
@@ -212,7 +236,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController?.view.window?.makeKey()
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return false }
-    func applicationWillTerminate(_ notification: Notification) { NSWorkspace.shared.notificationCenter.removeObserver(self); model.stopSettings(); model.stop() }
+    func applicationWillTerminate(_ notification: Notification) { NSWorkspace.shared.notificationCenter.removeObserver(self); model.quit() }
 }
 
 @main

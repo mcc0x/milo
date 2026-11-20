@@ -4,6 +4,21 @@ pub(crate) enum Action {
     Uninstall,
 }
 
+/// None for builds without the installer or a destination we must not manage.
+pub(crate) fn installed() -> Option<bool> {
+    if !cfg!(all(target_os = "macos", milo_menu_payload)) {
+        return None;
+    }
+    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+    if !home.is_absolute() { return None; }
+    let app = home.join("Applications/Milo Usage.app");
+    match std::fs::symlink_metadata(&app) {
+        Ok(info) if info.is_dir() && app.join("Contents/MacOS/MiloUsage").is_file() => Some(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(not(all(target_os = "macos", milo_menu_payload)))]
 pub(crate) fn run(_: Action) -> Result<String, String> {
     Err(if cfg!(target_os = "macos") {
@@ -27,6 +42,7 @@ pub(crate) fn run(action: Action) -> Result<String, String> {
     let mut child = Command::new("/bin/sh").args(["-c", include_str!("menubar.sh"), "milo-menubar"])
         .arg(match action { Action::Install => "install", Action::Uninstall => "uninstall" }).arg(apps)
         .arg(env!("MILO_MENU_HELPER_SHA"))
+        .arg(std::env::current_exe().map_err(|e| e.to_string())?)
         .stdin(if action == Action::Install { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|e| e.to_string())?;

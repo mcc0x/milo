@@ -288,6 +288,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Panel::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global?",
                     Panel::Confirm(Confirm::Repair) => "Repair?",
                     Panel::Confirm(Confirm::Remove) => "Remove?",
+                    Panel::Confirm(Confirm::RemoveMenuBar) => "Remove Usage?",
                     _ => self.panel.title(),
                 }
             } else {
@@ -365,6 +366,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             }
             Panel::Confirm(Confirm::Remove) => {
                 "Remove integration Milo owns from Rex and Claude Code. Open panes and personal preferences are left alone."
+            }
+            Panel::Confirm(Confirm::RemoveMenuBar) => {
+                "Remove only the menu bar app. The Milo CLI and pane settings stay as they are."
             }
         })
     }
@@ -732,12 +736,19 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 "Use global",
                 "Remove this worktree's pane preferences override.",
             ),
-            #[cfg(all(target_os = "macos", milo_menu_payload))]
-            Row::MenuBar => Cell::action(
-                "Install or open Milo Usage",
-                "Menu bar app",
-                "Show usage in the macOS menu bar. Opens the app if already installed.",
-            ),
+            Row::MenuBar => match self.menu_installed {
+                Some(false) => Cell::action(
+                    "Install Milo Usage menu bar app",
+                    "Install Usage",
+                    "Install and open the separate macOS menu bar app.",
+                ),
+                Some(true) => Cell::action(
+                    "Remove Milo Usage menu bar app…",
+                    "Remove Usage…",
+                    "Remove only the menu bar app, not the Milo CLI or pane settings.",
+                ),
+                None => unreachable!("the menu bar action is hidden when unavailable"),
+            },
             Row::SaveClaude => Cell::action(
                 "Save Claude Code choices",
                 "Save Claude",
@@ -776,6 +787,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Panel::Confirm(Confirm::Remove) => {
                     Cell::action("Remove integration", "Remove now", "Apply removal now.")
                 }
+                Panel::Confirm(Confirm::RemoveMenuBar) => {
+                    Cell::action("Remove app now", "Remove app now", "Remove Milo Usage from the menu bar.")
+                }
                 _ => unreachable!("only confirmation pages have a continue row"),
             },
         }
@@ -806,6 +820,7 @@ impl Panel {
             Self::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global default?",
             Self::Confirm(Confirm::Repair) => "Repair integration?",
             Self::Confirm(Confirm::Remove) => "Remove integration?",
+            Self::Confirm(Confirm::RemoveMenuBar) => "Remove Milo Usage?",
             Self::Exit => "Unsaved changes",
         }
     }
