@@ -13,7 +13,7 @@ mkdir -p "$app/Contents/MacOS" "$resources/Tools" "$tmp/Milo.iconset"
 (cd "$repo" && cargo build --locked --release --target-dir "$repo/target")
 install -m 755 "$repo/target/release/milo" "$resources/Tools/milo"
 swiftc -O -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" "$repo"/macos/MenuBar/*.swift -o "$app/Contents/MacOS/MiloUsage"
-cp "$repo"/src/usage/marks/claude.png "$repo"/src/usage/marks/codex.png "$repo/docs/img/milo.png" "$resources/"
+cp "$repo"/src/usage/marks/claude.png "$repo"/src/usage/marks/codex.png "$repo/site/src/images/milo-lockup.webp" "$resources/"
 for size in 16 32 128 256 512; do
     for scale in 1 2; do
         pixels=$((size * scale)); suffix=''; [ "$scale" = 1 ] || suffix=@2x
@@ -22,6 +22,8 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$tmp/Milo.iconset" -o "$resources/Milo.icns"
 cp "$repo/macos/Info.plist" "$app/Contents/Info.plist"
+version=$("$resources/Tools/milo" --version)
+/usr/bin/plutil -insert CFBundleShortVersionString -string "${version#milo }" "$app/Contents/Info.plist"
 # Finder and login items do not inherit a shell's exported provider paths. Keep
 # only the supported paths in this local bundle, not tokens or logs. Never ship it.
 python3 - "$resources/ProfilePaths.plist" <<'PY'

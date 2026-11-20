@@ -177,9 +177,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.autosaveName = "Milo Usage"
         if let button = status.button {
-            let mascot = Bundle.main.image(forResource: "milo")
-            mascot?.size = NSSize(width: 18, height: 18)
-            button.image = mascot
+            button.image = MiloMark.awake
             button.target = self; button.action = #selector(toggle); button.imagePosition = .imageLeading
             button.imageScaling = .scaleProportionallyDown
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
@@ -203,6 +201,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let reading = badgeReading(model.snapshot, mode: model.mode)
         let label = reading.map { "\($0.provider.name), \($0.window.label): \($0.window.remaining)% left" } ?? "Milo Usage"
         button.title = reading.map { " \($0.window.remaining)%" } ?? ""
+        status.length = reading == nil ? NSStatusItem.variableLength : 67
         button.toolTip = label; button.setAccessibilityLabel(label)
     }
     @objc private func toggle() { if popover.isShown { popover.performClose(nil) } else { show() } }
