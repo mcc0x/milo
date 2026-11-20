@@ -5,9 +5,12 @@
 //! The loop also checks periodically on macOS in case notifications miss a change.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::{ErrorKind, PipeReader, Read};
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::PathBuf;
+#[cfg(any(test, target_os = "macos"))]
+use std::path::Components;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// FSEvents accepts at most this many directory exclusions.
@@ -24,6 +27,7 @@ pub struct Scope {
 pub struct Ignored {
     pub dirs: HashSet<PathBuf>,
     pub files: HashSet<PathBuf>,
+    pub(crate) git: Option<GitFilter>,
     pub events: Events,
 }
 
@@ -40,11 +44,89 @@ pub enum Events {
     Collapsed(HashSet<PathBuf>),
 }
 
-#[cfg(target_os = "macos")]
+/// Git puts linked worktrees in private directories under the common directory.
+/// Only known private paths are filtered; shared and unclassified paths still wake us.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct GitFilter {
+    common: PathBuf,
+    linked_id: Option<OsString>,
+}
+
+impl GitFilter {
+    pub(crate) fn new(git: &Path, common: &Path) -> Option<Self> {
+        if !common.is_absolute() {
+            return None;
+        }
+        let linked_id = if git == common {
+            None
+        } else {
+            let mut parts = git.strip_prefix(common).ok()?.components();
+            if parts.next()?.as_os_str() != "worktrees" {
+                return None;
+            }
+            let id = parts.next()?;
+            if !matches!(id, std::path::Component::Normal(_)) || parts.next().is_some() {
+                return None;
+            }
+            Some(id.as_os_str().to_owned())
+        };
+        Some(Self { common: common.to_owned(), linked_id })
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    fn allows(&self, path: &Path) -> bool {
+        // Only exclude paths under the discovered directory spelling. A
+        // case-folded prefix could also match unrelated paths on a sensitive volume.
+        let Ok(relative) = path.strip_prefix(&self.common) else { return true };
+        let mut parts = relative.components();
+        let Some(first) = parts.next() else { return true };
+        let first = first.as_os_str().as_encoded_bytes();
+        if first == b"worktrees" {
+            // An event for the container could include changes to the current worktree.
+            let Some(id) = parts.next() else { return true };
+            return self.linked_id.as_deref().is_some_and(|own| {
+                let id = id.as_os_str();
+                let [own_bytes, id_bytes] = [own.as_encoded_bytes(), id.as_encoded_bytes()];
+                own_bytes.eq_ignore_ascii_case(id_bytes)
+                    // FSEvents can use a different spelling on a folding volume.
+                    // Don't rule out Unicode aliases or reinterpret invalid path bytes.
+                    || ((!own_bytes.is_ascii() || !id_bytes.is_ascii())
+                        && own.to_str().is_some() == id.to_str().is_some())
+            });
+        }
+        self.linked_id.is_none() || !main_private(first, parts)
+    }
+}
+
+/// Paths stored directly in the common directory for the main worktree only.
+#[cfg(any(test, target_os = "macos"))]
+fn main_private(first: &[u8], mut rest: Components<'_>) -> bool {
+    let private_ref = |name: &[u8]| matches!(name, b"bisect" | b"rewritten" | b"worktree");
+    let mut next = || rest.next().map(|part| part.as_os_str().as_encoded_bytes());
+    match first.strip_suffix(b".lock").unwrap_or(first) {
+        b"refs" => next().is_some_and(private_ref),
+        b"logs" => match next() {
+            Some(b"refs") => next().is_some_and(private_ref),
+            Some(b"HEAD" | b"HEAD.lock") => true,
+            _ => false,
+        },
+        b"info" => matches!(next(), Some(b"sparse-checkout" | b"sparse-checkout.lock")),
+        b"index" | b"config.worktree" | b"HEAD" | b"ORIG_HEAD" | b"FETCH_HEAD" => true,
+        b"AUTO_MERGE" | b"MERGE_AUTOSTASH" | b"MERGE_HEAD" | b"MERGE_MODE" | b"MERGE_MSG" | b"MERGE_RR" => true,
+        b"BISECT_ANCESTORS_OK" | b"BISECT_EXPECTED_REV" | b"BISECT_HEAD" | b"BISECT_LOG" => true,
+        b"BISECT_NAMES" | b"BISECT_RUN" | b"BISECT_START" | b"BISECT_TERMS" => true,
+        b"CHERRY_PICK_HEAD" | b"REVERT_HEAD" | b"REBASE_HEAD" | b"COMMIT_EDITMSG" | b"SQUASH_MSG" => true,
+        b"rebase-apply" | b"rebase-merge" | b"sequencer" => true,
+        name => name.starts_with(b"sharedindex."),
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
 impl Ignored {
     fn needs_paths(&self) -> bool {
         !self.dirs.is_empty()
             || !self.files.is_empty()
+            || self.git.is_some()
             || match &self.events {
                 Events::All => false,
                 Events::Reader { .. } => true,
@@ -52,9 +134,10 @@ impl Ignored {
             }
     }
 
-    fn allows(&self, path: &std::path::Path, is_dir: bool) -> bool {
+    fn allows(&self, path: &Path, is_dir: bool) -> bool {
         if (!is_dir && self.files.contains(path))
             || (!self.dirs.is_empty() && path.ancestors().any(|p| self.dirs.contains(p)))
+            || self.git.as_ref().is_some_and(|git| !git.allows(path))
         {
             return false;
         }
@@ -63,9 +146,8 @@ impl Ignored {
             Events::Collapsed(dirs) => return !path.ancestors().skip(1).any(|p| dirs.contains(p)),
             Events::Reader { file, worktree, metadata } => (file, worktree, metadata),
         };
-        // Event paths need not use the same spelling as the reader on
-        // case-insensitive volumes. Prefixes still end at a component.
-        let under = |path: &std::path::Path, base: &std::path::Path| {
+        // Reader permissions can be broader if the volume folds case.
+        let under = |path: &Path, base: &Path| {
             let mut parts = path.components();
             base.components().all(|part| {
                 parts.next().is_some_and(|p| {
@@ -486,6 +568,111 @@ mod imp {
 
     pub(super) fn start(_: &[PathBuf], _: &[PathBuf], _: Arc<Ignored>) -> Option<Listener> {
         None
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use crate::git::Repo;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn repository_scopes_filter_other_worktrees_but_keep_shared_git_changes() {
+        let f = Fixture::new();
+        f.write(".gitignore", "ignored.log\n");
+        f.commit("first");
+        f.git(&["worktree", "add", "-q", "../linked"]);
+        f.git(&["worktree", "add", "-q", "../linked-other"]);
+
+        let root = f.root.with_file_name("linked");
+        let common = f.root.join(".git");
+        let main = Repo::open(&f.root).unwrap().watch_scope();
+        let mut repo = Repo::open(&root).unwrap();
+        let linked = repo.watch_scope();
+        assert_eq!(main.roots, [f.root.clone()]);
+        assert_eq!(linked.roots, [root.clone(), common.clone()]);
+        assert!(main.ignored.needs_paths() && linked.ignored.needs_paths());
+
+        for path in [
+            "index",
+            "index.lock",
+            "sharedindex.0123456789abcdef",
+            "HEAD",
+            "config.worktree.lock",
+            "logs/HEAD",
+            "refs/rewritten/branch",
+            "info/sparse-checkout",
+            "rebase-merge/head-name",
+        ] {
+            let path = common.join(path);
+            assert!(main.ignored.allows(&path, false), "{path:?}");
+            assert!(!linked.ignored.allows(&path, false), "{path:?}");
+        }
+
+        for path in ["index", "index.lock", "HEAD", "config.worktree", "locked", "logs/HEAD", "commondir"] {
+            let own = common.join("worktrees/linked").join(path);
+            let sibling = common.join("worktrees/linked-other").join(path);
+            assert!(!main.ignored.allows(&own, false), "{own:?}");
+            assert!(linked.ignored.allows(&own, false), "{own:?}");
+            assert!(!main.ignored.allows(&sibling, false), "{sibling:?}");
+            assert!(!linked.ignored.allows(&sibling, false), "{sibling:?}");
+        }
+
+        for dir in ["", "worktrees", "logs", "logs/refs", "refs", "info", "objects", "reftable"] {
+            let dir = common.join(dir);
+            assert!(main.ignored.allows(&dir, true), "{dir:?}");
+            assert!(linked.ignored.allows(&dir, true), "{dir:?}");
+        }
+        assert!(linked.ignored.allows(&common.join("worktrees/linked"), true));
+        assert!(!linked.ignored.allows(&common.join("worktrees/linked-other"), true));
+        for path in ["config", "config.lock", "info/exclude", "packed-refs", "refs/heads/main", "objects/01/blob"] {
+            let path = common.join(path);
+            assert!(main.ignored.allows(&path, false), "{path:?}");
+            assert!(linked.ignored.allows(&path, false), "{path:?}");
+        }
+        assert!(main.ignored.allows(&common.with_file_name(".git-backup").join("worktrees/linked/index"), false));
+        assert!(linked.ignored.allows(&root.join("index"), false));
+
+        let ignored_file = root.join("ignored.log");
+        std::fs::write(&ignored_file, "new ignored file").unwrap();
+        repo.read();
+        let after = repo.watch_scope().ignored;
+        assert!(!after.allows(&ignored_file, false));
+        assert!(!after.allows(&common.join("worktrees/linked-other/index"), false));
+        assert!(after.allows(&common.join("worktrees/linked/index"), false));
+
+        let reader = repo.reader_filter(Path::new("page.txt"));
+        assert!(reader.allows(&root.join(".git"), false));
+        assert!(reader.allows(&common.join("worktrees"), true));
+        assert!(reader.allows(&common.join("refs/heads/main"), false));
+        assert!(reader.allows(&common.join("worktrees/linked/index"), false));
+        assert!(!reader.allows(&common.join("worktrees/linked-other/index"), false));
+    }
+
+    #[test]
+    fn worktree_filter_has_component_boundaries_and_preserves_raw_path_bytes() {
+        let common = Path::new("/project/.git");
+        let main = GitFilter::new(common, common).unwrap();
+        let linked = GitFilter::new(&common.join("worktrees/Current"), common).unwrap();
+        let worktrees = common.join("worktrees");
+        let invalid = OsStr::from_bytes(b"other-\xff");
+        let sibling = worktrees.join(invalid);
+        assert!(!main.allows(&sibling.join("index")));
+        assert!(!linked.allows(&sibling.join("index")));
+        assert!(!linked.allows(&worktrees.join("current-other").join(invalid)));
+        assert!(linked.allows(&worktrees.join("CURRENT").join(invalid)));
+        assert!(linked.allows(&common.join("refs/heads").join(invalid)));
+        assert!(linked.allows(Path::new("/project/.Git/worktrees/current-other/index")));
+
+        let raw_dir = common.join("worktrees").join(invalid);
+        let raw = GitFilter::new(&raw_dir, common).unwrap();
+        assert!(raw.allows(&raw_dir.join("index")));
+        assert!(!raw.allows(&worktrees.join("current/index")));
+        let unicode = GitFilter::new(&common.join("worktrees/Å"), common).unwrap();
+        assert!(unicode.allows(&worktrees.join("a\u{30a}/index")));
     }
 }
 

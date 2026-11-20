@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::read::{self, Content};
-use crate::watch::{Events, Ignored, Scope};
+use crate::watch::{Events, GitFilter, Ignored, Scope};
 use parse::{Status, parse_files, parse_history, parse_status};
 use pending::{DiffStamp, TrackedDiff, tracked_records};
 use run::OutputError;
@@ -343,7 +343,8 @@ impl Repo {
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let index_lock = git_dir.as_ref().map(|dir| dir.join("index.lock"));
         let shallow_file = common_dir.as_ref().map(|dir| dir.join("shallow"));
-        Some(Self {
+        let filter = git_dir.as_deref().zip(common_dir.as_deref()).and_then(|(git, common)| GitFilter::new(git, common));
+        let mut repo = Self {
             root,
             name,
             git,
@@ -354,7 +355,11 @@ impl Repo {
             shallow_file,
             index_lock,
             ..Self::default()
-        })
+        };
+        if let Some(filter) = filter {
+            Arc::get_mut(&mut repo.watch_ignored).unwrap().git = Some(filter);
+        }
+        Some(repo)
     }
 
     pub(crate) fn git_unavailable(&self) -> bool {
@@ -471,11 +476,15 @@ impl Repo {
         let file = self.root.join(relative);
         // Don't guess how a volume normalizes or folds non-ASCII path names.
         if !file.as_os_str().as_encoded_bytes().is_ascii() {
-            return Arc::default();
+            return Arc::new(Ignored { git: self.watch_ignored.git.clone(), ..Ignored::default() });
         }
         let worktree = self.git.then(|| self.root.clone());
         let metadata = [self.git.then(|| self.root.join(".git")), self.git_dir.clone(), self.common_dir.clone()];
-        Arc::new(Ignored { events: Events::Reader { file, worktree, metadata }, ..Ignored::default() })
+        Arc::new(Ignored {
+            git: self.watch_ignored.git.clone(),
+            events: Events::Reader { file, worktree, metadata },
+            ..Ignored::default()
+        })
     }
 
     fn exclusions(&self, status: &Status) -> Arc<Ignored> {
@@ -504,6 +513,7 @@ impl Repo {
         Arc::new(Ignored {
             dirs: exclusions(&status.ignored_dirs),
             files: exclusions(&status.ignored_files),
+            git: self.watch_ignored.git.clone(),
             ..Ignored::default()
         })
     }
