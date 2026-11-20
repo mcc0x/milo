@@ -42,6 +42,138 @@ local function resized(session_id, window_id, before, after)
   end)
 end
 
+local function find_window(view, window_id)
+  for _, window in ipairs(view and view.windows or {}) do
+    if window.window_id == window_id then return window end
+  end
+end
+
+-- Tab titles. Milo titles a tab only while its label is Rex's own or the one
+-- Milo set last, so a name anyone else chose is never replaced. Records are
+-- kept by window and block ID, never by a label or a position.
+local titles, titled, pane_tab, claims = memory.titles, {}, {}, nil
+
+-- The directory and agent a tab is titled for. Only the shells of a tab that
+-- is Milo's to title are ever asked about their processes.
+local function tab_facts(record)
+  local cwd, agent
+  for _, block_id in ipairs(record.order) do
+    local pane = record.panes[block_id]
+    if not pane then
+      pane = titles.facts(rex.call(terminal .. ".process", { session_id = record.session_id, block_id = block_id }))
+      record.panes[block_id] = pane
+    end
+    -- The project is the agent's if one runs in this tab, else the first shell's.
+    if pane.cwd and pane.agent and not agent then cwd, agent = pane.cwd, pane.agent end
+    cwd = cwd or pane.cwd
+  end
+  return cwd, agent
+end
+
+local function release(window_id, record)
+  record.claim = nil
+  titles.forget{ window_id }
+end
+
+-- A label that is neither Rex's own nor the title Milo set is a name someone
+-- chose, which ends Milo's part in the tab.
+local function named_elsewhere(window_id, record, default)
+  if record.label == default or (record.claim and record.label == record.claim) then return false end
+  if record.claim then release(window_id, record) end
+  return true
+end
+
+local function retitle(window_id)
+  local record = titled[window_id]
+  local session_id, default = record.session_id, "Window " .. window_id:sub(-8)
+  if named_elsewhere(window_id, record, default) then return end
+  local cwd, agent = tab_facts(record)
+  if not cwd then return end
+  local key = cwd .. "\n" .. (agent or "")
+  if key ~= record.key then record.key, record.title = key, titles.ask(cwd, agent) end
+  local title = record.title
+  if not title then return end
+  local wanted = title ~= "" and title or default
+  if record.label ~= wanted then
+    -- Asking Milo, Rex or a terminal takes a moment, and a name can be chosen
+    -- in it. Read the label again just before replacing it.
+    local window = find_window(rex.session.view{ session_id = session_id }, window_id)
+    if not window then return end
+    record.label = window.label
+    if named_elsewhere(window_id, record, default) then return end
+  end
+  if record.label ~= wanted then
+    if not rex.session.set_window_label{ session_id = session_id, window_id = window_id, label = title } then
+      -- Rex refused. Leave the tab as it is until its project or agent changes.
+      record.title = nil
+      return
+    end
+    record.label = wanted
+  end
+  if wanted == default then
+    if record.claim then release(window_id, record) end
+  elseif record.claim ~= wanted then
+    record.claim = wanted
+    titles.claim(window_id, wanted)
+  end
+end
+
+-- Stop tracking the session's tabs that are not in `seen`.
+local function drop_titles(session_id, seen)
+  local gone = {}
+  for window_id, record in pairs(titled) do
+    if record.session_id == session_id and not (seen and seen[window_id]) then
+      titled[window_id] = nil
+      for _, block_id in ipairs(record.order) do
+        if pane_tab[block_id] == window_id then pane_tab[block_id] = nil end
+      end
+      if record.claim then gone[#gone + 1] = window_id end
+    end
+  end
+  if #gone > 0 then titles.forget(gone) end
+end
+
+local function sync_titles(session_id, view)
+  if not titles then return end
+  claims = claims or titles.owned()
+  local seen = {}
+  for _, window in ipairs(view.windows or {}) do
+    local window_id = window.window_id
+    local record = titled[window_id]
+    if not record then
+      record = { session_id = session_id, panes = {}, order = {}, claim = claims[window_id] }
+      titled[window_id] = record
+    end
+    local order, present = {}, {}
+    for _, layer in ipairs(window.layers or {}) do
+      for _, block in ipairs(layer.kind == "tiled" and layer.blocks or {}) do
+        if block.creator_name == terminal and (block.label or ""):sub(1, 5) ~= "milo:" then
+          order[#order + 1], present[block.block_id], pane_tab[block.block_id] = block.block_id, true, window_id
+        end
+      end
+    end
+    for _, block_id in ipairs(record.order) do
+      if not present[block_id] then
+        record.panes[block_id] = nil
+        if pane_tab[block_id] == window_id then pane_tab[block_id] = nil end
+      end
+    end
+    seen[window_id], record.label, record.order = true, window.label, order
+    retitle(window_id)
+  end
+  drop_titles(session_id, seen)
+end
+
+local function pane_changed(ctx, event)
+  local block_id = event.block_id or ctx.block_id
+  local window_id = pane_tab[block_id]
+  local record = window_id and titled[window_id]
+  if not record then return end
+  -- A process change says who is in front. After any other change the terminal is asked.
+  record.panes[block_id] = event.foreground and titles.facts(event) or nil
+  retitle(window_id)
+end
+
 local function observe(session_id, revision)
   local last = sessions[session_id]
   if last and revision and last.revision and revision <= last.revision then return end
@@ -61,6 +193,7 @@ local function observe(session_id, revision)
       end
     end
   end
+  sync_titles(session_id, view)
   return view
 end
 
@@ -74,12 +207,6 @@ local function single_pane(window)
   local block = layer.blocks[1]
   if block.creator_name == terminal and (block.label or ""):sub(1, 5) ~= "milo:" then
     return block
-  end
-end
-
-local function find_window(view, window_id)
-  for _, window in ipairs(view and view.windows or {}) do
-    if window.window_id == window_id then return window end
   end
 end
 
@@ -192,8 +319,8 @@ local function ready(ctx, event)
   if tab then arrange(tab) end
 end
 
-rex.on("terminal.process_changed", ready)
-rex.on("terminal.pwd_changed", ready)
+rex.on("terminal.process_changed", function(ctx, event) ready(ctx, event); pane_changed(ctx, event) end)
+rex.on("terminal.pwd_changed", function(ctx, event) ready(ctx, event); pane_changed(ctx, event) end)
 rex.on("terminal.size_changed", ready)
 rex.on("block_owner_changed", ready)
 
@@ -228,7 +355,10 @@ end)
 
 rex.on("session_destroyed", function(_, event)
   local id = event.session_id
-  if id then sessions[id], waiting[id] = nil, nil end
+  if id then
+    sessions[id], waiting[id] = nil, nil
+    drop_titles(id)
+  end
   if next(pending) then flush() end
 end)
 
@@ -244,6 +374,7 @@ rex.on("session_created", function(_, event)
   if next(pending) then flush() end
   local id = event.session and event.session.session_id
   local view = id and rex.session.view{ session_id = id }
+  if view then sync_titles(id, view) end
   for _, window in ipairs(view and view.windows or {}) do new_tab(id, window) end
 end)
 

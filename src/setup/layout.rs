@@ -33,7 +33,7 @@ const LISTENER: &str = include_str!("listener.lua");
 // mistake a hand-edited ten-row setting for that old default.
 const TEN_ROW_ACTIONS: [u64; 4] =
     [0x97cf_a17d_8775_e350, 0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f, 0x1d1f_8dd4_6b14_c588];
-const TWO_ROW_ACTIONS: [u64; 2] = [0x5b89_2e57_9222_edf1, 0xe209_f094_9daa_1761];
+const TWO_ROW_ACTIONS: [u64; 3] = [0x5b89_2e57_9222_edf1, 0xe209_f094_9daa_1761, 0x87e4_ca78_9f5c_8cc4];
 
 pub(super) fn probe_lua(layout: &Layout, executable: &Path) -> String {
     let mut lua = actions_prefix(layout, &lua_path(executable));
@@ -613,7 +613,7 @@ pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
             || [
                 0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a,
                 0x1ed2_af59_4c5b_4bf4, 0x7b13_2b45_6752_1e02, 0x3f33_9081_87e5_4505, 0x9a88_3230_71bd_27e5,
-                0x3160_d88f_3615_347e,
+                0x3160_d88f_3615_347e, 0x9f96_0222_5e5f_6597, 0xf4de_b493_7bc8_8ba9,
             ]
             .contains(&fingerprint(body))
     })

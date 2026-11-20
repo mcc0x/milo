@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://usemilo.net">
-    <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. A Git-aware file tree, commit history, diff reader and usage limits in native panes for Superlogical’s Rex terminal.">
+    <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. Additions for Superlogical's multiplexer, Rex.">
   </a><br>
   <a href="https://usemilo.net">
     <picture>
@@ -32,7 +32,7 @@ Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
 <p align="center"><img src="docs/img/home.png" width="510" alt="Milo’s blue mascot and version beside Settings, Doctor and Uninstall"></p>
 
-Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone.
+Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone. With **Title Rex tabs** enabled, tabs you have not named show their project, worktree and agent.
 
 You can also run each pane on its own.
 

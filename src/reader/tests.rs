@@ -243,6 +243,10 @@ fn unknown_extensions_and_conflicting_shebangs_do_not_colour_code() {
         ("page.mjs", "#!/usr/bin/env zx\nreturn true", true),
         ("page.sh", "#!/bin/dash\nif true; then exit; fi", true),
         ("script.rs", "#!/usr/bin/env cargo\nfn main() {}", true),
+        ("tool.lua", "#!/usr/bin/env lua5.4\nreturn true", true),
+        ("other.lua", "#!/usr/bin/env python3\nreturn True", false),
+        ("tool.swift", "#!/usr/bin/swift\nreturn true", true),
+        ("rules.mk", "#!/usr/bin/make -f\ninclude more.mk", true),
     ] {
         f.write(name, source);
         let mut reader = Reader::open(&f.root.join(name)).unwrap();
@@ -799,4 +803,101 @@ fn a_single_file_commit_read_does_not_treat_a_shallow_boundary_as_a_root() {
     let id = CommitId::parse(&commits[0].hash).unwrap();
 
     assert_eq!(Reader::at_commit(&root.join("page.txt"), id).err(), Some("Git did not answer for this commit."));
+}
+
+/// The styled runs of a frame: the codes of each style and the text drawn with it.
+fn runs(out: &str) -> Vec<(&str, &str)> {
+    let codes = |run: &(&str, &str)| run.0.bytes().all(|b| b.is_ascii_digit() || b == b';');
+    out.split("\x1b[").filter_map(|run| run.split_once('m')).filter(codes).collect()
+}
+
+/// Whether a style inverts its cells. A 7 inside an extended colour is not the code for that.
+fn reversed(codes: &str) -> bool {
+    let mut codes = codes.split(';');
+    while let Some(code) = codes.next() {
+        match code {
+            "7" => return true,
+            "38" | "48" => {
+                let values = if codes.next() == Some("5") { 1 } else { 3 };
+                codes.nth(values - 1);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+#[test]
+fn lua_swift_sql_dockerfiles_and_makefiles_are_coloured_in_working_and_committed_reads() {
+    let f = Fixture::new();
+    let files = [
+        ("init.lua", "local text = [==[\n  long ]] text\n]==]\nreturn text .. 1\n", "local"),
+        ("App.swift", "import Foundation\nlet raw = #\"a \"b\" c\"#\nlet count = 1\n", "import"),
+        ("db/schema.sql", "select id\n  from users -- all\n limit 1;\n", "select"),
+        ("ops.d/Dockerfile", "FROM alpine:3 AS base\n# note\nRUN echo 1\n", "FROM"),
+        ("Makefile", "include rules.mk\nall: include/x.h\n\techo 1\n", "include"),
+    ];
+    for (path, before, _) in files {
+        f.write(path, before);
+    }
+    f.commit("before");
+    for (path, before, _) in files {
+        f.write(path, &before.replace('1', "2"));
+    }
+    let check = |reader: &mut Reader, path: &str, before: &str, keyword: &str| {
+        let mut screen = Screen::sized(60, 10);
+        reader.draw(&mut screen);
+        // Git's text is shown as it is, apart from the tab stops every reader expands.
+        let rows = screen.text();
+        for line in before.lines().chain(before.replace('1', "2").lines()) {
+            let line = line.replace('\t', "    ");
+            assert!(rows.iter().any(|row| row.ends_with(&line)), "{path}: {line:?} not in {rows:?}");
+        }
+        let out = String::from_utf8(screen.emitted()).unwrap();
+        let runs = runs(&out);
+        assert!(runs.contains(&("0;35", keyword)), "{path}: {out:?}");
+        // Only the changed number is emphasised, on both the removed and the added line.
+        let emphasised: Vec<_> = runs.iter().filter(|run| reversed(run.0)).map(|run| run.1).collect();
+        assert_eq!(emphasised, ["1", "2"], "{path}: {out:?}");
+    };
+    for (path, before, keyword) in files {
+        check(&mut Reader::open(&f.root.join(path)).unwrap(), path, before, keyword);
+    }
+
+    f.commit("after");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    for (path, before, keyword) in files {
+        check(&mut Reader::at_commit(&f.root.join(path), id).unwrap(), path, before, keyword);
+    }
+}
+
+#[test]
+fn each_changed_word_is_emphasised_and_stays_in_place_when_panning() {
+    let f = Fixture::new();
+    f.write("page.txt", "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk\n");
+    f.commit("before");
+    f.write("page.txt", "aaaa BBBB cccc dddd eeee ffff GGGG hhhh iiii jjjj kkkk\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+
+    let mut screen = Screen::sized(60, 5);
+    reader.draw(&mut screen);
+    let out = String::from_utf8(screen.emitted()).unwrap();
+    let emphasised = |out: &str| -> Vec<String> {
+        runs(out).iter().filter(|run| reversed(run.0)).map(|run| format!("{} {}", run.0, run.1)).collect()
+    };
+    assert_eq!(emphasised(&out), ["0;7;31 bbbb", "0;7;31 gggg", "0;7;32 BBBB", "0;7;32 GGGG"]);
+
+    // With the first word panned away and the second cut by the left edge, the rest of it keeps its emphasis.
+    let mut screen = Screen::sized(24, 5);
+    reader.draw(&mut screen);
+    for _ in 0..4 {
+        reader.key(Key::Right);
+        reader.draw(&mut screen);
+    }
+    let out = String::from_utf8(screen.emitted()).unwrap();
+    assert!(screen.text()[2].contains("+‹GG hhhh"), "{:?}", screen.text());
+    assert_eq!(emphasised(&out).last().map(String::as_str), Some("0;7;32 GG"), "{out:?}");
 }

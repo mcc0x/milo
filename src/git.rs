@@ -259,6 +259,40 @@ pub(crate) fn discover_worktree(dir: &Path) -> Result<Option<PathBuf>, &'static 
     Ok(raw.map(|raw| PathBuf::from(OsStr::from_bytes(&raw))).filter(|root| root.is_absolute()))
 }
 
+/// What people call a checkout: its repository and, in a linked worktree, that worktree's folder.
+pub struct Checkout {
+    pub root: PathBuf,
+    pub project: String,
+    pub worktree: Option<String>,
+}
+
+/// Name the checkout containing `dir`, without loading project state. An
+/// error means Git could not be asked, which says nothing about `dir`.
+pub fn checkout(dir: &Path) -> Result<Option<Checkout>, &'static str> {
+    let Some(dirs) = git_dirs(dir)? else { return Ok(None) };
+    let Some(folder) = dirs.root.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+        return Ok(None);
+    };
+    // A linked worktree keeps its index apart from the repository's branches.
+    let repository = match (&dirs.git, &dirs.common) {
+        (Some(git), Some(common)) if git != common => repository_name(common),
+        _ => None,
+    };
+    Ok(Some(match repository {
+        Some(project) if project != folder => Checkout { root: dirs.root, project, worktree: Some(folder) },
+        _ => Checkout { root: dirs.root, project: folder, worktree: None },
+    }))
+}
+
+/// The folder holding `.git`, or a bare repository's own folder without its `.git` ending.
+fn repository_name(common: &Path) -> Option<String> {
+    let own = common.file_name()?.to_string_lossy();
+    if own.starts_with('.') {
+        return Some(common.parent()?.file_name()?.to_string_lossy().into_owned());
+    }
+    Some(own.strip_suffix(".git").filter(|name| !name.is_empty()).unwrap_or(&own).to_owned())
+}
+
 fn discovery_output(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, &'static str> {
     match run::limited_output(dir, &[], args, 1 << 16) {
         Ok(mut raw) if raw.last() == Some(&b'\n') => {
@@ -796,6 +830,29 @@ mod tests {
         assert_eq!(repo.remote(), Some("origin/main"));
         assert!(repo.pending().unwrap().is_empty());
         assert!(!repo.history(1).unwrap()[0].unpushed);
+    }
+
+    #[test]
+    fn a_checkout_is_named_for_its_repository_and_its_linked_worktree() {
+        let f = Fixture::new();
+        f.write("sub/page.txt", "a file\n");
+        f.commit("first");
+        let named = |dir: &Path| checkout(dir).unwrap().map(|found| (found.project, found.worktree, found.root));
+        assert_eq!(named(&f.root.join("sub")), Some(("project".into(), None, f.root.clone())));
+
+        // A linked worktree belongs to the repository that owns it, wherever its folder is.
+        f.git(&["worktree", "add", "-q", "../feature"]);
+        let linked = f.root.with_file_name("feature");
+        assert_eq!(named(&linked.join("sub")), Some(("project".into(), Some("feature".into()), linked.clone())));
+
+        // A bare repository has no folder around it, so its own name is used.
+        f.git(&["clone", "-q", "--bare", ".", "../tool.git"]);
+        f.git(&["--git-dir", "../tool.git", "worktree", "add", "-q", "../hotfix"]);
+        let hotfix = f.root.with_file_name("hotfix");
+        assert_eq!(named(&hotfix), Some(("tool".into(), Some("hotfix".into()), hotfix.clone())));
+
+        let plain = Fixture::folder();
+        assert!(checkout(&plain.root).unwrap().is_none());
     }
 
     #[test]
