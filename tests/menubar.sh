@@ -13,6 +13,13 @@ test ! -e "$app/Contents/Resources/ProfilePaths.plist"
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 swiftc -swift-version 5 -parse-as-library "$repo/macos/MenuBar/BrowserHandoff.swift" "$repo/tests/menu-handoff.swift" -o "$root/check-handoff"
 "$root/check-handoff"
+# Build the same menu model and SwiftUI surface as the app, without its @main entry.
+set --
+for source in "$repo"/macos/MenuBar/*.swift; do
+    case "$source" in */App.swift) ;; *) set -- "$@" "$source" ;; esac
+done
+swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" "$@" "$repo/tests/menu-badge.swift" -o "$root/check-badge"
+"$root/check-badge"
 export HOME="$root/home"
 apps=$HOME/Applications
 dest="$apps/Milo.app"

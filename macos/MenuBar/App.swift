@@ -105,6 +105,8 @@ private final class Model: ObservableObject {
     @Published var mode = UserDefaults.standard.string(forKey: "badgeMode") ?? "auto" {
         didSet { UserDefaults.standard.set(mode, forKey: "badgeMode"); changed?() }
     }
+    @Published private(set) var badge: BadgeReading?
+    private(set) var badgeUpdatedAt = Date.now
     var changed: (() -> Void)?
     private var child: Process?
     private var input: FileHandle?
@@ -242,6 +244,11 @@ private final class Model: ObservableObject {
 
     private enum FeedError: Error { case invalid }
     private func failed(_ message: String) { snapshot = nil; failure = message; changed?() }
+    func updateBadge(at now: Date) {
+        badgeUpdatedAt = now
+        let reading = badgeReading(snapshot, mode: mode, now: now)
+        if badge != reading { badge = reading }
+    }
     func refresh() {
         guard let input else { start(); return }
         do { try input.write(contentsOf: Data([10])) } catch { stop(); start() }
@@ -274,7 +281,7 @@ private final class Model: ObservableObject {
 private struct Content: View {
     @ObservedObject var model: Model
     var body: some View {
-        UsagePanel(snapshot: model.snapshot, error: model.failure, badgeMode: $model.mode,
+        UsagePanel(snapshot: model.snapshot, error: model.failure, badge: model.badge, now: model.badgeUpdatedAt, badgeMode: $model.mode,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
                    loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
     }
@@ -311,11 +318,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private func updateBadge() {
         guard let button = status?.button else { return }
-        let reading = badgeReading(model.snapshot, mode: model.mode)
-        let label = reading.map { "\($0.provider.name), \($0.window.label): \($0.window.remaining)% left" } ?? "Milo"
-        button.title = reading.map { " \($0.window.remaining)%" } ?? ""
-        status.length = reading == nil ? NSStatusItem.variableLength : 67
-        button.toolTip = label; button.setAccessibilityLabel(label)
+        // The reader emits even unchanged frames, at most 30 seconds apart when settled.
+        // Use those ticks for the countdown and share the chosen window with the popover.
+        let now = Date.now
+        model.updateBadge(at: now)
+        let label = model.badge?.label(at: now) ?? "Milo"
+        let title = model.badge.map { " \($0.window.remaining)%" } ?? ""
+        if button.title != title {
+            button.title = title
+            status.length = model.badge == nil ? NSStatusItem.variableLength : 67
+        }
+        if button.toolTip != label {
+            button.toolTip = label; button.setAccessibilityLabel(label)
+        }
     }
     @objc private func toggle() { if popover.isShown { popover.performClose(nil) } else { show() } }
     private func show() {

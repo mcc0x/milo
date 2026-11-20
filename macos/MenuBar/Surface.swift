@@ -5,6 +5,18 @@ import SwiftUI
 struct UsageSnapshot: Codable, Equatable {
     let version: Int
     let providers: [UsageProvider]
+
+    func orderedProviders(pinning badge: BadgeReading?) -> some RandomAccessCollection<UsageProvider> {
+        pinnedIndices(providers.indices, first: badge?.providerIndex).lazy.map { providers[$0] }
+    }
+
+    func matchingBadge(_ badge: BadgeReading?) -> BadgeReading? {
+        guard let badge, providers.indices.contains(badge.providerIndex) else { return nil }
+        let provider = providers[badge.providerIndex]
+        guard provider.id == badge.providerID, provider.windows.indices.contains(badge.windowIndex),
+              provider.windows[badge.windowIndex] == badge.window else { return nil }
+        return badge
+    }
 }
 
 struct UsageProvider: Codable, Equatable {
@@ -12,6 +24,10 @@ struct UsageProvider: Codable, Equatable {
     let name: String
     let windows: [UsageWindow]
     let detail: String?
+
+    func orderedWindowIndices(pinning index: Int?) -> some RandomAccessCollection<Int> {
+        pinnedIndices(windows.indices, first: index)
+    }
 }
 
 struct UsageWindow: Codable, Equatable {
@@ -31,16 +47,73 @@ struct UsageWindow: Codable, Equatable {
     }
 }
 
-func badgeReading(_ snapshot: UsageSnapshot?, mode: String, now: Date = .now) -> (provider: UsageProvider, window: UsageWindow)? {
+struct BadgeReading: Equatable {
+    let providerIndex: Int
+    let windowIndex: Int
+    let providerID: String
+    let providerName: String
+    let window: UsageWindow
+
+    func label(at now: Date) -> String {
+        let summary = "\(providerName), \(limitName): \(window.remaining)% left."
+        guard let resetAt = window.resetAt else { return "\(summary) Reset time unavailable." }
+        let minutes = Int((Double(resetAt) - now.timeIntervalSince1970) / 60)
+        return "\(summary) Resets in \(Self.countdown(minutes))."
+    }
+
+    private var limitName: String {
+        let label = window.label
+        switch label {
+        case "week": return "weekly limit"
+        case "day": return "daily limit"
+        default: break
+        }
+        if label.hasSuffix(" week") { return "\(label.dropLast(5)) weekly limit" }
+        if let amount = UInt(label.dropLast()) {
+            switch label.last {
+            case "d": return "\(amount)-day limit"
+            case "h": return "\(amount)-hour limit"
+            case "m": return "\(amount)-minute limit"
+            default: break
+            }
+        }
+        return "\(label) limit"
+    }
+
+    private static func countdown(_ minutes: Int) -> String {
+        func unit(_ count: Int, _ name: String) -> String { "\(count) \(name)\(count == 1 ? "" : "s")" }
+        func pair(_ count: Int, _ name: String, _ remainder: Int, _ smaller: String) -> String {
+            let main = unit(count, name)
+            return remainder == 0 ? main : "\(main), \(unit(remainder, smaller))"
+        }
+        switch minutes {
+        case ..<1: return "less than a minute"
+        case ..<60: return unit(minutes, "minute")
+        case ..<1_440: return pair(minutes / 60, "hour", minutes % 60, "minute")
+        default: return pair(minutes / 1_440, "day", minutes / 60 % 24, "hour")
+        }
+    }
+}
+
+func badgeReading(_ snapshot: UsageSnapshot?, mode: String, now: Date) -> BadgeReading? {
     guard let snapshot, mode == "auto" || mode == "codex" || mode == "claude" else { return nil }
-    var lowest: (provider: UsageProvider, window: UsageWindow)?
-    for provider in snapshot.providers where mode == "auto" || provider.id == mode {
-        for window in provider.windows where window.state(at: now) == .current {
+    var lowest: BadgeReading?
+    for (providerIndex, provider) in snapshot.providers.enumerated() where mode == "auto" || provider.id == mode {
+        for (windowIndex, window) in provider.windows.enumerated() where window.state(at: now) == .current {
             if let lowest, lowest.window.remaining <= window.remaining { continue }
-            lowest = (provider, window)
+            lowest = BadgeReading(providerIndex: providerIndex, windowIndex: windowIndex,
+                                  providerID: provider.id, providerName: provider.name, window: window)
         }
     }
     return lowest
+}
+
+private func pinnedIndices(_ indices: Range<Int>, first: Int?) -> some RandomAccessCollection<Int> {
+    let first = first.flatMap { indices.contains($0) ? $0 : nil }
+    return indices.lazy.map { index in
+        guard let first, index <= first else { return index }
+        return index == 0 ? first : index - 1
+    }
 }
 
 private typealias PanelState<Value> = SwiftUI.State<Value>
@@ -48,6 +121,8 @@ private typealias PanelState<Value> = SwiftUI.State<Value>
 struct UsagePanel: View {
     let snapshot: UsageSnapshot?
     let error: String?
+    let badge: BadgeReading?
+    let now: Date
     @Binding var badgeMode: String
     let refresh: () -> Void
     let openSettings: () -> Void
@@ -135,18 +210,16 @@ struct UsagePanel: View {
                 message("Couldn’t refresh usage", detail: error, symbol: "exclamationmark.circle")
                 Divider()
             }
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                let active = badgeReading(snapshot, mode: badgeMode, now: context.date)
-                VStack(spacing: 12) {
-                    ForEach(snapshot.providers, id: \.id) { provider in
-                        section(provider, at: context.date, marked: active?.provider.id == provider.id ? active?.window : nil)
-                    }
+            let badge = snapshot.matchingBadge(self.badge)
+            VStack(spacing: 12) {
+                ForEach(snapshot.orderedProviders(pinning: badge), id: \.id) { provider in
+                    section(provider, at: now, marked: badge?.providerID == provider.id ? badge?.windowIndex : nil)
                 }
-                .padding(.bottom, 14)
-                if active == nil && badgeMode != "icon" {
-                    Text("No fresh limit for the menu bar.")
-                        .font(.caption).foregroundStyle(.secondary).padding(.bottom, 10)
-                }
+            }
+            .padding(.bottom, 14)
+            if badge == nil && badgeMode != "icon" {
+                Text("No fresh limit for the menu bar.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.bottom, 10)
             }
         } else if let error {
             message("Couldn’t read usage", detail: error, symbol: "exclamationmark.circle")
@@ -166,7 +239,7 @@ struct UsagePanel: View {
         }
     }
 
-    private func section(_ provider: UsageProvider, at now: Date, marked: UsageWindow?) -> some View {
+    private func section(_ provider: UsageProvider, at now: Date, marked: Int?) -> some View {
         HStack(alignment: .top, spacing: 10) {
             UsageGlyph(id: provider.id)
                 .frame(width: 21, height: 21)
@@ -175,8 +248,8 @@ struct UsagePanel: View {
                     .font(.system(size: 14, weight: .semibold))
                     .frame(minHeight: 21, alignment: .leading)
                     .accessibilityAddTraits(.isHeader)
-                ForEach(provider.windows.indices, id: \.self) { index in
-                    UsageLimitRow(window: provider.windows[index], now: now, marked: marked == provider.windows[index], blink: blink)
+                ForEach(provider.orderedWindowIndices(pinning: marked), id: \.self) { index in
+                    UsageLimitRow(window: provider.windows[index], now: now, marked: marked == index, blink: blink)
                 }
                 if let detail = provider.detail ?? (provider.windows.isEmpty ? "No reading yet" : nil) {
                     Text(detail)
