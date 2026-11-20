@@ -147,21 +147,13 @@
           </article>
         </div>
       </section>
-      <section class="field-notes" id="field-notes" aria-labelledby="start-title">
-        <header class="start-intro">
-          <h2 id="start-title">Getting started</h2>
-          <p>Prefer to let your agent set up Milo? <button type="button" data-copy="agent-prompt">Copy prompt</button></p>
-          <p id="agent-prompt" hidden>Help me set up Milo for Rex on this Mac. Check for Homebrew and Milo first. If Milo is missing, run `brew install mcc0x/milo/milo`. Run `milo doctor`, then ask which panes I want and whether to save the layout for this worktree or as my default. Use `milo web` to guide me through saving it. Keep my existing settings unless I ask to change them.</p>
+      <section class="field-notes" id="companion" aria-labelledby="companion-title">
+        <header class="start-intro" id="field-notes">
+          <img class="companions" src="./images/companions.webp" width="544" height="355" alt="Rex with a magnifying glass beside Milo, pointing ahead." loading="lazy">
+          <h2 id="companion-title">Your Rex deserves a companion.</h2>
         </header>
-        <section>
-          <h3>How do I get started?</h3>
-          <div class="brew-pill"><code id="setup-command">brew install mcc0x/milo/milo</code><button type="button" data-copy="setup-command" aria-describedby="setup-command">Copy</button></div>
-          <p>Then run <code>milo</code> in Rex. Choose your panes and turn on automatic arrangement for new shell tabs.</p>
-        </section>
-        <section>
-          <h3>Will Milo remember my layout?</h3>
-          <p>Yes. Save a layout per worktree to keep History open in one project and just Outline in another.</p>
-        </section>
+        <div class="brew-pill"><code id="setup-command">brew install mcc0x/milo/milo</code><button type="button" data-copy="setup-command" aria-describedby="setup-command">Copy</button></div>
+        <p>Then run <code>milo</code> in Rex.</p>
       </section>
     </main>
     <footer class="site-footer" id="open-source">
