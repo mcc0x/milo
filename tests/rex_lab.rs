@@ -5,8 +5,11 @@
 //! `rex` this test runs names that server's socket and cannot start another
 //! server. Programs the lab's server starts inherit the lab's home and its
 //! `REX_SERVER`; the test checks that in a lab terminal and on the listener's
-//! command line. The Rex a developer is working in is never asked anything,
-//! and none of its settings, sessions or tabs change.
+//! command line. A shell tab on macOS runs under `login`, which gives it the
+//! developer's home again, so `ZDOTDIR` points its zsh at the lab's startup
+//! files, and the test checks that the shell read them. The Rex a developer
+//! is working in is never asked anything, and none of its settings, sessions
+//! or tabs change.
 //!
 //! The test needs an installed `rex`, so it is ignored by default:
 //!
@@ -192,10 +195,18 @@ impl Lab {
         }
         // The editor's link, which is a password, is written here.
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        // The lab's shell reads no system-wide settings, so what it runs as it
-        // starts, and how long that takes, do not depend on the machine.
+        // The lab's shell reads no system-wide settings and none of the
+        // developer's, so what it runs as it starts, and how long that takes,
+        // do not depend on the machine. It notes where it found its settings,
+        // then copies itself several times over, as prompts and plugins make
+        // a shell do while the listener is still arranging its new tab.
         fs::write(root.join("home/.zshenv"), "unsetopt global_rcs\n").unwrap();
-        fs::write(root.join("home/.zshrc"), "").unwrap();
+        let startup = format!(
+            "print -r -- \"$ZDOTDIR\" \"$XDG_CONFIG_HOME\" \"$REX_SERVER\" >>'{}'\n\
+             zmodload zsh/zselect && repeat 8 ( zselect -t 1 )\n",
+            root.join("shells").display()
+        );
+        fs::write(root.join("home/.zshrc"), startup).unwrap();
         let (names, alone) = Default::default();
         let mut lab = Self { root, rex, milo, server: None, app: None, names, alone };
         for path in [&lab.rex, &lab.milo, &lab.root] {
@@ -220,11 +231,15 @@ impl Lab {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    /// The shell of the lab's terminals: zsh where there is one.
+    fn shell() -> &'static str {
+        ["/bin/zsh", "/bin/bash"].into_iter().find(|shell| Path::new(shell).exists()).unwrap_or("/bin/sh")
+    }
+
     /// Nothing from the developer's shell reaches the lab: not their home, their
     /// settings folders, nor the Rex session this test may itself be running in.
     fn command(&self, program: impl AsRef<Path>) -> Command {
         let home = self.root.join("home");
-        let shell = ["/bin/zsh", "/bin/bash"].into_iter().find(|shell| Path::new(shell).exists()).unwrap_or("/bin/sh");
         let mut command = Command::new(program.as_ref());
         command
             .env_clear()
@@ -232,8 +247,10 @@ impl Lab {
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_STATE_HOME", home.join(".local/state"))
             .env("HOME", &home)
+            // `login` gives a shell tab the developer's home, but leaves this.
+            .env("ZDOTDIR", &home)
             .env("TMPDIR", self.root.join("tmp"))
-            .env("SHELL", shell)
+            .env("SHELL", Self::shell())
             .env("TERM", "xterm-256color")
             .env("REX_SERVER", self.socket())
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -453,7 +470,8 @@ impl Lab {
     }
 
     /// A terminal of the lab's server must be in the lab too: its home, its
-    /// settings and its server are what Milo's panes will use.
+    /// settings and its server are what Milo's panes will use. A shell tab
+    /// must have started from the lab's files, not the developer's.
     fn check_terminals(&self, session: &str) {
         let (home, seen) = (self.root.join("home"), self.root.join("terminal"));
         let print = format!(
@@ -464,6 +482,11 @@ impl Lab {
         let _ = self.rex_output(&["window", "close", "-s", session, &id(&made, "window_id")]);
         let home = home.display();
         assert_eq!(self.read("terminal"), format!("{home}\n{home}/.config\n{home}/.local/state\n{}\n", self.socket()));
+        if Self::shell().ends_with("/zsh") {
+            let started = format!("{home} {home}/.config {}", self.socket());
+            let shells = || self.read("shells");
+            assert!(soon(|| !shells().is_empty()) && shells().lines().all(|shell| shell == started), "{}", shells());
+        }
     }
 
     /// The process ID and command line of each layout listener serving the lab.

@@ -116,7 +116,11 @@ Git worktrees through new tabs, divider drags, renamed tabs and sessions, and a
 restart of the server. Every `rex` the test runs names that socket and cannot
 start another server, and it checks that the lab's terminals and listener use
 the lab's home and server too, so the Rex you are working in is never asked
-anything. Set `MILO_TEST_REX` if `rex` is not on your path. The test prints
+anything. On macOS a shell tab runs under `login`, which hands it your home
+again, so the lab sets `ZDOTDIR` and checks that each shell read the lab's
+startup file and not yours. That file makes the shell copy itself a few times
+as it starts, which is what prompts and plugins do to a shell while its new
+tab is being arranged. Set `MILO_TEST_REX` if `rex` is not on your path. The test prints
 whether the restarted server ran Milo again in the panes it restored; that is
 Rex's choice. A new shell tab that does not get its rail fails the test: none
 is opened in its place. That holds for the tabs the test opens one at a time
