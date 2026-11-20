@@ -409,7 +409,7 @@ function showSaveOptions() {
   groups.replaceChildren();
   for (const [key, group] of Object.entries(state.groups)) {
     if (!canSaveDraft(key, group)) continue;
-    const title = groupLabels[key];
+    const title = key === 'preferences' ? 'Appearance and workflow' : groupLabels[key];
     groups.append(node('h3', '', title[0].toUpperCase() + title.slice(1)), saveChoices(key, group, 'dock'));
   }
   if (groups.childElementCount) byId('save-options').showModal();
@@ -508,14 +508,14 @@ function layoutView() {
 
 function appearanceView() {
   const disabled = !state.groups.preferences.editable;
-  return [groupCard('preferences', 'Pane appearance', 'Appearance and workflow share a save. A worktree inherits any choices it does not override.', [
-    setting('appearance.icons', 'Icons', 'Choose Nerd Font symbols, plain symbols, or no icons.', 'select',
+  return [groupCard('preferences', 'Pane appearance', '', [
+    setting('appearance.icons', 'Icons', '', 'select',
       {disabled, choices: [['nerd', 'Nerd Font'], ['plain', 'Plain'], ['off', 'Off']]}),
-    setting('appearance.static_marks', 'Activity marks', 'A static mark stays still when a file changes.', 'select',
+    setting('appearance.static_marks', 'Activity marks', '', 'select',
       {disabled, choices: [['false', 'Pulse'], ['true', 'Static']]}),
     setting('appearance.text_git_marks', 'Git status marks', 'Text adds letters and signs beside changed files and commits.', 'select',
       {disabled, choices: [['false', 'Style only'], ['true', 'Text']]}),
-    setting('appearance.usage_large_figures', 'Usage display', 'Auto uses text when there isn’t room for large figures.', 'select',
+    setting('appearance.usage_large_figures', 'Usage display', 'Auto fits the available space.', 'select',
       {disabled, choices: [['false', 'Auto compact'], ['true', 'Large figures']]}),
   ])];
 }
@@ -523,14 +523,14 @@ function appearanceView() {
 function workflowView() {
   const disabled = !state.groups.preferences.editable;
   const account = state.groups.account;
-  return [groupCard('preferences', 'Pane workflow', 'Workflow and appearance share a save. A worktree inherits any choices it does not override.', [
-    setting('workflow.project_mode', 'Project tracking', 'Follow the shell that opened the Milo panes, or keep the starting project.', 'select',
+  return [groupCard('preferences', 'Pane workflow', '', [
+    setting('workflow.project_mode', 'Project tracking', '', 'select',
       {disabled, choices: [['follow', 'Follow shell'], ['pin', 'Pin project']]}),
-    setting('workflow.follow_activity', 'Follow file edits', 'Reveal active files without saving the temporary reveals.', 'switch', {disabled}),
-    setting('workflow.changes_only', 'Outline starts with', 'Set the initial view. You can switch views later from Outline.', 'select',
+    setting('workflow.follow_activity', 'Follow file edits', 'Temporarily reveal active files.', 'switch', {disabled}),
+    setting('workflow.changes_only', 'Outline starts with', '', 'select',
       {disabled, choices: [['false', 'All files'], ['true', 'Changes only']]}),
-    setting('workflow.history_follow_new', 'Follow new commits', 'Keep History at the newest commit while you’re at the top.', 'switch', {disabled}),
-  ]), groupCard('account', 'Claude Code', 'Milo changes the Claude Code status line only if it is unused or already managed by Milo.', [
+    setting('workflow.history_follow_new', 'Follow new commits', 'Only while History is at the top.', 'switch', {disabled}),
+  ]), groupCard('account', 'Claude Code', '', [
     setting('account.claude_limits', 'Show Claude Code limits', state.account.claude_status, 'switch', {disabled: !account.editable}),
   ])];
 }
