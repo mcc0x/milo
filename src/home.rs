@@ -18,14 +18,17 @@ use mascot::Sprite;
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BRAND_WIDTH: usize = "Milo  ".len() + VERSION.len();
 const MENU: &[&str] = &["Open Web Menu", "Settings", "Doctor", "Uninstall Milo"];
-const MENU_WIDTH: usize = "Uninstall Menu App".len() + 2;
+const MENU_WIDTH: usize = "Install Menu App".len() + 2;
 const APP_ROW: usize = 3;
-const INSTALL_MENU: &[&str] = &menu_with_app("Install Menu App");
-const REMOVE_MENU: &[&str] = &menu_with_app("Uninstall Menu App");
-const COMPACT_REMOVE_MENU: &[&str] = &menu_with_app("Remove Menu App");
+const REMOVE_APP_ROW: usize = APP_ROW + 1;
+const OPEN_APP: &str = "Open or Update Menu App";
+const INSTALLED_MENU_WIDTH: usize = OPEN_APP.len() + 2;
+const INSTALL_MENU: &[&str] = &[MENU[0], MENU[1], MENU[2], "Install Menu App", MENU[APP_ROW]];
+const INSTALLED_MENU: &[&str] = &menu_with_installed_app(OPEN_APP);
+const COMPACT_INSTALLED_MENU: &[&str] = &menu_with_installed_app("Open/Update App");
 
-const fn menu_with_app(label: &str) -> [&str; 5] {
-    [MENU[0], MENU[1], MENU[2], label, MENU[APP_ROW]]
+const fn menu_with_installed_app(label: &str) -> [&str; 6] {
+    [MENU[0], MENU[1], MENU[2], label, "Remove Menu App", MENU[APP_ROW]]
 }
 
 /// Draws the largest prepared sprite that fits, centered within the supplied rectangle.
@@ -90,8 +93,8 @@ impl Home {
         match self.menu_app {
             None => MENU,
             Some(false) => INSTALL_MENU,
-            Some(true) if width < MENU_WIDTH => COMPACT_REMOVE_MENU,
-            Some(true) => REMOVE_MENU,
+            Some(true) if width < INSTALLED_MENU_WIDTH => COMPACT_INSTALLED_MENU,
+            Some(true) => INSTALLED_MENU,
         }
     }
 
@@ -99,12 +102,10 @@ impl Home {
         if status == self.menu_app {
             return false;
         }
-        match (self.menu_app, status) {
-            (None, Some(_)) if self.selected == APP_ROW => self.selected += 1,
-            (Some(_), None) if self.selected >= APP_ROW => self.selected -= 1,
-            _ => {}
-        }
+        let previous_last = self.labels(self.picker.width).len() - 1;
         self.menu_app = status;
+        let last = self.labels(self.picker.width).len() - 1;
+        self.selected = if self.selected == previous_last { last } else { self.selected.min(last - 1) };
         true
     }
 
@@ -164,7 +165,7 @@ impl Home {
     fn draw_menu(&mut self, s: &mut Screen, body: usize) {
         const GAP: usize = 5;
         let labels = self.labels(s.w);
-        let menu_width = MENU_WIDTH;
+        let menu_width = if self.menu_app == Some(true) { INSTALLED_MENU_WIDTH } else { MENU_WIDTH };
         let width = s.w.saturating_sub(menu_width + GAP + 2);
         if let Some(art) = Sprite::fit(width, body.saturating_sub(2)).filter(|_| width >= BRAND_WIDTH) {
             let brand_width = art.width().max(BRAND_WIDTH);
@@ -327,11 +328,11 @@ impl Pane for Home {
                     let result = self.diagnostics.start(doctor::report).map(|()| String::new());
                     self.show_guarded(View::Report(Report::new(doctor::TITLE, result)), click)
                 }
-                APP_ROW if self.menu_app == Some(false) => self.show_guarded(
-                    View::Report(Report::new("Install menu app", menubar::run(MenuAppAction::Install))),
-                    click,
-                ),
-                APP_ROW if self.menu_app == Some(true) => self.confirm_removal(Removal::MenuApp, click),
+                APP_ROW if self.menu_app.is_some() => {
+                    let title = if self.menu_app == Some(true) { OPEN_APP } else { "Install Menu App" };
+                    self.show_guarded(View::Report(Report::new(title, menubar::run(MenuAppAction::Install))), click)
+                }
+                REMOVE_APP_ROW if self.menu_app == Some(true) => self.confirm_removal(Removal::MenuApp, click),
                 index if index == self.labels(self.picker.width).len() - 1 => {
                     self.confirm_removal(Removal::Milo, click)
                 }
@@ -683,19 +684,29 @@ mod tests {
         assert!(!screen.text().iter().any(|line| line.contains("Menu App")));
         assert_eq!(home.key(Key::End), After::Stay);
 
-        for (status, label) in [(false, "Install Menu App"), (true, "Uninstall Menu App")] {
+        let choices: &[(bool, &[&str])] = &[(false, &["Install Menu App"]), (true, &[OPEN_APP, "Remove Menu App"])];
+        for &(status, labels) in choices {
             assert!(home.update_menu_app(Some(status)));
             home.draw(&mut screen);
             assert!(screen.text().iter().any(|line| line.contains("› Uninstall Milo")));
-            assert_eq!(screen.text().iter().filter(|line| line.contains("Menu App")).count(), 1);
-            let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
-            assert_eq!(home.hover_span(x, y), Some(x..x + label.len()));
+            assert_eq!(screen.text().iter().filter(|line| line.contains("Menu App")).count(), labels.len());
+            for &label in labels {
+                let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
+                assert_eq!(home.hover_span(x, y), Some(x..x + label.len()));
+            }
         }
-
         assert!(home.update_menu_app(None));
         home.draw(&mut screen);
         assert!(screen.text().iter().any(|line| line.contains("› Uninstall")));
         assert!(!screen.text().iter().any(|line| line.contains("Menu App")));
+
+        assert!(home.update_menu_app(Some(true)));
+        home.selected = REMOVE_APP_ROW;
+        // Losing a menu app entry must not move focus to the full CLI uninstall.
+        assert!(home.update_menu_app(Some(false)));
+        assert_eq!(home.selected, APP_ROW);
+        assert!(home.update_menu_app(None));
+        assert_eq!(home.selected, APP_ROW - 1);
     }
 
     #[test]
@@ -708,6 +719,13 @@ mod tests {
         assert_eq!(home.key(Key::Up), After::Stay);
         home.draw(&mut tiny);
         assert_eq!(tiny.text(), ["Remove Me"]);
+        assert_eq!(home.key(Key::Up), After::Stay);
+        home.draw(&mut tiny);
+        assert_eq!(tiny.text(), ["Open/Upda"]);
+        assert_eq!(home.click(1, 0), Some(Key::Enter));
+        assert_eq!(home.selected, APP_ROW);
+        assert_eq!(home.key(Key::Down), After::Stay);
+        home.draw(&mut tiny);
 
         // Click inside both the menu item and the Cancel button drawn in its place.
         let open = Key::Click(1, 0);

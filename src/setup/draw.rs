@@ -760,12 +760,17 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     "Install and open the separate macOS menu bar app.",
                 ),
                 Some(true) => Cell::action(
-                    "Remove Milo menu bar app…",
-                    "Remove app…",
-                    "Remove only the menu bar app, not the Milo CLI or pane settings.",
+                    "Open or update Milo menu bar app",
+                    "Open/update app",
+                    "Open the menu bar app, updating it if the bundled copy differs.",
                 ),
                 None => unreachable!("the menu bar action is hidden when unavailable"),
             },
+            Row::RemoveMenuBar => Cell::action(
+                "Remove Milo menu bar app…",
+                "Remove app…",
+                "Remove only the menu bar app, not the Milo CLI or pane settings.",
+            ),
             Row::SaveClaude => Cell::action(
                 "Save Claude Code choices",
                 "Save Claude",
@@ -837,7 +842,7 @@ impl Panel {
             Self::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global default?",
             Self::Confirm(Confirm::Repair) => "Repair integration?",
             Self::Confirm(Confirm::Remove) => "Remove integration?",
-            Self::Confirm(Confirm::RemoveMenuBar) => "Remove Milo?",
+            Self::Confirm(Confirm::RemoveMenuBar) => "Remove menu app?",
             Self::Exit => "Unsaved changes",
         }
     }

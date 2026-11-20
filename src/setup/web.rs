@@ -291,6 +291,7 @@ impl Editor {
                 None
             }
             Action::Menubar(action) if menubar::installed().is_some() => {
+                // Install also opens an existing app, replacing it only when the bundled copy differs.
                 return menubar::run(action).map(|text| Some(Ok(Cow::Owned(text))));
             }
             _ => return Err(UNAVAILABLE.into()),
@@ -758,12 +759,14 @@ mod tests {
         let status = field(field(state, "menubar"), "installed");
         match menubar::installed() {
             Some(installed) => assert_eq!(status.boolean(), Some(installed)),
-            None => {
-                assert!(status.null());
-                for operation in ["install", "uninstall"] {
-                    let request = format!(r#""action":"menubar","value":"{operation}""#);
-                    assert_eq!(action(&mut editor, &request).unwrap_err(), UNAVAILABLE);
-                }
+            None => assert!(status.null()),
+        }
+        for (operation, expected) in [("install", menubar::Action::Install), ("uninstall", menubar::Action::Uninstall)] {
+            let request = format!(r#""action":"menubar","value":"{operation}""#);
+            let body = format!(r#"{{"version":{},{request}}}"#, editor.version);
+            assert!(matches!(Action::parse(body.as_bytes()), Some((_, Action::Menubar(parsed))) if parsed == expected));
+            if status.null() {
+                assert_eq!(action(&mut editor, &request).unwrap_err(), UNAVAILABLE);
             }
         }
         for request in [

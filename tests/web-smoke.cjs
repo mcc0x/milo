@@ -1,10 +1,9 @@
 // Run with Node 20+, playwright-core, and either its installed Chromium or CHROME_BIN.
 // Usage: node tests/web-smoke.cjs path/to/packaged/milo
-// Add --menubar with a menu-capable binary in a macOS GUI session to exercise the installer.
 const assert = require('node:assert/strict');
 const {execFileSync, spawn} = require('node:child_process');
 const {once} = require('node:events');
-const {mkdir, mkdtemp, readFile, rm, stat} = require('node:fs/promises');
+const {mkdir, mkdtemp, readFile, rm} = require('node:fs/promises');
 const {tmpdir} = require('node:os');
 const {join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
@@ -105,58 +104,95 @@ async function chooseUsageTools(page, binary, cwd, env) {
   console.log('Usage tools: three choices saved globally and read back by doctor');
 }
 
-async function manageMenuApp(page, url, binary, cwd, env) {
+async function manageMenuApp(page, url, env) {
   await section(page, 'Workflow').click();
   const menu = page.getByRole('region', {name: 'Menu bar app', exact: true});
-  const response = await page.request.get(new URL('/api/state', url).href, {
-    headers: {Authorization: `Bearer ${new URL(url).hash.slice(1)}`},
-  });
-  assert(response.ok(), 'the editor reports menu app availability');
-  const {menubar} = await response.json();
+  const readState = async () => {
+    const response = await page.request.get(new URL('/api/state', url).href, {
+      headers: {Authorization: `Bearer ${new URL(url).hash.slice(1)}`},
+    });
+    assert(response.ok(), 'the editor reports menu app availability');
+    return response.json();
+  };
+  const {menubar} = await readState();
   const menuTab = section(page, 'Menu Bar');
   assert.equal(await menu.count(), 0, 'Workflow does not contain menu app settings');
   assert.equal(await menuTab.isVisible(), menubar.installed !== null, 'Menu Bar navigation follows server availability');
-  if (process.argv.includes('--menubar')) {
-    assert.equal(menubar.installed, false, 'the menu-capable binary starts without an app in the fixture home');
-    const bundle = join(env.HOME, 'Applications', 'Milo.app');
-    const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
-    const previous = await readFile(preferences, 'utf8');
-    const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
+  const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
+  const previous = await readFile(preferences, 'utf8');
+
+  const actions = [];
+  let draft;
+  let gate;
+  const intercept = async route => {
+    const action = route.request().postDataJSON();
+    if (action.field === 'workflow.project_mode') {
+      const response = await route.fetch();
+      assert(response.ok(), 'the real editor kept the preference draft');
+      draft = await response.json();
+      return route.fulfill({response, json: {...draft, menubar: {installed: false}}});
+    }
+    if (action.action !== 'menubar') return route.fallback();
+    actions.push(action);
+    await gate;
+    await route.fulfill({json: {...draft, menubar: {installed: action.value === 'install'}}});
+  };
+  // Hold menu app replies so the dashboard is exercised without opening apps
+  // or touching the logged-in user's services, even with a packaged installer.
+  await page.route('**/api/action', intercept);
+  const install = button(menu, 'Install menu app');
+  const update = button(menu, 'Open or update menu app');
+  const remove = button(menu, 'Remove menu app…');
+  const confirmation = dialog(page, 'Remove menu app?');
+  const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
+  const perform = async (activate, pending, active, next) => {
+    let complete;
+    gate = new Promise(resolve => { complete = resolve; });
+    try {
+      await activate();
+      await status(menu, pending).waitFor();
+      assert(await active.isDisabled(), 'menu actions cannot repeat while pending');
+      assert(await active.evaluate(el => el === document.activeElement), 'pending control keeps focus');
+      await active.press('Enter');
+      await status(page, dirty).waitFor({state: 'attached'});
+    } finally {
+      complete();
+    }
+    await next.and(page.locator(':not([aria-disabled])')).waitFor();
+    assert(await next.evaluate(el => el === document.activeElement), 'completed action restores focus');
+  };
+
+  try {
     await pin.click();
     await status(page, dirty).waitFor({state: 'attached'});
     await menuTab.click();
+    assert.equal(await remove.count(), 0, 'nothing to remove before installation');
+    await perform(() => install.click(), 'Installing menu app…', install, update);
+    await remove.waitFor();
+    await perform(() => update.click(), 'Opening or updating menu app…', update, update);
+    assert.equal(await confirmation.count(), 0, 'opening the installed app does not ask for removal');
+    await perform(() => update.click(), 'Opening or updating menu app…', update, update);
 
-    try {
-      await button(menu, 'Install menu app').click();
-      const remove = button(menu, 'Remove menu app…');
-      await remove.waitFor();
-      assert((await stat(bundle)).isDirectory(), 'the button installed the app');
-      await status(page, dirty).waitFor({state: 'attached'});
+    await remove.click();
+    await button(confirmation, 'Keep editing').click();
+    await confirmation.waitFor({state: 'hidden'});
+    assert(await update.isVisible(), 'cancel left the app installed');
 
-      const confirmation = dialog(page, 'Remove menu app?');
-      await remove.click();
-      await button(confirmation, 'Keep editing').click();
-      await confirmation.waitFor({state: 'hidden'});
-      assert((await stat(bundle)).isDirectory(), 'cancel left the app installed');
-
-      await remove.click();
-      await button(confirmation, 'Remove menu app').click();
-      await button(menu, 'Install menu app').waitFor();
-      await assert.rejects(stat(bundle), {code: 'ENOENT'}, 'confirm removed the app');
-      await status(page, dirty).waitFor({state: 'attached'});
-      await section(page, 'Workflow').click();
-      assert(await pin.isChecked(), 'removal retained the draft');
-      assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app changes did not save the draft');
-    } finally {
-      if (await stat(bundle).then(() => true, e => { if (e.code !== 'ENOENT') throw e; return false; })) {
-        execFileSync(binary, ['menubar', 'uninstall'], {cwd, env});
-      }
-    }
-    await button(page, 'Discard').click();
-    await button(dialog(page, 'Discard all unsaved changes?'), 'Discard changes').click();
-    await status(page, clean).waitFor({state: 'attached'});
-    console.log('Menu app: installed, kept on cancel, and removed without saving or losing the draft');
+    await remove.click();
+    await perform(() => button(confirmation, 'Remove menu app').click(), 'Removing menu app…', remove, install);
+    assert.equal(await remove.count(), 0, 'confirmed removal hides Remove');
+    assert.deepEqual(actions, ['install', 'install', 'install', 'uninstall'].map(value =>
+      ({action: 'menubar', value, version: draft.version})));
+  } finally {
+    await page.unroute('**/api/action', intercept);
   }
+  await section(page, 'Workflow').click();
+  assert(await pin.isChecked(), 'menu app operations retained the draft');
+  assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app operations did not save the draft');
+  await button(page, 'Discard').click();
+  await button(dialog(page, 'Discard all unsaved changes?'), 'Discard changes').click();
+  await status(page, clean).waitFor({state: 'attached'});
+  console.log('Menu app: installed, opened or updated twice, kept on cancel, and removed; draft preserved');
   await section(page, 'Layout').click();
 }
 
@@ -325,7 +361,7 @@ async function main() {
       assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
       await saveNumbers(page);
       await chooseUsageTools(page, binary, cwd, env);
-      await manageMenuApp(page, url, binary, cwd, env);
+      await manageMenuApp(page, url, env);
       await movePaneDuringPendingEdit(page);
       await discardFocusedNumber(page);
       await pressAfterNumberEdit(page);

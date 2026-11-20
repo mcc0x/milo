@@ -120,6 +120,7 @@ enum Row {
     TabTitles,
     ClaudeLimits,
     MenuBar,
+    RemoveMenuBar,
     SaveClaude,
     SavePrefs,
     UseGlobalPrefs,
@@ -161,6 +162,7 @@ const WORKFLOW: &[Row] = &[
     Row::ClaudeLimits,
     Row::SaveClaude,
     Row::MenuBar,
+    Row::RemoveMenuBar,
 ];
 
 /// The draft is never written when navigating, capturing or trying a layout.
@@ -335,8 +337,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Row::SavePrefs,
                 Row::UseGlobalPrefs,
             ],
-            Panel::Workflow if self.menu_installed.is_some() => WORKFLOW,
-            Panel::Workflow => &WORKFLOW[..WORKFLOW.len() - 1],
+            Panel::Workflow => match self.menu_installed {
+                Some(true) => WORKFLOW,
+                Some(false) => &WORKFLOW[..WORKFLOW.len() - 1],
+                None => &WORKFLOW[..WORKFLOW.len() - 2],
+            },
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
             Panel::Diagnostics => &[],
             Panel::Save(kind)
@@ -387,7 +392,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::UseGlobalPrefs(kind)) => (kind.panel(), Some(Row::UseGlobalPrefs)),
             Panel::Confirm(Confirm::Repair) => (Panel::Health, Some(Row::Repair)),
             Panel::Confirm(Confirm::Remove) => (Panel::Health, Some(Row::Remove)),
-            Panel::Confirm(Confirm::RemoveMenuBar) => (Panel::Workflow, Some(Row::MenuBar)),
+            Panel::Confirm(Confirm::RemoveMenuBar) => (Panel::Workflow, Some(Row::RemoveMenuBar)),
             Panel::Diagnostics => (Panel::Health, Some(Row::Diagnostics)),
             _ => (Panel::Layout, None),
         };
@@ -708,7 +713,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let install = action == MenuAction::Install;
         let result = menubar::run(action);
         self.menu_installed = menubar::installed();
-        self.select_panel(Panel::Workflow, Some(Row::MenuBar));
+        let row = if !install && self.menu_installed == Some(true) { Row::RemoveMenuBar } else { Row::MenuBar };
+        self.select_panel(Panel::Workflow, Some(row));
         self.report_text(
             result
                 .map(|message| {
@@ -828,14 +834,15 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Capture => self.capture(),
             Row::Undo => self.undo(),
             Row::SaveClaude => self.save_claude(),
-            Row::MenuBar => {
-                match self.menu_installed {
-                    Some(false) => self.change_menu_app(MenuAction::Install),
-                    Some(true) => self.select_panel(Panel::Confirm(Confirm::RemoveMenuBar), None),
-                    None => return After::Ignored,
-                }
+            Row::MenuBar if self.menu_installed.is_some() => {
+                self.change_menu_app(MenuAction::Install);
                 return After::Stay;
             }
+            Row::RemoveMenuBar if self.menu_installed == Some(true) => {
+                self.select_panel(Panel::Confirm(Confirm::RemoveMenuBar), None);
+                return After::Stay;
+            }
+            Row::MenuBar | Row::RemoveMenuBar => return After::Ignored,
             Row::SaveAndExit => return self.save_and_exit(),
             Row::Discard => return self.leave(),
             Row::SaveGlobal | Row::SaveWorktree => {

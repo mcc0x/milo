@@ -839,20 +839,23 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
 }
 
 #[test]
-fn workflow_shows_only_the_available_menu_bar_app_action() {
+fn workflow_shows_install_or_separate_open_and_remove_actions() {
     let mut pane = Setup::new(None, false, None, None, |_| panic!("drawing does not call Rex"));
     let rows = frame(&mut pane, 80, 20);
     assert!(!rows.iter().any(|row| row.contains("menu bar app")));
-    for (installed, label, short) in [
-        (false, "Install Milo menu bar app", "Install app"),
-        (true, "Remove Milo menu bar app…", "Remove app…"),
+    for (installed, action, label, short) in [
+        (false, Row::MenuBar, "Install Milo menu bar app", "Install app"),
+        (true, Row::MenuBar, "Open or update Milo menu bar app", "Open/update app"),
+        (true, Row::RemoveMenuBar, "Remove Milo menu bar app…", "Remove app…"),
     ] {
         pane.menu_installed = Some(installed);
-        pane.select_panel(Panel::Workflow, Some(Row::MenuBar));
+        pane.select_panel(Panel::Workflow, Some(action));
         let rows = frame(&mut pane, 80, 20);
-        assert_eq!(rows.iter().filter(|row| row.contains("Milo menu bar app")).count(), 1);
+        assert_eq!(rows.iter().any(|row| row.contains("Install Milo menu bar app")), !installed);
+        assert_eq!(rows.iter().any(|row| row.contains("Open or update Milo menu bar app")), installed);
+        assert_eq!(rows.iter().any(|row| row.contains("Remove Milo menu bar app…")), installed);
         assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(label)));
-        let rows = frame(&mut pane, 18, 8);
+        let rows = frame(&mut pane, 18, 1);
         let row = rows.iter().find(|row| row.starts_with('›')).unwrap();
         assert_eq!(row.trim_start_matches('›').trim_end_matches('▐').trim(), short);
     }
@@ -886,6 +889,14 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert!(!pane.rows().contains(&Row::MenuBar), "refresh hides an unmanageable app");
 
     pane.menu_installed = Some(true);
+    pane.select_panel(Panel::Workflow, Some(Row::MenuBar));
+    let rows = frame(&mut pane, 18, 1);
+    assert_eq!(pane.key(click_label(&rows, "Open/update app")), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow, "opening or updating never prompts for removal");
+    assert!(pane.message.as_ref().is_some_and(|(_, style)| *style == DEL.bold()));
+    assert!(!pane.rows().contains(&Row::MenuBar), "opening uses the same verified installer");
+
+    pane.menu_installed = Some(true);
 
     let rows = frame(&mut pane, 80, 20);
     let remove = click_label(&rows, "Remove Milo menu bar app…");
@@ -897,7 +908,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert!(rows.iter().any(|row| row.contains("The Milo CLI and pane settings stay")));
     assert_eq!(pane.key(Key::Enter), After::Stay);
     assert_eq!(pane.panel, Panel::Workflow);
-    assert!(pane.selected_row() == Some(Row::MenuBar));
+    assert!(pane.selected_row() == Some(Row::RemoveMenuBar));
     assert!(pane.message.is_none());
 
     assert_eq!(pane.key(Key::Enter), After::Stay);
@@ -907,6 +918,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert!(message.starts_with("Milo:"), "{message}");
     assert!(*style == DEL.bold());
     assert!(!pane.rows().contains(&Row::MenuBar));
+    assert!(!pane.rows().contains(&Row::RemoveMenuBar));
     assert_eq!(fs::read_to_string(&app).unwrap(), "Not a Milo app");
     assert!(pane.layout == layout && pane.prefs == prefs && pane.show_limits == show_limits);
     assert!(pane.layout_dirty() && pane.prefs_dirty() && pane.claude_dirty());
