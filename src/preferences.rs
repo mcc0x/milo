@@ -106,6 +106,55 @@ impl Default for Preferences {
     }
 }
 
+/// Keep the layers observed by an editor so stale tabs cannot overwrite settings.
+pub(crate) struct PreferenceSnapshot {
+    global: Option<String>,
+    local: Option<String>,
+    pub prefs: Preferences,
+    pub source: Source,
+}
+
+impl PreferenceSnapshot {
+    pub(crate) fn load(dir: &Path, root: Option<&Path>) -> io::Result<Self> {
+        let (global, local) = Self::read_layers(dir, root)?;
+        let mut prefs = Preferences::default();
+        let mut source = Source::Default;
+        for (layer, origin) in [(&global, Source::Global), (&local, Source::Worktree)] {
+            if let Some(text) = layer {
+                prefs.apply(text)?;
+                source = origin;
+            }
+        }
+        Ok(Self { global, local, prefs, source })
+    }
+
+    fn read_layers(dir: &Path, root: Option<&Path>) -> io::Result<(Option<String>, Option<String>)> {
+        let global = read(&config_file(dir, None), PREFERENCES_LIMIT)?;
+        let local = root.map(|root| read(&config_file(dir, Some(root)), PREFERENCES_LIMIT)).transpose()?.flatten();
+        Ok((global, local))
+    }
+
+    fn check(&self, dir: &Path, root: Option<&Path>) -> io::Result<()> {
+        let (global, local) = Self::read_layers(dir, root)?;
+        if self.global == global && self.local == local { Ok(()) } else { Err(io::ErrorKind::Interrupted.into()) }
+    }
+
+    pub(crate) fn save(&self, prefs: Preferences, dir: &Path, root: Option<&Path>, local: bool) -> io::Result<()> {
+        let destination = if local { Some(root.ok_or(io::ErrorKind::InvalidInput)?) } else { None };
+        let path = config_file(dir, destination);
+        // For a worktree, lock its inherited global layer before locking the
+        // destination. Global and keyboard writes use the same directory locks.
+        let save = || prefs.save_in(self.prefs, &path, || self.check(dir, root));
+        if local { locked(&config_file(dir, None), |_| save()) } else { save() }
+    }
+
+    pub(crate) fn inherit(&self, dir: &Path, root: &Path) -> io::Result<()> {
+        let global = config_file(dir, None);
+        let worktree = config_file(dir, Some(root));
+        locked(&global, |_| remove_layer(&worktree, || self.check(dir, Some(root))))
+    }
+}
+
 impl Preferences {
     /// Panes can use the last valid layer, but setup and Doctor must resolve strictly.
     pub fn for_pane(worktree: Option<&Path>) -> (Self, Option<&'static str>) {
@@ -131,7 +180,7 @@ impl Preferences {
         Self::resolve_in(&dir, worktree)
     }
 
-    fn resolve_in(dir: &Path, worktree: Option<&Path>) -> io::Result<(Self, Source)> {
+    pub(crate) fn resolve_in(dir: &Path, worktree: Option<&Path>) -> io::Result<(Self, Source)> {
         let mut prefs = Self::default();
         let mut source = Source::Default;
         for (root, layer) in [(None, Source::Global), (worktree, Source::Worktree)] {
@@ -187,9 +236,13 @@ impl Preferences {
     /// Apply only the edits made since the editor loaded its resolved preferences.
     pub fn save_changes(&self, before: Self, worktree: Option<&Path>) -> io::Result<()> {
         let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
+        self.save_in(before, &config_file(&dir, worktree), || Ok(()))
+    }
+
+    fn save_in(&self, before: Self, path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
         let boolean = |old, new| (old != new).then(|| bool_value(new));
-        update(
-            &config_file(&dir, worktree),
+        update_guarded(
+            path,
             &[
                 ("icons", (before.icons != self.icons).then(|| self.icons.value())),
                 ("static_marks", boolean(before.static_marks, self.static_marks)),
@@ -206,6 +259,7 @@ impl Preferences {
                 ("history_follow_new", boolean(before.history_follow_new, self.history_follow_new)),
                 ("usage_large_figures", boolean(before.usage_large_figures, self.usage_large_figures)),
             ],
+            check,
         )
     }
 
@@ -216,14 +270,7 @@ impl Preferences {
 
     pub fn clear(worktree: &Path) -> io::Result<()> {
         let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
-        let file = config_file(&dir, Some(worktree));
-        if !file.parent().is_some_and(Path::exists) {
-            return Ok(());
-        }
-        locked(&file, |_| match fs::remove_file(&file) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
-        })
+        remove_layer(&config_file(&dir, Some(worktree)), || Ok(()))
     }
 
     /// The keyboard toggle overrides just this setting, leaving inherited choices inherited.
@@ -242,11 +289,20 @@ fn bool_value(value: bool) -> &'static str {
 }
 
 fn update(path: &Path, edits: &[(&str, Option<&str>)]) -> io::Result<()> {
+    update_guarded(path, edits, || Ok(()))
+}
+
+fn update_guarded(
+    path: &Path,
+    edits: &[(&str, Option<&str>)],
+    check: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let extra = edits.iter().filter_map(|(key, value)| value.map(|value| key.len() + value.len() + 4)).sum::<usize>();
     if extra == 0 {
         return Ok(());
     }
     locked(path, |dir| {
+        check()?;
         let old = read(path, PREFERENCES_LIMIT)?.unwrap_or_default();
         // Validate the destination without filling in its missing (inherited) settings.
         Preferences::default().apply(&old)?;
@@ -272,6 +328,19 @@ fn update(path: &Path, edits: &[(&str, Option<&str>)]) -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "preferences file would exceed its size limit"));
         }
         replace(dir, path, &text)
+    })
+}
+
+fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    if !path.parent().is_some_and(Path::exists) {
+        return check();
+    }
+    locked(path, |_| {
+        check()?;
+        match fs::remove_file(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
     })
 }
 

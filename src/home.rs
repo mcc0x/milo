@@ -16,8 +16,8 @@ use mascot::Sprite;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BRAND_WIDTH: usize = "Milo  ".len() + VERSION.len();
-const MENU: &[&str] = &["Settings", "Doctor", "Uninstall"];
-const MENU_WIDTH: usize = 11;
+const MENU: &[&str] = &["Settings", "Doctor", "Open in browser", "Uninstall"];
+const MENU_WIDTH: usize = "Open in browser".len() + 2;
 const CONFIRM: &[&str] = &["Cancel", "Uninstall Milo"];
 const CONFIRM_NOTE: &str =
     "Removes Milo and its managed Rex and Claude Code integrations. Saved preferences and open panes will stay.";
@@ -112,7 +112,7 @@ impl Home {
             art.draw(s, x + (brand_width - art.width()) / 2, y);
             brand(s, x, y + art.height() + 1, brand_width);
 
-            let rows = 2 * MENU.len() - 1;
+            let rows = (2 * MENU.len() - 1).min(body);
             let pos = (x + brand_width + GAP, (body - rows) / 2);
             self.picker = Picker::draw(s, pos, MENU_WIDTH, rows, MENU, self.selected);
         } else {
@@ -257,7 +257,8 @@ impl Pane for Home {
                     let result = self.diagnostics.start(doctor::report).map(|()| String::new());
                     self.show(View::Report(Report::new(doctor::TITLE, result)))
                 }
-                2 => self.show_guarded(View::Confirm { selected: 0 }, click),
+                2 => After::OpenWeb,
+                3 => self.show_guarded(View::Confirm { selected: 0 }, click),
                 _ => unreachable!("selection stays within the menu"),
             },
             View::Menu => move_selection(&mut self.selected, MENU.len(), key),
@@ -482,7 +483,7 @@ mod tests {
         let mut home = Home::new();
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
-        for label in ["Settings", "Doctor", "Uninstall", "Enter open", "q quit"] {
+        for label in ["Settings", "Doctor", "Open in browser", "Uninstall", "Enter open", "q quit"] {
             let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
             let end = x + label.len();
             assert_eq!(home.hover_span(x, y), Some(x..end));
@@ -498,6 +499,8 @@ mod tests {
         }
         assert_eq!(home.selected, 0);
         let mut rail = Screen::sized(28, 12);
+        assert_eq!(home.key(click_on(&screen, "Open in browser")), After::OpenWeb);
+        home.key(Key::Home);
         home.draw(&mut rail);
         assert_eq!(rail.text()[11], " Enter open · q quit");
         let Key::Click(x, y) = click_on(&rail, "Enter open") else { unreachable!() };

@@ -23,6 +23,7 @@ pub enum After {
     Stay,
     Help,
     Leave,
+    OpenWeb,
 }
 
 /// A pane can observe an external source independently of the project file watcher.
@@ -481,6 +482,11 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                     match route_key(pane.as_mut(), &mut screen, &mut help, key) {
                         After::Ignored => {}
                         After::Stay => redraw = true,
+                        After::OpenWeb => {
+                            drop(pane);
+                            terminal.restore();
+                            return crate::web::run(true);
+                        }
                         After::Help => {
                             if Page::fits(&screen) {
                                 help = Some(pane.help());

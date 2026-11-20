@@ -23,6 +23,11 @@ pub(super) enum Scope {
     Worktree,
 }
 
+pub(super) struct DraftBaseline<'a> {
+    pub destination: (&'a Layout, Scope),
+    pub worktree: Option<&'a Layout>,
+}
+
 #[derive(Debug)]
 pub(super) enum LayoutError {
     Rex(&'static str),
@@ -103,6 +108,36 @@ fn selected(config: &Path, root: Option<&Path>) -> Result<Option<(Layout, Scope)
     select(None, Scope::Global)
 }
 
+fn check_draft(
+    config: &Path,
+    scope: Scope,
+    profile: Option<&(Layout, Image)>,
+    legacy: &Layout,
+    root: Option<&Path>,
+    expected: DraftBaseline<'_>,
+) -> Result<(), &'static str> {
+    let (before, before_scope) = expected.destination;
+    if let Some(observed) = expected.worktree {
+        let local = Location::new(config, Some(root.ok_or(NO_WORKTREE)?))?.load()?;
+        if !local.as_ref().is_some_and(|(current, _)| super::same_geometry(current, observed)) {
+            return Err(PROFILE_CHANGED);
+        }
+    }
+    let inherited;
+    let (current, current_scope) = if let Some((current, _)) = profile {
+        (current, scope)
+    } else if scope == Scope::Worktree {
+        inherited = Location::new(config, None)?.load()?;
+        (inherited.as_ref().map_or(legacy, |(layout, _)| layout), Scope::Global)
+    } else {
+        (legacy, Scope::Global)
+    };
+    if current_scope != before_scope || legacy.new_tabs != before.new_tabs || !super::same_geometry(current, before) {
+        return Err(PROFILE_CHANGED);
+    }
+    Ok(())
+}
+
 fn worktree(cwd: &Path) -> Option<PathBuf> {
     if !cwd.is_absolute() {
         return None;
@@ -137,7 +172,7 @@ impl Store {
     pub(super) fn save_draft(
         &self,
         layout: &Layout,
-        expected: (&Layout, Scope),
+        expected: DraftBaseline<'_>,
         scope: Scope,
         root: Option<&Path>,
         run: &RunRex<'_>,
@@ -152,7 +187,7 @@ impl Store {
         root: Option<&Path>,
         claude: Option<bool>,
         run: &RunRex<'_>,
-        expected: Option<(&Layout, Scope)>,
+        expected: Option<DraftBaseline<'_>>,
     ) -> Result<Saved, &'static str> {
         let location = Location::new(&self.config, root_for(scope, root)?)?;
         let _profiles = location.lock()?;
@@ -176,24 +211,9 @@ impl Store {
                 );
             }
             let profile = location.load()?;
-            if let Some((before, before_scope)) = expected {
+            if let Some(expected) = expected {
                 let (mut legacy, _) = self.layout()?;
-                let global = if scope == Scope::Worktree && profile.is_none() {
-                    Location::new(&self.config, None)?.load()?
-                } else {
-                    None
-                };
-                let (current, current_scope) = match (&profile, &global) {
-                    (Some((current, _)), _) => (current, scope),
-                    (None, Some((current, _))) => (current, Scope::Global),
-                    (None, None) => (&legacy, Scope::Global),
-                };
-                if current_scope != before_scope
-                    || legacy.new_tabs != before.new_tabs
-                    || !super::same_geometry(current, before)
-                {
-                    return Err(PROFILE_CHANGED);
-                }
+                check_draft(&self.config, scope, profile.as_ref(), &legacy, root, expected)?;
                 // The state lock is acquired inside save_with; don't publish a
                 // fallback that changed between planning and taking that lock.
                 prepare_fallback(&mut legacy);
@@ -206,27 +226,78 @@ impl Store {
         })
     }
 
+    pub(super) fn save_offline_draft(
+        &self,
+        layout: &Layout,
+        expected: DraftBaseline<'_>,
+        scope: Scope,
+        root: Option<&Path>,
+    ) -> Result<Saved, &'static str> {
+        let location = Location::new(&self.config, root_for(scope, root)?)?;
+        let _profiles = location.lock()?;
+        let (legacy, _) = self.layout()?;
+        let profile = location.load()?;
+        check_draft(&self.config, scope, profile.as_ref(), &legacy, root, expected)?;
+        if layout.new_tabs != legacy.new_tabs {
+            return Err(PROFILE_CHANGED);
+        }
+        let before = profile.map(|(_, image)| image);
+        files::install(location.change(before, Some(layout)).as_slice(), || true)?;
+        Ok(Saved::Ready)
+    }
+
+    pub(super) fn inherit_draft(&self, root: &Path, expected: &Layout) -> Result<(), &'static str> {
+        let location = Location::new(&self.config, Some(root))?;
+        let _profiles = location.lock()?;
+        let (legacy, _) = self.layout()?;
+        let (mut current, previous) = location.load()?.ok_or(PROFILE_CHANGED)?;
+        current.new_tabs = legacy.new_tabs;
+        if &current != expected {
+            return Err(PROFILE_CHANGED);
+        }
+        // Don't delete a usable override only to expose a broken global layer.
+        Location::new(&self.config, None)?.load()?;
+        files::install(location.change(Some(previous), None).as_slice(), || true)
+    }
+
     pub fn use_global(&self, root: &Path) -> Result<(), &'static str> {
         update(&self.config, Scope::Worktree, Some(root), None)
     }
 
     pub fn tab_context(&self, target: &rex::Target) -> (Option<PathBuf>, Option<(usize, usize)>) {
-        let Some((cwd, size)) = probe_context(target) else { return (None, None) };
+        let Some((cwd, size)) = probe_context(target, None) else { return (None, None) };
         (cwd.and_then(|cwd| worktree(Path::new(&cwd))), size)
     }
 
-    /// Estimate the full tab in cells from a laid-out terminal, excluding floats.
-    pub fn tab_size(&self, target: &rex::Target) -> Option<(usize, usize)> {
-        probe_context(target)?.1
+    pub(super) fn anchor_tab(&self, target: &rex::Target) -> Option<(String, Option<PathBuf>, Option<TabSize>)> {
+        let reply = probe_window(target, &Layout::default(), "milo_operation=context", Some("")).ok()?;
+        let (window, context) = reply.split_once('\n')?;
+        if !rex_id(window, "window:") {
+            return None;
+        }
+        let (cwd, size) = parse_context(context)?;
+        // A command tab or non-login shell may not report a shell cwd. The
+        // browser can still edit the worktree milo itself was launched from.
+        let root = cwd.as_deref().map_or_else(|| git::worktree(Path::new(".")), |cwd| worktree(Path::new(cwd)));
+        Some((window.into(), root, size))
     }
 
-    pub fn capture(&self, target: &rex::Target) -> Result<Layout, &'static str> {
-        let reply = probe(Some(target), &target.session, &Layout::default(), "milo_operation=capture", &[])?;
+    pub(super) fn tab_matches(&self, target: &rex::Target, window: &str) -> bool {
+        probe_context(target, Some(window)).is_some()
+    }
+
+    /// Estimate the full tab in cells from a laid-out terminal, excluding floats.
+    pub fn tab_size(&self, target: &rex::Target, window: Option<&str>) -> Option<(usize, usize)> {
+        probe_context(target, window)?.1
+    }
+
+    pub fn capture(&self, target: &rex::Target, window: Option<&str>) -> Result<Layout, &'static str> {
+        let reply = probe_window(target, &Layout::default(), "milo_operation=capture", window)?;
         Layout::parse_rail(reply.strip_prefix("ok ").ok_or_else(|| failure(&reply))?).ok_or(MIXED_RAIL)
     }
 
-    pub fn trial(&self, layout: &Layout, target: &rex::Target) -> Result<Trial, &'static str> {
-        let result = probe(Some(target), &target.session, layout, "milo_operation=trial", &[])?;
+    pub fn trial(&self, layout: &Layout, target: &rex::Target, window: Option<&str>) -> Result<Trial, &'static str> {
+        let result = probe_window(target, layout, "milo_operation=trial", window)?;
         let mut values = result.split_ascii_whitespace();
         if values.next() != Some("ok") {
             return Err(failure(&result));
@@ -316,10 +387,58 @@ fn probe(
         .ok_or(NO_TAB)
 }
 
+fn probe_window(
+    target: &rex::Target,
+    layout: &Layout,
+    operation: &str,
+    window: Option<&str>,
+) -> Result<String, &'static str> {
+    let Some(window) = window else { return probe(Some(target), &target.session, layout, operation, &[]) };
+    // The CLI accepts labels and partial IDs, and a valid block can move to
+    // another tab. Verify both original IDs in the same Lua call as the action.
+    const GUARD: &str = r#"
+do
+  local session = rex.session.view{ session_id = rex.session_id }
+  local original, wanted
+  if rex.block_id == rex.args.milo_web_block and rex.session_id == rex.args.milo_web_session then
+    wanted = rex.args.milo_web_window
+    for _, candidate in ipairs(session and session.windows or {}) do
+      if wanted == "" or candidate.window_id == wanted then
+        for _, layer in ipairs(candidate.layers or {}) do
+          for _, block in ipairs(layer.blocks or {}) do
+            if block.block_id == rex.block_id then original = candidate.window_id end
+          end
+        end
+      end
+    end
+  end
+  if not original then print("no_tab"); return end
+  if wanted == "" then print(original) end
+end
+"#;
+    let block = target.block.to_str().ok_or(NO_TAB)?;
+    let session = target.session.to_str().ok_or(NO_TAB)?;
+    let mut script = String::from(GUARD);
+    script.push_str(&probe_lua(layout, &executable()?));
+    let args =
+        [format!("milo_web_block={block}"), format!("milo_web_session={session}"), format!("milo_web_window={window}")];
+    rex::script(
+        Some(target),
+        &target.session,
+        &script,
+        std::iter::once(operation).chain(args.iter().map(String::as_str)),
+    )
+    .ok_or(NO_TAB)
+}
+
 type TabSize = (usize, usize);
 
-fn probe_context(target: &rex::Target) -> Option<(Option<OsString>, Option<TabSize>)> {
-    let reported = probe(Some(target), &target.session, &Layout::default(), "milo_operation=context", &[]).ok()?;
+fn probe_context(target: &rex::Target, window: Option<&str>) -> Option<(Option<OsString>, Option<TabSize>)> {
+    let reported = probe_window(target, &Layout::default(), "milo_operation=context", window).ok()?;
+    parse_context(&reported)
+}
+
+fn parse_context(reported: &str) -> Option<(Option<OsString>, Option<TabSize>)> {
     let mut fields = reported.strip_prefix("ok ")?.split_ascii_whitespace();
     let cwd = unhex(fields.next()?);
     let cols = fields.next()?.parse().ok()?;

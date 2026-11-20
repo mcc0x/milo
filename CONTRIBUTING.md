@@ -166,6 +166,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
+| `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
 | `src/syntax.rs` | Scans source text to find spans to colour. |
 | `src/syntax/delimiters.rs` | Handles string closers that depend on their openers. |
 | `src/syntax/langs.rs` | Defines language rules and maps them to file extensions. |
@@ -195,6 +196,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
+| `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |

@@ -14,6 +14,7 @@ use crate::paths;
 
 const RELOAD: [&str; 2] = ["config", "reload"];
 pub(super) const RELOAD_PENDING: &str = "rex-reload-pending";
+pub(super) const RELOAD_REMINDER_NOT_CLEARED: &str = "Saved, but could not clear the Rex reload reminder.";
 
 /// Lets setup use the real Rex command while tests use an isolated stand-in.
 pub(super) type RunRex<'a> = dyn Fn(&[&OsStr]) -> bool + 'a;
@@ -129,7 +130,7 @@ impl Store {
         }
         installed?;
         if (rex_changed || pending.is_some()) && !reload_failed && fs::remove_file(pending_path).is_err() {
-            return Err("Saved, but could not clear the Rex reload reminder.");
+            return Err(RELOAD_REMINDER_NOT_CLEARED);
         }
         let stop_failed =
             (restart && !stopped) || (layout.is_some() && !watch_layout && lock::stop(&self.state).is_err());

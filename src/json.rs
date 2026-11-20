@@ -67,6 +67,14 @@ impl<'a> Value<'a> {
         self.0 == "null"
     }
 
+    pub fn boolean(self) -> Option<bool> {
+        match self.0 {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
     pub fn elements(self) -> Option<impl Iterator<Item = Self>> {
         let mut input = Input::<false>(self.0.strip_prefix('[')?);
         Some(std::iter::from_fn(move || {

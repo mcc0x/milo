@@ -29,6 +29,7 @@ mod uninstall;
 mod usage;
 mod walk;
 mod watch;
+mod web;
 mod when;
 mod width;
 mod workflow;
@@ -51,6 +52,7 @@ Usage: milo
        milo history [PATH]
        milo usage
        milo setup
+       milo web [--no-open]
        milo doctor
        milo setup --repair | --remove
        milo view FILE [--commit ID]
@@ -64,6 +66,7 @@ Bare milo opens Home. milo PATH opens the outline at PATH.
 On first launch, milo and milo setup share a short welcome guide.
 --skip-onboarding marks the guide skipped and exits without opening a terminal or changing settings.
 milo setup saves a Rex layout and can enable Claude Code usage limits.
+milo web opens local Settings in your browser. Use --no-open to print the link without opening it.
 milo doctor explains local preferences, integration health and usage sources.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
@@ -136,6 +139,9 @@ fn command_help(name: &str) -> Option<&'static str> {
         "setup" => {
             "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
         }
+        "web" => {
+            "Usage: milo web [--no-open]\n\nEdit settings and preview layouts locally in your browser. Keep this command running. --no-open prints the private link without launching a browser."
+        }
         "doctor" => {
             "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
         }
@@ -184,6 +190,7 @@ enum Command<'a> {
     Usage,
     Home,
     Setup,
+    Web { open_browser: bool },
     SkipOnboarding,
     Doctor,
     Repair,
@@ -246,6 +253,9 @@ fn command<'a>(
         }
         (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID]".to_string()),
         (Some("setup"), None) => Command::Setup,
+        (Some("web"), None) => Command::Web { open_browser: true },
+        (Some("web"), Some(flag)) if flag == "--no-open" => Command::Web { open_browser: false },
+        (Some("web"), Some(_)) => return Err("expected milo web [--no-open]".into()),
         (Some("--skip-onboarding"), None) => Command::SkipOnboarding,
         (Some("setup"), Some(flag)) if flag == "--skip-onboarding" => Command::SkipOnboarding,
         (Some("doctor"), None) => Command::Doctor,
@@ -305,6 +315,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             Ok(Box::new(reader))
         }),
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
+        Command::Web { open_browser } => web::run(open_browser),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),
@@ -479,6 +490,8 @@ mod tests {
     fn setup_usage_and_helper_commands_reach_separate_destinations() {
         for (name, arg, expected) in [
             ("setup", None, Command::Setup),
+            ("web", None, Command::Web { open_browser: true }),
+            ("web", Some("--no-open"), Command::Web { open_browser: false }),
             ("--skip-onboarding", None, Command::SkipOnboarding),
             ("setup", Some("--skip-onboarding"), Command::SkipOnboarding),
             ("usage", None, Command::Usage),

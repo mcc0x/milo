@@ -667,7 +667,7 @@ fn uninstall_keeps_the_executable_when_the_owned_claude_status_line_cannot_be_re
 
     let mut home = Terminal::run(&mut command());
     home.until("Uninstall");
-    home.master.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    home.master.write_all(b"\x1b[F\r").unwrap();
     home.until("Cancel");
     home.master.write_all(b"\x1b[B\r").unwrap();
     // The incremental renderer may put cursor moves between words in the report.
@@ -779,8 +779,8 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
     for (cols, rows) in [(40, 16), (28, 12)] {
         let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
         tty.until("Uninstall");
-        // At 40 columns Settings opens over Project tracking; at 28 it opens over Save prefs.
-        let (col, row) = if cols == 40 { (32, 6) } else { (12, 8) };
+        // Click the visible Settings label; its cell may also be actionable after navigation.
+        let (col, row) = if cols == 40 { (29, 5) } else { (12, 7) };
         tty.click(col, row, "");
         tty.until("Workflow");
         tty.bytes.clear();

@@ -11,6 +11,7 @@ mod preview;
 mod profiles;
 mod rex_files;
 mod settings;
+pub(crate) mod web;
 mod welcome;
 
 pub(crate) use draw::wrap;
@@ -123,6 +124,7 @@ enum Row {
 }
 
 const LAYOUT: &[Row] = &[Row::Tree, Row::Sidebar, Row::Capture, Row::Tune, Row::UseGlobal];
+const OUTLINE_SHARES: &[&str] = &["0.50", "0.60", "0.70", "0.80"];
 const TUNE: &[Row] = &[
     Row::Pane(TabPane::Outline),
     Row::Pane(TabPane::History),
@@ -153,6 +155,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     store: Option<Store>,
     inside: bool,
     target: Option<rex::Target>,
+    web_window: Option<String>,
     root: Option<PathBuf>,
     run: R,
     layout: Layout,
@@ -214,10 +217,22 @@ impl Setup {
 impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn new(store: Option<Store>, inside: bool, target: Option<rex::Target>, root: Option<PathBuf>, run: R) -> Self {
         let claude = store.as_ref().map_or(Claude::Invalid, Store::claude);
+        Self::new_with_claude(store, inside, target, root, run, claude)
+    }
+
+    fn new_with_claude(
+        store: Option<Store>,
+        inside: bool,
+        target: Option<rex::Target>,
+        root: Option<PathBuf>,
+        run: R,
+        claude: Claude,
+    ) -> Self {
         let mut setup = Self {
             store,
             inside,
             target,
+            web_window: None,
             root,
             run,
             layout: Layout::default(),
@@ -447,6 +462,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if self.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
             self.undo()?;
         }
+        let message = self.persist_layout(scope, true)?;
+        if self.exit_from.is_none() {
+            self.back();
+        }
+        message
+    }
+
+    /// The browser can remember geometry without setting up Rex. Keep draft
+    /// interpretation, conflict detection and trial finalization shared.
+    fn persist_layout(
+        &mut self,
+        scope: Scope,
+        integrate_rex: bool,
+    ) -> Result<Result<&'static str, &'static str>, &'static str> {
         let auto_changed = self.auto_arrange_dirty();
         let draft_auto = self.layout.new_tabs;
         let before = self.saved.as_ref().ok_or("Reopen Settings before saving the layout.")?;
@@ -462,10 +491,40 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         } else {
             &self.layout
         };
-        let saved = self.store()?.save_draft(layout, expected, scope, self.root.as_deref(), &self.run)?;
-        self.reload_layout()?;
-        if scope == Scope::Worktree && auto_changed {
+        let expected = profiles::DraftBaseline {
+            destination: expected,
+            worktree: (scope == Scope::Global && self.scope == Scope::Worktree).then_some(before),
+        };
+        let store = self.store()?;
+        let (saved, warning) = if integrate_rex {
+            match store.save_draft(layout, expected, scope, self.root.as_deref(), &self.run) {
+                Ok(saved) => (saved, None),
+                Err(install::RELOAD_REMINDER_NOT_CLEARED) => (Saved::Ready, Some(install::RELOAD_REMINDER_NOT_CLEARED)),
+                Err(why) => return Err(why),
+            }
+        } else {
+            (store.save_offline_draft(layout, expected, scope, self.root.as_deref())?, None)
+        };
+        let result =
+            self.finish_layout_save(saved, scope, (scope == Scope::Worktree && auto_changed).then_some(draft_auto));
+        Ok(result.and_then(|message| warning.map_or(Ok(message), Err)))
+    }
+
+    fn finish_layout_save(
+        &mut self,
+        saved: Saved,
+        scope: Scope,
+        remaining_auto: Option<bool>,
+    ) -> Result<&'static str, &'static str> {
+        if let Err(why) = self.reload_layout() {
+            self.saved = None;
+            return Err(why);
+        }
+        if let Some(draft_auto) = remaining_auto {
             self.layout.new_tabs = draft_auto;
+        }
+        if self.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
+            self.undo()?;
         }
         if let Some((trial, tried)) = &self.trial
             && same_geometry(tried, &self.layout)
@@ -473,15 +532,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             trial.keep()?;
             self.trial = None;
         }
-        if self.exit_from.is_none() {
-            self.back();
-        }
         match saved {
             Saved::ListenerDidNotStart => {
                 Err("Saved, but the layout listener did not start. Open Health to repair it.")
             }
             Saved::ListenerDidNotStop => Err("Saved, but the layout listener did not stop. Open Health to repair it."),
-            Saved::Ready if scope == Scope::Worktree && auto_changed => {
+            Saved::Ready if remaining_auto.is_some() => {
                 Ok("Saved this worktree's layout. Save globally to change auto-arrange.")
             }
             Saved::Ready if scope == Scope::Worktree => Ok("Saved this worktree's layout."),
@@ -617,8 +673,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
         let store = self.store()?;
         let target = self.target()?;
-        let mut layout = store.capture(target)?;
-        let size = store.tab_size(target);
+        let mut layout = store.capture(target, self.web_window.as_deref())?;
+        let size = store.tab_size(target, self.web_window.as_deref());
         layout.new_tabs = self.layout.new_tabs;
         self.layout = layout;
         self.tab_size = size.or(self.tab_size);
@@ -626,7 +682,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     fn refresh_preview(&mut self) -> Result<&'static str, &'static str> {
-        self.tab_size = self.store()?.tab_size(self.target()?);
+        self.tab_size = self.store()?.tab_size(self.target()?, self.web_window.as_deref());
         if self.tab_size.is_some() {
             Ok("Preview updated to this tab's current size.")
         } else {
@@ -641,7 +697,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if !self.layout.panes.contains(&true) {
             return Err("There are no Milo panes to try.");
         }
-        let trial = self.store()?.trial(&self.layout, self.target()?)?;
+        let trial = self.store()?.trial(&self.layout, self.target()?, self.web_window.as_deref())?;
         let temporary = trial.temporary();
         self.trial = Some((trial, self.layout.clone()));
         Ok(if temporary {
@@ -751,7 +807,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                         order.swap(index, other);
                     }
                     Row::OutlineShare => {
-                        cycle(&mut self.layout.outline_share, &["0.50", "0.60", "0.70", "0.80"]);
+                        cycle(&mut self.layout.outline_share, OUTLINE_SHARES);
                         self.layout.geometry.shares = None;
                     }
                     Row::UsageRows => {

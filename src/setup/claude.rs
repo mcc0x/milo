@@ -49,6 +49,26 @@ impl Store {
         let note_path = self.state.join(OWN_CLAUDE);
         Ok(ClaudeFiles { settings: read(&path)?, path, note: read(&note_path)?, note_path })
     }
+
+    pub(super) fn claude_snapshot(&self) -> Result<(Claude, ClaudeSnapshot), &'static str> {
+        let files = self.claude_files()?;
+        let status = files.status();
+        Ok((status, ClaudeSnapshot { path: files.path.into_owned(), settings: files.settings, note: files.note }))
+    }
+
+    pub(super) fn save_claude_draft(&self, enabled: bool, before: &ClaudeSnapshot) -> Result<(), &'static str> {
+        self.save_with(None, None, &|_| false, |changes| {
+            let files = self.claude_files()?;
+            if files.path.as_ref() != before.path.as_path()
+                || files.settings != before.settings
+                || files.note != before.note
+            {
+                return Err("Claude Code settings changed. Reopen Settings before saving again.");
+            }
+            files.plan(enabled, changes)
+        })?;
+        Ok(())
+    }
 }
 
 /// The two files must agree before setup is allowed to remove a status line.
@@ -57,6 +77,12 @@ pub(super) struct ClaudeFiles<'a> {
     settings: Option<Image>,
     note: Option<Image>,
     note_path: PathBuf,
+}
+
+pub(super) struct ClaudeSnapshot {
+    path: PathBuf,
+    settings: Option<Image>,
+    note: Option<Image>,
 }
 
 impl ClaudeFiles<'_> {

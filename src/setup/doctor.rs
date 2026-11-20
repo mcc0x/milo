@@ -107,14 +107,23 @@ pub(crate) fn report() -> Result<String, String> {
 }
 
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {
+    let target = rex::Target::current();
     if root.is_some() {
-        return report_with_worktree(store, Ok(root));
+        return report_with_worktree(store, Ok(root), target.as_ref());
     }
     let discovered = discover_worktree(Path::new("."));
-    report_with_worktree(store, discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note))
+    report_with_worktree(store, discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note), target.as_ref())
 }
 
-fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static str>) -> Result<String, String> {
+pub(super) fn report_anchored(store: &Store, root: Option<&Path>, target: Option<&rex::Target>) -> Report {
+    report_with_worktree(store, Ok(root), target)
+}
+
+fn report_with_worktree(
+    store: &Store,
+    worktree: Result<Option<&Path>, &'static str>,
+    target: Option<&rex::Target>,
+) -> Report {
     let mut out = String::from(TITLE);
     out.push('\n');
     match worktree {
@@ -123,7 +132,7 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
         Err(note) => writeln!(out, "Worktree: {note}").unwrap(),
     }
     let root = worktree.ok().flatten();
-    match Preferences::resolve(root) {
+    match Preferences::resolve_in(&store.config, root) {
         Ok((p, source)) => {
             let scope = match source {
                 Source::Default => "built-in defaults",
@@ -160,7 +169,7 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
     match &layout {
         Ok((rail, true, scope)) => {
             let executable = rex_files::executable()?;
-            let live = LiveSidebar::read(rail, &executable);
+            let live = LiveSidebar::read(rail, &executable, target);
             write_sidebar(&mut out, rail, *scope, live);
             let file = read(&store.rex_file())?;
             let text = file.as_ref().and_then(|f| std::str::from_utf8(&f.bytes).ok()).unwrap_or("");
@@ -268,8 +277,8 @@ enum LiveSidebar {
 }
 
 impl LiveSidebar {
-    fn read(saved: &Layout, executable: &Path) -> Self {
-        let Some(target) = rex::Target::current() else {
+    fn read(saved: &Layout, executable: &Path, target: Option<&rex::Target>) -> Self {
+        let Some(target) = target else {
             return Self::NotObserved("run Doctor in the Rex tab you want to check");
         };
         let Some(block) = target.block.to_str().filter(|id| id.starts_with("block:")) else {
@@ -277,7 +286,7 @@ impl LiveSidebar {
         };
         let caller = format!("caller={block}");
         let lua = probe_lua(saved, executable);
-        rex::diagnostic_script(&target, &lua, &caller)
+        rex::diagnostic_script(target, &lua, &caller)
             .as_deref()
             .and_then(Self::parse)
             .unwrap_or(Self::NotObserved("could not read this Rex tab"))

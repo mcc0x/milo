@@ -59,6 +59,16 @@ Use the appearance choices to preview icons, choose text change marks, and turn 
 
 Run `milo` for Home or `milo setup` to go directly to Settings. Both share the same first-run guide. To skip it in an install script, run `milo setup --skip-onboarding`; it records the skip and exits without requiring a terminal or installing integrations. `milo outline` and the other direct pane commands never show the guide. Terminal panes work without Rex; split geometry and shell-following require Rex.
 
+## Browser editor
+
+With a source build, run `milo web` from the project you want to configure, or choose **Open in browser** from Milo Home. `milo web --no-open` prints the private link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+
+Adjust the sample layout before touching a real tab. Preview changes are a draft, not a save. In Rex, **Try in Rex** applies a temporary trial to the launching tab; undo it to return to the previous layout. Save explicitly for the current worktree or as the global default. Appearance and workflow settings use the same preference files as terminal Settings. Claude Code choices are account-wide. Outside Rex, you can still preview layouts and edit preferences without starting Rex.
+
+Finish the session with **Done**, or stop the command with `Ctrl-C`. If you only close the browser tab, the private link remains usable until you stop Milo or the session is idle for 15 minutes. Stopping Milo discards unsaved changes and undoes an unkept layout trial; it does not roll back settings you already saved.
+
+For UI development, run `cargo run --features web-dev -- web` from the Milo checkout and use the browser tab it opens. Edits to `src/web/app.css` apply in place; changes to `index.html`, `app.js`, or the mascot reload the page against the same in-memory settings draft. Finish any pending input first. Rust changes still require restarting the command. Normal builds serve embedded assets and do not watch the checkout.
+
 ## Rex actions
 
 Saving installs these actions in the Rex command palette:

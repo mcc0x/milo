@@ -11,6 +11,9 @@ keywords = ["terminal", "git", "tui", "rex", "code-reader"]
 categories = ["command-line-utilities", "development-tools"]
 include = ["src/**", "tests/**", "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml"]
 
+[features]
+web-dev = []
+
 [dependencies]
 libc = "0.2"
 
