@@ -17,11 +17,11 @@ use mascot::Sprite;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BRAND_WIDTH: usize = "Milo  ".len() + VERSION.len();
-const MENU: &[&str] = &["Settings", "Doctor", "Open in browser", "Uninstall"];
-const MENU_WIDTH: usize = "Open in browser".len() + 2;
+const MENU: &[&str] = &["Open Web Menu", "Settings", "Doctor", "Uninstall Milo"];
+const MENU_WIDTH: usize = "Uninstall Menu App".len() + 2;
 const APP_ROW: usize = 3;
-const INSTALL_MENU: &[&str] = &menu_with_app("Install menu app");
-const REMOVE_MENU: &[&str] = &menu_with_app("Remove menu app");
+const INSTALL_MENU: &[&str] = &menu_with_app("Install Menu App");
+const REMOVE_MENU: &[&str] = &menu_with_app("Uninstall Menu App");
 
 const fn menu_with_app(label: &str) -> [&str; 5] {
     [MENU[0], MENU[1], MENU[2], label, MENU[APP_ROW]]
@@ -311,16 +311,16 @@ impl Pane for Home {
                 if self.update_menu_app(menubar::installed()) { self.show(View::Menu) } else { After::Ignored }
             }
             View::Menu if choose => match self.selected {
-                0 => {
+                0 => After::OpenWeb,
+                1 => {
                     let mut setup = Box::new(Setup::open());
                     setup.swap_diagnostics(&mut self.diagnostics);
                     self.show_guarded(View::Settings(setup), click)
                 }
-                1 => {
+                2 => {
                     let result = self.diagnostics.start(doctor::report).map(|()| String::new());
                     self.show(View::Report(Report::new(doctor::TITLE, result)))
                 }
-                2 => After::OpenWeb,
                 APP_ROW if self.menu_app == Some(false) => self.show_guarded(
                     View::Report(Report::new("Install Milo Usage", menubar::run(MenuAppAction::Install))),
                     click,
@@ -570,14 +570,14 @@ mod tests {
         let mut home = Home::with_menu_app(None);
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
-        for label in ["Settings", "Doctor", "Open in browser", "Uninstall", "Enter open", "q quit"] {
+        for label in ["Open Web Menu", "Settings", "Doctor", "Uninstall Milo", "Enter open", "q quit"] {
             let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
             let end = x + label.len();
             assert_eq!(home.hover_span(x, y), Some(x..end));
             assert_eq!(home.hover_span(end - 1, y), Some(x..end));
             assert_eq!(home.hover_span(end, y), None);
         }
-        let Key::Click(x, y) = click_on(&screen, "Settings") else { unreachable!() };
+        let Key::Click(x, y) = click_on(&screen, "Open Web Menu") else { unreachable!() };
         assert_eq!(home.hover_span(x - 2, y), Some(x - 2..x - 1));
         assert_eq!(home.hover_span(x - 1, y), None);
         for label in ["Milo  v", "↑↓ move"] {
@@ -586,7 +586,7 @@ mod tests {
         }
         assert_eq!(home.selected, 0);
         let mut rail = Screen::sized(28, 12);
-        assert_eq!(home.key(click_on(&screen, "Open in browser")), After::OpenWeb);
+        assert_eq!(home.key(click_on(&screen, "Open Web Menu")), After::OpenWeb);
         home.key(Key::Home);
         home.draw(&mut rail);
         assert_eq!(rail.text()[11], " Enter open · q quit");
@@ -595,7 +595,7 @@ mod tests {
 
         let mut narrow = Screen::sized(4, 1);
         home.draw(&mut narrow);
-        assert_eq!(narrow.text(), ["Sett"]);
+        assert_eq!(narrow.text(), ["Open"]);
         assert_eq!(home.hover_span(3, 0), Some(0..4));
         assert_eq!(home.hover_span(4, 0), None);
     }
@@ -642,10 +642,11 @@ mod tests {
         let mut home = Home::with_menu_app(None);
         let mut screen = Screen::sized(9, 1);
         home.draw(&mut screen);
-        assert_eq!(screen.text(), ["Settings"]);
+        assert_eq!(screen.text(), ["Open Web"]);
+        assert_eq!(home.key(Key::Enter), After::OpenWeb);
         assert_eq!(home.key(Key::Down), After::Stay);
         home.draw(&mut screen);
-        assert_eq!(screen.text(), ["Doctor"]);
+        assert_eq!(screen.text(), ["Settings"]);
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut screen);
         assert_eq!(screen.text(), ["Uninstall"]);
@@ -656,14 +657,14 @@ mod tests {
         let mut home = Home::with_menu_app(None);
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
-        assert!(!screen.text().iter().any(|line| line.contains("menu app")));
+        assert!(!screen.text().iter().any(|line| line.contains("Menu App")));
         assert_eq!(home.key(Key::End), After::Stay);
 
-        for (status, label) in [(false, "Install menu app"), (true, "Remove menu app")] {
+        for (status, label) in [(false, "Install Menu App"), (true, "Uninstall Menu App")] {
             assert!(home.update_menu_app(Some(status)));
             home.draw(&mut screen);
-            assert!(screen.text().iter().any(|line| line.contains("› Uninstall")));
-            assert_eq!(screen.text().iter().filter(|line| line.contains("menu app")).count(), 1);
+            assert!(screen.text().iter().any(|line| line.contains("› Uninstall Milo")));
+            assert_eq!(screen.text().iter().filter(|line| line.contains("Menu App")).count(), 1);
             let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
             assert_eq!(home.hover_span(x, y), Some(x..x + label.len()));
         }
@@ -671,7 +672,7 @@ mod tests {
         assert!(home.update_menu_app(None));
         home.draw(&mut screen);
         assert!(screen.text().iter().any(|line| line.contains("› Uninstall")));
-        assert!(!screen.text().iter().any(|line| line.contains("menu app")));
+        assert!(!screen.text().iter().any(|line| line.contains("Menu App")));
     }
 
     #[test]
@@ -683,7 +684,7 @@ mod tests {
         assert_eq!(tiny.text(), ["Uninstall"]);
         assert_eq!(home.key(Key::Up), After::Stay);
         home.draw(&mut tiny);
-        assert_eq!(tiny.text(), ["Remove me"]);
+        assert_eq!(tiny.text(), ["Uninstall"]);
 
         // Click inside both the menu item and the Cancel button drawn in its place.
         let open = Key::Click(1, 0);
