@@ -26,7 +26,7 @@ fn claude_status_saves_limits_and_prints_a_short_plain_line() {
     let budget = &mut Budget::new(16384);
     let file = fs_ops::open_read(&path).unwrap();
     let version = FileVersion::opened(&file).unwrap();
-    let saved = status::saved(file, version, budget, NOW).unwrap();
+    let saved = status::saved(file, version, budget).unwrap();
     assert_eq!(saved.windows.base[0].unwrap().observed, NOW);
     assert_eq!(saved.windows.base[1].unwrap().resets, Some(1_795_219_200));
 }
@@ -100,7 +100,7 @@ fn identical_status_reports_advance_only_supplied_windows_at_most_once_a_minute(
     assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
 
     let usage = open(&f, next + 1);
-    let (report, _) = usage.claude.reported().unwrap();
+    let (report, _) = usage.claude.reported(usage.now()).unwrap();
     assert_eq!(report.at.seconds, next);
     let [five, week] = report.windows.base;
     assert_eq!(five.unwrap().observed, next);
@@ -123,7 +123,7 @@ fn old_and_elapsed_status_reports_cannot_freshen_or_replace_a_saved_window() {
     // A late partial report may fill an empty slot but must not make the reading older.
     claude_report(&path, r#"{"seven_day":{"used_percentage":55,"resets_at":1795219200}}"#, NOW - 1);
     let usage = open(&f, NOW);
-    let (report, _) = usage.claude.reported().unwrap();
+    let (report, _) = usage.claude.reported(usage.now()).unwrap();
     assert_eq!(report.at.seconds, NOW);
     assert_eq!(report.windows.base[1].unwrap().observed, NOW - 1);
 }
@@ -218,7 +218,7 @@ fn a_claude_save_dated_beyond_the_clock_allowance_gives_way_to_another_source_un
         let mut usage = unopened(&f, now);
         usage.claude_config = with_cache.then(|| f.root.join(".claude.json"));
         usage.check();
-        let source = usage.claude.reported().map(|(reading, source)| (reading.at.seconds, source.label()));
+        let source = usage.claude.reported(now).map(|(reading, source)| (reading.at.seconds, source.label()));
         (frame(&mut usage, 22, 2).pop().unwrap(), source)
     };
 
@@ -233,6 +233,34 @@ fn a_claude_save_dated_beyond_the_clock_allowance_gives_way_to_another_source_un
     // The next report replaces the misdated save rather than keeping its date.
     assert_eq!(status::run(STATUS, Vec::new(), Some(&path), NOW), 0);
     assert_eq!(look(NOW, true), ("Claude week · 39% left".into(), Some((NOW, "Milo Claude status line"))));
+}
+
+#[test]
+fn cached_claude_reports_reappear_as_the_clock_catches_up_without_reads() {
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    assert_eq!(status::run(STATUS, Vec::new(), Some(&path), NOW + CLOCK_SKEW + 1), 0);
+    let fetched_ms = (NOW + CLOCK_SKEW + 3) * 1000;
+    let cache = format!(
+        r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{fetched_ms},"utilization":{{"seven_day":{{"utilization":18}}}}}}}}"#,
+    );
+    write(&f, ".claude.json", &cache, NOW);
+    let mut usage = unopened(&f, NOW);
+    usage.claude_config = Some(f.root.join(".claude.json"));
+    assert!(usage.check());
+    assert!(usage.bytes_read > 0);
+    for (elapsed, wait, shown) in [
+        (0, 1, "Claude · no source"),
+        (1, 2, "Claude week · 39% left"),
+        (2, 1, "Claude week · 39% left"),
+        (3, 60, "Claude week · 82% left"),
+    ] {
+        usage.fixed_now = Some(NOW + elapsed);
+        assert_eq!(usage.next_frame(), Some(Duration::from_secs(wait)));
+        assert_eq!(frame(&mut usage, 22, 2)[1], shown);
+        assert!(usage.check());
+        assert_eq!(usage.bytes_read, 0);
+    }
 }
 
 #[test]

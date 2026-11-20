@@ -264,7 +264,10 @@ fn a_hidden_tool_is_neither_shown_nor_looked_for() {
 
     let mut usage = databases(automatic(&f, now).showing(tools(HIDE, AUTO, HIDE)));
     usage.check();
-    assert!(usage.codex.files.entries.is_empty() && usage.codex.reported().is_none(), "Codex's sessions were walked");
+    assert!(
+        usage.codex.files.entries.is_empty() && usage.codex.reported(usage.now()).is_none(),
+        "Codex's sessions were walked"
+    );
     assert!(usage.opencode.poll.fd().is_none(), "OpenCode's database was read");
     assert!(usage.omp.fd().is_some(), "Claude Code still has OMP's reports to read");
     let codex = Reading { at: Timestamp::seconds(now), windows: Limits::default() };
@@ -310,7 +313,10 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
         usage
     };
     let mut usage = found(&f);
-    assert_eq!([usage.codex.presence(), usage.claude.presence()], [Presence::Absent; 2]);
+    assert_eq!(
+        [usage.codex.presence(usage.codex.reported(now)), usage.claude.presence(usage.claude.reported(now))],
+        [Presence::Absent; 2]
+    );
     assert_eq!(usage.opencode.presence(usage.today.since), Presence::Absent);
     assert_eq!(trimmed(&mut usage, 28, 2), ["No usage to show yet", "Codex, Claude, OpenCode"]);
     assert_eq!(trimmed(&mut usage, 28, 4), ["No usage to show yet", "Waiting for Codex, Claude", "Code or OpenCode."]);
@@ -324,7 +330,10 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
     // quiet line with its next step, and still no place or number.
     write(&f, "claude.json", r#"{"numStartups":3}"#, now);
     let mut usage = found(&f);
-    assert_eq!([usage.codex.presence(), usage.claude.presence()], [Presence::Absent, Presence::Found]);
+    assert_eq!(
+        [usage.codex.presence(usage.codex.reported(now)), usage.claude.presence(usage.claude.reported(now))],
+        [Presence::Absent, Presence::Found]
+    );
     assert_eq!(trimmed(&mut usage, 36, 2), ["Claude · no saved limits found", "Run milo setup"]);
     assert_eq!(
         usage.doctor(None, None, TEST_WAIT),
@@ -332,7 +341,7 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
     );
     write(&f, CODEX, "{\"type\":\"session_meta\"}\n", now);
     let mut usage = found(&f);
-    assert_eq!(usage.codex.presence(), Presence::Found);
+    assert_eq!(usage.codex.presence(usage.codex.reported(now)), Presence::Found);
     assert_eq!(
         trimmed(&mut usage, 36, 4),
         ["No usage to show yet", "Codex · no limits to show", "Claude · no saved limits found"]
@@ -358,7 +367,10 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
     let week = Window { minutes: 10_080, percent: 32.0, resets: Some(now + DAY), observed: now };
     let claude = Reading { at: Timestamp::seconds(now), windows: Limits::new([None, Some(week)]) };
     assert!(usage.keep(omp::Reports { codex: None, claude: Some(claude) }));
-    assert_eq!([usage.codex.presence(), usage.claude.presence()], [Presence::Absent, Presence::Reading]);
+    assert_eq!(
+        [usage.codex.presence(usage.codex.reported(now)), usage.claude.presence(usage.claude.reported(now))],
+        [Presence::Absent, Presence::Reading]
+    );
     assert_eq!(trimmed(&mut usage, 22, 2), ["Claude week · 68% left", "Resets in 1d"]);
 }
 

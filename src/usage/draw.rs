@@ -1086,17 +1086,20 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
             CodexSessions::Unreadable => Hint::UNREADABLE,
         }
     };
-    let presence = [usage.codex.presence(), usage.claude.presence(), usage.opencode.presence(today)];
+    let codex_report = usage.codex.reported(now);
+    let claude_report = usage.claude.reported(now);
+    let presence =
+        [usage.codex.presence(codex_report), usage.claude.presence(claude_report), usage.opencode.presence(today)];
     let [codex, claude, opencode] = UsageTool::ALL.map(|tool| tools[tool]);
     // A tool Milo found keeps its hint ready for when no tool has a place.
     let reports = [
-        presence[0].relevant(codex).then(|| {
-            Report::new(Tool::Codex, usage.codex.reported().map(|(r, source)| (&r.windows, source)), missing, now)
-        }),
+        presence[0]
+            .relevant(codex)
+            .then(|| Report::new(Tool::Codex, codex_report.map(|(r, source)| (&r.windows, source)), missing, now)),
         presence[1].relevant(claude).then(|| {
             Report::new(
                 Tool::Claude,
-                usage.claude.reported().map(|(r, source)| (&r.windows, source)),
+                claude_report.map(|(r, source)| (&r.windows, source)),
                 if checking { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
                 now,
             )

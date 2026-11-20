@@ -57,8 +57,8 @@ fn look(usage: &mut Usage) -> [String; 2] {
 
 fn sources(usage: &Usage) -> [Option<&'static str>; 2] {
     [
-        usage.codex.reported().map(|(_, source)| source.label()),
-        usage.claude.reported().map(|(_, source)| source.label()),
+        usage.codex.reported(usage.now()).map(|(_, source)| source.label()),
+        usage.claude.reported(usage.now()).map(|(_, source)| source.label()),
     ]
 }
 

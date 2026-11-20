@@ -51,19 +51,16 @@ fn window(value: Option<Value<'_>>, minutes: u64, observed: Observed) -> Option<
 }
 
 /// The status helper's own cache can preserve windows from different reports.
-/// A save dated beyond the allowed clock difference is not a reading: being
-/// the newest, it would outrank every report that follows it.
-pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget, now: i64) -> Option<Reading> {
+pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
     let bytes = files::read_small(file, version, MAX_SAVED, budget)?;
     let [saved_at, rate_limits] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits"]);
     let at = saved_at?.integer()?;
-    (at <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
     let base = windows(rate_limits?, |value, minutes| window(value, minutes, Observed::Saved(at)));
     base.iter().any(Option::is_some).then_some(Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) })
 }
 
 /// Only inspect normal configurations up to 4 MiB; the cache is a top-level field.
-pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget, now: i64) -> Option<Reading> {
+pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
     let bytes = files::read_small(file, version, MAX_CONFIG, budget)?;
     let [cache, current] = Value::parse(&bytes)?.fields(["cachedUsageUtilization", "oauthAccount"]);
     let [at, usage, account] = cache?.fields(["fetchedAtMs", "utilization", "accountUuid"]);
@@ -72,7 +69,6 @@ pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget, now:
         (account.string(128)? == current?.string(128)?).then_some(())?;
     }
     let at = time::Timestamp::millis(at?)?;
-    (at.seconds <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
     let usage = usage.filter(|value| value.object() || value.null())?;
     let base = windows(usage, |value, minutes| {
         let [percent, reset] = value?.fields(["utilization", "resets_at"]);
@@ -175,7 +171,7 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
 fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     let previous = fs_ops::open_read(path).ok().and_then(|file| {
         let version = FileVersion::opened(&file)?;
-        saved(file, version, &mut Budget::new(MAX_SAVED + 1), now)
+        saved(file, version, &mut Budget::new(MAX_SAVED + 1)).filter(|reading| reading.visible_at() <= now)
     });
     let base = previous.map_or([None; 2], |reading| reading.windows.base);
     let merged = std::array::from_fn(|i| newer(base[i], windows[i]));

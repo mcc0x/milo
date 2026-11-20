@@ -598,7 +598,7 @@ pub(super) fn tail<T>(
     len: u64,
     max: u64,
     budget: &mut Budget,
-    find: impl Fn(&[u8]) -> Option<T>,
+    mut find: impl FnMut(&[u8]) -> Option<T>,
 ) -> io::Result<(Option<T>, Stream)> {
     let stop = len.saturating_sub(max.min(budget.remaining));
     let mut reverse = Reverse::new(len);
@@ -609,7 +609,7 @@ pub(super) fn tail<T>(
                 stream.remember_tail(line);
                 return ControlFlow::Continue(());
             }
-            line.and_then(&find).map_or(ControlFlow::Continue(()), ControlFlow::Break)
+            line.and_then(&mut find).map_or(ControlFlow::Continue(()), ControlFlow::Break)
         })? {
             return Ok((Some(found), stream));
         }

@@ -88,6 +88,53 @@ fn codex_allows_a_little_clock_skew_but_ignores_far_future_events() {
 }
 
 #[test]
+fn unchanged_codex_rollouts_reveal_future_complete_and_unterminated_reports_without_reads() {
+    let f = Fixture::folder();
+    let latest = NOW + CLOCK_SKEW;
+    let line = |at, used| codex(at, used, NOW + HOUR, "null");
+    write(&f, CODEX, &format!("{}{}{}", line(NOW, 20), line(latest + 1, 30), line(latest + 3, 35)), NOW);
+    let mut usage = open(&f, NOW);
+    append(&f, &format!("{}{}", line(latest + 2, 40), line(latest + 4, 50).trim_end()), NOW + 1);
+    assert!(usage.check());
+
+    for (elapsed, wait, shown) in [(0, 1, "80%"), (1, 1, "70%"), (2, 2, "60%"), (3, 1, "60%"), (4, 60, "50%")] {
+        usage.fixed_now = Some(NOW + elapsed);
+        assert_eq!(usage.next_frame(), Some(Duration::from_secs(wait)));
+        assert!(frame(&mut usage, 100, 2)[0].contains(shown));
+        assert!(usage.check());
+        assert_eq!(usage.bytes_read, 0);
+    }
+}
+
+#[test]
+fn a_codex_rollout_with_excess_deferred_reports_gets_only_a_bounded_due_read() {
+    let f = Fixture::folder();
+    let line = |at, used| codex(at, used, NOW + HOUR, "null");
+    let latest = NOW + CLOCK_SKEW;
+    let mut data = line(NOW, 20);
+    data.push_str(&line(latest + 1, 40));
+    for i in 2..=i64::try_from(CODEX_DEFERRED_LIMIT).unwrap() + 1 {
+        data.push_str(&line(latest + i, 50));
+    }
+    write(&f, CODEX, &data, NOW);
+    let mut usage = open(&f, NOW);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0);
+    assert!(frame(&mut usage, 100, 2)[0].contains("80%"));
+
+    usage.fixed_now = Some(NOW + 1);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0);
+    assert!(frame(&mut usage, 100, 2)[0].contains("60%"));
+    usage.fixed_now = Some(latest - CLOCK_SKEW + i64::try_from(CODEX_DEFERRED_LIMIT).unwrap() + 1);
+    assert!(usage.check());
+    assert!((1..=TAIL_BYTES).contains(&usage.bytes_read));
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0);
+    assert!(frame(&mut usage, 100, 2)[0].contains("50%"));
+}
+
+#[test]
 fn codex_shows_reset_when_the_time_passes_without_an_append() {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW, 77, NOW + 5, "null"), NOW);
@@ -220,7 +267,7 @@ fn codex_truncation_rewrite_and_replacement_reset_the_cursor() {
     assert!(frame(&mut usage, 100, 2)[0].contains("77%"));
     write(&f, CODEX, "{}\n", NOW);
     assert!(usage.check());
-    assert!(usage.codex.reported().is_none());
+    assert!(usage.codex.reported(usage.now()).is_none());
 
     let latest = codex(NOW, 64, NOW + DAY, "null");
     append(&f, &latest, NOW + 1);
@@ -241,7 +288,7 @@ fn codex_truncation_rewrite_and_replacement_reset_the_cursor() {
     write(&f, "replacement", &larger, NOW + 4);
     fs::rename(f.root.join("replacement"), f.root.join(CODEX)).unwrap();
     assert!(usage.check());
-    assert!(usage.codex.reported().is_none());
+    assert!(usage.codex.reported(usage.now()).is_none());
 }
 
 #[test]

@@ -8,7 +8,7 @@ mod sqlite;
 mod status;
 mod time;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::ControlFlow;
 use std::os::fd::RawFd;
@@ -32,6 +32,7 @@ const CLOCK_SKEW: i64 = 5 * MINUTE;
 const CODEX_LIVE: i64 = 5 * MINUTE;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const CODEX_BYTES: u64 = files::CODEX_FILES as u64 * TAIL_BYTES;
+const CODEX_DEFERRED_LIMIT: usize = 512;
 const CLAUDE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 4096;
 const SAVED_LIMITS: &str = "claude-limits.json";
@@ -219,15 +220,18 @@ struct Reading {
 }
 
 impl Reading {
+    fn visible_at(&self) -> i64 {
+        self.at.seconds.saturating_sub(CLOCK_SKEW)
+    }
+
     /// Skip non-limit transcript lines and ignore separate Codex model buckets.
-    fn codex(line: &[u8], now: i64) -> Option<Self> {
+    fn codex(line: &[u8]) -> Option<Self> {
         if !files::has_marker(line, b"token_count") {
             return None;
         }
         let [kind, at, payload] = Value::parse(line)?.fields(["type", "timestamp", "payload"]);
         kind?.is("event_msg").then_some(())?;
         let at = Timestamp::iso(at?)?;
-        (at.seconds <= now.saturating_add(CLOCK_SKEW)).then_some(())?;
         let [kind, limits] = payload?.fields(["type", "rate_limits"]);
         kind?.is("token_count").then_some(())?;
         let [bucket, primary, secondary] =
@@ -267,11 +271,62 @@ impl Source {
     }
 }
 
+/// Complete rollout reports in file order. Keep only the deferred reports
+/// that can become the last valid line as the clock catches up.
+#[derive(Default)]
+struct CodexReports {
+    reading: Option<Reading>,
+    deferred: VecDeque<Reading>,
+    recheck_at: Option<i64>,
+}
+
+impl CodexReports {
+    fn ready(&self, now: i64) -> usize {
+        self.deferred.partition_point(|reading| reading.visible_at() <= now)
+    }
+
+    fn advance(&mut self, now: i64) {
+        let ready = self.ready(now);
+        if ready != 0 {
+            self.reading = Some(self.deferred[ready - 1]);
+            self.deferred.drain(..ready);
+        }
+    }
+
+    fn discard_superseded(&mut self, by: &Reading) {
+        if self.recheck_at.is_some_and(|at| by.visible_at() <= at) {
+            self.recheck_at = None;
+        }
+        self.deferred.truncate(self.deferred.partition_point(|older| older.visible_at() < by.visible_at()));
+    }
+
+    fn append(&mut self, reading: Reading, now: i64) {
+        if reading.visible_at() <= now {
+            self.reading = Some(reading);
+            self.deferred.clear();
+            self.recheck_at = None;
+        } else {
+            self.discard_superseded(&reading);
+            if self.recheck_at.is_none() {
+                if self.deferred.len() == CODEX_DEFERRED_LIMIT {
+                    self.recheck_at = Some(reading.visible_at());
+                } else {
+                    self.deferred.push_back(reading);
+                }
+            }
+        }
+    }
+
+    fn recheck_due(&self, now: i64) -> bool {
+        self.recheck_at.is_some_and(|at| at <= now)
+    }
+}
+
 /// Retain the most recent complete report and the state needed to read appends.
 struct CodexFile {
     version: FileVersion,
     stream: Stream,
-    reading: Option<Reading>,
+    complete: CodexReports,
     pending: Option<Reading>,
 }
 
@@ -285,39 +340,89 @@ impl CodexFile {
     ) -> io::Result<Self> {
         let floor = budget.remaining.saturating_sub(TAIL_BYTES);
         let mut retained = None;
-        let parse = |line: &[u8]| Reading::codex(line, now);
         if let Some(mut old) = cached {
-            if version == old.version {
+            if version == old.version && !old.complete.recheck_due(now) {
                 return Ok(old);
             }
             let growing = version.same_file(old.version) && version.len > old.version.len;
-            if growing && old.stream.can_resume(file, budget)? {
-                if version.len - old.version.len <= budget.remaining - floor {
+            if version == old.version || growing && old.stream.can_resume(file, budget)? {
+                old.complete.advance(now);
+                if growing
+                    && !old.complete.recheck_due(now)
+                    && version.len - old.version.len <= budget.remaining - floor
+                {
                     old.stream.read(file, version.len, budget, |line| {
-                        if let Some(reading) = parse(line) {
-                            old.reading = Some(reading);
+                        if let Some(reading) = Reading::codex(line) {
+                            old.complete.append(reading, now);
                         }
                     })?;
                     if old.stream.offset != version.len {
                         return Err(io::ErrorKind::UnexpectedEof.into());
                     }
-                    old.pending = parse(old.stream.tail());
+                    old.pending = Reading::codex(old.stream.tail());
                     old.version = version;
                     return Ok(old);
                 }
+                if old.complete.recheck_due(now) {
+                    old.complete.recheck_at = None;
+                }
                 // A large append can push the previous report out of the bounded tail.
-                retained = old.pending.or(old.reading);
+                if let Some(pending) = old.pending {
+                    old.complete.append(pending, now);
+                }
+                retained = Some(old.complete);
             }
         }
 
-        let (reading, stream) = files::tail(file, version.len, budget.remaining - floor, budget, parse)?;
-        let pending = parse(stream.tail());
-        Ok(Self { version, stream, reading: reading.or(retained), pending })
+        let mut deferred = VecDeque::<Reading>::new();
+        // An exceptionally long run of deferred reports gets one bounded
+        // read when a report outside the in-memory frontier may be usable.
+        let mut recheck_at = None;
+        let (reading, stream) = files::tail(file, version.len, budget.remaining - floor, budget, |line| {
+            let reading = Reading::codex(line)?;
+            if reading.visible_at() <= now {
+                return Some(reading);
+            }
+            // A later line already eligible at the same time takes precedence.
+            if deferred.front().is_none_or(|later| reading.visible_at() < later.visible_at()) {
+                if deferred.len() == CODEX_DEFERRED_LIMIT {
+                    recheck_at = deferred.pop_back().map(|reading| reading.visible_at());
+                }
+                deferred.push_front(reading);
+            }
+            None
+        })?;
+        let complete = match (reading, retained) {
+            (None, Some(mut previous)) => {
+                for reading in deferred {
+                    previous.append(reading, now);
+                }
+                previous.recheck_at = previous.recheck_at.into_iter().chain(recheck_at).min();
+                previous
+            }
+            (reading, _) => CodexReports { reading, deferred, recheck_at },
+        };
+        let pending = Reading::codex(stream.tail());
+        Ok(Self { version, stream, complete, pending })
     }
 
     /// A valid last line is usable before its newline, but may still change.
-    fn reported(&self) -> Option<&Reading> {
-        self.pending.as_ref().or(self.reading.as_ref())
+    fn reported(&self, now: i64) -> Option<&Reading> {
+        self.pending
+            .as_ref()
+            .filter(|r| r.visible_at() <= now)
+            .or_else(|| self.complete.ready(now).checked_sub(1).map(|i| &self.complete.deferred[i]))
+            .or_else(|| self.complete.reading.as_ref().filter(|r| r.visible_at() <= now))
+    }
+
+    fn next_reading(&self, now: i64) -> Option<i64> {
+        let ready = self.complete.ready(now);
+        [self.pending.as_ref(), self.complete.deferred.get(ready), self.complete.reading.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(Reading::visible_at)
+            .filter(|&change| change > now)
+            .min()
     }
 }
 
@@ -359,7 +464,11 @@ impl Codex {
             CodexSessions::Present
         };
         for candidate in &mut self.files.entries {
-            if budget.remaining != 0 && !candidate.cached.as_ref().is_some_and(|file| file.version == candidate.version)
+            if budget.remaining != 0
+                && !candidate
+                    .cached
+                    .as_ref()
+                    .is_some_and(|file| file.version == candidate.version && !file.complete.recheck_due(now))
             {
                 candidate.cached = root.open(&candidate.path).and_then(|(file, version)| {
                     CodexFile::read(&file, version, candidate.cached.take(), now, budget).ok()
@@ -378,20 +487,28 @@ impl Codex {
     }
 
     /// Different sources can describe the same account, not separate limits to add.
-    fn reported(&self) -> Option<(&Reading, Source)> {
+    fn reported(&self, now: i64) -> Option<(&Reading, Source)> {
         self.files
             .cached()
-            .filter_map(|file| file.reported().map(|r| (r, Source::CodexSession)))
-            .chain(self.omp.iter().map(|r| (r, Source::Omp)))
+            .filter_map(|file| file.reported(now).map(|r| (r, Source::CodexSession)))
+            .chain(self.omp.iter().filter(|r| r.visible_at() <= now).map(|r| (r, Source::Omp)))
             .max_by_key(|(r, _)| r.at)
+    }
+
+    fn next_reading(&self, now: i64) -> Option<i64> {
+        self.files
+            .cached()
+            .filter_map(|file| file.next_reading(now))
+            .chain(self.omp.iter().map(Reading::visible_at).filter(|&change| change > now))
+            .min()
     }
 
     /// A rollout with something in it, or a tree Milo was refused, says Codex
     /// runs here. An empty folder or an empty file is only a leftover.
-    fn presence(&self) -> Presence {
+    fn presence(&self, reported: Option<(&Reading, Source)>) -> Presence {
         let found = matches!(self.sessions, CodexSessions::Unreadable)
             || self.files.entries.iter().any(|file| file.version.len > 0);
-        Presence::of_limits(self.reported().map(|(reading, _)| reading), found)
+        Presence::of_limits(reported.map(|(reading, _)| reading), found)
     }
 }
 
@@ -605,20 +722,30 @@ struct Activity {
 }
 
 impl Claude {
-    fn reported(&self) -> Option<(&Reading, Source)> {
+    fn reported(&self, now: i64) -> Option<(&Reading, Source)> {
         [(&self.status, Source::ClaudeStatus), (&self.native, Source::ClaudeCache), (&self.omp, Source::Omp)]
             .into_iter()
             .filter_map(|(reading, source)| Some((reading.as_ref()?, source)))
+            .filter(|(reading, _)| reading.visible_at() <= now)
             .max_by_key(|(reading, _)| reading.at)
+    }
+
+    fn next_reading(&self, now: i64) -> Option<i64> {
+        [self.status.as_ref(), self.native.as_ref(), self.omp.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(Reading::visible_at)
+            .filter(|&change| change > now)
+            .min()
     }
 
     /// Claude Code keeps `~/.claude.json` from its first run and writes a
     /// transcript for each session. A `~/.claude` folder alone is no sign of
     /// it: Milo's own setup can create one.
-    fn presence(&self) -> Presence {
+    fn presence(&self, reported: Option<(&Reading, Source)>) -> Presence {
         let found = self.native_version.is_some_and(|version| version.len() > 0)
             || self.files.entries.iter().any(|file| file.version.len > 0);
-        Presence::of_limits(self.reported().map(|(reading, _)| reading), found)
+        Presence::of_limits(reported.map(|(reading, _)| reading), found)
     }
 
     /// Merge duplicate IDs only when a contributing file changes.
@@ -876,7 +1003,7 @@ impl Usage {
         }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
-        self.check_limits(now, &mut claude_budget);
+        self.check_limits(&mut claude_budget);
         self.codex.check(self.codex_dir.as_deref(), now, clock, manual, &mut codex_budget);
         let cutoff = self.today.since(now);
         let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, clock, manual, &mut claude_budget);
@@ -894,14 +1021,14 @@ impl Usage {
         result.is_some_and(|reports| self.keep(reports)) || checking
     }
 
-    fn check_limits(&mut self, now: i64, claude_budget: &mut Budget) {
+    fn check_limits(&mut self, claude_budget: &mut Budget) {
         if let Some(path) = &self.limits_file {
             files::read_cached(
                 path,
                 &mut self.claude.saved_version,
                 &mut self.claude.status,
                 claude_budget,
-                |file, version, budget| status::saved(file, version, budget, now),
+                status::saved,
             );
         }
         if let Some(path) = &self.claude_config {
@@ -910,7 +1037,7 @@ impl Usage {
                 &mut self.claude.native_version,
                 &mut self.claude.native,
                 claude_budget,
-                |file, version, budget| status::native(file, version, budget, now),
+                status::native,
             );
         }
     }
@@ -932,18 +1059,15 @@ impl Usage {
         if let Some(reports) = saved {
             self.keep(reports);
         }
-        self.check_limits(now, &mut Budget::new(CLAUDE_BYTES));
+        self.check_limits(&mut Budget::new(CLAUDE_BYTES));
         self.codex.check(self.codex_dir.as_deref(), now, clock, true, &mut Budget::new(CODEX_BYTES));
         let cutoff = self.today.since(now);
         self.claude.check(self.claude_dir.as_deref(), cutoff, clock, true, &mut Budget::new(0));
+        let codex = self.codex.reported(now);
+        let claude = self.claude.reported(now);
         let limits = [
-            (UsageTool::Codex, self.codex.presence(), self.codex.reported(), "run Codex to save one"),
-            (
-                UsageTool::Claude,
-                self.claude.presence(),
-                self.claude.reported(),
-                "turn on Show Claude Code limits in milo setup",
-            ),
+            (UsageTool::Codex, self.codex.presence(codex), codex, "run Codex to save one"),
+            (UsageTool::Claude, self.claude.presence(claude), claude, "turn on Show Claude Code limits in milo setup"),
         ];
         let mut lines = Vec::new();
         for (tool, presence, reported, step) in limits {
@@ -1038,18 +1162,20 @@ impl Pane for Usage {
         After::Stay
     }
 
-    /// Redraw when a report gets old or its known reset elapses, even without new data.
+    /// Redraw when the clock changes which readings and windows are usable.
     fn next_frame(&self) -> Option<Duration> {
         let now = self.now();
         let earliest = self
             .codex
-            .reported()
+            .reported(now)
             .into_iter()
-            .chain(self.claude.reported())
+            .chain(self.claude.reported(now))
             .flat_map(|(reading, source)| reading.windows.windows().map(move |window| (window, source)))
             .filter(|(window, _)| !window.is_reset(now))
             .flat_map(|(window, source)| [window.resets, Some(window.stale_at(source))])
             .flatten()
+            .chain(self.codex.next_reading(now))
+            .chain(self.claude.next_reading(now))
             .filter(|&change| change > now)
             .min();
         let wait = earliest.map_or(MINUTE, |ts| ts.saturating_sub(now).min(MINUTE));
@@ -1059,7 +1185,7 @@ impl Pane for Usage {
     /// A tool Milo neither shows nor found is left out of the help as well.
     fn help(&self) -> Page {
         let today = self.today.since;
-        let claude = self.claude.presence().relevant(self.tools[UsageTool::Claude]);
+        let claude = self.claude.presence(self.claude.reported(self.now())).relevant(self.tools[UsageTool::Claude]);
         let opencode = self.opencode.presence(today).relevant(self.tools[UsageTool::OpenCode]);
         Page::new(help_rows(claude, opencode))
     }
