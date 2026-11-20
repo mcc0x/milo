@@ -209,10 +209,10 @@ struct UsagePanel: View {
     private var footer: some View {
         HStack {
             Button(action: openSettings) {
-                Label("Settings…", systemImage: "slider.horizontal.3")
+                Label("Browser settings…", systemImage: "slider.horizontal.3")
             }
             .buttonStyle(.borderless)
-            .help("Open Milo web settings")
+            .help("Open Milo settings in your browser")
             .keyboardShortcut(",", modifiers: .command)
             Spacer()
             Menu {

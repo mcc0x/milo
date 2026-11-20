@@ -17,8 +17,8 @@ use mascot::Sprite;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BRAND_WIDTH: usize = "Milo  ".len() + VERSION.len();
-const MENU: &[&str] = &["Open Web Menu", "Settings", "Doctor", "Uninstall Milo"];
-const MENU_WIDTH: usize = "Install Menu App".len() + 2;
+const MENU: &[&str] = &["Browser settings", "Terminal settings", "Doctor", "Uninstall Milo"];
+const MENU_WIDTH: usize = MENU[1].len() + 2;
 const APP_ROW: usize = 3;
 const REMOVE_APP_ROW: usize = APP_ROW + 1;
 const OPEN_APP: &str = "Open or Update Menu App";
@@ -548,8 +548,8 @@ mod tests {
         home.draw(&mut wide);
         let lines = wide.text();
         let title = lines.iter().find(|line| line.contains("Milo  v")).unwrap();
-        let settings = lines.iter().find(|line| line.contains("Settings")).unwrap();
-        assert!(settings.chars().position(|ch| ch == 'S') > title.chars().position(|ch| ch == 'M'));
+        let settings = lines.iter().find(|line| line.contains("Terminal settings")).unwrap();
+        assert!(settings.chars().position(|ch| ch == 'T') > title.chars().position(|ch| ch == 'M'));
 
         let mut narrow = Screen::sized(18, 13);
         home.draw(&mut narrow);
@@ -581,14 +581,14 @@ mod tests {
         let mut home = Home::with_menu_app(None);
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
-        for label in ["Open Web Menu", "Settings", "Doctor", "Uninstall Milo", "Enter open", "q quit"] {
+        for label in ["Browser settings", "Terminal settings", "Doctor", "Uninstall Milo", "Enter open", "q quit"] {
             let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
             let end = x + label.len();
             assert_eq!(home.hover_span(x, y), Some(x..end));
             assert_eq!(home.hover_span(end - 1, y), Some(x..end));
             assert_eq!(home.hover_span(end, y), None);
         }
-        let Key::Click(x, y) = click_on(&screen, "Open Web Menu") else { unreachable!() };
+        let Key::Click(x, y) = click_on(&screen, "Browser settings") else { unreachable!() };
         assert_eq!(home.hover_span(x - 2, y), Some(x - 2..x - 1));
         assert_eq!(home.hover_span(x - 1, y), None);
         for label in ["Milo  v", "↑↓ move"] {
@@ -597,7 +597,7 @@ mod tests {
         }
         assert_eq!(home.selected, 0);
         let mut rail = Screen::sized(28, 12);
-        assert_eq!(home.key(click_on(&screen, "Open Web Menu")), After::OpenWeb);
+        assert_eq!(home.key(click_on(&screen, "Browser settings")), After::OpenWeb);
         home.key(Key::Home);
         home.draw(&mut rail);
         assert_eq!(rail.text()[11], " Enter open · q quit");
@@ -606,7 +606,7 @@ mod tests {
 
         let mut narrow = Screen::sized(4, 1);
         home.draw(&mut narrow);
-        assert_eq!(narrow.text(), ["Open"]);
+        assert_eq!(narrow.text(), ["Brow"]);
         assert_eq!(home.hover_span(3, 0), Some(0..4));
         assert_eq!(home.hover_span(4, 0), None);
     }
@@ -653,11 +653,11 @@ mod tests {
         let mut home = Home::with_menu_app(None);
         let mut screen = Screen::sized(9, 1);
         home.draw(&mut screen);
-        assert_eq!(screen.text(), ["Open Web"]);
+        assert_eq!(screen.text(), ["Browser s"]);
         assert_eq!(home.key(Key::Enter), After::OpenWeb);
         assert_eq!(home.key(Key::WheelDown), After::Stay);
         home.draw(&mut screen);
-        assert_eq!(screen.text(), ["Settings"]);
+        assert_eq!(screen.text(), ["Terminal"]);
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut screen);
         assert_eq!(screen.text(), ["Uninstall"]);
@@ -673,7 +673,7 @@ mod tests {
         for &label in MENU {
             assert!(lines.iter().any(|line| line.contains(label)), "{lines:?}");
         }
-        assert_eq!(home.key(click_on(&wide, "Open Web Menu")), After::OpenWeb);
+        assert_eq!(home.key(click_on(&wide, "Browser settings")), After::OpenWeb);
     }
 
     #[test]

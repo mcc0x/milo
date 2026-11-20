@@ -21,13 +21,13 @@ sh macos/build-menu.sh
 
 For a source build, use `./target/local-menu/milo` for subsequent menu commands. On `main`, both build modes omit personal paths. Run `milo menubar install` from the shell whose provider and configuration paths you want the menu to use; run it again if they change. These paths live in a private file beside the installed app, not in the signed bundle. The app has its own reader and does not require Rex.
 
-If the CLI that installed the app has changed or moved, **Settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor. The published v0.1.4 release predates install-time profile capture and uses default provider paths.
+If the CLI that installed the app has changed or moved, **Browser settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor. The published v0.1.4 release predates install-time profile capture and uses default provider paths.
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 
 ![Milo’s native menu with example Codex and Claude limits and the Settings button](img/menu-bar.webp)
 
-Choose **Settings…** to open the [local browser editor](setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
+Choose **Browser settings…** to open the [local browser editor](setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
 
 ## Which tools appear
 

@@ -64,7 +64,7 @@ See how much of each reported limit you have left. Milo reads local reports save
 
 ### In the macOS menu bar
 
-Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage. Click it for reset times, or choose **Settings…** to open the browser editor.
+Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage. Click it for reset times, or choose **Browser settings…** to open the browser editor.
 
 <p align="center"><img src="docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
@@ -82,7 +82,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 
 | Command | Opens |
 | --- | --- |
-| `milo` | Milo Home: Settings, Doctor, browser editor and Uninstall |
+| `milo` | Milo Home: Browser settings, Terminal settings, Doctor and Uninstall |
 | `milo outline [PATH]` | File tree |
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |

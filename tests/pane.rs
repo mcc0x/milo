@@ -883,7 +883,7 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
         tty.until("q quit");
         let (settings, home_quit) = {
             let home = tty.output();
-            (painted(&home, "Settings").next().unwrap(), painted(&home, "q quit").next().unwrap())
+            (painted(&home, "Terminal").next().unwrap(), painted(&home, "q quit").next().unwrap())
         };
 
         // A fresh Settings frame shows which cells would really change a draft
@@ -932,8 +932,8 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
         if cols == 40 {
             tty.bytes.clear();
             tty.master.write_all(b"q").unwrap();
-            tty.until("Settings");
-            let (row, span) = painted(&tty.output(), "Settings").next().unwrap();
+            tty.until("Terminal");
+            let (row, span) = painted(&tty.output(), "Terminal").next().unwrap();
             tty.bytes.clear();
             tty.click(span.start, row, "");
             tty.until("Workflow");

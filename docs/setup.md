@@ -83,11 +83,11 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Browser editor
 
-Run `milo web` from the project you want to configure, or choose **Open Web Menu** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+Run `milo web` from the project you want to configure, or choose **Browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
 ![The local editor showing pane order, rail side, width and Usage height for an example worktree](img/web-settings.webp)
 
-On macOS, the optional [Milo menu app](usage.md#macos-menu-bar) also opens this editor from **Settings…**. To configure a particular worktree, run `milo web` from that project.
+On macOS, the optional [Milo menu app](usage.md#macos-menu-bar) also opens this editor from **Browser settings…**. To configure a particular worktree, run `milo web` from that project.
 
 The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
 

@@ -72,7 +72,7 @@ See how much of each reported limit you have left. Milo reads local reports save
 
 ### In the macOS menu bar
 
-Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage. Click it for reset times, or choose **Settings…** to open the browser editor.
+Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage. Click it for reset times, or choose **Browser settings…** to open the browser editor.
 
 <p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
@@ -90,7 +90,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 
 | Command | Opens |
 | --- | --- |
-| `milo` | Milo Home: Settings, Doctor, browser editor and Uninstall |
+| `milo` | Milo Home: Browser settings, Terminal settings, Doctor and Uninstall |
 | `milo outline [PATH]` | File tree |
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |
@@ -197,11 +197,11 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Browser editor
 
-Run `milo web` from the project you want to configure, or choose **Open Web Menu** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+Run `milo web` from the project you want to configure, or choose **Browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
 ![The local editor showing pane order, rail side, width and Usage height for an example worktree](https://github.com/mcc0x/milo/blob/main/docs/img/web-settings.webp)
 
-On macOS, the optional [Milo menu app](https://github.com/mcc0x/milo/blob/main/docs/usage.md#macos-menu-bar) also opens this editor from **Settings…**. To configure a particular worktree, run `milo web` from that project.
+On macOS, the optional [Milo menu app](https://github.com/mcc0x/milo/blob/main/docs/usage.md#macos-menu-bar) also opens this editor from **Browser settings…**. To configure a particular worktree, run `milo web` from that project.
 
 The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
 
@@ -471,13 +471,13 @@ sh macos/build-menu.sh
 
 For a source build, use `./target/local-menu/milo` for subsequent menu commands. On `main`, both build modes omit personal paths. Run `milo menubar install` from the shell whose provider and configuration paths you want the menu to use; run it again if they change. These paths live in a private file beside the installed app, not in the signed bundle. The app has its own reader and does not require Rex.
 
-If the CLI that installed the app has changed or moved, **Settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor. The published v0.1.4 release predates install-time profile capture and uses default provider paths.
+If the CLI that installed the app has changed or moved, **Browser settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor. The published v0.1.4 release predates install-time profile capture and uses default provider paths.
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 
 ![Milo’s native menu with example Codex and Claude limits and the Settings button](https://github.com/mcc0x/milo/blob/main/docs/img/menu-bar.webp)
 
-Choose **Settings…** to open the [local browser editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
+Choose **Browser settings…** to open the [local browser editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
 
 ## Which tools appear
 
