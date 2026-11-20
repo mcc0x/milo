@@ -219,8 +219,9 @@ dialog p { margin-block-start: .4rem; color: var(--muted); }
 .dialog-actions { margin-block-start: 1.05rem; justify-content: end; }
 
 @media (max-width: 45rem) {
-  .control-dock { max-width: none; flex-wrap: nowrap; gap: 0; padding: .15rem; }
+  .control-dock { gap: 0; padding: .15rem; }
   .navigation, .dock-actions { gap: 0; }
+  .navigation { flex-wrap: wrap; justify-content: center; }
   .navigation > button, .dock-actions .draft-action { inline-size: 2.75rem; min-height: 2.75rem; padding: 0; }
   .navigation > button { gap: 0; }
   .navigation > button:hover { background: radial-gradient(circle, #ffffff91 1rem, transparent calc(1rem + 1px)); }

@@ -9,7 +9,7 @@ const navButtons = [...document.querySelectorAll('[data-page]')];
 const queue = [];
 const numericDrafts = new Map();
 const heldDrafts = new Set();
-let panelPress = false;
+let pointerPress = false;
 let saveRequested = false;
 let page = 'layout';
 let state;
@@ -109,19 +109,25 @@ async function api(path, method = 'GET', payload) {
   const headers = {Authorization: `Bearer ${token}`};
   if (payload !== undefined) headers['Content-Type'] = 'application/json';
   let response;
+  let data = null;
   try {
     response = await fetch(path, {method, headers, body: JSON.stringify(payload), cache: 'no-store', credentials: 'omit', redirect: 'error'});
+    if (response.status !== 204) {
+      data = await response.json().catch(error => {
+        if (response.ok) throw error;
+        return null;
+      });
+    }
   } catch {
     connected = false;
     throw new Error('The local editor did not answer. Reconnect, or run milo web again if the session has ended.');
   }
   if (!response.ok) {
-    const data = await response.json().catch(() => null);
     if (response.status === 401 || response.status === 403) connected = false;
     throw new Error(data?.error || `The local editor returned HTTP ${response.status}.`);
   }
   connected = true;
-  return response.status === 204 ? null : response.json();
+  return data;
 }
 
 let toastTimer;
@@ -246,6 +252,8 @@ function confirm(title, note, label, action) {
   };
   dialog.returnValue = '';
   dialog.showModal();
+  // Keep numbers blurred by opening the dialog local until the user decides.
+  heldDrafts.clear();
 }
 
 function discard(group) {
@@ -437,7 +445,7 @@ function setting(field, title, detail, type, options = {}) {
   const explanation = node('span', 'setting-detail', detail);
   const wrap = node('div', 'setting-input');
   if (type === 'select') {
-    const value = lookup(state, field);
+    const value = draftValue(field);
     const choices = node('fieldset', 'choice-strip');
     choices.disabled = Boolean(options.disabled);
     choices.append(node('legend', 'sr-only', title));
@@ -478,7 +486,7 @@ function setting(field, title, detail, type, options = {}) {
     control.type = 'checkbox';
     control.className = 'switch';
     control.setAttribute('role', 'switch');
-    control.checked = lookup(state, field);
+    control.checked = draftValue(field);
     control.addEventListener('change', () => edit(field, control.checked));
   } else {
     const value = draftValue(field);
@@ -505,8 +513,8 @@ function setting(field, title, detail, type, options = {}) {
         updateChrome();
       });
       control.addEventListener('change', () => {
-        // Redrawing the panel under a held pointer would cancel the click on the pressed control.
-        if (panelPress) heldDrafts.add(field);
+        // Let the pressed control act before submitting a draft blurred by this press.
+        if (pointerPress) heldDrafts.add(field);
         else applyNumericDraft(field);
       });
       control.addEventListener('keydown', event => {
@@ -644,7 +652,8 @@ function scopeActions(key, group) {
   const label = originLabels[group.scope];
   row.append(group.inherit ? disclosure(`scope-${key}`, `${label} ▾`, `${label} options`, [
     button('Remove override…', 'text-button', `inherit-${key}`, () => {
-      confirm('Remove worktree override?', `This worktree will use the global ${groupLabels[key]}${group.dirty ? ' and lose unsaved changes in this group' : ''}.`,
+      const dirty = group.dirty || (key === 'layout' && numericDrafts.size > 0);
+      confirm('Remove worktree override?', `This worktree will use the global ${groupLabels[key]}${dirty ? ' and lose unsaved changes in this group' : ''}.`,
         'Remove override', () => command('inherit', {group: key}));
     }, paused),
   ]) : node('span', 'group-origin', label));
@@ -663,21 +672,24 @@ function panePicker(editable) {
   picker.disabled = !editable;
   const legend = node('legend', 'sr-only', 'Panes in rail order');
   const list = node('ol', 'pane-list');
-  state.layout.order.forEach((role, index, order) => {
+  draftValue('layout.order').forEach((role, index, order) => {
     const line = node('li', 'pane-line');
     const label = node('label');
     const input = node('input');
     input.type = 'checkbox';
     input.id = `enable-${role}`;
-    input.checked = state.layout.panes[role];
+    input.checked = draftValue(`layout.panes.${role}`);
     input.addEventListener('change', () => edit(`layout.panes.${role}`, input.checked));
     label.append(input, document.createTextNode(roleNames[role]));
     const positions = node('div', 'button-row');
     for (const [delta, arrow, direction] of [[-1, '←', 'up'], [1, '→', 'down']]) {
       const to = index + delta;
       const move = button(arrow, 'secondary', `move-${role}-${direction}`, () => {
-        const next = [...order];
-        [next[index], next[to]] = [next[to], next[index]];
+        const next = [...draftValue('layout.order')];
+        const from = next.indexOf(role);
+        const destination = from + delta;
+        if (destination < 0 || destination >= next.length) return;
+        [next[from], next[destination]] = [next[destination], next[from]];
         edit('layout.order', next);
       }, to < 0 || to >= order.length);
       move.setAttribute('aria-label', `Move ${roleNames[role]} ${delta < 0 ? 'earlier' : 'later'}`);
@@ -726,7 +738,7 @@ function appearanceView() {
     setting('appearance.usage_large_figures', 'Usage display', 'Auto fits the available space.', 'select',
       {disabled, choices: [['false', 'Auto compact'], ['true', 'Large figures']]}),
     ...usageTools.map(([key, name]) => setting(`appearance.usage_${key}`, `${name} usage`,
-      usageDetails[state.appearance[`usage_${key}`]], 'select', {disabled, choices: usageChoices})),
+      usageDetails[draftValue(`appearance.usage_${key}`)], 'select', {disabled, choices: usageChoices})),
   ])];
 }
 
@@ -822,15 +834,15 @@ function layoutActions() {
   return actions;
 }
 
-byId('settings-panel').addEventListener('pointerdown', event => {
-  if (event.button === 0) panelPress = true;
+document.addEventListener('pointerdown', event => {
+  if (event.button === 0) pointerPress = true;
 }, {capture: true});
 for (const type of ['pointerup', 'pointercancel', 'contextmenu', 'blur']) {
   window.addEventListener(type, () => {
-    if (!panelPress) return;
+    if (!pointerPress) return;
     // The timer runs after the click that this release dispatches.
     setTimeout(() => {
-      panelPress = false;
+      pointerPress = false;
       for (const field of heldDrafts) applyNumericDraft(field);
       heldDrafts.clear();
     });
@@ -864,18 +876,16 @@ byId('confirm').addEventListener('close', event => {
 });
 byId('retry').addEventListener('click', () => { void connect(true); });
 byId('drop-edit').addEventListener('click', () => {
-  if (running || closing) return;
+  if (!paused || running || closing) return;
   if (document.activeElement === byId('drop-edit')) restoreSettingsFocus();
   queue.shift();
-  paused = false;
-  localError = '';
-  render();
-  void drain();
+  paused = queue.length > 0;
+  void connect();
 });
 for (const id of ['open-retry', 'reconnect']) byId(id).addEventListener('click', () => { void connect(); });
 // The dev client may refresh the page once browser-only input has reached the draft.
 window.addEventListener('milo:dev-reload', event => {
-  if (running || paused || closing || ended || queue.length || byId('confirm').open || numericDrafts.size) {
+  if (running || paused || closing || ended || queue.length || document.querySelector('dialog[open]') || numericDrafts.size) {
     event.preventDefault();
   } else {
     window.removeEventListener('beforeunload', warnOnUnload);

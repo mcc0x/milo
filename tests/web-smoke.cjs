@@ -196,10 +196,48 @@ async function pressAfterNumberEdit(page) {
   console.log('Invalid number: leaving Layout pointed back at the field');
 }
 
+async function movePaneDuringPendingEdit(page) {
+  const routePattern = '**/api/action';
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const hold = route => gate.then(() => route.continue());
+  await page.route(routePattern, hold, {times: 1});
+  try {
+    const move = button(page, 'Move Outline later');
+    const sent = page.waitForRequest(request => new URL(request.url()).pathname === '/api/action');
+    await move.click();
+    await sent;
+    await move.click();
+  } finally {
+    release();
+  }
+  await status(page, dirty).waitFor({state: 'attached'});
+  const panes = page.getByRole('group', {name: 'Panes in rail order', exact: true});
+  const order = await panes.getByRole('checkbox').evaluateAll(inputs => inputs.map(input => input.labels[0].textContent));
+  assert.deepEqual(order, ['History', 'Usage', 'Outline'], 'both moves apply in order');
+}
+
+async function discardFocusedNumber(page) {
+  const field = number(page, 'Rail width');
+  const original = await field.inputValue();
+  await field.fill('42');
+  const box = await button(page, 'Discard').boundingBox();
+  assert(box, 'Discard is on screen');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  const confirmation = dialog(page, 'Discard all unsaved changes?');
+  await button(confirmation, 'Discard changes').click();
+  await status(page, clean).waitFor({state: 'attached'});
+  assert.equal(await field.inputValue(), original, 'discard did not reapply the number after blur');
+}
+
 async function rejectStaleDone(context, current, url) {
   const confirmation = dialog(current, 'Close the dashboard?');
-  await button(current, 'Done').click();
-  await button(confirmation, 'Close dashboard').waitFor();
+  const field = number(current, 'Rail width');
+  await field.fill('42');
+  const box = await button(current, 'Done').boundingBox();
+  assert(box, 'Done is on screen');
+  await current.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await button(confirmation, 'Discard and close').waitFor();
   const second = await openEditor(context, url);
 
   const right = second.getByRole('radio', {name: 'Right', exact: true});
@@ -209,14 +247,27 @@ async function rejectStaleDone(context, current, url) {
 
   const [response] = await Promise.all([
     current.waitForResponse(response => new URL(response.url()).pathname === '/api/close'),
-    button(confirmation, 'Close dashboard').click(),
+    button(confirmation, 'Discard and close').click(),
   ]);
   assert.equal(response.status(), 409, 'stale Done must not close the session');
   await current.getByText(/The draft changed in another request/).first().waitFor();
   await button(current, 'Refresh editor state').click();
-  await status(current, dirty).waitFor({state: 'attached'});
-  assert(await current.getByRole('radio', {name: 'Right', exact: true}).isChecked(), 'the newer draft was retained');
+  await current.getByRole('radio', {name: 'Right', exact: true, checked: true}).waitFor();
+  assert.equal(await field.inputValue(), '42', 'refresh kept the local number after Done was rejected');
   console.log('Stale Done: the second tab’s draft survived and was visible after refresh');
+
+  // Another tab commits a newer draft. Dropping the rejected local edit should
+  // show that draft immediately, without resubmitting the dropped value.
+  const outline = {name: 'Outline', exact: true};
+  const changed = second.waitForResponse(response => new URL(response.url()).pathname === '/api/action');
+  await second.getByRole('checkbox', outline).uncheck();
+  assert((await changed).ok(), 'the other tab made another change');
+  await current.bringToFront();
+  await current.getByRole('radio', {name: 'Left', exact: true}).click();
+  await button(current, 'Drop this edit').click();
+  await current.getByRole('checkbox', {...outline, checked: false}).waitFor();
+  assert(await current.getByRole('radio', {name: 'Right', exact: true}).isChecked(), 'the stale edit was dropped');
+  assert.equal(await field.inputValue(), '42', 'dropping one edit kept the independent local number');
 }
 
 async function confirmFromMobileFooter(browser, url, exited) {
@@ -224,6 +275,10 @@ async function confirmFromMobileFooter(browser, url, exited) {
   const context = await browser.newContext({viewport, isMobile: true, hasTouch: true});
   context.setDefaultTimeout(timeout);
   const page = await openEditor(context, url);
+  await page.setViewportSize({width: 260, height: viewport.height});
+  const dock = await page.locator('.control-dock').boundingBox();
+  assert(dock && dock.x >= 0 && dock.x + dock.width <= 260, 'navigation and draft controls fit at narrow widths');
+  await page.setViewportSize(viewport);
   const done = button(page.getByRole('contentinfo'), 'Done');
   const box = await done.boundingBox();
   assert(box && box.x >= 0 && box.x + box.width <= viewport.width &&
@@ -271,6 +326,8 @@ async function main() {
       await saveNumbers(page);
       await chooseUsageTools(page, binary, cwd, env);
       await manageMenuApp(page, url, binary, cwd, env);
+      await movePaneDuringPendingEdit(page);
+      await discardFocusedNumber(page);
       await pressAfterNumberEdit(page);
       await page.close();
     });
