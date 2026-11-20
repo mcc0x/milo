@@ -57,7 +57,8 @@ checkout_for_script() {
     [ "${script##*/}" = install.sh ] || return 1
     dir=$(cd -P "${script%/*}/" && pwd -P) || return 1
     top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
-    [ "$dir" = "$top" ] &&
+    # Compare the directories, not their spelling: the shell keeps the typed case, Git the stored one.
+    [ "$dir" -ef "$top" ] &&
         [ -f "$dir/src/main.rs" ] &&
         grep -q '^name = "milo"$' "$dir/Cargo.toml" 2>/dev/null &&
         git -C "$dir" ls-files --error-unmatch -- install.sh >/dev/null 2>&1 || return 1

@@ -81,5 +81,10 @@ expect_install checkout sh install.sh
 cd "$unrelated"
 expect_install checkout sh '../milo checkout/install.sh'
 expect_install checkout sh linked-install.sh
+# A case-insensitive volume reaches the checkout through another spelling of its path.
+respelled="$fixture/MILO checkout"
+if [ "$respelled" -ef "$checkout" ]; then
+    expect_install checkout sh "$respelled/install.sh"
+fi
 expect_install fetched sh install.sh
 cat "$checkout/install.sh" | expect_install fetched sh

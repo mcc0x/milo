@@ -29,13 +29,15 @@ cargo fmt -- --check               # no diff; the settings are in rustfmt.toml
 cargo test                         # everything passes
 ```
 
+After changing `install.sh`, also run `sh tests/install.sh`; `cargo test` does not run it.
+
 Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
 When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
 
 ## Tagging a release
 
-Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. GitHub Actions runs `cargo test --release --locked` on an arm64 macOS runner. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
+Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. On an arm64 macOS runner, GitHub Actions runs `sh tests/install.sh` and `cargo test --release --locked`, then drives the browser editor of a release build in Chromium with `tests/web-smoke.cjs`. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
 
 ## What a good change looks like
 
@@ -199,5 +201,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
+| `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |
+| `tests/web-smoke.cjs` | Saves and closes the browser editor of a built binary in Chromium. |
