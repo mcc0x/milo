@@ -52,10 +52,7 @@
     <p class="sr-only" id="draft-status" role="status"></p>
 
     <main class="editor-main">
-      <header class="section-header">
-        <h1 id="section-title" tabindex="-1">Layout</h1>
-        <p id="section-description"></p>
-      </header>
+      <h1 class="sr-only">Milo settings</h1>
       <div id="error-box" hidden>
         <p id="error"></p>
         <div class="button-row" id="error-actions" hidden>
@@ -65,11 +62,9 @@
         </div>
       </div>
       <div id="workspace" class="workspace">
-        <aside class="preview" id="preview" aria-labelledby="preview-title">
-          <div class="preview-heading">
-            <h2 id="preview-title">Tab preview</h2>
-            <span class="preview-tag">Fictional workspace</span>
-          </div>
+        <section id="settings-panel" class="settings-panel" tabindex="-1"></section>
+        <details class="preview" id="preview" open>
+          <summary class="preview-heading"><strong id="preview-title">Tab preview</strong><span class="preview-tag">Sample workspace</span></summary>
           <div class="terminal">
             <div class="terminal-bar">
               <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -81,8 +76,7 @@
           <p class="preview-detail" id="preview-detail"></p>
           <p class="split-help" id="split-help">Drag the dividers or focus them and press the arrow keys.</p>
           <div class="trial-tools" id="trial-tools" hidden></div>
-        </aside>
-        <section id="settings-panel" class="settings-panel" aria-labelledby="section-title"></section>
+        </details>
       </div>
     </main>
   <footer class="actionbar" id="actionbar" hidden>

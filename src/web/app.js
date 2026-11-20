@@ -4,18 +4,16 @@ const byId = id => document.getElementById(id);
 const token = location.hash.slice(1);
 const roles = ['outline', 'history', 'usage'];
 const roleNames = {outline: 'Outline', history: 'History', usage: 'Usage'};
-const pages = {
-  layout: ['Layout', 'Arrange the Milo panes that sit beside your work.'],
-  appearance: ['Appearance', 'Choose how Milo marks activity, files and usage.'],
-  workflow: ['Workflow', 'Decide what Milo follows and what opens first.'],
-  health: ['Health', 'Check this editor’s connection and your local Milo setup.'],
-};
 const originLabels = {default: 'Built-in defaults', global: 'Global default', worktree: 'Worktree override', account: 'Account settings'};
 const groupLabels = {layout: 'layout', preferences: 'pane preferences', account: 'Claude Code choices'};
 const navButtons = [...document.querySelectorAll('[data-page]')];
 const queue = [];
 let page = 'layout';
 let state;
+const compactPreview = matchMedia('(max-width: 45rem)');
+function fitPreview() { byId('preview').open = !compactPreview.matches; }
+compactPreview.addEventListener('change', fitPreview);
+fitPreview();
 let running = false;
 let paused = false;
 let closing = false;
@@ -286,12 +284,13 @@ function render() {
     dot.replaceChildren(node('span', 'sr-only', ' (unsaved changes)'));
     dot.hidden = !dirty;
   }
-  [byId('section-title').textContent, byId('section-description').textContent] = pages[page];
   byId('preview').hidden = page === 'health';
   byId('workspace').classList.toggle('without-preview', page === 'health');
   if (page !== 'health') renderPreview();
   const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, health: healthView};
-  byId('settings-panel').replaceChildren(...views[page]());
+  const panel = byId('settings-panel');
+  panel.replaceChildren(...views[page]());
+  panel.setAttribute('aria-labelledby', panel.querySelector('h2').id);
   updateChrome();
   if (focusId && !focus.isConnected) {
     const replacement = byId(focusId);
@@ -299,7 +298,7 @@ function render() {
       if (unfinished !== null) replacement.value = unfinished;
       replacement.focus({preventScroll: true});
     } else {
-      byId('section-title').focus({preventScroll: true});
+      panel.focus({preventScroll: true});
     }
   }
 }
@@ -315,7 +314,7 @@ function setting(field, title, detail, type, options = {}) {
   const value = lookup(state, field);
   control.id = label.htmlFor = id;
   explanation.id = `${id}-detail`;
-  control.setAttribute('aria-describedby', explanation.id);
+  if (detail) control.setAttribute('aria-describedby', explanation.id);
   control.disabled = Boolean(options.disabled);
   if (type === 'switch') {
     control.type = 'checkbox';
@@ -352,7 +351,8 @@ function setting(field, title, detail, type, options = {}) {
     edit(field, next);
   }
   control.addEventListener('change', apply);
-  info.append(label, explanation);
+  info.append(label);
+  if (detail) info.append(explanation);
   wrap.append(control);
   if (options.unit) wrap.append(node('span', 'unit', '%'));
   row.append(info, wrap);
@@ -368,7 +368,8 @@ function groupCard(key, title, description, controls) {
   heading.id = `group-${key}`;
   card.setAttribute('aria-labelledby', heading.id);
   titleline.append(heading, node('span', 'group-origin', originLabels[group.scope]));
-  header.append(titleline, node('p', '', description));
+  header.append(titleline);
+  if (description) header.append(node('p', '', description));
   const list = node('div', 'group-controls');
   list.append(...controls);
   card.append(header, list, groupFooter(key, group));
@@ -407,22 +408,17 @@ function groupFooter(key, group) {
   const footer = node('footer', 'group-footer');
   const extras = node('div', 'button-row');
   const install = key === 'layout' && state.context.inside_rex && !state.context.installed && (group.save_global || group.save_worktree);
-  const trial = key === 'layout' && state.trial;
-  const enabled = group.dirty || install || trial;
-  const note = !group.editable ? 'These settings are read-only in this session.' : group.dirty ?
-    'You’re editing an unsaved draft. Choose where to save it.' : trial ?
-      'Choose where to save this layout.' : install ?
-        'Choose a scope to save this layout and set up the Rex integration.' : 'No unsaved changes in this group.';
-  footer.append(node('p', '', note));
-  const saves = saveChoices(key, group, 'save', !enabled || paused);
+  if (!group.editable) footer.append(node('p', '', 'Read-only in this session.'));
+  if (install) {
+    footer.append(node('p', '', 'Set up in Rex by saving this layout for a worktree or as the default.'),
+      saveChoices(key, group, 'install', paused));
+  }
   if (group.inherit) {
     extras.append(button('Use global default', 'text-button', `inherit-${key}`, () => {
       confirm('Use the global default?', `This removes this worktree’s ${groupLabels[key]} override${group.dirty ? ' and discards the unsaved changes in this group' : ''}.`,
         'Use global default', () => command('inherit', {group: key}));
     }, paused));
   }
-  if (group.dirty) extras.append(button('Discard changes', 'text-button', `discard-${key}`, () => discard(key), paused));
-  if (saves.childElementCount) footer.append(saves);
   if (extras.childElementCount) footer.append(extras);
   return footer;
 }
@@ -430,8 +426,7 @@ function groupFooter(key, group) {
 function panePicker(editable) {
   const picker = node('fieldset', 'pane-picker');
   picker.disabled = !editable;
-  const legend = node('legend', 'setting-label', 'Milo panes');
-  legend.append(node('span', 'setting-detail', 'Choose which panes show and their order in the rail.'));
+  const legend = node('legend', 'sr-only', 'Panes in rail order');
   const list = node('ol', 'pane-list');
   state.layout.order.forEach((role, index, order) => {
     const line = node('li', 'pane-line');
@@ -443,14 +438,14 @@ function panePicker(editable) {
     input.addEventListener('change', () => edit(`layout.panes.${role}`, input.checked));
     label.append(input, document.createTextNode(roleNames[role]));
     const positions = node('div', 'button-row');
-    for (const [delta, arrow, direction] of [[-1, '↑', 'up'], [1, '↓', 'down']]) {
+    for (const [delta, arrow, direction] of [[-1, '←', 'up'], [1, '→', 'down']]) {
       const to = index + delta;
       const move = button(arrow, 'secondary', `move-${role}-${direction}`, () => {
         const next = [...order];
         [next[index], next[to]] = [next[to], next[index]];
         edit('layout.order', next);
       }, to < 0 || to >= order.length);
-      move.setAttribute('aria-label', `Move ${roleNames[role]} ${direction}`);
+      move.setAttribute('aria-label', `Move ${roleNames[role]} ${delta < 0 ? 'earlier' : 'later'}`);
       positions.append(move);
     }
     line.append(label, positions);
@@ -461,18 +456,18 @@ function panePicker(editable) {
 }
 
 function layoutView() {
-  const {layout, groups, capabilities, context} = state;
+  const {layout, groups, capabilities} = state;
   const disabled = !groups.layout.editable;
   const presets = node('div', 'presets');
   for (const [preset, label] of [['tree', 'Just the tree'], ['sidebar', 'Project sidebar']]) {
     presets.append(button(label, 'secondary', `preset-${preset}`, () => command('preset', {preset}), disabled || paused));
   }
   const options = {disabled, min: 0.000001, max: 99.999999, step: 'any', unit: '%'};
-  const controls = [presets, panePicker(!disabled),
-    setting('layout.side', 'Rail side', 'Which side of the shell holds Milo panes.', 'select', {disabled, choices: [['left', 'Left'], ['right', 'Right']]}),
-    setting('layout.width', 'Rail width', 'Share of the tab reserved for the Milo panes.', 'number', options),
-    setting('layout.outline_share', 'Outline share', 'Outline’s share of the space it splits with History. Changing this resets custom heights.', 'number', options),
-    setting('layout.usage_rows', 'Usage rows', 'Target height for Usage in terminal rows. Changing this resets custom heights.', 'number',
+  const controls = [panePicker(!disabled), presets,
+    setting('layout.side', 'Rail side', '', 'select', {disabled, choices: [['left', 'Left'], ['right', 'Right']]}),
+    setting('layout.width', 'Rail width', 'Percentage of the tab.', 'number', options),
+    setting('layout.outline_share', 'Outline share', 'Relative to History. Resets custom heights.', 'number', options),
+    setting('layout.usage_rows', 'Usage rows', 'Resets custom heights.', 'number',
       {disabled, min: 1, max: 4294967295, step: 1}),
   ];
   if (layout.ratios) {
@@ -484,9 +479,7 @@ function layoutView() {
   if (capabilities.auto_arrange) {
     controls.push(setting('layout.auto_arrange', 'Arrange new shell tabs', 'This switch is global. New command tabs and tabs with an existing layout are skipped.', 'switch'));
   }
-  const description = context.inside_rex ? 'Edits change only the preview until you try or save them.' :
-    'Save a layout for later. Trying, capturing and arranging tabs requires a Rex session.';
-  return [groupCard('layout', 'Pane layout', description, controls)];
+  return [groupCard('layout', 'Panes', '', controls)];
 }
 
 function appearanceView() {
@@ -760,10 +753,10 @@ for (const tab of navButtons) {
   tab.addEventListener('click', () => {
     page = tab.dataset.page;
     render();
-    byId('section-title').focus();
+    byId('settings-panel').focus();
   });
 }
-byId('skip-settings').addEventListener('click', () => byId('section-title').focus());
+byId('skip-settings').addEventListener('click', () => byId('settings-panel').focus());
 byId('done').addEventListener('click', done);
 byId('save-draft').addEventListener('click', showSaveOptions);
 byId('discard-all').addEventListener('click', () => discard('all'));
