@@ -4,10 +4,13 @@
 //! Nothing here reads a terminal's screen, its title or what was typed.
 //! A *claim* records the title Milo last gave a tab, by Rex window ID, so
 //! that a restarted listener can tell its own titles from names people chose.
+//! An answer's *grounds* are the files it depends on. While they read the
+//! same, the listener reuses the answer instead of starting Milo and Git again.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::git::{self, Checkout};
@@ -21,7 +24,7 @@ const CLAIMS_LIMIT: u64 = 1 << 20;
 /// Rex's default limits allow this many tabs on one server.
 const CLAIMS_KEPT: usize = 4096;
 const BAD_ARGS: &str = "Invalid tab-title arguments.";
-const NO_PROJECT: &str = "This directory is not in a Git project.";
+const NO_PROJECT: &str = "This shell is not in a Git project.";
 const BAD_STATE: &str = "Could not update Milo's remembered tab titles.";
 
 /// Internal, noninteractive entry point for the installed Rex listener and actions.
@@ -49,19 +52,30 @@ fn run(args: &[OsString], config: &Path, state: &Path) -> Result<String, &'stati
     match (action.to_str(), rest) {
         // The explicit session action names any Git project, whatever the tab-title choice.
         (Some("name"), [cwd]) => {
-            let checkout = git::checkout(Path::new(cwd)).ok_or(NO_PROJECT)?;
+            let checkout = git::checkout(Path::new(cwd))?.ok_or(NO_PROJECT)?;
             let label = label(&checkout, None);
-            let root = checkout.root.to_str().filter(|root| !label.is_empty() && !root.contains('\n'));
-            Ok(format!("{label}\n{}\n", root.ok_or(NO_PROJECT)?))
+            if label.is_empty() {
+                return Err(NO_PROJECT);
+            }
+            Ok(format!("{label}\n"))
         }
         // An empty title leaves the tab with Rex's own label.
         (Some("title"), [cwd, agent @ ..]) if agent.len() <= 1 => {
             let agent = agent.first().map(|name| agent_name(name).ok_or(BAD_ARGS)).transpose()?;
-            let checkout = git::checkout(Path::new(cwd));
-            let (prefs, _) =
-                Preferences::for_pane_in(config, checkout.as_ref().map(|checkout| checkout.root.as_path()));
-            let title = checkout.filter(|_| prefs.tab_titles).map(|checkout| label(&checkout, agent));
-            Ok(format!("={}\n", title.unwrap_or_default()))
+            let cwd = Path::new(cwd);
+            let (title, grounds) = match git::checkout(cwd) {
+                Ok(Some(checkout)) => {
+                    let (prefs, _) = Preferences::for_pane_in(config, Some(&checkout.root));
+                    let title = if prefs.tab_titles { label(&checkout, agent) } else { String::new() };
+                    (title, preferences::layers(config, &checkout.root).to_vec())
+                }
+                Ok(None) => (String::new(), outside_grounds(cwd)),
+                // Git could not be asked, which may not be so next time.
+                Err(_) => (String::new(), Vec::new()),
+            };
+            // A path through a link can come to mean another folder without any file changing.
+            let settled = cwd.canonicalize().is_ok_and(|real| real == cwd);
+            Ok(answer(&title, if settled { &grounds } else { &[] }))
         }
         (Some("claim"), [id, title]) => {
             let title = title.to_str().filter(|title| !title.is_empty() && fit(title, LABEL_LIMIT) == *title);
@@ -76,6 +90,48 @@ fn run(args: &[OsString], config: &Path, state: &Path) -> Result<String, &'stati
         }
         _ => Err(BAD_ARGS),
     }
+}
+
+/// A title, then its grounds on a line each. Grounds that a line cannot carry
+/// are all left out, and the listener asks again about an answer without any.
+fn answer(title: &str, grounds: &[PathBuf]) -> String {
+    let mut text = format!("={title}\n");
+    let lines: Option<Vec<&str>> = grounds
+        .iter()
+        .map(|path| path.to_str().filter(|path| path.starts_with('/') && !path.contains(['\n', '\r'])))
+        .collect();
+    for line in lines.unwrap_or_default() {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text
+}
+
+/// Outside a project, an answer holds until a repository appears at `dir` or
+/// above it, so its grounds are the places where one could. There are none if
+/// something is already in such a place, since Git has just refused it and
+/// may not next time. There are none either if another user could put a file
+/// there: the listener opens what it finds, and must not be handed their pipe.
+fn outside_grounds(dir: &Path) -> Vec<PathBuf> {
+    let mut grounds = Vec::new();
+    for folder in dir.ancestors() {
+        let git = folder.join(".git");
+        if git.symlink_metadata().is_ok() || !private(folder) {
+            return Vec::new();
+        }
+        // A linked worktree's `.git` is a file. A repository's is a folder, and
+        // whether a folder opens as a file is up to the system, so name a file in it too.
+        grounds.push(git.join("HEAD"));
+        grounds.push(git);
+    }
+    grounds
+}
+
+/// Whether only this user and the system can add files to `folder`.
+fn private(folder: &Path) -> bool {
+    // SAFETY: `geteuid` takes no arguments and only reads this process's user ID.
+    let user = unsafe { libc::geteuid() };
+    folder.metadata().is_ok_and(|meta| meta.mode() & 0o022 == 0 && (meta.uid() == user || meta.uid() == 0))
 }
 
 /// The listener passes the name of a process it recognised, never free text.
@@ -179,6 +235,8 @@ impl Claims {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
     use crate::fixture::Fixture;
     use crate::preferences::PreferenceSnapshot;
@@ -198,6 +256,18 @@ mod tests {
         fn run(&self, args: &[&str]) -> Result<String, &'static str> {
             let args: Vec<OsString> = args.iter().map(OsString::from).collect();
             run(&args, &self.fixture.root.join("config"), &self.fixture.root.join("state"))
+        }
+
+        /// The title Milo answers with and the grounds it gives for it.
+        fn asked(&self, about: &[&str]) -> (String, Vec<PathBuf>) {
+            let reply = self.run(&[&["title"], about].concat()).unwrap();
+            let mut lines = reply.lines();
+            let title = lines.next().and_then(|line| line.strip_prefix('=')).expect("a title line").to_owned();
+            (title, lines.map(PathBuf::from).collect())
+        }
+
+        fn title(&self, about: &[&str]) -> String {
+            self.asked(about).0
         }
 
         /// Save the choice the way Settings does, globally or for one checkout.
@@ -229,14 +299,14 @@ mod tests {
         let main = main.to_str().unwrap();
         let linked = project.root.with_file_name("feature");
         let linked = linked.to_str().unwrap();
-        assert_eq!(homes.run(&["title", main, "claude"]).unwrap(), "=\n");
+        assert_eq!(homes.title(&[main, "claude"]), "");
 
         homes.choose(None, true);
-        assert_eq!(homes.run(&["title", main]).unwrap(), "=project\n");
-        assert_eq!(homes.run(&["title", main, "claude"]).unwrap(), "=project · claude\n");
-        assert_eq!(homes.run(&["title", linked, "omp"]).unwrap(), "=project/feature · omp\n");
+        assert_eq!(homes.title(&[main]), "project");
+        assert_eq!(homes.title(&[main, "claude"]), "project · claude");
+        assert_eq!(homes.title(&[linked, "omp"]), "project/feature · omp");
         let plain = Fixture::folder();
-        assert_eq!(homes.run(&["title", plain.root.to_str().unwrap(), "claude"]).unwrap(), "=\n");
+        assert_eq!(homes.title(&[plain.root.to_str().unwrap(), "claude"]), "");
         assert_eq!(homes.claims(), "", "asking for a title remembers nothing");
     }
 
@@ -246,12 +316,82 @@ mod tests {
         let on = project();
         let off = project();
         homes.choose(Some(&on.root), true);
-        assert_eq!(homes.run(&["title", on.root.to_str().unwrap()]).unwrap(), "=project\n");
-        assert_eq!(homes.run(&["title", off.root.to_str().unwrap()]).unwrap(), "=\n");
+        assert_eq!(homes.title(&[on.root.to_str().unwrap()]), "project");
+        assert_eq!(homes.title(&[off.root.to_str().unwrap()]), "");
 
         homes.choose(None, true);
         homes.choose(Some(&off.root), false);
-        assert_eq!(homes.run(&["title", off.root.to_str().unwrap()]).unwrap(), "=\n");
+        assert_eq!(homes.title(&[off.root.to_str().unwrap()]), "");
+    }
+
+    #[test]
+    fn a_project_answer_stands_on_the_preferences_that_can_change_it() {
+        let homes = Homes::new();
+        let project = project();
+        let inside = project.root.join("deep");
+        std::fs::create_dir(&inside).unwrap();
+        let inside = inside.to_str().unwrap();
+        let read = |grounds: &[PathBuf]| grounds.iter().map(|file| std::fs::read(file).ok()).collect::<Vec<_>>();
+
+        // The grounds are named before either file exists, so that a first choice is noticed.
+        let (title, grounds) = homes.asked(&[inside, "codex"]);
+        let unset = read(&grounds);
+        assert!(title.is_empty() && !grounds.is_empty() && unset.iter().all(Option::is_none));
+        homes.choose(Some(&project.root), true);
+        let here = read(&grounds);
+        assert_ne!(here, unset);
+        homes.choose(None, true);
+        assert_ne!(read(&grounds), here);
+        assert_eq!(homes.asked(&[inside]), ("project".to_owned(), grounds));
+    }
+
+    #[test]
+    fn an_answer_outside_a_project_stands_until_a_repository_appears() {
+        let homes = Homes::new();
+        homes.choose(None, true);
+        let plain = Fixture::folder();
+        let deep = plain.root.join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        let (title, grounds) = homes.asked(&[deep.to_str().unwrap()]);
+        assert!(title.is_empty() && grounds.iter().all(|file| std::fs::read(file).is_err()));
+        // Where others can write above the temporary folder, as in `/tmp`, nothing can stand.
+        let private_above = plain.root.ancestors().all(private);
+        let named = |spot: PathBuf| grounds.contains(&spot);
+        assert_eq!(named(deep.join(".git")) && named(plain.root.join(".git/HEAD")), private_above);
+        plain.git(&["init", "-q", "--template=", "-b", "main"]);
+        assert_eq!(grounds.iter().any(|file| std::fs::read(file).is_ok()), private_above);
+        assert_eq!(homes.title(&[deep.to_str().unwrap()]), "project");
+    }
+
+    #[test]
+    fn an_answer_that_may_not_last_has_no_grounds() {
+        let homes = Homes::new();
+        homes.choose(None, true);
+        let nothing = (String::new(), Vec::new());
+        // A repository Git will not use might be put right.
+        let refused = Fixture::folder();
+        std::fs::create_dir(refused.root.join(".git")).unwrap();
+        assert_eq!(homes.asked(&[refused.root.to_str().unwrap()]), nothing);
+
+        // Where anyone may add files, the listener is not sent to open what turns up.
+        let open = Fixture::folder();
+        let inside = open.root.join("shared/inside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::set_permissions(open.root.join("shared"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(homes.asked(&[inside.to_str().unwrap()]), nothing);
+
+        // A link can be pointed at another project, which no preference file would show.
+        let project = project();
+        let link = open.root.join("link");
+        std::os::unix::fs::symlink(&project.root, &link).unwrap();
+        assert_eq!(homes.asked(&[link.to_str().unwrap()]), ("project".to_owned(), Vec::new()));
+    }
+
+    #[test]
+    fn grounds_that_a_line_cannot_carry_are_all_left_out() {
+        assert_eq!(answer("project", &[PathBuf::from("/my config/milo")]), "=project\n/my config/milo\n");
+        assert_eq!(answer("project", &[PathBuf::from("/config"), PathBuf::from("/a\nb")]), "=project\n");
+        assert_eq!(answer("", &[PathBuf::from("relative")]), "=\n");
     }
 
     #[test]
@@ -262,10 +402,7 @@ mod tests {
         let linked = project.root.with_file_name("feature");
         let inside = linked.join("deep");
         std::fs::create_dir(&inside).unwrap();
-        assert_eq!(
-            homes.run(&["name", inside.to_str().unwrap()]).unwrap(),
-            format!("project/feature\n{}\n", linked.display()),
-        );
+        assert_eq!(homes.run(&["name", inside.to_str().unwrap()]).unwrap(), "project/feature\n");
         let plain = Fixture::folder();
         assert_eq!(homes.run(&["name", plain.root.to_str().unwrap()]), Err(NO_PROJECT));
     }

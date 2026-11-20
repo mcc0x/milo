@@ -19,9 +19,10 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   `milo_peek_outline` opens a temporary floating outline instead of docking it.
 - With **Title Rex tabs** on, Milo names tabs nobody has named for their Git
   project, worktree and agent. A tab you or the user rename keeps that name and
-  Milo stops titling it. Milo never renames a session.
-  `milo_session_from_project` creates a new session named for the project of
-  the given shell; run it only when the user asks for such a session.
+  Milo stops titling it. Milo never renames a session on its own.
+  `milo_name_session` renames the session it is run in after the project of
+  the given shell. It creates and switches to nothing. Run it only when the
+  user asks for that name.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 

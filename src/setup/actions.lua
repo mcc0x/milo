@@ -22,7 +22,6 @@ end
 local errors = {
   mixed = "Milo panes must share one side rail, separate from other panes.",
   no_rail = "Add Milo panes in a side rail before remembering this layout.",
-  no_project = "Open a shell in a Git project first.",
   no_shell = "Focus the shell Milo should use, then try again.",
   no_tab = "Could not find this Rex tab.",
   zoomed = "Unzoom the tab first.",
@@ -451,13 +450,68 @@ if ... == "listener" then
     return result and result.ok and result.stdout
   end
 
+  -- What a file holds now: its bytes, "" for an empty one or a folder, and
+  -- false for one that is not there.
+  local function reading(path)
+    local file = io.open(path, "r")
+    if not file then return false end
+    -- Far more than Milo accepts in a preference file, so any two it would read differ here.
+    local text = file:read(1048576)
+    file:close()
+    return text or ""
+  end
+
+  -- Milo's answers by directory, so that a change it has already answered
+  -- for starts neither Milo nor Git. An answer names its grounds, the files
+  -- it depends on, and stands while they read the same. One without grounds
+  -- is not kept.
+  local answers, kept = {}, 0
+  local function stands(answer)
+    for path, text in pairs(answer.grounds) do
+      if reading(path) ~= text then return false end
+    end
+    return true
+  end
+
+  local function same_files(one, other)
+    for path in pairs(one) do
+      if other[path] == nil then return false end
+    end
+    for path in pairs(other) do
+      if one[path] == nil then return false end
+    end
+    return true
+  end
+
+  local function ask(cwd, agent)
+    local answer = answers[cwd]
+    if answer and not stands(answer) then answers[cwd], kept, answer = nil, kept - 1, nil end
+    local who = agent or ""
+    local known = answer and (answer.untitled and "" or answer.titles[who])
+    if known then return known end
+    local reply = title_exec{ milo, "tab-title", "title", cwd, agent }
+    local title, rest = (reply or ""):match("^=([^\r\n]*)(.*)")
+    if not title then return end
+    local grounds = {}
+    for path in rest:gmatch("[^\r\n]+") do grounds[path] = reading(path) end
+    if not next(grounds) then return title end
+    -- For the same files, keep the earlier readings: they were taken before Milo read them.
+    if not (answer and same_files(answer.grounds, grounds)) then
+      if answer then kept = kept - 1 end
+      -- A listener can outlive many folders. Start again rather than grow without end.
+      if kept >= 256 then answers, kept = {}, 0 end
+      answer = { grounds = grounds, titles = {} }
+      answers[cwd], kept = answer, kept + 1
+    end
+    -- Without a title, titles are off here or this is no project, whoever runs in it.
+    if title == "" then answer.untitled = true else answer.titles[who] = title end
+    return title
+  end
+
   memory.titles = {
     facts = pane_facts,
     -- The label a tab should show, where "" is Rex's own. Nil if Milo could not say.
-    ask = function(cwd, agent)
-      local reply = title_exec{ milo, "tab-title", "title", cwd, agent }
-      return reply and reply:match("^=([^\r\n]*)")
-    end,
+    ask = ask,
     -- The titles Milo set and still stands by, by window ID. They outlive this listener.
     owned = function()
       local claims = {}
@@ -747,28 +801,23 @@ rex.action{ name = "milo_reset_layout", title = "Milo: Reset Saved Layout…", a
 rex.action{ name = "milo_peek_outline", title = "Milo: Peek Outline", run = function(ctx) peek(ctx, false) end }
 rex.action{ name = "milo_close_peek", title = "Milo: Dismiss Outline Peek", run = function(ctx) peek(ctx, true) end }
 
--- The only place Milo names a session, and only one this action has just made.
-local function session_from_project(ctx)
+-- The only place Milo names a session: the one this action was run in, and
+-- only when someone runs it. It makes no session and shows none.
+local function name_session(ctx)
   local window = tab(ctx)
   if not window then raise("no_tab") end
   local _, cwd = anchor(ctx, window, true)
   if not cwd then raise("no_shell") end
   local reply = profile_exec({ milo, "tab-title", "name", cwd }, 3)
-  local label, root = (reply and reply.ok and reply.stdout or ""):match("^([^\n]+)\n(/[^\n]*)\n$")
-  if not label then raise("no_project") end
-  local made, err = rex.call("session.create", { label = label, initial_windows = {
-    { layout = rex.layout.block{ flavor = terminal .. ".shell", options = { cwd = root } } },
-  } })
-  if not made or not made.session_id then raise(err or "Rex could not create the session.") end
-  -- Show it in the app the action was chosen in. From the CLI no app chose
-  -- it, and Rex reports an undelivered client action as the action failing.
-  if ctx.origin == "palette" or ctx.origin == "key" then
-    pcall(function() rex.client.queue("session.select", { session_id = made.session_id }) end)
+  local label = (reply and reply.ok and reply.stdout or ""):match("^([^\n]+)\n$")
+  if not label then
+    raise(reply and reply.stderr and reply.stderr:match("[^\r\n]+") or "Could not name this session.")
   end
-  return "Created the " .. label .. " session."
+  local named, err = rex.session.set_label{ session_id = ctx.session_id, label = label }
+  if not named then raise(err or "Rex could not rename this session.") end
+  return "Named this session " .. label .. "."
 end
-rex.action{ name = "milo_session_from_project", title = "Milo: New Session from This Project",
-  run = session_from_project }
+rex.action{ name = "milo_name_session", title = "Milo: Name Session from This Project", run = name_session }
 rex.action{
   name = "milo_close", title = "Milo: Close Panes in This Tab",
   run = function(ctx)

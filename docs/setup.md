@@ -61,7 +61,7 @@ Use the appearance choices to preview icons, choose text change marks, and turn 
 
 Run `milo` for Home or `milo setup` to go directly to Settings. Both share the same first-run guide. To skip it in an install script, run `milo setup --skip-onboarding`; it records the skip and exits without requiring a terminal or installing integrations. `milo outline` and the other direct pane commands never show the guide. Terminal panes work without Rex; split geometry and shell-following require Rex.
 
-## Tab titles and project sessions
+## Tab titles and session names
 
 Milo leaves tab and session names alone unless you ask. It builds a name from folder names and the name of an agent's process. It never reads what a terminal shows, a terminal's title or a program's status text, so nothing you type to an agent ends up in a name.
 
@@ -71,7 +71,9 @@ Milo titles a tab only while its label is Rex's own, such as `Window 89abcdef`, 
 
 A change to the setting reaches new tabs at once, and an open tab the next time its shell changes directory or an agent starts or stops in it. Turning titles off gives a tab Rex's label back at that point. Agents are recognised by the name of their program: one started under another name, such as `node`, is not shown.
 
-**Milo: New Session from This Project** creates a session named the same way, without the agent, with one shell at the root of the project or linked worktree. It is the only way Milo names a session, and the session you run it from keeps its name. Chosen in the app, the action also shows the new session. Run with `rex do milo_session_from_project`, it only creates it. Outside a Git project it creates nothing and says so. The action does not depend on **Title Rex tabs**.
+The listener starts Milo to ask about a directory once, and with titles on once more for each agent that runs there. After that it asks again when your global preferences or that worktree's own have changed, or when a folder outside any project has gained a repository. So with titles off, other tabs in a directory and later visits to it normally start no further process. Milo is asked every time about a directory it cannot vouch for: one outside a project with a folder above it that other users can write to, such as `/tmp`, one reached through a link, or one where Git could not run.
+
+**Milo: Name Session from This Project** renames the session you run it in after the project of its shell: `project`, or `project/worktree` in a linked worktree, without the agent. It is the only way Milo names a session, and it happens only when you run the action: from the command palette, with a key you bound to it, or with `rex do milo_name_session`. It creates no session and switches to none. Outside a Git project it changes nothing and says so. Milo does not remember the name or keep it up to date, so rename the session again whenever you like. The action does not depend on **Title Rex tabs**.
 
 Both need the installed Rex integration. After upgrading Milo, run `milo setup --repair` so Rex loads the current actions and listener.
 
@@ -106,7 +108,7 @@ Saving installs these actions in the Rex command palette:
 | Close the outline peek | `milo_close_peek` |
 | Remember the current rail | `milo_remember_layout` |
 | Reset a remembered layout | `milo_reset_layout` |
-| Milo: New Session from This Project | `milo_session_from_project` |
+| Name the session after this project | `milo_name_session` |
 
 Milo does not install key bindings. For an optional shortcut, check Rex's shortcut settings and `rex keymap` first; the latter lists config bindings, not every Mac app shortcut. If the chord is free, put a binding such as `rex.bind("cmd+shift+m", "milo_peek_outline")` in your own Rex `init.lua`. Actions also work directly in the palette without any binding.
 

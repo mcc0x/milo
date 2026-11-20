@@ -34,7 +34,8 @@ local function tab_title(argv)
   if titling.broken then return { ok = false, stdout = "" } end
   local title = titling.on and titling.names[argv[4]] or ""
   if title ~= "" and argv[5] then title = title .. " · " .. argv[5] end
-  return { ok = true, stdout = "=" .. title .. "\n" }
+  -- Milo names the files its answer depends on, as the stand-in does once it has one.
+  return { ok = true, stdout = "=" .. title .. "\n" .. (titling.grounds and titling.grounds .. "\n" or "") }
 end
 rex = {
   on = function(event, fn) handlers[event] = fn end,
@@ -545,3 +546,29 @@ front("kept", shell_in("/my project", "claude"))
 assert(titling.claims[kept.window_id] == "project · claude")
 handlers.session_destroyed({}, { session_id = "project" })
 assert(not next(titling.claims))
+
+-- With titles off, a directory Milo has answered for starts nothing more: not
+-- for another tab in it, a shell that comes back to it, or an agent starting.
+local choice = os.tmpname()
+local function choose(text)
+  local out = assert(io.open(choice, "w"))
+  out:write(text)
+  out:close()
+end
+choose("")
+local here, there = titled_tab(9, nil, "here"), titled_tab(10, nil, "there")
+titling.on, titling.grounds, titling.relabels = false, choice, {}
+windows, processes, asks = { here, there }, { here = shell_in("/my project"), there = shell_in("/my project") }, titling.asks
+boot(loadfile(arg[1]))
+assert(titling.asks == asks + 1)
+moved("here", "/other")
+moved("here", "/my project")
+front("there", shell_in("/my project", "claude"))
+assert(titling.asks == asks + 2 and #titling.relabels == 0)
+
+-- Saving the choice changes the file Milo named, so the next change in a tab is titled.
+titling.on = true
+choose("tab_titles = true\n")
+front("there", shell_in("/my project"))
+assert(there.label == "project" and titling.asks == asks + 3)
+assert(os.remove(choice))

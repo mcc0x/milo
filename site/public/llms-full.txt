@@ -164,7 +164,7 @@ Use the appearance choices to preview icons, choose text change marks, and turn 
 
 Run `milo` for Home or `milo setup` to go directly to Settings. Both share the same first-run guide. To skip it in an install script, run `milo setup --skip-onboarding`; it records the skip and exits without requiring a terminal or installing integrations. `milo outline` and the other direct pane commands never show the guide. Terminal panes work without Rex; split geometry and shell-following require Rex.
 
-## Tab titles and project sessions
+## Tab titles and session names
 
 Milo leaves tab and session names alone unless you ask. It builds a name from folder names and the name of an agent's process. It never reads what a terminal shows, a terminal's title or a program's status text, so nothing you type to an agent ends up in a name.
 
@@ -174,7 +174,9 @@ Milo titles a tab only while its label is Rex's own, such as `Window 89abcdef`, 
 
 A change to the setting reaches new tabs at once, and an open tab the next time its shell changes directory or an agent starts or stops in it. Turning titles off gives a tab Rex's label back at that point. Agents are recognised by the name of their program: one started under another name, such as `node`, is not shown.
 
-**Milo: New Session from This Project** creates a session named the same way, without the agent, with one shell at the root of the project or linked worktree. It is the only way Milo names a session, and the session you run it from keeps its name. Chosen in the app, the action also shows the new session. Run with `rex do milo_session_from_project`, it only creates it. Outside a Git project it creates nothing and says so. The action does not depend on **Title Rex tabs**.
+The listener starts Milo to ask about a directory once, and with titles on once more for each agent that runs there. After that it asks again when your global preferences or that worktree's own have changed, or when a folder outside any project has gained a repository. So with titles off, other tabs in a directory and later visits to it normally start no further process. Milo is asked every time about a directory it cannot vouch for: one outside a project with a folder above it that other users can write to, such as `/tmp`, one reached through a link, or one where Git could not run.
+
+**Milo: Name Session from This Project** renames the session you run it in after the project of its shell: `project`, or `project/worktree` in a linked worktree, without the agent. It is the only way Milo names a session, and it happens only when you run the action: from the command palette, with a key you bound to it, or with `rex do milo_name_session`. It creates no session and switches to none. Outside a Git project it changes nothing and says so. Milo does not remember the name or keep it up to date, so rename the session again whenever you like. The action does not depend on **Title Rex tabs**.
 
 Both need the installed Rex integration. After upgrading Milo, run `milo setup --repair` so Rex loads the current actions and listener.
 
@@ -209,7 +211,7 @@ Saving installs these actions in the Rex command palette:
 | Close the outline peek | `milo_close_peek` |
 | Remember the current rail | `milo_remember_layout` |
 | Reset a remembered layout | `milo_reset_layout` |
-| Milo: New Session from This Project | `milo_session_from_project` |
+| Name the session after this project | `milo_name_session` |
 
 Milo does not install key bindings. For an optional shortcut, check Rex's shortcut settings and `rex keymap` first; the latter lists config bindings, not every Mac app shortcut. If the chord is free, put a binding such as `rex.bind("cmd+shift+m", "milo_peek_outline")` in your own Rex `init.lua`. Actions also work directly in the palette without any binding.
 
@@ -472,9 +474,10 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   `milo_peek_outline` opens a temporary floating outline instead of docking it.
 - With **Title Rex tabs** on, Milo names tabs nobody has named for their Git
   project, worktree and agent. A tab you or the user rename keeps that name and
-  Milo stops titling it. Milo never renames a session.
-  `milo_session_from_project` creates a new session named for the project of
-  the given shell; run it only when the user asks for such a session.
+  Milo stops titling it. Milo never renames a session on its own.
+  `milo_name_session` renames the session it is run in after the project of
+  the given shell. It creates and switches to nothing. Run it only when the
+  user asks for that name.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 
@@ -624,8 +627,18 @@ explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned
 `titles.rs` names tabs and sessions for the listener and the session action,
 and keeps the titles Milo set by Rex window ID in the state folder. A title
 may use folder names and an agent's process name. Never read a terminal's
-title, screen or status text for it, never rename a session from the listener,
-and never replace a label that is neither Rex's default nor Milo's own.
+title, screen or status text for it, and never replace a label that is neither
+Rex's default nor Milo's own. Only `milo_name_session` names a session, and
+only the one it is run in: never rename, create or switch a session from the
+listener or as a side effect of another action.
+
+The listener keeps the answers of `milo tab-title title` by directory, so that
+most events start no process. Each answer lists its grounds, the files that
+decide it, and is reused while they read the same: a project's two preference
+files, or outside a project the places where a repository could appear. When
+neither says enough, as when Git could not run, list none and the listener
+asks again. The listener opens every file listed, so never list a path that
+another user could create.
 
 Run `cargo test setup::` for generation, screen and installation tests. The
 tests use throwaway settings and a stand-in for Rex. With Lua 5.1 installed,
@@ -695,7 +708,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
-| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or start a project session. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
 | `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |

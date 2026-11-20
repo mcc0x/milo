@@ -266,19 +266,22 @@ pub struct Checkout {
     pub worktree: Option<String>,
 }
 
-/// Name the checkout containing `dir`, without loading project state.
-pub fn checkout(dir: &Path) -> Option<Checkout> {
-    let dirs = git_dirs(dir).ok().flatten()?;
-    let folder = dirs.root.file_name()?.to_string_lossy().into_owned();
+/// Name the checkout containing `dir`, without loading project state. An
+/// error means Git could not be asked, which says nothing about `dir`.
+pub fn checkout(dir: &Path) -> Result<Option<Checkout>, &'static str> {
+    let Some(dirs) = git_dirs(dir)? else { return Ok(None) };
+    let Some(folder) = dirs.root.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+        return Ok(None);
+    };
     // A linked worktree keeps its index apart from the repository's branches.
     let repository = match (&dirs.git, &dirs.common) {
         (Some(git), Some(common)) if git != common => repository_name(common),
         _ => None,
     };
-    Some(match repository {
+    Ok(Some(match repository {
         Some(project) if project != folder => Checkout { root: dirs.root, project, worktree: Some(folder) },
         _ => Checkout { root: dirs.root, project: folder, worktree: None },
-    })
+    }))
 }
 
 /// The folder holding `.git`, or a bare repository's own folder without its `.git` ending.
@@ -834,7 +837,7 @@ mod tests {
         let f = Fixture::new();
         f.write("sub/page.txt", "a file\n");
         f.commit("first");
-        let named = |dir: &Path| checkout(dir).map(|found| (found.project, found.worktree, found.root));
+        let named = |dir: &Path| checkout(dir).unwrap().map(|found| (found.project, found.worktree, found.root));
         assert_eq!(named(&f.root.join("sub")), Some(("project".into(), None, f.root.clone())));
 
         // A linked worktree belongs to the repository that owns it, wherever its folder is.
@@ -849,7 +852,7 @@ mod tests {
         assert_eq!(named(&hotfix), Some(("tool".into(), Some("hotfix".into()), hotfix.clone())));
 
         let plain = Fixture::folder();
-        assert!(checkout(&plain.root).is_none());
+        assert!(checkout(&plain.root).unwrap().is_none());
     }
 
     #[test]

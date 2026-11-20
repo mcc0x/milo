@@ -356,6 +356,11 @@ fn config_file(dir: &Path, worktree: Option<&Path>) -> PathBuf {
     }
 }
 
+/// The files a pane's preferences are read from: the global defaults, then the worktree's own.
+pub(crate) fn layers(dir: &Path, worktree: &Path) -> [PathBuf; 2] {
+    [config_file(dir, None), config_file(dir, Some(worktree))]
+}
+
 /// A stable identifier for the checkout path, not the common git directory.
 fn worktree_key(root: &Path) -> u64 {
     root.as_os_str()

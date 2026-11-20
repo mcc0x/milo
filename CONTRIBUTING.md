@@ -93,8 +93,18 @@ explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned
 `titles.rs` names tabs and sessions for the listener and the session action,
 and keeps the titles Milo set by Rex window ID in the state folder. A title
 may use folder names and an agent's process name. Never read a terminal's
-title, screen or status text for it, never rename a session from the listener,
-and never replace a label that is neither Rex's default nor Milo's own.
+title, screen or status text for it, and never replace a label that is neither
+Rex's default nor Milo's own. Only `milo_name_session` names a session, and
+only the one it is run in: never rename, create or switch a session from the
+listener or as a side effect of another action.
+
+The listener keeps the answers of `milo tab-title title` by directory, so that
+most events start no process. Each answer lists its grounds, the files that
+decide it, and is reused while they read the same: a project's two preference
+files, or outside a project the places where a repository could appear. When
+neither says enough, as when Git could not run, list none and the listener
+asks again. The listener opens every file listed, so never list a path that
+another user could create.
 
 Run `cargo test setup::` for generation, screen and installation tests. The
 tests use throwaway settings and a stand-in for Rex. With Lua 5.1 installed,
@@ -164,7 +174,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
-| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or start a project session. |
+| `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
 | `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
