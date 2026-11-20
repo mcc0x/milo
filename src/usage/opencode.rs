@@ -4,7 +4,6 @@
 //! queries name only the session tables and return sums and times: message
 //! text is parsed inside SQLite and credentials are never selected.
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -248,7 +247,8 @@ fn count(value: Option<Value<'_>>) -> Option<u64> {
 /// What the local database could tell Milo. Only `Today` carries figures.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub(super) enum Report {
-    /// No database: OpenCode is not installed, or has saved nothing here.
+    /// No database: OpenCode is not installed, has saved nothing here, or
+    /// left only an empty or foreign file under the database's name.
     #[default]
     Missing,
     /// A database that could not be queried in time.
@@ -278,9 +278,10 @@ impl Report {
                     format!(", newest {} ago", when::duration(now.saturating_sub(at), Detail::Rounded))
                 });
                 format!(
-                    "{} tokens and {cache_read} cache reads in {} steps today{newest} ({} in {path:?})",
+                    "{} tokens and {cache_read} cache reads in {} {} today{newest} ({} in {path:?})",
                     today.tokens.fresh(),
                     today.steps,
+                    if today.steps == 1 { "step" } else { "steps" },
                     today.store.label()
                 )
             }
@@ -329,7 +330,7 @@ pub(super) fn poll(path: Option<PathBuf>, wait: Duration) -> Poll<Report> {
 
 /// Both queries share one wait, so a busy database costs at most that long.
 pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Report {
-    if std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+    if !sqlite::is_database(path) {
         return Report::Missing;
     }
     let deadline = Instant::now() + wait;

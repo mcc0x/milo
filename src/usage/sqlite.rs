@@ -113,16 +113,26 @@ pub(super) fn executable() -> &'static OsStr {
     OsStr::new("/usr/bin/sqlite3")
 }
 
+/// The start of a regular file that begins as a SQLite database does, read
+/// without following a link.
+fn header(path: &Path) -> Option<[u8; 20]> {
+    let mut header = [0; 20];
+    let mut file = fs_ops::open_read(path).ok()?;
+    let database = file.metadata().is_ok_and(|m| m.is_file())
+        && file.read_exact(&mut header).is_ok()
+        && &header[..16] == b"SQLite format 3\0";
+    database.then_some(header)
+}
+
+/// Whether a tool saved a database at `path`. A missing, empty or foreign
+/// file under that name is no sign of the tool.
+pub(super) fn is_database(path: &Path) -> bool {
+    header(path).is_some()
+}
+
 /// Skip incomplete WAL file sets rather than opening an unusable database.
 fn readable(path: &Path) -> bool {
-    let mut header = [0; 20];
-    let Ok(mut file) = fs_ops::open_read(path) else { return false };
-    if !file.metadata().is_ok_and(|m| m.is_file())
-        || file.read_exact(&mut header).is_err()
-        || &header[..16] != b"SQLite format 3\0"
-    {
-        return false;
-    }
+    let Some(header) = header(path) else { return false };
     match (header[18], header[19]) {
         (1, 1) => true,
         (1 | 2, 2) | (2, 1) => ["-wal", "-shm"].iter().all(|suffix| {

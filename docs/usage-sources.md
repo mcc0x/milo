@@ -8,6 +8,7 @@ A source is added only when all of these hold:
 - **Its format was checked against a pinned release**, in source and in a database or file that release wrote, and the test fixtures come from that release.
 - **Each read is bounded** in time, bytes or both, and never changes the tool's files.
 - **Each figure keeps its own meaning.** The table below is the vocabulary. A figure that a source cannot support stays unknown; it is never shown as zero, estimated from another kind, or filled in from a plan's published allowance.
+- **A tool that is not in use takes no room.** Whether a tool is in use on this machine is decided from the same bounded reads, apart from whether it has a figure. An adapter says what counts as found, and an empty folder or an empty file never does. [Which tools appear](usage.md#which-tools-appear) has the rule for each tool.
 
 | Kind | What it is | What it is not |
 | --- | --- | --- |

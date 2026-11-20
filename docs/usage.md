@@ -1,8 +1,40 @@
 # Usage limits
 
-`milo usage` shows how much of a reported limit is **left**, not how much has been used. The two-row rail gives each provider one line for its most constrained window. When there's room, it adds the reset countdown for a recent reading or when an older reading was last seen. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a taller rail too.
+`milo usage` shows how much of a reported limit is **left**, not how much has been used. It shows the tools that have something to show, and gives the whole pane to them. The two-row rail gives each of two tools one line for its most constrained window, and a tool on its own both rows. When there's room, it adds the reset countdown for a recent reading or when an older reading was last seen. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a taller rail too.
 
-A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%. Run `milo doctor` to see which local source supplied each provider's reading.
+A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%, and a tool with nothing known is left out unless you ask to always see it. Run `milo doctor` to see which local source supplied each tool's reading.
+
+## Which tools appear
+
+Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` and `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.
+
+| Choice | What the pane does |
+| --- | --- |
+| Auto, the default | Gives the tool a place while it has a figure saved on this Mac: a limit window for Codex or Claude Code, or tokens OpenCode recorded today. Without one the tool takes no room. |
+| Always show | Keeps the tool's place, and says what is unknown and what to do next, such as `Claude · no source` and `Run milo setup`. It never fills in a number. A pane too small for every place still gives its rows to limits first. |
+| Hide | Never shows the tool and does not look for it: its folders are not walked or watched, and its database is not opened. With Codex and Claude Code both hidden, oh-my-pi's database is not opened either. |
+
+Whether a tool is in use here is read from files the tool itself saved. Milo does not run the tool, read its sign-in or use the network to find out.
+
+| Tool | Found when |
+| --- | --- |
+| Codex | A session file `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` has something in it, or oh-my-pi has saved a Codex report. |
+| Claude Code | `~/.claude.json` has something in it, or a session written today is under `~/.claude/projects`, or the status line or oh-my-pi has saved a limit report. |
+| OpenCode | The file where it keeps its database is a SQLite database. |
+
+Empty folders, empty files, another kind of file under the same name and a `~/.claude` folder that holds only settings do not count, and links are not followed. A report oh-my-pi saved for a tool does count, even when nothing else of the tool is on disk. The looks are the bounded reads described under [Where the figures come from](#where-the-figures-come-from).
+
+A tool that is found but has no figure yet stays out of the way of the tools that have one. When no tool has a figure, the pane shows one quiet block instead of empty places: what each found tool is waiting for, such as `Claude · no saved limits found` and `Run milo setup`, or `No usage to show yet` and the tools Milo looks for when it found none.
+
+The frame closes up around what is shown:
+
+- **Two tools with limits** share the pane: side by side when it is wide, one above the other on a rail.
+- **One tool with limits** has the pane to itself. A rail lists its other windows under the tightest one, and a wide pane keeps its windows together at the left.
+- **OpenCode with one of them** takes the second place: the other half of a wide pane, or the lower half of a rail.
+- **OpenCode with both** has one row beneath them, from the third row of a rail or in a wide pane at least nine rows tall. Two rows go to the two limits.
+- **OpenCode alone** fills the two-row rail with today's tokens, then its cost and steps. A larger pane draws the tokens large.
+
+`milo doctor` follows the same rule. It reports a tool that was found or is always shown, and says nothing of one that is absent or hidden beyond the choice itself.
 
 ## Where the figures come from
 
@@ -27,7 +59,7 @@ An unchanged status-line reading confirms the same window, but Milo saves that c
 
 ## OpenCode activity
 
-OpenCode saves no limits on this machine, so Milo shows none for it. What it does save is each step's token counts and its own cost estimate. On a pane two rows taller than the key hints need, Milo adds one line above them, such as `OpenCode · 48.2k tokens today · $1.37 est.`. A narrower pane drops the cost first, then shortens the rest. The two-row rail does not show it.
+OpenCode saves no limits on this machine, so Milo shows none for it. What it does save is each step's token counts and its own cost estimate. Beneath two tools with limits Milo gives it one line, such as `OpenCode · 48.2k tokens today · $1.37 est.`. A narrower pane drops the cost first, then shortens the rest. Beside one tool, or alone, it also shows the number of steps, when the last one was recorded and the cache reads. [Which tools appear](#which-tools-appear) says where it goes at each size.
 
 | Figure | What it means |
 | --- | --- |
@@ -45,7 +77,8 @@ The usage pane reads local data. It does not call the providers, run their tools
 
 ## If a figure is missing
 
+- A tool that is not there at all has no figure saved on this Mac, or is hidden. Run `milo doctor` to see what Milo found, or choose **Always show** for it in setup to keep its place and see what it is waiting for.
 - Make the pane taller and wider to see labels, reset times and hints. Where the terminal can show pictures, including in Rex, milo draws the logos and large figures as pictures. Otherwise it draws with text. Short panes use text either way.
 - Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. Reload does not ask a provider for a fresh reading.
-- `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. A narrow pane may shorten these hints.
+- A tool that is always shown, or found while no tool has a figure, says why it has none. `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. `no tokens recorded today` means OpenCode's database has nothing from today. A narrow pane may shorten these hints.
 - For oh-my-pi, check that `/usr/bin/sqlite3` is available and the harness has saved a report. For Claude Code, see [setup](setup.md#claude-code-limits) if neither saved source has a reading.

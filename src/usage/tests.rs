@@ -5,6 +5,7 @@ mod codex;
 mod layout;
 mod opencode_activity;
 mod status_line;
+mod tools;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
@@ -68,8 +69,23 @@ fn open(f: &Fixture, now: i64) -> Usage {
     usage
 }
 
+/// Codex and Claude Code keep their places, as both did before each tool had
+/// a choice. Most tests here are about what a place shows, unknown included.
 fn unopened(f: &Fixture, now: i64) -> Usage {
+    automatic(f, now).showing(tools(Show::Always, Show::Always, Show::Auto))
+}
+
+/// The pane with no choice made: a tool has a place only while it has a figure.
+fn automatic(f: &Fixture, now: i64) -> Usage {
     Usage::from_dirs(Some(f.root.join("codex")), Some(f.root.join("claude")), Some(f.root.join(STATE)), now)
+}
+
+fn tools(codex: Show, claude: Show, opencode: Show) -> UsageTools {
+    let mut tools = UsageTools::default();
+    for (tool, show) in UsageTool::ALL.into_iter().zip([codex, claude, opencode]) {
+        tools[tool] = show;
+    }
+    tools
 }
 
 fn frame(usage: &mut Usage, width: usize, height: usize) -> Vec<String> {
@@ -764,6 +780,23 @@ mod omp_limits {
         usage.omp.start(NOW, Instant::now() + Duration::from_secs(20));
         finish_omp(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex · no source", "Claude week · 68% left"]);
+    }
+
+    #[test]
+    fn a_report_omp_saved_gives_its_tool_a_place_with_nothing_else_of_the_tool_on_disk() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let week = window("anthropic:7d", "0.32", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "claude", "anthropic", NOW * 1000, &format!("[{week}]"));
+        // Another provider's report is no tool of Milo's, and an empty one has no figure.
+        report(&path, "gemini", "google", NOW * 1000, &format!("[{week}]"));
+        report(&path, "codex", "openai-codex", NOW * 1000, "[]");
+        let mut usage = automatic(&f, NOW).with_databases(Some(path), None, TEST_WAIT);
+        assert!(usage.check());
+        assert_eq!(frame(&mut usage, 22, 2), ["Checking local usage…", ""]);
+        finish_omp(&mut usage);
+        assert_eq!([usage.codex.presence(), usage.claude.presence()], [Presence::Found, Presence::Reading]);
+        assert_eq!(frame(&mut usage, 22, 2), ["Claude week · 68% left", "Resets in 1d"]);
     }
 
     #[test]

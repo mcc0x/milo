@@ -187,7 +187,7 @@ fn a_tiny_rail_keeps_provider_names_when_status_text_does_not_fit() {
 
 #[test]
 fn every_usage_help_row_fits_a_28_column_pane() {
-    for row in help_rows() {
+    for row in help_rows(true, true) {
         let width = row.iter().map(|(text, _)| str_width(text)).sum::<usize>();
         assert!(width <= 26, "{width} columns: {:?}", row.iter().map(|(text, _)| text).collect::<Vec<_>>());
     }

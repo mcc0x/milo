@@ -5,7 +5,7 @@ use std::fmt::{self, Display, Write as _};
 use super::claude::ClaudeSnapshot;
 use super::*;
 use crate::json::{self, Value};
-use crate::preferences::PreferenceSnapshot;
+use crate::preferences::{PreferenceSnapshot, Show};
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
 const UNAVAILABLE: &str = "That choice is unavailable in this Settings session.";
@@ -194,13 +194,15 @@ impl Editor {
         let try_layout = capture && layout.panes.contains(&true);
         let auto_arrange = live && layout_state.editable;
         let root = setup.root.as_deref().map(Path::to_string_lossy);
-        let mut out = String::with_capacity(1500);
+        let [usage_codex, usage_claude, usage_opencode] = UsageTool::ALL.map(|tool| prefs.usage_tools[tool].value());
+        let mut out = String::with_capacity(1600);
         write!(out, concat!(
             "{{\"version\":{},",
             "\"context\":{{\"inside_rex\":{},\"worktree\":{},\"directory\":{},\"installed\":{}}},",
             "\"layout\":{{\"panes\":{{\"outline\":{},\"history\":{},\"usage\":{}}},\"side\":\"{}\",\"width\":{},",
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
-            "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{}}},",
+            "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{},",
+            "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\"}},",
             "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
@@ -212,6 +214,7 @@ impl Editor {
             layout.usage_rows.parse::<u32>().unwrap_or(super::layout::DEFAULT_USAGE_ROWS),
             Optional(layout.geometry.shares.map(Ratios)), layout.new_tabs,
             icons, prefs.static_marks, prefs.text_git_marks, prefs.usage_large_figures,
+            usage_codex, usage_claude, usage_opencode,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new,
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
@@ -515,6 +518,7 @@ enum Edit {
     StaticMarks(bool),
     TextGitMarks(bool),
     UsageLargeFigures(bool),
+    UsageTool(UsageTool, Show),
     ProjectMode(ProjectMode),
     FollowActivity(bool),
     ChangesOnly(bool),
@@ -567,6 +571,11 @@ impl Edit {
             "workflow.changes_only" => Self::ChangesOnly(value.boolean()?),
             "workflow.history_follow_new" => Self::HistoryFollowNew(value.boolean()?),
             "account.claude_limits" => Self::ClaudeLimits(value.boolean()?),
+            field if field.starts_with("appearance.usage_") => {
+                let key = &field["appearance.".len()..];
+                let tool = UsageTool::ALL.into_iter().find(|tool| tool.key() == key)?;
+                Self::UsageTool(tool, Show::parse(value.string(6)?.as_ref())?)
+            }
             field => Self::Pane(pane_named(field.strip_prefix("layout.panes.")?)?, value.boolean()?),
         })
     }
@@ -605,6 +614,7 @@ impl Edit {
             Self::StaticMarks(on) => prefs.static_marks = on,
             Self::TextGitMarks(on) => prefs.text_git_marks = on,
             Self::UsageLargeFigures(on) => prefs.usage_large_figures = on,
+            Self::UsageTool(tool, show) => prefs.usage_tools[tool] = show,
             Self::ProjectMode(mode) => prefs.project_mode = mode,
             Self::FollowActivity(on) => prefs.follow_activity = on,
             Self::ChangesOnly(on) => prefs.changes_only = on,
@@ -906,6 +916,50 @@ mod tests {
         action(&mut newer, r#""action":"inherit","group":"preferences""#).unwrap();
         assert_eq!(newer.setup.prefs_scope, Source::Default);
         assert_eq!(newer.setup.prefs, Preferences::default());
+    }
+
+    #[test]
+    fn usage_tool_choices_are_reported_edited_and_saved_with_the_other_preferences() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let root = &f.root;
+        let mut editor = outside(store.clone(), Some(root));
+        let before = editor.state();
+        let appearance = field(Value::parse(before.as_bytes()).unwrap(), "appearance");
+        for key in ["usage_codex", "usage_claude", "usage_opencode"] {
+            assert!(field(appearance, key).is("auto"), "{key}");
+        }
+        for request in [
+            r#""action":"set","field":"appearance.usage_opencode","value":"sometimes""#,
+            r#""action":"set","field":"appearance.usage_opencode","value":true"#,
+            r#""action":"set","field":"appearance.usage_gemini","value":"auto""#,
+        ] {
+            assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION, "{request}");
+            assert_eq!(editor.state(), before, "{request}");
+        }
+
+        set(&mut editor, "appearance.usage_claude", "\"always\"");
+        let draft = set(&mut editor, "appearance.usage_opencode", "\"hide\"");
+        let draft = Value::parse(draft.as_bytes()).unwrap();
+        assert!(field(field(draft, "appearance"), "usage_opencode").is("hide"));
+        assert_eq!(field(field(field(draft, "groups"), "preferences"), "dirty").boolean(), Some(true));
+        assert!(!store.config.exists(), "a draft writes nothing");
+        action(&mut editor, r#""action":"save","group":"preferences","scope":"global""#).unwrap();
+        let choices = |prefs: Preferences| UsageTool::ALL.map(|tool| prefs.usage_tools[tool]);
+        let saved = PreferenceSnapshot::load(&store.config, Some(root)).unwrap();
+        assert_eq!((choices(saved.prefs), saved.source), ([Show::Auto, Show::Always, Show::Hide], Source::Global));
+
+        // A later session starts from the saved choices, and a worktree can differ from them.
+        let mut later = outside(store.clone(), Some(root));
+        let appearance = later.state();
+        let appearance = field(Value::parse(appearance.as_bytes()).unwrap(), "appearance");
+        assert!(field(appearance, "usage_claude").is("always") && field(appearance, "usage_opencode").is("hide"));
+        set(&mut later, "appearance.usage_opencode", "\"auto\"");
+        action(&mut later, r#""action":"save","group":"preferences","scope":"worktree""#).unwrap();
+        let local = PreferenceSnapshot::load(&store.config, Some(root)).unwrap();
+        assert_eq!((choices(local.prefs), local.source), ([Show::Auto, Show::Always, Show::Auto], Source::Worktree));
+        let global = PreferenceSnapshot::load(&store.config, None).unwrap();
+        assert_eq!(choices(global.prefs), [Show::Auto, Show::Always, Show::Hide]);
     }
 
     #[test]

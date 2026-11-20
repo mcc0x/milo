@@ -58,7 +58,7 @@ See recent commits and, when the branch tracks a remote branch, how many still n
   <img src="docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent left, time until reset and an Opus weekly limit">
 </p>
 
-See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code. A taller pane also shows the tokens and estimated cost OpenCode recorded today. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
+See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code, and the tokens and estimated cost OpenCode recorded today. It shows the tools that have a figure on this Mac, so there is no empty place for one you do not use, and setup can always show or hide each tool. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
 
 ## Reader
 

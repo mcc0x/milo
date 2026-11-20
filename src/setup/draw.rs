@@ -663,6 +663,22 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 "Auto uses text in narrow panes and large figures where there is room.",
             )
             .with_short_value(if prefs.usage_large_figures { "Large" } else { "Auto" }),
+            Row::UsageTool(tool) => {
+                use crate::preferences::{Show, UsageTool};
+                let (label, short) = match tool {
+                    UsageTool::Codex => ("Codex usage", "Codex"),
+                    UsageTool::Claude => ("Claude Code usage", "Claude"),
+                    UsageTool::OpenCode => ("OpenCode usage", "OpenCode"),
+                };
+                let show = prefs.usage_tools[tool];
+                Cell::choice(
+                    label,
+                    short,
+                    show.label(),
+                    "Auto shows the tool once it has a figure saved here. Always show keeps its place and says what is unknown. Hide never looks for it.",
+                )
+                .with_short_value(if show == Show::Always { "Always" } else { show.label() })
+            }
             Row::FollowProject => Cell::choice(
                 "Project tracking",
                 "Project",

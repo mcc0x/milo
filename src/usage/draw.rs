@@ -1,5 +1,6 @@
-//! Gives both tools the same frame, with less detail when the pane is small.
-//! Activity a harness recorded gets a row of its own beneath them.
+//! Gives each tool with a figure a place in the frame, with less detail when
+//! the pane is small. A tool with limits has a panel; activity a harness
+//! recorded has a row beneath the panels, or the pane to itself.
 
 mod digits;
 mod figure;
@@ -9,7 +10,9 @@ use std::sync::LazyLock;
 
 use crate::help;
 use crate::picture::Picture;
+use crate::preferences::{Show, UsageTool, UsageTools};
 use crate::screen::{Screen, Style};
+use crate::setup::wrap;
 use crate::ui::FAINT;
 use crate::when::{self, Detail};
 use crate::width::str_width;
@@ -20,7 +23,9 @@ use super::{Activity, CodexSessions, Limits, Source, Usage, Window, opencode};
 const SIDE_BY_SIDE: usize = 64;
 const LARGE_ROWS: usize = 3;
 const TILE: &str = "██";
-const OPENCODE: &str = "OpenCode";
+const NO_USAGE: [&str; 2] = ["No usage to show yet", "No usage yet"];
+/// A lone panel keeps its windows together rather than spreading them over a wide pane.
+const LONE: usize = 72;
 
 #[derive(Clone, Copy)]
 enum Tool {
@@ -292,6 +297,22 @@ impl Hint {
         state: "cannot read",
         next: Some("Check session access"),
     };
+    const NO_DATABASE: Self =
+        Self { full: "no database found", short: "no database", state: "no source", next: Some("Run OpenCode") };
+    const NO_TOKENS: Self =
+        Self { full: "no tokens recorded today", short: "no tokens today", state: "no tokens", next: None };
+    const UNREAD: Self = Self {
+        full: "could not read its database",
+        short: "could not read",
+        state: "cannot read",
+        next: Some("Press r to try again"),
+    };
+    const UNCHECKED: Self = Self {
+        full: "database format not checked",
+        short: "format not checked",
+        state: "unknown",
+        next: Some("Run milo doctor"),
+    };
 
     const fn no_limits(tool: Tool) -> Self {
         Self { full: "no limits to show", short: "no limits", state: "no limits", next: Some(tool.open()) }
@@ -349,6 +370,11 @@ impl<'a> Report<'a> {
         Self { tool, first, extra: [figures.next(), figures.next()], hint }
     }
 
+    /// What a tool without a figure is waiting for, under its name.
+    fn waiting(&self) -> Option<(&'static str, &Hint)> {
+        Some((self.tool.name(), self.hint.as_ref()?))
+    }
+
     fn metrics(&self) -> impl Iterator<Item = &Metric<'a>> + Clone {
         std::iter::once(&self.first).chain(self.extra.iter().flatten())
     }
@@ -358,7 +384,16 @@ impl<'a> Report<'a> {
         self.metrics().reduce(|a, b| if tighter(b, a) { b } else { a }).unwrap_or(&self.first)
     }
 
-    fn summary(&self, screen: &mut Screen, area: Area, inline_detail: bool, activity: impl FnOnce() -> Activity) {
+    /// The tightest window in words. `rest` adds the tool's other windows
+    /// below it, for a tool that shares the rail with no other limits.
+    fn summary(
+        &self,
+        screen: &mut Screen,
+        area: Area,
+        inline_detail: bool,
+        rest: bool,
+        activity: impl FnOnce() -> Activity,
+    ) {
         let metric = self.limiting();
         let mut line = 1;
         if let Some(hint) = &self.hint {
@@ -406,6 +441,14 @@ impl<'a> Report<'a> {
             if line < area.h && metric.age.is_some() {
                 area.note(screen, line, self.tool.open());
                 line += 1;
+            }
+        }
+        if rest && self.hint.is_none() {
+            for other in self.metrics().filter(|&other| !std::ptr::eq(other, metric)) {
+                if line < area.h && other.inline_width() <= area.w {
+                    other.row(screen, area, line);
+                    line += 1;
+                }
             }
         }
         if line < area.h
@@ -530,7 +573,7 @@ impl<'a> Report<'a> {
         }
         if area.w < 30 {
             if area.h == LARGE_ROWS {
-                return self.summary(screen, area, false, activity);
+                return self.summary(screen, area, false, false, activity);
             }
             return self.compact(screen, area, activity);
         }
@@ -786,60 +829,236 @@ fn tokens(tokens: u64) -> String {
     if fraction == 0 || whole >= 100 { format!("{whole}{suffix}") } else { format!("{whole}.{fraction}{suffix}") }
 }
 
-/// What OpenCode recorded today after its name, in the longest wording that fits.
-fn opencode_text(activity: &opencode::Activity, width: usize) -> Option<String> {
-    let used = tokens(activity.tokens.fresh());
-    let cost = activity.cost.and_then(opencode::Cost::text);
-    let priced = cost.map(|cost| format!(" · {used} tokens today · {cost} est."));
-    [priced, Some(format!(" · {used} tokens today")), Some(format!(" {used} tokens"))]
-        .into_iter()
-        .flatten()
-        .find(|text| OPENCODE.len() + str_width(text) <= width)
+/// Fills rows from `row` with as many of the items as fit on each, in order.
+fn flow(screen: &mut Screen, area: Area, mut row: usize, items: impl Iterator<Item = String>) {
+    let mut line = String::new();
+    for item in items {
+        if !line.is_empty() && str_width(&line) + 3 + str_width(&item) > area.w {
+            area.note(screen, row, &line);
+            row += 1;
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push_str(" · ");
+        }
+        line.push_str(&item);
+    }
+    area.note(screen, row, &line);
 }
 
-fn side_by_side(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
+/// OpenCode's place in the frame. It saves no limits, so it never stands
+/// between two tools that do: it takes the place a second one would have had,
+/// or one row beneath both, or the pane to itself.
+enum Harness<'a> {
+    Today(&'a opencode::Activity),
+    /// Shown only when asked for, or when no tool has a figure.
+    Unknown(Hint),
+}
+
+impl<'a> Harness<'a> {
+    const NAMES: [&'static str; 2] = ["OpenCode", "OC"];
+
+    fn new(usage: &'a Usage, today: i64) -> Self {
+        if let Some(activity) = usage.opencode.today(today) {
+            return Self::Today(activity);
+        }
+        Self::Unknown(match usage.opencode.report {
+            _ if usage.opencode.poll.checking() => Hint::CHECKING,
+            opencode::Report::Missing => Hint::NO_DATABASE,
+            opencode::Report::Unreadable => Hint::UNREAD,
+            opencode::Report::Unsupported => Hint::UNCHECKED,
+            // Yesterday's totals wait for the read that replaces them.
+            opencode::Report::Today(activity) if activity.since != today => Hint::CHECKING,
+            opencode::Report::Today(_) => Hint::NO_TOKENS,
+        })
+    }
+
+    /// The name and what follows it, from the fullest wording to the barest.
+    /// `priced` adds the cost where no other row will carry it.
+    fn wording(&self, choice: usize, priced: bool) -> Option<(&'static str, String)> {
+        let [name, short] = Self::NAMES;
+        Some(match (self, choice) {
+            (Self::Today(activity), 0) => {
+                let cost = activity.cost.and_then(opencode::Cost::text).filter(|_| priced)?;
+                (name, format!(" · {} tokens today · {cost} est.", tokens(activity.tokens.fresh())))
+            }
+            (Self::Today(activity), 1) => (name, format!(" · {} tokens today", tokens(activity.tokens.fresh()))),
+            (Self::Today(activity), 2) => (name, format!(" {} tokens today", tokens(activity.tokens.fresh()))),
+            (Self::Today(activity), 3) => (name, format!(" {} tokens", tokens(activity.tokens.fresh()))),
+            (Self::Today(activity), 4) => (name, format!(" {}", tokens(activity.tokens.fresh()))),
+            (Self::Today(activity), _) => (short, format!(" {}", tokens(activity.tokens.fresh()))),
+            (Self::Unknown(hint), 0) => (name, format!(" · {}", hint.full)),
+            (Self::Unknown(hint), 1) => (name, format!(" · {}", hint.short)),
+            (Self::Unknown(hint), 2) => (name, format!(" · {}", hint.state)),
+            (Self::Unknown(_), 3) => (name, String::new()),
+            (Self::Unknown(_), _) => (short, String::new()),
+        })
+    }
+
+    /// The longest wording that fits `width`, or nothing when even the barest does not.
+    fn fitting(&self, width: usize, priced: bool) -> Option<(&'static str, String)> {
+        (0..6)
+            .filter_map(|choice| self.wording(choice, priced))
+            .find(|(name, text)| name.len() + str_width(text) <= width)
+    }
+
+    fn line(&self, screen: &mut Screen, area: Area, priced: bool) {
+        if let Some((name, text)) = self.fitting(area.w, priced) {
+            let mut row = RowWriter { screen, x: area.x, y: area.y, left: area.w };
+            row.add(name, Style::PLAIN.bold());
+            row.add(&text, FAINT);
+        }
+    }
+
+    /// What else OpenCode recorded today, the most useful first.
+    fn details(activity: &opencode::Activity, now: i64) -> impl Iterator<Item = String> {
+        let cost = activity.cost.and_then(opencode::Cost::text).map(|cost| format!("{cost} est."));
+        let steps = if activity.steps == 1 { "1 step".into() } else { format!("{} steps", activity.steps) };
+        let last = activity.last.map(|at| format!("last {} ago", compact_time(now.saturating_sub(at))));
+        let reads = activity.tokens.cache_read;
+        let reads = (reads > 0).then(|| format!("{} cache reads", tokens(reads)));
+        [cost, Some(steps), last, reads].into_iter().flatten()
+    }
+
+    /// The rail's form: the name and today's tokens, then the details in the rows below.
+    fn summary(&self, screen: &mut Screen, area: Area, now: i64) {
+        self.line(screen, area, area.h == 1);
+        match self {
+            Self::Today(activity) => flow(screen, area, 1, Self::details(activity, now)),
+            Self::Unknown(hint) => area.note(screen, 1, hint.next.unwrap_or_default()),
+        }
+    }
+
+    /// Alone in a roomy pane: the name beside today's tokens drawn large.
+    fn panel(&self, screen: &mut Screen, area: Area, now: i64) {
+        let lane = if area.w >= 56 { 16 } else { 12 };
+        let (Self::Today(activity), true) = (self, area.w >= 30 && area.h >= LARGE_ROWS + 2) else {
+            return self.summary(screen, area, now);
+        };
+        let used = tokens(activity.tokens.fresh());
+        let figures = Area { x: area.x + lane, w: area.w - lane, ..area };
+        if digits::width(&used) > figures.w {
+            return self.summary(screen, area, now);
+        }
+        let chart = Chart::new(area.h);
+        let mut name = RowWriter { screen, x: area.x, y: area.y + chart.label + 2, left: lane - 1 };
+        name.add(TILE, Style::PLAIN);
+        name.add(" ", FAINT);
+        name.add(Self::NAMES[0], Style::PLAIN);
+        figures.note(screen, chart.label, "tokens today");
+        digits::draw(screen, figures.x, figures.y + chart.label + 1, &used, Style::PLAIN);
+        flow(screen, figures, chart.note, Self::details(activity, now));
+    }
+}
+
+/// Two places beside each other, with a line between them.
+fn beside(screen: &mut Screen, area: Area) -> [Area; 2] {
     let (left, right) = area.split(1);
     for row in area.y..area.y + area.h {
         screen.put(left.w, row, 1, "│", FAINT);
     }
-    reports[0].panel(screen, left.inset(), area.h, Activity::default);
-    reports[1].panel(screen, right.inset(), area.h, activity);
+    [left.inset(), right.inset()]
 }
 
-fn stacked(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
+/// Two places one above the other. The lower may be a row taller.
+fn above(screen: &mut Screen, area: Area) -> [Area; 2] {
     let rule = usize::from(area.h > 2);
     let top = (area.h - rule) / 2;
     if rule > 0 {
         for x in 0..area.w {
-            screen.put(x, top, 1, "─", FAINT);
+            screen.put(x, area.y + top, 1, "─", FAINT);
         }
     }
-    let upper = Area { h: top, ..area }.inset();
-    let lower = Area { y: top + rule, h: area.h - top - rule, ..area }.inset();
-    // The lower half may be a row taller; both marks are sized for the shorter.
-    let marks = upper.h.min(lower.h);
-    reports[0].panel(screen, upper, marks, Activity::default);
-    reports[1].panel(screen, lower, marks, activity);
+    [Area { h: top, ..area }.inset(), Area { y: area.y + top + rule, h: area.h - top - rule, ..area }.inset()]
 }
 
+/// A rail's two halves, with a rule between them once each has two rows.
 /// On a sidebar, names and the most limiting window come before decoration.
-fn text_first(screen: &mut Screen, area: Area, reports: &[Report; 2], activity: impl FnOnce() -> Activity) {
-    if area.h == 1 {
-        let i = usize::from(tighter(reports[1].limiting(), reports[0].limiting()));
-        return reports[i].summary(screen, area, false, activity);
-    }
+fn halves(screen: &mut Screen, area: Area) -> [Area; 2] {
     let rule = usize::from(area.h >= 5);
-    let upper_h = (area.h - rule) / 2;
+    let upper = (area.h - rule) / 2;
     if rule != 0 {
         for x in area.x..area.x + area.w {
-            screen.put(x, upper_h, 1, "─", FAINT);
+            screen.put(x, area.y + upper, 1, "─", FAINT);
         }
     }
-    let upper = Area { h: upper_h, ..area };
-    let lower = Area { y: upper_h + rule, h: area.h - upper_h - rule, ..area };
-    let inline_detail = area.h == 2;
-    reports[0].summary(screen, upper, inline_detail, Activity::default);
-    reports[1].summary(screen, lower, inline_detail, activity);
+    [Area { h: upper, ..area }, Area { y: area.y + upper + rule, h: area.h - upper - rule, ..area }]
+}
+
+/// Names in a row, with `last` before the final one.
+fn list(names: impl Iterator<Item = &'static str>, last: &str) -> String {
+    let mut names = names.peekable();
+    let mut out = String::new();
+    while let Some(name) = names.next() {
+        if !out.is_empty() {
+            out.push_str(if names.peek().is_some() { ", " } else { last });
+        }
+        out.push_str(name);
+    }
+    out
+}
+
+/// One quiet block when no tool has a place: what each tool Milo found is
+/// waiting for, or that none was found. It never names a hidden tool, and
+/// names an absent one only when all it can say is which tools it looks for.
+fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], checking: bool, tools: UsageTools) {
+    let title = |screen: &mut Screen, [long, short]: [&str; 2]| {
+        if let Some(text) = [long, short].into_iter().find(|text| str_width(text) <= area.w) {
+            screen.put(area.x, area.y, area.w, text, Style::PLAIN);
+        }
+    };
+    // A sentence is shown whole or not at all. Too few rows leave its brief form.
+    let words = |screen: &mut Screen, sentence: &str, brief: &str| {
+        if wrap(sentence, area.w).count() < area.h {
+            for (i, line) in wrap(sentence, area.w).enumerate() {
+                area.note(screen, 1 + i, line);
+            }
+        } else {
+            area.note(screen, 1, brief);
+        }
+    };
+    let count = waiting.iter().flatten().count();
+    if count == 0 {
+        let looked_for = || UsageTool::ALL.into_iter().filter(|&tool| tools[tool] != Show::Hide);
+        if checking {
+            title(screen, ["Checking local usage…", "Checking…"]);
+        } else if looked_for().next().is_none() {
+            title(screen, ["Usage is hidden", "Hidden"]);
+            words(screen, "Every tool is hidden. Change this in milo setup.", "See milo setup");
+        } else {
+            title(screen, NO_USAGE);
+            let sentence = format!("Waiting for {}.", list(looked_for().map(UsageTool::label), " or "));
+            let brief = list(
+                looked_for().map(|tool| match tool {
+                    UsageTool::Codex => Tool::Codex.name(),
+                    UsageTool::Claude => Tool::Claude.name(),
+                    UsageTool::OpenCode => Harness::NAMES[0],
+                }),
+                ", ",
+            );
+            words(screen, &sentence, &brief);
+        }
+        return;
+    }
+    // A lone tool has room for its next step. The title gives way to both.
+    let next = waiting.iter().flatten().next().filter(|_| count == 1).and_then(|(_, hint)| hint.next);
+    let mut row = usize::from(area.h > count + usize::from(next.is_some()));
+    if row != 0 {
+        title(screen, NO_USAGE);
+    }
+    for (name, hint) in waiting.into_iter().flatten() {
+        let text = [hint.full, hint.short, hint.state].into_iter().find(|text| name.len() + 3 + text.len() <= area.w);
+        if row < area.h && name.len() <= area.w {
+            let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
+            writer.add(name, Style::PLAIN);
+            if let Some(text) = text {
+                writer.add(" · ", FAINT);
+                writer.add(text, FAINT);
+            }
+        }
+        row += 1;
+    }
+    area.note(screen, row, next.unwrap_or_default());
 }
 
 /// Choose a grid that leaves room for a useful figure at each supported size.
@@ -849,6 +1068,7 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     if w == 0 || h == 0 {
         return;
     }
+    let tools = usage.tools;
     let checking = usage.omp.checking();
     let missing = if checking {
         Hint::CHECKING
@@ -859,44 +1079,111 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
             CodexSessions::Unreadable => Hint::UNREADABLE,
         }
     };
+    let presence = [usage.codex.presence(), usage.claude.presence(), usage.opencode.presence(today)];
+    let [codex, claude, opencode] = UsageTool::ALL.map(|tool| tools[tool]);
+    // A tool Milo found keeps its hint ready for when no tool has a place.
     let reports = [
-        Report::new(Tool::Codex, usage.codex.reported().map(|(r, source)| (&r.windows, source)), missing, now),
-        Report::new(
-            Tool::Claude,
-            usage.claude.reported().map(|(r, source)| (&r.windows, source)),
-            if checking { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
-            now,
-        ),
+        presence[0].relevant(codex).then(|| {
+            Report::new(Tool::Codex, usage.codex.reported().map(|(r, source)| (&r.windows, source)), missing, now)
+        }),
+        presence[1].relevant(claude).then(|| {
+            Report::new(
+                Tool::Claude,
+                usage.claude.reported().map(|(r, source)| (&r.windows, source)),
+                if checking { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
+                now,
+            )
+        }),
     ];
+    let harness = presence[2].relevant(opencode).then(|| Harness::new(usage, today));
+    let limits = [
+        reports[0].as_ref().filter(|_| presence[0].placed(codex)),
+        reports[1].as_ref().filter(|_| presence[1].placed(claude)),
+    ];
+    let count = limits.iter().flatten().count();
     let split = h == 1 || h >= 3 && w >= SIDE_BY_SIDE;
     // At two rows, give each provider a full line for its tightest limit.
     // Leave the captions and activity their rows in a taller compact pane.
     let text = h == 2 || w < SIDE_BY_SIDE && (!usage.large_figures || w < 19 || h < 9);
     let footer = w >= 8 && h >= if split { 7 } else { 14 };
-    // Harness activity is not a provider's limit, so it sits apart from both
-    // panels, above the key hints and in line with them. It waits for a pane
-    // two rows taller than the hints need, so that a panel with three windows
-    // still has a row for today's tokens.
-    let line = Area { x: 1, y: h.saturating_sub(2), w: w.saturating_sub(2), h: 1 };
-    let harness = usage
-        .opencode
-        .today(today)
-        .filter(|_| w >= 8 && h >= if split { 9 } else { 16 })
-        .and_then(|activity| opencode_text(activity, line.w));
-    let area = Area { x: 0, y: 0, w, h: h - usize::from(footer) - usize::from(harness.is_some()) };
+    let rows = h - usize::from(footer);
+    let pad = usize::from(w >= 24);
+    let placed = harness.as_ref().filter(|_| presence[2].placed(opencode));
+    // Harness activity is not a provider's limit. Beneath two tools with
+    // limits it has one row, above the key hints and in line with them.
+    // Beside panels it waits for a pane two rows taller than the hints need,
+    // so that a panel with three windows still has a row for today's tokens.
+    // On a rail it takes a row as soon as each tool above has one.
+    let inset = if text { pad } else { 1 };
+    let line = Area { x: inset, y: rows - 1, w: w.saturating_sub(2 * inset), h: 1 };
+    let room = if text { rows > 2 } else { w >= 8 && h >= if split { 9 } else { 16 } };
+    let beneath = placed.filter(|harness| count == 2 && room && harness.fitting(line.w, true).is_some());
+    // The rule needs two rows left for each tool above it, and their own rule.
+    let ruled = text && beneath.is_some() && rows > 6;
+    let taken = usize::from(beneath.is_some()) + usize::from(ruled);
+    let area = Area { x: 0, y: 0, w, h: rows - taken };
+    let rail = Area { x: pad, w: w - 2 * pad, ..area };
     let activity = || usage.claude.activity(today, now);
-    if text {
-        let pad = usize::from(area.w >= 24);
-        text_first(screen, Area { x: pad, w: area.w - 2 * pad, ..area }, &reports, activity);
-    } else if split {
-        side_by_side(screen, area, &reports, activity);
-    } else {
-        stacked(screen, area, &reports, activity);
+    match (limits, placed) {
+        ([Some(codex), Some(claude)], _) if text && rail.h == 1 => {
+            // One row goes to whichever tool is nearer its limit.
+            let tightest = if tighter(claude.limiting(), codex.limiting()) { claude } else { codex };
+            tightest.summary(screen, rail, false, false, activity);
+        }
+        ([Some(codex), Some(claude)], _) if text => {
+            let [upper, lower] = halves(screen, rail);
+            codex.summary(screen, upper, rail.h == 2, false, Activity::default);
+            claude.summary(screen, lower, rail.h == 2, false, activity);
+        }
+        ([Some(codex), Some(claude)], _) => {
+            let [first, second] = if split { beside(screen, area) } else { above(screen, area) };
+            // Both marks are sized for the shorter place.
+            let marks = first.h.min(second.h);
+            codex.panel(screen, first, marks, Activity::default);
+            claude.panel(screen, second, marks, activity);
+        }
+        // One tool with limits leaves no empty half: OpenCode takes the
+        // other place when it has something to show, and otherwise the tool
+        // has the frame to itself, with its other windows listed on a rail.
+        ([Some(one), None] | [None, Some(one)], other) => {
+            let tokens = || if matches!(one.tool, Tool::Claude) { activity() } else { Activity::default() };
+            match other {
+                Some(harness) if text && rail.h > 1 => {
+                    let [upper, lower] = halves(screen, rail);
+                    one.summary(screen, upper, upper.h == 1, true, tokens);
+                    harness.summary(screen, lower, now);
+                }
+                Some(harness) if !text => {
+                    let [first, second] = if split { beside(screen, area) } else { above(screen, area) };
+                    one.panel(screen, first, first.h.min(second.h), tokens);
+                    harness.panel(screen, second, now);
+                }
+                // With one row for both, the limit comes first.
+                _ if text => one.summary(screen, rail, rail.h == 1, true, tokens),
+                _ => one.panel(screen, Area { w: area.w.min(LONE), ..area }.inset(), area.h, tokens),
+            }
+        }
+        ([None, None], Some(harness)) if text => harness.summary(screen, rail, now),
+        ([None, None], Some(harness)) => harness.panel(screen, area.inset(), now),
+        ([None, None], None) => {
+            let waiting = [
+                reports[0].as_ref().and_then(Report::waiting),
+                reports[1].as_ref().and_then(Report::waiting),
+                match &harness {
+                    Some(Harness::Unknown(hint)) => Some((Harness::NAMES[0], hint)),
+                    _ => None,
+                },
+            ];
+            quiet(screen, rail, waiting, checking || usage.opencode.poll.checking(), tools);
+        }
     }
-    if let Some(text) = harness {
-        let mut row = RowWriter { screen, x: line.x, y: line.y, left: line.w };
-        row.add(OPENCODE, Style::PLAIN.bold());
-        row.add(&text, FAINT);
+    if let Some(harness) = beneath {
+        if ruled {
+            for x in rail.x..rail.x + rail.w {
+                screen.put(x, area.h, 1, "─", FAINT);
+            }
+        }
+        harness.line(screen, line, true);
     }
     if footer {
         help::draw_hint(screen, "r reload", &["q quit"], "? help");

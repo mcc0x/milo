@@ -49,7 +49,7 @@ pub(super) struct Database {
 }
 
 impl Database {
-    fn new(f: &Fixture, schema: &str, store: Store) -> Self {
+    pub(super) fn new(f: &Fixture, schema: &str, store: Store) -> Self {
         let path = f.root.join("opencode.db");
         // sqlite3 would take the schema's leading comment for an option, so a statement goes first.
         let project =
@@ -69,7 +69,7 @@ impl Database {
         self.store != Store::V1 && self.writer != Writer::Old
     }
 
-    fn session(&self, id: &str, version: &str, created: i64, fork_of: Option<&str>) {
+    pub(super) fn session(&self, id: &str, version: &str, created: i64, fork_of: Option<&str>) {
         let created = created * 1000;
         let mut sql = String::new();
         if self.in_old_tables() {
@@ -270,9 +270,20 @@ fn unchecked_writers_tables_and_rows_stay_unknown() {
     }
     let now = local_noon();
     let f = Fixture::folder();
-    assert_eq!(opencode::read(&f.root.join("opencode.db"), now, TEST_WAIT), Report::Missing);
-    f.write("opencode.db", "not a database");
-    assert_eq!(opencode::read(&f.root.join("opencode.db"), now, TEST_WAIT), Report::Unreadable);
+    let path = f.root.join("opencode.db");
+    assert_eq!(opencode::read(&path, now, TEST_WAIT), Report::Missing);
+    // An empty or foreign file under the name is not a database OpenCode saved.
+    for leftover in ["", "not a database"] {
+        f.write("opencode.db", leftover);
+        assert_eq!(opencode::read(&path, now, TEST_WAIT), Report::Missing, "{leftover:?}");
+    }
+    // A database is OpenCode's even when it cannot be read: here its journal files are gone.
+    fs::remove_file(&path).unwrap();
+    exec(&path, "CREATE TABLE session(id);");
+    exec(&path, "PRAGMA journal_mode=WAL;");
+    assert!(!f.root.join("opencode.db-wal").exists());
+    assert_eq!(opencode::read(&path, now, TEST_WAIT), Report::Unreadable);
+    fs::remove_file(&path).unwrap();
 
     let spoil: [Spoil<'_>; 10] = [
         ("a newer major release", &|db| {
@@ -411,10 +422,13 @@ fn the_pane_gives_opencode_a_row_of_its_own_when_there_is_room_for_it() {
     assert_eq!(wide[7].trim_end(), " OpenCode · 1.5k tokens today · $0.42 est.", "in line with the key hints");
     assert!(wide[8].starts_with(" r reload"), "{wide:?}");
     assert_eq!(opencode_rows(&mut usage, 100, 8), [""; 0], "the panels keep their rows on a shorter pane");
+    // On a rail it has a row as soon as each tool above it has one, in the wording that fits.
     assert_eq!(opencode_rows(&mut usage, 40, 16), ["OpenCode · 1.5k tokens today"]);
+    assert_eq!(opencode_rows(&mut usage, 40, 3), ["OpenCode · 1.5k tokens today"]);
+    assert_eq!(opencode_rows(&mut usage, 40, 2), [""; 0]);
     assert_eq!(opencode_rows(&mut usage, 24, 16), ["OpenCode 1.5k tokens"]);
-    assert_eq!(opencode_rows(&mut usage, 20, 16), [""; 0]);
-    assert_eq!(opencode_rows(&mut usage, 40, 15), [""; 0]);
+    assert_eq!(opencode_rows(&mut usage, 20, 16), ["OpenCode 1.5k tokens"]);
+    assert_eq!(opencode_rows(&mut usage, 14, 16), ["OpenCode 1.5k"]);
 
     // Yesterday's totals are not today's: they go until the next read replaces them.
     usage.fixed_now = Some(now + DAY);

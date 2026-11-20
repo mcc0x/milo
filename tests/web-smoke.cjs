@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const {execFileSync, spawn} = require('node:child_process');
 const {once} = require('node:events');
-const {mkdir, mkdtemp, rm} = require('node:fs/promises');
+const {mkdir, mkdtemp, readFile, rm} = require('node:fs/promises');
 const {tmpdir} = require('node:os');
 const {join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
@@ -18,6 +18,10 @@ const button = (page, name) => page.getByRole('button', {name, exact: true});
 const dialog = (page, name) => page.getByRole('dialog', {name, exact: true});
 const number = (page, name) => page.getByRole('spinbutton', {name, exact: true});
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
+const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
+const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
+const usageChoice = (page, tool, name) =>
+  page.getByRole('group', {name: `${tool} usage`, exact: true}).getByRole('radio', {name, exact: true});
 
 async function withMilo(binary, cwd, env, run) {
   const server = spawn(binary, ['web', '--no-open', '--port', '0'], {
@@ -71,6 +75,43 @@ async function saveNumbers(page) {
     assert.equal(await field.inputValue(), value, name);
     console.log(`${name}: saved on the first click`);
   }
+}
+
+async function chooseUsageTools(page, binary, cwd, env) {
+  await section(page, 'Appearance').click();
+  for (const tool of usageTools) {
+    assert(await usageChoice(page, tool, 'Auto').isChecked(), `${tool} starts on Auto`);
+  }
+  await usageChoice(page, 'OpenCode', 'Hide').click();
+  await usageChoice(page, 'OpenCode', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
+  await page.getByText('Never shown, and never looked for.').waitFor();
+  await usageChoice(page, 'Claude Code', 'Always show').click();
+  await status(page, dirty).waitFor({state: 'attached'});
+  const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
+  await assert.rejects(readFile(preferences), {code: 'ENOENT'}, 'a draft writes no preferences');
+
+  await button(page, 'Save').click();
+  await button(dialog(page, 'Save changes'), 'Save as global default').click();
+  await status(page, clean).waitFor({state: 'attached'});
+  assert.equal(await readFile(preferences, 'utf8'), 'usage_claude = always\nusage_opencode = hide\n');
+  assert(await usageChoice(page, 'Codex', 'Auto').isChecked(), 'Codex was left on Auto');
+  // What the panes read is what the controls saved, and a hidden tool is not looked for.
+  const doctor = execFileSync(binary, ['doctor'], {cwd, env, encoding: 'utf8'});
+  assert.match(doctor, /^ {2}Usage tools: Claude Code always shown; OpenCode hidden; others automatic$/m);
+  assert.match(doctor, /^Claude Code limits: no local report; /m);
+  assert.doesNotMatch(doctor, /^(Codex limits|OpenCode activity|Usage tools: none)/m);
+  await section(page, 'Layout').click();
+  console.log('Usage tools: three choices saved globally and read back by doctor');
+}
+
+async function usageToolsPersisted(page) {
+  await section(page, 'Appearance').click();
+  const expected = [['Codex', 'Auto'], ['Claude Code', 'Always show'], ['OpenCode', 'Hide']];
+  for (const [tool, name] of expected) {
+    assert(await usageChoice(page, tool, name).isChecked(), `${tool} persisted as ${name}`);
+  }
+  await section(page, 'Layout').click();
+  await page.getByRole('heading', {name: 'Panes', exact: true}).waitFor();
 }
 
 async function pressAfterNumberEdit(page) {
@@ -172,6 +213,7 @@ async function main() {
       const dev = await page.request.get(new URL('/dev/version', url).href);
       assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
       await saveNumbers(page);
+      await chooseUsageTools(page, binary, cwd, env);
       await pressAfterNumberEdit(page);
       await page.close();
     });
@@ -180,6 +222,7 @@ async function main() {
       for (const [name, value] of edits) {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }
+      await usageToolsPersisted(page);
       await rejectStaleDone(desktop, page, url);
       await confirmFromMobileFooter(browser, url, exited);
     });

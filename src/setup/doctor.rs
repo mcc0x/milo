@@ -16,7 +16,7 @@ use super::profiles::{LayoutError, Scope};
 use super::rex_files::{LISTENER_STATE_MISMATCH, LOADER_CONFLICT};
 use super::{lock, rex_files};
 use crate::git::discover_worktree;
-use crate::preferences::{IconMode, Preferences, Source};
+use crate::preferences::{IconMode, Preferences, Show, Source, UsageTool, UsageTools};
 use crate::{rex, usage};
 
 pub(crate) const TITLE: &str = "Milo doctor";
@@ -128,25 +128,33 @@ pub(crate) fn report() -> Result<String, String> {
     full_report(&store()?, None)
 }
 
-/// The report someone reads: the installation's health, then what OpenCode
-/// saved. That probe opens a database, so health checks alone do not run it.
+/// The report someone reads: the installation's health, then what the usage
+/// tools saved. That look opens their files and databases, so health checks
+/// alone do not run it.
 pub(super) fn full_report(store: &Store, root: Option<&Path>) -> Result<String, String> {
-    let mut report = report_for(store, root)?;
-    for line in usage::opencode_source() {
+    let (mut report, tools) = inspect(store, root)?;
+    for line in usage::doctor(tools) {
         report.push('\n');
         report.push_str(&line);
     }
     Ok(report)
 }
 
+#[cfg(test)]
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {
+    inspect(store, root).map(|(report, _)| report)
+}
+
+fn inspect(store: &Store, root: Option<&Path>) -> Result<(String, UsageTools), String> {
     let target = rex::Target::current();
-    if root.is_some() {
-        return report_with_worktree(store, Ok(root), target.as_ref()).map(|(report, _)| report);
-    }
-    let discovered = discover_worktree(Path::new("."));
-    report_with_worktree(store, discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note), target.as_ref())
-        .map(|(report, _)| report)
+    let discovered;
+    let worktree = if root.is_some() {
+        Ok(root)
+    } else {
+        discovered = discover_worktree(Path::new("."));
+        discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note)
+    };
+    report_with_worktree(store, worktree, target.as_ref()).map(|(report, _, tools)| (report, tools))
 }
 
 pub(super) fn health_anchored(
@@ -154,7 +162,7 @@ pub(super) fn health_anchored(
     root: Option<&Path>,
     target: Result<Option<&rex::Target>, &'static str>,
 ) -> Result<Health, String> {
-    let (_, health) = report_with_worktree(store, Ok(root), target.ok().flatten())?;
+    let (_, health, _) = report_with_worktree(store, Ok(root), target.ok().flatten())?;
     // The missing original tab matters more than other warnings, but it
     // shouldn't hide a definite problem with the installation.
     Ok(match target {
@@ -167,8 +175,9 @@ fn report_with_worktree(
     store: &Store,
     worktree: Result<Option<&Path>, &'static str>,
     target: Option<&rex::Target>,
-) -> Result<(String, Health), String> {
+) -> Result<(String, Health, UsageTools), String> {
     let mut health = Health::Good;
+    let mut tools = UsageTools::default();
     let mut out = String::from(TITLE);
     out.push('\n');
     match worktree {
@@ -204,6 +213,8 @@ fn report_with_worktree(
             )
             .unwrap();
             writeln!(out, "  Narrow usage: {}", if p.usage_large_figures { "large figures" } else { "text" }).unwrap();
+            writeln!(out, "  Usage tools: {}", usage_tools(p.usage_tools)).unwrap();
+            tools = p.usage_tools;
         }
         Err(e) => {
             health.issue("Milo could not read your pane preferences.");
@@ -333,12 +344,28 @@ fn report_with_worktree(
             writeln!(out, "unreadable; check Claude settings ({:?})", store.claude).unwrap()
         }
     }
-    for (provider, source) in usage::sources() {
-        writeln!(out, "{provider} limits: {}", source.unwrap_or("no local report; see the usage pane for setup hints"))
-            .unwrap();
-    }
     out.pop();
-    Ok((out, health))
+    Ok((out, health, tools))
+}
+
+/// Only a choice someone made is spelled out, so a tool left alone goes unnamed.
+fn usage_tools(tools: UsageTools) -> String {
+    let mut out = String::new();
+    for tool in UsageTool::ALL {
+        let choice = match tools[tool] {
+            Show::Auto => continue,
+            Show::Always => "always shown",
+            Show::Hide => "hidden",
+        };
+        write!(out, "{} {choice}; ", tool.label()).unwrap();
+    }
+    out.push_str(match out.len() {
+        0 => "automatic",
+        _ if UsageTool::ALL.into_iter().any(|tool| tools[tool] == Show::Auto) => "others automatic",
+        _ => "",
+    });
+    out.truncate(out.trim_end_matches("; ").len());
+    out
 }
 
 enum LiveUsage {
@@ -641,6 +668,22 @@ mod tests {
         assert!(report.contains("run milo setup --repair"), "{report}");
         assert!(!report.contains("Saved layout profile"), "{report}");
         assert_eq!(std::fs::read_to_string(store.init).unwrap(), contents);
+    }
+
+    #[test]
+    fn doctor_names_a_usage_tool_only_when_a_choice_was_made_for_it() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        let report = report_for(&store, Some(&fixture.root)).unwrap();
+        assert!(report.contains("\n  Usage tools: automatic\n"), "{report}");
+        assert!(!report.contains("OpenCode") && !report.contains("limits:"), "{report}");
+
+        let mut tools = UsageTools::default();
+        tools[UsageTool::OpenCode] = Show::Hide;
+        assert_eq!(usage_tools(tools), "OpenCode hidden; others automatic");
+        tools[UsageTool::Codex] = Show::Always;
+        tools[UsageTool::Claude] = Show::Always;
+        assert_eq!(usage_tools(tools), "Codex always shown; Claude Code always shown; OpenCode hidden");
     }
 
     #[test]

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use crate::help::{self, Page};
 use crate::keys::{ConfirmClick, Key};
 use crate::pane::{After, External, Pane};
-use crate::preferences::{IconMode, Preferences, ProjectMode, Source};
+use crate::preferences::{IconMode, Preferences, ProjectMode, Source, UsageTool};
 use crate::screen::{Screen, Style};
 use crate::ui::{DEL, FAINT};
 use crate::{paths, rex};
@@ -104,6 +104,7 @@ enum Row {
     Activity,
     GitMarks,
     UsageStyle,
+    UsageTool(UsageTool),
     FollowProject,
     FollowActivity,
     ChangesOnly,
@@ -308,9 +309,17 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Layout if self.scope == Scope::Global => &LAYOUT[..4],
             Panel::Layout => LAYOUT,
             Panel::Tune => TUNE,
-            Panel::Appearance => {
-                &[Row::Icons, Row::Activity, Row::GitMarks, Row::UsageStyle, Row::SavePrefs, Row::UseGlobalPrefs]
-            }
+            Panel::Appearance => &[
+                Row::Icons,
+                Row::Activity,
+                Row::GitMarks,
+                Row::UsageStyle,
+                Row::UsageTool(UsageTool::Codex),
+                Row::UsageTool(UsageTool::Claude),
+                Row::UsageTool(UsageTool::OpenCode),
+                Row::SavePrefs,
+                Row::UseGlobalPrefs,
+            ],
             Panel::Workflow => WORKFLOW,
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
             Panel::Diagnostics => &[],
@@ -596,6 +605,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Activity => self.prefs.static_marks = !self.prefs.static_marks,
             Row::GitMarks => self.prefs.text_git_marks = !self.prefs.text_git_marks,
             Row::UsageStyle => self.prefs.usage_large_figures = !self.prefs.usage_large_figures,
+            Row::UsageTool(tool) => self.prefs.usage_tools[tool] = self.prefs.usage_tools[tool].next(),
             Row::FollowProject => {
                 self.prefs.project_mode = match self.prefs.project_mode {
                     ProjectMode::Follow => ProjectMode::Pin,
@@ -737,6 +747,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             | Row::Activity
             | Row::GitMarks
             | Row::UsageStyle
+            | Row::UsageTool(_)
             | Row::FollowProject
             | Row::FollowActivity
             | Row::ChangesOnly

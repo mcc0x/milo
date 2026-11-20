@@ -1,5 +1,6 @@
 use super::*;
 use crate::fixture::Fixture;
+use crate::preferences::Show;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::Command;
@@ -205,6 +206,48 @@ fn global_preference_save_does_not_copy_worktree_or_stale_values() {
         Preferences::resolve(Some(&worktree)).unwrap(),
         (Preferences { changes_only: true, ..expected }, Source::Worktree),
     );
+    assert!(!pane.prefs_dirty());
+}
+
+#[test]
+fn usage_tool_choices_cycle_in_appearance_and_save_to_the_chosen_scope() {
+    let Some(root) =
+        isolated_settings("setup::tests::usage_tool_choices_cycle_in_appearance_and_save_to_the_chosen_scope")
+    else {
+        return;
+    };
+    let worktree = root.join("worktree");
+    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    pane.reload_prefs().unwrap();
+    pane.key(Key::Char('2'));
+    let rows = frame(&mut pane, 80, 24);
+    for label in ["Codex usage", "Claude Code usage", "OpenCode usage"] {
+        assert!(rows.iter().any(|row| row.contains(label) && row.contains("Auto")), "{label}: {rows:?}");
+    }
+
+    let opencode = Row::UsageTool(UsageTool::OpenCode);
+    choose(&mut pane, opencode);
+    let rows = frame(&mut pane, 80, 24);
+    assert!(rows.iter().any(|row| row.contains("OpenCode usage") && row.contains("Always show")), "{rows:?}");
+    assert!(rows.iter().any(|row| row.contains("Always show keeps its place")), "{rows:?}");
+    choose(&mut pane, opencode);
+    assert!(frame(&mut pane, 18, 12).iter().any(|row| row.starts_with('›') && row.ends_with("Hide")));
+    assert!(pane.prefs_dirty());
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+    let (saved, source) = Preferences::resolve(Some(&worktree)).unwrap();
+    assert_eq!((saved.usage_tools[UsageTool::OpenCode], source), (Show::Hide, Source::Global));
+
+    // A worktree can show a tool the global choice hides, and keeps inheriting the rest.
+    assert_eq!(pane.panel, Panel::Appearance);
+    choose(&mut pane, opencode);
+    choose(&mut pane, Row::UsageTool(UsageTool::Codex));
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    let choices = |prefs: Preferences| UsageTool::ALL.map(|tool| prefs.usage_tools[tool]);
+    let (local, source) = Preferences::resolve(Some(&worktree)).unwrap();
+    assert_eq!((choices(local), source), ([Show::Always, Show::Auto, Show::Auto], Source::Worktree));
+    assert_eq!(choices(Preferences::resolve(None).unwrap().0), [Show::Auto, Show::Auto, Show::Hide]);
     assert!(!pane.prefs_dirty());
 }
 
