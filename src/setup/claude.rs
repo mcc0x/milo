@@ -119,15 +119,20 @@ impl ClaudeFiles<'_> {
 
     /// A matching command without a note may have been added by the user.
     pub(super) fn status(&self) -> Claude {
-        self.status_of(self.editor().as_ref())
+        self.status_with_ownership().0
     }
 
-    fn status_of(&self, editor: Option<&Settings<'_>>) -> Claude {
-        let ownership = self.ownership();
-        match editor.map(|editor| editor.status(ownership.map(|(_, command)| command))) {
+    /// The note can still be valid after its status line is gone or replaced.
+    pub(super) fn status_with_ownership(&self) -> (Claude, bool) {
+        let command = self.ownership().map(|(_, command)| command);
+        (Self::status_of(self.editor().as_ref(), command), command.is_some())
+    }
+
+    fn status_of(editor: Option<&Settings<'_>>, command: Option<&str>) -> Claude {
+        match editor.map(|editor| editor.status(command)) {
             Some(Status::Absent) => Claude::Off,
             Some(Status::Foreign) => Claude::Foreign,
-            Some(Status::Milo) if ownership.is_some() => Claude::On,
+            Some(Status::Milo) if command.is_some() => Claude::On,
             Some(Status::Milo) => Claude::NotOwned,
             None => Claude::Invalid,
         }
@@ -136,11 +141,13 @@ impl ClaudeFiles<'_> {
     /// Recheck ownership against the files just read rather than the pane's old state.
     pub(super) fn plan(self, enabled: bool, changes: &mut Vec<Change>) -> Result<(), &'static str> {
         let json = self.editor();
-        let status = self.status_of(json.as_ref());
-        if !status.editable() {
+        let ownership = self.ownership();
+        let status = Self::status_of(json.as_ref(), ownership.map(|(_, command)| command));
+        let clear_stale_note = !enabled && status == Claude::Foreign && ownership.is_some();
+        if !status.editable() && !clear_stale_note {
             return Err("Claude Code settings changed. Reopen setup to see them.");
         }
-        if self.note.is_some() && self.ownership().is_none() {
+        if self.note.is_some() && ownership.is_none() {
             return Err("Milo's Claude Code note was changed. It was left alone.");
         }
         let json = json.expect("editable settings are valid");
@@ -160,7 +167,7 @@ impl ClaudeFiles<'_> {
                 changes.extend(Change::new(self.path.into_owned(), self.settings, Some(text.into_bytes())));
             }
             (Claude::On, false) => {
-                let (origin, command) = self.ownership().expect("the status line is owned");
+                let (origin, command) = ownership.expect("the status line is owned");
                 let delete = origin == CLAUDE_CREATED
                     && matches!(self.path, Cow::Borrowed(_))
                     && self.settings.as_ref().is_some_and(|file| file.bytes == settings::new(command).as_bytes());
@@ -168,7 +175,8 @@ impl ClaudeFiles<'_> {
                 changes.extend(Change::new(self.path.into_owned(), self.settings, after));
                 changes.extend(Change::new(self.note_path, self.note, None));
             }
-            (Claude::Off, false) => changes.extend(Change::new(self.note_path, self.note, None)),
+            // A missing or replaced status line no longer needs its ownership note.
+            (Claude::Off | Claude::Foreign, false) => changes.extend(Change::new(self.note_path, self.note, None)),
             _ => {}
         }
         Ok(())
@@ -194,14 +202,17 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_launcher_does_not_match_the_ownership_note() {
+    fn a_replacement_launcher_is_left_alone_when_clearing_the_stale_note() {
         let text = settings::new("'/a/milo' claude-status");
         let settings = Some(Image { bytes: text.into_bytes(), mode: 0o600 });
         let note = Some(Image { bytes: b"created\n'/other/milo' claude-status".to_vec(), mode: 0o600 });
-        let files =
-            ClaudeFiles { path: Cow::Borrowed(Path::new("settings.json")), settings, note, note_path: PathBuf::new() };
-        assert!(files.status() == Claude::Foreign);
-        assert!(files.plan(false, &mut Vec::new()).is_err());
+        let path = Cow::Borrowed(Path::new("settings.json"));
+        let files = ClaudeFiles { path, settings, note, note_path: OWN_CLAUDE.into() };
+        assert!(files.status_with_ownership() == (Claude::Foreign, true));
+        let mut changes = Vec::new();
+        files.plan(false, &mut changes).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path(), Path::new(OWN_CLAUDE));
     }
 
     #[test]

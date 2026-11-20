@@ -641,8 +641,10 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
     if rex && !store.listener_state_matches()? {
         return Err(LISTENER_STATE_MISMATCH.into());
     }
-    let claude = match store.claude() {
-        Claude::On => Some(false),
+    let (claude, has_valid_note) =
+        store.claude_files().map_or((Claude::Invalid, false), |files| files.status_with_ownership());
+    let claude = match claude {
+        Claude::On | Claude::Off | Claude::Foreign => has_valid_note.then_some(false),
         Claude::Invalid => {
             let note = read(&store.claude_note())
                 .map_err(|_| "Could not verify Claude Code ownership. Check access to Milo's state directory.")?;
@@ -661,7 +663,6 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
             )
             .into());
         }
-        Claude::Off | Claude::Foreign => None,
     };
     if !rex && claude.is_none() {
         return Ok("No managed integration to remove. Preferences and user settings were left alone.".into());
@@ -795,6 +796,69 @@ mod tests {
         assert!(message.contains("Removed managed integrations"));
         assert!(message.contains("Rex was not reloaded"));
         assert!(!store.init.exists());
+    }
+
+    #[test]
+    fn removal_clears_a_stale_claude_note_when_the_status_line_is_absent() {
+        let kept = b"{\n  \"keep\" : [1, 2]\n}\n";
+        for settings in [None, Some(kept.as_slice())] {
+            let fixture = Fixture::folder();
+            let store = fixture_store(&fixture);
+            let no_rex = |_: &[&OsStr]| panic!("Claude settings do not need Rex");
+            store.save(None, Some(true), &no_rex).unwrap();
+            if let Some(settings) = settings {
+                std::fs::write(&store.claude, settings).unwrap();
+            } else {
+                std::fs::remove_file(&store.claude).unwrap();
+            }
+            let before = read(&store.claude).unwrap();
+
+            assert!(remove_from(&store, &no_rex).unwrap().contains("Removed managed integrations"));
+            assert!(!store.claude_note().exists());
+            assert!(read(&store.claude).unwrap() == before);
+            assert!(remove_from(&store, &no_rex).unwrap().contains("No managed integration"));
+        }
+    }
+
+    #[test]
+    fn removal_clears_only_the_active_profiles_stale_claude_note() {
+        let fixture = Fixture::folder();
+        let default = fixture_store(&fixture);
+        let active = Store {
+            claude: fixture.root.join("alternate/settings.json"),
+            claude_state: Some(default.state.join("alternate")),
+            ..default.clone()
+        };
+        let no_rex = |_: &[&OsStr]| panic!("Claude settings do not need Rex");
+        for store in [&default, &active] {
+            store.save(None, Some(true), &no_rex).unwrap();
+        }
+        let foreign = "{\r\n   \"statusLine\": {\"type\":\"command\",\"command\":\"my-status\"}, \"keep\" : 7\r\n}\r\n";
+        std::fs::write(&active.claude, foreign).unwrap();
+        let default_settings = std::fs::read(&default.claude).unwrap();
+        let default_note = std::fs::read(default.claude_note()).unwrap();
+
+        assert!(remove_from(&active, &no_rex).unwrap().contains("Removed managed integrations"));
+        assert!(!active.claude_note().exists());
+        assert_eq!(std::fs::read_to_string(&active.claude).unwrap(), foreign);
+        assert_eq!(std::fs::read(&default.claude).unwrap(), default_settings);
+        assert_eq!(std::fs::read(default.claude_note()).unwrap(), default_note);
+    }
+
+    #[test]
+    fn removal_leaves_an_unrecognized_claude_note_alone() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        let no_rex = |_: &[&OsStr]| panic!("Claude settings do not need Rex");
+        let foreign = br#"{"statusLine":{"type":"command","command":"my-status"}}"#;
+        std::fs::write(&store.claude, foreign).unwrap();
+        std::fs::create_dir_all(&store.state).unwrap();
+        let changed = b"updated\nmy-status";
+        std::fs::write(store.claude_note(), changed).unwrap();
+
+        assert!(remove_from(&store, &no_rex).unwrap().contains("No managed integration"));
+        assert_eq!(std::fs::read(store.claude_note()).unwrap(), changed);
+        assert_eq!(std::fs::read(&store.claude).unwrap(), foreign);
     }
 
     #[test]
