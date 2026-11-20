@@ -53,6 +53,11 @@ pub trait Pane {
         Scope { roots: Vec::new(), ignored: Default::default(), complete: true }
     }
 
+    /// A new scope after a key changes what the pane is watching.
+    fn watch_scope_after_input(&self, _current: &Scope) -> Option<Scope> {
+        None
+    }
+
     /// The reader opener belongs to the terminal pane, not its current project.
     fn reader_opener(&mut self) -> Option<&mut OpenReader> {
         None
@@ -270,6 +275,26 @@ pub(super) fn watch_pane(pane: &mut dyn Pane, check_on_open: bool) -> (Watcher, 
         }
     }
     (watcher, pace)
+}
+
+pub(super) fn refresh_watch_after_input(
+    pane: &dyn Pane,
+    watcher: &mut Watcher,
+    pace: &mut Option<Pace>,
+    keep_polling: bool,
+) {
+    let Some(scope) = pane.watch_scope_after_input(watcher.scope()) else { return };
+    let handoff = watcher.refresh(scope);
+    if let Some(idle) = watch_idle(watcher, keep_polling) {
+        let timing = pace.get_or_insert_with(|| Pace::new(idle, Instant::now()));
+        timing.idle = idle;
+        if handoff {
+            // The key's snapshot preceded the new coverage.
+            timing.report_change();
+        }
+    } else {
+        *pace = None;
+    }
 }
 
 pub(super) fn check_watched_pane(
@@ -510,6 +535,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                     }
                     overlay_changed |= had_help != help.is_some();
                 }
+                refresh_watch_after_input(pane.as_ref(), &mut watcher, &mut pace, check_on_open);
             }
             Wait::Woken => {
                 watcher.drain();

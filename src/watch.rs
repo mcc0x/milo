@@ -31,13 +31,25 @@ pub struct Ignored {
 pub enum Events {
     #[default]
     All,
-    Reader { file: PathBuf, worktree: Option<PathBuf>, metadata: [Option<PathBuf>; 3] },
+    Reader {
+        file: PathBuf,
+        worktree: Option<PathBuf>,
+        metadata: [Option<PathBuf>; 3],
+    },
+    /// Filter descendants only, never the directory entry shown by Outline.
+    Collapsed(HashSet<PathBuf>),
 }
 
 #[cfg(target_os = "macos")]
 impl Ignored {
     fn needs_paths(&self) -> bool {
-        !self.dirs.is_empty() || !self.files.is_empty() || self.events != Events::All
+        !self.dirs.is_empty()
+            || !self.files.is_empty()
+            || match &self.events {
+                Events::All => false,
+                Events::Reader { .. } => true,
+                Events::Collapsed(dirs) => !dirs.is_empty(),
+            }
     }
 
     fn allows(&self, path: &std::path::Path, is_dir: bool) -> bool {
@@ -46,7 +58,11 @@ impl Ignored {
         {
             return false;
         }
-        let Events::Reader { file, worktree, metadata } = &self.events else { return true };
+        let (file, worktree, metadata) = match &self.events {
+            Events::All => return true,
+            Events::Collapsed(dirs) => return !path.ancestors().skip(1).any(|p| dirs.contains(p)),
+            Events::Reader { file, worktree, metadata } => (file, worktree, metadata),
+        };
         // Event paths need not use the same spelling as the reader on
         // case-insensitive volumes. Prefixes still end at a component.
         let under = |path: &std::path::Path, base: &std::path::Path| {
@@ -440,7 +456,9 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use crate::git::Repo;
-    use crate::pane::Pane;
+    use crate::keys::Key;
+    use crate::outline::Outline;
+    use crate::pane::{Pane, check_watched_pane, refresh_watch_after_input, watch_pane};
     use crate::reader::Reader;
     use crate::screen::Screen;
 
@@ -463,6 +481,86 @@ mod tests {
         while changed(watcher, 300) {
             assert!(std::time::Instant::now() < deadline, "fixture never settled");
         }
+    }
+
+    #[test]
+    fn outline_watches_visible_directory_changes_and_updates_coverage_when_folds_change() {
+        let f = Fixture::folder();
+        f.write("fold/nested/hidden.txt", "old\n");
+        let mut outline = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let (mut watcher, mut pace) = watch_pane(&mut outline, false);
+        let fd = watcher.fd().unwrap();
+        assert!(watcher.native.is_empty(), "native exclusions could hide the directory entry itself");
+        let mut screen = Screen::sized(60, 8);
+        let draw = |outline: &mut Outline, screen: &mut Screen, name: &str| {
+            outline.draw(screen);
+            screen.text().iter().any(|row| row.contains(name))
+        };
+
+        f.write("top.txt", "present\n");
+        assert!(changed(&watcher, 30_000));
+        assert!(check_watched_pane(&mut outline, &mut watcher, &mut pace, false));
+        assert!(draw(&mut outline, &mut screen, "top.txt"));
+        settle(&watcher);
+        f.write("fold/nested/hidden.txt", "edited\n");
+        f.write("fold/nested/added.txt", "new\n");
+        assert!(!changed(&watcher, 300), "changes inside the closed folder must not wake Outline");
+
+        outline.key(Key::Right);
+        refresh_watch_after_input(&outline, &mut watcher, &mut pace, false);
+        assert_eq!(watcher.fd(), Some(fd), "folds should not restart the native stream");
+        f.write("fold/visible.txt", "new immediate child\n");
+        assert!(changed(&watcher, 30_000));
+        assert!(check_watched_pane(&mut outline, &mut watcher, &mut pace, false));
+        assert!(draw(&mut outline, &mut screen, "visible.txt"));
+        assert!(!draw(&mut outline, &mut screen, "added.txt"));
+        settle(&watcher);
+        f.write("fold/nested/later.txt", "new within the nested fold\n");
+        assert!(!changed(&watcher, 300), "opening a parent must not open coverage under a nested fold");
+
+        outline.key(Key::Down);
+        outline.key(Key::Right);
+        refresh_watch_after_input(&outline, &mut watcher, &mut pace, false);
+        assert!(draw(&mut outline, &mut screen, "later.txt"), "opening a fold reads its current contents");
+        outline.key(Key::Left);
+        refresh_watch_after_input(&outline, &mut watcher, &mut pace, false);
+        std::fs::rename(f.root.join("fold/nested"), f.root.join("fold/renamed")).unwrap();
+        assert!(changed(&watcher, 30_000), "renaming the visible closed directory must wake Outline");
+        assert!(check_watched_pane(&mut outline, &mut watcher, &mut pace, false));
+        assert!(draw(&mut outline, &mut screen, "renamed"));
+        assert!(!draw(&mut outline, &mut screen, "nested"));
+        settle(&watcher);
+        f.write("fold/renamed/still-hidden.txt", "new\n");
+        assert!(!changed(&watcher, 300), "the renamed directory should now be filtered");
+    }
+
+    #[test]
+    fn an_incomplete_git_directory_keeps_waking_outline_until_promotion() {
+        let f = Fixture::folder();
+        f.write("fold/hidden.txt", "untracked\n");
+        let mut outline = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let (mut watcher, mut pace) = watch_pane(&mut outline, false);
+
+        std::fs::create_dir(f.root.join(".git")).unwrap();
+        assert!(changed(&watcher, 30_000));
+        assert!(check_watched_pane(&mut outline, &mut watcher, &mut pace, false));
+        assert!(outline.promoted_worktree().is_none());
+        settle(&watcher);
+
+        f.git(&["init", "-q", "--template=", "-b", "main"]);
+        assert!(changed(&watcher, 30_000), "changes within .git must be noticed before promotion");
+        assert!(check_watched_pane(&mut outline, &mut watcher, &mut pace, false));
+        assert!(outline.promoted_worktree().is_some());
+        let mut screen = Screen::sized(60, 8);
+        outline.draw(&mut screen);
+        assert!(screen.text()[0].contains("1 to commit"));
+        settle(&watcher);
+
+        f.write("fold/also-untracked.txt", "new\n");
+        assert!(changed(&watcher, 30_000), "a promoted Outline needs the whole worktree");
+        assert!(check_watched_pane(&mut outline, &mut watcher, &mut pace, false));
+        outline.draw(&mut screen);
+        assert!(screen.text()[0].contains("2 to commit"));
     }
 
     #[test]

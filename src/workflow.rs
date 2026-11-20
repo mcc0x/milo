@@ -143,6 +143,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         self.pane.watch_scope()
     }
 
+    fn watch_scope_after_input(&self, current: &Scope) -> Option<Scope> {
+        self.pane.watch_scope_after_input(current)
+    }
+
     fn git_busy(&self) -> bool {
         self.pane.git_busy()
     }

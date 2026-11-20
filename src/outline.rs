@@ -8,6 +8,7 @@ mod untracked;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::git::{Kind, PendingFile, Repo};
@@ -20,7 +21,7 @@ use crate::screen::{Screen, Style};
 use crate::tree::{Folds, Tree, folders_above};
 use crate::ui::{self, ADD, DEL};
 use crate::walk;
-use crate::watch::Scope;
+use crate::watch::{Events, Ignored, Scope};
 
 use self::attention::Attention;
 use self::draw::{ChangeColumns, Layout};
@@ -36,6 +37,7 @@ pub struct Outline {
     untracked: untracked::Untracked,
     /// Without git, the listing the tree was built from, to notice changes.
     listing: walk::Listing,
+    folder_filter: Option<Arc<Ignored>>,
     tree: Tree,
     /// Measured once per row layout, and only when there is room for details.
     change_columns: Option<ChangeColumns>,
@@ -97,6 +99,7 @@ impl Outline {
             pending: Vec::new(),
             untracked: untracked::Untracked::default(),
             listing: walk::Listing::default(),
+            folder_filter: None,
             tree: Tree::default(),
             change_columns: None,
             folds,
@@ -138,11 +141,33 @@ impl Outline {
 
     fn refresh_folder(&mut self, selected: Option<Rc<str>>) {
         let listing = walk::list(&self.repo.root, |p| self.folds.is_open(p));
-        if listing.paths != self.listing.paths {
+        let changed = listing.paths != self.listing.paths;
+        if changed {
             self.tree.rebuild(listing.paths.iter().map(String::as_str), &[]);
             self.relayout(selected);
         }
+        if cfg!(target_os = "macos") && (changed || self.folder_filter.is_none()) {
+            let collapsed = listing
+                .paths
+                .iter()
+                .filter(|p| {
+                    p.ends_with('/')
+                        && !self.folds.is_open(p)
+                        // Git can begin sending descendant events before a new .git is valid.
+                        && !p.eq_ignore_ascii_case(".git/")
+                        // A lossy name may not identify a unique path on disk.
+                        && !p.contains('\u{fffd}')
+                })
+                .map(|p| self.repo.root.join(p))
+                .collect();
+            self.folder_filter = Some(Arc::new(Ignored { events: Events::Collapsed(collapsed), ..Ignored::default() }));
+        }
         self.listing = listing;
+    }
+
+    fn active_folder_filter(&self) -> Option<&Arc<Ignored>> {
+        // An inline Reader may need Git metadata inside a closed folder.
+        self.folder_filter.as_ref().filter(|_| self.reading.is_none())
     }
 
     fn check_folder(&mut self) {
@@ -166,6 +191,7 @@ impl Outline {
         }
         self.repo = repo;
         self.listing = walk::Listing::default();
+        self.folder_filter = None;
         self.load();
     }
 
@@ -259,6 +285,8 @@ impl Outline {
         if self.repo.git {
             self.relayout(selected);
         } else {
+            // Even an empty folder changes coverage when opened or closed.
+            self.folder_filter = None;
             self.refresh_folder(selected);
         }
     }
@@ -325,7 +353,19 @@ impl Pane for Outline {
     }
 
     fn watch_scope(&self) -> Scope {
-        self.repo.watch_scope()
+        let mut scope = self.repo.watch_scope();
+        if let Some(ignored) = self.active_folder_filter() {
+            scope.ignored = Arc::clone(ignored);
+        }
+        scope
+    }
+
+    fn watch_scope_after_input(&self, current: &Scope) -> Option<Scope> {
+        let changed = match self.active_folder_filter() {
+            Some(ignored) => !Arc::ptr_eq(ignored, &current.ignored),
+            None => matches!(current.ignored.events, Events::Collapsed(_)),
+        };
+        changed.then(|| self.watch_scope())
     }
 
     fn reader_opener(&mut self) -> Option<&mut OpenReader> {
