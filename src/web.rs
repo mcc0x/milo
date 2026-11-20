@@ -3,17 +3,18 @@
 #[cfg(feature = "web-dev")]
 mod dev;
 mod http;
+mod launch;
 
 use std::fs::File;
 use std::io::{self, PipeReader, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, IntoRawFd};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use self::http::{Access, Input, Request, Response, Route};
+use self::launch::Launch;
 use crate::setup::web::Editor;
 
 #[cfg(not(feature = "web-dev"))]
@@ -53,7 +54,6 @@ pub(crate) const DEFAULT_PORT: u16 = 6110;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLIENTS: usize = 16;
-const LAUNCHER_CHECK: Duration = Duration::from_millis(100);
 static STOP: AtomicBool = AtomicBool::new(false);
 static WAKE_WRITER: AtomicI32 = AtomicI32::new(-1);
 
@@ -83,9 +83,9 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("could not print the editor URL: {error}"))?;
     }
-    let launcher = if open_browser {
-        match launch(&url) {
-            Ok(child) => Some(child),
+    let launcher = if open_browser && !STOP.load(Ordering::Relaxed) {
+        match Launch::start(&url) {
+            Ok(launcher) => Some(launcher),
             Err(error) => {
                 eprintln!("milo web: could not open the browser ({error}); open the URL above");
                 None
@@ -107,25 +107,6 @@ fn random_token() -> io::Result<String> {
         token.push(char::from(HEX[usize::from(byte & 15)]));
     }
     Ok(token)
-}
-
-fn launch(url: &str) -> io::Result<Child> {
-    #[cfg(target_os = "macos")]
-    let program = "/usr/bin/open";
-    #[cfg(not(target_os = "macos"))]
-    let program = "xdg-open";
-    Command::new(program).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-}
-
-fn check_launcher(launcher: &mut Option<Child>) {
-    let Some(child) = launcher else { return };
-    match child.try_wait() {
-        Ok(None) => return,
-        Ok(Some(status)) if status.success() => {}
-        Ok(Some(status)) => eprintln!("milo web: could not open the browser ({status}); open the URL above"),
-        Err(error) => eprintln!("milo web: could not check the browser launcher ({error}); open the URL above"),
-    }
-    *launcher = None;
 }
 
 extern "C" fn stop(_: libc::c_int) {
@@ -190,7 +171,7 @@ fn serve(
     wake: &PipeReader,
     access: &Access<'_>,
     editor: &mut Editor,
-    mut launcher: Option<Child>,
+    mut launcher: Option<Launch>,
 ) -> io::Result<()> {
     let mut clients: Vec<Client> = Vec::with_capacity(MAX_CLIENTS);
     let mut fds = [libc::pollfd { fd: -1, events: libc::POLLIN, revents: 0 }; MAX_CLIENTS + 2];
@@ -198,15 +179,18 @@ fn serve(
     let mut last_activity = Instant::now();
     let mut closing = false;
     while !STOP.load(Ordering::Relaxed) && last_activity.elapsed() < IDLE_TIMEOUT {
-        check_launcher(&mut launcher);
         let now = Instant::now();
         clients.retain(|client| client.deadline > now);
         if closing && clients.is_empty() {
             break;
         }
         let mut deadline = last_activity + IDLE_TIMEOUT;
-        if launcher.is_some() {
-            deadline = deadline.min(now + LAUNCHER_CHECK);
+        if let Some(launch) = &mut launcher {
+            if let Some(check) = launch.poll(now) {
+                deadline = deadline.min(check);
+            } else {
+                launcher = None;
+            }
         }
         fds[0].fd = if closing || clients.len() == MAX_CLIENTS { -1 } else { listener.as_raw_fd() };
         for (fd, client) in fds[2..].iter_mut().zip(&clients) {
@@ -246,6 +230,9 @@ fn serve(
                 Ok(Progress::Reply { authenticated, close }) => {
                     if authenticated {
                         last_activity = Instant::now();
+                        if let Some(launcher) = &mut launcher {
+                            launcher.connected();
+                        }
                     }
                     if close {
                         // Only flush the close response. No queued request may change the draft after this.
@@ -422,7 +409,7 @@ mod tests {
             )
             .unwrap();
             fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
-            let output = Command::new(std::env::current_exe().unwrap())
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "web::tests::close_waits_for_the_active_trial_to_undo", "--nocapture"])
                 .env(CHILD, "1")
                 .env("HOME", &folder.root)
