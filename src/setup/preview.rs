@@ -65,10 +65,6 @@ impl<'a> Preview<'a> {
         Self { layout, size, rail, shares, count }
     }
 
-    pub(super) fn proportions(&self) -> (f64, [f64; 3], Option<(usize, usize)>) {
-        (if self.count == 0 { 0.0 } else { self.rail }, self.shares, self.size)
-    }
-
     pub(super) fn minimum_height(&self) -> usize {
         self.count.max(1) * 2 + 1
     }

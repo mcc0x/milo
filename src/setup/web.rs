@@ -3,7 +3,6 @@
 use std::fmt::{self, Display, Write as _};
 
 use super::claude::ClaudeSnapshot;
-use super::preview::Preview;
 use super::*;
 use crate::json::{self, Value};
 use crate::preferences::PreferenceSnapshot;
@@ -45,12 +44,12 @@ impl Editor {
         let store = Store::real();
         let target = inside.then(rex::Target::current).flatten();
         let anchor = store.as_ref().zip(target.as_ref()).and_then(|(store, target)| store.anchor_tab(target));
-        let (root, window, size) = if inside {
-            anchor.map_or((None, None, None), |(window, root, size)| (root, Some(window), size))
+        let (root, window) = if inside {
+            anchor.map_or((None, None), |(window, root, _)| (root, Some(window)))
         } else {
-            (crate::preferences::worktree(Path::new(".")), None, None)
+            (crate::preferences::worktree(Path::new(".")), None)
         };
-        Self::new(store, inside, target, root, window, size, rex::run)
+        Self::new(store, inside, target, root, window, rex::run)
     }
 
     fn new(
@@ -59,13 +58,11 @@ impl Editor {
         target: Option<rex::Target>,
         root: Option<PathBuf>,
         window: Option<String>,
-        size: Option<(usize, usize)>,
         run: fn(&[&OsStr]) -> bool,
     ) -> Self {
         let (status, claude) = account_at(store.as_ref());
         let mut setup = Setup::new_with_claude(store, inside, target, root, run, status);
         setup.web_window = window;
-        setup.tab_size = size;
         if !inside && let Err(why) = setup.reload_layout() {
             setup.report(Err(why));
         }
@@ -174,8 +171,6 @@ impl Editor {
         let setup = &self.setup;
         let layout = &setup.layout;
         let prefs = &setup.prefs;
-        let (width, [outline, history, usage], size) = Preview::new(layout, setup.tab_size).proportions();
-        let (cols, rows) = size.unzip();
         let [show_outline, show_history, show_usage] = layout.panes;
         let [first, second, third] = layout.geometry.order.map(TabPane::name);
         let (layout_state, prefs_state, account_state) = self.groups();
@@ -201,27 +196,25 @@ impl Editor {
         let root = setup.root.as_deref().map(Path::to_string_lossy);
         let mut out = String::with_capacity(1500);
         write!(out, concat!(
-            "{{\"version\":{},\"app_version\":\"", env!("CARGO_PKG_VERSION"), "\",",
+            "{{\"version\":{},",
             "\"context\":{{\"inside_rex\":{},\"worktree\":{},\"directory\":{},\"installed\":{}}},",
             "\"layout\":{{\"panes\":{{\"outline\":{},\"history\":{},\"usage\":{}}},\"side\":\"{}\",\"width\":{},",
-            "\"order\":[\"{}\",\"{}\",\"{}\"],\"outline_share\":{},\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
-            "\"preview\":{{\"width\":{},\"shares\":[{},{},{}],\"cols\":{},\"rows\":{}}},",
+            "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
             "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{}}},",
             "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
-            "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"refresh\":{},\"auto_arrange\":{}}},",
+            "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"auto_arrange\":{}}},",
             "\"dirty\":{},\"trial\":{},\"doctor\":{},\"message\":"),
             self.version, setup.inside, Optional(root.as_deref().map(Quoted)), Optional(self.directory.as_deref().map(Quoted)), setup.installed,
             show_outline, show_history, show_usage, side, layout.width.parse::<f64>().unwrap_or(0.2),
-            first, second, third, layout.outline_share.parse::<f64>().unwrap_or(0.7),
+            first, second, third,
             layout.usage_rows.parse::<u32>().unwrap_or(super::layout::DEFAULT_USAGE_ROWS),
             Optional(layout.geometry.shares.map(Ratios)), layout.new_tabs,
-            width, outline, history, usage, Optional(cols), Optional(rows),
             icons, prefs.static_marks, prefs.text_git_marks, prefs.usage_large_figures,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new,
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
-            capture, try_layout, trial, live, auto_arrange, setup.dirty(), trial,
+            capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
             Optional(self.doctor.as_ref()),
         ).expect("writing to a string");
         if let Some((text, style)) = &setup.message {
@@ -264,10 +257,6 @@ impl Editor {
                 edit.apply(&mut self.setup);
                 None
             }
-            Action::Preset(tree) if layout.editable => {
-                self.setup.preset(tree);
-                None
-            }
             Action::Discard(group) => {
                 self.discard(group)?;
                 Some(Ok("Draft changes discarded. Saved settings were left alone."))
@@ -304,7 +293,6 @@ impl Editor {
                 self.doctor = None;
                 Some(Ok(message))
             }
-            Action::Refresh if self.live() => Some(self.setup.refresh_preview()),
             Action::Doctor => {
                 self.doctor = None;
                 let setup = &self.setup;
@@ -448,21 +436,19 @@ enum WriteScope {
 
 enum Action {
     Set(Edit),
-    Preset(bool),
     Save(Group, WriteScope),
     Inherit(Group),
     Discard(Group),
     Capture,
     Try,
     Undo,
-    Refresh,
     Doctor,
 }
 
 impl Action {
     fn parse(body: &[u8]) -> Option<(u64, Self)> {
-        let names = ["action", "version", "field", "value", "group", "scope", "preset"];
-        let mut fields: [Option<Value<'_>>; 7] = [None; 7];
+        let names = ["action", "version", "field", "value", "group", "scope"];
+        let mut fields = [None; 6];
         let mut valid = true;
         json::settings_object(std::str::from_utf8(body).ok()?, |member| {
             if let Some(index) = names.iter().position(|name| member.key.is(name)) {
@@ -471,22 +457,13 @@ impl Action {
                 valid = false;
             }
         })?;
-        let [Some(action), Some(version), field, value, group, scope, preset] = fields else { return None };
+        let [Some(action), Some(version), field, value, group, scope] = fields else { return None };
         if !valid {
             return None;
         }
-        let command = match [field, value, group, scope, preset] {
-            [Some(field), Some(value), None, None, None] if action.is("set") => Self::Set(Edit::parse(field, value)?),
-            [None, None, None, None, Some(preset)] if action.is("preset") => {
-                if preset.is("tree") {
-                    Self::Preset(true)
-                } else if preset.is("sidebar") {
-                    Self::Preset(false)
-                } else {
-                    return None;
-                }
-            }
-            [None, None, Some(group), Some(scope), None] if action.is("save") => {
+        let command = match [field, value, group, scope] {
+            [Some(field), Some(value), None, None] if action.is("set") => Self::Set(Edit::parse(field, value)?),
+            [None, None, Some(group), Some(scope)] if action.is("save") => {
                 match (Group::parse(group)?, scope.string(8)?.as_ref()) {
                     (group @ (Group::Layout | Group::Preferences), "global") => Self::Save(group, WriteScope::Global),
                     (group @ (Group::Layout | Group::Preferences), "worktree") => {
@@ -496,16 +473,15 @@ impl Action {
                     _ => return None,
                 }
             }
-            [None, None, Some(group), None, None] if action.is("inherit") => match Group::parse(group)? {
+            [None, None, Some(group), None] if action.is("inherit") => match Group::parse(group)? {
                 group @ (Group::Layout | Group::Preferences) => Self::Inherit(group),
                 _ => return None,
             },
-            [None, None, Some(group), None, None] if action.is("discard") => Self::Discard(Group::parse(group)?),
-            [None, None, None, None, None] => match action.string(7)?.as_ref() {
+            [None, None, Some(group), None] if action.is("discard") => Self::Discard(Group::parse(group)?),
+            [None, None, None, None] => match action.string(7)?.as_ref() {
                 "capture" => Self::Capture,
                 "try" => Self::Try,
                 "undo" => Self::Undo,
-                "refresh" => Self::Refresh,
                 "doctor" => Self::Doctor,
                 _ => return None,
             },
@@ -532,7 +508,6 @@ enum Edit {
     Side(Side),
     Width(f64),
     Order([TabPane; 3]),
-    OutlineShare(f64),
     UsageRows(u32),
     Ratios(Option<[u32; 3]>),
     AutoArrange(bool),
@@ -549,14 +524,13 @@ enum Edit {
 
 impl Edit {
     fn parse(field: Value<'_>, value: Value<'_>) -> Option<Self> {
-        let fraction = || value.number().filter(|n| 0.0 < *n && *n < 1.0);
         Some(match field.string(32)?.as_ref() {
             "layout.side" => Self::Side(match value.string(5)?.as_ref() {
                 "left" => Side::Left,
                 "right" => Side::Right,
                 _ => return None,
             }),
-            "layout.width" => Self::Width(fraction()?),
+            "layout.width" => Self::Width(value.number().filter(|n| 0.0 < *n && *n < 1.0)?),
             "layout.order" => {
                 let order = triplet(value, |value| pane_named(value.string(7)?.as_ref()))?;
                 let [a, b, c] = order;
@@ -565,7 +539,6 @@ impl Edit {
                 }
                 Self::Order(order)
             }
-            "layout.outline_share" => Self::OutlineShare(fraction()?),
             "layout.usage_rows" => Self::UsageRows(value.unsigned()?.try_into().ok().filter(|&rows| rows > 0)?),
             "layout.ratios" if value.null() => Self::Ratios(None),
             "layout.ratios" => {
@@ -604,7 +577,6 @@ impl Edit {
             | Self::Side(_)
             | Self::Width(_)
             | Self::Order(_)
-            | Self::OutlineShare(_)
             | Self::UsageRows(_)
             | Self::Ratios(_)
             | Self::AutoArrange(_) => Group::Layout,
@@ -621,10 +593,6 @@ impl Edit {
             Self::Side(side) => layout.geometry.side = side,
             Self::Width(width) => set_number(&mut layout.width, width, &layout::WIDTHS.map(|width| width.proportion)),
             Self::Order(order) => layout.geometry.order = order,
-            Self::OutlineShare(share) => {
-                set_number(&mut layout.outline_share, share, OUTLINE_SHARES);
-                layout.geometry.shares = None;
-            }
             Self::UsageRows(rows) => {
                 if layout.usage_rows.parse() != Ok(rows) {
                     layout.usage_rows = rows.to_string();
@@ -754,7 +722,7 @@ mod tests {
     }
 
     fn outside(store: Store, root: Option<&Path>) -> Editor {
-        Editor::new(Some(store), false, None, root.map(Path::to_path_buf), None, None, |_| {
+        Editor::new(Some(store), false, None, root.map(Path::to_path_buf), None, |_| {
             panic!("outside Rex must never run an integration command")
         })
     }
@@ -778,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_edits_preview_without_writing_until_a_scoped_save() {
+    fn layout_edits_stay_in_the_draft_until_a_scoped_save() {
         let f = Fixture::folder();
         let store = fixture_store(&f);
         let root = f.root.join("it's a \"worktree\"");
@@ -794,15 +762,13 @@ mod tests {
         set(&mut editor, "layout.width", "0.35");
         set(&mut editor, "layout.order", "[\"usage\",\"history\",\"outline\"]");
         set(&mut editor, "layout.panes.history", "false");
-        set(&mut editor, "layout.outline_share", "0.6");
         set(&mut editor, "layout.usage_rows", "10");
         let state = set(&mut editor, "layout.ratios", "[750000,0,250000]");
-        let parsed = Value::parse(state.as_bytes()).unwrap();
-        let preview = field(parsed, "preview");
-        assert_eq!(field(preview, "width").number(), Some(0.35));
-        assert!(field(preview, "rows").null());
-        let shares: Vec<_> = field(preview, "shares").elements().unwrap().map(|part| part.number().unwrap()).collect();
-        assert_eq!(shares, [0.75, 0.0, 0.25]);
+        let layout = field(Value::parse(state.as_bytes()).unwrap(), "layout");
+        assert!(field(layout, "side").is("right"));
+        assert_eq!(field(layout, "width").number(), Some(0.35));
+        assert_eq!(field(layout, "usage_rows").unsigned(), Some(10));
+        assert_eq!(triplet(field(layout, "ratios"), Value::unsigned), Some([750_000, 0, 250_000]));
         assert!(!store.config.exists());
 
         action(&mut editor, r#""action":"save","group":"layout","scope":"worktree""#).unwrap();
@@ -812,16 +778,20 @@ mod tests {
         assert_eq!(remembered.geometry.side, Side::Right);
         assert_eq!(remembered.geometry.order, [TabPane::Usage, TabPane::History, TabPane::Outline]);
         assert_eq!(remembered.geometry.shares, Some([750_000, 0, 250_000]));
-        assert_eq!(remembered.outline_share, "0.60");
+        assert_eq!(remembered.width, "0.35");
         assert_eq!(remembered.usage_rows, "10");
         assert!(!remembered.chosen(TabPane::History));
         assert!(!editor.setup.dirty());
         assert!(!store.init.exists() && !store.rex_file().exists() && !store.state.exists());
 
+        let reset = set(&mut editor, "layout.ratios", "null");
+        assert!(field(field(Value::parse(reset.as_bytes()).unwrap(), "layout"), "ratios").null());
+        assert_eq!(store.layout_for(Some(&root)).unwrap().0.geometry.shares, remembered.geometry.shares);
         set(&mut editor, "layout.side", "\"left\"");
         set(&mut editor, "workflow.changes_only", "true");
         action(&mut editor, r#""action":"discard","group":"layout""#).unwrap();
         assert_eq!(editor.setup.layout.geometry.side, Side::Right);
+        assert_eq!(editor.setup.layout.geometry.shares, remembered.geometry.shares);
         assert!(editor.setup.prefs_dirty());
         action(&mut editor, r#""action":"inherit","group":"layout""#).unwrap();
         assert_eq!(store.layout_for(Some(&root)).unwrap().2, Scope::Global);
@@ -850,21 +820,37 @@ mod tests {
             r#""action":"try""#,
             r#""action":"capture""#,
             r#""action":"undo""#,
-            r#""action":"refresh""#,
             r#""action":"remove""#,
         ] {
             assert!(action(&mut editor, request).is_err(), "{request}");
             assert_eq!(editor.state(), before, "{request}");
         }
-        let old_version = editor.version;
+        let old_version = field(Value::parse(before.as_bytes()).unwrap(), "version").unsigned().unwrap();
         let after = set(&mut editor, "layout.side", "\"right\"");
-        assert!(
-            editor
-                .action(format!("{{\"version\":{old_version},\"action\":\"preset\",\"preset\":\"tree\"}}").as_bytes())
-                .is_err()
-        );
+        assert_eq!(field(Value::parse(after.as_bytes()).unwrap(), "version").unsigned(), Some(old_version + 1));
+        let stale = format!(r#"{{"version":{old_version},"action":"set","field":"layout.side","value":"left"}}"#);
+        assert!(editor.action(stale.as_bytes()).unwrap_err().contains("draft changed"));
         assert_eq!(editor.state(), after);
         assert!(!editor.setup.store().unwrap().config.exists());
+    }
+
+    #[test]
+    fn unused_controls_are_neither_advertised_nor_accepted() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        let before = editor.state();
+        let state = Value::parse(before.as_bytes()).unwrap();
+        assert!(state.fields(["preview", "app_version"]).into_iter().all(|field| field.is_none()));
+        assert!(field(state, "layout").fields(["outline_share"])[0].is_none());
+        assert!(field(state, "capabilities").fields(["refresh"])[0].is_none());
+        for request in [
+            r#""action":"preset","preset":"tree""#,
+            r#""action":"refresh""#,
+            r#""action":"set","field":"layout.outline_share","value":0.6"#,
+        ] {
+            assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION, "{request}");
+        }
+        assert_eq!(editor.state(), before);
     }
 
     #[test]
@@ -951,10 +937,10 @@ mod tests {
     }
 
     #[test]
-    fn a_rex_launch_without_the_original_target_may_preview_but_cannot_install() {
+    fn a_rex_launch_without_the_original_target_can_edit_the_draft_but_cannot_install() {
         let f = Fixture::folder();
         let store = fixture_store(&f);
-        let mut editor = Editor::new(Some(store.clone()), true, None, None, None, None, |_| {
+        let mut editor = Editor::new(Some(store.clone()), true, None, None, None, |_| {
             panic!("a lost original tab must not perform integration commands")
         });
         set(&mut editor, "layout.width", "0.4");
@@ -972,7 +958,7 @@ mod tests {
         let verdict = field(Value::parse(checked.as_bytes()).unwrap(), "doctor");
         assert!(field(verdict, "level").is("good"));
 
-        let mut lost = Editor::new(Some(store.clone()), true, None, None, None, None, |_| {
+        let mut lost = Editor::new(Some(store.clone()), true, None, None, None, |_| {
             panic!("Health must not change the integration")
         });
         let checked = action(&mut lost, r#""action":"doctor""#).unwrap();

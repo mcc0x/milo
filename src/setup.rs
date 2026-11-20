@@ -673,11 +673,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
         let store = self.store()?;
         let target = self.target()?;
-        let mut layout = store.capture(target, self.web_window.as_deref())?;
-        let size = store.tab_size(target, self.web_window.as_deref());
+        let window = self.web_window.as_deref();
+        let mut layout = store.capture(target, window)?;
+        if window.is_none() {
+            self.tab_size = store.tab_size(target, None).or(self.tab_size);
+        }
         layout.new_tabs = self.layout.new_tabs;
         self.layout = layout;
-        self.tab_size = size.or(self.tab_size);
         Ok("Captured Milo panes from this tab. Nothing was saved.")
     }
 
