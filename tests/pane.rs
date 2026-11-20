@@ -788,7 +788,7 @@ fn panes_keep_global_preferences_when_a_worktree_override_is_invalid() {
     let file = fs::read_dir(config.join("worktrees")).unwrap().next().unwrap().unwrap().path();
     let invalid = "changes_only = false\nhistory_follow_new = broken\n";
     fs::write(&file, invalid).unwrap();
-    fs::write(config.join("preferences.conf"), "changes_only = true\n").unwrap();
+    fs::write(config.join("preferences.conf"), "changes_only = true\nusage_codex = always\n").unwrap();
 
     for (args, content) in [
         (&["outline"][..], "c all files"),

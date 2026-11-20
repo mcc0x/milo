@@ -261,7 +261,7 @@ fn a_claude_save_dated_beyond_the_clock_allowance_gives_way_to_another_source_un
     let ahead = NOW + CLOCK_SKEW + 1;
     assert_eq!(status::run(STATUS, Vec::new(), Some(&path), ahead), 0);
     assert_eq!(look(NOW, true), ("Claude week · 82% left".into(), Some((NOW - 2 * MINUTE, "Claude Code usage cache"))));
-    assert_eq!(look(NOW, false), ("Claude · no source".into(), None));
+    assert_eq!(look(NOW, false), ("Claude · future report".into(), None));
     // A second later the same save is within the allowance, and is the newest report.
     assert_eq!(look(NOW + 1, true), ("Claude week · 39% left".into(), Some((ahead, "Milo Claude status line"))));
 
@@ -285,7 +285,7 @@ fn cached_claude_reports_reappear_as_the_clock_catches_up_without_reads() {
     assert!(usage.check());
     assert!(usage.bytes_read > 0);
     for (elapsed, wait, shown) in [
-        (0, 1, "Claude · no source"),
+        (0, 1, "Claude · future report"),
         (1, 2, "Claude week · 39% left"),
         (2, 1, "Claude week · 39% left"),
         (3, 60, "Claude week · 82% left"),

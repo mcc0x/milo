@@ -75,6 +75,94 @@ fn menu_stream_limit_values_freshness_and_elapsed_state_match_the_pane() {
 }
 
 #[test]
+fn missing_historical_and_exhausted_limits_are_distinct_in_both_surfaces() {
+    let f = Fixture::folder();
+    let reset = NOW + HOUR;
+    write(&f, CODEX, &codex(NOW, 100, reset, "null"), NOW);
+    let mut usage = open(&f, NOW + 5 * MINUTE - 1);
+    let expected_blank = "Claude no saved limits";
+
+    for (now, shown, fresh) in [
+        (NOW + 5 * MINUTE - 1, "Codex week · 0% left", true),
+        (NOW + 5 * MINUTE, "Codex week · 0% last", false),
+    ] {
+        usage.fixed_now = Some(now);
+        assert_eq!(frame(&mut usage, 22, 2), [shown, expected_blank]);
+        let line = snapshot(&mut usage);
+        let mut providers = providers(&line);
+        let codex = window(providers.next().unwrap(), 0);
+        assert_eq!(field(codex, "remaining").unsigned(), Some(0));
+        assert_eq!(field(codex, "fresh").boolean(), Some(fresh));
+        assert_eq!(field(codex, "staleAt").integer(), Some(NOW + 5 * MINUTE));
+        let claude = providers.next().unwrap();
+        assert!(field(claude, "windows").elements().unwrap().next().is_none());
+        assert!(field(claude, "detail").is("No saved limits found"));
+        assert!(providers.next().is_none(), "absent automatic OpenCode must stay hidden");
+    }
+
+    usage.fixed_now = Some(reset);
+    let line = snapshot(&mut usage);
+    let codex = providers(&line).next().unwrap();
+    assert!(field(codex, "windows").elements().unwrap().next().is_none());
+    assert!(field(codex, "detail").is("Reset elapsed"));
+    assert_eq!(frame(&mut usage, 22, 2), ["Codex · reset elapsed", expected_blank]);
+}
+
+#[test]
+fn enabled_providers_keep_their_specific_reasons_without_more_rows() {
+    let f = Fixture::folder();
+    write(&f, CODEX, "{\"type\":\"session_meta\"}\n", NOW);
+    write(&f, &format!("{STATE}/{SAVED_LIMITS}"), "not a saved report", NOW);
+    let mut usage = automatic(&f, NOW).showing(tools(Show::Always, Show::Always, Show::Always));
+    usage.check();
+    usage.opencode.report = opencode::Report::Unsupported;
+    let rows = frame(&mut usage, 84, 2);
+    assert!(rows[0].contains("Codex · no limits to show") && rows[0].contains("Claude · no usable saved limits"));
+    assert!(rows[1].contains("OpenCode · database format not checked"));
+    assert!(!rows.join("\n").contains('%'));
+
+    let line = snapshot(&mut usage);
+    for (provider, expected) in providers(&line).zip([
+        "No limits to show",
+        "No usable saved limits",
+        "Database format not checked",
+    ]) {
+        assert!(field(provider, "windows").elements().unwrap().next().is_none());
+        assert!(field(provider, "detail").is(expected));
+    }
+    assert_eq!(providers(&line).count(), 3);
+}
+
+#[test]
+fn a_tighter_old_window_cannot_displace_a_current_one_in_the_two_row_pane() {
+    let f = Fixture::folder();
+    let mut usage = automatic(&f, NOW);
+    let reset = NOW + HOUR;
+    usage.claude.native = Some(Reading {
+        at: Timestamp::seconds(NOW),
+        windows: Limits::new([
+            Some(Window { minutes: 300, percent: 99.9, resets: Some(reset), observed: NOW }),
+            Some(Window { minutes: 10_080, percent: 100.0, resets: Some(reset), observed: NOW - 5 * MINUTE }),
+        ]),
+    });
+    let rail = frame(&mut usage, 22, 2);
+    assert_eq!(rail, ["Claude 5h · <1% left", "Resets in 1h"]);
+    let panel = frame(&mut usage, 72, 4);
+    assert!(panel[0].contains("week · last reported") && panel[1].contains("0%"), "{panel:?}");
+    assert!(panel[2].find("left").unwrap() < panel[2].find("5 m ago").unwrap(), "{panel:?}");
+    let inline = frame(&mut usage, 72, 1);
+    assert!(inline[0].contains("week 0% last") && !inline[0].contains("last left"), "{inline:?}");
+
+    let line = snapshot(&mut usage);
+    let claude = providers(&line).next().unwrap();
+    let fresh = |index| field(window(claude, index), "fresh").boolean().unwrap();
+    assert!(fresh(0));
+    assert!(!fresh(1));
+    assert_eq!(field(window(claude, 0), "remaining").unsigned(), Some(1));
+    assert_eq!(field(window(claude, 1), "remaining").unsigned(), Some(0));
+}
+
+#[test]
 fn menu_stream_global_preferences_change_without_reopening_an_unaffected_reader() {
     let f = Fixture::new();
     let config = f.root.join("config");
@@ -139,6 +227,12 @@ fn menu_stream_open_code_reports_activity_but_never_invents_a_limit() {
 
     usage.fixed_now = Some(now + DAY);
     assert_eq!(providers(&snapshot(&mut usage)).count(), 0);
+    usage.tools[UsageTool::OpenCode] = Show::Always;
+    let line = snapshot(&mut usage);
+    let opencode = providers(&line).next().unwrap();
+    assert!(field(opencode, "windows").elements().unwrap().next().is_none());
+    assert!(field(opencode, "detail").is("No reading for today yet"));
+    assert!(frame(&mut usage, 76, 2)[0].contains("no reading for today yet"));
 }
 
 #[test]

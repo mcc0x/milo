@@ -110,27 +110,52 @@ pub(super) fn read_small(file: File, version: FileVersion, cap: u64, budget: &mu
     (len <= cap && len == version.len).then_some(bytes)
 }
 
-/// Reads only changed regular files; a removed or bad file stops being a source.
+/// Reads only changed regular files; returns whether access failed, rather than
+/// assuming no reading was saved. Removed and non-regular paths are not sources.
 pub(super) fn read_cached<T>(
     path: &Path,
     previous: &mut Option<SnapshotVersion>,
     snapshot: &mut Option<T>,
     budget: &mut Budget,
     parse: impl FnOnce(File, FileVersion, &mut Budget) -> Option<T>,
-) {
-    let Some(version) = path.symlink_metadata().ok().and_then(|metadata| SnapshotVersion::regular(&metadata)) else {
+) -> bool {
+    let clear = |previous: &mut Option<SnapshotVersion>, snapshot: &mut Option<T>| {
         *previous = None;
         *snapshot = None;
-        return;
+    };
+    let version = match path.symlink_metadata() {
+        Ok(metadata) => SnapshotVersion::regular(&metadata),
+        Err(error) => {
+            clear(previous, snapshot);
+            return error.kind() != io::ErrorKind::NotFound;
+        }
+    };
+    let Some(version) = version else {
+        clear(previous, snapshot);
+        return false;
     };
     if *previous == Some(version) {
-        return;
+        return false;
     }
-    *snapshot = fs_ops::open_read(path).ok().and_then(|file| {
-        let version = SnapshotVersion::regular(&file.metadata().ok()?)?;
-        *previous = Some(version);
-        parse(file, version.file, budget)
+    let opened = fs_ops::open_read(path).and_then(|file| {
+        let version = SnapshotVersion::regular(&file.metadata()?);
+        Ok(version.map(|v| (file, v)))
     });
+    match opened {
+        Ok(Some((file, version))) => {
+            *previous = Some(version);
+            *snapshot = parse(file, version.file, budget);
+            false
+        }
+        Ok(None) => {
+            clear(previous, snapshot);
+            false
+        }
+        Err(error) => {
+            clear(previous, snapshot);
+            error.kind() != io::ErrorKind::NotFound
+        }
+    }
 }
 
 /// Bounds pipe capture even if its writer stops producing output without closing it.

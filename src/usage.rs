@@ -747,6 +747,7 @@ struct Claude {
     native_version: Option<SnapshotVersion>,
     native: Option<Reading>,
     omp: Option<Reading>,
+    unreadable_limits: bool,
 }
 
 /// A partial total is a lower bound, not an exact amount of today's activity.
@@ -778,7 +779,9 @@ impl Claude {
     /// transcript for each session. A `~/.claude` folder alone is no sign of
     /// it: Milo's own setup can create one.
     fn presence(&self, reported: Option<(&Reading, Source)>) -> Presence {
-        let found = self.native_version.is_some_and(|version| version.len() > 0)
+        let found = self.unreadable_limits
+            || self.native_version.is_some_and(|version| version.len() > 0)
+            || self.saved_version.is_some_and(|version| version.len() > 0)
             || self.files.entries.iter().any(|file| file.version.len > 0);
         Presence::of_limits(reported.map(|(reading, _)| reading), found)
     }
@@ -1083,8 +1086,9 @@ impl Usage {
     }
 
     fn check_limits(&mut self, claude_budget: &mut Budget) {
+        let mut unreadable = false;
         if let Some(path) = &self.limits_file {
-            files::read_cached(
+            unreadable |= files::read_cached(
                 path,
                 &mut self.claude.saved_version,
                 &mut self.claude.status,
@@ -1093,7 +1097,7 @@ impl Usage {
             );
         }
         if let Some(path) = &self.claude_config {
-            files::read_cached(
+            unreadable |= files::read_cached(
                 path,
                 &mut self.claude.native_version,
                 &mut self.claude.native,
@@ -1101,6 +1105,7 @@ impl Usage {
                 status::native,
             );
         }
+        self.claude.unreadable_limits = unreadable;
     }
 }
 

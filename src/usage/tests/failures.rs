@@ -15,7 +15,7 @@ use super::*;
 
 /// What `healthy` shows: the tightest window of each tool, read a minute ago.
 const HEALTHY: [&str; 2] = ["Codex week · 60% left", "Claude week · 39% left"];
-const UNKNOWN: [&str; 2] = ["Codex · no source", "Claude · no source"];
+const UNKNOWN: [&str; 2] = ["Codex · no sessions", "Claude no saved limits"];
 const CLAUDE_CONFIG: &str = ".claude.json";
 
 /// A Codex session log and a Claude status save, each a minute old.
@@ -225,7 +225,7 @@ fn a_locked_source_is_unknown_until_it_can_be_read_again() {
     // Sessions that exist but cannot be opened are not "no sessions".
     let log = lock_out(f.root.join(CODEX));
     let saved = lock_out(save(&f));
-    assert_eq!(look(&mut usage), ["Codex · cannot read", "Claude week · 82% left"]);
+    assert_eq!(look(&mut usage), ["Codex · could not read", "Claude week · 82% left"]);
     assert!(frame(&mut usage, 140, 4)[2].contains("could not read sessions · Check session access"));
     drop((log, saved));
     assert_eq!(look(&mut usage), HEALTHY);
@@ -233,7 +233,7 @@ fn a_locked_source_is_unknown_until_it_can_be_read_again() {
     let day = lock_out(f.root.join(CODEX).parent().unwrap().to_owned());
     let config = lock_out(f.root.join(CLAUDE_CONFIG));
     let saved = lock_out(save(&f));
-    assert_eq!(look(&mut usage), ["Codex · cannot read", "Claude · no source"]);
+    assert_eq!(look(&mut usage), ["Codex · could not read", "Claude · cannot read"]);
     drop((day, config, saved));
     assert_eq!(look(&mut usage), HEALTHY);
 
@@ -340,7 +340,7 @@ fn a_source_in_an_unknown_shape_is_never_misread() {
     assert_eq!(look(&mut usage)[1], HEALTHY[1]);
     // A save without the fields Milo wrote is not a reading.
     f.write(&format!("{STATE}/{SAVED_LIMITS}"), r#"{"version":2,"limits":{"five_hour":{"used":23}}}"#);
-    assert_eq!(look(&mut usage)[1], UNKNOWN[1]);
+    assert_eq!(look(&mut usage)[1], "Claude · unusable save");
 
     let f = Fixture::folder();
     let Some(db) = omp_database(&f, "0.25", "0.27") else { return };

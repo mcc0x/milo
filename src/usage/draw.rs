@@ -21,6 +21,8 @@ use self::figure::Figure;
 use super::{Activity, CodexSessions, Limits, Source, Usage, Window, opencode};
 
 const SIDE_BY_SIDE: usize = 64;
+/// Space for two useful summaries beside each other when a third tool is required.
+const THREE_SUMMARIES: usize = 52;
 const LARGE_ROWS: usize = 3;
 const FIGURES_PER_TOOL: usize = 3;
 const TILE: &str = "██";
@@ -99,11 +101,36 @@ enum When {
 
 impl When {
     /// Says that the figure is what is left, and when there is room, when it starts over.
-    fn draw(self, screen: &mut Screen, area: Area, row: usize) {
+    fn draw(self, screen: &mut Screen, area: Area, row: usize, historical: bool, age: Option<i64>) {
+        if let Some(age) = age {
+            let exact = format!("{} ago", when::duration(age, Detail::Exact));
+            let age = if exact.len() <= area.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
+            if age.len() <= area.w {
+                if let Self::Running(seconds) = self
+                    && age.len() + 10 <= area.w
+                {
+                    let reset = when::duration(seconds, Detail::Exact);
+                    if age.len() + 9 + reset.len() <= area.w {
+                        return area.note(screen, row, &format!("{age} · reset {reset}"));
+                    }
+                }
+                return area.note(screen, row, &age);
+            }
+        }
         match self {
             Self::Elapsed => area.note(screen, row, if area.w >= 13 { "Reset elapsed" } else { "elapsed" }),
             Self::Running(seconds) => {
                 let time = when::duration(seconds, Detail::Exact);
+                if historical {
+                    let text = if time.len() + 17 <= area.w {
+                        format!("Reported reset · {time}")
+                    } else if time.len() + 6 <= area.w {
+                        format!("reset {time}")
+                    } else {
+                        return;
+                    };
+                    return area.note(screen, row, &text);
+                }
                 if time.len() + 17 <= area.w {
                     area.note(screen, row, &format!("left · resets in {time}"));
                 } else if time.len() + 7 <= area.w {
@@ -112,9 +139,9 @@ impl When {
                     area.note(screen, row, "left");
                 }
             }
-            Self::Unknown => {
-                area.note(screen, row, if area.w >= 18 { "Reset time unknown" } else { "left" });
-            }
+            Self::Unknown if area.w >= 18 => area.note(screen, row, "Reset time unknown"),
+            Self::Unknown if !historical => area.note(screen, row, "left"),
+            Self::Unknown => {}
         }
     }
 }
@@ -133,6 +160,7 @@ struct Metric<'a> {
 impl Metric<'_> {
     fn limit(window: Window, now: i64, source: Source) -> Self {
         let elapsed = window.is_reset(now);
+        let age = (!elapsed && window.is_stale(now, source)).then(|| now.saturating_sub(window.observed));
         let when = if elapsed {
             When::Elapsed
         } else {
@@ -140,9 +168,15 @@ impl Metric<'_> {
         };
         Self {
             label: window.label(),
-            number: (!elapsed).then(|| Figure::new(window.number(), window.percent)),
+            number: (!elapsed).then(|| {
+                if age.is_some() {
+                    Figure::historical(window.number())
+                } else {
+                    Figure::new(window.number(), window.percent)
+                }
+            }),
             when,
-            age: (!elapsed && window.is_stale(now, source)).then(|| now.saturating_sub(window.observed)),
+            age,
             used: window.percent,
         }
     }
@@ -195,7 +229,7 @@ impl Metric<'_> {
     }
 
     /// Stay legible when either images or large text glyphs do not fit.
-    fn panel(&self, screen: &mut Screen, area: Area, rows: Chart, slot: usize) {
+    fn panel(&self, screen: &mut Screen, area: Area, rows: Chart, slot: usize, shared_age: bool) {
         if self.age.is_some() {
             let suffix = if self.label.len() + 16 <= area.w { " · last reported" } else { " last" };
             if self.label.len() + suffix.len() <= area.w {
@@ -210,7 +244,7 @@ impl Metric<'_> {
         }
         self.figure(screen, area, area.y + rows.label + 1, rows.large, slot);
         if self.number.is_some() || matches!(self.when, When::Elapsed) {
-            self.when.draw(screen, area, rows.note);
+            self.when.draw(screen, area, rows.note, self.age.is_some(), self.age.filter(|_| !shared_age));
         }
     }
 
@@ -234,18 +268,25 @@ impl Metric<'_> {
     /// then the reading's age if it is old, or else when the window starts over.
     fn caption(&self, screen: &mut Screen, area: Area, row: usize) {
         if matches!(self.when, When::Elapsed) {
-            return self.when.draw(screen, area, row);
+            return self.when.draw(screen, area, row, false, None);
         }
-        let (lead, detail) = match (self.age, self.when) {
-            (Some(age), _) => ("", Some(format!("{} ago", when::duration(age, Detail::Rounded)))),
-            (None, When::Elapsed) => unreachable!("elapsed is handled above"),
-            (None, When::Running(seconds)) => ("resets in ", Some(when::duration(seconds, Detail::Exact))),
-            (None, When::Unknown) => ("", None),
-        };
-        let words = self.label.len() + 8;
-        if self.age.is_some() && detail.as_ref().is_some_and(|detail| words + 3 + detail.len() > area.w) {
+        if let Some(age) = self.age {
+            let time = when::duration(age, Detail::Rounded);
+            let prefix = self.label.len() + 16;
+            if prefix + time.len() + 5 <= area.w {
+                return area.note(screen, row, &format!("{} · last reported {time} ago", self.label));
+            }
+            if prefix <= area.w {
+                return area.note(screen, row, &format!("{} · last reported", self.label));
+            }
             return area.note(screen, row, "Last reported");
         }
+        let (lead, detail) = match self.when {
+            When::Elapsed => unreachable!("elapsed is handled above"),
+            When::Running(seconds) => ("resets in ", Some(when::duration(seconds, Detail::Exact))),
+            When::Unknown => ("", None),
+        };
+        let words = self.label.len() + 8;
         if words > area.w {
             return area.note(screen, row, &self.label);
         }
@@ -274,7 +315,7 @@ impl Metric<'_> {
 
 /// Long and short explanations let missing figures fit either layout.
 #[derive(PartialEq, Eq)]
-struct Hint {
+pub(super) struct Hint {
     full: &'static str,
     short: &'static str,
     state: &'static str,
@@ -283,13 +324,30 @@ struct Hint {
 
 impl Hint {
     const CHECKING: Self = Self { full: "checking local limits", short: "checking", state: "checking", next: None };
+    const CHECKING_ACTIVITY: Self =
+        Self { full: "checking local activity", short: "checking", state: "checking", next: None };
+    const OLD_READING: Self = Self { full: "last reported", short: "last", state: "old", next: None };
+    const FUTURE_REPORT: Self =
+        Self { full: "report is dated ahead", short: "future report", state: "dated ahead", next: None };
     const NO_SESSIONS: Self =
-        Self { full: "no sessions found", short: "no sessions", state: "no source", next: Some("Run Codex") };
+        Self { full: "no sessions found", short: "no sessions", state: "no log", next: Some("Run Codex") };
     const NO_SAVED_LIMITS: Self = Self {
         full: "no saved limits found",
         short: "no saved limits",
-        state: "no source",
+        state: "no limits",
         next: Some("Run milo setup"),
+    };
+    const UNREADABLE_LIMITS: Self = Self {
+        full: "could not read saved limits",
+        short: "cannot read limits",
+        state: "cannot read",
+        next: Some("Check limit file access"),
+    };
+    const UNUSABLE_LIMITS: Self = Self {
+        full: "no usable saved limits",
+        short: "unusable save",
+        state: "no limits",
+        next: Some("Open Claude Code"),
     };
     const UNREADABLE: Self = Self {
         full: "could not read sessions",
@@ -301,6 +359,8 @@ impl Hint {
         Self { full: "no database found", short: "no database", state: "no source", next: Some("Run OpenCode") };
     const NO_TOKENS: Self =
         Self { full: "no tokens recorded today", short: "no tokens today", state: "no tokens", next: None };
+    const ACTIVITY_OUTDATED: Self =
+        Self { full: "no reading for today yet", short: "no reading today", state: "no reading", next: None };
     const UNREAD: Self = Self {
         full: "could not read its database",
         short: "could not read",
@@ -318,6 +378,34 @@ impl Hint {
         Self { full: "no limits to show", short: "no limits", state: "no limits", next: Some(tool.open()) }
     }
 
+    pub(super) fn text(&self) -> &'static str {
+        self.full
+    }
+
+    fn words(&self) -> [&'static str; 3] {
+        [self.full, self.short, self.state]
+    }
+
+    fn line(&self, screen: &mut Screen, area: Area, tool: Tool) {
+        let mut row = RowWriter { screen, x: area.x, y: area.y, left: area.w };
+        let names = tool.names();
+        for name in names {
+            if let Some(reason) = self.words().into_iter().find(|reason| name.len() + 1 + reason.len() <= area.w) {
+                let gap = if name.len() + 3 + reason.len() <= area.w { " · " } else { " " };
+                row.add(name, tool.colour().bold());
+                row.add(gap, FAINT);
+                row.add(reason, FAINT);
+                return;
+            }
+        }
+        if let Some(name) = names.into_iter().find(|name| name.len() <= area.w) {
+            row.add(name, tool.colour().bold());
+            if row.left >= 2 {
+                row.add(" —", FAINT);
+            }
+        }
+    }
+
     /// Draws the hint, with `also` after it on the same row when both fit.
     fn draw(&self, screen: &mut Screen, area: Area, row: usize, also: Option<&str>) {
         if let Some(also) = also
@@ -329,6 +417,50 @@ impl Hint {
             writer.add(also, FAINT);
         } else {
             area.note(screen, row, if self.full.len() <= area.w { self.full } else { self.short });
+        }
+    }
+}
+
+impl Usage {
+    /// A recognized report without windows is more specific than the source's
+    /// absence. An in-flight search must not erase a known read failure.
+    pub(super) fn limit_hint(&self, tool: UsageTool, reported: bool, now: i64) -> Hint {
+        let checking = self.omp.checking();
+        match tool {
+            UsageTool::Codex if reported => Hint::no_limits(Tool::Codex),
+            UsageTool::Codex => match self.codex.sessions {
+                CodexSessions::Unreadable => Hint::UNREADABLE,
+                _ if self.codex.next_reading(now).is_some() => Hint::FUTURE_REPORT,
+                _ if checking => Hint::CHECKING,
+                CodexSessions::Missing => Hint::NO_SESSIONS,
+                CodexSessions::Present => Hint::no_limits(Tool::Codex),
+            },
+            UsageTool::Claude if reported => Hint::no_limits(Tool::Claude),
+            UsageTool::Claude if self.claude.unreadable_limits => Hint::UNREADABLE_LIMITS,
+            UsageTool::Claude if self.claude.next_reading(now).is_some() => Hint::FUTURE_REPORT,
+            UsageTool::Claude
+                if self.claude.status.is_none() && self.claude.saved_version.is_some_and(|version| version.len() > 0) =>
+            {
+                Hint::UNUSABLE_LIMITS
+            }
+            UsageTool::Claude if checking => Hint::CHECKING,
+            UsageTool::Claude => Hint::NO_SAVED_LIMITS,
+            UsageTool::OpenCode => unreachable!("OpenCode has no limits source"),
+        }
+    }
+}
+
+impl super::OpenCode {
+    pub(super) fn activity_hint(&self, today: i64) -> Hint {
+        match self.report {
+            opencode::Report::Unreadable => Hint::UNREAD,
+            opencode::Report::Unsupported => Hint::UNCHECKED,
+            opencode::Report::Today(activity) if activity.since != today => {
+                if self.poll.fd().is_some() { Hint::CHECKING_ACTIVITY } else { Hint::ACTIVITY_OUTDATED }
+            }
+            opencode::Report::Today(_) => Hint::NO_TOKENS,
+            opencode::Report::Missing if self.poll.checking() => Hint::CHECKING_ACTIVITY,
+            opencode::Report::Missing => Hint::NO_DATABASE,
         }
     }
 }
@@ -350,7 +482,7 @@ enum SummaryEnd {
 impl<'a> Report<'a> {
     /// Leave out unreported windows; a dash stands for the whole missing report.
     fn new(tool: Tool, report: Option<(&'a Limits, Source)>, missing: Hint, now: i64) -> Self {
-        let Some((limits, source)) = report else {
+        let Some((limits, source)) = report.filter(|(limits, _)| limits.any()) else {
             return Self { tool, first: Metric::missing("limits"), extra: [None, None], hint: Some(missing) };
         };
         let base = limits.base.into_iter().flatten().map(|window| Metric::limit(window, now, source));
@@ -360,14 +492,8 @@ impl<'a> Report<'a> {
             metric
         });
         let mut figures = base.chain(model);
-        let (first, hint) = match figures.next() {
-            Some(first) => (first, None),
-            None => {
-                let hint = if missing == Hint::CHECKING { missing } else { Hint::no_limits(tool) };
-                (Metric::missing("limits"), Some(hint))
-            }
-        };
-        Self { tool, first, extra: [figures.next(), figures.next()], hint }
+        let first = figures.next().expect("a nonempty report has a metric");
+        Self { tool, first, extra: [figures.next(), figures.next()], hint: None }
     }
 
     /// What a tool without a figure is waiting for, under its name.
@@ -397,7 +523,7 @@ impl<'a> Report<'a> {
         let metric = self.limiting();
         let mut line = 1;
         if let Some(hint) = &self.hint {
-            self.summary_line(screen, area, "", hint.state, SummaryEnd::Plain, FAINT);
+            hint.line(screen, area, self.tool);
             if let Some(next) = hint.next {
                 area.note(screen, line, next);
                 line += 1;
@@ -409,13 +535,13 @@ impl<'a> Report<'a> {
             line += 1;
         } else {
             let age_below = area.h > 1 && area.w >= "Last reported".len();
-            let end = if let Some(age) = metric.age.filter(|_| !age_below) {
-                SummaryEnd::Last(inline_detail.then_some(age))
-            } else {
-                SummaryEnd::Left(match metric.when {
+            let end = match metric.age {
+                Some(_) if age_below => SummaryEnd::Plain,
+                Some(age) => SummaryEnd::Last(inline_detail.then_some(age)),
+                None => SummaryEnd::Left(match metric.when {
                     When::Running(seconds) if inline_detail => Some(seconds),
                     _ => None,
-                })
+                }),
             };
             self.summary_line(screen, area, &metric.label, metric.number(), end, metric.colour());
             if let Some(age) = metric.age.filter(|_| age_below) {
@@ -432,7 +558,11 @@ impl<'a> Report<'a> {
             }
             if line < area.h {
                 match metric.when {
-                    When::Running(seconds) => area.note(screen, line, &format!("Resets in {}", compact_time(seconds))),
+                    When::Running(seconds) => {
+                        let time = compact_time(seconds);
+                        let reset = if metric.age.is_some() { "Reported reset · " } else { "Resets in " };
+                        area.note(screen, line, &format!("{reset}{time}"));
+                    }
                     When::Unknown => area.note(screen, line, "Reset time unknown"),
                     When::Elapsed => unreachable!("elapsed handled separately"),
                 }
@@ -505,9 +635,11 @@ impl<'a> Report<'a> {
             }
             return;
         }
-        // Only a current figure can stand on its own. When a status or stale
-        // figure will not fit, keep the provider identifiable instead.
-        if can_stand_alone {
+        // Only a current figure can stand on its own. A historical figure
+        // gives way to its status if the number and qualifier won't both fit.
+        if matches!(end, SummaryEnd::Last(_)) {
+            Hint::OLD_READING.line(screen, area, self.tool);
+        } else if can_stand_alone {
             writer.add(if value.len() <= area.w { value } else { "—" }, style);
         } else if let Some(name) = names.into_iter().find(|name| name.len() <= area.w) {
             writer.add(name, self.tool.colour().bold());
@@ -519,10 +651,15 @@ impl<'a> Report<'a> {
 
     /// Shorten the name and labels before giving up a reported figure.
     fn inline(&self, screen: &mut Screen, area: Area) {
-        if matches!(self.hint, Some(Hint::CHECKING)) {
-            return self.summary_line(screen, area, "", Hint::CHECKING.state, SummaryEnd::Plain, FAINT);
+        if let Some(hint) = &self.hint {
+            return hint.line(screen, area, self.tool);
         }
         let first = &self.first;
+        if (first.age.is_some() || matches!(first.when, When::Elapsed))
+            && self.extra.iter().flatten().any(|metric| metric.number.is_some() && metric.age.is_none())
+        {
+            return self.summary(screen, area, false, false, Activity::default);
+        }
         let name = self
             .tool
             .names()
@@ -531,6 +668,9 @@ impl<'a> Report<'a> {
             .unwrap_or_default();
         let identity = if name.is_empty() { 0 } else { name.len() + 1 };
         let label = identity + first.inline_width() <= area.w;
+        if !label && (first.age.is_some() || matches!(first.when, When::Elapsed)) {
+            return self.summary(screen, area, false, false, Activity::default);
+        }
         let mut used = identity + if label { first.inline_width() } else { first.number_width() };
         let extras = self.extra.iter().flatten().take_while(|metric| {
             let width = 2 + metric.inline_width();
@@ -560,7 +700,11 @@ impl<'a> Report<'a> {
             row.add("  ", FAINT);
             metric.inline(&mut row, true);
         }
-        if self.first.number.is_some() && self.first.age.is_none() && used + 3 * usize::from(tile) + 5 <= area.w {
+        if first.number.is_some()
+            && first.age.is_none()
+            && self.extra.iter().flatten().take(count).all(|metric| metric.number.is_some() && metric.age.is_none())
+            && row.left >= 5
+        {
             row.add(" left", FAINT);
         }
     }
@@ -595,22 +739,26 @@ impl<'a> Report<'a> {
             }
         }
         let metrics = all().take(count);
-        // How old the reading is, said once for the tool rather than under
-        // each of its windows.
-        if let Some(age) = metrics.clone().filter_map(|metric| metric.age).max()
+        // An age in the mark's lane labels the whole group only when every
+        // displayed window has that age. A newer window keeps its own caption.
+        let shared_age = if let Some(age) = self.first.age
             && beneath <= chart.note
+            && metrics.clone().all(|metric| metric.age == Some(age))
         {
             let exact = format!("{} ago", when::duration(age, Detail::Exact));
             let text =
                 if exact.len() <= column.w { exact } else { format!("{} ago", when::duration(age, Detail::Rounded)) };
             column.note(screen, chart.note, &text);
-        }
+            text.len() <= column.w
+        } else {
+            false
+        };
         let slot = self.tool.first_figure_slot();
         let width = figures.w - (count - 1) * gap;
         for (i, metric) in metrics.enumerate() {
             let start = width * i / count;
             let w = width * (i + 1) / count - start;
-            metric.panel(screen, Area { x: figures.x + start + i * gap, w, ..figures }, chart, slot + i);
+            metric.panel(screen, Area { x: figures.x + start + i * gap, w, ..figures }, chart, slot + i, shared_age);
         }
         // A window without a figure of its own gets a row below the captions,
         // across the whole panel once it is clear of the mark.
@@ -725,8 +873,12 @@ impl<'a> Report<'a> {
 }
 
 fn tighter(a: &Metric<'_>, b: &Metric<'_>) -> bool {
-    let rank =
-        |metric: &Metric<'_>| if metric.number.is_some() { 2 } else { u8::from(matches!(metric.when, When::Elapsed)) };
+    let rank = |metric: &Metric<'_>| match (&metric.number, metric.age, metric.when) {
+        (Some(_), None, _) => 3,
+        (Some(_), Some(_), _) => 2,
+        (None, _, When::Elapsed) => 1,
+        _ => 0,
+    };
     let seconds = |metric: &Metric<'_>| match metric.when {
         When::Running(seconds) => seconds,
         _ => i64::MAX,
@@ -861,15 +1013,7 @@ impl<'a> Harness<'a> {
         if let Some(activity) = usage.opencode.today(today) {
             return Self::Today(activity);
         }
-        Self::Unknown(match usage.opencode.report {
-            _ if usage.opencode.poll.checking() => Hint::CHECKING,
-            opencode::Report::Missing => Hint::NO_DATABASE,
-            opencode::Report::Unreadable => Hint::UNREAD,
-            opencode::Report::Unsupported => Hint::UNCHECKED,
-            // Yesterday's totals wait for the read that replaces them.
-            opencode::Report::Today(activity) if activity.since != today => Hint::CHECKING,
-            opencode::Report::Today(_) => Hint::NO_TOKENS,
-        })
+        Self::Unknown(usage.opencode.activity_hint(today))
     }
 
     /// The name and what follows it, from the fullest wording to the barest.
@@ -954,7 +1098,7 @@ impl<'a> Harness<'a> {
 fn beside(screen: &mut Screen, area: Area) -> [Area; 2] {
     let (left, right) = area.split(1);
     for row in area.y..area.y + area.h {
-        screen.put(left.w, row, 1, "│", FAINT);
+        screen.put(left.x + left.w, row, 1, "│", FAINT);
     }
     [left.inset(), right.inset()]
 }
@@ -984,22 +1128,8 @@ fn halves(screen: &mut Screen, area: Area) -> [Area; 2] {
     [Area { h: upper, ..area }, Area { y: area.y + upper + rule, h: area.h - upper - rule, ..area }]
 }
 
-/// Names in a row, with `last` before the final one.
-fn list(names: impl Iterator<Item = &'static str>, last: &str) -> String {
-    let mut names = names.peekable();
-    let mut out = String::new();
-    while let Some(name) = names.next() {
-        if !out.is_empty() {
-            out.push_str(if names.peek().is_some() { ", " } else { last });
-        }
-        out.push_str(name);
-    }
-    out
-}
-
 /// One quiet block when no tool has a place: what each tool Milo found is
-/// waiting for, or that none was found. It never names a hidden tool, and
-/// names an absent one only when all it can say is which tools it looks for.
+/// waiting for, or that no enabled source has a reading.
 fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], checking: bool, tools: UsageTools) {
     let title = |screen: &mut Screen, [long, short]: [&str; 2]| {
         if let Some(text) = [long, short].into_iter().find(|text| str_width(text) <= area.w) {
@@ -1018,24 +1148,14 @@ fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], c
     };
     let count = waiting.iter().flatten().count();
     if count == 0 {
-        let looked_for = || UsageTool::ALL.into_iter().filter(|&tool| tools[tool] != Show::Hide);
+        let any_enabled = UsageTool::ALL.into_iter().any(|tool| tools[tool] != Show::Hide);
         if checking {
             title(screen, ["Checking local usage…", "Checking…"]);
-        } else if looked_for().next().is_none() {
+        } else if !any_enabled {
             title(screen, ["Usage is hidden", "Hidden"]);
             words(screen, "Every tool is hidden. Change this in milo setup.", "See milo setup");
         } else {
             title(screen, NO_USAGE);
-            let sentence = format!("Waiting for {}.", list(looked_for().map(UsageTool::label), " or "));
-            let brief = list(
-                looked_for().map(|tool| match tool {
-                    UsageTool::Codex => Tool::Codex.name(),
-                    UsageTool::Claude => Tool::Claude.name(),
-                    UsageTool::OpenCode => Harness::NAMES[0],
-                }),
-                ", ",
-            );
-            words(screen, &sentence, &brief);
         }
         return;
     }
@@ -1046,7 +1166,7 @@ fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], c
         title(screen, NO_USAGE);
     }
     for (name, hint) in waiting.into_iter().flatten() {
-        let text = [hint.full, hint.short, hint.state].into_iter().find(|text| name.len() + 3 + text.len() <= area.w);
+        let text = hint.words().into_iter().find(|text| name.len() + 3 + text.len() <= area.w);
         if row < area.h && name.len() <= area.w {
             let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
             writer.add(name, Style::PLAIN);
@@ -1069,15 +1189,6 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     }
     let tools = usage.tools;
     let checking = usage.omp.checking();
-    let missing = if checking {
-        Hint::CHECKING
-    } else {
-        match usage.codex.sessions {
-            CodexSessions::Missing => Hint::NO_SESSIONS,
-            CodexSessions::Present => Hint::no_limits(Tool::Codex),
-            CodexSessions::Unreadable => Hint::UNREADABLE,
-        }
-    };
     let codex_report = usage.codex.reported(now);
     let claude_report = usage.claude.reported(now);
     let presence =
@@ -1085,14 +1196,19 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     let [codex, claude, opencode] = UsageTool::ALL.map(|tool| tools[tool]);
     // A tool Milo found keeps its hint ready for when no tool has a place.
     let reports = [
-        presence[0]
-            .relevant(codex)
-            .then(|| Report::new(Tool::Codex, codex_report.map(|(r, source)| (&r.windows, source)), missing, now)),
+        presence[0].relevant(codex).then(|| {
+            Report::new(
+                Tool::Codex,
+                codex_report.map(|(r, source)| (&r.windows, source)),
+                usage.limit_hint(UsageTool::Codex, codex_report.is_some(), now),
+                now,
+            )
+        }),
         presence[1].relevant(claude).then(|| {
             Report::new(
                 Tool::Claude,
                 claude_report.map(|(r, source)| (&r.windows, source)),
-                if checking { Hint::CHECKING } else { Hint::NO_SAVED_LIMITS },
+                usage.limit_hint(UsageTool::Claude, claude_report.is_some(), now),
                 now,
             )
         }),
@@ -1115,10 +1231,15 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     // limits it has one row, above the key hints and in line with them.
     // Beside panels it waits for a pane two rows taller than the hints need,
     // so that a panel with three windows still has a row for today's tokens.
-    // On a rail it takes a row as soon as each tool above has one.
+    // On a wide two-row rail, an explicitly enabled OpenCode shares the
+    // space without changing the pane height or displacing either limit tool.
     let inset = if text { pad } else { 1 };
     let line = Area { x: inset, y: rows - 1, w: w.saturating_sub(2 * inset), h: 1 };
-    let room = if text { rows > 2 } else { w >= 8 && h >= if split { 9 } else { 16 } };
+    let room = if text {
+        rows > 2 || rows == 2 && opencode == Show::Always && w >= THREE_SUMMARIES
+    } else {
+        w >= 8 && h >= if split { 9 } else { 16 }
+    };
     let beneath = placed.filter(|harness| count == 2 && room && harness.fitting(line.w, true).is_some());
     // The rule needs two rows left for each tool above it, and their own rule.
     let ruled = text && beneath.is_some() && rows > 6;
@@ -1127,6 +1248,11 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     let rail = Area { x: pad, w: w - 2 * pad, ..area };
     let activity = || usage.claude.activity(today, now);
     match (limits, placed) {
+        ([Some(codex), Some(claude)], _) if text && rail.h == 1 && beneath.is_some() => {
+            let [left, right] = beside(screen, rail);
+            codex.summary(screen, left, false, false, Activity::default);
+            claude.summary(screen, right, false, false, activity);
+        }
         ([Some(codex), Some(claude)], _) if text && rail.h == 1 => {
             // One row goes to whichever tool is nearer its limit.
             let tightest = if tighter(claude.limiting(), codex.limiting()) { claude } else { codex };

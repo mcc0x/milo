@@ -19,19 +19,23 @@ struct UsageWindow: Codable, Equatable {
     let remaining: Int
     let fresh: Bool
     let resetAt: Int?
+    let staleAt: Int?
 
-    fileprivate func resetHasElapsed(at now: Date) -> Bool {
-        guard let resetAt else { return false }
-        return Double(resetAt) <= now.timeIntervalSince1970
+    fileprivate enum State { case current, historical, elapsed }
+
+    fileprivate func state(at now: Date) -> State {
+        let seconds = now.timeIntervalSince1970
+        if let resetAt, Double(resetAt) <= seconds { return .elapsed }
+        if !fresh || staleAt.map({ Double($0) <= seconds }) == true { return .historical }
+        return .current
     }
 }
 
-func badgeReading(_ snapshot: UsageSnapshot?, mode: String) -> (provider: UsageProvider, window: UsageWindow)? {
+func badgeReading(_ snapshot: UsageSnapshot?, mode: String, now: Date = .now) -> (provider: UsageProvider, window: UsageWindow)? {
     guard let snapshot, mode == "auto" || mode == "codex" || mode == "claude" else { return nil }
-    let now = Date()
     var lowest: (provider: UsageProvider, window: UsageWindow)?
     for provider in snapshot.providers where mode == "auto" || provider.id == mode {
-        for window in provider.windows where window.fresh && !window.resetHasElapsed(at: now) {
+        for window in provider.windows where window.state(at: now) == .current {
             if let lowest, lowest.window.remaining <= window.remaining { continue }
             lowest = (provider, window)
         }
@@ -132,7 +136,7 @@ struct UsagePanel: View {
                 Divider()
             }
             TimelineView(.periodic(from: .now, by: 30)) { context in
-                let active = badgeReading(snapshot, mode: badgeMode)
+                let active = badgeReading(snapshot, mode: badgeMode, now: context.date)
                 VStack(spacing: 12) {
                     ForEach(snapshot.providers, id: \.id) { provider in
                         section(provider, at: context.date, marked: active?.provider.id == provider.id ? active?.window : nil)
@@ -253,9 +257,9 @@ private struct UsageLimitRow: View {
     let marked: Bool
     let blink: Bool
 
-    private func note(elapsed: Bool) -> String {
-        if elapsed { return "Reset elapsed. Waiting for a new report." }
-        if !window.fresh { return "Older reading" }
+    private func note(for state: UsageWindow.State) -> String {
+        if state == .elapsed { return "Reset elapsed. Waiting for a new report." }
+        if state == .historical { return "Last reported, not current" }
         guard let resetAt = window.resetAt else { return "Reset time unavailable" }
         let reset = Date(timeIntervalSince1970: Double(resetAt))
         if Calendar.current.isDate(reset, inSameDayAs: now) {
@@ -264,10 +268,14 @@ private struct UsageLimitRow: View {
         return "Resets \(reset.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
     }
 
-
     var body: some View {
-        let elapsed = window.resetHasElapsed(at: now)
-        let note = note(elapsed: elapsed)
+        let state = window.state(at: now)
+        let note = note(for: state)
+        let value = switch state {
+        case .current: "\(window.remaining) percent left. \(note)\(marked ? ". Shown in the menu bar." : "")"
+        case .historical: "\(window.remaining) percent when last reported. Not current."
+        case .elapsed: note
+        }
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(window.label)
@@ -283,15 +291,15 @@ private struct UsageLimitRow: View {
                     .foregroundStyle(.secondary)
                     .help("Shown in the menu bar")
             }
-            if !elapsed {
-                Text("\(window.remaining)%")
+            if state != .elapsed {
+                Text(state == .current ? "\(window.remaining)% left" : "\(window.remaining)%")
                     .font(.system(size: 15, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(!window.fresh ? Color.secondary : window.remaining <= 10 ? Color.orange : Color.primary)
+                    .foregroundStyle(state == .historical ? Color.secondary : window.remaining <= 10 ? Color.orange : Color.primary)
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(window.label)
-        .accessibilityValue(elapsed ? note : "\(window.remaining) percent remaining. \(note)\(marked ? ". Shown in the menu bar." : "")")
+        .accessibilityValue(value)
     }
 }
 

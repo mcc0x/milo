@@ -226,10 +226,13 @@ fn always_show_keeps_a_place_and_says_what_is_unknown_without_a_number() {
     codex_limits(&f, now);
     let mut usage = automatic(&f, now).showing(tools(AUTO, ALWAYS, ALWAYS));
     usage.check();
-    assert_eq!(trimmed(&mut usage, 28, 3), ["Codex week · 26% left", "Claude · no source", "OpenCode · no database"]);
+    assert_eq!(
+        trimmed(&mut usage, 28, 3),
+        ["Codex week · 26% left", "Claude · no saved limits", "OpenCode · no database"]
+    );
     let rail = trimmed(&mut usage, 30, 12).join("\n");
     assert!(rail.contains("Run milo setup") && rail.contains("OpenCode · no database found"), "{rail}");
-    assert_eq!(trimmed(&mut usage, 22, 2), ["Codex week · 26% left", "Claude · no source"]);
+    assert_eq!(trimmed(&mut usage, 22, 2), ["Codex week · 26% left", "Claude no saved limits"]);
     // Where a figure would be, the unknown tool has a dash and its next step, never a number.
     let wide = frame(&mut usage, 140, 5);
     let claude: Vec<&str> = wide.iter().map(|row| row.split_once('│').unwrap().1).collect();
@@ -318,8 +321,8 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
         [Presence::Absent; 2]
     );
     assert_eq!(usage.opencode.presence(usage.today.since), Presence::Absent);
-    assert_eq!(trimmed(&mut usage, 28, 2), ["No usage to show yet", "Codex, Claude, OpenCode"]);
-    assert_eq!(trimmed(&mut usage, 28, 4), ["No usage to show yet", "Waiting for Codex, Claude", "Code or OpenCode."]);
+    assert_eq!(trimmed(&mut usage, 28, 2), ["No usage to show yet"]);
+    assert_eq!(trimmed(&mut usage, 28, 4), ["No usage to show yet"]);
     assert_eq!(trimmed(&mut usage, 12, 2), ["No usage yet"]);
     every_size(&mut usage, |w, h, rows| {
         assert!(!rows.join("\n").contains(['%', '—', '│', '─']), "{w}x{h}: {rows:?}");
@@ -346,7 +349,7 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
         trimmed(&mut usage, 36, 4),
         ["No usage to show yet", "Codex · no limits to show", "Claude · no saved limits found"]
     );
-    assert_eq!(trimmed(&mut usage, 22, 2), ["Codex · no limits", "Claude · no source"]);
+    assert_eq!(trimmed(&mut usage, 22, 2), ["Codex · no limits", "Claude · no limits"]);
     assert!(usage.help().text().contains("Claude Code") && !usage.help().text().contains("OpenCode"));
 
     // A found tool without a figure gives its rows to one that has figures.

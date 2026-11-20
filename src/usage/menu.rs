@@ -11,7 +11,7 @@ use crate::preferences::Preferences;
 use crate::{paths, term, when};
 
 use super::{
-    Activity, CodexSessions, Reading, SAVED_LIMITS, Show, Source, Usage, UsageTool, UsageTools, Window,
+    Activity, Reading, SAVED_LIMITS, Show, Source, Usage, UsageTool, UsageTools, Window,
     claude_sources, codex_sessions, draw, omp, opencode, sqlite,
 };
 
@@ -101,25 +101,28 @@ impl Usage {
             write!(output, r#"{separator}{{"id":"{id}","name":"{}","windows":["#, tool.label()).unwrap();
             separator = ",";
             let (state, activity) = match tool {
-                UsageTool::Codex => {
-                    let missing = match self.codex.sessions {
-                        CodexSessions::Missing => "No sessions found",
-                        CodexSessions::Present => "No limits to show",
-                        CodexSessions::Unreadable => "Could not read sessions",
-                    };
-                    (limit_windows(output, codex, now, missing), None)
-                }
+                UsageTool::Codex => (
+                    limit_windows(output, codex, now, || self.limit_hint(tool, codex.is_some(), now).text()),
+                    None,
+                ),
                 UsageTool::Claude => (
-                    limit_windows(output, claude, now, "No saved limits found"),
+                    limit_windows(output, claude, now, || self.limit_hint(tool, claude.is_some(), now).text()),
                     draw::activity_text(self.claude.activity(today, now)),
                 ),
                 UsageTool::OpenCode => self.opencode.menu_detail(today),
             };
             output.push(']');
-            match (state, activity.as_deref()) {
-                (Some(state), Some(activity)) => write!(output, r#","detail":"{state} · {activity}""#).unwrap(),
-                (Some(detail), None) | (None, Some(detail)) => write!(output, r#","detail":"{detail}""#).unwrap(),
-                (None, None) => {}
+            if let Some(state) = state {
+                // These fixed captions are ASCII. Start the menu's standalone
+                // detail with a capital without allocating another string.
+                let initial = char::from(state.as_bytes()[0].to_ascii_uppercase());
+                write!(output, r#","detail":"{initial}{}"#, &state[1..]).unwrap();
+                if let Some(activity) = &activity {
+                    write!(output, " · {activity}").unwrap();
+                }
+                output.push('"');
+            } else if let Some(activity) = activity {
+                write!(output, r#","detail":"{activity}""#).unwrap();
             }
             output.push('}');
         }
@@ -137,14 +140,7 @@ impl super::OpenCode {
             }
             return (None, Some(detail));
         }
-        let state = match self.report {
-            opencode::Report::Missing => "No database found",
-            opencode::Report::Unsupported => "Database format not checked",
-            opencode::Report::Unreadable => "Could not read its database",
-            opencode::Report::Today(activity) if activity.since != today => "Checking local activity",
-            opencode::Report::Today(_) => "No tokens recorded today",
-        };
-        (Some(state), None)
+        (Some(self.activity_hint(today).text()), None)
     }
 }
 
@@ -154,18 +150,21 @@ fn limit_windows(
     output: &mut String,
     report: Option<(&Reading, Source)>,
     now: i64,
-    missing: &'static str,
+    missing: impl FnOnce() -> &'static str,
 ) -> Option<&'static str> {
-    let Some((reading, source)) = report else { return Some(missing) };
+    let Some((reading, source)) = report.filter(|(reading, _)| reading.windows.any()) else {
+        return Some(missing());
+    };
     let mut separator = "";
     let mut emit = |window: Window, label: &str| {
         // Base labels are generated from a duration, and model captions allow
         // only ASCII names. Provider names and detail are fixed or numeric text.
         write!(
             output,
-            r#"{separator}{{"label":"{label}","remaining":{},"fresh":{}"#,
+            r#"{separator}{{"label":"{label}","remaining":{},"fresh":{},"staleAt":{}"#,
             window.remaining(),
             !window.is_stale(now, source),
+            window.stale_at(source),
         )
         .unwrap();
         if let Some(reset) = window.resets {
@@ -180,7 +179,7 @@ fn limit_windows(
     if let Some(model) = reading.windows.model_week.as_ref().filter(|model| !model.window.is_reset(now)) {
         emit(model.window, model.caption());
     }
-    separator.is_empty().then(|| if reading.windows.any() { "Reset elapsed" } else { "No limits to show" })
+    separator.is_empty().then_some("reset elapsed")
 }
 
 pub(super) fn snapshots(

@@ -53,6 +53,7 @@ enum Level {
     Green,
     Yellow,
     Red,
+    Historical,
 }
 
 impl Level {
@@ -61,15 +62,16 @@ impl Level {
             Self::Green => GREEN,
             Self::Yellow => YELLOW,
             Self::Red => RED,
+            Self::Historical => return crate::ui::FAINT,
         })
     }
 
     fn rgb(self, light: bool) -> [u8; 3] {
         // Images cannot use theme palette entries. Pick fixed colours with
         // readable contrast against dark and light terminal backgrounds.
-        const PALETTE: [[[u8; 3]; 3]; 2] = [
-            [[0x3f, 0xb9, 0x50], [0xd2, 0x99, 0x22], [0xff, 0x7b, 0x72]],
-            [[0x19, 0x70, 0x36], [0x86, 0x56, 0x00], [0xb4, 0x23, 0x2b]],
+        const PALETTE: [[[u8; 3]; 4]; 2] = [
+            [[0x3f, 0xb9, 0x50], [0xd2, 0x99, 0x22], [0xff, 0x7b, 0x72], [0x8b, 0x94, 0x9e]],
+            [[0x19, 0x70, 0x36], [0x86, 0x56, 0x00], [0xb4, 0x23, 0x2b], [0x65, 0x6d, 0x76]],
         ];
         PALETTE[usize::from(light)][self as usize]
     }
@@ -90,6 +92,10 @@ impl Figure {
             _ => Level::Green,
         };
         Self { text, level }
+    }
+
+    pub(super) fn historical(text: &'static str) -> Self {
+        Self { text, level: Level::Historical }
     }
 
     pub(super) fn style(self) -> Style {
@@ -152,7 +158,7 @@ thread_local! {
 mod tests {
     use super::*;
     use crate::usage::draw::{Chart, Hint, Metric, Report, Tool};
-    use crate::usage::{Activity, Source, Window};
+    use crate::usage::{Activity, Limits, Source, Window};
 
     fn metric(percent: f64) -> Metric<'static> {
         Metric::limit(Window { minutes: 300, percent, resets: None, observed: 0 }, 0, Source::CodexSession)
@@ -167,7 +173,7 @@ mod tests {
             if let Some(able) = able {
                 screen.set_pictures(able);
             }
-            metric.panel(&mut screen, area, Chart::new(area.h), 0);
+            metric.panel(&mut screen, area, Chart::new(area.h), 0, false);
             let rows = screen.text();
             assert_eq!(rows[2], "    5h");
             if able == Some(true) {
@@ -184,8 +190,9 @@ mod tests {
     fn short_panels_keep_plain_text_even_when_pictures_are_supported() {
         let mut screen = Screen::sized(32, 2);
         screen.set_pictures(true);
-        let mut report = Report::new(Tool::Codex, None, Hint::no_limits(Tool::Codex), 0);
-        report.first = metric(73.0);
+        let window = Window { minutes: 300, percent: 73.0, resets: None, observed: 0 };
+        let limits = Limits::new([Some(window), None]);
+        let report = Report::new(Tool::Codex, Some((&limits, Source::Omp)), Hint::no_limits(Tool::Codex), 0);
         report.panel(&mut screen, Area { x: 0, y: 0, w: 32, h: 2 }, 2, Activity::default);
         assert_eq!(screen.text(), ["██ Codex 5h 27% left", ""]);
         assert_eq!(screen.picture_at(), None);
@@ -198,8 +205,8 @@ mod tests {
         let area = Area { x: 0, y: 0, w: 16, h: 5 };
         let draw = |screen: &mut Screen, percent| {
             screen.clear();
-            metric(27.0).panel(screen, area, Chart::new(area.h), 0);
-            metric(percent).panel(screen, Area { x: 16, ..area }, Chart::new(area.h), 1);
+            metric(27.0).panel(screen, area, Chart::new(area.h), 0, false);
+            metric(percent).panel(screen, Area { x: 16, ..area }, Chart::new(area.h), 1, false);
         };
         let uploads =
             |screen: &mut Screen| String::from_utf8(screen.emitted()).unwrap().matches("\x1b_Ga=t,f=100,").count();

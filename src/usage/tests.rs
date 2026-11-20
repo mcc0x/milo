@@ -796,7 +796,7 @@ mod omp_limits {
         assert!(usage.check());
         assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · checking"]);
         finish_omp(&mut usage);
-        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude · no source"]);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude no saved limits"]);
 
         report(&path, "codex", "openai-codex", NOW * 1000, &format!("[{}]", week("0.65")));
         assert!(usage.check());
@@ -804,7 +804,7 @@ mod omp_limits {
         assert_eq!(usage.key(Key::Char('r')), After::Stay);
         assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 75% left", "Claude · checking"]);
         finish_omp(&mut usage);
-        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude · no source"]);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex week · 35% left", "Claude no saved limits"]);
     }
 
     #[test]
@@ -816,7 +816,7 @@ mod omp_limits {
         usage.omp = omp::poll(Some(path.clone()), TEST_WAIT);
 
         let checking = ["Codex · checking", "Claude · checking"];
-        let settled = ["Codex · no source", "Claude · no limits"];
+        let settled = ["Codex · no sessions", "Claude · no limits"];
         assert!(usage.check());
         let next_poll = Instant::now() + Duration::from_secs(20);
         assert_eq!(frame(&mut usage, 22, 2), checking);
@@ -829,7 +829,7 @@ mod omp_limits {
         assert_eq!(frame(&mut usage, 22, 2), settled);
 
         assert_eq!(usage.key(Key::Char('r')), After::Stay);
-        assert_eq!(frame(&mut usage, 22, 2), checking);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · no limits"]);
         finish_omp(&mut usage);
         assert_eq!(frame(&mut usage, 22, 2), settled);
 
@@ -837,7 +837,7 @@ mod omp_limits {
         report(&path, "claude", "anthropic", NOW * 1000, &format!("[{week}]"));
         usage.omp.start(NOW, Instant::now() + Duration::from_secs(20));
         finish_omp(&mut usage);
-        assert_eq!(frame(&mut usage, 22, 2), ["Codex · no source", "Claude week · 68% left"]);
+        assert_eq!(frame(&mut usage, 22, 2), ["Codex · no sessions", "Claude week · 68% left"]);
     }
 
     #[test]

@@ -50,12 +50,13 @@ fn size_classes_keep_the_primary_figures_in_both_panels() {
     // last row of the digits with the percent sign closed up after them.
     let codex = ("73%", " █  ▄▄▛%");
     let claude = ("48%", "  █ ▜▄▛%");
-    let dash = ("—", "—");
+    let no_codex = ("no sessions found", "—");
+    let no_claude = ("no saved limits found", "—");
     for (name, codex_at, claude_at, reset_at, left, right) in [
         ("both", Some(now), Some(now), next, codex, claude),
-        ("Codex only", Some(now), None, next, codex, dash),
-        ("Claude only", None, Some(now), next, dash, claude),
-        ("neither", None, None, next, dash, dash),
+        ("Codex only", Some(now), None, next, codex, no_claude),
+        ("Claude only", None, Some(now), next, no_codex, claude),
+        ("neither", None, None, next, no_codex, no_claude),
     ] {
         let f = Fixture::folder();
         example_limits(&f, codex_at, claude_at, reset_at, now);
@@ -270,8 +271,9 @@ fn an_old_reading_says_so_once_and_each_window_keeps_its_reset_time() {
     assert!(wide.contains("2 h") && wide.contains("2 d"), "{wide}");
 
     let narrow = frame(&mut usage, 36, 12)[..5].join("\n");
-    assert!(narrow.contains("week · 26% left") && narrow.contains("Last reported 5h55m ago"), "{narrow}");
-    assert!(narrow.contains("Resets in 2d") && narrow.contains("Open Codex"), "{narrow}");
+    assert!(narrow.contains("week · 26%") && narrow.contains("Last reported 5h55m ago"), "{narrow}");
+    assert!(!narrow.contains("26% left") && narrow.contains("Reported reset · 2d"), "{narrow}");
+    assert!(narrow.contains("Open Codex"), "{narrow}");
 }
 
 #[test]
@@ -412,7 +414,7 @@ fn elapsed_and_missing_limits_give_different_next_steps_without_guessing_percent
     let rows = frame(&mut usage, 22, 6);
     assert_eq!(rows[0], "Codex · reset elapsed");
     assert_eq!(rows[1], "Open Codex");
-    assert_eq!(rows[3], "Claude · no source");
+    assert_eq!(rows[3], "Claude no saved limits");
     assert_eq!(rows[4], "Run milo setup");
     assert!(!rows.join("\n").contains('%'));
 
@@ -433,5 +435,5 @@ fn a_short_stale_summary_is_labeled_even_without_a_spare_line() {
     usage.fixed_now = Some(NOW + 5 * MINUTE);
     assert_eq!(frame(&mut usage, 22, 1), ["Codex week · 20% last"]);
     assert_eq!(frame(&mut usage, 12, 6)[0], "Cx 20% last");
-    assert_eq!(frame(&mut usage, 6, 1), ["Codex"]);
+    assert_eq!(frame(&mut usage, 6, 1), ["Cx old"]);
 }
