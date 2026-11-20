@@ -13,7 +13,7 @@
 
 ## Install
 
-The v0.1.2 release is available for Apple Silicon Macs. Install it with Homebrew:
+The v0.1.3 release is available for Apple Silicon Macs. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -22,7 +22,7 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.2/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.3/install.sh &&
   sh milo-install.sh
 ```
 
@@ -78,7 +78,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID]` | File reader |
 | `milo setup` | Setup screen |
-| `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) (source build) |
+| `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
 | `milo doctor` | Read-only preference and integration report |
 
 `milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.

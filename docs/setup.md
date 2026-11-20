@@ -4,7 +4,7 @@
 
 ## Install
 
-The v0.1.2 prebuilt release is for Apple Silicon macOS. Use Homebrew:
+The v0.1.3 prebuilt release is for Apple Silicon macOS. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -13,7 +13,7 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.2/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.3/install.sh &&
   sh milo-install.sh
 ```
 
@@ -63,7 +63,7 @@ Run `milo` for Home or `milo setup` to go directly to Settings. Both share the s
 
 ## Browser editor
 
-With a source build, run `milo web` from the project you want to configure, or choose **Open in browser** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+Run `milo web` from the project you want to configure, or choose **Open in browser** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
 The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
 

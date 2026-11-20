@@ -43,9 +43,9 @@ if [ "$(uname -s)" != Darwin ] ||
     fail 'This release requires an Apple Silicon Mac. See https://github.com/mcc0x/milo for source installation.'
 fi
 
-version=v0.1.2
+version=v0.1.3
 asset=milo-aarch64-apple-darwin
-expected=e9defbc84682150c31ad35b1e6e26d3ec5882ff8f7aee6a878ac117c257c4ef6
+expected=935cc8d08b5d52a958862a64ffd1249c5688babac2c02d820a2176426e3ba04b
 release=https://github.com/mcc0x/milo/releases/download/$version
 
 # Stage on the same filesystem so a verified download can replace milo by rename.
