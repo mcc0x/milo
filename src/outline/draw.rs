@@ -1,5 +1,6 @@
 //! Lays out and draws the project heading and file tree or strip.
 
+use std::ops::Range;
 use std::time::Instant;
 
 use crate::git::{GIT_UNAVAILABLE, Kind, PendingFile};
@@ -30,11 +31,18 @@ pub(super) struct Layout {
     body_top: usize,
     pub(super) body_rows: usize,
     /// Actual rows shown, empty when a layout change invalidates the click targets.
-    pub(super) tree_rows: std::ops::Range<usize>,
+    pub(super) tree_rows: Range<usize>,
+    /// The actual painted file entries, in column-major order.
+    strip_hits: Vec<StripHit>,
     heading: bool,
     hint: bool,
     wide: bool,
     partial: bool,
+}
+
+struct StripHit {
+    x: Range<usize>,
+    file: usize,
 }
 
 impl Layout {
@@ -47,6 +55,18 @@ impl Layout {
     pub(super) fn row_at(&self, x: usize, y: usize) -> Option<usize> {
         let offset = y.checked_sub(self.body_top)?;
         (x < self.width && offset < self.tree_rows.len()).then(|| self.tree_rows.start + offset)
+    }
+
+    pub(super) fn strip_file_at(&self, x: usize, y: usize) -> Option<usize> {
+        let row = y.checked_sub(self.body_top)?;
+        if row >= self.body_rows {
+            return None;
+        }
+        self.strip_hits.get(row..)?.iter().step_by(self.body_rows).find(|hit| hit.x.contains(&x)).map(|hit| hit.file)
+    }
+
+    pub(super) fn clear_strip_targets(&mut self) {
+        self.strip_hits.clear();
     }
 }
 
@@ -85,8 +105,10 @@ impl Outline {
         let folder_partial = self.listing.truncated || self.listing.unreadable && !self.listing.paths.is_empty();
         let partial = self.repo.paths_incomplete() || folder_partial;
         let mut layout = arrange(s.w, s.h, self.repo.git, partial);
+        layout.strip_hits = std::mem::take(&mut self.painted.strip_hits);
+        layout.clear_strip_targets();
         if layout.width == 0 {
-            self.painted = layout;
+            self.record_layout(layout);
             return;
         }
         if layout.heading {
@@ -101,7 +123,7 @@ impl Outline {
         if layout.strip {
             self.discover_untracked();
             if layout.body_rows > 0 {
-                self.draw_strip(s, &layout);
+                self.draw_strip(s, &mut layout);
             }
         } else {
             let git_unavailable = self.repo.git_unavailable();
@@ -118,7 +140,7 @@ impl Outline {
                 self.draw_hint(s);
             }
         }
-        self.painted = layout;
+        self.record_layout(layout);
     }
 
     /// Names the project and branch beside the work that is waiting, if it fits.
@@ -331,7 +353,7 @@ impl Outline {
     }
 
     /// Shows pending files, most recent first, filling columns top to bottom.
-    fn draw_strip(&mut self, s: &mut Screen, layout: &Layout) {
+    fn draw_strip(&mut self, s: &mut Screen, layout: &mut Layout) {
         let (w, y0, rows) = (layout.width, layout.body_top, layout.body_rows);
         if !layout.heading && !self.repo.ok() {
             s.put_fit(1, 0, w - 2, GIT_ERROR, ui::DEL);
@@ -359,7 +381,9 @@ impl Outline {
                 if files[i].kind == Kind::Untracked {
                     self.untracked.show(i);
                 }
-                ui::file_name(s, x + 1, y0 + row, width - 2, &files[i], self.icons, self.text_git_marks);
+                let left = x + 1;
+                let used = ui::file_name(s, left, y0 + row, width - 2, &files[i], self.icons, self.text_git_marks);
+                layout.strip_hits.push(StripHit { x: left..left + used, file: i });
             }
             x += width;
             shown += column.len();

@@ -133,8 +133,17 @@ pub fn git_mark(s: &mut Screen, x: usize, y: usize, room: usize, kind: Kind, unc
     4
 }
 
-/// "name parent/dir": the file name first, so it survives a narrow column.
-pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &PendingFile, icons: IconMode, text: bool) {
+/// Draws "name parent/dir", putting the name first so it survives a narrow
+/// column. Returns the drawn width, not including padding.
+pub fn file_name(
+    s: &mut Screen,
+    x: usize,
+    y: usize,
+    max_w: usize,
+    f: &PendingFile,
+    icons: IconMode,
+    text: bool,
+) -> usize {
     let st = kind_style(f.kind);
     let st = if f.unpushed { st } else { st.bold() };
     let (dir, name) = f.path.rsplit_once('/').unwrap_or(("", &f.path));
@@ -142,10 +151,18 @@ pub fn file_name(s: &mut Screen, x: usize, y: usize, max_w: usize, f: &PendingFi
     if used == 0 || max_w - used >= 4 {
         used += icon(s, x + used, y, max_w - used, icons::file(icons, name));
     }
-    used += s.put_middle(x + used, y, max_w - used, name, st);
-    if !dir.is_empty() && used + 2 < max_w {
-        s.put_fit(x + used + 1, y, max_w - used - 1, dir, FAINT);
+    let name_width = s.put_middle(x + used, y, max_w - used, name, st);
+    if name_width == 0 {
+        return used.saturating_sub(1); // The last icon or mark reserves a gap.
     }
+    used += name_width;
+    if !dir.is_empty() && used + 2 < max_w {
+        let dir_width = s.put_fit(x + used + 1, y, max_w - used - 1, dir, FAINT);
+        if dir_width > 0 {
+            used += 1 + dir_width;
+        }
+    }
+    used
 }
 
 /// Keeps the selected row visible without scrolling past the last full page.

@@ -16,7 +16,7 @@ use crate::help::{self, Page};
 use crate::keys::Key;
 use crate::pane::{After, Pane};
 use crate::preferences::{FoldStore, IconMode, Preferences, ProjectMode};
-use crate::reader::{OpenReader, ReadFile, Reader};
+use crate::reader::{OpenReader, Reader};
 use crate::screen::{Screen, Style};
 use crate::tree::{Folds, Tree, folders_above};
 use crate::ui::{self, ADD, DEL};
@@ -208,6 +208,7 @@ impl Outline {
     }
 
     fn update_recent(&mut self) {
+        self.invalidate_strip_clicks();
         self.recent.clear();
         let mut once = HashSet::new();
         for (i, f) in self.pending.iter().enumerate() {
@@ -312,19 +313,6 @@ impl Outline {
     /// Shows a line in place of the key hint for a few seconds.
     fn say(&mut self, text: impl Into<String>) {
         self.note = Some((text.into(), Instant::now()));
-    }
-
-    /// Opens the reader in this pane, or replaces the floating reader in Rex.
-    fn open_file(&mut self, path: &str) {
-        match self.opener.open(&self.repo, ReadFile::Working(path)) {
-            Ok(reader) => {
-                self.reading = reader;
-                if self.reading.is_some() {
-                    self.painted.tree_rows = 0..0;
-                }
-            }
-            Err(why) => self.say(why),
-        }
     }
 
     fn draw_at(&mut self, screen: &mut Screen, now: Instant) {
@@ -1057,6 +1045,142 @@ mod tests {
         assert_eq!(o.strip_col, 2);
         o.key(Key::Left);
         assert_eq!(o.strip_col, 1);
+    }
+
+    #[test]
+    fn the_strip_double_click_opens_the_painted_file_without_single_click_scrolling() {
+        let f = Fixture::new();
+        for name in 'a'..='i' {
+            f.write(&format!("{name}.txt"), &format!("contents of {name}\n"));
+        }
+        let mut o = open(&f);
+        let at = Instant::now();
+        draw_at(&mut o, 34, 5, at);
+        o.outline_key(Key::Right, at);
+        let strip = draw_at(&mut o, 34, 5, at).text();
+        assert_eq!(o.strip_col, 1);
+        assert_eq!(strip[1].match_indices(".txt").count(), 2, "{strip:?}");
+        let start = strip[1].rfind(".txt").unwrap() - 1;
+        let name = &strip[1][start..start + 5];
+        let x = crate::width::str_width(&strip[1][..start]);
+        assert!(x > 17, "{strip:?}");
+        let click = Key::Click(x, 1);
+
+        o.outline_key(click, at);
+        assert!(o.reading.is_none());
+        assert_eq!(o.strip_col, 1);
+        assert_eq!(draw_at(&mut o, 34, 5, at).text(), strip);
+
+        assert_eq!(o.outline_key(click, at + Duration::from_millis(10)), After::Stay);
+        assert!(o.reading.is_some());
+        assert!(draw_at(&mut o, 40, 8, at).text()[0].contains(name));
+    }
+
+    #[test]
+    fn strip_padding_heading_and_scroll_indicators_cannot_arm_or_open_a_file() {
+        let f = Fixture::new();
+        for name in 'a'..='e' {
+            f.write(&format!("{name}.txt"), "pending\n");
+        }
+        let mut o = open(&f);
+        let at = Instant::now();
+        let strip = draw_at(&mut o, 34, 5, at).text();
+        assert_eq!(strip[1].match_indices(".txt").count(), 2, "{strip:?}");
+        assert_eq!(strip[2].match_indices(".txt").count(), 1, "{strip:?}");
+        let misses = [
+            Key::Click(0, 1),  // Left margin.
+            Key::Click(13, 1), // Beyond the end of the first entry.
+            Key::Click(17, 1), // Between columns.
+            Key::Click(20, 2), // Empty row in the second column.
+            Key::Click(30, 0), // Project heading.
+            Key::Click(34, 1), // Outside the pane.
+        ];
+        for click in misses {
+            o.outline_key(click, at);
+            o.outline_key(click, at);
+            assert!(o.clicked.is_none() && o.reading.is_none(), "{click:?}");
+        }
+
+        assert!(draw_at(&mut o, 17, 5, at).text()[4].ends_with('›'));
+        o.outline_key(Key::Click(16, 4), at);
+        assert!(o.clicked.is_none());
+        o.outline_key(Key::End, at);
+        assert!(draw_at(&mut o, 17, 5, at).text()[1].starts_with('‹'));
+        o.outline_key(Key::Click(0, 1), at);
+        assert!(o.clicked.is_none());
+    }
+
+    #[test]
+    fn strip_clicks_wait_for_a_new_frame_after_pending_files_change() {
+        let f = Fixture::new();
+        f.write("first.txt", "first\n");
+        let mut o = open(&f);
+        let at = Instant::now();
+        let click = Key::Click(4, 1);
+        assert!(draw_at(&mut o, 40, 5, at).text()[1].contains("first.txt"));
+        o.outline_key(click, at);
+        assert!(o.clicked.is_some());
+
+        fs::remove_file(f.root.join("first.txt")).unwrap();
+        f.write("other.txt", "replacement\n");
+        o.reload();
+        assert!(o.clicked.is_none());
+        o.outline_key(click, at);
+        o.outline_key(click, at);
+        assert!(o.clicked.is_none() && o.reading.is_none());
+
+        assert!(draw_at(&mut o, 40, 5, at).text()[1].contains("other.txt"));
+        o.outline_key(click, at);
+        assert!(o.reading.is_none());
+        o.outline_key(click, at);
+        assert!(o.reading.is_some());
+        assert!(draw_at(&mut o, 40, 8, at).text()[0].contains("other.txt"));
+    }
+
+    #[test]
+    fn a_strip_click_is_forgotten_when_its_file_leaves_the_cell() {
+        let f = Fixture::new();
+        f.write("tides.ts", "export const tides = [];\n");
+        let mut o = open(&f);
+        let at = Instant::now();
+        let click = Key::Click(4, 1);
+        draw_at(&mut o, 40, 5, at);
+        o.outline_key(click, at);
+        assert!(o.clicked.is_some());
+
+        assert!(draw_at(&mut o, 40, 3, at).text()[0].contains("tides.ts"));
+        assert!(o.clicked.is_none());
+        draw_at(&mut o, 40, 5, at);
+        o.outline_key(click, at);
+        assert!(o.reading.is_none());
+        o.outline_key(click, at);
+        assert!(o.reading.is_some());
+
+        o.outline_key(Key::Char('q'), at);
+        o.outline_key(click, at);
+        o.outline_key(click, at);
+        assert!(o.clicked.is_none() && o.reading.is_none());
+    }
+
+    #[test]
+    fn strip_clicks_after_batched_scroll_still_target_the_painted_column() {
+        let f = Fixture::new();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            f.write(name, "pending\n");
+        }
+        let mut o = open(&f);
+        let at = Instant::now();
+        let strip = draw_at(&mut o, 17, 1, at).text();
+        let name = strip[0].split_whitespace().find(|word| word.ends_with(".txt")).unwrap();
+        let click = Key::Click(4, 0);
+
+        o.outline_key(Key::End, at);
+        o.outline_key(click, at);
+        assert_eq!(o.strip_col, 2);
+        assert!(o.reading.is_none());
+        o.outline_key(click, at);
+        assert!(o.reading.is_some());
+        assert!(draw_at(&mut o, 40, 8, at).text()[0].contains(name));
     }
 
     #[test]

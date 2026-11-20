@@ -31,7 +31,7 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | `r` | Reload |
 | `q` | Quit |
 
-Click a folder to open or close it, click a file to select it, or double-click a file to read it. In the short outline strip there is no cursor: Left / Right or `h` / `l` scroll by one column, and Home / End or `g` / `G` go to either end. The arrow keys, `j` / `k`, the wheel and Page Up / Page Down also scroll the strip one column at a time.
+Click a folder to open or close it, click a file to select it, or double-click a file to read it. In the short Outline strip, double-click a filename to read it; a single click doesn’t scroll the strip. There’s no keyboard cursor: arrows, `h` / `l`, `j` / `k`, the wheel and Page Up / Page Down scroll one column at a time. Home / End or `g` / `G` go to either end.
 
 ### History
 

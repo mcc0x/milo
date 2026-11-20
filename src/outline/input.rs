@@ -7,14 +7,21 @@ use crate::keys::Direction::{Next, Previous};
 use crate::keys::{DOUBLE_CLICK, Key};
 use crate::pane::{After, Pane};
 use crate::preferences::Preferences;
+use crate::reader::ReadFile;
 
 use super::Outline;
-use super::draw::margin;
+use super::draw::{Layout, margin};
 
 pub(super) struct Click {
-    path: Rc<str>,
+    target: ClickTarget,
     cell: (usize, usize),
     at: Instant,
+}
+
+#[derive(PartialEq, Eq)]
+enum ClickTarget {
+    Tree(Rc<str>),
+    Strip(usize),
 }
 
 enum Pointed {
@@ -62,14 +69,23 @@ impl Outline {
                 }
                 true
             }
-            _ if self.painted.strip => self.strip_key(key),
+            _ if self.painted.strip => self.strip_key(key, now),
             _ => self.tree_key(key, now),
         };
         if changed || reschedule || by_click != self.by_click { After::Stay } else { After::Ignored }
     }
 
-    /// The strip has no cursor: its keys move it a column at a time.
-    fn strip_key(&mut self, key: Key) -> bool {
+    /// The strip has no cursor. Keys scroll it; a double click opens a file.
+    fn strip_key(&mut self, key: Key, now: Instant) -> bool {
+        if let Key::Click(x, y) = key {
+            let Some(file) = self.painted.strip_file_at(x, y) else {
+                self.clicked = None;
+                return false;
+            };
+            let Some(target) = self.repeat_click(ClickTarget::Strip(file), (x, y), now) else { return false };
+            self.open_file(target);
+            return true;
+        }
         if self.painted.body_rows == 0 {
             return false;
         }
@@ -153,7 +169,7 @@ impl Outline {
                 self.set_open(path, false);
             }
             (Key::Enter, Some(Pointed::File(path))) => {
-                self.open_file(&path);
+                self.open_file(ClickTarget::Tree(path));
             }
             (Key::Char('h') | Key::Left, _) => self.sel = self.tree.parent_row(self.sel).unwrap_or(self.sel),
             _ => {}
@@ -200,20 +216,62 @@ impl Outline {
     /// Clicks toggle folders, select files, and open files when repeated.
     fn click(&mut self, row: usize, cell: (usize, usize), now: Instant) {
         let Some(node) = self.tree.row(row) else { return };
-        let (path, dir) = (node.path.clone(), node.dir);
-        let again = self.clicked.take().is_some_and(|click| {
-            click.path == path && click.cell == cell && now.saturating_duration_since(click.at) < DOUBLE_CLICK
-        });
+        let target = ClickTarget::Tree(Rc::clone(&node.path));
+        let folder = node.dir.then(|| Rc::clone(&node.path));
         (self.sel, self.by_click) = (row, true);
-        match (dir, again) {
-            (true, false) => {
+        match (folder, self.repeat_click(target, cell, now)) {
+            (Some(path), None) => {
                 let open = self.folds.is_open(&path);
-                self.clicked = Some(Click { path: path.clone(), cell, at: now });
                 self.set_open(path, !open);
             }
-            (true, true) => {} // A double click on a folder is one toggle, not two.
-            (false, false) => self.clicked = Some(Click { path, cell, at: now }),
-            (false, true) => self.open_file(&path),
+            (None, Some(target)) => self.open_file(target),
+            _ => {} // A double click on a folder is one toggle, not two.
+        }
+    }
+
+    /// Only a repeated click on the same target and terminal cell opens it.
+    fn repeat_click(&mut self, target: ClickTarget, cell: (usize, usize), now: Instant) -> Option<ClickTarget> {
+        if self.clicked.take().is_some_and(|click| {
+            click.target == target && click.cell == cell && now.saturating_duration_since(click.at) < DOUBLE_CLICK
+        }) {
+            return Some(target);
+        }
+        self.clicked = Some(Click { target, cell, at: now });
+        None
+    }
+
+    pub(super) fn record_layout(&mut self, layout: Layout) {
+        if let Some(Click { target: ClickTarget::Strip(file), cell: (x, y), .. }) = &self.clicked
+            && layout.strip_file_at(*x, *y) != Some(*file)
+        {
+            self.clicked = None;
+        }
+        self.painted = layout;
+    }
+
+    /// Pending indices no longer identify the files in the last painted strip.
+    pub(super) fn invalidate_strip_clicks(&mut self) {
+        self.painted.clear_strip_targets();
+        if matches!(self.clicked, Some(Click { target: ClickTarget::Strip(_), .. })) {
+            self.clicked = None;
+        }
+    }
+
+    /// Opens the reader in this pane, or replaces the floating reader in Rex.
+    fn open_file(&mut self, target: ClickTarget) {
+        let path: &str = match &target {
+            ClickTarget::Tree(path) => path,
+            ClickTarget::Strip(file) => self.pending[*file].path.as_str(),
+        };
+        match self.opener.open(&self.repo, ReadFile::Working(path)) {
+            Ok(reader) => {
+                self.reading = reader;
+                if self.reading.is_some() {
+                    self.painted.tree_rows = 0..0;
+                    self.painted.clear_strip_targets();
+                }
+            }
+            Err(why) => self.say(why),
         }
     }
 }
