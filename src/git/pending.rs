@@ -46,6 +46,7 @@ pub(super) struct TrackedDiff {
     /// In status path order, including both ends of a rename.
     stamps: Vec<DiffStamp>,
     files: Vec<PendingFile>,
+    index: Option<DiffStamp>,
 }
 
 /// Compare the porcelain records directly: names alone miss staging,
@@ -77,26 +78,42 @@ impl Repo {
         if paths.is_empty() {
             return Some(Vec::new());
         }
-        // Sample before Git runs; an edit during the diff must not be cached
-        // under a stamp taken after the edit. Take the old entry so a failed
-        // diff cannot leave stale results behind.
+        // Keep stamps taken before Git runs so a later edit cannot be cached
+        // under its newer stamp. A failed diff must drop the old counts.
+        // `read` has already discarded the cache if tracked status or the
+        // comparison base changed.
         let mut known = self.pending_tracked.take().unwrap_or_default();
-        let mut fresh = known.stamps.len() == paths.len();
+        let same_paths = known.stamps.len() == paths.len();
         let mut cacheable = true;
-        let mut absolute = PathBuf::new();
+        let mut changed = Vec::new();
         known.stamps.resize(paths.len(), DiffStamp::Missing);
-        for (path, previous) in paths.iter().zip(&mut known.stamps) {
-            absolute.clear();
-            absolute.push(&self.root);
-            absolute.push(path);
-            let stamp = DiffStamp::at(&absolute);
-            fresh &= stamp == *previous;
+        for (at, (stamp, previous)) in self.diff_stamps().zip(&mut known.stamps).enumerate() {
+            if same_paths && stamp != *previous {
+                changed.push(at);
+            }
             // A lossy status path may not name the file we just stamped.
-            cacheable &= !matches!(stamp, DiffStamp::Uncertain(_)) && !path.contains('\u{fffd}');
+            cacheable &= !matches!(stamp, DiffStamp::Uncertain(_)) && !paths[at].contains('\u{fffd}');
             *previous = stamp;
         }
-        if !fresh {
-            known.files = self.diff_tracked(&known.stamps)?;
+        if !same_paths || !changed.is_empty() {
+            let index = self.diff_index();
+            let named = paths.len() <= PATHS_LIMIT;
+            // Use the tip from status, not a possibly newer HEAD. The large
+            // full diff uses the tip to exclude files that are only unpushed.
+            let ends = self.ends();
+            let tip = if ends.has_commit() { ends.tip.as_str() } else { EMPTY_TREE };
+            let against = if named { ends.base.as_deref().unwrap_or(tip) } else { tip };
+            if !(cacheable
+                && same_paths
+                && changed.len() < paths.len()
+                && changed.len() <= PATHS_LIMIT
+                && index.is_some()
+                && index == known.index
+                && self.recount_tracked(&mut known, &changed, against)?)
+            {
+                known.files = self.diff_tracked(&known.stamps, against, named)?;
+            }
+            known.index = index;
         }
         if cacheable {
             let mut files = Vec::with_capacity(known.files.len() + self.status.untracked.len());
@@ -108,15 +125,73 @@ impl Repo {
         }
     }
 
-    fn diff_tracked(&self, stamps: &[DiffStamp]) -> Option<Vec<PendingFile>> {
+    fn diff_stamps(&self) -> impl Iterator<Item = DiffStamp> + '_ {
+        let mut absolute = PathBuf::new();
+        self.status.tracked_uncommitted.iter().map(move |path| {
+            absolute.clear();
+            absolute.push(&self.root);
+            absolute.push(path);
+            DiffStamp::at(&absolute)
+        })
+    }
+
+    fn diff_index(&self) -> Option<DiffStamp> {
+        let stamp = DiffStamp::at(&self.git_dir.as_ref()?.join("index"));
+        matches!(stamp, DiffStamp::File { .. }).then_some(stamp)
+    }
+
+    fn recount_tracked(&self, known: &mut TrackedDiff, changed: &[usize], against: &str) -> Option<bool> {
+        if !self.status.sources.is_empty() || !self.status.unmerged.is_empty() {
+            return Some(false);
+        }
+        let attributes = |path: &Path| {
+            path.file_name().is_some_and(|name| name.as_encoded_bytes().eq_ignore_ascii_case(b".gitattributes"))
+        };
+        // Edited attributes can change the counts of other files too.
+        if self.status.untracked.iter().any(|path| attributes(Path::new(path)))
+            || self.status.ignored_files.iter().any(|path| attributes(path))
+        {
+            return Some(false);
+        }
+        let args = ["diff", against, "--no-renames", "--raw", "--numstat", "-z", "--"];
+        let mut scoped = Vec::with_capacity(args.len() + changed.len());
+        scoped.extend(args);
+        let mut rows = Vec::with_capacity(changed.len());
+        for &at in changed {
+            let path = &self.status.tracked_uncommitted[at];
+            if !matches!(known.stamps[at], DiffStamp::File { .. }) || attributes(Path::new(path)) {
+                return Some(false);
+            }
+            // Neither the old nor new diff can have a rename candidate at an
+            // edited path. Additions and deletions can pair across the tree.
+            let Some(row) = known.files.iter().position(|file| file.path == *path && file.kind == Kind::Modified)
+            else {
+                return Some(false);
+            };
+            scoped.push(path);
+            rows.push(row);
+        }
+        let files = parse_files(&self.git(&scoped)?);
+        if files.len() != rows.len()
+            || !files.iter().zip(&rows).all(|(file, &row)| {
+                file.kind == Kind::Modified && file.path == known.files[row].path
+            })
+            // A save or index update during the scoped diff can change which
+            // paths need recounting. Don't merge results from two snapshots.
+            || !self.diff_stamps().eq(known.stamps.iter().copied())
+            || self.diff_index() != known.index
+        {
+            return Some(false);
+        }
+        for ((mut file, row), &at) in files.into_iter().zip(rows).zip(changed) {
+            file.stamp = known.stamps[at].file();
+            known.files[row] = file;
+        }
+        Some(true)
+    }
+
+    fn diff_tracked(&self, stamps: &[DiffStamp], against: &str, named: bool) -> Option<Vec<PendingFile>> {
         let paths = &self.status.tracked_uncommitted;
-        let named = paths.len() <= PATHS_LIMIT;
-        // Naming the paths lets the outline use the Reader's base without
-        // including files that are only unpushed. Use the tip from status,
-        // not a possibly newer HEAD.
-        let ends = self.ends();
-        let tip = if ends.has_commit() { ends.tip.as_str() } else { EMPTY_TREE };
-        let against = if named { ends.base.as_deref().unwrap_or(tip) } else { tip };
         let args = ["diff", against, "-M", "--raw", "--numstat", "-z", "--"];
         let raw = if named {
             let mut scoped = Vec::with_capacity(args.len() + paths.len());
@@ -238,11 +313,13 @@ mod tests {
     fn worktree_stamps_and_comparison_base_refresh_the_counts() {
         let f = Fixture::new();
         f.write("page.txt", "first\n");
+        f.write("peer.txt", "base\n");
         f.commit("first");
         f.push();
         f.write("page.txt", "first\nsecond\n");
         f.commit("second");
         f.write("page.txt", "first\nsecond\nthird\n");
+        f.write("peer.txt", "local edit\n");
         let mut repo = Repo::open(&f.root).unwrap();
         repo.read();
         assert_eq!(tracked_page(&mut repo).add, 2);
@@ -257,6 +334,118 @@ mod tests {
         repo.read();
         assert!(tracked_records(&before).eq(tracked_records(&repo.raw)), "the push only changed the comparison base");
         assert_eq!(tracked_page(&mut repo).add, 2);
+    }
+
+    #[test]
+    fn large_refresh_recounts_only_the_saved_path() {
+        let f = Fixture::new();
+        let saved = "module/:*.txt";
+        f.write(saved, "base\n");
+        for i in 0..PATHS_LIMIT {
+            f.write(&format!("file{i:03}.txt"), &format!("base {i}\n"));
+        }
+        f.commit("base");
+        f.write(saved, "base\nfirst edit\n");
+        for i in 0..PATHS_LIMIT {
+            f.write(&format!("file{i:03}.txt"), &format!("base {i}\nlocal edit\n"));
+        }
+        let mut warm = Repo::open(&f.root).unwrap();
+        warm.read();
+        let before = warm.pending().unwrap();
+        assert_eq!(before.len(), PATHS_LIMIT + 1);
+        let raw = warm.raw.clone();
+
+        // Git can still read status and recount the saved file, but a
+        // whole-tree recount needs an unrelated file's missing base blob.
+        let oid = warm.git(&["rev-parse", "HEAD:file000.txt"]).unwrap();
+        let oid = std::str::from_utf8(&oid).unwrap().trim();
+        let object = f.root.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+        let hidden = object.with_extension("hidden");
+        fs::rename(&object, &hidden).unwrap();
+        f.write(saved, "base\nnext edit\nextra line\n");
+
+        warm.read();
+        assert!(tracked_records(&raw).eq(tracked_records(&warm.raw)));
+        let updated = warm.pending().unwrap();
+        assert_eq!(updated.len(), before.len());
+        for (old, new) in before.iter().zip(&updated) {
+            if old.path == saved {
+                assert_eq!(new.path, saved);
+                assert_eq!((new.add, new.del), (2, 0));
+            } else {
+                assert_eq!(new, old);
+            }
+        }
+        let mut cold = Repo::open(&f.root).unwrap();
+        cold.read();
+        assert!(cold.pending().is_none());
+        fs::rename(&hidden, &object).unwrap();
+        cold.read();
+        assert_eq!(cold.pending().unwrap(), updated);
+    }
+
+    #[test]
+    fn changed_rename_similarity_uses_the_full_diff() {
+        let f = Fixture::new();
+        let base = "a recognizable line of text\n".repeat(20);
+        f.write("old.txt", &base);
+        f.write("peer.txt", "base\n");
+        f.commit("base");
+        f.git(&["mv", "old.txt", "new.txt"]);
+        f.write("new.txt", &format!("{base}one new line\n"));
+        f.write("peer.txt", "local edit\n");
+        let mut warm = Repo::open(&f.root).unwrap();
+        warm.read();
+        let before = warm.pending().unwrap();
+        assert!(before.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Renamed));
+
+        let raw = warm.raw.clone();
+        f.write("new.txt", &"nothing in common\n".repeat(20));
+        warm.read();
+        assert!(tracked_records(&raw).eq(tracked_records(&warm.raw)));
+        let after = warm.pending().unwrap();
+        assert!(after.iter().any(|file| file.path == "old.txt" && file.kind == Kind::Deleted));
+        assert!(after.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Added));
+    }
+
+    #[test]
+    fn index_update_after_status_does_not_reuse_stale_counts() {
+        let f = Fixture::new();
+        f.write("page.txt", "base\n");
+        f.write("peer.txt", "base\n");
+        f.commit("base");
+        f.write("page.txt", "base\nfirst edit\n");
+        f.write("peer.txt", "base\nlocal edit\n");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let before = repo.pending().unwrap();
+        assert_eq!((before[1].path.as_str(), before[1].kind, before[1].add), ("peer.txt", Kind::Modified, 1));
+
+        f.write("page.txt", "base\nnext edit\nextra line\n");
+        repo.read();
+        f.git(&["rm", "--cached", "peer.txt"]);
+        let after = repo.pending().unwrap();
+        assert_eq!((after[1].path.as_str(), after[1].kind, after[1].del), ("peer.txt", Kind::Deleted, 1));
+    }
+
+    #[test]
+    fn edit_after_sampling_prevents_merging_scoped_counts() {
+        let f = Fixture::new();
+        f.write("page.txt", "base\n");
+        f.write("peer.txt", "base\n");
+        f.commit("base");
+        f.write("page.txt", "base\nfirst edit\n");
+        f.write("peer.txt", "base\nlocal edit\n");
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let before = repo.pending().unwrap();
+        let mut known = repo.pending_tracked.take().unwrap();
+
+        f.write("page.txt", "base\nnext edit\nextra line\n");
+        known.stamps = repo.diff_stamps().collect();
+        f.write("peer.txt", "base\nanother edit\nextra line\n");
+        assert_eq!(repo.recount_tracked(&mut known, &[0], repo.against()), Some(false));
+        assert_eq!(known.files, before);
     }
 
     #[test]
