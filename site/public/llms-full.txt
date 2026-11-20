@@ -130,6 +130,8 @@ cd milo
 sh install.sh
 ```
 
+The source installer builds the checkout containing the script, even when launched from another directory. A standalone or piped copy clones Milo from GitHub into a private temporary directory instead.
+
 The source installer also honours `MILO_BIN_DIR` and defaults to `~/.local/bin`.
 
 ## In Rex

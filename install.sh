@@ -37,9 +37,34 @@ fi
 command -v cargo >/dev/null 2>&1 || fail 'Cargo is required. Get Rust 1.91 or later at https://rustup.rs/ and run this installer again.'
 command -v git >/dev/null 2>&1 || fail 'Git is required. Install Git and run this installer again.'
 
-if ! repo=$(git rev-parse --show-toplevel 2>/dev/null) ||
-    [ ! -f "$repo/src/main.rs" ] ||
-    ! grep -q '^name = "milo"$' "$repo/Cargo.toml" 2>/dev/null; then
+# Use a checkout only when this script belongs to it, not because the caller is in one.
+checkout_for_script() {
+    case $- in
+        *s*) return 1 ;;
+    esac
+    case "$0" in
+        /*) script=$0 ;;
+        *) script=$PWD/$0 ;;
+    esac
+    [ -f "$script" ] || return 1
+    while [ -L "$script" ]; do
+        link=$(readlink "$script") || return 1
+        case "$link" in
+            /*) script=$link ;;
+            *) script=${script%/*}/$link ;;
+        esac
+    done
+    [ "${script##*/}" = install.sh ] || return 1
+    dir=$(cd -P "${script%/*}/" && pwd -P) || return 1
+    top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+    [ "$dir" = "$top" ] &&
+        [ -f "$dir/src/main.rs" ] &&
+        grep -q '^name = "milo"$' "$dir/Cargo.toml" 2>/dev/null &&
+        git -C "$dir" ls-files --error-unmatch -- install.sh >/dev/null 2>&1 || return 1
+    printf '%s\n' "$dir"
+}
+
+if ! repo=$(checkout_for_script); then
     tmp_base=${TMPDIR:-/tmp}
     case "$tmp_base" in
         /*) ;;
@@ -80,3 +105,4 @@ else
     printf '%s' "$binary" | sed "s/'/'\\\\''/g"
     printf "'\n"
 fi
+exit 0

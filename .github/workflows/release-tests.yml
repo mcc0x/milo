@@ -50,6 +50,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Test source installer
+        run: sh tests/install.sh
       - name: Test release build on Apple Silicon
         run: |
           test "$(uname -m)" = arm64
