@@ -271,7 +271,19 @@ impl History {
                     let end = if s.w <= DETAIL_COLS {
                         right
                     } else if self.open_index() == Some(index) {
-                        open_files.map_or(right, |diff| file_count(s, y, diff.files.len() + diff.unrepresented))
+                        let end = open_files.map_or(right, |diff| file_count(s, y, diff.files.len() + diff.unrepresented));
+                        // Leave room for a useful subject before spending columns on the object ID.
+                        let id = &self.entries[index].commit.hash[..7];
+                        if end >= 3 + 20 + 1 + id.len() + 2 {
+                            let start = end - id.len() - 2;
+                            s.put(start, y, id.len(), id, FAINT);
+                            if open_files.is_some() {
+                                s.put(end - 1, y, 1, "·", FAINT);
+                            }
+                            start - 1
+                        } else {
+                            end
+                        }
                     } else {
                         ages.draw(s, y, self.entries[index].commit.time)
                     };

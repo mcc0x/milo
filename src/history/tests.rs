@@ -162,6 +162,19 @@ fn the_remote_boundary_is_a_rule_and_does_not_take_the_cursor() {
 }
 
 #[test]
+fn expanded_commit_identifies_the_revision_without_crowding_a_narrow_rail() {
+    let f = Fixture::new();
+    f.write("page.txt", "v1\n");
+    f.commit("edit page");
+    let mut history = open(&f);
+    let id = history.entries[0].commit.hash[..7].to_owned();
+    assert!(!row(&draw(&mut history, 60, 8).text(), "edit page").contains(&id));
+    history.key(Key::Enter);
+    assert!(row(&draw(&mut history, 60, 8).text(), "edit page").ends_with(&format!("{id} · 1 file")));
+    assert!(!row(&draw(&mut history, 28, 8).text(), "edit page").contains(&id));
+}
+
+#[test]
 fn clicks_toggle_commits_and_only_a_quick_repeat_reads_the_same_file() {
     let f = Fixture::new();
     for i in 0..6 {
