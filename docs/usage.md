@@ -8,11 +8,24 @@ A reset time is a prediction from the last report, not a new measurement. Once i
 
 With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to install and open `~/Applications/Milo.app`. Run it again to reopen or upgrade. `milo menubar uninstall` stops the app, unregisters launch at login if enabled, and removes only the app. Neither command needs sudo or a download.
 
+If you have the older `Milo Usage.app`, run the install command again. It migrates the app to `Milo.app`; you don’t need to uninstall first.
+
 You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). Install opens the app. When it’s installed, the control offers removal and asks for confirmation. Removing it keeps the Milo CLI, your settings, and any unsaved Settings draft.
 
-For the local preview, build with `sh macos/build-menu.sh` and use `target/local-menu/milo` as your CLI. The released CLI does not yet include the app. The local builder captures supported provider/config directory overrides from your shell, so rebuild if those paths change and do not distribute a personalized build. The app includes its own reader and does not require Rex.
+From a source checkout, build and install the preview:
+
+```sh
+sh macos/build-menu.sh
+./target/local-menu/milo menubar install
+```
+
+Use `./target/local-menu/milo` for subsequent menu commands. The v0.1.3 Homebrew and release binaries do not include the app. The builder captures supported provider/config directory overrides from your shell, so rebuild if those paths change and do not distribute a personalized build. The app includes its own reader and does not require Rex.
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
+
+![Milo’s native menu with example Codex and Claude limits and the Settings button](img/menu-bar.webp)
+
+Choose **Settings…** to open the [local browser editor](setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
 
 ## Which tools appear
 
