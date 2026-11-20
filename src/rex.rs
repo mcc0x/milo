@@ -244,7 +244,7 @@ pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str
         json(&root.to_string_lossy()),
     );
     script(Some(&target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
-        .filter(|reply| reply.starts_with("block:") && !reply.contains(char::is_whitespace))
+        .filter(|reply| exact_block(OsStr::new(reply)).is_some())
         .ok_or("Rex did not open the file.")
 }
 
@@ -313,15 +313,7 @@ impl ShellObserver {
     }
 
     pub fn read(&mut self) -> ShellChange {
-        let mut bytes = [0; 8192];
-        match self.output.read(&mut bytes) {
-            Ok(0) => ShellChange::Closed,
-            Ok(n) => self.frame.read(&bytes[..n]),
-            Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {
-                ShellChange::Unchanged
-            }
-            Err(_) => ShellChange::Closed,
-        }
+        self.frame.drain(&mut self.output)
     }
 }
 
@@ -341,7 +333,12 @@ fn exact_block(id: &OsStr) -> Option<&str> {
 pub(crate) fn exact_id<'a>(id: &'a OsStr, kind: &str) -> Option<&'a str> {
     let id = id.to_str()?;
     let suffix = id.strip_prefix(kind)?;
-    (suffix.len() == 36 && suffix.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then_some(id)
+    (suffix.len() == 36
+        && suffix.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        }))
+    .then_some(id)
 }
 
 #[derive(Default)]
@@ -351,6 +348,28 @@ struct Frame {
 }
 
 impl Frame {
+    fn drain(&mut self, input: &mut impl io::Read) -> ShellChange {
+        let mut latest = ShellChange::Unchanged;
+        let mut bytes = [0; 8192];
+        // Coalesce queued updates without letting a busy producer starve input.
+        for _ in 0..8 {
+            match input.read(&mut bytes) {
+                Ok(0) if matches!(latest, ShellChange::Unchanged) => return ShellChange::Closed,
+                Ok(0) => break,
+                Ok(n) => {
+                    let update = self.read(&bytes[..n]);
+                    if !matches!(update, ShellChange::Unchanged) {
+                        latest = update;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => return ShellChange::Closed,
+            }
+        }
+        latest
+    }
+
     fn read(&mut self, mut bytes: &[u8]) -> ShellChange {
         const LINE_LIMIT: usize = b"milo-cwd ".len() + 2 * 16384;
         let mut latest = ShellChange::Unchanged;
@@ -401,7 +420,9 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, ShellChange, json, layout_catalog, probe_output, reader_command, reader_label};
+    use super::{Frame, ShellChange, exact_block, json, layout_catalog, probe_output, reader_command, reader_label};
+    use std::ffi::OsStr;
+    use std::io::Cursor;
     use std::path::Path;
     use std::process::Command;
     use std::time::Duration;
@@ -457,6 +478,25 @@ mod tests {
             assert!(matches!(decoder.read(&data), ShellChange::Unchanged));
         }
         assert!(matches!(decoder.read(b"\nmilo-cwd -\n"), ShellChange::Unreported));
+    }
+
+    #[test]
+    fn queued_shell_frames_across_reads_only_apply_the_latest_directory() {
+        let mut decoder = Frame::default();
+        let mut bytes = b"milo-cwd 2f61\n".to_vec();
+        bytes.resize(8190, b'x');
+        bytes.extend_from_slice(b"\nmilo-cwd 2f62\n");
+        let mut input = Cursor::new(bytes);
+        assert!(matches!(decoder.drain(&mut input), ShellChange::Directory(path) if path == Path::new("/b")));
+        assert!(matches!(decoder.drain(&mut input), ShellChange::Closed));
+    }
+
+    #[test]
+    fn rex_block_replies_must_contain_whole_uuids() {
+        let parse = |id| exact_block(OsStr::new(id)).is_some();
+        assert!(parse("block:01a1f929-dc65-7cc5-9ba2-cac3108697bf"));
+        assert!(!parse("block:01a1f929dc65-7-cc5-9ba2-cac3108697bf"));
+        assert!(!parse("block:------------------------------------"));
     }
 
     #[test]

@@ -483,12 +483,13 @@ if ... == "listener" then
     return true
   end
 
-  local function ask(cwd, agent)
+  local function ask(cwd, agent, cached_only)
     local answer = answers[cwd]
+    if cached_only and not answer then return end
     if answer and not stands(answer) then answers[cwd], kept, answer = nil, kept - 1, nil end
     local who = agent or ""
     local known = answer and (answer.untitled and "" or answer.titles[who])
-    if known then return known end
+    if known then return known, true end
     local reply = title_exec{ milo, "tab-title", "title", cwd, agent }
     local title, rest = (reply or ""):match("^=([^\r\n]*)(.*)")
     if not title then return end
@@ -505,12 +506,13 @@ if ... == "listener" then
     end
     -- Without a title, titles are off here or this is no project, whoever runs in it.
     if title == "" then answer.untitled = true else answer.titles[who] = title end
-    return title
+    return title, true
   end
 
   memory.titles = {
     facts = pane_facts,
     -- The label a tab should show, where "" is Rex's own. Nil if Milo could not say.
+    -- A second result says whether the answer has grounds that events can recheck.
     ask = ask,
     -- The titles Milo set and still stands by, by window ID. They outlive this listener.
     owned = function()

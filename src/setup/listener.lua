@@ -90,9 +90,18 @@ local function retitle(window_id)
   local cwd, agent = tab_facts(record)
   if not cwd then return end
   local key = cwd .. "\n" .. (agent or "")
-  if key ~= record.key then record.key, record.title = key, titles.ask(cwd, agent) end
+  local changed = key ~= record.key
+  -- Recheck file-backed answers on events even when this shell has not
+  -- moved. Answers without grounds still wait for a new cwd or agent.
+  if changed or record.cached then
+    local title, cached = titles.ask(cwd, agent, not changed)
+    record.cached = cached
+    if changed or (title ~= nil and title ~= record.title) then
+      record.key, record.title, record.refused = key, title, nil
+    end
+  end
   local title = record.title
-  if not title then return end
+  if not title or record.refused then return end
   local wanted = title ~= "" and title or default
   if record.label ~= wanted then
     -- Asking Milo, Rex or a terminal takes a moment, and a name can be chosen
@@ -104,8 +113,8 @@ local function retitle(window_id)
   end
   if record.label ~= wanted then
     if not rex.session.set_window_label{ session_id = session_id, window_id = window_id, label = title } then
-      -- Rex refused. Leave the tab as it is until its project or agent changes.
-      record.title = nil
+      -- Don't retry the same refused title on each event.
+      record.refused = true
       return
     end
     record.label = wanted

@@ -609,11 +609,20 @@ moved("here", "/my project")
 front("there", shell_in("/my project", "claude"))
 assert(titling.asks == asks + 2 and #titling.relabels == 0)
 
--- Saving the choice changes the file Milo named, so the next change in a tab is titled.
+-- Saving the choice is noticed on the next event, even at the same cwd and agent.
 titling.on = true
 choose("tab_titles = true\n")
-front("there", shell_in("/my project"))
-assert(there.label == "project" and titling.asks == asks + 3)
+front("there", shell_in("/my project", "claude"))
+assert(there.label == "project · claude" and titling.asks == asks + 3)
+front("there", shell_in("/my project", "claude"))
+assert(titling.asks == asks + 3, "unchanged grounds must not start Milo")
+changed()
+assert(here.label == "project" and titling.asks == asks + 4)
+choose("")
+titling.on = false
+changed()
+assert(here.label == "Window 00000009" and there.label == "Window 0000000a" and titling.asks == asks + 5)
+titling.on = true
 assert(os.remove(choice))
 
 -- A new tab is arranged and titled by the same events, each from what it

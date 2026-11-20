@@ -78,7 +78,7 @@ fn run(args: &[OsString], config: &Path, state: &Path) -> Result<String, &'stati
             Ok(answer(&title, if settled { &grounds } else { &[] }))
         }
         (Some("claim"), [id, title]) => {
-            let title = title.to_str().filter(|title| !title.is_empty() && fit(title, LABEL_LIMIT) == *title);
+            let title = title.to_str().filter(|title| storable(title));
             claims.set(&window(id)?, title.ok_or(BAD_ARGS)?).map_err(|_| BAD_STATE)?;
             Ok(String::new())
         }
@@ -160,13 +160,18 @@ fn label(checkout: &Checkout, agent: Option<&str>) -> String {
 /// UTF-8 bytes, so the label Rex stores is exactly the one Milo remembers.
 fn fit(text: &str, limit: usize) -> String {
     let mut left = limit;
-    let kept: String = text
-        .trim()
+    let mut kept: String = text
         .chars()
         .filter(|c| !c.is_control())
+        .skip_while(|c| c.is_whitespace())
         .take_while(|c| left.checked_sub(c.len_utf8()).map(|rest| left = rest).is_some())
         .collect();
-    kept.trim().to_owned()
+    kept.truncate(kept.trim_end().len());
+    kept
+}
+
+fn storable(title: &str) -> bool {
+    !title.is_empty() && title.len() <= LABEL_LIMIT && title.trim() == title && !title.chars().any(char::is_control)
 }
 
 /// The title Milo last gave one tab.
@@ -192,17 +197,23 @@ impl Claims {
         Ok(text
             .lines()
             .filter_map(|line| line.split_once('\t'))
-            .filter(|(window, title)| rex::exact_id(OsStr::new(window), "window:").is_some() && !title.is_empty())
+            .filter(|(window, title)| rex::exact_id(OsStr::new(window), "window:").is_some() && storable(title))
             .map(|(window, title)| Claim { window: window.to_owned(), title: title.to_owned() })
             .collect())
     }
 
     fn set(&self, window: &str, title: &str) -> io::Result<()> {
         self.change(|claims| {
-            match claims.iter_mut().find(|claim| claim.window == window) {
-                Some(claim) if claim.title == title => return false,
-                Some(claim) => title.clone_into(&mut claim.title),
-                None => claims.push(Claim { window: window.to_owned(), title: title.to_owned() }),
+            if let Some(i) = claims.iter().position(|claim| claim.window == window) {
+                if claims[i].title == title {
+                    return false;
+                }
+                // A changed title is newly claimed, even if the window is old.
+                let mut claim = claims.remove(i);
+                title.clone_into(&mut claim.title);
+                claims.push(claim);
+            } else {
+                claims.push(Claim { window: window.to_owned(), title: title.to_owned() });
             }
             true
         })
@@ -415,6 +426,7 @@ mod tests {
             label(&checkout, agent)
         };
         assert_eq!(named("  my\tapp\u{85} ", None, None), "myapp");
+        assert_eq!(named(&format!("\u{7f}{}myapp", " ".repeat(LABEL_LIMIT)), None, None), "myapp");
         assert_eq!(named("\u{1}\n", None, Some("codex")), "", "an unnameable project gets no title at all");
         let long = "é".repeat(100);
         let title = named(&long, Some("tree"), Some("claude"));
@@ -435,7 +447,7 @@ mod tests {
         homes.run(&["claim", TAB, "project · claude"]).unwrap();
         assert_eq!(
             homes.run(&["owned"]).unwrap(),
-            format!("{TAB}\tproject · claude\n{OTHER}\tproject/feature · omp\n"),
+            format!("{OTHER}\tproject/feature · omp\n{TAB}\tproject · claude\n"),
         );
         homes.run(&["forget", TAB]).unwrap();
         assert_eq!(homes.claims(), format!("{OTHER}\tproject/feature · omp\n"));
@@ -473,14 +485,17 @@ mod tests {
     fn remembered_titles_survive_damage_and_keep_the_newest_tabs() {
         let homes = Homes::new();
         let id = |n: usize| format!("window:00000000-0000-0000-0000-{n:012x}");
-        let mut text = String::from("not a claim\nwindow:short\tname\n");
+        let mut text = format!("not a claim\nwindow:short\tname\n{TAB}\tbad\tclaim\n");
         for n in 0..CLAIMS_KEPT {
             writeln!(text, "{}\tolder", id(n)).unwrap();
         }
         homes.fixture.write(&format!("state/{CLAIMS_FILE}"), &text);
+        assert!(!homes.run(&["owned"]).unwrap().contains(TAB));
+        homes.run(&["claim", &id(0), "changed"]).unwrap();
         homes.run(&["claim", TAB, "project"]).unwrap();
         let kept = homes.claims();
         assert_eq!(kept.lines().count(), CLAIMS_KEPT);
-        assert!(kept.starts_with(&format!("{}\tolder\n", id(1))) && kept.ends_with(&format!("{TAB}\tproject\n")));
+        assert!(kept.starts_with(&format!("{}\tolder\n", id(2))));
+        assert!(kept.ends_with(&format!("{}\tchanged\n{TAB}\tproject\n", id(0))));
     }
 }
