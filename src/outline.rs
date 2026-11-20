@@ -334,6 +334,14 @@ impl Pane for Outline {
         self.outline_key(key, Instant::now())
     }
 
+    fn editing(&self) -> bool {
+        self.reading.as_ref().is_some_and(Pane::editing)
+    }
+
+    fn paste(&mut self, text: Option<&str>) -> After {
+        self.reading.as_mut().map_or(After::Ignored, |reader| reader.paste(text))
+    }
+
     fn notice(&self) -> Option<&'static str> {
         self.promotion.and_then(|(_, notice)| notice)
     }

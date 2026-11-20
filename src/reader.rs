@@ -1,7 +1,13 @@
-//! Shows one file read-only, with code colours and a line diff.
+//! Shows one file with code colours and a line diff, and edits a working text file when asked.
 
+mod buffer;
 mod content;
+mod disk;
 mod draw;
+mod edit;
+#[cfg(test)]
+mod edit_tests;
+mod rescue;
 #[cfg(test)]
 mod tests;
 mod working_path;
@@ -19,9 +25,12 @@ use crate::picture::Picture;
 use crate::preferences::{IconMode, Preferences};
 use crate::rex;
 use crate::screen::{Screen, Style};
-use crate::syntax::{Lang, Span, State};
+use crate::syntax::{self, Lang, Span, State};
 use crate::ui::{ADD, DEL};
 use crate::watch::{Ignored, Scope};
+use disk::{ReadOnly, SaveError};
+use edit::{Editor, Safekeeping, Step};
+pub use rescue::take_note as take_rescue_note;
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
@@ -53,12 +62,27 @@ pub struct Reader {
     columns: usize,
     /// Furthest horizontal offset of the last drawn viewport.
     pan_limit: usize,
+    /// Why the file cannot be edited, as far as can be told without opening it.
+    read_only: Option<ReadOnly>,
+    /// The draft, while the file is being edited.
+    editor: Option<Box<Editor>>,
+    /// Milo's state folder, where a draft is kept if the reader is closed from outside.
+    state: Option<PathBuf>,
 }
 
+/// A short message in place of the hints, or of the details in a reader too short for hints.
 #[derive(Clone, Copy)]
 enum JumpNotice {
-    At { number: usize, total: usize },
+    At {
+        number: usize,
+        total: usize,
+    },
     NoChanges,
+    /// Words to show in full where they fit, and without `lead` where they do not.
+    Said {
+        lead: &'static str,
+        text: &'static str,
+    },
 }
 
 /// A working file can change; a commit needs only its name and date.
@@ -105,6 +129,12 @@ impl OpenReader {
                 }
             }),
             Self::Floating { block } => {
+                // Replacing the reader would end it and leave its edits only as a kept draft.
+                if let (Some(open), Some(state)) = (block.as_deref(), rescue::state_dir())
+                    && rescue::block_has_draft(&state, open)
+                {
+                    return Err("The open reader has unsaved edits.");
+                }
                 let (path, hash) = match target {
                     ReadFile::Working(path) => (path, None),
                     ReadFile::Committed { commit, file } => (file.path.as_str(), Some(commit.hash.as_str())),
@@ -209,6 +239,9 @@ impl Reader {
             rows: 0,
             columns: 0,
             pan_limit: 0,
+            read_only: None,
+            editor: None,
+            state: rescue::state_dir(),
         }
     }
 
@@ -237,9 +270,12 @@ impl Reader {
         self.body.lines().len().saturating_sub(self.rows.max(1))
     }
 
+    /// Forgets the position among the changes. What was said about the file itself stays its full time.
     fn clear_change(&mut self) {
         self.current_change = None;
-        self.change_notice = None;
+        if !matches!(self.change_notice, Some((JumpNotice::Said { .. }, _))) {
+            self.change_notice = None;
+        }
     }
 
     fn scroll(&mut self, delta: isize) {
@@ -307,6 +343,9 @@ impl Pane for Reader {
     fn help(&self) -> Page {
         use help::{HelpRow, heading, key, note, sample};
 
+        if let Some(editor) = &self.editor {
+            return editor.help();
+        }
         let mut rows = vec![
             heading("Lines"),
             sample("+", ADD.bold(), "added"),
@@ -321,11 +360,32 @@ impl Pane for Reader {
             key("←→   ", "scroll (h l)"),
             key("g G  ", "top/bottom"),
             key("q Esc", "close"),
+            HelpRow::new(),
+            heading("Editing"),
         ];
+        match self.read_only {
+            None => rows.extend([key("e    ", "edit this file"), note("Nothing is written"), note("until you save.")]),
+            Some(ReadOnly(why)) => rows.extend([note("Read-only:"), note(why)]),
+        }
         if matches!(self.source, Source::Committed { .. }) {
             rows.insert(1, note("As of a commit"));
         }
         Page::new(rows)
+    }
+
+    fn editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    fn paste(&mut self, text: Option<&str>) -> After {
+        let now = Instant::now();
+        match &mut self.editor {
+            Some(editor) => {
+                let step = editor.paste(text, now);
+                self.apply(step, now)
+            }
+            None => After::Ignored,
+        }
     }
 
     fn watch_scope(&self) -> Scope {
@@ -371,7 +431,11 @@ impl Pane for Reader {
     }
 
     fn next_frame(&self) -> Option<Duration> {
-        self.change_notice.map(|(_, until)| until.saturating_duration_since(Instant::now()))
+        let now = Instant::now();
+        match &self.editor {
+            Some(editor) => editor.next_frame(now),
+            None => self.change_notice.map(|(_, until)| until.saturating_duration_since(now)),
+        }
     }
 
     fn key(&mut self, key: Key) -> After {
@@ -385,6 +449,10 @@ impl Pane for Reader {
 
 impl Reader {
     fn input(&mut self, key: Key, now: Instant) -> After {
+        if let Some(editor) = &mut self.editor {
+            let step = editor.key(key, now);
+            return self.apply(step, now);
+        }
         let key = match key {
             Key::Char(' ') => Key::PgDn,
             Key::Char('b') => Key::PgUp,
@@ -393,6 +461,7 @@ impl Reader {
         let before = (self.top, self.pan);
         match key {
             Key::Char('q') | Key::Esc => return After::Leave,
+            Key::Char('e') => return self.edit(now),
             Key::Char('n') => return self.jump(Direction::Next, now),
             Key::Char('N') => return self.jump(Direction::Previous, now),
             Key::Char('l') | Key::Right => self.pan(Direction::Next),
@@ -404,5 +473,120 @@ impl Reader {
             }
         }
         if (self.top, self.pan) == before { After::Ignored } else { After::Stay }
+    }
+
+    /// Starts editing the file, or says why it is read-only.
+    pub fn edit(&mut self, now: Instant) -> After {
+        match self.open_editor() {
+            Ok(editor) => {
+                self.editor = Some(Box::new(editor));
+                self.clear_change();
+            }
+            Err(ReadOnly(why)) => {
+                let notice = JumpNotice::Said { lead: "Read-only: ", text: why };
+                self.change_notice = Some((notice, now + CHANGE_NOTICE));
+            }
+        }
+        After::Stay
+    }
+
+    /// Reads the file as it is now, which is what gets edited, not the lines on screen.
+    fn open_editor(&mut self) -> Result<Editor, ReadOnly> {
+        // What is shown decides part of the answer, so bring it up to date first.
+        self.refresh(false);
+        if let Some(why) = self.read_only {
+            return Err(why);
+        }
+        let Source::Working(work) = &self.source else { return Err(ReadOnly::COMMIT) };
+        let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
+        let entry = stamp.reachable().and(entry.map_err(ReadOnly::of))?;
+        let original = disk::load(&entry)?;
+        let keep = self.state.clone().map(|state| Safekeeping {
+            state,
+            file: work.repo.root.join(&work.relative),
+            block: std::env::var("REX_BLOCK").ok().filter(|_| !cfg!(test) && rex::inside()),
+        });
+        Ok(Editor::open(original, syntax::for_file(&self.path), self.top_line(), keep))
+    }
+
+    /// Whether the file may be edited, as far as its place and what is shown of it can say.
+    fn edit_refusal(&self) -> Option<ReadOnly> {
+        let Source::Working(work) = &self.source else { return Some(ReadOnly::COMMIT) };
+        match &self.body {
+            Body::Note(note) if *note == content::NOT_TEXT => return Some(ReadOnly::NOT_TEXT),
+            Body::Picture(_) => return Some(ReadOnly::PICTURE),
+            _ => {}
+        }
+        let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
+        let entry = match stamp.reachable().and(entry.map_err(ReadOnly::of)) {
+            Ok(entry) => entry,
+            Err(why) => return Some(why),
+        };
+        if entry.is_link() {
+            Some(ReadOnly::LINK)
+        } else if !entry.is_regular() {
+            Some(ReadOnly::NOT_FILE)
+        } else if matches!(self.body, Body::Note(note) if note != content::EMPTY) {
+            Some(ReadOnly::NOT_SHOWN)
+        } else {
+            None
+        }
+    }
+
+    /// The file line at the top of the view, counted from zero and skipping removed lines.
+    fn top_line(&self) -> usize {
+        let lines = self.body.lines();
+        let from = self.top.min(lines.len().saturating_sub(1));
+        let shown = lines[from..].iter().chain(lines[..from].iter().rev()).find(|line| line.kind != LineKind::Del);
+        shown.map_or(0, |line| line.number as usize - 1)
+    }
+
+    fn apply(&mut self, step: Step, now: Instant) -> After {
+        match step {
+            Step::Ignored => return After::Ignored,
+            Step::Stay => {}
+            Step::Help => return After::Help,
+            Step::Close => self.close_editor(None),
+            Step::Save { close, overwrite } => self.save(close, overwrite, now),
+        }
+        After::Stay
+    }
+
+    /// Writes the draft over the file it was read from, if that file is still where it was.
+    fn save(&mut self, close: bool, overwrite: bool, now: Instant) {
+        let (Source::Working(work), Some(editor)) = (&self.source, &mut self.editor) else { return };
+        let saved = {
+            let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
+            match stamp.reachable() {
+                Ok(()) => editor.save_to(entry.as_ref().map_err(|error| *error), overwrite),
+                Err(_) => Err(SaveError::Refused("The path to the file changed. Not saved.")),
+            }
+        };
+        match saved {
+            Ok(()) => {
+                editor.saved(now);
+                if close {
+                    self.close_editor(Some("Saved"));
+                }
+            }
+            Err(SaveError::Changed) => editor.ask_overwrite(close),
+            Err(SaveError::Refused(why)) => editor.say(why, now),
+        }
+    }
+
+    /// Goes back to reading at the line the draft was showing, with a fresh diff.
+    fn close_editor(&mut self, said: Option<&'static str>) {
+        let Some(editor) = self.editor.take() else { return };
+        let line = editor.top();
+        drop(editor);
+        self.refresh(true);
+        self.opening = false;
+        self.clear_change();
+        self.pan = 0;
+        let lines = self.body.lines();
+        self.top =
+            lines.iter().position(|l| l.kind != LineKind::Del && l.number as usize > line).unwrap_or(lines.len());
+        self.top = self.top.min(self.last_top());
+        self.change_notice = said.map(|text| (JumpNotice::Said { lead: "", text }, Instant::now() + CHANGE_NOTICE));
     }
 }

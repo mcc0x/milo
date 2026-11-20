@@ -3,6 +3,7 @@
 use std::ops::Range;
 use std::time::Instant;
 
+use super::edit::Editor;
 use super::{Body, JumpNotice, Reader, Source};
 use crate::diff::{Line, LineKind};
 use crate::git::Kind;
@@ -33,16 +34,17 @@ fn class_style(class: Class) -> Style {
     }
 }
 
-struct LinePainter<'a> {
-    x: usize,
-    width: usize,
-    pan: usize,
-    lang: Option<&'static Lang>,
-    spans: &'a mut Vec<Span>,
+/// Draws one numbered line of a file with its code colours and change marks.
+pub(super) struct LinePainter<'a> {
+    pub(super) x: usize,
+    pub(super) width: usize,
+    pub(super) pan: usize,
+    pub(super) lang: Option<&'static Lang>,
+    pub(super) spans: &'a mut Vec<Span>,
 }
 
 impl LinePainter<'_> {
-    fn draw_line(&mut self, s: &mut Screen, y: usize, line: &Line, state: &State) {
+    pub(super) fn draw_line(&mut self, s: &mut Screen, y: usize, line: &Line, state: &State) {
         let (sign, text_style, margin_style) = match line.kind {
             LineKind::Same => (" ", Style::PLAIN, FAINT),
             LineKind::Add if self.lang.is_some() => ("+", Style::PLAIN, ADD.bold()),
@@ -121,6 +123,11 @@ impl LinePainter<'_> {
 impl Reader {
     pub(super) fn draw_file(&mut self, s: &mut Screen, now: Instant) {
         s.clear();
+        if let Some(mut editor) = self.editor.take() {
+            self.draw_editor(s, &mut editor, now);
+            self.editor = Some(editor);
+            return;
+        }
         if self.change_notice.is_some_and(|(_, until)| now >= until) {
             self.change_notice = None;
         }
@@ -132,7 +139,11 @@ impl Reader {
             return;
         }
         let notice = self.change_notice.map(|(notice, _)| notice);
-        self.draw_heading(s, if hint { None } else { notice });
+        let right = match notice {
+            Some(notice) if !hint => draw_change_notice(s, 0, notice),
+            _ => self.draw_details(s),
+        };
+        self.draw_heading(s, right);
         if self.rows > 0 {
             self.draw_body(s);
         }
@@ -142,6 +153,22 @@ impl Reader {
             } else {
                 self.draw_hint(s);
             }
+        }
+    }
+
+    /// The draft takes the place of the file, under the same heading.
+    fn draw_editor(&mut self, s: &mut Screen, editor: &mut Editor, now: Instant) {
+        if s.w == 0 || s.h == 0 {
+            return;
+        }
+        let hint = s.h >= 3;
+        let right = editor.draw_state(s);
+        self.draw_heading(s, right);
+        editor.draw_body(s, s.h - 1 - usize::from(hint));
+        // With no row for hints, a question or message takes the heading's row.
+        let y = if hint { s.h - 1 } else { 0 };
+        if !editor.draw_message(s, y, now) && hint {
+            editor.draw_hint(s);
         }
     }
 
@@ -201,17 +228,18 @@ impl Reader {
             (true, false) => "n next change",
             (false, _) => "",
         };
-        let middle: &[_] = if still { &["q close"] } else { &["↑↓ scroll", "q close"] };
+        let middle: &[_] = match (still, self.read_only.is_none()) {
+            (true, true) => &["e edit", "q close"],
+            (true, false) => &["q close"],
+            (false, true) => &["↑↓ scroll", "e edit", "q close"],
+            (false, false) => &["↑↓ scroll", "q close"],
+        };
         crate::help::draw_hint(s, action, middle, "? help");
     }
 
-    /// Keeps the file name ahead of its directory so the name gets the space first.
-    fn draw_heading(&self, s: &mut Screen, notice: Option<JumpNotice>) {
-        let right = if let Some(notice) = notice {
-            draw_change_notice(s, 0, notice)
-        } else {
-            self.draw_details(s)
-        };
+    /// Keeps the file name ahead of its directory so the name gets the space
+    /// first. `right` is where what is already drawn at the right edge starts.
+    fn draw_heading(&self, s: &mut Screen, right: usize) {
         let (dir, name) = self.path.rsplit_once('/').unwrap_or(("", &self.path));
         let room = if right == s.w - 1 { right } else { right.saturating_sub(2) };
         let mut x = 1;
@@ -268,15 +296,15 @@ impl Reader {
 fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> usize {
     const PREFIX: &str = "Change ";
     const OF: &str = " of ";
-    const NONE: &str = "No changes";
     let number_width = |n: usize| n.ilog10() as usize + 1;
-    let (full, numbers) = match notice {
+    let (full, numbers, (lead, text)) = match notice {
         JumpNotice::At { number, total } => {
             let first = number_width(number);
             let counts = first + OF.len() + number_width(total);
-            (PREFIX.len() + counts, Some((number, total, first, counts)))
+            (PREFIX.len() + counts, Some((number, total, first, counts)), ("", ""))
         }
-        JumpNotice::NoChanges => (NONE.len(), None),
+        JumpNotice::NoChanges => ("No changes".len(), None, ("", "No changes")),
+        JumpNotice::Said { lead, text } => (lead.len() + text.len(), None, (lead, text)),
     };
     let margin = usize::from(s.w >= full + 2);
     let room = s.w - margin * 2;
@@ -294,7 +322,9 @@ fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> usize {
             s.put_fit(x, y, width, "Change…", st);
         }
         None => {
-            s.put_fit(x, y, width, NONE, st);
+            // Where both do not fit, the words that differ say more than the words that lead them.
+            let led = if full <= room { s.put(x, y, width, lead, st) } else { 0 };
+            s.put_fit(x + led, y, width - led, text, st);
         }
     }
     if y != 0 {

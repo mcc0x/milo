@@ -143,6 +143,20 @@ impl Entry<'_> {
         !matches!(self.stat.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFLNK)
     }
 
+    pub(super) fn is_regular(&self) -> bool {
+        self.stat.st_mode & libc::S_IFMT == libc::S_IFREG
+    }
+
+    pub(super) fn is_link(&self) -> bool {
+        self.stat.st_mode & libc::S_IFMT == libc::S_IFLNK
+    }
+
+    /// Opens the file to read and write through the held directory. A link
+    /// that has taken the file's place is refused, not followed.
+    pub(super) fn open_edit(&self) -> io::Result<File> {
+        open_at(self.parent.as_ref().unwrap_or(self.root), &self.name, libc::O_RDWR)
+    }
+
     pub(super) fn read(&self, limit: u64) -> Content {
         let dir = self.parent.as_ref().unwrap_or(self.root);
         let link = || link_at(dir, &self.name).map_or_else(|e| LookupError::of(e).content(), Content::Link);

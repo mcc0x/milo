@@ -183,6 +183,77 @@ impl Terminal {
         String::from_utf8_lossy(&self.bytes)
     }
 
+    /// The rows a terminal would show after everything read so far. A frame
+    /// carries only the cells that changed, so the words on a row are not
+    /// always next to each other in the output. Every cell is taken as one column wide.
+    fn screen(&self) -> Vec<String> {
+        let output = self.output();
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        let (mut x, mut y) = (0, 0);
+        let mut chars = output.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                if !c.is_control() {
+                    if rows.len() <= y {
+                        rows.resize(y + 1, Vec::new());
+                    }
+                    if rows[y].len() <= x {
+                        rows[y].resize(x + 1, ' ');
+                    }
+                    rows[y][x] = c;
+                    x += 1;
+                }
+                continue;
+            }
+            match chars.next() {
+                Some('[') => {
+                    let mut values = String::new();
+                    let last = chars.by_ref().find(|&c| {
+                        values.push(c);
+                        ('@'..='~').contains(&c)
+                    });
+                    values.pop();
+                    match last {
+                        Some('H') => {
+                            let mut at = values.split(';').map(|n| n.parse::<usize>().unwrap_or(1) - 1);
+                            (y, x) = (at.next().unwrap_or(0), at.next().unwrap_or(0));
+                        }
+                        Some('J') => rows.clear(),
+                        _ => {}
+                    }
+                }
+                // A string for the terminal itself ends at ESC \ or a bell.
+                Some(']' | '_' | 'P') => {
+                    let mut escaped = false;
+                    for c in chars.by_ref() {
+                        if c == '\x07' || escaped && c == '\\' {
+                            break;
+                        }
+                        escaped = c == '\x1b';
+                    }
+                }
+                _ => {}
+            }
+        }
+        rows.into_iter().map(|row| row.into_iter().collect()).collect()
+    }
+
+    /// Waits until some row of the screen holds `text`.
+    fn shows(&mut self, text: &str) {
+        let until = Instant::now() + TEST_WAIT;
+        while !self.screen().iter().any(|row| row.contains(text)) {
+            assert!(self.read(until), "expected {text:?} on {:#?}", self.screen());
+        }
+    }
+
+    /// Waits until no row of the screen holds `text`.
+    fn hides(&mut self, text: &str) {
+        let until = Instant::now() + TEST_WAIT;
+        while self.screen().iter().any(|row| row.contains(text)) {
+            assert!(self.read(until), "expected no {text:?} on {:#?}", self.screen());
+        }
+    }
+
     fn wait_for_exit(&mut self) -> ExitStatus {
         let until = Instant::now() + TEST_WAIT;
         loop {
@@ -676,7 +747,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
         (&["history", "--help"][..], "Usage: milo history [PATH]"),
         (&["usage", "--help"][..], "Usage: milo usage [--menu-stream]"),
         (&["setup", "--help"][..], "Usage: milo setup"),
-        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID]"),
+        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID | --edit]"),
         (&["listen", "--help"][..], "Usage: milo listen [--stop]"),
         (&["claude-status", "--help"][..], "Usage: milo claude-status"),
     ] {
@@ -687,7 +758,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
     }
     for (args, message) in [
         (&["not-a-milo-command"][..], "milo: not-a-milo-command is not a directory; see milo --help for commands\n"),
-        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID]\n"),
+        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID | --edit]\n"),
     ] {
         let output = run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
@@ -1060,4 +1131,168 @@ fn usage_and_doctor_read_only_the_selected_provider_directories() {
     pane.until("39%");
     pane.master.write_all(b"q").unwrap();
     assert!(pane.wait_for_exit().success());
+}
+
+#[test]
+fn the_reader_edits_a_file_and_asks_before_ctrl_c_can_lose_the_draft() {
+    let project = Project::new();
+    let file = project.0.join("project/page.txt");
+    fs::write(&file, "old\r\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "page.txt"]));
+    tty.shows("e edit");
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save · ^Z undo · Esc done · ^G help");
+
+    // Keys that close or explain a reader are text now, and a paste is text too.
+    tty.master.write_all(b"q? \x1b[200~pasted\nlines \x1b[201~").unwrap();
+    tty.shows("unsaved");
+    tty.shows("q? pasted");
+    tty.shows("lines old");
+    tty.master.write_all(b"\x03").unwrap();
+    tty.shows("Unsaved edits: s save · d discard · Esc back");
+    assert_eq!(fs::read(&file).unwrap(), b"old\r\n");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("^S save");
+
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read(&file).unwrap(), b"q? pasted\r\nlines old\r\n");
+
+    // Saved, so leaving does not ask, and the reader is a reader again.
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert!(!project.0.join("state/milo/drafts").exists());
+}
+
+#[test]
+fn a_reader_ended_from_outside_keeps_its_unsaved_edits_and_offers_them_again() {
+    let project = Project::new();
+    let file = project.0.join("project/page.txt");
+    fs::write(&file, "old\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "page.txt", "--edit"]));
+    tty.shows("^S save");
+    tty.master.write_all(b"draft ").unwrap();
+    tty.shows("unsaved");
+    let pid = i32::try_from(tty.child.id()).unwrap();
+    // SAFETY: This is our own, still-owned child, not a process group.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    tty.wait_for_exit();
+    assert!(tty.restored());
+    // The line about the draft comes after the terminal is handed back.
+    tty.until("\x1b[?1049l");
+    tty.until("were kept");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "old\n");
+    let drafts: Vec<_> =
+        fs::read_dir(project.0.join("state/milo/drafts")).unwrap().map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(fs::read_to_string(&drafts[0]).unwrap(), "draft old\n");
+
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "page.txt", "--edit"]));
+    tty.shows("Kept draft found: r restore · d delete · Esc later");
+    tty.master.write_all(b"r").unwrap();
+    tty.shows("Draft restored");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "draft old\n");
+    assert!(!drafts[0].exists());
+}
+
+#[test]
+fn view_edit_opens_a_read_only_file_for_reading_and_says_why() {
+    let project = Project::new();
+    fs::write(project.0.join("project/data.bin"), b"a\0b").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "data.bin", "--edit"]));
+    tty.shows("Read-only: not text");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+
+    let both = project.command(env!("CARGO_BIN_EXE_milo")).args(["view", "x", "--edit", "--commit"]).output().unwrap();
+    assert!(!both.status.success());
+    assert!(String::from_utf8_lossy(&both.stderr).contains("[--commit ID | --edit]"));
+}
+
+#[test]
+fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(root.join(name), format!("{name} text\n")).unwrap();
+    }
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.arg("outline"));
+    tty.shows("c.txt");
+    tty.master.write_all(b"j\r").unwrap();
+    tty.shows("b.txt text");
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"edited \x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "edited b.txt text\n");
+
+    // Esc stops editing, q closes the reader, and the outline still has that file selected.
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("c.txt");
+    tty.hides("edited b.txt text");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("edited b.txt text");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
+fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "data\n").unwrap();
+    let block = "block:11111111-1111-1111-1111-111111111111";
+    let rex = project.0.join("rex");
+    fs::write(&rex, format!("#!/bin/sh\ncat >/dev/null\necho open >> \"$HOME/opens\"\necho {block}\n")).unwrap();
+    fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut paths = vec![project.0.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let in_rex = |args: &[&str], block: &str| {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        command
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("REX_SESSION", "test")
+            .env("REX_BLOCK", block)
+            .args(args);
+        command
+    };
+    let wait_for_opens = |count: usize| {
+        let until = Instant::now() + TEST_WAIT;
+        while fs::read_to_string(project.0.join("opens")).map_or(0, |log| log.lines().count()) != count {
+            assert!(Instant::now() < until, "expected {count} requests to open a reader");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    // The outline opens the file in a floating reader, which Rex runs in the block it names.
+    let mut outline = Terminal::run(&mut in_rex(&["outline"], "block:22222222-2222-2222-2222-222222222222"));
+    outline.shows("page.txt");
+    outline.master.write_all(b"\r").unwrap();
+    wait_for_opens(1);
+    let mut reader = Terminal::run(&mut in_rex(&["view", "page.txt", "--edit"], block));
+    reader.shows("^S save");
+    reader.master.write_all(b"x").unwrap();
+    reader.shows("unsaved");
+
+    outline.master.write_all(b"\r").unwrap();
+    outline.shows("The open reader has unsaved edits.");
+    wait_for_opens(1);
+
+    // Once the edit is taken back, the reader can be replaced again.
+    reader.master.write_all(b"\x1a").unwrap();
+    reader.hides("unsaved");
+    outline.master.write_all(b"\r").unwrap();
+    wait_for_opens(2);
 }

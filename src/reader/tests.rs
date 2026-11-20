@@ -18,7 +18,8 @@ fn reader_hints_say_close_and_keep_help_last() {
     let f = Fixture::folder();
     f.write("page.txt", "a file\n");
     let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
-    assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · q close · ? help");
+    assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · e edit · q close · ? help");
+    assert_eq!(drawn(&mut reader, 28, 5)[4], " e edit · q close · ? help");
     assert_eq!(drawn(&mut reader, 20, 5)[4], " q close · ? help");
 }
 
@@ -28,7 +29,7 @@ fn an_empty_file_uses_the_body_row_not_the_hint_row() {
     f.write("empty.txt", "");
     let mut reader = Reader::open(&f.root.join("empty.txt")).unwrap();
     let rows = drawn(&mut reader, 40, 3);
-    assert_eq!(&rows[1..], ["  Empty.", " q close · ? help"]);
+    assert_eq!(&rows[1..], ["  Empty.", " e edit · q close · ? help"]);
 }
 
 #[test]
