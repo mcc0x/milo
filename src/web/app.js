@@ -284,7 +284,7 @@ function render() {
     dot.replaceChildren(node('span', 'sr-only', ' (unsaved changes)'));
     dot.hidden = !dirty;
   }
-  byId('preview').hidden = page === 'health';
+  byId('preview').inert = page === 'health';
   if (page !== 'health') renderPreview();
   const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, health: healthView};
   const panel = byId('settings-panel');
@@ -768,7 +768,8 @@ for (const tab of navButtons) {
   tab.addEventListener('click', () => {
     page = tab.dataset.page;
     render();
-    byId('settings-panel').focus();
+    byId('settings-panel').parentElement.scrollTop = 0;
+    byId('settings-panel').focus({preventScroll: true});
   });
 }
 byId('skip-settings').addEventListener('click', () => byId('settings-panel').focus());
