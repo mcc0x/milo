@@ -20,12 +20,6 @@
 
   <div class="frame surface" id="editor" hidden>
     <button class="skip-link" id="skip-settings" type="button">Skip to settings</button>
-  <footer class="actionbar" id="actionbar" hidden>
-    <img src="/rex.png" width="20" height="20" alt="">
-    <div id="context" class="context"></div>
-    <span id="connection" class="connection sr-only"></span>
-    <span id="version" class="version"></span>
-  </footer>
     <div class="control-dock">
     <nav class="navigation" aria-label="Settings sections">
       <button type="button" data-page="layout" aria-current="page" aria-controls="settings-panel">
@@ -52,7 +46,6 @@
         <button id="save-draft" class="button secondary draft-action" type="button" aria-label="Save" title="Save" disabled>
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 10 4.2 4.2L16.5 5.5"/></svg>
         </button>
-        <button id="done" class="button primary" type="button" title="Stop the local editor">Done</button>
       </div>
     </div>
     <p class="sr-only" id="draft-status" role="status"></p>
@@ -70,6 +63,14 @@
       </div>
         <section id="settings-panel" class="settings-panel" tabindex="-1"></section>
     </main>
+    <footer class="actionbar" id="actionbar" hidden>
+      <img src="/rex.png" width="20" height="20" alt="">
+      <div class="session-info">
+        <div id="context" class="context"></div>
+        <span id="connection" class="connection"></span>
+      </div>
+      <button id="done" class="button secondary" type="button">Done</button>
+    </footer>
   </div>
 
   <div class="frame opening" id="opening">
@@ -78,7 +79,7 @@
   </div>
   <main id="closed" class="frame opening" hidden>
     <h1>Settings closed</h1>
-    <p>Your local editor has stopped. You can close this tab.</p>
+    <p>Run <code>milo web</code> in your project to reopen the dashboard. You can close this tab.</p>
   </main>
 
 

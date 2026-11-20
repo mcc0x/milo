@@ -18,6 +18,8 @@ let localError = '';
 let operationWarning = '';
 let confirmAction;
 let warned = false;
+const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
+let keepaliveTimer;
 
 function node(tag, className, text) {
   const el = document.createElement(tag);
@@ -63,8 +65,11 @@ function enqueue(action) {
   }
   operationWarning = '';
   if (!paused) localError = '';
-  updateChrome();
+  const checking = action.action === 'doctor';
+  if (checking) byId('health-status').textContent = 'Checking health…';
+  else updateChrome();
   void drain();
+  if (checking) render();
 }
 
 async function api(path, method = 'GET', payload) {
@@ -107,9 +112,21 @@ async function drain() {
       if (state.message?.error) operationWarning = state.message.text;
       else if (state.message) notify(state.message.text);
       queue.splice(0, 1 + (pending ?? 0));
+      if (action.action === 'doctor') {
+        const {level, note} = state.doctor;
+        byId('health-status').textContent = `Health check: ${healthLabels[level]}.${note ? ` ${note}` : ''}`;
+      } else if (!state.doctor && !queue.some(item => item.action === 'doctor')) {
+        byId('health-status').textContent = '';
+      }
     } catch (error) {
       localError = error.message;
-      if (action.action === 'doctor') state.doctor = {level: 'warning', note: 'Check could not finish. Try again.'};
+      if (action.action === 'doctor') {
+        state.doctor = null;
+        byId('health-status').textContent = '';
+        localError = `Health check could not finish. ${localError}`;
+      } else if (queue.some(item => item.action === 'doctor')) {
+        byId('health-status').textContent = 'Health check did not run because an edit was not applied.';
+      }
       notify(localError, true);
       if (action.action !== 'set') queue.shift();
       // Do not run a queued save or capture after an earlier edit failed.
@@ -127,14 +144,24 @@ async function drain() {
 
 async function connect(retryEdits = false) {
   if (running || closing || ended) return;
+  const openingMessage = byId('opening-message');
+  const focusId = document.activeElement?.id;
+  if (focusId === 'retry' || focusId === 'reconnect') {
+    restoreSettingsFocus();
+  } else if (focusId === 'open-retry') {
+    openingMessage.tabIndex = -1;
+    openingMessage.focus();
+  }
+  let focusOpenedSettings = false;
   running = true;
   localError = '';
   if (state) updateChrome();
   byId('open-retry').hidden = true;
-  byId('opening-message').textContent = 'Opening your local settings…';
+  openingMessage.textContent = 'Opening your local settings…';
   try {
     const latest = await api('/api/state');
     state = latest;
+    if (!queue.some(item => item.action === 'doctor')) byId('health-status').textContent = '';
     operationWarning = latest.message?.error ? latest.message.text : '';
     if (!paused || retryEdits) {
       paused = false;
@@ -142,18 +169,21 @@ async function connect(retryEdits = false) {
       localError = 'Reconnected. An edit is still waiting to be applied.';
     }
     byId('editor').hidden = byId('actionbar').hidden = false;
+    focusOpenedSettings = document.activeElement === openingMessage;
     byId('opening').hidden = true;
     if (localError) notify(localError, true);
     else if (latest.message && !operationWarning) notify(latest.message.text);
   } catch (error) {
     localError = error.message;
     notify(localError, true);
-    byId('opening-message').textContent = error.message;
+    openingMessage.textContent = error.message;
     byId('open-retry').hidden = !token;
   } finally {
     running = false;
-    if (state) render();
-    else renderConnection();
+    if (state) {
+      render();
+      if (focusOpenedSettings) restoreSettingsFocus();
+    } else renderConnection();
   }
   if (!paused) void drain();
 }
@@ -163,7 +193,13 @@ function confirm(title, note, label, action) {
   byId('confirm-title').textContent = title;
   byId('confirm-note').textContent = note;
   byId('confirm-do').textContent = label;
-  confirmAction = action;
+  const opener = document.activeElement;
+  const focusId = opener?.id;
+  const headingId = opener?.closest('.settings-group')?.getAttribute('aria-labelledby');
+  confirmAction = confirmed => {
+    restoreSettingsFocus(focusId && byId(focusId), headingId);
+    if (confirmed) action();
+  };
   dialog.returnValue = '';
   dialog.showModal();
 }
@@ -175,12 +211,12 @@ function discard(group) {
     'Discard changes', () => command('discard', {group}));
 }
 
-async function closeSession() {
+async function closeSession(version) {
   if (running || closing || ended) return;
   closing = true;
   updateChrome();
   try {
-    await api('/api/close', 'POST');
+    await api('/api/close', 'POST', {version});
     ended = true;
     state = undefined;
     queue.length = 0;
@@ -198,18 +234,32 @@ async function closeSession() {
 }
 
 function done() {
-  if (running || closing) return;
-  if (state.dirty || state.trial || queue.length) {
-    confirm('Close without saving?', 'Unsaved changes and any active trial will be discarded. Settings you already saved will stay.',
-      'Discard and close', closeSession);
-  } else {
-    void closeSession();
-  }
+  if (!state || running || closing) return;
+  const version = state.version;
+  const unsaved = state.dirty || state.trial || queue.some(item => item.action !== 'doctor');
+  confirm('Close the dashboard?', unsaved
+    ? 'Closing discards unsaved changes and ends any layout trial. Run milo web in your project to reopen the dashboard.'
+    : 'This stops the local editor. Your saved settings stay as they are. Run milo web in your project to reopen the dashboard.',
+    unsaved ? 'Discard and close' : 'Close dashboard', () => closeSession(version));
 }
 
 function warnOnUnload(event) {
   event.preventDefault();
   event.returnValue = '';
+}
+
+async function keepDraftAlive() {
+  if (running || closing || ended) return;
+  try {
+    // Renew the idle deadline without replacing the draft or changing connection status.
+    const response = await fetch('/api/state', {
+      headers: {Authorization: `Bearer ${token}`},
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'error',
+    });
+    await response.body?.cancel();
+  } catch { /* Only foreground requests report connection errors. */ }
 }
 
 function renderConnection() {
@@ -221,10 +271,15 @@ function renderConnection() {
 
 function updateChrome() {
   renderConnection();
-  const needsWarning = Boolean(state && (state.dirty || state.trial || queue.length));
+  const needsWarning = Boolean(state && (state.dirty || state.trial || queue.some(item => item.action !== 'doctor')));
   if (needsWarning !== warned) {
-    if (needsWarning) window.addEventListener('beforeunload', warnOnUnload);
-    else window.removeEventListener('beforeunload', warnOnUnload);
+    if (needsWarning) {
+      window.addEventListener('beforeunload', warnOnUnload);
+      keepaliveTimer = setInterval(keepDraftAlive, KEEPALIVE_INTERVAL_MS);
+    } else {
+      window.removeEventListener('beforeunload', warnOnUnload);
+      clearInterval(keepaliveTimer);
+    }
     warned = needsWarning;
   }
   if (!state) return;
@@ -239,7 +294,8 @@ function updateChrome() {
   const dirty = Object.values(state.groups).filter(group => group.dirty).length;
   const status = byId('draft-status');
   status.dataset.dirty = String(needsWarning);
-  const summary = closing ? 'Closing settings…' : paused ? 'Edit not applied' : running || queue.length ? 'Updating draft…' :
+  const updatingDraft = queue.some(item => item.action !== 'doctor');
+  const summary = closing ? 'Closing settings…' : paused ? 'Edit not applied' : updatingDraft ? 'Updating draft…' :
     dirty ? `Unsaved changes in ${dirty === 1 ? '1 group' : `${dirty} groups`}` : state.trial ? 'Layout trial active' : 'No unsaved changes';
   if (status.textContent !== summary) status.textContent = summary;
   byId('discard-all').disabled = !needsWarning || running || closing || !connected;
@@ -248,16 +304,28 @@ function updateChrome() {
   const saving = !byId('save-draft').disabled;
   byId('save-draft').classList.toggle('primary', saving);
   byId('save-draft').classList.toggle('secondary', !saving);
-  byId('done').classList.toggle('primary', !needsWarning);
   byId('done').disabled = running || closing;
+}
+
+function restoreSettingsFocus(target, headingId) {
+  if (target) {
+    if (target.matches('h2')) target.tabIndex = -1;
+    target.focus();
+    if (document.activeElement === target) return;
+  }
+  const heading = (headingId && byId(headingId)) || byId('settings-panel').querySelector('h2');
+  if (heading) {
+    heading.tabIndex = -1;
+    heading.focus();
+  }
 }
 
 function render() {
   const focus = document.activeElement;
-  const focusId = focus?.id;
+  const trigger = focus?.closest('.action-menu')?.firstElementChild;
+  const focusId = trigger?.id || focus?.id;
+  const headingId = trigger?.closest('.settings-group')?.getAttribute('aria-labelledby');
   const unfinished = focus?.type === 'number' && focus.value !== focus.dataset.initial ? focus.value : null;
-  byId('version').textContent = `Milo v${state.app_version}`;
-  byId('version').hidden = false;
   const locationLabel = node('strong', '', state.context.inside_rex ? 'In Rex' : 'Outside Rex');
   const path = state.context.worktree || state.context.directory;
   const name = path?.split('/').filter(Boolean).at(-1) || path || 'Directory unavailable';
@@ -287,8 +355,10 @@ function render() {
   updateChrome();
   if (focusId && !focus.isConnected) {
     const replacement = byId(focusId);
-    if (replacement && !replacement.disabled && !replacement.hidden) {
-      if (unfinished !== null) replacement.value = unfinished;
+    if (replacement && unfinished !== null) replacement.value = unfinished;
+    if (trigger || focus.matches('h2[tabindex="-1"]')) {
+      restoreSettingsFocus(replacement, headingId);
+    } else if (replacement && !replacement.matches(':disabled, [hidden]')) {
       replacement.focus({preventScroll: true});
     } else {
       panel.focus({preventScroll: true});
@@ -370,6 +440,11 @@ function setting(field, title, detail, type, options = {}) {
   info.append(label);
   if (detail) info.append(explanation);
   wrap.append(control);
+  if (type === 'switch') {
+    const track = node('span', 'switch-track');
+    track.setAttribute('aria-hidden', 'true');
+    wrap.append(track);
+  }
   if (options.unit) wrap.append(node('span', 'unit', '%'));
   row.append(info, wrap);
   return row;
@@ -403,7 +478,7 @@ function saveChoices(key, group, select, disabled = false) {
   for (const [scope, label] of [['worktree', 'Save for this worktree'], ['global', 'Save as global default'], ['account', 'Save Claude Code choices']]) {
     if (group[`save_${scope}`]) choices.append(button(label, choices.childElementCount ? 'secondary' : 'primary',
       `${select}-${key}-${scope}`, () => {
-        if (select === 'dock') byId('save-options').close();
+        if (select === 'dock') byId('save-options').close('save');
         command('save', {group: key, scope});
       }, disabled));
   }
@@ -418,17 +493,28 @@ function showSaveOptions() {
     const title = key === 'preferences' ? 'Appearance and workflow' : groupLabels[key];
     groups.append(node('h3', '', title[0].toUpperCase() + title.slice(1)), saveChoices(key, group, 'dock'));
   }
-  if (groups.childElementCount) byId('save-options').showModal();
+  if (groups.childElementCount) {
+    const dialog = byId('save-options');
+    dialog.returnValue = '';
+    dialog.showModal();
+  }
 }
 
-function disclosure(label, accessibleName, items) {
+function disclosure(id, label, accessibleName, items) {
   const details = node('details', 'action-menu');
   details.name = 'editor-actions';
-  const trigger = node('summary', '', label);
+  const trigger = node('summary');
+  trigger.id = id;
+  trigger.append(node('span', '', label));
   trigger.setAttribute('aria-label', accessibleName);
   const panel = node('div', 'action-menu-items');
   panel.append(...items);
-  panel.addEventListener('click', () => { details.open = false; });
+  panel.addEventListener('click', event => {
+    if (!event.target.closest('button:not(:disabled)')) return;
+    // Return focus before the action can open a dialog or replace this menu.
+    trigger.focus();
+    details.open = false;
+  }, {capture: true});
   details.append(trigger, panel);
   return details;
 }
@@ -438,28 +524,29 @@ document.addEventListener('pointerdown', event => {
   if (menu && !menu.contains(event.target)) menu.open = false;
 });
 document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('dialog[open]')) return;
   const menu = document.querySelector('.action-menu[open]');
-  if (event.key === 'Escape' && menu) {
-    menu.open = false;
-    menu.firstElementChild.focus();
-  }
+  if (!menu) return;
+  if (menu.contains(document.activeElement)) menu.firstElementChild.focus();
+  menu.open = false;
+  event.preventDefault();
 });
 
 function scopeActions(key, group) {
   const row = node('div', 'scope-actions');
   const label = originLabels[group.scope];
-  row.append(group.inherit ? disclosure(`${label} ▾`, `${label} options`, [
+  row.append(group.inherit ? disclosure(`scope-${key}`, `${label} ▾`, `${label} options`, [
     button('Remove override…', 'text-button', `inherit-${key}`, () => {
       confirm('Remove worktree override?', `This worktree will use the global ${groupLabels[key]}${group.dirty ? ' and lose unsaved changes in this group' : ''}.`,
         'Remove override', () => command('inherit', {group: key}));
     }, paused),
   ]) : node('span', 'group-origin', label));
   if (key === 'layout' && state.context.inside_rex && !state.context.installed && (group.save_global || group.save_worktree)) {
-    row.append(disclosure('Set up in Rex…', 'Set up in Rex', [saveChoices(key, group, 'install', paused)]));
+    row.append(disclosure('setup-layout', 'Set up in Rex…', 'Set up in Rex', [saveChoices(key, group, 'install', paused)]));
   }
   if (key === 'layout') {
     const actions = layoutActions();
-    if (actions.length) row.append(disclosure('•••', 'Layout actions', actions));
+    if (actions.length) row.append(disclosure('layout-actions', '•••', 'Layout actions', actions));
   }
   return row;
 }
@@ -541,22 +628,24 @@ function workflowView() {
   ])];
 }
 
+const healthLabels = {good: 'All good', warning: 'Warning', issue: 'Issue found'};
+
 function healthView() {
   const section = node('section', 'health');
-  const result = state.doctor;
-  const labels = {good: 'All good', warning: 'Warning', issue: 'Issue found'};
+  const checking = queue.some(item => item.action === 'doctor');
+  const result = checking ? null : state.doctor;
   const heading = node('h2', '', 'Health Check');
   heading.id = 'diagnostics-title';
   section.append(heading);
   if (result) {
     const status = node('div', 'health-result');
-    status.setAttribute('role', 'status');
-    status.dataset.level = result.level || 'warning';
-    status.append(node('strong', '', labels[result.level] || 'Check unavailable'));
+    status.dataset.level = result.level;
+    status.append(node('strong', '', healthLabels[result.level]));
     if (result.note) status.append(node('p', '', result.note));
     section.append(status);
   }
-  section.append(button(result ? 'Run again' : 'Run check', 'secondary', 'doctor', () => command('doctor'), paused || running));
+  section.append(button(checking ? 'Checking…' : result ? 'Run again' : 'Run check', 'secondary', 'doctor',
+    () => command('doctor'), checking || paused || running));
   return [section];
 }
 
@@ -593,17 +682,21 @@ for (const tab of navButtons) {
 byId('skip-settings').addEventListener('click', () => byId('settings-panel').focus());
 byId('done').addEventListener('click', done);
 byId('save-draft').addEventListener('click', showSaveOptions);
+byId('save-options').addEventListener('close', event => {
+  if (event.target.returnValue !== 'save') restoreSettingsFocus(byId('save-draft'));
+});
 byId('discard-all').addEventListener('click', () => discard('all'));
 byId('confirm-cancel').addEventListener('click', () => byId('confirm').close('cancel'));
 byId('confirm-do').addEventListener('click', () => byId('confirm').close('continue'));
 byId('confirm').addEventListener('close', event => {
   const action = confirmAction;
   confirmAction = undefined;
-  if (event.target.returnValue === 'continue') action?.();
+  action?.(event.target.returnValue === 'continue');
 });
 byId('retry').addEventListener('click', () => { void connect(true); });
 byId('drop-edit').addEventListener('click', () => {
   if (running || closing) return;
+  if (document.activeElement === byId('drop-edit')) restoreSettingsFocus();
   queue.shift();
   paused = false;
   localError = '';

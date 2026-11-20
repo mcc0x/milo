@@ -276,17 +276,23 @@ impl Editor {
             }
             Action::Try if self.live() && layout.editable => {
                 self.setup.try_layout()?;
+                self.doctor = None;
                 Some(Ok(if self.setup.trial.as_ref().is_some_and(|(trial, _)| trial.temporary()) {
                     "Previewing a temporary rail in the original Rex tab. Existing panes are untouched."
                 } else {
                     "Trying this layout in the original Rex tab. Nothing was saved."
                 }))
             }
-            Action::Undo if self.setup.trial.is_some() => Some(Ok(self.setup.undo()?)),
+            Action::Undo if self.setup.trial.is_some() => {
+                let message = self.setup.undo()?;
+                self.doctor = None;
+                Some(Ok(message))
+            }
             Action::Refresh if self.live() => Some(self.setup.refresh_preview()),
             Action::Doctor => {
+                self.doctor = None;
                 let setup = &self.setup;
-                let target = setup.target.as_ref().filter(|_| self.require_tab().is_ok());
+                let target = if setup.inside { self.require_tab().map(|()| setup.target.as_ref()) } else { Ok(None) };
                 self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
                 None
             }
@@ -300,6 +306,7 @@ impl Editor {
         if matches!(group, Group::Layout | Group::All) {
             if setup.trial.is_some() {
                 setup.undo()?;
+                self.doctor = None;
             }
             if let Some(saved) = &setup.saved {
                 setup.layout.clone_from(saved);
@@ -324,6 +331,7 @@ impl Editor {
             return Ok(Ok("No layout changes to save."));
         }
         let notice = self.setup.persist_layout(scope, inside)?;
+        self.doctor = None;
         Ok(if inside {
             notice
         } else {
@@ -343,6 +351,7 @@ impl Editor {
         let saved = setup.saved.as_ref().ok_or(UNAVAILABLE)?;
         let root = setup.root.as_deref().ok_or(UNAVAILABLE)?;
         setup.store()?.inherit_draft(root, saved)?;
+        self.doctor = None;
         let auto = setup.auto_arrange_dirty().then_some(setup.layout.new_tabs);
         if let Err(why) = setup.reload_layout() {
             setup.saved = None;
@@ -361,6 +370,7 @@ impl Editor {
         }
         let snapshot = self.preferences.as_ref().ok_or(UNAVAILABLE)?;
         snapshot.save(setup.prefs, &setup.store()?.config, setup.root.as_deref(), local).map_err(prefs_error)?;
+        self.doctor = None;
         Ok(self.load_preferences().map(|()| match (local, self.setup.prefs_scope) {
             (true, _) => "Saved pane preferences for this worktree. Reopen panes to apply.",
             (false, Source::Worktree) => "Saved global pane preferences. This worktree still overrides them.",
@@ -373,6 +383,7 @@ impl Editor {
         let snapshot = self.preferences.as_ref().ok_or(UNAVAILABLE)?;
         let root = setup.root.as_deref().ok_or(UNAVAILABLE)?;
         snapshot.inherit(&setup.store()?.config, root).map_err(prefs_error)?;
+        self.doctor = None;
         Ok(self.load_preferences().map(|()| "This worktree now uses global pane preferences. Reopen panes to apply."))
     }
 
@@ -383,6 +394,7 @@ impl Editor {
         }
         let expected = self.claude.as_ref().ok_or(UNAVAILABLE)?;
         setup.store()?.save_claude_draft(setup.show_limits, expected)?;
+        self.doctor = None;
         self.load_account();
         if self.claude.is_some() {
             Ok(Ok("Saved Claude Code choices."))
@@ -933,5 +945,64 @@ mod tests {
         assert!(action(&mut editor, r#""action":"save","group":"layout","scope":"global""#).is_err());
         assert!(action(&mut editor, r#""action":"try""#).is_err());
         assert!(!store.config.exists() && !store.init.exists() && !store.state.exists());
+    }
+
+    #[test]
+    fn browser_health_distinguishes_a_lost_rex_tab_from_an_offline_launch() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut offline = outside(store.clone(), None);
+        let checked = action(&mut offline, r#""action":"doctor""#).unwrap();
+        let verdict = field(Value::parse(checked.as_bytes()).unwrap(), "doctor");
+        assert!(field(verdict, "level").is("good"));
+
+        let mut lost = Editor::new(Some(store.clone()), true, None, None, None, None, |_| {
+            panic!("Health must not change the integration")
+        });
+        let checked = action(&mut lost, r#""action":"doctor""#).unwrap();
+        let verdict = field(Value::parse(checked.as_bytes()).unwrap(), "doctor");
+        assert!(field(verdict, "level").is("warning"));
+        assert!(field(verdict, "note").is(LOST_TAB));
+
+        fs::write(&store.claude, "{").unwrap();
+        let checked = action(&mut lost, r#""action":"doctor""#).unwrap();
+        let verdict = field(Value::parse(checked.as_bytes()).unwrap(), "doctor");
+        assert!(field(verdict, "level").is("issue"));
+        assert!(field(verdict, "note").is("Milo could not read Claude Code’s settings."));
+    }
+
+    #[test]
+    fn saved_changes_invalidate_browser_health_but_draft_edits_do_not() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), Some(&f.root));
+        for (draft, operation) in [
+            (Some(("layout.width", "0.4")), r#""action":"save","group":"layout","scope":"worktree""#),
+            (None, r#""action":"inherit","group":"layout""#),
+            (Some(("appearance.static_marks", "true")), r#""action":"save","group":"preferences","scope":"worktree""#),
+            (None, r#""action":"inherit","group":"preferences""#),
+            (Some(("account.claude_limits", "true")), r#""action":"save","group":"account","scope":"account""#),
+        ] {
+            action(&mut editor, r#""action":"doctor""#).unwrap();
+            if let Some((field, value)) = draft {
+                set(&mut editor, field, value);
+            }
+            assert!(action(&mut editor, r#""action":"try""#).is_err());
+            assert!(editor.doctor.is_some(), "draft edits and rejected actions must not clear Health");
+            let saved = action(&mut editor, operation).unwrap();
+            assert!(field(Value::parse(saved.as_bytes()).unwrap(), "doctor").null(), "{operation}");
+        }
+    }
+
+    #[test]
+    fn failed_browser_health_rerun_clears_the_previous_verdict() {
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        action(&mut editor, r#""action":"doctor""#).unwrap();
+        assert!(editor.doctor.is_some());
+
+        editor.setup.store = None;
+        assert!(action(&mut editor, r#""action":"doctor""#).is_err());
+        let state = editor.state();
+        assert!(field(Value::parse(state.as_bytes()).unwrap(), "doctor").null());
     }
 }
