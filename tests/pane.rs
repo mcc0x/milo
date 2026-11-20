@@ -834,7 +834,8 @@ fn repeat_clicks_do_not_cross_the_onboarding_handoff() {
         tty.bytes.clear();
         tty.click(4, skip_row, "2");
         tty.until("Pulse");
-        tty.click(5, skip_row, "");
+        // Appearance has its save action three rows lower, below the usage tools.
+        tty.click(5, skip_row + 3, "");
         tty.until("Save preferences for");
         tty.master.write_all(b"qq").unwrap();
         assert!(tty.wait_for_exit().success());

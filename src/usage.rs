@@ -1,8 +1,10 @@
-//! Shows the last reported usage limits and today's local Claude Code activity.
+//! Shows the last reported usage limits and today's local Claude Code and OpenCode activity.
 
 mod draw;
 mod files;
 mod omp;
+mod opencode;
+mod sqlite;
 mod status;
 mod time;
 
@@ -17,6 +19,7 @@ use crate::help::{self, Page};
 use crate::json::Value;
 use crate::keys::Key;
 use crate::pane::{After, External, Pane};
+use crate::preferences::{Show, UsageTool, UsageTools};
 use crate::screen::Screen;
 use crate::watch::Scope;
 use crate::when::{DAY, MINUTE};
@@ -126,6 +129,53 @@ impl Limits {
     /// Include the model-specific week when scheduling the next reset.
     fn windows(&self) -> impl Iterator<Item = &Window> {
         self.base.iter().flatten().chain(self.model_week.as_ref().map(|model| &model.window))
+    }
+
+    /// A report can arrive without a single window Milo can show.
+    fn any(&self) -> bool {
+        self.windows().next().is_some()
+    }
+}
+
+/// What this machine says about a tool, apart from the choice made in setup.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Presence {
+    /// Nothing the tool saved was found, so nothing says it is in use here.
+    Absent,
+    /// The tool keeps data here, but none of it is a figure Milo can show.
+    Found,
+    /// A saved figure: a limit window, or tokens recorded today.
+    Reading,
+}
+
+impl Presence {
+    /// A tool with limits has a reading once a report holds a window.
+    fn of_limits(reported: Option<&Reading>, found: bool) -> Self {
+        if reported.is_some_and(|reading| reading.windows.any()) {
+            Self::Reading
+        } else if found || reported.is_some() {
+            Self::Found
+        } else {
+            Self::Absent
+        }
+    }
+
+    /// Auto gives a place only to a figure. Always keeps the place, to say what is unknown.
+    fn placed(self, show: Show) -> bool {
+        match show {
+            Show::Auto => self == Self::Reading,
+            Show::Always => true,
+            Show::Hide => false,
+        }
+    }
+
+    /// Whether the pane or doctor has anything to say about the tool.
+    fn relevant(self, show: Show) -> bool {
+        match show {
+            Show::Auto => self != Self::Absent,
+            Show::Always => true,
+            Show::Hide => false,
+        }
     }
 }
 
@@ -334,6 +384,14 @@ impl Codex {
             .filter_map(|file| file.reported().map(|r| (r, Source::CodexSession)))
             .chain(self.omp.iter().map(|r| (r, Source::Omp)))
             .max_by_key(|(r, _)| r.at)
+    }
+
+    /// A rollout with something in it, or a tree Milo was refused, says Codex
+    /// runs here. An empty folder or an empty file is only a leftover.
+    fn presence(&self) -> Presence {
+        let found = matches!(self.sessions, CodexSessions::Unreadable)
+            || self.files.entries.iter().any(|file| file.version.len > 0);
+        Presence::of_limits(self.reported().map(|(reading, _)| reading), found)
     }
 }
 
@@ -554,6 +612,15 @@ impl Claude {
             .max_by_key(|(reading, _)| reading.at)
     }
 
+    /// Claude Code keeps `~/.claude.json` from its first run and writes a
+    /// transcript for each session. A `~/.claude` folder alone is no sign of
+    /// it: Milo's own setup can create one.
+    fn presence(&self) -> Presence {
+        let found = self.native_version.is_some_and(|version| version.len() > 0)
+            || self.files.entries.iter().any(|file| file.version.len > 0);
+        Presence::of_limits(self.reported().map(|(reading, _)| reading), found)
+    }
+
     /// Merge duplicate IDs only when a contributing file changes.
     fn check(&mut self, path: Option<&Path>, cutoff: i64, clock: Instant, force: bool, budget: &mut Budget) -> bool {
         let Ok((root, mut changed)) = self.files.refresh(path, Tree::Claude { since: cutoff }, clock, force) else {
@@ -637,17 +704,63 @@ impl Today {
     }
 }
 
+/// What OpenCode recorded locally, read off the pane loop like OMP's reports.
+struct OpenCode {
+    poll: sqlite::Poll<opencode::Report>,
+    report: opencode::Report,
+}
+
+impl OpenCode {
+    fn new(path: Option<PathBuf>, wait: Duration) -> Self {
+        Self { poll: opencode::poll(path, wait), report: opencode::Report::default() }
+    }
+
+    /// A background result needs a new frame when it changes the report, or
+    /// ends a read the pane was announcing.
+    fn collect(&mut self) -> bool {
+        let checking = self.poll.checking();
+        let Some(result) = self.poll.collect() else { return false };
+        let Some(report) = result else { return checking };
+        let changed = self.report != report;
+        self.report = report;
+        changed || checking
+    }
+
+    /// Totals stand only for the local day they were read for, and only when something was used.
+    fn today(&self, today: i64) -> Option<&opencode::Activity> {
+        match &self.report {
+            opencode::Report::Today(activity) if activity.since == today && activity.tokens.fresh() > 0 => {
+                Some(activity)
+            }
+            _ => None,
+        }
+    }
+
+    /// Only a database OpenCode wrote says it is in use here.
+    fn presence(&self, today: i64) -> Presence {
+        if self.today(today).is_some() {
+            Presence::Reading
+        } else if self.report == opencode::Report::Missing {
+            Presence::Absent
+        } else {
+            Presence::Found
+        }
+    }
+}
+
 /// Uses the installed providers' directories; tests supply their own directories and time.
 pub struct Usage {
     codex_dir: Option<PathBuf>,
     claude_dir: Option<PathBuf>,
     limits_file: Option<PathBuf>,
     claude_config: Option<PathBuf>,
-    omp: omp::Poll,
+    omp: sqlite::Poll<omp::Reports>,
+    opencode: OpenCode,
     codex: Codex,
     claude: Claude,
     today: Today,
     large_figures: bool,
+    tools: UsageTools,
     preference_note: Option<&'static str>,
     #[cfg(test)]
     fixed_now: Option<i64>,
@@ -660,15 +773,56 @@ impl Usage {
         let root = preferences::worktree(Path::new("."));
         let (prefs, note) = preferences::Preferences::for_pane(root.as_deref());
         let home = paths::home();
-        let mut usage = Self::for_home(home.as_deref(), when::now()).with_large_figures(prefs.usage_large_figures);
+        let usage = Self::for_home(home.as_deref(), when::now())
+            .with_large_figures(prefs.usage_large_figures)
+            .showing(prefs.usage_tools);
+        let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
+        let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         usage.preference_note = note;
-        usage.omp = omp::Poll::new(omp::database(home.as_deref()), omp::QUERY_WAIT);
         usage
     }
 
     pub fn with_large_figures(mut self, large: bool) -> Self {
         self.large_figures = large;
         self
+    }
+
+    /// A hidden tool is not looked for: its folders are neither walked nor
+    /// watched, and its saved reports are not read.
+    pub fn showing(mut self, tools: UsageTools) -> Self {
+        self.tools = tools;
+        if tools[UsageTool::Codex] == Show::Hide {
+            self.codex_dir = None;
+        }
+        if tools[UsageTool::Claude] == Show::Hide {
+            self.claude_dir = None;
+            self.limits_file = None;
+            self.claude_config = None;
+        }
+        self
+    }
+
+    /// OMP's database serves both tools with limits; OpenCode's serves only OpenCode.
+    fn with_databases(mut self, omp: Option<PathBuf>, opencode: Option<PathBuf>, wait: Duration) -> Self {
+        self.omp = omp::poll(omp.filter(|_| self.reads_omp()), wait);
+        self.opencode = OpenCode::new(opencode.filter(|_| self.tools[UsageTool::OpenCode] != Show::Hide), wait);
+        self
+    }
+
+    fn reads_omp(&self) -> bool {
+        [UsageTool::Codex, UsageTool::Claude].into_iter().any(|tool| self.tools[tool] != Show::Hide)
+    }
+
+    /// A report for a hidden tool is dropped as soon as it is read.
+    fn keep(&mut self, reports: omp::Reports) -> bool {
+        let codex = reports.codex.filter(|_| self.tools[UsageTool::Codex] != Show::Hide);
+        let claude = reports.claude.filter(|_| self.tools[UsageTool::Claude] != Show::Hide);
+        if self.codex.omp == codex && self.claude.omp == claude {
+            return false;
+        }
+        self.codex.omp = codex;
+        self.claude.omp = claude;
+        true
     }
 
     fn for_home(home: Option<&Path>, now: i64) -> Self {
@@ -686,11 +840,13 @@ impl Usage {
             claude_dir,
             limits_file: state.map(|dir| dir.join(SAVED_LIMITS)),
             claude_config: None,
-            omp: omp::Poll::new(None, omp::QUERY_WAIT),
+            omp: omp::poll(None, sqlite::QUERY_WAIT),
+            opencode: OpenCode::new(None, sqlite::QUERY_WAIT),
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
             large_figures: false,
+            tools: UsageTools::default(),
             preference_note: None,
             #[cfg(test)]
             fixed_now: Some(now),
@@ -710,10 +866,13 @@ impl Usage {
     /// Give each provider its own I/O allowance so one busy log cannot starve the other.
     fn refresh(&mut self, now: i64, clock: Instant, manual: bool) -> bool {
         self.collect_omp();
+        self.opencode.collect();
         if manual {
             self.omp.reload(now, clock);
+            self.opencode.poll.reload(now, clock);
         } else {
             self.omp.start(now, clock);
+            self.opencode.poll.start(now, clock);
         }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
@@ -732,13 +891,7 @@ impl Usage {
     fn collect_omp(&mut self) -> bool {
         let checking = self.omp.checking();
         let Some(result) = self.omp.collect() else { return false };
-        let Some(reports) = result else { return checking };
-        if self.codex.omp == reports.codex && self.claude.omp == reports.claude {
-            return checking;
-        }
-        self.codex.omp = reports.codex;
-        self.claude.omp = reports.claude;
-        true
+        result.is_some_and(|reports| self.keep(reports)) || checking
     }
 
     fn check_limits(&mut self, now: i64, claude_budget: &mut Budget) {
@@ -763,21 +916,57 @@ impl Usage {
     }
 }
 
-/// A bounded, read-only probe for doctor. Activity transcripts are not needed.
-pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
-    let now = when::now();
+/// What doctor says about usage, from one bounded, read-only look: a line for
+/// each tool that is found or always shown, and none for a tool that is
+/// hidden or absent. Transcripts are found but not read.
+pub fn doctor(tools: UsageTools) -> Vec<String> {
     let home = paths::home();
-    let mut usage = Usage::for_home(home.as_deref(), now);
-    if let Some(reports) = omp::database(home.as_deref()).and_then(|path| omp::read(&path, now, omp::QUERY_WAIT)) {
-        usage.codex.omp = reports.codex;
-        usage.claude.omp = reports.claude;
+    let usage = Usage::for_home(home.as_deref(), when::now()).showing(tools);
+    usage.doctor(omp::database(home.as_deref()), opencode::database(home.as_deref()), sqlite::QUERY_WAIT)
+}
+
+impl Usage {
+    fn doctor(mut self, omp: Option<PathBuf>, opencode: Option<PathBuf>, wait: Duration) -> Vec<String> {
+        let (now, clock) = (self.now(), Instant::now());
+        let saved = omp.filter(|_| self.reads_omp()).and_then(|path| omp::read(&path, now, wait));
+        if let Some(reports) = saved {
+            self.keep(reports);
+        }
+        self.check_limits(now, &mut Budget::new(CLAUDE_BYTES));
+        self.codex.check(self.codex_dir.as_deref(), now, clock, true, &mut Budget::new(CODEX_BYTES));
+        let cutoff = self.today.since(now);
+        self.claude.check(self.claude_dir.as_deref(), cutoff, clock, true, &mut Budget::new(0));
+        let limits = [
+            (UsageTool::Codex, self.codex.presence(), self.codex.reported(), "run Codex to save one"),
+            (
+                UsageTool::Claude,
+                self.claude.presence(),
+                self.claude.reported(),
+                "turn on Show Claude Code limits in milo setup",
+            ),
+        ];
+        let mut lines = Vec::new();
+        for (tool, presence, reported, step) in limits {
+            if presence.relevant(self.tools[tool]) {
+                let name = tool.label();
+                lines.push(match reported {
+                    Some((_, source)) => format!("{name} limits: {}", source.label()),
+                    None => format!("{name} limits: no local report; {step}"),
+                });
+            }
+        }
+        let show = self.tools[UsageTool::OpenCode];
+        if show != Show::Hide {
+            let report = opencode.as_deref().map_or(opencode::Report::Missing, |path| opencode::read(path, now, wait));
+            if show == Show::Always || report != opencode::Report::Missing {
+                lines.extend(report.describe(opencode.as_deref(), now));
+            }
+        }
+        if lines.is_empty() && UsageTool::ALL.into_iter().any(|tool| self.tools[tool] != Show::Hide) {
+            lines.push("Usage tools: none found".into());
+        }
+        lines
     }
-    usage.check_limits(now, &mut Budget::new(CLAUDE_BYTES));
-    usage.codex.check(usage.codex_dir.as_deref(), now, Instant::now(), true, &mut Budget::new(CODEX_BYTES));
-    [
-        ("Codex", usage.codex.reported().map(|(_, source)| source.label())),
-        ("Claude", usage.claude.reported().map(|(_, source)| source.label())),
-    ]
 }
 
 impl Pane for Usage {
@@ -803,12 +992,15 @@ impl Pane for Usage {
         self.claude.files.changed();
     }
 
+    /// One job is watched at a time. A finished job's descriptor stays
+    /// readable, so the other is picked up as soon as the first is collected.
     fn external_fd(&self) -> Option<RawFd> {
-        self.omp.fd()
+        self.omp.fd().or_else(|| self.opencode.poll.fd())
     }
 
     fn check_external(&mut self) -> External {
-        if self.collect_omp() { External::Redraw } else { External::Unchanged }
+        let omp = self.collect_omp();
+        if self.opencode.collect() || omp { External::Redraw } else { External::Unchanged }
     }
 
     fn draw(&mut self, screen: &mut Screen) {
@@ -864,14 +1056,18 @@ impl Pane for Usage {
         Some(Duration::from_secs(u64::try_from(wait).unwrap_or(60)))
     }
 
+    /// A tool Milo neither shows nor found is left out of the help as well.
     fn help(&self) -> Page {
-        Page::new(help_rows())
+        let today = self.today.since;
+        let claude = self.claude.presence().relevant(self.tools[UsageTool::Claude]);
+        let opencode = self.opencode.presence(today).relevant(self.tools[UsageTool::OpenCode]);
+        Page::new(help_rows(claude, opencode))
     }
 }
 
-fn help_rows() -> Vec<help::HelpRow> {
+fn help_rows(claude: bool, opencode: bool) -> Vec<help::HelpRow> {
     use help::{HelpRow, heading, key, note};
-    vec![
+    let mut rows = vec![
         heading("Usage limits"),
         note("Figures come from the"),
         note("tool's last report."),
@@ -879,14 +1075,35 @@ fn help_rows() -> Vec<help::HelpRow> {
         note("a new reading."),
         note("Open the tool to update."),
         HelpRow::new(),
-        heading("Claude Code"),
-        note("Tokens today show local"),
-        note("activity, not a limit."),
-        note("Setup can add a status"),
-        note("line to collect limits."),
-        key("r", "reload"),
-        key("q", "quit"),
-    ]
+        heading("Tools"),
+        note("A tool appears once it"),
+        note("has a figure to show."),
+        note("milo setup can always"),
+        note("show or hide each one."),
+        HelpRow::new(),
+    ];
+    if claude {
+        rows.extend([
+            heading("Claude Code"),
+            note("Tokens today show local"),
+            note("activity, not a limit."),
+            note("Setup can add a status"),
+            note("line to collect limits."),
+            HelpRow::new(),
+        ]);
+    }
+    if opencode {
+        rows.extend([
+            heading("OpenCode"),
+            note("Tokens today come from"),
+            note("its local database."),
+            note("Cost is its estimate."),
+            note("It saves no limits."),
+            HelpRow::new(),
+        ]);
+    }
+    rows.extend([key("r", "reload"), key("q", "quit")]);
+    rows
 }
 
 /// Claude Code must get a line and a successful exit even if it sent bad data.

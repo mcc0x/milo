@@ -75,6 +75,11 @@ pub(super) struct SnapshotVersion {
 }
 
 impl SnapshotVersion {
+    /// An empty file is a leftover, not something a tool saved.
+    pub(super) fn len(self) -> u64 {
+        self.file.len
+    }
+
     fn regular(metadata: &std::fs::Metadata) -> Option<Self> {
         metadata.is_file().then(|| Self {
             file: FileVersion {

@@ -49,7 +49,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/omp.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It stays read-only.** milo never changes a repository. Every git command it runs only reads.
 
@@ -116,6 +116,12 @@ on a scratch copy. The flag prevents the actions file starting a listener
 during the check. Check both files and try the pane choices. Only try a
 reload or the actions on a disposable Rex configuration and session, never
 as part of the automated tests.
+
+### Adding a usage source
+
+[Usage sources](docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
+
+A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
 
 ### Adding a language to the reader
 
@@ -193,8 +199,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
-| `src/usage.rs` | Collects the latest limits and today's Claude Code activity. |
-| `src/usage/draw.rs` | Lays out usage figures, reset times, and hints. |
+| `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity, and works out which tools are in use. |
+| `src/usage/draw.rs` | Lays out the tools that have a place, with their figures, reset times, and hints. |
 | `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
 | `src/usage/files.rs` | Scans session files and bounds how much a refresh reads. |
@@ -207,12 +213,17 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
+| `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
+| `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
+| `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
+| `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
 | `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
+| `src/usage/tests/tools.rs` | Checks which tools have a place, and the frame for each combination and choice. |
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
@@ -222,4 +233,4 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |
-| `tests/web-smoke.cjs` | Saves and closes the browser editor of a built binary in Chromium. |
+| `tests/web-smoke.cjs` | Saves layout and usage tool choices in the browser editor of a built binary in Chromium, then closes it. |

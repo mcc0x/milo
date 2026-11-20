@@ -3,12 +3,15 @@
 mod activity;
 mod codex;
 mod layout;
+mod opencode_activity;
 mod status_line;
+mod tools;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, symlink};
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
@@ -66,8 +69,23 @@ fn open(f: &Fixture, now: i64) -> Usage {
     usage
 }
 
+/// Codex and Claude Code keep their places, as both did before each tool had
+/// a choice. Most tests here are about what a place shows, unknown included.
 fn unopened(f: &Fixture, now: i64) -> Usage {
+    automatic(f, now).showing(tools(Show::Always, Show::Always, Show::Auto))
+}
+
+/// The pane with no choice made: a tool has a place only while it has a figure.
+fn automatic(f: &Fixture, now: i64) -> Usage {
     Usage::from_dirs(Some(f.root.join("codex")), Some(f.root.join("claude")), Some(f.root.join(STATE)), now)
+}
+
+fn tools(codex: Show, claude: Show, opencode: Show) -> UsageTools {
+    let mut tools = UsageTools::default();
+    for (tool, show) in UsageTool::ALL.into_iter().zip([codex, claude, opencode]) {
+        tools[tool] = show;
+    }
+    tools
 }
 
 fn frame(usage: &mut Usage, width: usize, height: usize) -> Vec<String> {
@@ -383,6 +401,21 @@ fn malformed_enormous_and_deeply_nested_lines_are_skipped() {
     assert!(rows[1].contains("77%") && rows[3].contains("1.2k tokens today"));
 }
 
+/// Fixture databases are made with the same sqlite3 the readers run.
+fn sqlite_installed() -> bool {
+    let installed = Command::new(sqlite::executable()).arg("-version").output().is_ok();
+    if !installed {
+        eprintln!("skipping database fixture: sqlite3 is not installed");
+    }
+    installed
+}
+
+fn exec(path: &Path, sql: &str) {
+    let result =
+        Command::new(sqlite::executable()).args(["-batch", "-init", "/dev/null"]).arg(path).arg(sql).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+}
+
 mod omp_limits {
     use std::process::{Command, Stdio};
 
@@ -396,19 +429,12 @@ mod omp_limits {
     ";
 
     fn sqlite(f: &Fixture) -> Option<PathBuf> {
-        if Command::new(omp::sqlite()).arg("-version").output().is_err() {
-            eprintln!("skipping OMP fixture: sqlite3 is not installed");
+        if !sqlite_installed() {
             return None;
         }
         let path = f.root.join("agent.db");
         exec(&path, SCHEMA);
         Some(path)
-    }
-
-    fn exec(path: &Path, sql: &str) {
-        let result =
-            Command::new(omp::sqlite()).args(["-batch", "-init", "/dev/null"]).arg(path).arg(sql).output().unwrap();
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
     fn report(path: &Path, key: &str, provider: &str, ms: i64, limits: &str) {
@@ -487,7 +513,7 @@ mod omp_limits {
             ),
         );
 
-        let bytes = omp::query(omp::sqlite(), &path, TEST_WAIT).unwrap();
+        let bytes = sqlite::query(sqlite::executable(), &path, omp::SQL, TEST_WAIT).unwrap();
         assert!(!omp::SQL.to_ascii_lowercase().contains("auth_credentials"));
         assert!(omp::SQL.trim_start().starts_with("PRAGMA query_only=ON;"));
         assert!(!String::from_utf8_lossy(&bytes).contains("key-only-secret"));
@@ -532,14 +558,14 @@ mod omp_limits {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         assert!(omp::read(&f.root.join("missing.db"), NOW, TEST_WAIT).is_none());
-        assert!(omp::query(f.root.join("missing-sqlite").as_os_str(), &path, TEST_WAIT).is_none());
+        assert!(sqlite::query(f.root.join("missing-sqlite").as_os_str(), &path, omp::SQL, TEST_WAIT).is_none());
         let executable = f.root.join("sqlite-stub");
         let script = |lines: &str| write_executable(&executable, lines);
         script("printf '%s' 'not JSON'");
-        let bytes = omp::query(executable.as_os_str(), &path, TEST_WAIT).unwrap();
+        let bytes = sqlite::query(executable.as_os_str(), &path, omp::SQL, TEST_WAIT).unwrap();
         assert!(omp::parse(&bytes, NOW).is_none());
         script("printf '%s\\n' \"$$\" >\"$0.pid\"; printf '%70000s' x");
-        assert!(omp::query(executable.as_os_str(), &path, TEST_WAIT).is_none());
+        assert!(sqlite::query(executable.as_os_str(), &path, omp::SQL, TEST_WAIT).is_none());
         assert_reaped(&executable);
         exec(&path, "DROP TABLE usage_history;");
         assert!(omp::read(&path, NOW, TEST_WAIT).is_none());
@@ -580,7 +606,7 @@ mod omp_limits {
             assert!(!f.root.join(sidecar).exists());
         }
         // Use a child that would otherwise succeed even on a database without sidecars.
-        assert!(omp::query(std::ffi::OsStr::new("/usr/bin/true"), &path, TEST_WAIT).is_none());
+        assert!(sqlite::query(std::ffi::OsStr::new("/usr/bin/true"), &path, omp::SQL, TEST_WAIT).is_none());
     }
 
     #[test]
@@ -590,7 +616,7 @@ mod omp_limits {
         let db = f.root.join("agent #?% café.db");
         fs::rename(path, &db).unwrap();
         let week = window("anthropic:7d", "0.27", (NOW + DAY) * 1000, 10_080, "null");
-        let mut writer = Command::new(omp::sqlite())
+        let mut writer = Command::new(sqlite::executable())
             .args(["-batch", "-bail", "-init", "/dev/null"])
             .current_dir(&f.root)
             .arg(&db)
@@ -623,7 +649,7 @@ mod omp_limits {
         // Simulate a sidecar disappearing after milo's preflight but before SQLite opens it.
         let stub = f.root.join("sqlite-stub");
         write_executable(&stub, "/bin/rm \"${0%/*}/copy.db-shm\"; exec /usr/bin/sqlite3 \"$@\"");
-        let result = omp::query(stub.as_os_str(), &f.root.join("copy.db"), TEST_WAIT);
+        let result = sqlite::query(stub.as_os_str(), &f.root.join("copy.db"), omp::SQL, TEST_WAIT);
         assert!(!f.root.join("copy.db-shm").exists());
         assert!(result.is_none());
     }
@@ -642,7 +668,7 @@ mod omp_limits {
         write(&f, CODEX, &codex(NOW - 1, 45, reset, &secondary), NOW);
         status::run(STATUS, Vec::new(), Some(&state), NOW - 1);
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
+        usage.omp = omp::poll(Some(path), TEST_WAIT);
         assert!(usage.check());
         finish_omp(&mut usage);
         assert_eq!(usage.codex.reported().unwrap().1.label(), "OMP usage database");
@@ -707,7 +733,7 @@ mod omp_limits {
         let week = |fraction| window("openai-codex:primary", fraction, reset, 10_080, "null");
         report(&path, "codex", "openai-codex", NOW * 1000, &format!("[{}]", week("0.25")));
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+        usage.omp = omp::poll(Some(path.clone()), TEST_WAIT);
 
         assert!(usage.check());
         assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · checking"]);
@@ -729,7 +755,7 @@ mod omp_limits {
         let Some(path) = sqlite(&f) else { return };
         report(&path, "claude", "anthropic", NOW * 1000, "[]");
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+        usage.omp = omp::poll(Some(path.clone()), TEST_WAIT);
 
         let checking = ["Codex · checking", "Claude · checking"];
         let settled = ["Codex · no source", "Claude · no limits"];
@@ -757,11 +783,28 @@ mod omp_limits {
     }
 
     #[test]
+    fn a_report_omp_saved_gives_its_tool_a_place_with_nothing_else_of_the_tool_on_disk() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let week = window("anthropic:7d", "0.32", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "claude", "anthropic", NOW * 1000, &format!("[{week}]"));
+        // Another provider's report is no tool of Milo's, and an empty one has no figure.
+        report(&path, "gemini", "google", NOW * 1000, &format!("[{week}]"));
+        report(&path, "codex", "openai-codex", NOW * 1000, "[]");
+        let mut usage = automatic(&f, NOW).with_databases(Some(path), None, TEST_WAIT);
+        assert!(usage.check());
+        assert_eq!(frame(&mut usage, 22, 2), ["Checking local usage…", ""]);
+        finish_omp(&mut usage);
+        assert_eq!([usage.codex.presence(), usage.claude.presence()], [Presence::Found, Presence::Reading]);
+        assert_eq!(frame(&mut usage, 22, 2), ["Claude week · 68% left", "Resets in 1d"]);
+    }
+
+    #[test]
     fn omp_poll_does_not_start_another_query_before_twenty_seconds() {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         let clock = Instant::now();
-        let mut poll = omp::Poll::new(Some(path), TEST_WAIT);
+        let mut poll = omp::poll(Some(path), TEST_WAIT);
         poll.start(NOW, clock);
         assert!(poll.fd().is_some());
         wait_for(|| poll.collect().is_some());
@@ -782,7 +825,7 @@ mod omp_limits {
         let Some(path) = sqlite(&f) else { return };
         report(&path, "claude", "anthropic", NOW * 1000, "[]");
         let start = Instant::now();
-        let mut poll = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+        let mut poll = omp::poll(Some(path.clone()), TEST_WAIT);
         let mut read = |clock| {
             poll.start(NOW, clock);
             assert!(poll.fd().is_some());
@@ -796,6 +839,26 @@ mod omp_limits {
         assert!(read(start).claude.is_some());
         fs::remove_file(path).unwrap();
         assert!(read(start + Duration::from_secs(20)).claude.is_none());
+    }
+
+    #[test]
+    fn omp_and_opencode_reads_started_together_both_reach_the_pane() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = local_noon();
+        let week = window("anthropic:7d", "0.27", (now + DAY) * 1000, 10_080, "null");
+        report(&path, "claude", "anthropic", now * 1000, &format!("[{week}]"));
+        let db = opencode_activity::busy_day(&f, opencode_activity::RELEASES[3], now);
+        let mut usage = unopened(&f, now);
+        usage.omp = omp::poll(Some(path), TEST_WAIT);
+        usage.opencode = OpenCode::new(Some(db.path.clone()), TEST_WAIT);
+
+        usage.check();
+        assert!(usage.omp.fd().is_some() && usage.opencode.poll.fd().is_some());
+        opencode_activity::settle(&mut usage);
+        let rows = frame(&mut usage, 100, 9);
+        let claude = rows.iter().any(|row| row.contains("left · resets in 1 d"));
+        assert!(claude && rows[7].contains("OpenCode · 1.5k"), "{rows:?}");
     }
 }
 
