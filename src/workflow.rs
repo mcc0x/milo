@@ -189,6 +189,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn key(&mut self, key: Key) -> After {
+        // A one-row notice hides the pane but leaves its last hit map intact.
+        if self.notice_only && matches!(key, Key::Click(..)) {
+            return After::Ignored;
+        }
         if let Key::Focus(focused) = key {
             self.focus = Some(focused);
         }
@@ -287,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_only_frame_suspends_the_inner_pane_deadline() {
+    fn a_notice_only_frame_suspends_inner_deadlines_and_clicks() {
         struct Due;
         impl Pane for Due {
             fn draw(&mut self, screen: &mut Screen) {
@@ -300,8 +304,8 @@ mod tests {
             fn next_frame(&self) -> Option<Duration> {
                 Some(Duration::ZERO)
             }
-            fn key(&mut self, _: Key) -> After {
-                After::Ignored
+            fn key(&mut self, key: Key) -> After {
+                if matches!(key, Key::Click(..)) { After::Stay } else { After::Ignored }
             }
         }
 
@@ -321,12 +325,14 @@ mod tests {
         pane.draw(&mut screen);
         assert!(screen.text()[0].contains(NO_CWD));
         assert_eq!(pane.next_frame(), None);
+        assert!(matches!(pane.key(Key::Click(1, 0)), After::Ignored));
 
         screen.resize(40, 2);
         pane.draw(&mut screen);
         assert_eq!(screen.text()[0], "Content");
         assert!(screen.text()[1].contains(NO_CWD));
         assert_eq!(pane.next_frame(), Some(Duration::ZERO));
+        assert_eq!(pane.key(Key::Click(1, 0)), After::Stay);
 
         screen.resize(40, 1);
         pane.draw(&mut screen);
