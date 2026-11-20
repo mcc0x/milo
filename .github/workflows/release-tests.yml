@@ -20,8 +20,12 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.91.0 --profile minimal
       - run: command -v sqlite3 || (sudo apt-get update && sudo apt-get install -y sqlite3)
-      - run: cargo +1.91.0 check --locked --all-targets
+      - name: Test installers on Linux
+        run: sh tests/install.sh
+      - run: cargo +1.91.0 check --locked --all-targets --all-features
       - run: cargo +1.91.0 test --locked
+      - name: Verify the source package builds
+        run: cargo +1.91.0 package --locked
 
   docs-bundle:
     name: Published documentation matches source
@@ -63,7 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Test source installer
+      - name: Test installers
         run: sh tests/install.sh
       - name: Test release build on Apple Silicon
         run: |

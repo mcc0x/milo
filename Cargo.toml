@@ -9,7 +9,8 @@ repository = "https://github.com/mcc0x/milo"
 license = "MIT"
 keywords = ["terminal", "git", "tui", "rex", "code-reader"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["src/**", "tests/**", "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml"]
+# Shell test drivers require files from a Git checkout, not the Cargo archive.
+include = ["src/**", "tests/**", "!tests/*.sh", "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml"]
 
 [features]
 web-dev = []

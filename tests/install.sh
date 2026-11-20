@@ -33,6 +33,7 @@ ln -s '../milo checkout/install.sh' "$unrelated/linked-install.sh"
 cat > "$fixture/tools/git" <<'EOF'
 #!/bin/sh
 set -eu
+[ "${GIT_DIR+x}${GIT_WORK_TREE+x}${GIT_INDEX_FILE+x}${GIT_COMMON_DIR+x}" = '' ]
 [ "$1" = clone ] || exec "$REAL_GIT" "$@"
 [ "$#:$2:$3:$4" = '5:--depth:1:https://github.com/mcc0x/milo' ]
 case "$5" in
@@ -54,7 +55,15 @@ case "$PWD" in
         ;;
 esac
 case "$1" in
-    -vV) printf 'host: fixture-host-%s\n' "$kind" ;;
+    -vV)
+        case "${FIXTURE_CARGO_VERSION:-ok}" in
+            missing-host) printf 'cargo (fixture)\n' ;;
+            *)
+                printf 'host: fixture-host-%s\n' "$kind"
+                [ "${FIXTURE_CARGO_VERSION:-ok}" != fail ]
+                ;;
+        esac
+        ;;
     build)
         [ "$#:$2:$3:$4:$6:$8:$9" = "9:--release:--locked:--manifest-path:--target-dir:--target:fixture-host-$kind" ]
         source=${5%/Cargo.toml}
@@ -89,10 +98,26 @@ expect_install() {
     [ "$(find "$TMPDIR" -print)" = "$TMPDIR" ]
 }
 
+expect_failure() (
+    diagnostic=$1
+    shift
+    if output=$("$@" 2>&1); then
+        printf 'Unexpected success: %s\n%s\n' "$*" "$output" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$output" | grep -Fq "$diagnostic"; then
+        printf 'Expected %s: %s\n%s\n' "$diagnostic" "$*" "$output" >&2
+        exit 1
+    fi
+)
+
 cd "$checkout"
 expect_install checkout sh install.sh
 cd "$unrelated"
 expect_install checkout sh '../milo checkout/install.sh'
+# Git hooks and plumbing can export overrides for the caller's checkout.
+expect_install checkout env GIT_DIR="$unrelated/.git" GIT_WORK_TREE="$unrelated" \
+    GIT_INDEX_FILE="$unrelated/.git/index" sh '../milo checkout/install.sh'
 expect_install checkout sh linked-install.sh
 # A case-insensitive volume reaches the checkout through another spelling of its path.
 respelled="$fixture/MILO checkout"
@@ -101,6 +126,14 @@ if [ "$respelled" -ef "$checkout" ]; then
 fi
 expect_install fetched sh install.sh
 cat "$checkout/install.sh" | expect_install fetched sh
+
+# A failed `cargo -vV` can print a host; neither failure should reach the build.
+expect_failure 'Could not determine the Cargo host target' \
+    env FIXTURE_CARGO_VERSION=fail sh install.sh
+expect_failure 'Cargo did not report a valid host target' \
+    env FIXTURE_CARGO_VERSION=missing-host sh install.sh
+[ "$(find "$MILO_BIN_DIR" -print)" = "$MILO_BIN_DIR" ]
+[ "$(find "$TMPDIR" -print)" = "$TMPDIR" ]
 
 # Pin the fixture payload instead of the release binary; use the real SHA-256 tool.
 RELEASE_FIXTURE=$fixture/release-binary
@@ -130,16 +163,17 @@ case "$9" in
     https://github.com/mcc0x/milo/releases/download/*/milo-aarch64-apple-darwin) ;;
     *) exit 1 ;;
 esac
-cp "$RELEASE_FIXTURE" "$8"
+case "${FIXTURE_RELEASE_DOWNLOAD:-ok}" in
+    fail) printf 'partial\n' > "$8"; exit 1 ;;
+    corrupt) printf 'corrupt\n' > "$8" ;;
+    ok) cp "$RELEASE_FIXTURE" "$8" ;;
+    *) exit 1 ;;
+esac
 EOF
 chmod +x "$fixture/tools/uname" "$fixture/tools/curl"
 
 expect_uninstall_refusal() {
-    if output=$(sh "$1" --uninstall 2>&1); then
-        printf 'Unexpected uninstall success: %s\n' "$output" >&2
-        exit 1
-    fi
-    printf '%s\n' "$output" | grep -q 'no matching installer receipt'
+    expect_failure 'no matching installer receipt' sh "$1" --uninstall
 }
 
 exercise_uninstall() (
@@ -165,6 +199,15 @@ exercise_uninstall() (
     [ -x "$binary" ]
     cmp "$binary" "$payload"
     [ "$(cat "$old_binary")" = unrelated ]
+
+    if [ "$kind" = release ]; then
+        cp "$receipt" "$fixture/verified-receipt"
+        expect_failure 'Could not download' env FIXTURE_RELEASE_DOWNLOAD=fail sh "$installer"
+        expect_failure 'SHA-256 checksum mismatch' env FIXTURE_RELEASE_DOWNLOAD=corrupt sh "$installer"
+        cmp "$binary" "$payload"
+        cmp "$receipt" "$fixture/verified-receipt"
+        [ -z "$(find "$MILO_BIN_DIR" -name '.milo.*' -print)" ]
+    fi
 
     # A receipt copied together with the exact binary is not valid at another destination.
     cp "$binary" "$other/milo"
