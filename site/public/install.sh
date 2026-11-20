@@ -16,7 +16,17 @@ case "$bin_dir" in
     /*) ;;
     *) bin_dir=$PWD/$bin_dir ;;
 esac
-binary=${bin_dir%/}/milo
+
+resolve_destination() {
+    if [ -d "$bin_dir" ]; then
+        binary=$(cd -P "$bin_dir" && printf '%s/milo' "${PWD%/}")
+        bin_dir=${binary%/*}
+        bin_dir=${bin_dir:-/}
+    else
+        binary=${bin_dir%/}/milo
+    fi
+    receipt=${binary%/*}/.milo-install-receipt
+}
 
 check_destination() {
     if [ -L "$binary" ] || { [ -e "$binary" ] && [ ! -f "$binary" ]; }; then
@@ -24,11 +34,26 @@ check_destination() {
     fi
 }
 
+sha256() {
+    if command -v shasum >/dev/null 2>&1; then
+        sum=$(shasum -a 256 < "$1") || return 1
+    else
+        sum=$(sha256sum < "$1") || return 1
+    fi
+    printf '%s\n' "${sum%% *}"
+}
+
+resolve_destination
 check_destination
 
 if [ "${1-}" = --uninstall ]; then
     if [ -f "$binary" ]; then
+        if [ -L "$receipt" ] || [ ! -f "$receipt" ] || ! digest=$(sha256 "$binary") ||
+            ! printf '%s\n%s\n' "$digest" "$binary" | cmp -s - "$receipt"; then
+            fail "Not removing $binary: no matching installer receipt. For older installs, verify the binary before removing it manually."
+        fi
         rm -f "$binary"
+        rm -f "$receipt"
         printf 'Removed %s.\n' "$binary"
     else
         printf 'No milo binary at %s. Nothing to do.\n' "$binary"
@@ -49,7 +74,10 @@ expected=935cc8d08b5d52a958862a64ffd1249c5688babac2c02d820a2176426e3ba04b
 release=https://github.com/mcc0x/milo/releases/download/$version
 
 # Stage on the same filesystem so a verified download can replace milo by rename.
-mkdir -p "$bin_dir"
+if [ ! -d "$bin_dir" ]; then
+    mkdir -p "$bin_dir"
+    resolve_destination
+fi
 scratch=$(mktemp -d "${bin_dir%/}/.milo.XXXXXXXX")
 trap 'rm -rf "$scratch"' 0
 trap 'exit 1' HUP INT TERM
@@ -58,18 +86,27 @@ staged=$scratch/milo
 curl --disable --proto '=https' --proto-redir '=https' -fsSL \
     -o "$staged" "$release/$asset" ||
     fail "Could not download $asset for Milo $version."
-actual=$(shasum -a 256 < "$staged")
-[ "${actual%% *}" = "$expected" ] || fail "SHA-256 checksum mismatch for $asset. Milo was not installed."
+actual=$(sha256 "$staged")
+[ "$actual" = "$expected" ] || fail "SHA-256 checksum mismatch for $asset. Milo was not installed."
+
+staged_receipt=$scratch/${receipt##*/}
+if [ -L "$receipt" ] || { [ -e "$receipt" ] && [ ! -f "$receipt" ]; }; then
+    fail "Not changing $receipt: it is not a regular file."
+fi
+(umask 077; printf '%s\n%s\n' "$actual" "$binary" > "$staged_receipt")
 
 check_destination
 if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$staged" "$binary"; then
-    printf 'milo is already installed at %s. Nothing to do.\n' "$binary"
+    message="milo is already installed at $binary. Nothing to do."
 else
     chmod 755 "$staged"
-    # Directory form appends "milo" once without following a final symlink.
+    # The directory form replaces the entry without following a final symlink.
     /bin/mv -f "$staged" "${bin_dir%/}/"
-    printf 'Installed milo %s at %s.\n' "$version" "$binary"
+    message="Installed milo $version at $binary."
 fi
+# Publish after the binary so an interruption cannot authorize different bytes.
+/bin/mv -f "$staged_receipt" "${bin_dir%/}/"
+printf '%s\n' "$message"
 
 active=$(command -v milo || :)
 if [ -n "$active" ] && [ "$active" -ef "$binary" ]; then
@@ -84,3 +121,4 @@ else
     printf '%s' "$binary" | sed "s/'/'\\\\''/g"
     printf "'\n"
 fi
+exit 0
