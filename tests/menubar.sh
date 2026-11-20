@@ -20,6 +20,8 @@ for source in "$repo"/macos/MenuBar/*.swift; do
 done
 swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" "$@" "$repo/tests/menu-badge.swift" -o "$root/check-badge"
 "$root/check-badge"
+swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" "$@" "$repo/tests/menu-alerts.swift" -o "$root/check-alerts"
+"$root/check-alerts"
 export HOME="$root/home"
 apps=$HOME/Applications
 dest="$apps/Milo.app"

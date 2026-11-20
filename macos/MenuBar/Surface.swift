@@ -124,6 +124,8 @@ struct UsagePanel: View {
     let badge: BadgeReading?
     let now: Date
     @Binding var badgeMode: String
+    @Binding var alertThreshold: UsageAlertThreshold
+    let alertIssue: String?
     let refresh: () -> Void
     let openSettings: () -> Void
     let quit: () -> Void
@@ -157,6 +159,14 @@ struct UsagePanel: View {
             .padding(.vertical, 10)
             usageHeading.padding(.bottom, 8)
             readings
+            if let alertIssue {
+                Text(alertIssue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 10)
+            }
             Divider()
             footer
                 .padding(.vertical, 10)
@@ -298,6 +308,13 @@ struct UsagePanel: View {
                     Text("Codex").tag("codex")
                     Text("Claude").tag("claude")
                     Text("Icon only").tag("icon")
+                }
+                .pickerStyle(.menu)
+                Divider()
+                Picker("Low-quota alerts", selection: $alertThreshold) {
+                    ForEach(UsageAlertThreshold.allCases, id: \.self) { threshold in
+                        Text(threshold.title).tag(threshold)
+                    }
                 }
                 .pickerStyle(.menu)
                 Divider()

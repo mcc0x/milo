@@ -111,6 +111,7 @@ private final class Model: ObservableObject {
     private var child: Process?
     private var input: FileHandle?
     private let reader = DispatchQueue(label: "net.usemilo.usage.frames", qos: .utility)
+    let alerts = UsageAlerts()
 
     private var settings: Process?
     private var settingsURL: URL?
@@ -230,6 +231,7 @@ private final class Model: ObservableObject {
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.child === process else { return }
                             self.snapshot = frame; self.failure = nil; self.changed?()
+                            self.alerts.observe(frame)
                         }
                     }
                     guard pending.count <= 65536 else { throw FeedError.invalid }
@@ -254,6 +256,7 @@ private final class Model: ObservableObject {
         do { try input.write(contentsOf: Data([10])) } catch { stop(); start() }
     }
     func stop() {
+        alerts.clearBaseline()
         try? input?.close(); input = nil
         if let process = child, process.isRunning { process.terminate() }
         child = nil
@@ -280,8 +283,10 @@ private final class Model: ObservableObject {
 
 private struct Content: View {
     @ObservedObject var model: Model
+    @ObservedObject var alerts: UsageAlerts
     var body: some View {
         UsagePanel(snapshot: model.snapshot, error: model.failure, badge: model.badge, now: model.badgeUpdatedAt, badgeMode: $model.mode,
+                   alertThreshold: Binding(get: { alerts.threshold }, set: { alerts.select($0) }), alertIssue: alerts.issue,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
                    loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
     }
@@ -294,6 +299,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var status: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        model.alerts.start()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.autosaveName = "Milo Usage"
         if let button = status.button {
@@ -303,7 +309,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         }
         popover.behavior = .transient
-        let host = NSHostingController(rootView: Content(model: model)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
+        let host = NSHostingController(rootView: Content(model: model, alerts: model.alerts)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
         model.changed = { [weak self] in self?.updateBadge() }
         updateBadge(); model.start()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
@@ -313,6 +319,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func woke() {
         // A badge that was fresh before sleep must be rechecked before showing it again.
         model.snapshot = nil
+        model.alerts.clearBaseline()
         updateBadge()
         model.refresh()
     }
@@ -336,6 +343,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func show() {
         guard let button = status?.button else { return }
         model.refreshLoginStatus()
+        model.alerts.refreshPermission()
         updateBadge(); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
