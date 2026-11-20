@@ -1,35 +1,71 @@
 .hero .demo-footer { margin-bottom: 0; }
-.hero-index { display: grid; grid-template-columns: auto auto; justify-content: space-between; gap: clamp(2rem, 6vw, 5rem); margin-top: 1rem; }
-.hero-index > :last-child h2 { text-align: right; }
-.hero-index h2 { margin: 0 0 .35rem; font-size: .8rem; font-weight: 550; color: var(--secondary); }
-.hero-index ul { display: grid; grid-template-columns: repeat(2, max-content); gap: .35rem 1.15rem; padding: 0; margin: 0; list-style: none; }
-.hero-index li { display: flex; align-items: center; gap: .35rem; font-size: .9rem; font-weight: 620; }
-.hero-index :is(svg,img) { width: 1.15rem; height: 1.15rem; object-fit: contain; }
-.hero-index svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.omp-icon { background: #262b38; border-radius: .3rem; padding: 2px; }
+.features { --cell-pad: clamp(1.25rem, 2.3vw, 2rem); padding-block: 1rem clamp(3rem, 7vw, 6rem); }
+.features h2 { margin: 0 0 1rem; font-size: clamp(1.65rem, 3vw, 2.6rem); line-height: 1.1; letter-spacing: -.045em; font-weight: 680; }
+.intro { position: relative; }
+.bubbles { display: flex; justify-content: center; align-items: center; gap: 1.3rem; padding: .45rem 0; margin: 0; list-style: none; }
+.bubbles li { display: grid; place-items: center; }
+.bubbles span { display: grid; place-items: center; width: 2.6rem; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at 30% 18%, #ffffffeb, transparent 49%), linear-gradient(145deg, #ffffff4d, #eaf6ff73 70%, #ffffffab); border: 1px solid #ffffffad; box-shadow: inset 0 -2px 5px #aac5ea59, inset 0 2px 4px white, 0 13px 20px -11px #586ba27d; }
+.bubbles span { width: 3.25rem; }
+.bubbles :is(img,svg) { width: 65%; height: 65%; object-fit: contain; }
+.bubbles li:nth-child(2) img { padding: .12rem; background: #242831; border-radius: .45rem; }
+@media (prefers-reduced-motion: no-preference) {
+  .bubbles span { animation: bubble-float 5s ease-in-out infinite alternate; }
+  .bubbles li:nth-child(even) span { animation-delay: -3s; }
+  .bubbles li:nth-child(3) span { animation-delay: -1.5s; }
+}
+@keyframes bubble-float { to { transform: translateY(-5px); } }
+.feature-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; --tile-radius: 1rem; }
+.feature { min-width: 0; padding: var(--cell-pad); border-radius: var(--tile-radius); background: #ffffff78; box-shadow: inset 0 1px 0 #ffffffb0; }
+.feature h3, .feature dt { margin: 0; font: 650 clamp(1.08rem, 1.4vw, 1.25rem)/1.25 Bricolage, system-ui, sans-serif; letter-spacing: -.02em; }
+.feature p, .feature dd { margin: .3rem 0 0; color: var(--secondary); font-size: clamp(.94rem, 1.15vw, 1.05rem); line-height: 1.45; text-wrap: pretty; }
+.feature svg { display: block; width: 2.25rem; height: 2.25rem; padding: .46rem; margin-bottom: .8rem; color: var(--blue); background: #204e8010; border-radius: .6rem; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.feature-panes { grid-column: 1 / -1; overflow: hidden; padding: 0; background: #b7d4e5; }
+.feature-panes dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 0; }
+.feature-panes dl > div { padding: var(--cell-pad); background: #dfedf6; }
+.feature-panes svg { color: #245b76; background: #a2c8d64a; }
+.feature code { white-space: nowrap; font: .88em var(--mono); }
+.feature-menu small { display: inline-block; vertical-align: middle; margin-left: .2rem; padding: .18rem .5rem; border-radius: 2rem; background: #204e800d; color: var(--blue); font: 600 .7rem/1.2 Bricolage, system-ui, sans-serif; letter-spacing: 0; }
+@media (max-width: 60rem) {
+  .feature-panes dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .feature-grid { grid-template-columns: 1fr; }
+  .feature:not(.feature-panes) { display: grid; grid-template-columns: 2.25rem 1fr; column-gap: .9rem; }
+  .feature > svg { grid-row: span 2; margin: 0; }
+}
+@media (max-width: 30rem) {
+  .feature-panes dl { grid-template-columns: 1fr; }
+  .feature-panes dl > div { position: relative; padding: 1rem 1rem 1rem 4.35rem; }
+  .feature-panes svg { position: absolute; top: 1rem; left: 1.2rem; }
+}
 .site-footer { align-items: center; flex-wrap: wrap; gap: 0 1rem; padding: .25rem .75rem 1rem; }
-@media (max-width: 32rem) {
-  .hero-index { gap: 1.25rem; }
-  .hero-index ul { grid-template-columns: 1fr; }
+.hero .terminal { margin-block-start: 1rem; }
+@media (max-width: 45rem) {
+  .hero { min-height: auto; }
 }
 
 @media (min-width: 45.001rem) {
-  body { min-height: 100svh; display: grid; grid-template-rows: minmax(min-content, 1fr) auto; padding-bottom: clamp(.75rem, 2vh, 1.5rem); }
-  main { display: flex; }
-  .hero .terminal { display: flex; flex-direction: column; flex: 1 0 auto; max-height: min(65.5svh, 43.7rem); }
-  .hero { min-height: 0; padding-block: clamp(.5rem, 1.5vh, 1.25rem) 0; }
+  .hero .terminal { display: flex; flex-direction: column; height: clamp(23rem, 58svh, 43.7rem); }
+  .hero { min-height: 100svh; padding-block: clamp(.5rem, 1.5vh, 1.25rem) .25rem; }
+  .hero .demo-footer { margin-bottom: auto; }
   .intro { margin: auto 0 0; gap: .5rem; padding: .25rem 0 .85rem; }
   .terminal-panes {
     flex: 1 0 auto; height: 15rem; contain: size;
     grid-template-rows: calc(var(--usage-height) + var(--usage-extra, 0px)) minmax(0, 1fr) 37%;
   }
   .terminal :is(.outline, .history) { min-height: 0; overflow: hidden; }
-  .hero-index { margin: .25rem 0 auto; }
-  .hero-index ul { grid-template-columns: repeat(4, max-content); }
 }
 @media (min-width: 66rem) {
   .hero { position: relative; }
   .masthead { position: absolute; inset: clamp(.5rem, 1.5vh, 1.25rem) 0 auto; pointer-events: none; }
   .masthead a { pointer-events: auto; }
   .intro { width: calc(100% - 18rem); align-self: center; }
+}
+@media (min-width: 62rem) {
+  .hero .intro { width: 100%; }
+  .bubbles { position: absolute; inset: 0; display: block; pointer-events: none; }
+  .bubbles li { position: absolute; }
+  .bubbles li:nth-child(1) { left: 3%; top: 8%; }
+  .bubbles li:nth-child(2) { left: 15%; bottom: 21%; }
+  .bubbles li:nth-child(3) { right: 15%; top: -9%; }
+  .bubbles li:nth-child(4) { right: 3%; bottom: 24%; }
+  .bubbles span { width: 4rem; }
 }

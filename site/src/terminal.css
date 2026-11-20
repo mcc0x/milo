@@ -4,12 +4,11 @@
   font-display: block;
 }
 
+.hero, .features { width: min(calc(100% - 3rem), 78rem); margin-inline: auto; }
 .hero {
   display: flex;
   flex-direction: column;
   min-height: 100svh;
-  width: min(calc(100% - 3rem), 78rem);
-  margin-inline: auto;
   padding-block: clamp(1rem, 3vh, 2.5rem);
 }
 
@@ -337,7 +336,8 @@
 
 /* A phone shows one pane at a time: the one the scene is on. */
 @media (max-width: 45rem) {
-  .hero { width: calc(100% - 1.5rem); padding-block: .9rem; }
+  .hero, .features { width: calc(100% - 1.5rem); }
+  .hero { padding-block: .9rem; }
   /* Room for two lines, so a longer caption moves nothing below it. */
   .demo-footer { grid-template-columns: minmax(0, 1fr) auto; column-gap: .35rem; }
   .caption { grid-column: 1; min-height: calc(2lh + .9rem); font-size: 1rem; text-wrap: balance; }
