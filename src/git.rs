@@ -7,7 +7,7 @@ mod parse;
 mod pending;
 pub(crate) mod run;
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use crate::read::{self, Content};
 use crate::watch::{Events, Ignored, Scope};
 use parse::{Status, parse_files, parse_history, parse_status};
-use pending::{TrackedDiff, tracked_records};
+use pending::{DiffStamp, TrackedDiff, tracked_records};
 use run::OutputError;
 
 /// A diff of one file larger than this is not loaded.
@@ -28,8 +28,6 @@ pub(crate) const GIT_UNAVAILABLE: &str = "Git could not be run.";
 const PATHS_LIMIT: usize = 300;
 /// The object name git reports before a branch has its first commit.
 const UNBORN: &str = "(initial)";
-/// The empty tree serves as the base until the first commit.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// How a path differs, in order of precedence when a folder summarises its contents.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -92,6 +90,13 @@ impl PendingFile {
     }
 }
 
+/// A Git diff's openable changes and any names the panes cannot represent.
+#[derive(Default)]
+pub(crate) struct DiffFiles {
+    pub(crate) files: Vec<PendingFile>,
+    pub(crate) unrepresented: usize,
+}
+
 /// An object name supplied by the caller, not a branch name or revision expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitId<'a>(&'a str);
@@ -133,13 +138,10 @@ impl Ends {
     fn has_commit(&self) -> bool {
         !self.tip.is_empty() && self.tip != UNBORN
     }
-
-    fn head(&self) -> &'static str {
-        if self.has_commit() { "HEAD" } else { EMPTY_TREE }
-    }
 }
 
 /// The default branch to try in place of an upstream, even before it exists.
+#[derive(PartialEq, Eq)]
 struct StandIn {
     name: String,
     oid: Option<String>,
@@ -152,19 +154,24 @@ impl StandIn {
     }
 }
 
-/// What could make the merge base change between two status reads.
-#[derive(PartialEq, Eq)]
-struct Basis<'a> {
-    tip: &'a str,
-    target: Option<&'a str>,
-    ahead: u32,
+#[derive(Default, PartialEq, Eq)]
+struct Comparison {
+    upstream: Option<String>,
+    stand_in: Option<StandIn>,
 }
 
-impl<'a> Basis<'a> {
-    fn new(status: &'a Status, stand_in: Option<&'a StandIn>) -> Self {
-        let target = stand_in.and_then(|r| r.oid.as_deref()).or(status.upstream.as_deref());
-        Self { tip: &status.ends.tip, target, ahead: status.ahead }
+impl Comparison {
+    fn oid(&self) -> Option<&str> {
+        self.upstream.as_deref().or_else(|| self.stand_in.as_ref()?.oid.as_deref())
     }
+}
+
+/// A poll keeps the same status and comparison for the subsequent read.
+struct Snapshot {
+    raw: Vec<u8>,
+    status: Option<Status>,
+    comparison: Comparison,
+    shallow: Option<DiffStamp>,
 }
 
 #[derive(Default)]
@@ -179,6 +186,7 @@ pub struct HistoryVersion {
     pub branch: String,
     tip: String,
     target: Option<String>,
+    shallow: Option<DiffStamp>,
     pub ahead: Option<u32>,
 }
 
@@ -187,6 +195,7 @@ impl HistoryVersion {
         self.tip == repo.ends().tip
             && self.branch == repo.branch()
             && self.target.as_deref() == repo.history_target()
+            && self.shallow == repo.shallow
             && self.ahead == repo.upstream_ahead()
     }
 }
@@ -194,21 +203,14 @@ impl HistoryVersion {
 #[derive(Default)]
 struct Unpushed {
     ends: Ends,
-    files: Vec<PendingFile>,
+    diff: DiffFiles,
 }
 
 #[derive(Default)]
 struct Tracked {
-    index: Option<FileStamp>,
+    index: Option<DiffStamp>,
     paths: String,
-}
-
-/// A rename's source and the state it was found in.
-struct RenameLookup {
-    path: String,
-    ends: Ends,
-    index: Option<FileStamp>,
-    from: Option<String>,
+    incomplete: bool,
 }
 
 #[derive(Default)]
@@ -223,23 +225,25 @@ pub struct Repo {
     /// its branches. They differ in a linked worktree.
     git_dir: Option<PathBuf>,
     common_dir: Option<PathBuf>,
+    shallow_file: Option<PathBuf>,
+    shallow: Option<DiffStamp>,
+    empty_tree: OnceCell<String>,
     index_lock: Option<PathBuf>,
     config: run::Config,
     read_for: ReadFor,
     /// When set, status is limited to this path.
     file: Option<String>,
-    stand_in: Option<StandIn>,
+    comparison: Comparison,
     /// The status last read, as git printed it and as parsed.
     raw: Vec<u8>,
     status: Status,
     /// Shared with the watcher until Git reports different ignored paths.
     watch_ignored: Arc<Ignored>,
     /// A status `poll` found to differ, kept for `read` to take in.
-    polled: Option<Vec<u8>>,
+    polled: Option<Snapshot>,
     unpushed: Unpushed,
     pending_tracked: Option<TrackedDiff>,
     tracked: Tracked,
-    moved: Option<RenameLookup>,
 }
 
 struct GitDirs {
@@ -338,6 +342,7 @@ impl Repo {
         };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let index_lock = git_dir.as_ref().map(|dir| dir.join("index.lock"));
+        let shallow_file = common_dir.as_ref().map(|dir| dir.join("shallow"));
         Some(Self {
             root,
             name,
@@ -346,6 +351,7 @@ impl Repo {
             ok: Cell::new(true),
             git_dir,
             common_dir,
+            shallow_file,
             index_lock,
             ..Self::default()
         })
@@ -384,7 +390,7 @@ impl Repo {
 
     /// The upstream, or the name of the remote whose default branch stands in for it.
     pub fn remote(&self) -> Option<&str> {
-        self.status.upstream.as_deref().or_else(|| self.stand_in.as_ref().and_then(StandIn::remote))
+        self.status.upstream.as_deref().or_else(|| self.comparison.stand_in.as_ref().and_then(StandIn::remote))
     }
 
     /// A remote can be configured even when there is no branch to compare with.
@@ -405,9 +411,23 @@ impl Repo {
         &self.status.ends
     }
 
-    /// Compare pending files to the base when there is one, otherwise to HEAD.
-    fn against(&self) -> &str {
-        self.ends().base.as_deref().unwrap_or_else(|| self.ends().head())
+    /// The empty tree depends on the repository's object format.
+    fn empty_tree(&self) -> Option<&str> {
+        if let Some(oid) = self.empty_tree.get() {
+            return Some(oid);
+        }
+        let oid = self.require(self.optional_oid(&["hash-object", "-t", "tree", "--stdin"])?)?;
+        Some(self.empty_tree.get_or_init(|| oid))
+    }
+
+    /// Compare pending files to the base when there is one, otherwise to the sampled tip.
+    fn against(&self) -> Option<&str> {
+        let ends = self.ends();
+        match ends.base.as_deref() {
+            Some(base) => Some(base),
+            None if ends.has_commit() => Some(&ends.tip),
+            None => self.empty_tree(),
+        }
     }
 
     /// A required answer that git did not give must not replace what is known.
@@ -514,6 +534,14 @@ impl Repo {
         self.require(run::output(&self.root, self.guard(), args))
     }
 
+    fn snapshot(&mut self) -> Option<Snapshot> {
+        let shallow = self.shallow_file.as_deref().map(DiffStamp::at);
+        let raw = self.status_raw()?;
+        let status = (raw != self.raw).then(|| parse_status(&raw));
+        let comparison = self.comparison(status.as_ref().unwrap_or(&self.status))?;
+        Some(Snapshot { raw, status, comparison, shallow })
+    }
+
     /// Asks git whether the repository state has moved and checks tracked file stamps.
     /// The outline samples untracked stamps separately. Keeps changed status for `read`.
     pub fn poll(&mut self, files: &[PendingFile]) -> bool {
@@ -522,16 +550,19 @@ impl Repo {
             return false;
         }
         let had_remote = self.has_remote();
-        let Some(raw) = self.status_raw() else { return false };
+        let Some(snapshot) = self.snapshot() else { return false };
         let changed = !self.ok()
             || had_remote != self.has_remote()
-            || raw != self.raw
-            || files
-                .iter()
-                .filter(|f| f.kind != Kind::Untracked)
-                .any(|f| FileStamp::at(&self.root.join(&f.path)) != f.stamp)
-            || self.stand_in_moved();
-        self.polled = changed.then_some(raw);
+            || snapshot.status.is_some()
+            || snapshot.comparison != self.comparison
+            || snapshot.shallow != self.shallow
+            || self.tracked_diff_moved()
+            || files.iter().any(|f| {
+                f.kind != Kind::Untracked
+                    && (f.unpushed || self.pending_tracked.is_none())
+                    && FileStamp::at(&self.root.join(&f.path)) != f.stamp
+            });
+        self.polled = changed.then_some(snapshot);
         changed
     }
 
@@ -544,68 +575,74 @@ impl Repo {
         changed
     }
 
-    fn stand_in_moved(&self) -> bool {
-        // A push or fetch moves the remote's branch without touching this one.
-        self.stand_in.as_ref().is_some_and(|r| {
-            (r.oid.is_some() || self.has_remote()) && self.resolve(&r.name).is_some_and(|oid| oid != r.oid)
-        })
-    }
-
     /// Takes in the repository's status and comparison base, keeping both on failure.
     pub fn read(&mut self) {
         if !self.git {
             return;
         }
-        let Some(raw) = self.polled.take().or_else(|| self.status_raw()) else {
+        let Some(Snapshot { raw, status, comparison, shallow }) = self.polled.take().or_else(|| self.snapshot()) else {
             return;
         };
-        let mut status = parse_status(&raw);
-        let Some(stand_in) = self.stand_in(&status) else { return };
-        let base_changed = if matches!(self.read_for, ReadFor::Pending) {
-            if Basis::new(&status, stand_in.as_ref()) == Basis::new(&self.status, self.stand_in.as_ref()) {
-                status.ends.base = self.status.ends.base.take();
-                false
-            } else {
-                let Some(base) = self.merge_base(&status, stand_in.as_ref()) else { return };
-                let changed = base != self.status.ends.base;
-                status.ends.base = base;
-                changed
+        let current = status.as_ref().unwrap_or(&self.status);
+        let tip_changed = current.ends.tip != self.ends().tip;
+        let graph_changed = shallow != self.shallow;
+        let basis_changed = tip_changed || graph_changed || comparison.oid() != self.comparison.oid();
+        let base = match self.read_for {
+            ReadFor::History => None,
+            ReadFor::Pending if basis_changed => {
+                let Some(base) = self.merge_base(&current.ends.tip, comparison.oid()) else { return };
+                base
             }
-        } else {
-            self.status.ends.base.is_some()
+            ReadFor::Pending => self.status.ends.base.take(),
         };
+        let base_changed = (basis_changed || matches!(self.read_for, ReadFor::History)) && base != self.ends().base;
         if self.pending_tracked.is_some()
             && (!self.ok()
                 || base_changed
-                || status.ends.tip != self.status.ends.tip
-                || !tracked_records(&raw).eq(tracked_records(&self.raw)))
+                || tip_changed
+                || (status.is_some() && !tracked_records(&raw).eq(tracked_records(&self.raw))))
         {
             self.invalidate_tracked_diff();
         }
-        if status.ignored_dirs != self.status.ignored_dirs || status.ignored_files != self.status.ignored_files {
-            self.watch_ignored = self.exclusions(&status);
+        if let Some(status) = status {
+            if status.ignored_dirs != self.status.ignored_dirs || status.ignored_files != self.status.ignored_files {
+                self.watch_ignored = self.exclusions(&status);
+            }
+            (self.raw, self.status) = (raw, status);
         }
-        (self.raw, self.status, self.stand_in) = (raw, status, stand_in);
+        self.status.ends.base = base;
+        (self.comparison, self.shallow) = (comparison, shallow);
         self.ok.set(true);
     }
 
-    fn stand_in(&self, status: &Status) -> Option<Option<StandIn>> {
-        if status.upstream.is_some() || !self.has_remote() || !status.ends.has_commit() {
-            return Some(None);
+    fn comparison(&self, status: &Status) -> Option<Comparison> {
+        if !status.ends.has_commit() {
+            return Some(Comparison::default());
         }
-        let remote = status.gone.as_deref().and_then(|u| u.split_once('/')).map_or("origin", |(remote, _)| remote);
-        let name = format!("refs/remotes/{remote}/HEAD");
-        let oid = self.resolve(&name)?;
-        Some(Some(StandIn { name, oid }))
+        if status.upstream.is_some() {
+            // A short upstream name can resolve to an unrelated tag or branch.
+            let upstream = if status.ahead > 0 {
+                let name = format!("{}@{{upstream}}^{{commit}}", status.branch);
+                Some(self.require(self.resolve(&name)?)?)
+            } else {
+                None
+            };
+            return Some(Comparison { upstream, stand_in: None });
+        }
+        let stand_in = if self.has_remote() {
+            let remote = status.gone.as_deref().and_then(|u| u.split_once('/')).map_or("origin", |(remote, _)| remote);
+            let name = format!("refs/remotes/{remote}/HEAD");
+            let oid = self.resolve(&name)?;
+            Some(StandIn { name, oid })
+        } else {
+            None
+        };
+        Some(Comparison { upstream: None, stand_in })
     }
 
-    fn merge_base(&self, status: &Status, stand_in: Option<&StandIn>) -> Option<Option<String>> {
-        // An upstream this branch is level with has nothing to compare.
-        let target =
-            status.upstream.as_deref().filter(|_| status.ahead > 0).or_else(|| stand_in.and_then(|r| r.oid.as_deref()));
-        let Some(target) = target.filter(|_| status.ends.has_commit()) else { return Some(None) };
-        let base = self.optional_oid(&["merge-base", "--end-of-options", &status.ends.tip, target])?;
-        Some(base.filter(|base| *base != status.ends.tip))
+    fn merge_base(&self, tip: &str, target: Option<&str>) -> Option<Option<String>> {
+        let Some(target) = target.filter(|&target| target != tip) else { return Some(None) };
+        self.optional_oid(&["merge-base", "--end-of-options", tip, target])
     }
 
     /// Returns pending files from the last `read`, uncommitted before unpushed.
@@ -628,11 +665,11 @@ impl Repo {
                     let args = ["diff", base, &ends.tip, "-M", "--raw", "--numstat", "-z", "--"];
                     parse_files(&self.git(&args)?)
                 }
-                None => Vec::new(),
+                None => DiffFiles::default(),
             };
-            self.unpushed = Unpushed { ends: ends.clone(), files: parsed };
+            self.unpushed = Unpushed { ends: ends.clone(), diff: parsed };
         }
-        files.extend(self.unpushed.files.iter().cloned().map(|mut file| {
+        files.extend(self.unpushed.diff.files.iter().cloned().map(|mut file| {
             file.unpushed = true;
             file.stamp = FileStamp::at(&self.root.join(&file.path));
             file
@@ -640,8 +677,9 @@ impl Repo {
         Some(())
     }
 
-    fn index_stamp(&self) -> Option<FileStamp> {
-        FileStamp::at(&self.git_dir.as_ref()?.join("index"))
+    /// Some pathname bytes cannot be used by the panes' UTF-8 path model.
+    pub(crate) fn paths_incomplete(&self) -> bool {
+        self.status.unrepresented != 0 || self.tracked.incomplete || self.unpushed.diff.unrepresented != 0
     }
 
     /// Tracked paths relative to the root. A failed refresh leaves the cache intact.
@@ -649,11 +687,21 @@ impl Repo {
         if !self.ok() {
             return None;
         }
-        let index = self.index_stamp();
+        let index = self.diff_index();
         if index.is_none() || index != self.tracked.index {
             let raw = self.git(&["ls-files", "-z", "--cached"])?;
-            let paths = String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-            self.tracked = Tracked { index, paths };
+            let (paths, incomplete) = match String::from_utf8(raw) {
+                Ok(paths) => (paths, false),
+                Err(invalid) => {
+                    let mut paths = String::new();
+                    for path in invalid.as_bytes().split(|&b| b == 0).filter_map(parse::utf8_path) {
+                        paths.push_str(path);
+                        paths.push('\0');
+                    }
+                    (paths, true)
+                }
+            };
+            self.tracked = Tracked { index, paths, incomplete };
         }
         Some(self.tracked.paths.split_terminator('\0'))
     }
@@ -666,27 +714,16 @@ impl Repo {
         self.status.unmerged.iter().any(|p| p == path)
     }
 
-    /// Finds the source of a rename. The whole-tree comparison is cached
-    /// for the same path, refs and index.
-    pub fn moved_from(&mut self, path: &str) -> Option<String> {
-        let index = self.index_stamp();
-        let fresh = index.is_some()
-            && self
-                .moved
-                .as_ref()
-                .is_some_and(|known| known.path == path && &known.ends == self.ends() && known.index == index);
-        if !fresh {
-            let raw = self.git(&["diff", self.against(), "-M", "--raw", "-z", "--"])?;
-            let from = parse_files(&raw).into_iter().find(|f| f.path == path).and_then(|f| f.from);
-            self.moved = Some(RenameLookup { path: path.to_string(), ends: self.ends().clone(), index, from });
-        }
-        self.moved.as_ref().filter(|known| known.path == path)?.from.clone()
+    /// Rename similarity depends on the current worktree contents, not just its index.
+    pub fn moved_from(&self, path: &str) -> Option<String> {
+        let raw = self.git(&["diff", self.against()?, "-M", "--name-status", "-z", "--"])?;
+        parse::changed_file(&raw, path)??.from
     }
 
     /// Every line, including losses, against the base or last commit.
     /// `None` means too large to show or that git could not be asked.
     pub fn file_diff(&self, path: &str, from: Option<&str>) -> Option<Vec<u8>> {
-        match run::working_diff(&self.root, self.guard(), self.against(), path, from) {
+        match run::working_diff(&self.root, self.guard(), self.against()?, path, from) {
             Ok(diff) => Some(diff),
             // An oversized diff is not a git failure.
             Err(OutputError::TooLarge) => None,
@@ -696,7 +733,9 @@ impl Repo {
 
     /// Counts paths with work to commit, counting a move once.
     pub fn uncommitted_count(&self) -> usize {
-        self.status.tracked_uncommitted.len() - self.status.sources.len() + self.status.untracked.len()
+        self.status.tracked_uncommitted.len() - self.status.sources.len()
+            + self.status.untracked.len()
+            + self.status.unrepresented
     }
 
     /// The full number ahead of the upstream, if this branch has one.
@@ -709,16 +748,13 @@ impl Repo {
             branch: self.branch().to_owned(),
             tip: self.ends().tip.clone(),
             target: self.history_target().map(str::to_owned),
+            shallow: self.shallow,
             ahead: self.upstream_ahead(),
         }
     }
 
     fn history_target(&self) -> Option<&str> {
-        match self.upstream_ahead() {
-            Some(0) => None,
-            Some(_) => self.status.upstream.as_deref(),
-            None => self.stand_in.as_ref()?.oid.as_deref().filter(|&oid| oid != self.ends().tip),
-        }
+        self.comparison.oid().filter(|&oid| oid != self.ends().tip)
     }
 
     /// Finds the full object name and date without reading the work tree.
@@ -733,7 +769,7 @@ impl Repo {
     /// Git treats a shallow boundary as a root. Without the real parent we
     /// cannot tell what changed there.
     fn has_parent_history(&self, hash: &str) -> bool {
-        self.common_dir.as_ref().is_none_or(|dir| match read::file(&dir.join("shallow"), DIFF_LIMIT) {
+        self.shallow_file.as_ref().is_none_or(|file| match read::file(file, DIFF_LIMIT) {
             Content::Gone => true,
             Content::Bytes(bytes) => !bytes.split(|&b| b == b'\n').any(|oid| oid == hash.as_bytes()),
             _ => false,
@@ -741,7 +777,7 @@ impl Repo {
     }
 
     /// Reads the files touched by this commit, compared with its first parent.
-    pub fn files_at(&self, hash: &str) -> Option<Vec<PendingFile>> {
+    pub(crate) fn files_at(&self, hash: &str) -> Option<DiffFiles> {
         if !self.has_parent_history(hash) {
             return None;
         }
@@ -755,7 +791,7 @@ impl Repo {
             return None;
         }
         let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Paths).ok()?;
-        Some(parse::changed_file(&raw, path))
+        parse::changed_file(&raw, path)
     }
 
     /// Reads a whole-file patch, using both paths when a file moved.
@@ -799,13 +835,14 @@ impl Repo {
             "--no-notes",
             "--no-decorate",
             "--no-patch",
+            "-z",
             "--encoding=UTF-8",
             "--format=%H%x00%ct%x00%P%x00%s",
             "--end-of-options",
             tip,
             "--",
         ])?;
-        Some(parse_history(&raw, &unpushed))
+        self.require(parse_history(&raw, &unpushed))
     }
 }
 
@@ -900,7 +937,7 @@ mod tests {
         f.git(&["mv", "old.txt", "new.txt"]);
         f.write("HEAD", "not a ref\n");
 
-        let mut repo = read_repo(&f);
+        let repo = read_repo(&f);
         assert_eq!(repo.moved_from("new.txt").as_deref(), Some("old.txt"));
         assert!(repo.ok());
     }
@@ -922,6 +959,84 @@ mod tests {
         let commits = repo.history(1).unwrap();
         assert_eq!(commits[0].subject, "second");
         assert!(commits[0].unpushed);
+    }
+
+    #[test]
+    fn moving_an_upstream_with_the_same_ahead_count_refreshes_pending_and_history() {
+        let f = Fixture::new();
+        f.write("base.txt", "base\n");
+        f.commit("base");
+        f.push();
+        f.git(&["switch", "-q", "-c", "left"]);
+        f.write("left.txt", "left\n");
+        f.commit("left");
+        f.git(&["switch", "-q", "-c", "right", "main"]);
+        f.write("right.txt", "right\n");
+        f.commit("right");
+        f.git(&["switch", "-q", "main"]);
+        f.git(&["merge", "-q", "--no-ff", "-m", "merge left", "left"]);
+        f.git(&["merge", "-q", "--no-ff", "-m", "merge right", "right"]);
+        f.git(&["update-ref", "refs/remotes/origin/main", "left"]);
+
+        let mut repo = read_repo(&f);
+        let version = repo.history_version();
+        let pending = repo.pending().unwrap();
+        assert_eq!(pending.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["right.txt"]);
+        let is_unpushed = |repo: &Repo, subject: &str| {
+            repo.history(12).unwrap().into_iter().find(|c| c.subject == subject).unwrap().unpushed
+        };
+        assert!(!is_unpushed(&repo, "left"));
+        f.git(&["update-ref", "refs/remotes/origin/main", "right"]);
+        assert!(!is_unpushed(&repo, "left"), "history should use the sampled upstream until the next read");
+
+        let before = repo.raw.clone();
+        assert!(repo.poll(&pending), "the upstream moved but the ahead/behind counts did not");
+        repo.read();
+        assert_eq!(repo.raw, before);
+        assert!(!version.matches(&repo));
+        assert!(is_unpushed(&repo, "left"));
+        assert!(!is_unpushed(&repo, "right"));
+        let pending = repo.pending().unwrap();
+        assert_eq!(pending.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["left.txt"]);
+    }
+
+    #[test]
+    fn staged_changes_in_an_unborn_sha256_repository_use_its_empty_tree() {
+        let f = Fixture::folder();
+        f.git(&["init", "-q", "--template=", "-b", "main", "--object-format=sha256"]);
+        f.write("page.txt", "staged\n");
+        f.git(&["add", "page.txt"]);
+        f.write("page.txt", "staged\nunstaged\n");
+
+        let mut repo = read_repo(&f);
+        let files = repo.pending().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!((files[0].kind, files[0].add, files[0].del), (Kind::Added, 2, 0));
+        assert!(repo.file_diff("page.txt", None).unwrap().ends_with(b"+staged\n+unstaged\n"));
+        assert!(repo.history(1).unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn git_lists_valid_siblings_without_mistaking_non_utf8_names_for_them() {
+        let f = Fixture::new();
+        let invalid = f.root.join(OsStr::from_bytes(b"page\xff.txt"));
+        f.write("page\u{fffd}.txt", "valid\n");
+        fs::write(&invalid, "raw path\n").unwrap();
+        f.commit("both paths");
+        let mut repo = read_repo(&f);
+        assert_eq!(repo.tracked().unwrap().collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
+        assert!(repo.paths_incomplete());
+
+        let diff = repo.files_at(&repo.ends().tip).unwrap();
+        assert_eq!(diff.unrepresented, 1);
+        assert_eq!(diff.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
+
+        fs::write(invalid, "edited raw path\n").unwrap();
+        repo.read();
+        assert_eq!(repo.uncommitted_count(), 1);
+        assert!(repo.pending().unwrap().is_empty());
+        assert!(repo.paths_incomplete());
     }
 
     #[test]
@@ -1077,7 +1192,7 @@ mod tests {
         f.write(path, "same content\n");
         f.git(&["add", "-A"]);
 
-        let mut repo = read_repo(&f);
+        let repo = read_repo(&f);
         assert_eq!(repo.moved_from(path).as_deref(), Some(from));
         let patch = crate::diff::parse(&repo.file_diff(path, Some(from)).unwrap());
         assert_eq!(patch.kind, Kind::Renamed);

@@ -4,18 +4,18 @@ use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use super::{EMPTY_TREE, FileStamp, Kind, PATHS_LIMIT, PendingFile, Repo, parse_files};
+use super::{FileStamp, Kind, PATHS_LIMIT, PendingFile, Repo, parse_files};
 
 /// Worktree inputs that can be stamped without opening a file.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffStamp {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum DiffStamp {
     Missing,
     File { stamp: FileStamp, device: u64, inode: u64, changed: (i64, i64) },
     Uncertain(Option<FileStamp>),
 }
 
 impl DiffStamp {
-    fn at(path: &Path) -> Self {
+    pub(super) fn at(path: &Path) -> Self {
         match path.symlink_metadata() {
             Ok(meta) => match FileStamp::of(&meta) {
                 Some(stamp) if meta.is_file() || meta.is_symlink() => Self::File {
@@ -73,6 +73,10 @@ impl Repo {
         self.pending_tracked = None;
     }
 
+    pub(super) fn tracked_diff_moved(&self) -> bool {
+        self.pending_tracked.as_ref().is_some_and(|known| !self.diff_stamps().eq(known.stamps.iter().copied()))
+    }
+
     pub(super) fn tracked_uncommitted(&mut self) -> Option<Vec<PendingFile>> {
         let paths = &self.status.tracked_uncommitted;
         if paths.is_empty() {
@@ -91,8 +95,7 @@ impl Repo {
             if same_paths && stamp != *previous {
                 changed.push(at);
             }
-            // A lossy status path may not name the file we just stamped.
-            cacheable &= !matches!(stamp, DiffStamp::Uncertain(_)) && !paths[at].contains('\u{fffd}');
+            cacheable &= !matches!(stamp, DiffStamp::Uncertain(_));
             *previous = stamp;
         }
         if !same_paths || !changed.is_empty() {
@@ -101,7 +104,7 @@ impl Repo {
             // Use the tip from status, not a possibly newer HEAD. The large
             // full diff uses the tip to exclude files that are only unpushed.
             let ends = self.ends();
-            let tip = if ends.has_commit() { ends.tip.as_str() } else { EMPTY_TREE };
+            let tip = if ends.has_commit() { ends.tip.as_str() } else { self.empty_tree()? };
             let against = if named { ends.base.as_deref().unwrap_or(tip) } else { tip };
             if !(cacheable
                 && same_paths
@@ -135,7 +138,7 @@ impl Repo {
         })
     }
 
-    fn diff_index(&self) -> Option<DiffStamp> {
+    pub(super) fn diff_index(&self) -> Option<DiffStamp> {
         let stamp = DiffStamp::at(&self.git_dir.as_ref()?.join("index"));
         matches!(stamp, DiffStamp::File { .. }).then_some(stamp)
     }
@@ -171,7 +174,7 @@ impl Repo {
             scoped.push(path);
             rows.push(row);
         }
-        let files = parse_files(&self.git(&scoped)?);
+        let files = parse_files(&self.git(&scoped)?).files;
         if files.len() != rows.len()
             || !files.iter().zip(&rows).all(|(file, &row)| {
                 file.kind == Kind::Modified && file.path == known.files[row].path
@@ -202,7 +205,7 @@ impl Repo {
             self.git(&args)?
         };
         let stamps: HashMap<&str, _> = paths.iter().zip(stamps).map(|(p, s)| (p.as_str(), s.file())).collect();
-        let mut files = parse_files(&raw);
+        let mut files = parse_files(&raw).files;
         if named {
             self.add_missing_files(&mut files, &stamps);
         } else {
@@ -398,6 +401,7 @@ mod tests {
         warm.read();
         let before = warm.pending().unwrap();
         assert!(before.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Renamed));
+        assert_eq!(warm.moved_from("new.txt").as_deref(), Some("old.txt"));
 
         let raw = warm.raw.clone();
         f.write("new.txt", &"nothing in common\n".repeat(20));
@@ -406,6 +410,7 @@ mod tests {
         let after = warm.pending().unwrap();
         assert!(after.iter().any(|file| file.path == "old.txt" && file.kind == Kind::Deleted));
         assert!(after.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Added));
+        assert_eq!(warm.moved_from("new.txt"), None);
     }
 
     #[test]
@@ -444,7 +449,7 @@ mod tests {
         f.write("page.txt", "base\nnext edit\nextra line\n");
         known.stamps = repo.diff_stamps().collect();
         f.write("peer.txt", "base\nanother edit\nextra line\n");
-        assert_eq!(repo.recount_tracked(&mut known, &[0], repo.against()), Some(false));
+        assert_eq!(repo.recount_tracked(&mut known, &[0], repo.against().unwrap()), Some(false));
         assert_eq!(known.files, before);
     }
 
@@ -495,6 +500,7 @@ mod tests {
         f.write("replacement", "xxxx\nyyyy\n");
         fs::File::options().write(true).open(&replacement).unwrap().set_modified(page.stamp.unwrap().written).unwrap();
         fs::rename(replacement, f.root.join("page.txt")).unwrap();
+        assert!(repo.poll(std::slice::from_ref(&page)), "the replacement kept its size and mtime");
         repo.read();
         let changed = tracked_page(&mut repo);
         assert_eq!(changed.stamp, page.stamp);

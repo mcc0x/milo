@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use super::{Commit, CommitId, CommitVersion, Ends, Kind, PendingFile};
+use super::{Commit, CommitId, CommitVersion, DiffFiles, Ends, Kind, PendingFile};
 use crate::when;
 
 #[derive(Default)]
@@ -27,6 +27,16 @@ pub(super) struct Status {
     pub(super) ignored_files: Vec<PathBuf>,
     /// Paths left in conflict by a merge.
     pub(super) unmerged: Vec<String>,
+    /// Changed entries that cannot be opened using the panes' UTF-8 paths.
+    pub(super) unrepresented: usize,
+}
+
+pub(super) fn utf8_path(raw: &[u8]) -> Option<&str> {
+    std::str::from_utf8(raw).ok().filter(|path| !path.is_empty())
+}
+
+fn status_path(record: &[u8], fields: usize) -> Option<&str> {
+    utf8_path(record.splitn(fields, |&b| b == b' ').nth(fields - 1)?)
 }
 
 /// Parses `git status --porcelain=v2 --branch -z`.
@@ -36,7 +46,6 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
     // Git names a missing upstream but omits the ahead/behind line.
     let mut measured = false;
     // The path is the last of a fixed number of fields, and may hold spaces.
-    let path = |entry: &str, fields: usize| entry.splitn(fields, ' ').nth(fields - 1).map(str::to_string);
     while let Some(bytes) = entries.next() {
         if let Some(path) = bytes.strip_prefix(b"! ") {
             // Don't accidentally exclude a different path with a replacement character.
@@ -48,37 +57,55 @@ pub(super) fn parse_status(raw: &[u8]) -> Status {
             }
             continue;
         }
-        let text = String::from_utf8_lossy(bytes);
-        let e = text.as_ref();
-        if let Some(path) = e.strip_prefix("? ") {
+        if let Some(path) = bytes.strip_prefix(b"? ") {
             // A nested repository is reported as a directory, with a slash.
-            st.untracked.push(path.trim_end_matches('/').to_string());
-        } else if e.starts_with("1 ") {
-            st.tracked_uncommitted.extend(path(e, 9));
-        } else if e.starts_with("2 ") {
-            let mut fields = e.splitn(10, ' ');
-            let score = fields.nth(8);
-            st.tracked_uncommitted.extend(fields.next().map(str::to_string));
-            // Both renames and copies have a second path, but only a move
-            // makes its source part of the change.
-            let from = entries.next().unwrap_or_default();
-            if score.is_some_and(|score| score.starts_with('R')) {
-                let from = String::from_utf8_lossy(from);
-                st.tracked_uncommitted.push(from.to_string());
-                st.sources.push(from.into_owned());
+            if let Some(path) = utf8_path(path) {
+                st.untracked.push(path.trim_end_matches('/').to_owned());
+            } else {
+                st.unrepresented += 1;
             }
-        } else if e.starts_with("u ") {
-            st.unmerged.extend(path(e, 11));
-            st.tracked_uncommitted.extend(path(e, 11));
-        } else if let Some(v) = e.strip_prefix("# branch.oid ") {
-            st.ends.tip = v.to_string();
-        } else if let Some(v) = e.strip_prefix("# branch.head ") {
-            st.branch = v.to_string();
-        } else if let Some(v) = e.strip_prefix("# branch.upstream ") {
-            st.upstream = Some(v.to_string());
-        } else if let Some(v) = e.strip_prefix("# branch.ab +") {
+        } else if bytes.starts_with(b"1 ") {
+            if let Some(path) = status_path(bytes, 9) {
+                st.tracked_uncommitted.push(path.to_owned());
+            } else {
+                st.unrepresented += 1;
+            }
+        } else if bytes.starts_with(b"2 ") {
+            let mut fields = bytes.splitn(10, |&b| b == b' ');
+            let rename = fields.nth(8).is_some_and(|score| score.starts_with(b"R"));
+            let path = fields.next().and_then(utf8_path);
+            // Both renames and copies have another token. A copy doesn't
+            // require the source to be openable because it is an addition.
+            let source = entries.next().and_then(utf8_path);
+            if let Some(path) = path.filter(|_| !rename || source.is_some()) {
+                st.tracked_uncommitted.push(path.to_owned());
+                if let Some(source) = source.filter(|_| rename) {
+                    st.tracked_uncommitted.push(source.to_owned());
+                    st.sources.push(source.to_owned());
+                }
+            } else {
+                st.unrepresented += 1;
+            }
+        } else if bytes.starts_with(b"u ") {
+            if let Some(path) = status_path(bytes, 11) {
+                st.unmerged.push(path.to_owned());
+                st.tracked_uncommitted.push(path.to_owned());
+            } else {
+                st.unrepresented += 1;
+            }
+        } else if let Some(v) = bytes.strip_prefix(b"# branch.oid ") {
+            st.ends.tip = String::from_utf8_lossy(v).into_owned();
+        } else if let Some(v) = bytes.strip_prefix(b"# branch.head ") {
+            st.branch = String::from_utf8_lossy(v).into_owned();
+        } else if let Some(v) = bytes.strip_prefix(b"# branch.upstream ") {
+            st.upstream = Some(String::from_utf8_lossy(v).into_owned());
+        } else if let Some(v) = bytes.strip_prefix(b"# branch.ab +") {
             measured = true;
-            st.ahead = v.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            st.ahead = v
+                .split(|&b| b == b' ')
+                .next()
+                .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok())
+                .unwrap_or(0);
         }
     }
     if !measured {
@@ -97,63 +124,78 @@ fn diff_kind(code: u8) -> Kind {
     }
 }
 
-/// Finds the exact destination path in `--name-status -z` output.
-pub(super) fn changed_file(raw: &[u8], path: &str) -> Option<PendingFile> {
-    let mut tokens = raw.split(|&b| b == 0);
-    while let Some(&code) = tokens.next()?.first() {
+/// Finds the exact destination path in `--name-status -z` output, or fails
+/// if opening that change would require an unrepresentable rename source.
+pub(super) fn changed_file(raw: &[u8], path: &str) -> Option<Option<PendingFile>> {
+    if raw.is_empty() {
+        return Some(None);
+    }
+    let mut tokens = raw.strip_suffix(b"\0")?.split(|&b| b == 0);
+    while let Some(status) = tokens.next() {
+        let code = *status.first()?;
         // Renames and copies list the old path first.
         let old = if matches!(code, b'R' | b'C') { Some(tokens.next()?) } else { None };
         if tokens.next()? == path.as_bytes() {
             let mut file = PendingFile::new(path, diff_kind(code));
-            file.from = old.filter(|_| code == b'R').map(|old| String::from_utf8_lossy(old).into_owned());
-            return Some(file);
+            if code == b'R' {
+                file.from = Some(utf8_path(old?)?.to_owned());
+            }
+            return Some(Some(file));
         }
     }
-    None
+    Some(None)
 }
 
 /// Parses `--raw --numstat -z` output: what happened to each path, then how
 /// many lines each gained and lost.
-pub(super) fn parse_files(raw: &[u8]) -> Vec<PendingFile> {
-    let mut files = Vec::new();
-    let text = String::from_utf8_lossy(raw);
-    let mut tokens = text.split('\0').filter(|t| !t.is_empty());
+pub(super) fn parse_files(raw: &[u8]) -> DiffFiles {
+    let mut diff = DiffFiles::default();
+    let mut tokens = raw.split(|&b| b == 0).filter(|t| !t.is_empty());
     let mut next = 0;
+    let number = |s: &[u8]| std::str::from_utf8(s).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     while let Some(tok) = tokens.next() {
-        if tok.starts_with(':') {
-            let code = tok.rsplit(' ').next().and_then(|c| c.bytes().next()).unwrap_or(b'M');
+        if tok.starts_with(b":") {
+            let code = tok.rsplit(|&b| b == b' ').next().and_then(|c| c.first()).copied().unwrap_or(b'M');
             let kind = diff_kind(code);
             // Renames and copies list the old path first.
-            let old = if matches!(code, b'R' | b'C') { tokens.next() } else { None };
+            let old = if matches!(code, b'R' | b'C') { tokens.next().and_then(utf8_path) } else { None };
             if let Some(path) = tokens.next() {
-                let mut file = PendingFile::new(path, kind);
-                file.from = old.filter(|_| code == b'R').map(str::to_string);
-                files.push(file);
+                if let Some(path) = utf8_path(path).filter(|_| code != b'R' || old.is_some()) {
+                    let mut file = PendingFile::new(path, kind);
+                    file.from = old.filter(|_| code == b'R').map(str::to_owned);
+                    diff.files.push(file);
+                } else {
+                    diff.unrepresented += 1;
+                }
             }
             continue;
         }
-        let mut f = tok.splitn(3, '\t');
-        let (add, del, path) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
-        let path = if path.is_empty() {
-            tokens.next();
-            tokens.next().unwrap_or("")
+        let mut f = tok.splitn(3, |&b| b == b'\t');
+        let (Some(add), Some(del), Some(path)) = (f.next(), f.next(), f.next()) else { continue };
+        let (old, path) = if path.is_empty() {
+            (tokens.next(), tokens.next().unwrap_or_default())
         } else {
-            path
+            (None, path)
         };
+        let Some(path) = utf8_path(path) else { continue };
         // Both lists come in the same order, so the match is normally `next`.
-        let at = if files.get(next).is_some_and(|f| f.path == path) {
+        // The old path also matters for a rename whose source cannot be opened.
+        let matches = |file: &PendingFile| {
+            file.path == path && (file.kind != Kind::Renamed || file.from.as_deref().map(str::as_bytes) == old)
+        };
+        let at = if diff.files.get(next).is_some_and(matches) {
             Some(next)
         } else {
-            files.iter().position(|f| f.path == path)
+            diff.files.iter().position(matches)
         };
         if let Some(i) = at {
             next = i + 1;
             // Binary files report "-" and keep their counts at zero.
-            files[i].add = add.parse().unwrap_or(0);
-            files[i].del = del.parse().unwrap_or(0);
+            diff.files[i].add = number(add);
+            diff.files[i].del = number(del);
         }
     }
-    files
+    diff
 }
 
 pub(super) fn commit_version(raw: &[u8], id: CommitId<'_>) -> Option<CommitVersion> {
@@ -164,25 +206,27 @@ pub(super) fn commit_version(raw: &[u8], id: CommitId<'_>) -> Option<CommitVersi
 }
 
 /// Parses history and marks the commits in the unpushed list.
-pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Vec<Commit> {
-    let unpushed = String::from_utf8_lossy(unpushed);
-    let unpushed: HashSet<&str> = unpushed.lines().collect();
-    String::from_utf8_lossy(log)
-        .lines()
-        .filter_map(|line| {
-            let mut f = line.splitn(4, '\0');
-            let (hash, time, parents, subject) = (f.next()?, f.next()?, f.next()?, f.next()?);
-            let time = time.parse().unwrap_or(0);
-            Some(Commit {
+pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Option<Vec<Commit>> {
+    let unpushed: HashSet<&[u8]> = unpushed.split(|&b| b == b'\n').filter(|oid| !oid.is_empty()).collect();
+    let mut commits = Vec::new();
+    if !log.is_empty() {
+        let mut fields = log.strip_suffix(b"\0")?.split(|&b| b == 0);
+        while let Some(hash) = fields.next() {
+            let name = std::str::from_utf8(hash).ok()?;
+            let time = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+            let parents = fields.next()?;
+            let subject = fields.next()?;
+            commits.push(Commit {
                 unpushed: unpushed.contains(hash),
-                hash: hash.to_string(),
-                subject: subject.to_string(),
+                hash: name.to_owned(),
+                subject: String::from_utf8_lossy(subject).into_owned(),
                 time,
                 day: when::local_day(time),
-                merge: parents.contains(' '),
-            })
-        })
-        .collect()
+                merge: parents.contains(&b' '),
+            });
+        }
+    }
+    Some(commits)
 }
 
 #[cfg(test)]
@@ -259,7 +303,8 @@ mod tests {
         let files = parse_files(
             b":100644 100644 a b M\0src/a.rs\0:000000 100644 0 c A\0new file.txt\0:100644 000000 d 0 D\0gone\0\
               3\t1\tsrc/a.rs\x005\t0\tnew file.txt\x000\t7\tgone\0",
-        );
+        )
+        .files;
         let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.kind, f.add, f.del)).collect();
         assert_eq!(
             got,
@@ -270,7 +315,8 @@ mod tests {
     #[test]
     fn diff_keeps_the_source_of_a_rename() {
         let files =
-            parse_files(b":100644 100644 a b R090\0old/name.rs\0new/name.rs\x002\t1\t\0old/name.rs\0new/name.rs\0");
+            parse_files(b":100644 100644 a b R090\0old/name.rs\0new/name.rs\x002\t1\t\0old/name.rs\0new/name.rs\0")
+                .files;
         assert_eq!(files.len(), 1);
         assert_eq!((files[0].path.as_str(), files[0].kind), ("new/name.rs", Kind::Renamed));
         assert_eq!(files[0].from.as_deref(), Some("old/name.rs"));
@@ -279,12 +325,42 @@ mod tests {
 
     #[test]
     fn binary_files_have_no_line_counts() {
-        let files = parse_files(b":100644 100644 a b M\0logo.png\0-\t-\tlogo.png\0");
+        let files = parse_files(b":100644 100644 a b M\0logo.png\0-\t-\tlogo.png\0").files;
         assert_eq!((files[0].add, files[0].del), (0, 0));
     }
 
     #[test]
     fn a_diff_with_a_missing_path_produces_no_file() {
-        assert!(parse_files(b":100644 100644 a b \0").is_empty());
+        assert!(parse_files(b":100644 100644 a b \0").files.is_empty());
+    }
+
+    #[test]
+    fn invalid_path_bytes_do_not_alias_a_replacement_character() {
+        let st = parse_status(
+            b"? path\xff\0? path\xef\xbf\xbd\0\
+              2 R. N... 100644 100644 100644 h1 h2 R100 new.txt\0old\xff\0? last.txt\0",
+        );
+        assert_eq!(st.untracked, ["path\u{fffd}", "last.txt"]);
+        assert!(st.tracked_uncommitted.is_empty());
+        assert_eq!(st.unrepresented, 2);
+
+        let diff = parse_files(
+            b":100644 100644 a b M\0path\xff\0:100644 100644 a b M\0path\xef\xbf\xbd\0\
+              100\t50\tpath\xff\x002\t1\tpath\xef\xbf\xbd\0",
+        );
+        assert_eq!(diff.unrepresented, 1);
+        assert_eq!(diff.files.len(), 1);
+        let file = &diff.files[0];
+        assert_eq!((file.path.as_str(), file.add, file.del), ("path\u{fffd}", 2, 1));
+        assert!(changed_file(b"R100\0old\xff\0new.txt\0", "new.txt").is_none());
+    }
+
+    #[test]
+    fn history_fields_are_nul_delimited() {
+        let commits = parse_history(b"aaaa\x0017\0\0first\nline\0bbbb\x0018\0aaaa cccc\0\0", b"bbbb\n").unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!((commits[0].subject.as_str(), commits[0].time), ("first\nline", 17));
+        assert!(commits[1].subject.is_empty() && commits[1].unpushed && commits[1].merge);
+        assert!(parse_history(b"aaaa\0invalid\0\0subject\0", b"").is_none());
     }
 }

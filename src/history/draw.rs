@@ -260,7 +260,7 @@ impl History {
     fn draw_body(&self, s: &mut Screen, body_top: usize, top: usize) {
         let mut ages = Ages::default();
         let open_files = self.open_files();
-        let files = open_files.unwrap_or_default();
+        let files = open_files.map_or(&[][..], |diff| diff.files.as_slice());
         let right = s.w - 1;
         for (i, row) in self.rows.iter().enumerate().skip(top).take(self.shown) {
             let y = body_top + i - top;
@@ -271,7 +271,7 @@ impl History {
                     let end = if s.w <= DETAIL_COLS {
                         right
                     } else if self.open_index() == Some(index) {
-                        open_files.map_or(right, |files| file_count(s, y, files.len()))
+                        open_files.map_or(right, |diff| file_count(s, y, diff.files.len() + diff.unrepresented))
                     } else {
                         ages.draw(s, y, self.entries[index].commit.time)
                     };

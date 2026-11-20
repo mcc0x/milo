@@ -59,7 +59,7 @@ impl History {
     fn read_file(&mut self, i: usize) {
         let Some(open) = self.open_index() else { return };
         let entry = &self.entries[open];
-        let Some(file) = entry.files.as_ref().and_then(|files| files.get(i)) else { return };
+        let Some(file) = entry.files.as_ref().and_then(|diff| diff.files.get(i)) else { return };
         let commit = &entry.commit;
         match self.opener.open(&self.repo, ReadFile::Committed { commit, file }) {
             Ok(reader) => self.reading = reader,
@@ -69,8 +69,10 @@ impl History {
 
     /// Make room for the preview when a keyboard opens a commit at the edge.
     fn keep_preview_in_view(&mut self) {
-        let files = self.open_files().map_or(0, <[_]>::len);
-        let preview = files.min(FILE_PREVIEW) + usize::from(files > FILE_PREVIEW);
+        let preview = self.open_files().map_or(0, |diff| {
+            let files = diff.files.len();
+            files.min(FILE_PREVIEW) + usize::from(files > FILE_PREVIEW) + usize::from(diff.unrepresented > 0)
+        });
         let shown = self.shown.max(1);
         let room = preview.max(1).min(shown - 1);
         self.top = self.top.max((self.cursor + room + 1).saturating_sub(shown));

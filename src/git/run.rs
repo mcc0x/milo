@@ -1,7 +1,9 @@
 //! Runs read-only git commands without letting a repository run its own programs.
 
+use std::ffi::OsStr;
 use std::io::Read as _;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
@@ -22,8 +24,7 @@ pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     launcher.arg("--exec-path");
     let real = checked_output(launcher, 4096)
         .ok()
-        .and_then(|raw| String::from_utf8(raw).ok())
-        .map(|path| Path::new(path.trim()).join("git"));
+        .and_then(|raw| raw.strip_suffix(b"\n").map(|path| Path::new(OsStr::from_bytes(path)).join("git")));
     real.filter(|path| path.is_absolute() && path.is_file()).unwrap_or_else(|| PathBuf::from("git"))
 });
 
@@ -129,8 +130,9 @@ pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Opti
     let (status, raw) = capture(command(root, guard, args), 128).ok()?;
     if status.success() {
         let mut oid = String::from_utf8(raw).ok()?;
-        oid.truncate(oid.trim_end().len());
-        (!oid.is_empty()).then_some(Some(oid))
+        let len = oid.strip_suffix('\n')?.len();
+        oid.truncate(len);
+        (matches!(len, 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit())).then_some(Some(oid))
     } else {
         (status.code() == Some(1) && raw.is_empty()).then_some(None)
     }

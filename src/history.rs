@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::git::{Commit, HistoryVersion, PendingFile, Repo};
+use crate::git::{Commit, DiffFiles, HistoryVersion, Repo};
 use crate::help::Page;
 use crate::keys::Key;
 use crate::pane::{After, Pane};
@@ -28,7 +28,7 @@ struct Entry {
     /// Arrived since this pane first read the history.
     fresh: bool,
     /// File lists stay cached while their commit is in the timeline.
-    files: Option<Vec<PendingFile>>,
+    files: Option<DiffFiles>,
 }
 
 /// Rows the cursor can point at, with the guides between them.
@@ -169,9 +169,12 @@ impl History {
         if !self.version.as_ref().is_some_and(|version| version.matches(&self.repo)) {
             let Some(commits) = self.repo.history(LIMIT) else { return };
             self.replace_commits(commits, selected, uncommitted);
-        } else if self.uncommitted != uncommitted {
-            self.uncommitted = uncommitted;
-            self.rebuild_in_place(selected);
+        } else {
+            let new_files = self.open_index().is_some_and(|i| self.load_files(i));
+            if new_files || self.uncommitted != uncommitted {
+                self.uncommitted = uncommitted;
+                self.rebuild_in_place(selected);
+            }
         }
     }
 
@@ -183,7 +186,11 @@ impl History {
             .open
             .as_ref()
             .and_then(|open| Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files }));
-        let follow = self.follow_new && selected == Some(TimelineRow::Commit(0)) && self.open_index() != Some(0);
+        let tip_changed = commits.first().map(|c| &c.hash) != self.entries.first().map(|e| &e.commit.hash);
+        let follow = self.follow_new
+            && tip_changed
+            && selected == Some(TimelineRow::Commit(0))
+            && self.open_index() != Some(0);
         let selected = match selected {
             Some(TimelineRow::Commit(0)) if follow => TimelineRow::Commit(0),
             Some(TimelineRow::Commit(i)) => TimelineRow::Commit(remap(i).unwrap_or(0)),
@@ -197,12 +204,15 @@ impl History {
         let same_branch =
             branch != "(detached)" && self.version.as_ref().is_some_and(|version| version.branch == branch);
         self.entries.extend(commits.into_iter().map(|commit| {
-            let (fresh, files) = before.remove(&commit.hash).unwrap_or((same_branch, None));
+            let (fresh, files) = before.remove(&commit.hash).unwrap_or((same_branch && tip_changed, None));
             Entry { commit, fresh, files }
         }));
         self.version = Some(self.repo.history_version());
         self.clicked = None;
         self.open = open;
+        if let Some(index) = self.open_index() {
+            self.load_files(index);
+        }
         self.uncommitted = uncommitted;
         if follow {
             self.top = 0;
@@ -220,8 +230,8 @@ impl History {
         self.open.as_ref().map(|open| open.index)
     }
 
-    fn open_files(&self) -> Option<&[PendingFile]> {
-        self.entries[self.open_index()?].files.as_deref()
+    fn open_files(&self) -> Option<&DiffFiles> {
+        self.entries[self.open_index()?].files.as_ref()
     }
 
     fn rebuild_in_place(&mut self, selected: Option<TimelineRow>) {
@@ -242,14 +252,19 @@ impl History {
             }
             self.rows.push(TimelineRow::Commit(i));
             if let Some(open) = self.open.as_ref().filter(|open| open.index == i) {
-                match entry.files.as_deref() {
-                    Some([]) => self.rows.push(TimelineRow::Note("No files changed.")),
-                    Some(files) => {
-                        let n = files.len();
+                match &entry.files {
+                    Some(diff) if diff.files.is_empty() && diff.unrepresented == 0 => {
+                        self.rows.push(TimelineRow::Note("No files changed."));
+                    }
+                    Some(diff) => {
+                        let n = diff.files.len();
                         let shown = if open.all_files { n } else { n.min(FILE_PREVIEW) };
                         self.rows.extend((0..shown).map(TimelineRow::File));
                         if shown < n {
                             self.rows.push(TimelineRow::More);
+                        }
+                        if diff.unrepresented != 0 {
+                            self.rows.push(TimelineRow::Note("Some file names cannot be shown."));
                         }
                     }
                     None => self.rows.push(TimelineRow::Note("Git did not answer for this commit.")),
@@ -266,13 +281,19 @@ impl History {
         self.open = if self.open_index() == Some(i) {
             None
         } else {
-            let entry = &mut self.entries[i];
-            if entry.files.is_none() {
-                entry.files = self.repo.files_at(&entry.commit.hash);
-            }
+            self.load_files(i);
             Some(OpenCommit { index: i, all_files: false })
         };
         self.build_rows(Some(TimelineRow::Commit(i)));
+    }
+
+    fn load_files(&mut self, i: usize) -> bool {
+        let entry = &mut self.entries[i];
+        if entry.files.is_some() {
+            return false;
+        }
+        entry.files = self.repo.files_at(&entry.commit.hash);
+        entry.files.is_some()
     }
 
     fn show_all_files(&mut self) {

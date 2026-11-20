@@ -443,6 +443,34 @@ fn a_shallow_boundary_does_not_claim_unchanged_files_were_added() {
     assert!(row(&rows, "second").contains("▾"));
     assert!(rows.iter().any(|row| row.contains("Git did not answer for this commit.")), "{rows:?}");
     assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
+
+    f.git(&["-C", "shallow", "fetch", "--unshallow", "origin"]);
+    assert!(history.check());
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "second").contains("▾"));
+    assert!(!row(&rows, "first").starts_with('•'), "{rows:?}");
+    assert!(rows.iter().any(|row| row.contains("new.txt")), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_commit_with_unrepresentable_names_reports_a_partial_file_list() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let f = Fixture::new();
+    f.write("page\u{fffd}.txt", "valid path\n");
+    std::fs::write(f.root.join(OsStr::from_bytes(b"page\xff.txt")), "raw path\n").unwrap();
+    f.commit("two files");
+
+    let mut history = open(&f);
+    history.key(Key::Enter);
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "two files").ends_with("2 files"), "{rows:?}");
+    assert!(rows.iter().any(|row| row.contains("Some file names cannot be shown.")), "{rows:?}");
+    assert_eq!(rows.iter().filter(|r| r.contains("page\u{fffd}.txt")).count(), 1);
+    assert_eq!(read_next(&mut history, "page\u{fffd}.txt")[1], " 1 + valid path");
 }
 
 #[test]
