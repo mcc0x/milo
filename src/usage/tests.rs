@@ -2,6 +2,7 @@
 
 mod activity;
 mod codex;
+mod failures;
 mod layout;
 mod status_line;
 
@@ -395,7 +396,7 @@ mod omp_limits {
             used_fraction REAL, status TEXT, resets_at INTEGER);
     ";
 
-    fn sqlite(f: &Fixture) -> Option<PathBuf> {
+    pub(super) fn sqlite(f: &Fixture) -> Option<PathBuf> {
         if Command::new(omp::sqlite()).arg("-version").output().is_err() {
             eprintln!("skipping OMP fixture: sqlite3 is not installed");
             return None;
@@ -405,13 +406,13 @@ mod omp_limits {
         Some(path)
     }
 
-    fn exec(path: &Path, sql: &str) {
+    pub(super) fn exec(path: &Path, sql: &str) {
         let result =
             Command::new(omp::sqlite()).args(["-batch", "-init", "/dev/null"]).arg(path).arg(sql).output().unwrap();
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
-    fn report(path: &Path, key: &str, provider: &str, ms: i64, limits: &str) {
+    pub(super) fn report(path: &Path, key: &str, provider: &str, ms: i64, limits: &str) {
         exec(
             path,
             &format!(
@@ -421,7 +422,7 @@ mod omp_limits {
         );
     }
 
-    fn window(id: &str, fraction: &str, reset_ms: i64, minutes: u64, tier: &str) -> String {
+    pub(super) fn window(id: &str, fraction: &str, reset_ms: i64, minutes: u64, tier: &str) -> String {
         let duration_ms = minutes * 60_000;
         format!(
             r#"{{"id":"{id}","amount":{{"usedFraction":{fraction}}},"scope":{{"tier":{tier}}},
@@ -429,7 +430,7 @@ mod omp_limits {
         )
     }
 
-    fn wait_for(mut ready: impl FnMut() -> bool) {
+    pub(super) fn wait_for(mut ready: impl FnMut() -> bool) {
         let deadline = Instant::now() + TEST_WAIT * 2;
         while !ready() {
             assert!(Instant::now() < deadline);
@@ -442,7 +443,7 @@ mod omp_limits {
     }
 
     /// The pane's external fd must wake without a filesystem event or another scheduled check.
-    fn wait_omp(usage: &mut Usage) -> External {
+    pub(super) fn wait_omp(usage: &mut Usage) -> External {
         let mut ready = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
         let timeout = i32::try_from(TEST_WAIT.as_millis()).unwrap();
         loop {
