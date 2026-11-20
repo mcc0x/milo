@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::git::{Commit, DiffFiles, HistoryVersion, Repo};
+use crate::git::{Commit, CommitFilesError, DiffFiles, HistoryVersion, Repo};
 use crate::help::Page;
 use crate::keys::Key;
 use crate::pane::{After, Pane};
@@ -64,6 +64,7 @@ struct Detail {
 struct OpenCommit {
     index: usize,
     all_files: bool,
+    error: Option<CommitFilesError>,
 }
 
 /// A click anchors its selected row and may be the first of a double click.
@@ -169,12 +170,9 @@ impl History {
         if !self.version.as_ref().is_some_and(|version| version.matches(&self.repo)) {
             let Some(commits) = self.repo.history(LIMIT) else { return };
             self.replace_commits(commits, selected, uncommitted);
-        } else {
-            let new_files = self.open_index().is_some_and(|i| self.load_files(i));
-            if new_files || self.uncommitted != uncommitted {
-                self.uncommitted = uncommitted;
-                self.rebuild_in_place(selected);
-            }
+        } else if self.load_files() || self.uncommitted != uncommitted {
+            self.uncommitted = uncommitted;
+            self.rebuild_in_place(selected);
         }
     }
 
@@ -182,10 +180,9 @@ impl History {
     fn replace_commits(&mut self, commits: Vec<Commit>, selected: Option<TimelineRow>, uncommitted: usize) {
         self.detail = None;
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
-        let open = self
-            .open
-            .as_ref()
-            .and_then(|open| Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files }));
+        let open = self.open.as_ref().and_then(|open| {
+            Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files, error: None })
+        });
         let tip_changed = commits.first().map(|c| &c.hash) != self.entries.first().map(|e| &e.commit.hash);
         let follow = self.follow_new
             && tip_changed
@@ -210,9 +207,7 @@ impl History {
         self.version = Some(self.repo.history_version());
         self.clicked = None;
         self.open = open;
-        if let Some(index) = self.open_index() {
-            self.load_files(index);
-        }
+        self.load_files();
         self.uncommitted = uncommitted;
         if follow {
             self.top = 0;
@@ -267,7 +262,10 @@ impl History {
                             self.rows.push(TimelineRow::Note("Some file names cannot be shown."));
                         }
                     }
-                    None => self.rows.push(TimelineRow::Note("Git did not answer for this commit.")),
+                    None => self.rows.push(TimelineRow::Note(match open.error {
+                        Some(CommitFilesError::ShallowBoundary) => "Shallow history: parent unavailable.",
+                        _ => "Git did not answer for this commit.",
+                    })),
                 }
             }
         }
@@ -281,19 +279,26 @@ impl History {
         self.open = if self.open_index() == Some(i) {
             None
         } else {
-            self.load_files(i);
-            Some(OpenCommit { index: i, all_files: false })
+            Some(OpenCommit { index: i, all_files: false, error: None })
         };
+        self.load_files();
         self.build_rows(Some(TimelineRow::Commit(i)));
     }
 
-    fn load_files(&mut self, i: usize) -> bool {
-        let entry = &mut self.entries[i];
+    fn load_files(&mut self) -> bool {
+        let Some(open) = &mut self.open else { return false };
+        let entry = &mut self.entries[open.index];
         if entry.files.is_some() {
             return false;
         }
-        entry.files = self.repo.files_at(&entry.commit.hash);
-        entry.files.is_some()
+        match self.repo.files_at(&entry.commit.hash) {
+            Ok(files) => {
+                entry.files = Some(files);
+                open.error = None;
+                true
+            }
+            Err(error) => open.error.replace(error) != Some(error),
+        }
     }
 
     fn show_all_files(&mut self) {

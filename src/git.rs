@@ -97,6 +97,12 @@ pub(crate) struct DiffFiles {
     pub(crate) unrepresented: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitFilesError {
+    ShallowBoundary,
+    Git,
+}
+
 /// An object name supplied by the caller, not a branch name or revision expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitId<'a>(&'a str);
@@ -780,39 +786,55 @@ impl Repo {
         parse::commit_version(&raw, id)
     }
 
-    /// Git treats a shallow boundary as a root. Without the real parent we
-    /// cannot tell what changed there.
-    fn has_parent_history(&self, hash: &str) -> bool {
-        self.shallow_file.as_ref().is_none_or(|file| match read::file(file, DIFF_LIMIT) {
-            Content::Gone => true,
-            Content::Bytes(bytes) => !bytes.split(|&b| b == b'\n').any(|oid| oid == hash.as_bytes()),
-            _ => false,
-        })
+    /// Git treats a shallow boundary as a root, even when the commit has a parent.
+    fn check_parent_history(&self, hash: &str) -> Result<(), CommitFilesError> {
+        let Some(file) = &self.shallow_file else { return Ok(()) };
+        match read::file(file, DIFF_LIMIT) {
+            Content::Gone => return Ok(()),
+            Content::Bytes(bytes) => {
+                if !bytes.split(|&b| b == b'\n').any(|oid| oid == hash.as_bytes()) {
+                    return Ok(());
+                }
+            }
+            _ => return Err(CommitFilesError::Git),
+        }
+
+        // A shallow marker alone is not enough: a depth-limited clone can
+        // mark a genuine root. Read the actual header, not Git's ancestry view.
+        let hash = CommitId::parse(hash).ok_or(CommitFilesError::Git)?.0;
+        let raw = run::limited_output(&self.root, &[], &["cat-file", "commit", "--end-of-options", hash], DIFF_LIMIT)
+            .map_err(|_| CommitFilesError::Git)?;
+        let mut headers = raw.split(|&b| b == b'\n');
+        if !headers.next().is_some_and(|line| line.starts_with(b"tree ")) {
+            return Err(CommitFilesError::Git);
+        }
+        if let Some(parent) = headers.next().and_then(|line| line.strip_prefix(b"parent ")) {
+            return Err(if parent.len() == hash.len() && parent.iter().all(u8::is_ascii_hexdigit) {
+                CommitFilesError::ShallowBoundary
+            } else {
+                CommitFilesError::Git
+            });
+        }
+        Ok(())
     }
 
     /// Reads the files touched by this commit, compared with its first parent.
-    pub(crate) fn files_at(&self, hash: &str) -> Option<DiffFiles> {
-        if !self.has_parent_history(hash) {
-            return None;
-        }
-        let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Files).ok()?;
-        Some(parse_files(&raw))
+    pub(crate) fn files_at(&self, hash: &str) -> Result<DiffFiles, CommitFilesError> {
+        self.check_parent_history(hash)?;
+        let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Files).map_err(|_| CommitFilesError::Git)?;
+        Ok(parse_files(&raw))
     }
 
     /// Finds the change for one path without asking Git for any line counts.
     pub(crate) fn changed_file_at(&self, hash: &str, path: &str) -> Option<Option<PendingFile>> {
-        if !self.has_parent_history(hash) {
-            return None;
-        }
+        self.check_parent_history(hash).ok()?;
         let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Paths).ok()?;
         parse::changed_file(&raw, path)
     }
 
     /// Reads a whole-file patch, using both paths when a file moved.
     pub fn file_diff_at(&self, hash: &str, file: &PendingFile) -> Result<Vec<u8>, OutputError> {
-        if !self.has_parent_history(hash) {
-            return Err(OutputError::Failed);
-        }
+        self.check_parent_history(hash).map_err(|_| OutputError::Failed)?;
         run::commit_diff(&self.root, hash, run::CommitDiff::File(file))
     }
 
@@ -1328,7 +1350,10 @@ mod tests {
         fs::remove_file(f.root.join(".git/objects").join(&oid[..2]).join(&oid[2..])).unwrap();
         fs::remove_file(f.root.join("unrelated.txt")).unwrap();
 
-        assert!(repo.files_at(hash).is_none(), "the commit's line counts should be unavailable");
+        assert!(
+            matches!(repo.files_at(hash), Err(CommitFilesError::Git)),
+            "the commit's line counts should be unavailable"
+        );
         let file = repo.changed_file_at(hash, "page.txt").unwrap().unwrap();
         assert_eq!(file.kind, Kind::Added);
         assert!(repo.file_diff_at(hash, &file).ok().unwrap().ends_with(b"+stored content\n"));

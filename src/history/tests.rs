@@ -430,6 +430,19 @@ fn a_file_in_the_first_commit_has_only_additions() {
 }
 
 #[test]
+fn a_genuine_root_marked_shallow_still_shows_its_files() {
+    let f = Fixture::new();
+    f.write("first.txt", "first line\n");
+    f.commit("start");
+    // Exercise a root with a marker even if this Git does not write one when cloning.
+    f.write(".git/shallow", &format!("{}\n", open(&f).entries[0].commit.hash));
+    let mut history = open(&f);
+    history.key(Key::Enter);
+    let rows = read_next(&mut history, "first.txt");
+    assert_eq!(rows[1], " 1 + first line");
+}
+
+#[test]
 fn a_shallow_boundary_does_not_claim_unchanged_files_were_added() {
     let f = Fixture::new();
     f.write("old.txt", "already there\n");
@@ -441,7 +454,7 @@ fn a_shallow_boundary_does_not_claim_unchanged_files_were_added() {
     history.key(Key::Enter);
     let rows = draw(&mut history, 65, 12).text();
     assert!(row(&rows, "second").contains("▾"));
-    assert!(rows.iter().any(|row| row.contains("Git did not answer for this commit.")), "{rows:?}");
+    assert_eq!(rows[2], "   Shallow history: parent unavailable.");
     assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
 
     f.git(&["-C", "shallow", "fetch", "--unshallow", "origin"]);
@@ -451,6 +464,28 @@ fn a_shallow_boundary_does_not_claim_unchanged_files_were_added() {
     assert!(!row(&rows, "first").starts_with('•'), "{rows:?}");
     assert!(rows.iter().any(|row| row.contains("new.txt")), "{rows:?}");
     assert!(!rows.iter().any(|row| row.contains("old.txt")), "{rows:?}");
+}
+
+#[test]
+fn an_unrelated_git_failure_does_not_claim_the_parent_is_unavailable() {
+    let f = Fixture::new();
+    f.write("page.txt", "first line\n");
+    f.commit("start");
+    let mut history = open(&f);
+    let config = f.root.join(".git/config");
+    let original = std::fs::read(&config).unwrap();
+    f.write(".git/config", "[broken");
+
+    history.key(Key::Enter);
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "start").contains("▾"));
+    assert_eq!(rows[2], "   Git did not answer for this commit.");
+
+    std::fs::write(config, original).unwrap();
+    history.key(Key::Char('r'));
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "start").contains("▾"));
+    assert!(rows[2].contains("page.txt"), "{rows:?}");
 }
 
 #[cfg(target_os = "linux")]

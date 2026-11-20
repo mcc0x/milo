@@ -36,7 +36,7 @@ If filtering or folding hides the selected file, Outline keeps the cursor on its
 
 History counts commits to push against the branch's tracked remote branch. `no branch tracked` means there is no tracked branch, not that all commits have been pushed. Milo can still use the remote's default branch to mark commits for comparison. `no remote` means the project has no remote configured.
 
-A shallow clone has only part of the project's history. Milo lists the commits Git has, but it cannot list a commit's changed files if its parent is missing. In that case history shows `Git did not answer for this commit.` instead of showing every file as new.
+A shallow clone has only part of the project's history. If you expand a commit whose parent is beyond the shallow boundary, History says `Shallow history: parent unavailable.` It does not show every file as new. After fetching more history, press `r` to reload. A genuine first commit still shows its added files.
 
 ## Reading files
 
