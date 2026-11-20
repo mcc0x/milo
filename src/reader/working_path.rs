@@ -114,6 +114,16 @@ pub(super) struct Stamp {
     changed: (i128, i128),
 }
 
+impl Stamp {
+    pub(super) fn at(path: &Path) -> Option<Self> {
+        let stat = fs::symlink_metadata(path).ok()?;
+        stat.is_file().then(|| Self {
+            identity: (stat.dev().into(), stat.ino().into()),
+            changed: (stat.ctime().into(), stat.ctime_nsec().into()),
+        })
+    }
+}
+
 pub(super) struct Entry<'a> {
     root: &'a File,
     parent: Option<File>,

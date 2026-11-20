@@ -401,6 +401,9 @@ impl Pane for Outline {
         if self.repo.git {
             self.untracked.request_sweep();
         }
+        if let Some(reader) = &mut self.reading {
+            reader.filesystem_changed();
+        }
     }
 
     fn next_frame(&self) -> Option<Duration> {

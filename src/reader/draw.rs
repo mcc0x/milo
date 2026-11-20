@@ -123,6 +123,7 @@ impl Reader {
         let hint = s.h >= 3;
         self.rows = s.h.saturating_sub(1 + usize::from(hint));
         self.columns = 0;
+        self.pan_limit = 0;
         if s.w == 0 || s.h == 0 {
             return;
         }
@@ -159,10 +160,8 @@ impl Reader {
                 let x = if s.w >= gutter + 3 { gutter } else { 0 };
                 let width = s.w - 1 - x;
                 self.columns = width;
-                if self.pan > 0 {
-                    let longest = shown.iter().map(Line::display_width).max().unwrap_or(0);
-                    self.pan = self.pan.min(longest.saturating_sub(width));
-                }
+                self.pan_limit = shown.iter().map(Line::display_width).max().unwrap_or(0).saturating_sub(width);
+                self.pan = self.pan.min(self.pan_limit);
                 let mut painter = LinePainter { x, width, pan: self.pan, lang: text.lang, spans: &mut self.spans };
                 let first = text.starts.partition_point(|(at, _)| *at <= self.top).saturating_sub(1);
                 let mut starts = text.starts[first..].iter().peekable();

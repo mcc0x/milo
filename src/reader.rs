@@ -46,6 +46,8 @@ pub struct Reader {
     rows: usize,
     /// Columns of text on screen, excluding the gutter and scrollbar.
     columns: usize,
+    /// Furthest horizontal offset of the last drawn viewport.
+    pan_limit: usize,
 }
 
 /// A working file can change; a commit needs only its name and date.
@@ -61,6 +63,7 @@ struct WorkingFile {
     watch_only: Arc<Ignored>,
     /// Ancestor links can lead to entries elsewhere in the worktree.
     watch_all: Arc<Ignored>,
+    attributes: content::Attributes,
     notified: bool,
     stamp: Option<content::WorkingStamp>,
 }
@@ -203,6 +206,7 @@ impl Reader {
             pan: 0,
             rows: 0,
             columns: 0,
+            pan_limit: 0,
         }
     }
 
@@ -249,7 +253,7 @@ impl Reader {
         // Leave an overlapping column for a wide glyph clipped at the right edge.
         let step = self.columns.saturating_sub(1).clamp(1, 8);
         self.pan = match direction {
-            Direction::Next => self.pan + step,
+            Direction::Next => self.pan.saturating_add(step).min(self.pan_limit),
             Direction::Previous => self.pan.saturating_sub(step),
         };
     }
@@ -287,6 +291,11 @@ impl Pane for Reader {
     fn watch_scope(&self) -> Scope {
         match &self.source {
             Source::Working(work) => {
+                if work.stamp.as_ref().is_some_and(|stamp| !stamp.at_root_path) {
+                    // Keep polling the held directory, not the possibly
+                    // unrelated directory now at its old pathname.
+                    return Scope { roots: Vec::new(), ignored: Arc::clone(&work.watch_all), complete: false };
+                }
                 let mut scope = work.repo.watch_scope();
                 scope.ignored = Arc::clone(if work.stamp.as_ref().is_some_and(|stamp| stamp.linked_ancestor) {
                     &work.watch_all
@@ -300,7 +309,8 @@ impl Pane for Reader {
     }
 
     fn git_busy(&self) -> bool {
-        self.working_repo().is_some_and(Repo::busy)
+        let Source::Working(work) = &self.source else { return false };
+        work.repo.busy() && work.root.at_path(&work.repo.root) == Ok(true)
     }
 
     fn filesystem_changed(&mut self) {

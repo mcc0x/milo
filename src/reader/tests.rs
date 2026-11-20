@@ -347,6 +347,8 @@ fn repeated_edits_to_a_tracked_file_use_one_fresh_git_status_each() {
             assert_git_calls(&trace, [1, 1, 1]);
         }
 
+        fs::create_dir(root.join("unrelated")).unwrap();
+        fs::write(root.join("unrelated/.gitattributes"), "* -diff\n").unwrap();
         fs::write(&trace, "").unwrap();
         assert!(reader.check());
         assert_git_calls(&trace, [1, 1, 0]);
@@ -423,6 +425,8 @@ fn a_directory_replaced_by_a_link_while_open_does_not_show_its_target() {
 
 #[test]
 fn moved_project_readers_keep_reading_the_original_text_and_picture() {
+    use crate::pane::{check_watched_pane, watch_pane};
+
     let f = Fixture::new();
     f.write("sub/file.txt", "original text\n");
     fs::write(f.root.join("sub/logo.png"), Picture::sample_png(16, 8)).unwrap();
@@ -431,6 +435,8 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     let mut picture = Reader::open(&f.root.join("sub/logo.png")).unwrap();
     assert!(drawn(&mut text, 60, 6)[1].ends_with("original text"));
     assert!(drawn(&mut picture, 60, 6)[0].ends_with("16×8"));
+    let (mut watcher, mut pace) = watch_pane(&mut text, false);
+    assert_eq!(watcher.scope().roots.as_slice(), std::slice::from_ref(&f.root));
 
     let moved = f.root.with_file_name("moved-project");
     fs::rename(&f.root, &moved).unwrap();
@@ -440,12 +446,25 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     fs::write(f.root.join("sub/logo.png"), Picture::sample_png(64, 32)).unwrap();
     f.commit("replacement project");
     f.write("sub/file.txt", "replacement project edit\n");
+    f.write(".git/index.lock", "");
 
     fs::write(moved.join("sub/file.txt"), "moved project edit\n").unwrap();
     fs::write(moved.join("sub/logo.png"), Picture::sample_png(32, 16)).unwrap();
-    assert!(text.check() && picture.check());
+    assert!(check_watched_pane(&mut text, &mut watcher, &mut pace, false));
+    assert!(!text.git_busy() && !picture.git_busy());
+    assert!(watcher.scope().roots.is_empty() && !watcher.scope().complete);
+    assert!(picture.check());
     assert_eq!(drawn(&mut text, 60, 6)[1], " 1   moved project edit");
     assert!(drawn(&mut picture, 60, 6)[0].ends_with("32×16"));
+
+    // Still poll the original, and reinstall path-based coverage if it comes back.
+    fs::write(moved.join("sub/file.txt"), "another moved edit\n").unwrap();
+    assert!(check_watched_pane(&mut text, &mut watcher, &mut pace, false));
+    assert_eq!(drawn(&mut text, 60, 6)[1], " 1   another moved edit");
+    fs::rename(&f.root, f.root.with_file_name("replacement")).unwrap();
+    fs::rename(moved, &f.root).unwrap();
+    assert!(check_watched_pane(&mut text, &mut watcher, &mut pace, false));
+    assert_eq!(watcher.scope().roots.as_slice(), std::slice::from_ref(&f.root));
 }
 
 #[test]
@@ -475,6 +494,39 @@ fn reader_follows_internal_directory_links_without_following_the_final_link() {
     symlink(f.root.join("other"), &sub).unwrap();
     let mut link = Reader::open(&shortcut.join("link.txt")).unwrap();
     assert_eq!(drawn(&mut link, 60, 6)[1], " 1   ../other/file.txt");
+}
+
+#[test]
+fn a_reader_follows_retargets_of_the_original_directory_alias() {
+    let f = Fixture::new();
+    let outside = Fixture::folder();
+    f.write("first/report.txt", "first report\n");
+    f.write("second/report.txt", "second report\n");
+    outside.write("report.txt", "outside report\n");
+    f.commit("reports");
+
+    let shortcut = f.root.join("current");
+    symlink("first", &shortcut).unwrap();
+    let mut reader = Reader::open(&shortcut.join("report.txt")).unwrap();
+    let rows = drawn(&mut reader, 60, 6);
+    assert!(rows[0].contains("current") && rows[1].ends_with("first report"), "{rows:?}");
+
+    let replacement = f.root.join("new-link");
+    let retarget = |target: &Path| {
+        symlink(target, &replacement).unwrap();
+        fs::rename(&replacement, &shortcut).unwrap();
+    };
+    retarget(Path::new("second"));
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[1], " 1   second report");
+
+    retarget(&outside.root);
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This path now leads outside the project.");
+
+    retarget(Path::new("first"));
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[1], " 1   first report");
 }
 
 #[test]
@@ -606,6 +658,24 @@ fn panning_a_narrow_reader_does_not_skip_text_or_a_wide_character() {
 }
 
 #[test]
+fn panning_left_after_batched_right_repeats_moves_from_the_right_edge() {
+    let f = Fixture::folder();
+    f.write("page.txt", "0123456789abcdefghijklmnopqrstuvwxyz");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    assert!(drawn(&mut reader, 20, 3)[1].ends_with("0123456789abcd"));
+    for _ in 0..3 {
+        assert!(matches!(reader.key(Key::Right), After::Stay));
+    }
+    assert!(drawn(&mut reader, 20, 3)[1].ends_with("mnopqrstuvwxyz"));
+
+    for _ in 0..2 {
+        assert!(matches!(reader.key(Key::Right), After::Ignored));
+    }
+    assert!(matches!(reader.key(Key::Left), After::Stay));
+    assert!(drawn(&mut reader, 20, 3)[1].ends_with("efghijklmnopqr"));
+}
+
+#[test]
 fn a_link_shows_its_path_even_when_the_target_is_gone() {
     let f = Fixture::new();
     let target = f.root.join("../target.txt");
@@ -666,6 +736,69 @@ fn a_working_reader_refreshes_after_the_index_lock_clears() {
     fs::remove_file(f.root.join(".git/index.lock")).unwrap();
     assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
     assert!(drawn(&mut reader, 60, 6).iter().any(|row| row.contains("latest edit")));
+}
+
+#[test]
+fn polling_a_working_reader_refreshes_attribute_only_diff_changes() {
+    let f = Fixture::new();
+    f.write("src/page.txt", "original\n");
+    f.write("src/.gitattributes", "page.txt diff\n");
+    f.commit("base");
+    f.write("src/page.txt", "edited\n");
+    let mut reader = Reader::open(&f.root.join("src/page.txt")).unwrap();
+    assert_eq!(drawn(&mut reader, 60, 6)[2], " 1 + edited");
+
+    let replace = |rule| {
+        f.write(".git/replacement-rule", rule);
+        fs::rename(f.root.join(".git/replacement-rule"), f.root.join("src/.gitattributes")).unwrap();
+    };
+    replace("page.txt -diff\n");
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), NOT_TEXT);
+
+    replace("page.txt diff\n");
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[2], " 1 + edited");
+}
+
+#[test]
+fn polling_a_linked_worktree_reader_checks_shared_info_attributes() {
+    let f = Fixture::new();
+    f.write("page.txt", "original\n");
+    f.commit("base");
+    f.git(&["worktree", "add", "-q", "../linked"]);
+    let file = f.root.with_file_name("linked").join("page.txt");
+    fs::write(&file, "edited\n").unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    assert_eq!(drawn(&mut reader, 60, 6)[2], " 1 + edited");
+
+    f.write(".git/info/attributes", "page.txt -diff\n");
+    assert!(reader.check());
+    assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), NOT_TEXT);
+}
+
+#[test]
+fn the_inline_reader_refreshes_configured_attributes_after_a_notification() {
+    let f = Fixture::new();
+    f.write("page.txt", "original\n");
+    f.write(".git/custom-attributes", "page.txt diff\n");
+    let rules = f.root.join(".git/custom-attributes");
+    f.git(&["config", "core.attributesFile", rules.to_str().unwrap()]);
+    f.commit("base");
+    f.write("page.txt", "edited\n");
+    let mut outline = crate::outline::Outline::new(Repo::open(&f.root).unwrap(), false);
+    // Use the selectable tree, not the short usage-style strip.
+    let mut screen = Screen::sized(60, 12);
+    outline.draw(&mut screen);
+    outline.key(Key::Enter);
+    outline.draw(&mut screen);
+    assert_eq!(screen.text()[2], " 1 + edited");
+
+    f.write(".git/custom-attributes", "page.txt -diff\n");
+    outline.filesystem_changed();
+    assert!(outline.check());
+    outline.draw(&mut screen);
+    assert_eq!(screen.text()[2].trim_start(), NOT_TEXT);
 }
 
 #[test]

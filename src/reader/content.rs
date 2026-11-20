@@ -26,14 +26,31 @@ impl Location {
     fn find(file: &Path) -> Option<Self> {
         let file = std::path::absolute(file).ok()?;
         let dir = file.ancestors().skip(1).find(|dir| dir.is_dir())?;
-        // Resolve the directory, but keep the final component even if it is a link.
+        // Keep the final component even if it is a link. Within a known
+        // worktree also keep the directory aliases the user actually opened.
         let resolved = dir.canonicalize().ok()?;
-        if resolved != dir && leaves_project(dir, &resolved) {
-            return None;
+        let tail = file.strip_prefix(dir).ok()?;
+        if resolved != dir {
+            if dir.components().any(|part| part == Component::ParentDir) {
+                // Explicit parent traversals retain their filesystem meaning;
+                // just check the project named by the lexical path.
+                let mut lexical = PathBuf::new();
+                for part in dir.components() {
+                    if part == Component::ParentDir {
+                        lexical.pop();
+                    } else {
+                        lexical.push(part);
+                    }
+                }
+                let _ = enclosing_worktree(&lexical, &resolved)?;
+            } else if let Some((logical, root)) = enclosing_worktree(dir, &resolved)? {
+                let repo = Repo::open(&root)?;
+                let relative = root.strip_prefix(&repo.root).ok()?.join(file.strip_prefix(logical).ok()?);
+                return Some(Self { repo, relative });
+            }
         }
-        let absolute = resolved.join(file.strip_prefix(dir).ok()?);
         let repo = Repo::open(&resolved)?;
-        let relative = absolute.strip_prefix(&repo.root).ok()?.to_path_buf();
+        let relative = resolved.join(tail).strip_prefix(&repo.root).ok()?.to_path_buf();
         Some(Self { repo, relative })
     }
 }
@@ -42,6 +59,7 @@ impl Location {
 pub(super) struct WorkingStamp {
     entry: Result<Stamp, LookupError>,
     compare: bool,
+    pub(super) at_root_path: bool,
     pub(super) linked_ancestor: bool,
 }
 
@@ -51,32 +69,66 @@ impl WorkingStamp {
         let mut links = 0;
         let entry = at_path.and_then(|_| root.entry(&repo.root, relative, &mut links));
         let linked_ancestor = links != 0;
-        let compare = at_path == Ok(true)
+        let at_root_path = at_path == Ok(true);
+        let compare = at_root_path
             && repo.git
             && relative.to_str().is_some()
+            && !linked_ancestor
             && match &entry {
-                Ok(entry) => !linked_ancestor && !entry.is_special(),
+                Ok(entry) => !entry.is_special(),
                 Err(error) => *error == LookupError::Gone,
             };
-        let stamp = Self { entry: entry.as_ref().map(Entry::stamp).map_err(|e| *e), compare, linked_ancestor };
+        let entry_stamp = entry.as_ref().map(Entry::stamp).map_err(|e| *e);
+        let stamp = Self { entry: entry_stamp, compare, at_root_path, linked_ancestor };
         (entry, stamp)
     }
 }
 
-/// Don't let a directory link move the reader out of a project named by the path.
-fn leaves_project(dir: &Path, resolved: &Path) -> bool {
-    let mut lexical = PathBuf::new();
-    for part in dir.components() {
-        if part == Component::ParentDir {
-            lexical.pop();
-        } else {
-            lexical.push(part);
+/// Finds the innermost worktree named by the lexical path, not one reached
+/// through an alias. A target outside any worktree named by the path is refused.
+fn enclosing_worktree<'a>(dir: &'a Path, resolved: &Path) -> Option<Option<(&'a Path, PathBuf)>> {
+    let mut project: Option<(&Path, PathBuf)> = None;
+    for name in dir.ancestors() {
+        if fs::symlink_metadata(name.join(".git")).is_err() {
+            continue;
+        }
+        let root = name.canonicalize().ok()?;
+        if !resolved.starts_with(&root) {
+            return None;
+        }
+        if project.as_ref().is_none_or(|(alias, target)| {
+            alias.strip_prefix(name).is_ok_and(|tail| root.join(tail) != *target)
+        }) {
+            project = Some((name, root));
         }
     }
-    lexical.ancestors().any(|root| {
-        fs::symlink_metadata(root.join(".git")).is_ok()
-            && root.canonicalize().is_ok_and(|root| !resolved.starts_with(root))
-    })
+    Some(project)
+}
+
+/// Poll only the rules that can affect the selected path, not sibling directories.
+pub(super) struct Attributes(Vec<(PathBuf, Option<Stamp>)>);
+
+impl Attributes {
+    fn new(repo: &Repo, relative: &Path) -> Self {
+        if !repo.git || relative.to_str().is_none() {
+            return Self(Vec::new());
+        }
+        let info = repo
+            .common_dir()
+            .map_or_else(|| repo.root.join(".git/info/attributes"), |dir| dir.join("info/attributes"));
+        let rules = relative.ancestors().skip(1).map(|dir| repo.root.join(dir).join(".gitattributes"));
+        Self(rules.chain(std::iter::once(info)).map(|path| (path, None)).collect())
+    }
+
+    fn changed(&mut self) -> bool {
+        let mut changed = false;
+        for (path, before) in &mut self.0 {
+            let current = Stamp::at(path);
+            changed |= *before != current;
+            *before = current;
+        }
+        changed
+    }
 }
 
 impl Reader {
@@ -91,12 +143,14 @@ impl Reader {
         let (icons, note) = Self::appearance_for(&repo);
         let note = if repo.git_unavailable() { Some(GIT_UNAVAILABLE) } else { note };
         let watch_only = repo.reader_filter(&relative);
+        let attributes = Attributes::new(&repo, &relative);
         let source = Source::Working(Box::new(WorkingFile {
             repo,
             root,
             relative,
             watch_only,
             watch_all: Default::default(),
+            attributes,
             notified: false,
             stamp: None,
         }));
@@ -158,13 +212,17 @@ impl Reader {
     /// Rebuilds the working file when it or Git has changed, keeping the last good result if git fails.
     pub(super) fn refresh(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
-        let WorkingFile { repo, root, relative, stamp: last, .. } = work.as_mut();
+        let WorkingFile { repo, root, relative, attributes, stamp: last, .. } = work.as_mut();
         let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
-        // A changed file already needs a fresh status read, even if Git's
-        // porcelain entry for it is unchanged. Otherwise use the current poll.
-        let read_status = force || last.as_ref() != Some(&stamp);
-        if !read_status && !(stamp.compare && repo.read_if_changed()) {
-            return;
+        let attrs_changed = stamp.compare && attributes.changed();
+        // A changed entry needs fresh status. Otherwise poll status once and
+        // also refresh the patch when rules changed without changing porcelain.
+        let read_status = last.as_ref() != Some(&stamp);
+        if !read_status {
+            let status_changed = stamp.compare && repo.read_if_changed();
+            if !(status_changed || stamp.compare && force || attrs_changed) {
+                return;
+            }
         }
         let unchanged = || FileDiff { lines: Vec::new(), kind: Kind::None, binary: false };
         let patch = if stamp.compare {

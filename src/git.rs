@@ -366,6 +366,10 @@ impl Repo {
         self.git_unavailable
     }
 
+    pub(crate) fn common_dir(&self) -> Option<&Path> {
+        self.common_dir.as_deref()
+    }
+
     /// Rediscover a plain folder when Git's directory or gitfile appears.
     pub(crate) fn discover_git(&self) -> Option<Self> {
         if self.git || !self.root.join(".git").exists() {
