@@ -49,16 +49,26 @@ impl Layout {
     }
 }
 
-fn arrange(w: usize, h: usize, git: bool) -> Layout {
+fn arrange(w: usize, h: usize, git: bool, truncated: bool) -> Layout {
     if w < 3 || h == 0 {
         return Layout::default();
     }
     let strip = git && h <= STRIP_ROWS;
-    let heading = h >= HEADING_ROWS;
+    let heading = h >= HEADING_ROWS || truncated && h > 1;
     let hint = h >= HINT_ROWS;
     let body_top = usize::from(heading);
     let body_rows = h - body_top - usize::from(hint);
     Layout { strip, width: w, body_top, body_rows, heading, hint, wide: w >= WIDE_COLS, ..Layout::default() }
+}
+
+fn draw_partial(s: &mut Screen, width: usize) -> usize {
+    let text = match width {
+        40.. => "Showing a partial listing",
+        25.. => "Partial listing",
+        16.. => "Partial",
+        _ => "!",
+    };
+    s.put_right(width - 1, 0, text, ui::DEL)
 }
 
 /// Rows to keep between the cursor and the edge of the tree, when possible.
@@ -71,13 +81,19 @@ impl Outline {
         s.clear();
         self.expire(now);
         self.untracked.start_frame();
-        let mut layout = arrange(s.w, s.h, self.repo.git);
+        let mut layout = arrange(s.w, s.h, self.repo.git, self.listing.truncated);
         if layout.width == 0 {
             self.painted = layout;
             return;
         }
         if layout.heading {
             self.draw_heading(s, layout.width);
+        } else if self.listing.truncated {
+            // Keep room for a file and the warning when there is only one row.
+            layout.width -= draw_partial(s, layout.width) + 1;
+            if layout.width < 3 {
+                layout.body_rows = 0;
+            }
         }
         if layout.strip {
             self.discover_untracked();
@@ -85,7 +101,7 @@ impl Outline {
         } else {
             let git_unavailable = self.repo.git_unavailable();
             if (self.note.is_some() || git_unavailable) && !layout.hint {
-                layout.body_rows -= 1;
+                layout.body_rows = layout.body_rows.saturating_sub(1);
             }
             self.draw_tree(s, &mut layout, now);
             self.discover_untracked();
@@ -107,6 +123,8 @@ impl Outline {
         let summary_width = if self.repo.git {
             let uncommitted = self.pending.partition_point(|file| !file.unpushed);
             self.draw_summary(s, width, name_width, uncommitted)
+        } else if self.listing.truncated {
+            draw_partial(s, width)
         } else if self.listing.unreadable && !self.listing.paths.is_empty() && width >= 24 {
             let problem = if width >= 45 { "Some files could not be listed" } else { "Cannot list all files" };
             s.put_right(width - 1, 0, problem, ui::DEL)
@@ -444,21 +462,21 @@ mod tests {
 
     #[test]
     fn the_shortest_panes_spend_their_rows_on_files() {
-        let short = arrange(40, 3, true);
+        let short = arrange(40, 3, true, false);
         assert!(!short.heading);
         assert_eq!((short.body_top, short.body_rows), (0, 3));
-        let headed = arrange(40, 4, true);
+        let headed = arrange(40, 4, true, false);
         assert!(headed.heading);
         assert_eq!((headed.body_top, headed.body_rows), (1, 3));
-        assert!(arrange(40, 7, true).strip);
-        assert!(!arrange(40, 8, true).strip);
-        assert!(!arrange(40, 7, false).strip);
+        assert!(arrange(40, 7, true, false).strip);
+        assert!(!arrange(40, 8, true, false).strip);
+        assert!(!arrange(40, 7, false, false).strip);
     }
 
     #[test]
     fn the_twelfth_row_can_show_a_hint() {
-        let before = arrange(52, 11, true);
-        let after = arrange(52, 12, true);
+        let before = arrange(52, 11, true, false);
+        let after = arrange(52, 12, true, false);
         assert!(!before.hint && after.hint);
         assert_eq!(before.body_rows, 10);
         assert_eq!(after.body_rows, 10);
@@ -466,7 +484,7 @@ mod tests {
 
     #[test]
     fn extra_columns_require_enough_width() {
-        assert!(!arrange(51, 8, true).wide);
-        assert!(arrange(52, 8, true).wide);
+        assert!(!arrange(51, 8, true, false).wide);
+        assert!(arrange(52, 8, true, false).wide);
     }
 }

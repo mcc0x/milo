@@ -1120,6 +1120,29 @@ mod tests {
     }
 
     #[test]
+    fn a_giant_flat_folder_is_bounded_and_marks_the_partial_tree() {
+        let f = Fixture::folder();
+        for i in 0..walk::CAP {
+            fs::File::create(f.root.join(format!("entry-{i:05}.txt"))).unwrap();
+        }
+        f.write(".DS_Store", "");
+        let mut o = open(&f);
+        assert_eq!(o.listing.paths.len(), walk::CAP);
+        assert!(!o.listing.truncated, "exactly the limit is still a complete listing");
+
+        f.write("one-more.txt", "");
+        assert!(o.check());
+        assert_eq!(o.listing.paths.len(), walk::CAP);
+        assert!(o.listing.truncated);
+        let views = [(60, 8, "Showing a partial listing"), (20, 2, "Partial"), (37, 1, "Partial listing")];
+        for (width, height, notice) in views {
+            let rows = draw(&mut o, width, height).text();
+            assert!(rows[0].contains(notice), "{rows:?}");
+            assert!(rows.iter().any(|row| row.contains("entry-")), "{rows:?}");
+        }
+    }
+
+    #[test]
     fn a_plain_folder_outline_promotes_on_explicit_refresh_even_with_a_gitfile() {
         let f = Fixture::folder();
         f.write("page.txt", "before\n");

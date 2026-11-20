@@ -24,6 +24,8 @@ In narrow History, the wrapped subject uses only the room below a clicked row, s
 
 The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
+In a plain folder, Outline lists the top level and the folders you expand. It shows a partial-listing warning if those folders contain more than 50,000 entries.
+
 If Git holds the index lock for more than a moment, Outline, History and the working-file Reader show `Waiting for Git` and pause automatic updates. They update when the lock clears; Milo never removes it.
 
 Untracked files appear before Milo counts their lines. In a wide outline, `?` means the count is not ready, not zero. The outline counts the files in view in small batches as you scroll; a folder shows `?` while any of its new files are still uncounted.

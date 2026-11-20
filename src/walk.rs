@@ -2,21 +2,23 @@
 
 use std::path::Path;
 
-/// Stop adding folders to the walk after this many entries have been listed.
-const CAP: usize = 50_000;
+/// Maximum number of entries retained in a plain tree.
+pub(super) const CAP: usize = 50_000;
 
 #[derive(Default)]
 pub struct Listing {
     pub paths: Vec<String>,
     pub unreadable: bool,
+    pub truncated: bool,
 }
 
 /// Sorted paths relative to `root`. Folders end in `/` and their contents are
 /// listed only if `open` says to descend. Symbolic links are not followed.
+/// A truncated listing is sorted too, but doesn't enumerate the rest.
 pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
     let mut listing = Listing::default();
     let mut dirs = vec![String::new()];
-    while let Some(dir) = dirs.pop() {
+    'walk: while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(root.join(&dir)) else {
             listing.unreadable = true;
             continue;
@@ -35,10 +37,14 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
                 listing.unreadable = true;
                 continue;
             };
+            if listing.paths.len() == CAP {
+                listing.truncated = true;
+                break 'walk;
+            }
             let mut path = format!("{dir}{}", name.to_string_lossy());
             if kind.is_dir() {
                 path.push('/');
-                if listing.paths.len() < CAP && open(&path) {
+                if open(&path) {
                     dirs.push(path.clone());
                 }
             }
