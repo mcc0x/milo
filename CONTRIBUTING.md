@@ -6,6 +6,8 @@ Keep changes small and make milo simpler, faster or more correct.
 
 You need Rust 1.91 or later, git, and a terminal.
 
+CI checks every target and runs the portable test suite on Linux with Rust 1.91.0 and SQLite installed. Keep the Apple Silicon job too: filesystem notifications, terminal images and the packaged browser editor have platform-specific behavior.
+
 Set `fork_url` to the URL of a fork you can access, then run:
 
 ```sh
