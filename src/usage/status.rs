@@ -184,9 +184,12 @@ fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Re
 
 /// An older or smaller report must not roll back a known nondecreasing window.
 fn newer(previous: Option<Window>, incoming: Option<Window>) -> Option<Window> {
-    let (Some(old), Some(new)) = (previous, incoming) else {
+    let (Some(old), Some(mut new)) = (previous, incoming) else {
         return incoming.or(previous);
     };
+    // An omitted reset is not evidence of a new window. Keep the known
+    // deadline while accepting an otherwise valid update to this window.
+    new.resets = new.resets.or(old.resets);
     if new.observed < old.observed || new.resets < old.resets {
         return previous;
     }
@@ -202,7 +205,7 @@ fn newer(previous: Option<Window>, incoming: Option<Window>) -> Option<Window> {
             _ => {}
         }
     }
-    incoming
+    Some(new)
 }
 
 /// A replacement makes the next read see both windows from the same save.

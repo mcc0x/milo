@@ -79,6 +79,41 @@ fn claude_keeps_the_highest_figures_for_the_same_period_and_merges_partial_repor
 }
 
 #[test]
+fn claude_updates_usage_without_a_reset_but_keeps_the_window_monotonic() {
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    let reset = NOW + HOUR;
+    let with_reset = |percent, reset| format!(r#"{{"five_hour":{{"used_percentage":{percent},"resets_at":{reset}}}}}"#);
+    let without_reset = |percent| format!(r#"{{"five_hour":{{"used_percentage":{percent}}}}}"#);
+    claude_report(&path, &with_reset(20, reset), NOW);
+    claude_report(&path, &without_reset(55), NOW + 1);
+    let updated = fs::read(&path).unwrap();
+    for (report, at) in [
+        (without_reset(50), NOW + 2),
+        (with_reset(53, reset), NOW + 2),
+        (with_reset(70, reset - 1), NOW + 2),
+        (without_reset(65), NOW),
+    ] {
+        claude_report(&path, &report, at);
+        assert_eq!(fs::read(&path).unwrap(), updated);
+    }
+
+    let mut usage = open(&f, NOW + 2);
+    let (reading, _) = usage.claude.reported(usage.now()).unwrap();
+    let window = reading.windows.base[0].unwrap();
+    assert_eq!((window.percent, window.resets, window.observed), (55.0, Some(reset), NOW + 1));
+    usage.fixed_now = Some(reset);
+    assert!(frame(&mut usage, 140, 3)[2].contains("Reset elapsed"));
+
+    let next = reset + 5 * HOUR;
+    claude_report(&path, &with_reset(5, next), reset);
+    assert!(usage.check());
+    let (reading, _) = usage.claude.reported(usage.now()).unwrap();
+    let window = reading.windows.base[0].unwrap();
+    assert_eq!((window.percent, window.resets), (5.0, Some(next)));
+}
+
+#[test]
 fn identical_status_reports_advance_only_supplied_windows_at_most_once_a_minute() {
     let f = Fixture::folder();
     let path = f.root.join(STATE).join(SAVED_LIMITS);

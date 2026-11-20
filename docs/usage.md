@@ -58,6 +58,7 @@ Milo labels reports as older after five minutes, or ten minutes for oh-my-pi to 
 **Show Claude Code limits** in `milo setup` adds a status line if you do not already have one. Claude Code calls `milo claude-status` to show a short line and save the reported limits to `~/.local/state/milo/claude-limits.json` (or under an absolute `$XDG_STATE_HOME`). It does not save prompts or replies. You do not need to enable it if Claude Code or oh-my-pi already saves a report.
 
 An unchanged status-line reading confirms the same window, but Milo saves that confirmation at most once a minute per window. A lower figure for the same window or an older reset does not replace or refresh the saved figure.
+If an update leaves out the reset time, it can update a nondecreasing figure without discarding the last known reset.
 
 ## OpenCode activity
 
