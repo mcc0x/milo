@@ -85,6 +85,9 @@ impl Picture {
     /// Opens PNG bytes, which can be borrowed or already owned.
     pub fn png(png: Cow<'static, [u8]>) -> Option<Self> {
         let (width, height) = png_size(&png)?;
+        if !png_has_image_data(&png) {
+            return None;
+        }
         Some(Self::with_size(png, width, height))
     }
 
@@ -99,18 +102,17 @@ impl Picture {
         let (cell_w, cell_h) = (u64::from(cell.0.max(1)), u64::from(cell.1.max(1)));
         let (w, h) = (u64::from(self.width), u64::from(self.height));
         let (room_w, room_h) = (cols as u64 * cell_w, rows as u64 * cell_h);
-        // Compared as cross products, so nothing is lost to rounding.
-        let (shown_w, shown_h) = if w <= room_w && h <= room_h {
-            (w, h)
+        // Compare as cross products, and round up so a fractional pixel
+        // cannot drop the cell that contains it.
+        let (shown_cols, shown_rows) = if w <= room_w && h <= room_h {
+            (w.div_ceil(cell_w), h.div_ceil(cell_h))
         } else if w * room_h > h * room_w {
-            (room_w, h * room_w / w)
+            (cols as u64, (h * room_w).div_ceil(w * cell_h))
         } else {
-            (w * room_h / h, room_h)
+            ((w * room_h).div_ceil(h * cell_w), rows as u64)
         };
-        let cells = |pixels: u64, cell: u64, most: usize| {
-            usize::try_from(pixels.div_ceil(cell)).map_or(most, |n| n.clamp(1, most))
-        };
-        (cells(shown_w, cell_w, cols.max(1)), cells(shown_h, cell_h, rows.max(1)))
+        let cells = |n: u64, most: usize| usize::try_from(n.max(1)).map_or(most, |n| n.min(most));
+        (cells(shown_cols, cols.max(1)), cells(shown_rows, rows.max(1)))
     }
 
     /// Writes what hands the picture's data to a terminal that speaks the
@@ -397,6 +399,7 @@ mod tests {
         let path = Path::new("partial.png");
         for end in [24, png.len() - 13, png.len() - 1] {
             let bytes = png[..end].to_vec();
+            assert!(Picture::png(bytes.clone().into()).is_none());
             assert_eq!(Picture::decode(bytes.clone(), path).err(), Some(bytes));
         }
         assert!(Picture::decode(png, path).is_ok());
@@ -466,6 +469,9 @@ mod tests {
         assert_eq!(sized(2000, 1000).fit(cell, 80, 20), (80, 20));
         // Tall and thin, limited by the height: 160 by 320 pixels.
         assert_eq!(sized(500, 1000).fit(cell, 80, 20), (20, 20));
+        // A fractional pixel just past a cell boundary still needs the next cell.
+        assert_eq!(sized(100, 51).fit(cell, 8, 20), (8, 3));
+        assert_eq!(sized(51, 100).fit(cell, 80, 4), (5, 4));
         // Never less than one cell, nor more than there is.
         assert_eq!(sized(1, 1).fit(cell, 80, 20), (1, 1));
         assert_eq!(sized(4000, 10).fit(cell, 80, 20), (80, 1));

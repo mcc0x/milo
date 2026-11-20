@@ -207,6 +207,8 @@ struct Pictures {
     /// The current request and the last set uploaded, which help can hide briefly.
     wanted: Vec<Placement>,
     uploaded: Vec<Placement>,
+    /// IDs whose deletion hasn't been written yet, kept for cleanup if a write fails.
+    pending_deletes: Vec<u32>,
     hidden: bool,
     /// The end of the current resize burst, while picture uploads are held.
     resize_due: Option<Instant>,
@@ -222,6 +224,7 @@ impl Default for Pictures {
             cell: (8, 16),
             wanted: Vec::new(),
             uploaded: Vec::new(),
+            pending_deletes: Vec::new(),
             hidden: false,
             resize_due: None,
             data: Vec::new(),
@@ -297,6 +300,7 @@ impl Screen {
         // Erasing the display makes some terminals, Rex among them, drop the
         // pictures' data as well. Free it everywhere and upload it afresh.
         for old in self.pictures.uploaded.drain(..) {
+            self.pictures.pending_deletes.push(old.id);
             delete_picture(&mut self.out, old.id, 'I');
         }
         self.pictures.wanted.clear();
@@ -332,11 +336,8 @@ impl Screen {
     }
 
     pub fn underline(&mut self, y: usize, span: Range<usize>) {
-        if y < self.h {
-            let row = &mut self.cur[y * self.w..(y + 1) * self.w];
-            for cell in row.get_mut(span).into_iter().flatten() {
-                cell.st.0 |= UNDERLINE;
-            }
+        for cell in self.styled_span(span.start, y, span.end.saturating_sub(span.start)) {
+            cell.st.0 |= UNDERLINE;
         }
     }
 
@@ -385,15 +386,33 @@ impl Screen {
         pictures.wanted.push(at);
     }
 
+    fn row_room(&self, x: usize, y: usize, max_w: usize) -> usize {
+        if y < self.h { max_w.min(self.w.saturating_sub(x)) } else { 0 }
+    }
+
     /// The cells of row `y` from `x`, at most `w` wide, clipped to the screen.
     fn span(&mut self, x: usize, y: usize, w: usize) -> (&mut [Cell], &mut Marks) {
-        let cells = if y >= self.h || x >= self.w {
+        let width = self.row_room(x, y, w);
+        let cells = if width == 0 {
             &mut [][..]
         } else {
             let start = y * self.w + x;
-            &mut self.cur[start..start + w.min(self.w - x)]
+            &mut self.cur[start..start + width]
         };
         (cells, &mut self.marks)
+    }
+
+    /// A wide glyph has one style, even when the requested span hits only one of its columns.
+    fn styled_span(&mut self, x: usize, y: usize, w: usize) -> &mut [Cell] {
+        let width = self.row_room(x, y, w);
+        if width == 0 {
+            return &mut [];
+        }
+        let row = &mut self.cur[y * self.w..(y + 1) * self.w];
+        let start = x - usize::from(row[x].glyph == CONT);
+        let end = x + width;
+        let end = end + usize::from(row.get(end).is_some_and(|cell| cell.glyph == CONT));
+        &mut row[start..end]
     }
 
     /// Overwriting one column of a wide glyph erases the other column too.
@@ -444,8 +463,18 @@ impl Screen {
 
     /// Draws text ending just before `end`. Returns the columns used.
     pub fn put_right(&mut self, end: usize, y: usize, text: &str, st: Style) -> usize {
-        let end = end.min(self.w);
-        let width = str_width(text).min(end);
+        let end = self.row_room(0, y, end);
+        if end == 0 {
+            return 0;
+        }
+        let mut width = 0;
+        for ch in text.chars() {
+            let next = width + char_width(ch);
+            if next > end {
+                break;
+            }
+            width = next;
+        }
         self.put(end - width, y, width, text, st)
     }
 
@@ -469,7 +498,11 @@ impl Screen {
 
     /// Like `put`, but ends a string that does not fit with an ellipsis.
     pub fn put_fit(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
-        if max_w == 0 || str_width(s) <= max_w {
+        let max_w = self.row_room(x, y, max_w);
+        if max_w == 0 {
+            return 0;
+        }
+        if str_width(s) <= max_w {
             return self.put(x, y, max_w, s, st);
         }
         let used = self.put(x, y, max_w - 1, s, st);
@@ -479,6 +512,7 @@ impl Screen {
     /// Like `put`, but shortens a string that does not fit in the middle,
     /// so a file name keeps both its start and its extension.
     pub fn put_middle(&mut self, x: usize, y: usize, max_w: usize, s: &str, st: Style) -> usize {
+        let max_w = self.row_room(x, y, max_w);
         if max_w < 8 {
             return self.put_fit(x, y, max_w, s, st);
         }
@@ -496,35 +530,41 @@ impl Screen {
 
     /// Gives a span a style, keeping what is written there.
     pub fn paint(&mut self, x: usize, y: usize, w: usize, st: Style) {
-        for cell in self.span(x, y, w).0 {
+        for cell in self.styled_span(x, y, w) {
             cell.st = st;
         }
     }
 
     /// Inverts a span, to pick out the changed part of a line.
     pub fn emphasise(&mut self, x: usize, y: usize, w: usize) {
-        for cell in self.span(x, y, w).0 {
+        for cell in self.styled_span(x, y, w) {
             cell.st = cell.st.reverse();
         }
     }
 
     /// Lays a wash behind a span, keeping each cell's own text and colour.
     pub fn wash(&mut self, x: usize, y: usize, w: usize, wash: Wash) {
-        for cell in self.span(x, y, w).0 {
+        for cell in self.styled_span(x, y, w) {
             cell.st = cell.st.with_wash(wash);
         }
     }
 
     /// Release even the hidden uploads before giving the terminal back.
     pub fn release_pictures(&mut self, send: impl FnOnce(&[u8])) {
+        if self.pictures.uploaded.is_empty() && self.pictures.pending_deletes.is_empty() {
+            return;
+        }
         self.out.truncate(SYNC_ON.len());
+        // An interrupted frame may have stopped in the middle of a control sequence.
+        self.out.push(0x18);
+        for id in self.pictures.pending_deletes.drain(..) {
+            delete_picture(&mut self.out, id, 'I');
+        }
         for old in self.pictures.uploaded.drain(..) {
             delete_picture(&mut self.out, old.id, 'I');
         }
-        if self.out.len() > SYNC_ON.len() {
-            send(&self.out[SYNC_ON.len()..]);
-            self.out.truncate(SYNC_ON.len());
-        }
+        send(&self.out[SYNC_ON.len()..]);
+        self.out.truncate(SYNC_ON.len());
     }
 
     /// Places, moves or removes the pictures asked for in this frame.
@@ -546,7 +586,10 @@ impl Screen {
         }
         for old in &pictures.uploaded {
             match pictures.wanted.iter().find(|at| at.id == old.id) {
-                None => delete_picture(&mut self.out, old.id, 'I'),
+                None => {
+                    pictures.pending_deletes.push(old.id);
+                    delete_picture(&mut self.out, old.id, 'I');
+                }
                 Some(at) if !pictures.hidden && at != old => {
                     delete_picture(&mut self.out, old.id, 'i');
                 }
@@ -595,36 +638,27 @@ impl Screen {
                 if cell != *old {
                     *old = cell;
                 }
-                if same
-                    && (!palette_changed
-                        || !cell.st.wash_id().checked_sub(1).is_some_and(|i| washes[i] != prev_washes[i]))
+                if cell.glyph == CONT
+                    || same
+                        && (!palette_changed
+                            || !cell.st.wash_id().checked_sub(1).is_some_and(|i| washes[i] != prev_washes[i]))
                 {
                     continue;
                 }
-                // A wide glyph must be drawn from its first column, unless
-                // the terminal has already drawn it while painting this row.
-                let (first, glyph) = if cell.glyph == CONT {
-                    if next_col == x + 1 {
-                        continue;
-                    }
-                    (x - 1, cur[x - 1])
-                } else {
-                    (x, cell)
-                };
-                if first != next_col {
-                    let _ = write!(self.out, "\x1b[{};{}H", y + 1, first + 1);
+                if x != next_col {
+                    let _ = write!(self.out, "\x1b[{};{}H", y + 1, x + 1);
                 }
-                if active != Some(glyph.st) {
-                    glyph.st.sgr(&mut self.out, washes);
-                    active = Some(glyph.st);
+                if active != Some(cell.st) {
+                    cell.st.sgr(&mut self.out, washes);
+                    active = Some(cell.st);
                 }
-                if let Some(text) = self.marks.get(glyph.glyph) {
+                if let Some(text) = self.marks.get(cell.glyph) {
                     self.out.extend_from_slice(text.as_bytes());
                 } else {
-                    self.out.extend_from_slice(glyph.glyph.scalar().encode_utf8(&mut utf8).as_bytes());
+                    self.out.extend_from_slice(cell.glyph.scalar().encode_utf8(&mut utf8).as_bytes());
                 }
-                let wide = cur.get(first + 1).is_some_and(|cell| cell.glyph == CONT);
-                next_col = first + 1 + usize::from(wide);
+                let wide = cur.get(x + 1).is_some_and(|cell| cell.glyph == CONT);
+                next_col = x + 1 + usize::from(wide);
             }
         }
         let data_at = self.flush_picture();
@@ -640,6 +674,9 @@ impl Screen {
                 self.pictures.data.clear();
                 result
             };
+            if result.is_ok() {
+                self.pictures.pending_deletes.clear();
+            }
             self.out.truncate(SYNC_ON.len());
             result
         } else {
@@ -748,9 +785,10 @@ mod tests {
 
     #[test]
     fn right_alignment_counts_columns_not_bytes() {
-        let mut screen = Screen::sized(8, 1);
+        let mut screen = Screen::sized(8, 2);
         assert_eq!(screen.put_right(7, 0, "−界", Style::PLAIN), 3);
-        assert_eq!(screen.text(), ["    −界"]);
+        assert_eq!(screen.put_right(2, 1, "a界", Style::PLAIN), 1);
+        assert_eq!(screen.text(), ["    −界", " a"]);
     }
 
     #[test]
@@ -769,9 +807,33 @@ mod tests {
     }
 
     #[test]
+    fn ellipses_fit_in_the_actual_remaining_columns() {
+        let mut screen = Screen::sized(8, 2);
+        assert_eq!(screen.put_fit(4, 0, 10, "very-long-name.txt", Style::PLAIN), 4);
+        assert_eq!(screen.put_middle(2, 1, 10, "very-long-name.txt", Style::PLAIN), 6);
+        assert_eq!(screen.text(), ["    ver…", "  very-…"]);
+    }
+
+    #[test]
+    fn styling_either_half_repaints_the_whole_wide_glyph() {
+        let mut screen = Screen::sized(4, 1);
+        screen.put(1, 0, 2, "界", Style::PLAIN);
+        assert!(frame(&mut screen).contains("\x1b[1;2H\x1b[0m界"));
+
+        screen.paint(2, 0, 1, Style::fg(RED));
+        assert!(frame(&mut screen).contains("\x1b[1;2H\x1b[0;31m界"));
+        screen.emphasise(1, 0, 1);
+        assert!(frame(&mut screen).contains("\x1b[1;2H\x1b[0;7;31m界"));
+        screen.underline(0, 2..8);
+        assert!(frame(&mut screen).contains("\x1b[1;2H\x1b[0;4;7;31m界"));
+        assert!(frame(&mut screen).is_empty());
+    }
+
+    #[test]
     fn only_attached_printable_marks_are_sent_and_changed_accent_cells_are_redrawn() {
         let mut screen = Screen::sized(6, 1);
-        screen.put(0, 0, 6, "\u{301}\x1b\u{202e}界\u{301}e\u{200d}\u{302}\u{34f}\u{fe0f}x", Style::PLAIN);
+        let text = "\u{301}\x1b\u{202e}界\u{301}e\u{200d}\u{302}\u{34f}\u{180b}\u{1d173}\u{fe0f}x";
+        screen.put(0, 0, 6, text, Style::PLAIN);
         let first = frame(&mut screen);
         assert!(first.contains("界\u{301}e\u{302}x"), "{first:?}");
         assert!(!first.contains("\u{301}界"));
@@ -874,15 +936,15 @@ mod tests {
         screen.clear();
         frame(&mut screen);
         let mut released = false;
-        screen.release_pictures(|bytes| released = bytes.starts_with(b"\x1b_Ga=d,d=I,i=1,"));
+        screen.release_pictures(|bytes| released = bytes.starts_with(b"\x18\x1b_Ga=d,d=I,i=1,"));
         assert!(released);
     }
 
     #[test]
     fn two_pictures_move_and_leave_independently() {
-        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10";
-        let a = Picture::embedded(PNG).unwrap();
-        let b = Picture::embedded(PNG).unwrap();
+        let png = Picture::sample_png(16, 16);
+        let a = Picture::png(png.clone().into()).unwrap();
+        let b = Picture::png(png.into()).unwrap();
         let mut screen = Screen::sized(20, 6);
         screen.show_picture(&a, 2, 1, 4, 2);
         screen.show_picture(&b, 12, 1, 4, 2);
@@ -918,6 +980,34 @@ mod tests {
         let replaced = frame(&mut screen);
         assert!(replaced.contains(&format!("a=d,d=I,i={},", a.id)));
         assert!(!replaced.contains("a=t") && replaced.contains(&format!("a=p,i={},", b.id)));
+    }
+
+    #[test]
+    fn cleanup_covers_both_old_and_new_pictures_after_a_failed_frame() {
+        let png = Picture::sample_png(16, 16);
+        let a = Picture::png(png.clone().into()).unwrap();
+        let b = Picture::png(png.into()).unwrap();
+        for resize in [false, true] {
+            let mut screen = Screen::sized(20, 6);
+            screen.show_picture(&a, 2, 1, 4, 2);
+            frame(&mut screen);
+            screen.clear();
+            if resize {
+                screen.resize(24, 6);
+            }
+            screen.show_picture(&b, 2, 1, 4, 2);
+            assert!(screen.flush(|_| Err(io::ErrorKind::BrokenPipe.into())).is_err());
+            let mut released = false;
+            screen.release_pictures(|bytes| {
+                let commands = std::str::from_utf8(bytes).unwrap();
+                assert!(commands.starts_with('\x18'));
+                for picture in [&a, &b] {
+                    assert!(commands.contains(&format!("a=d,d=I,i={},", picture.id)));
+                }
+                released = true;
+            });
+            assert!(released);
+        }
     }
 
     #[test]

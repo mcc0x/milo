@@ -17,17 +17,21 @@ pub fn cell_width(ch: char) -> CellWidth {
     match c {
         0..=0x1f | 0x7f..=0x9f | 0xad => Skip,
         0x20..=0x2ff => Narrow,
-        // These format characters and presentation modifiers are not emitted.
+        // Omit Unicode default-ignorables (except Hangul fillers), along
+        // with other controls and modifiers that can change how a row is drawn.
         0x34f
         | 0x61c
-        | 0x180e
+        | 0x17b4..=0x17b5
+        | 0x180b..=0x180f
         | 0x200b..=0x200f
         | 0x2028..=0x202e
         | 0x2060..=0x206f
         | 0x20e3
         | 0xfe00..=0xfe0f
         | 0xfeff
-        | 0xfff9..=0xfffb
+        | 0xfff0..=0xfffb
+        | 0x1bca0..=0x1bca3
+        | 0x1d173..=0x1d17a
         | 0xe0000..=0xe0fff => Skip,
         // Vowel and trailing Jamo join the preceding Hangul cell. Include the
         // assigned ranges in Jamo Extended-B (HangulSyllableType.txt, V and T).
@@ -82,6 +86,13 @@ mod tests {
         assert_eq!(str_width("\x1b[31m"), 4);
         assert_eq!(str_width("漢字-e\u{0301}"), 6);
         assert_eq!(str_width("か\u{3099}"), 2);
+    }
+
+    #[test]
+    fn default_ignorable_formatting_does_not_split_or_shift_a_row() {
+        let text = "a\u{17b4}\u{180b}\u{180f}\u{1bca0}\u{1d173}b";
+        assert_eq!(str_width(text), 2);
+        assert_eq!(byte_at_col(text, 1), text.len() - 1);
     }
 
     #[test]
