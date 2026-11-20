@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::{Escape, Quote, find_end, is_word, string_end, word_end};
+use super::{Class, Escape, Quote, find_end, is_word, string_end, word_end};
 
 #[derive(Clone, Copy)]
 pub(super) enum Dialect {
@@ -12,6 +12,8 @@ pub(super) enum Dialect {
     Csharp,
     Php,
     Javascript,
+    Lua,
+    Swift,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -21,6 +23,12 @@ pub enum Delimiter {
     CsharpRaw(usize),
     Heredoc(Rc<[u8]>),
     Template(Template),
+    /// A Lua long string and the number of `=` between its brackets.
+    LuaString(u8),
+    /// A Lua long comment, closed like a long string of its level.
+    LuaComment(u8),
+    /// A Swift multiline string that needs this many `#` after its closing quotes.
+    SwiftRaw(u8),
 }
 
 impl Dialect {
@@ -49,13 +57,35 @@ impl Dialect {
                 let end = template.end(b, from + 1);
                 (end, end.is_none().then_some(Delimiter::Template(template)))
             }
+            Self::Lua if b[from] == b'[' => {
+                let level = lua_level(rest)?;
+                let end = lua_end(b, from + usize::from(level) + 2, level.into());
+                (end, end.is_none().then_some(Delimiter::LuaString(level)))
+            }
+            Self::Swift if b[from] == b'#' => {
+                let (end, open) = swift_open(b, from)?;
+                (end, open.map(Delimiter::SwiftRaw))
+            }
             _ => return None,
         };
         Some((end.unwrap_or(b.len()), open))
     }
+
+    /// Returns where a comment whose closer depends on its opener ends, and the delimiter to keep if it stays open.
+    #[inline]
+    pub(super) fn comment(self, b: &[u8], from: usize) -> Option<(usize, Option<Delimiter>)> {
+        let Self::Lua = self else { return None };
+        let level = lua_level(b[from..].strip_prefix(b"--")?)?;
+        let end = lua_end(b, from + usize::from(level) + 4, level.into());
+        Some((end.unwrap_or(b.len()), end.is_none().then_some(Delimiter::LuaComment(level))))
+    }
 }
 
 impl Delimiter {
+    pub(super) fn class(&self) -> Class {
+        if matches!(self, Self::LuaComment(_)) { Class::Comment } else { Class::Str }
+    }
+
     pub(super) fn end(&mut self, b: &[u8]) -> Option<usize> {
         match self {
             Self::RustRaw(hashes) => repeated_end(b, 0, b'"', b'#', (*hashes).into()),
@@ -70,6 +100,8 @@ impl Delimiter {
                 Some(b.len() - after.len() + usize::from(after.starts_with(b";")))
             }
             Self::Template(template) => template.end(b, 0),
+            Self::LuaString(level) | Self::LuaComment(level) => lua_end(b, 0, (*level).into()),
+            Self::SwiftRaw(hashes) => swift_end(b, 0, (*hashes).into()),
         }
     }
 }
@@ -80,6 +112,63 @@ fn rust_hashes(rest: &[u8]) -> Option<(usize, u8)> {
     let count = after.iter().take_while(|&&c| c == b'#').count();
     (after.get(count) == Some(&b'"')).then_some(())?;
     Some((prefix + count + 2, u8::try_from(count).ok()?))
+}
+
+/// The number of `=` in a long bracket opener such as `[==[`.
+fn lua_level(rest: &[u8]) -> Option<u8> {
+    let after = rest.strip_prefix(b"[")?;
+    let level = after.iter().take_while(|&&c| c == b'=').count();
+    (after.get(level) == Some(&b'[')).then_some(())?;
+    u8::try_from(level).ok()
+}
+
+/// Where a Swift string that starts with `#` ends, and the number of `#` that close it if it stays open.
+fn swift_open(b: &[u8], from: usize) -> Option<(Option<usize>, Option<u8>)> {
+    // Only the first `#` of a run opens a string, so a long run is counted once, not from each of its bytes.
+    if from > 0 && b[from - 1] == b'#' {
+        return None;
+    }
+    let hashes = b[from..].iter().take_while(|&&c| c == b'#').count();
+    let marks = u8::try_from(hashes).ok()?;
+    let quotes = b[from + hashes..].iter().take(3).take_while(|&&c| c == b'"').count();
+    if quotes == 0 {
+        return None;
+    }
+    // A closer on the same line makes one string of it, even when that string starts with two quotes.
+    let end = repeated_end(b, from + hashes + 1, b'"', b'#', hashes);
+    Some((end, (end.is_none() && quotes == 3).then_some(marks)))
+}
+
+/// Where a `]`, `level` `=` and another `]` end.
+fn lua_end(b: &[u8], from: usize, level: usize) -> Option<usize> {
+    let mut i = from;
+    while i < b.len() {
+        if b[i] != b']' {
+            i += 1;
+            continue;
+        }
+        let marks = b[i + 1..].iter().take(level).take_while(|&&c| c == b'=').count();
+        // The byte after a failed run may be the `]` that starts the real closer.
+        i += 1 + marks;
+        if marks == level && b.get(i) == Some(&b']') {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
+/// Where three quotes and `hashes` `#` end. Extra quotes before them belong to the string.
+fn swift_end(b: &[u8], from: usize, hashes: usize) -> Option<usize> {
+    let mut i = from;
+    while let Some(quotes) = find_end(b, i, "\"\"\"") {
+        let quotes = quotes + b[quotes..].iter().take_while(|&&c| c == b'"').count();
+        let marks = b[quotes..].iter().take(hashes).take_while(|&&c| c == b'#').count();
+        if marks == hashes {
+            return Some(quotes + marks);
+        }
+        i = quotes + marks;
+    }
+    None
 }
 
 fn repeated_end(b: &[u8], from: usize, first: u8, repeat: u8, count: usize) -> Option<usize> {

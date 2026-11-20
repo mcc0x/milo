@@ -1,4 +1,4 @@
-//! Defines the code-colouring rules and selects them by file extension.
+//! Defines the code-colouring rules and selects them by file name or extension.
 
 use super::{Dialect, Escape, Lang, Quote};
 
@@ -18,12 +18,16 @@ const PLAIN: Lang = Lang {
     jsx: false,
     attributes: false,
     table_headers: false,
+    caseless: false,
+    leading_keywords: false,
 };
 
 const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, escape: Escape::Backslash, extra_quotes: 0 };
 const SINGLE: Quote = Quote { open: "'", close: "'", ..DOUBLE };
 const C_COMMENTS: &[(&str, &str)] = &[("/*", "*/")];
 const C_QUOTES: &[Quote] = &[DOUBLE, SINGLE];
+/// Shell quoting kept to one line, for files where a stray apostrophe is ordinary text.
+const LINE_QUOTES: &[Quote] = &[DOUBLE, Quote { escape: Escape::None, ..SINGLE }];
 
 static RUST: Lang = Lang {
     chars: true,
@@ -199,6 +203,87 @@ static SHELL: Lang = Lang {
     ..PLAIN
 };
 
+static LUA: Lang = Lang {
+    line_comments: &["--"],
+    dialect: Dialect::Lua,
+    quotes: C_QUOTES,
+    keywords: &[
+        "and", "break", "do", "else", "elseif", "end", "for", "function", "goto", "if", "in", "local", "not", "or",
+        "repeat", "return", "then", "until", "while",
+    ],
+    constants: &["true", "false", "nil"],
+    ..PLAIN
+};
+
+static SWIFT: Lang = Lang {
+    directives: true,
+    line_comments: &["//"],
+    block_comments: C_COMMENTS,
+    dialect: Dialect::Swift,
+    quotes: &[Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE }, DOUBLE],
+    keywords: &[
+        "actor", "any", "as", "associatedtype", "async", "await", "break", "case", "catch", "class", "continue",
+        "convenience", "default", "defer", "deinit", "didSet", "do", "dynamic", "else", "enum", "extension",
+        "fallthrough", "fileprivate", "final", "for", "func", "get", "guard", "if", "import", "in", "indirect", "init",
+        "inout", "internal", "is", "isolated", "lazy", "let", "macro", "mutating", "nonisolated", "nonmutating",
+        "open", "operator", "optional", "override", "precedencegroup", "private", "protocol", "public", "repeat",
+        "required", "rethrows", "return", "self", "Self", "set", "some", "static", "struct", "subscript", "super",
+        "switch", "throw", "throws", "try", "typealias", "unowned", "var", "weak", "where", "while", "willSet",
+    ],
+    constants: &["true", "false", "nil"],
+    ..PLAIN
+};
+
+/// The words most dialects share. Strings stay on one line because dialects disagree about backslashes.
+static SQL: Lang = Lang {
+    names: false,
+    caseless: true,
+    line_comments: &["--"],
+    block_comments: C_COMMENTS,
+    quotes: &[Quote { escape: Escape::Doubled, ..SINGLE }, Quote { escape: Escape::Doubled, ..DOUBLE }],
+    keywords: &[
+        "add", "all", "alter", "and", "any", "as", "asc", "begin", "between", "by", "cascade", "case", "cast", "check",
+        "column", "commit", "conflict", "constraint", "create", "cross", "database", "declare", "default", "delete",
+        "desc", "distinct", "do", "drop", "else", "end", "except", "exists", "explain", "for", "foreign", "from",
+        "full", "function", "grant", "group", "having", "if", "in", "index", "inner", "insert", "intersect", "into",
+        "is", "join", "key", "left", "like", "limit", "natural", "not", "nothing", "offset", "on", "or", "order",
+        "outer", "over", "partition", "primary", "procedure", "recursive", "references", "rename", "replace", "return",
+        "returning", "returns", "revoke", "right", "rollback", "schema", "select", "set", "table", "temp", "temporary",
+        "then", "to", "transaction", "trigger", "truncate", "union", "unique", "update", "use", "using", "values",
+        "view", "when", "where", "window", "with",
+    ],
+    constants: &["true", "false", "null"],
+    ..PLAIN
+};
+
+/// Instructions are conventionally upper case, which keeps them apart from the shell words in `RUN`.
+static DOCKERFILE: Lang = Lang {
+    names: false,
+    spaced_comments: true,
+    line_comments: &["#"],
+    quotes: LINE_QUOTES,
+    keywords: &[
+        "ADD", "ARG", "AS", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM", "HEALTHCHECK", "LABEL", "MAINTAINER",
+        "ONBUILD", "RUN", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+    ],
+    ..PLAIN
+};
+
+/// A recipe's tab is expanded before the scanner sees it, so a shell word such as
+/// `else` or `export` that starts a recipe line is coloured like the directive.
+static MAKEFILE: Lang = Lang {
+    names: false,
+    spaced_comments: true,
+    leading_keywords: true,
+    line_comments: &["#"],
+    quotes: LINE_QUOTES,
+    keywords: &[
+        "define", "else", "endef", "endif", "export", "ifdef", "ifeq", "ifndef", "ifneq", "include", "override",
+        "private", "sinclude", "undefine", "unexport", "vpath",
+    ],
+    ..PLAIN
+};
+
 static JSON: Lang = Lang {
     line_comments: &["//"],
     block_comments: C_COMMENTS,
@@ -251,14 +336,25 @@ pub(super) const FILE_LANGS: &[(&[&str], &Lang)] = &[
     (&["json", "jsonc"], &JSON),
     (&["yaml", "yml"], &YAML),
     (&["toml"], &TOML),
+    (&["lua"], &LUA),
+    (&["swift"], &SWIFT),
+    (&["sql"], &SQL),
+    (&["dockerfile"], &DOCKERFILE),
+    (&["mk"], &MAKEFILE),
 ];
 
-/// Find a language by file extension, ignoring ASCII case.
-pub fn for_file(name: &str) -> Option<&'static Lang> {
-    let (_, ext) = name.rsplit_once('.')?;
-    FILE_LANGS
-        .iter()
-        .find_map(|(extensions, lang)| extensions.iter().any(|e| ext.eq_ignore_ascii_case(e)).then_some(*lang))
+/// Files known by their whole name.
+const NAMED_LANGS: &[(&[&str], &Lang)] = &[(&["Dockerfile"], &DOCKERFILE), (&["Makefile", "GNUmakefile"], &MAKEFILE)];
+
+fn listed_lang(langs: &[(&[&str], &'static Lang)], word: &str) -> Option<&'static Lang> {
+    langs.iter().find_map(|(words, lang)| words.iter().any(|w| word.eq_ignore_ascii_case(w)).then_some(*lang))
+}
+
+/// Find a language by the name of a path's last component or by its extension, ignoring ASCII case.
+pub fn for_file(path: &str) -> Option<&'static Lang> {
+    let name = path.rsplit('/').next()?;
+    let by_extension = || listed_lang(FILE_LANGS, name.rsplit_once('.')?.1);
+    listed_lang(NAMED_LANGS, name).or_else(by_extension)
 }
 
 impl Lang {
@@ -275,6 +371,9 @@ impl Lang {
             "bun" | "deno" | "node" | "nodejs" | "ts-node" | "tsx" | "zx" => &[&JAVASCRIPT, &TYPESCRIPT, &JSX, &TSX],
             "php" => &[&PHP],
             "cargo" | "rust-script" => &[&RUST],
+            "lua" | "luajit" => &[&LUA],
+            "swift" => &[&SWIFT],
+            "make" | "gmake" => &[&MAKEFILE],
             _ => return false,
         };
         languages.iter().any(|&lang| std::ptr::eq(self, lang))
@@ -326,7 +425,233 @@ mod tests {
     #[test]
     fn languages_are_found_by_file_name() {
         assert!(for_file("main.rs").is_some() && for_file("App.TSX").is_some() && for_file("Cargo.toml").is_some());
-        assert!(for_file("README.md").is_none() && for_file("Makefile").is_none());
+        for (name, lang) in [
+            ("init.lua", &LUA),
+            ("App.swift", &SWIFT),
+            ("db/001_users.SQL", &SQL),
+            ("Dockerfile", &DOCKERFILE),
+            ("dockerfile", &DOCKERFILE),
+            ("ops.d/Dockerfile", &DOCKERFILE),
+            ("api.dockerfile", &DOCKERFILE),
+            ("Makefile", &MAKEFILE),
+            ("makefile", &MAKEFILE),
+            ("GNUmakefile", &MAKEFILE),
+            ("build/rules.mk", &MAKEFILE),
+            ("Makefile.toml", &TOML),
+        ] {
+            assert!(for_file(name).is_some_and(|found| std::ptr::eq(found, lang)), "{name}");
+        }
+        // A name matches whole, and a dot in a folder's name does not start an extension.
+        let unknown = ["README.md", "LICENSE", "Dockerfiles", "Dockerfile.md", "Makefile.win", "my.Makefile"];
+        for name in unknown.into_iter().chain(["v1.rs/README", "Makefile/notes"]) {
+            assert!(for_file(name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn lua_long_brackets_close_only_at_their_own_level() {
+        let mut state = State::Code;
+        assert_eq!(
+            pieces(&LUA, "local s = [==[one ]] two", &mut state),
+            [("local", Class::Keyword), ("[==[one ]] two", Class::Str)]
+        );
+        assert_eq!(pieces(&LUA, "-- ]=] still text", &mut state), [("-- ]=] still text", Class::Str)]);
+        assert_eq!(
+            pieces(&LUA, "]]==] .. name -- done", &mut state),
+            [("]]==]", Class::Str), ("-- done", Class::Comment)]
+        );
+        assert_eq!(state, State::Code);
+
+        assert_eq!(pieces(&LUA, "x = 1 --[[ note", &mut state), [("1", Class::Number), ("--[[ note", Class::Comment)]);
+        let hidden = "local hidden = \"]=]\"";
+        assert_eq!(pieces(&LUA, hidden, &mut state), [(hidden, Class::Comment)]);
+        assert_eq!(
+            pieces(&LUA, "]] return t[a[1]], [[x]]", &mut state),
+            [("]]", Class::Comment), ("return", Class::Keyword), ("1", Class::Number), ("[[x]]", Class::Str)]
+        );
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn lua_colours_one_line_long_comments_and_ordinary_code() {
+        assert_eq!(
+            one(&LUA, "--[==[ a ]] b ]==] local n = nil"),
+            [("--[==[ a ]] b ]==]", Class::Comment), ("local", Class::Keyword), ("nil", Class::Number)]
+        );
+        assert_eq!(one(&LUA, "--[= not long ]]"), [("--[= not long ]]", Class::Comment)]);
+        assert_eq!(
+            one(&LUA, "if a ~= b then print(\"hi\") end"),
+            [
+                ("if", Class::Keyword),
+                ("then", Class::Keyword),
+                ("print", Class::Function),
+                ("\"hi\"", Class::Str),
+                ("end", Class::Keyword),
+            ]
+        );
+        // More `=` than a level can count is not a long bracket, and the line stays code.
+        let mut state = State::Code;
+        let wide = format!("[{}[", "=".repeat(256));
+        assert_eq!(pieces(&LUA, &wide, &mut state), []);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn swift_raw_strings_need_their_number_signs_to_close() {
+        assert_eq!(
+            one(&SWIFT, r###"let s = #"a "quoted" \(x)"# + ##"one "# two"##"###),
+            [
+                ("let", Class::Keyword),
+                (r##"#"a "quoted" \(x)"#"##, Class::Str),
+                (r###"##"one "# two"##"###, Class::Str),
+            ]
+        );
+        assert_eq!(one(&SWIFT, "  #\"raw\"# + #\"\"#"), [("#\"raw\"#", Class::Str), ("#\"\"#", Class::Str)]);
+
+        let mut state = State::Code;
+        assert_eq!(
+            pieces(&SWIFT, "let text = #\"\"\"", &mut state),
+            [("let", Class::Keyword), ("#\"\"\"", Class::Str)]
+        );
+        let body = "  \"\"\" // still \"# text";
+        assert_eq!(pieces(&SWIFT, body, &mut state), [(body, Class::Str)]);
+        assert_eq!(
+            pieces(&SWIFT, "  \"\"\"#; return nil", &mut state),
+            [("  \"\"\"#", Class::Str), ("return", Class::Keyword), ("nil", Class::Number)]
+        );
+        assert_eq!(state, State::Code);
+
+        // An unclosed one-line raw string ends with its line, and one that starts with two quotes is one line.
+        pieces(&SWIFT, "let open = #\"unclosed", &mut state);
+        assert_eq!(state, State::Code);
+        assert_eq!(
+            pieces(&SWIFT, "let q = #\"\"\"\"# + 1", &mut state)[1..],
+            [("#\"\"\"\"#", Class::Str), ("1", Class::Number)]
+        );
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn a_long_run_of_swift_number_signs_is_not_read_again_from_each_one() {
+        // Each `#` used to count every `#` after it before finding no quote.
+        let text = format!("x{}", "#".repeat(1 << 18));
+        let mut state = State::Code;
+        assert!(pieces(&SWIFT, &text, &mut state).is_empty());
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn swift_colours_multiline_strings_nested_comments_and_directives() {
+        let mut state = State::Code;
+        assert_eq!(pieces(&SWIFT, "let s = \"\"\"", &mut state), [("let", Class::Keyword), ("\"\"\"", Class::Str)]);
+        let body = "/* text */ \"quoted\"";
+        assert_eq!(pieces(&SWIFT, body, &mut state), [(body, Class::Str)]);
+        assert_eq!(pieces(&SWIFT, "\"\"\"", &mut state), [("\"\"\"", Class::Str)]);
+        assert_eq!(state, State::Code);
+
+        let outer = "/* outer /* inner */ still";
+        assert_eq!(pieces(&SWIFT, outer, &mut state), [(outer, Class::Comment)]);
+        assert_eq!(
+            pieces(&SWIFT, "*/ guard let x else { return }", &mut state),
+            [
+                ("*/", Class::Comment),
+                ("guard", Class::Keyword),
+                ("let", Class::Keyword),
+                ("else", Class::Keyword),
+                ("return", Class::Keyword),
+            ]
+        );
+        assert_eq!(one(&SWIFT, "#if os(iOS)"), [("#if", Class::Keyword), ("os", Class::Function)]);
+        assert_eq!(
+            one(&SWIFT, "func greet(_ name: String) -> Int? { nil } // done"),
+            [
+                ("func", Class::Keyword),
+                ("greet", Class::Function),
+                ("String", Class::Type),
+                ("Int", Class::Type),
+                ("nil", Class::Number),
+                ("// done", Class::Comment),
+            ]
+        );
+    }
+
+    #[test]
+    fn sql_keywords_ignore_case_and_strings_double_their_quotes() {
+        assert_eq!(
+            one(&SQL, "SELECT name FROM users WHERE note = 'it''s' AND ok IS NOT NULL; -- done"),
+            [
+                ("SELECT", Class::Keyword),
+                ("FROM", Class::Keyword),
+                ("WHERE", Class::Keyword),
+                ("'it''s'", Class::Str),
+                ("AND", Class::Keyword),
+                ("IS", Class::Keyword),
+                ("NOT", Class::Keyword),
+                ("NULL", Class::Number),
+                ("-- done", Class::Comment),
+            ]
+        );
+        assert_eq!(
+            one(&SQL, "create table \"order\" (id integer primary key, n int default 42) /* v2 */"),
+            [
+                ("create", Class::Keyword),
+                ("table", Class::Keyword),
+                ("\"order\"", Class::Str),
+                ("primary", Class::Keyword),
+                ("key", Class::Keyword),
+                ("default", Class::Keyword),
+                ("42", Class::Number),
+                ("/* v2 */", Class::Comment),
+            ]
+        );
+        // A column named like a keyword is a member, and an open string ends with its line.
+        assert_eq!(one(&SQL, "select o.key from o"), [("select", Class::Keyword), ("from", Class::Keyword)]);
+        let mut state = State::Code;
+        pieces(&SQL, "insert into t values ('open", &mut state);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn dockerfile_colours_instructions_but_not_shell_words() {
+        assert_eq!(
+            one(&DOCKERFILE, "FROM alpine:3.20 AS build # stage"),
+            [("FROM", Class::Keyword), ("3.20", Class::Number), ("AS", Class::Keyword), ("# stage", Class::Comment)]
+        );
+        assert_eq!(
+            one(&DOCKERFILE, "RUN add-apt-repository ppa && echo \"it's $USER\" 'a\\' # note"),
+            [
+                ("RUN", Class::Keyword),
+                ("\"it's $USER\"", Class::Str),
+                ("'a\\'", Class::Str),
+                ("# note", Class::Comment)
+            ]
+        );
+        assert_eq!(one(&DOCKERFILE, "    run from copy $USER"), []);
+        let mut state = State::Code;
+        pieces(&DOCKERFILE, "LABEL note=don't", &mut state);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn makefile_directives_are_keywords_only_at_the_start_of_a_line() {
+        assert_eq!(
+            one(&MAKEFILE, "include config.mk # local"),
+            [("include", Class::Keyword), ("# local", Class::Comment)]
+        );
+        assert_eq!(one(&MAKEFILE, "-include local.mk"), [("include", Class::Keyword)]);
+        assert_eq!(one(&MAKEFILE, "  ifeq ($(MODE),release)"), [("ifeq", Class::Keyword)]);
+        assert_eq!(one(&MAKEFILE, "main.o: main.c include/define.h"), []);
+        // A directive ends at a blank; these are targets.
+        for target in ["include/version.h: version.txt", "export-pdf: doc.tex", "define.o: define.c"] {
+            assert_eq!(one(&MAKEFILE, target), [], "{target}");
+        }
+        assert_eq!(
+            one(&MAKEFILE, "\t$(CC) -O2 -o $@ $< \"don't\" # link"),
+            [("\"don't\"", Class::Str), ("# link", Class::Comment)]
+        );
+        let mut state = State::Code;
+        pieces(&MAKEFILE, "\t@echo don't stop", &mut state);
+        assert_eq!(state, State::Code);
     }
 
     #[test]
