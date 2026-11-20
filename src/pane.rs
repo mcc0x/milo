@@ -386,7 +386,19 @@ fn with_loading<T>(
                         }
                         !painted
                     }
-                    Wait::Interrupted => {}
+                };
+                if check_size && Instant::now() >= delay {
+                    let (w, h) = terminal.size();
+                    if !painted || (screen.w, screen.h) != (w, h) {
+                        draw_loading(screen, dir, w, h);
+                        if let Err(e) = screen.flush(|bytes| terminal.write_while_open(bytes, ready.as_raw_fd())) {
+                            if e.kind() == io::ErrorKind::Interrupted && !term::TERMINATED.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            break;
+                        }
+                        painted = true;
+                    }
                 }
             }
             term::TERMINATED.store(true, Ordering::Relaxed);

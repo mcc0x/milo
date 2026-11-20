@@ -23,6 +23,8 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 // terminal type reply tells us the terminal has finished answering.
 const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\
     \x1b]11;?\x1b\\\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
+// Return to ground state before the next frame after a cancelled loading write.
+const CANCEL_FRAME: &[u8] = b"\x18\x1b[?2026l";
 // End a partial control string or synchronized update before changing modes.
 const LEAVE: &[u8] =
     b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
@@ -77,6 +79,7 @@ pub struct Session {
     output: File,
     signal: PipeReader,
     pending_interrupt: bool,
+    cancelled_output: bool,
     saved: Option<libc::termios>,
 }
 
@@ -110,7 +113,8 @@ impl Session {
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut session = Self { keyboard, output, signal, pending_interrupt: false, saved: Some(saved) };
+        let mut session =
+            Self { keyboard, output, signal, pending_interrupt: false, cancelled_output: false, saved: Some(saved) };
         session.write(ENTER)?;
         Ok(session)
     }
@@ -127,7 +131,20 @@ impl Session {
     }
 
     /// Make progress while the terminal is reading, but let a signal interrupt backpressure.
-    pub fn write(&mut self, mut data: &[u8]) -> io::Result<()> {
+    pub fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        if self.cancelled_output {
+            self.write_until(CANCEL_FRAME, None)?;
+            self.cancelled_output = false;
+        }
+        self.write_until(data, None)
+    }
+
+    /// The opening thread must be able to hand the terminal back even if it stopped reading.
+    pub(crate) fn write_while_open(&mut self, data: &[u8], done: RawFd) -> io::Result<()> {
+        self.write_until(data, Some(done))
+    }
+
+    fn write_until(&mut self, mut data: &[u8], done: Option<RawFd>) -> io::Result<()> {
         while !data.is_empty() {
             if TERMINATED.load(Ordering::Relaxed) {
                 return Err(ErrorKind::Interrupted.into());
@@ -140,12 +157,16 @@ impl Session {
                     let mut fds = [
                         libc::pollfd { fd: self.output.as_raw_fd(), events: libc::POLLOUT, revents: 0 },
                         libc::pollfd { fd: self.signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                        libc::pollfd { fd: done.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
                     ];
                     if wait_ready(&mut fds, -1) < 0 {
                         let e = io::Error::last_os_error();
                         if e.kind() != ErrorKind::Interrupted {
                             return Err(e);
                         }
+                    } else if fds[2].revents != 0 {
+                        self.cancelled_output = true;
+                        return Err(ErrorKind::Interrupted.into());
                     } else if fds[1].revents != 0 {
                         drain_signal(&self.signal);
                         // Keep the wakeup for the pane without leaving the pipe readable
@@ -403,6 +424,7 @@ mod tests {
             output,
             signal,
             pending_interrupt: false,
+            cancelled_output: false,
             saved: None,
         };
         wake(wakeup.as_raw_fd());
@@ -426,6 +448,39 @@ mod tests {
         });
         assert!(matches!(terminal.wait(0, None, None), Wait::Interrupted));
         assert!(matches!(terminal.wait(0, None, None), Wait::Timeout));
+    }
+
+    #[test]
+    fn completing_open_cancels_a_partial_loading_frame_and_resets_terminal_state() {
+        use std::os::fd::OwnedFd;
+
+        let (keyboard, _input) = io::pipe().unwrap();
+        let (mut read, output) = io::pipe().unwrap();
+        let (signal, _signal_writer) = io::pipe().unwrap();
+        let (done, completion) = io::pipe().unwrap();
+        for fd in [output.as_raw_fd(), read.as_raw_fd()] {
+            // SAFETY: Both descriptors are open; F_SETFL sets nonblocking mode.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) }, 0);
+        }
+        let mut terminal = Session {
+            keyboard: File::from(OwnedFd::from(keyboard)),
+            output: File::from(OwnedFd::from(output)),
+            signal,
+            pending_interrupt: false,
+            cancelled_output: false,
+            saved: None,
+        };
+        let frame = vec![b'x'; 1 << 20];
+        drop(completion);
+        assert_eq!(terminal.write_while_open(&frame, done.as_raw_fd()).unwrap_err().kind(), ErrorKind::Interrupted);
+        let mut partial = Vec::new();
+        assert_eq!(read.read_to_end(&mut partial).unwrap_err().kind(), ErrorKind::WouldBlock);
+        assert!(!partial.is_empty() && partial.len() < frame.len());
+
+        terminal.write(b"Ready").unwrap();
+        let mut resumed = [0; CANCEL_FRAME.len() + 5];
+        read.read_exact(&mut resumed).unwrap();
+        assert!(resumed.starts_with(CANCEL_FRAME) && resumed.ends_with(b"Ready"));
     }
 
     fn modes(terminal: &File) -> (libc::tcflag_t, libc::tcflag_t, libc::tcflag_t, libc::tcflag_t) {
