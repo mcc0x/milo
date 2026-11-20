@@ -114,18 +114,24 @@
       </section>
       <section class="features" aria-labelledby="features-title">
         <h2 id="features-title">What’s in Milo?</h2>
+        <p class="feature-intro">Four panes, local settings, and layouts that remember your worktree. Bring your own agent:
+          <span><img src="./images/claude.png" alt="">Claude Code</span>,
+          <span><img class="omp-mark" src="./images/omp.svg" alt="">OMP</span>,
+          <span><img src="./images/codex.png" alt="">Codex</span>, or
+          <span><svg viewBox="0 0 24 30" aria-hidden="true"><path fill="#292828" fill-rule="evenodd" d="M0 0h24v30H0zm6 6v18h12V6z"/><path fill="#a49e9e" d="M6 12h12v12H6z"/></svg>OpenCode</span>.
+        </p>
         <div class="feature-grid">
           <article class="feature feature-panes">
             <h3 class="visually-hidden">Workspace panes</h3>
             <dl>
-              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v14h5M5 7h5"/><rect x="11" y="4" width="8" height="6" rx="1.5"/><rect x="11" y="14" width="8" height="6" rx="1.5"/></svg>Outline</dt><dd>A Git-aware file tree that points out what changed.</dd></div>
-              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="5" r="2.3"/><circle cx="7" cy="19" r="2.3"/><circle cx="17" cy="6" r="2.3"/><path d="M7 8v9m0-3c6 0 10-1 10-6"/></svg>History</dt><dd>Browse commits and see what’s waiting to be pushed.</dd></div>
-              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6C9 4 6 4 3 5v13c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1zm0 0v13"/></svg>Reader</dt><dd>Open a file or read its diff without leaving your tab.</dd></div>
-              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18a9 9 0 1 1 16 0M12 14l4-5"/><circle cx="12" cy="15" r="1.5"/></svg>Usage</dt><dd>Check your agent limits and when they reset.</dd></div>
+              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v14h5M5 7h5"/><rect x="11" y="4" width="8" height="6" rx="1.5"/><rect class="pane-leaf" x="11" y="14" width="8" height="6" rx="1.5"/></svg>Outline</dt><dd>A Git-aware file tree that points out what changed.</dd></div>
+              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="5" r="2.3"/><circle cx="7" cy="19" r="2.3"/><circle class="pane-commit" cx="17" cy="6" r="2.3"/><path d="M7 8v9m0-3c6 0 10-1 10-6"/></svg>History</dt><dd>Browse commits and see what’s waiting to be pushed.</dd></div>
+              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6C9 4 6 4 3 5v13c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1zm0 0v13"/><path class="pane-ink" d="m15 10 3-.6" pathLength="1"/></svg>Reader</dt><dd>Open a file or read its diff without leaving your tab.</dd></div>
+              <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18a9 9 0 1 1 16 0"/><path class="pane-needle" d="m12 14 4-5"/><circle cx="12" cy="15" r="1.5"/></svg>Usage</dt><dd>Check your agent limits and when they reset.</dd></div>
             </dl>
           </article>
           <article class="feature feature-memory">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7H4v14h12v-2"/><path d="M8 3h12v14l-6-3-6 3z"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><g class="layout-window"><rect x="2" y="4" width="20" height="16" rx="2.5"/><path d="M2 8h20"/><path class="layout-divider" d="M10 8v12"/></g></svg>
             <h3>Layouts</h3>
             <p>Save a default or a layout per worktree. Turn on automatic arrangement to reuse your pane sizes in new shell tabs.</p>
           </article>

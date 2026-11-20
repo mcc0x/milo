@@ -1,19 +1,38 @@
 .hero .demo-footer { margin-bottom: 0; }
 .features { --cell-pad: clamp(1.25rem, 2.3vw, 2rem); padding-block: 1rem clamp(3rem, 7vw, 6rem); }
-.features h2 { margin: 0 0 1rem; font-size: clamp(1.65rem, 3vw, 2.6rem); line-height: 1.1; letter-spacing: -.045em; font-weight: 680; }
+.features h2 { margin: 0 0 .4rem; font-size: clamp(1.65rem, 3vw, 2.6rem); line-height: 1.1; letter-spacing: -.045em; font-weight: 680; }
+.feature-intro { max-width: 68ch; margin: 0 0 1.35rem; color: var(--secondary); font-size: clamp(.97rem, 1.18vw, 1.08rem); line-height: 1.65; text-wrap: pretty; }
+.feature-intro span { white-space: nowrap; font-weight: 600; color: var(--ink); }
+.feature-intro :is(img, svg) { display: inline-block; width: 1em; height: 1em; object-fit: contain; margin-right: .25em; vertical-align: -.14em; }
+.feature-intro .omp-mark { background: #242831; border-radius: .22em; padding: .08em; }
 .intro { position: relative; }
 .bubbles { display: flex; justify-content: center; align-items: center; gap: 1.3rem; padding: .45rem 0; margin: 0; list-style: none; }
 .bubbles li { display: grid; place-items: center; }
-.bubbles span { display: grid; place-items: center; width: 2.6rem; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at 30% 18%, #ffffffeb, transparent 49%), linear-gradient(145deg, #ffffff4d, #eaf6ff73 70%, #ffffffab); border: 1px solid #ffffffad; box-shadow: inset 0 -2px 5px #aac5ea59, inset 0 2px 4px white, 0 13px 20px -11px #586ba27d; }
-.bubbles span { width: 3.25rem; }
+.bubbles span { display: grid; place-items: center; width: 3.25rem; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at var(--glint-x, 30%) var(--glint-y, 18%), #ffffffeb, transparent 49%), linear-gradient(145deg, #ffffff4d, #eaf6ff73 70%, #ffffffab); border: 1px solid #ffffffad; box-shadow: inset 0 -2px 5px #aac5ea59, inset 0 2px 4px white, 0 13px 20px -11px #586ba27d; }
 .bubbles :is(img,svg) { width: 65%; height: 65%; object-fit: contain; }
 .bubbles li:nth-child(2) img { padding: .12rem; background: #242831; border-radius: .45rem; }
 @media (prefers-reduced-motion: no-preference) {
   .bubbles span { animation: bubble-float 5s ease-in-out infinite alternate; }
   .bubbles li:nth-child(even) span { animation-delay: -3s; }
   .bubbles li:nth-child(3) span { animation-delay: -1.5s; }
+  .pane-beat .pane-leaf { animation: leaf-in .28s ease-out backwards; }
+  .pane-beat .pane-commit { animation: commit-in .3s .14s ease-out backwards; }
+  .pane-beat .pane-ink { stroke-dasharray: 1; animation: ink-in .32s .29s ease-out backwards; }
+  .pane-beat .pane-needle { transform-origin: 12px 15px; animation: needle-settle .46s .44s ease-out backwards; }
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .bubbles li { pointer-events: auto; }
+  .bubbles li:hover span { animation-play-state: paused; }
+  .feature-memory:hover .layout-divider { animation: remember-split 1s ease-in-out; }
+  .feature-memory:hover .layout-window { animation: reopen-layout 1s ease-out; }
 }
 @keyframes bubble-float { to { transform: translateY(-5px); } }
+@keyframes leaf-in { from { opacity: 0; transform: translateX(-4px); } }
+@keyframes commit-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes ink-in { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes needle-settle { from { transform: rotate(-52deg); } 72% { transform: rotate(6deg); } }
+@keyframes remember-split { 0%, 100% { transform: none; } 32%, 66% { transform: translateX(4px); } }
+@keyframes reopen-layout { 0%, 38%, 86%, 100% { opacity: 1; transform: none; } 55% { opacity: .12; transform: translateY(-2px); } 56% { opacity: 0; transform: translateY(2px); } }
 .feature-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; --tile-radius: 1rem; }
 .feature { min-width: 0; padding: var(--cell-pad); border-radius: var(--tile-radius); background: #ffffff78; box-shadow: inset 0 1px 0 #ffffffb0; }
 .feature h3, .feature dt { margin: 0; font: 650 clamp(1.08rem, 1.4vw, 1.25rem)/1.25 Bricolage, system-ui, sans-serif; letter-spacing: -.02em; }

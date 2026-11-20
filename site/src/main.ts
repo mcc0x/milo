@@ -170,6 +170,28 @@ document.addEventListener('visibilitychange', syncPlayback);
 if (!reduceMotion.matches) beginLoop();
 syncMotionPreference();
 
+// Leave completed icons in the HTML; play their entrance only on the first visit.
+const paneStrip = document.querySelector<HTMLElement>('.feature-panes')!;
+const reveal = new IntersectionObserver(([entry], observer) => {
+  if (!entry.isIntersecting) return;
+  if (!reduceMotion.matches) paneStrip.classList.add('pane-beat');
+  observer.disconnect();
+}, { threshold: 0.25 });
+reveal.observe(paneStrip);
+
+for (const bubble of document.querySelectorAll<HTMLElement>('.bubbles li')) {
+  bubble.addEventListener('pointermove', event => {
+    if (event.pointerType !== 'mouse' || reduceMotion.matches) return;
+    const box = bubble.getBoundingClientRect();
+    bubble.style.setProperty('--glint-x', `${20 + 60 * (event.clientX - box.left) / box.width}%`);
+    bubble.style.setProperty('--glint-y', `${15 + 50 * (event.clientY - box.top) / box.height}%`);
+  });
+  bubble.addEventListener('pointerleave', () => {
+    bubble.style.removeProperty('--glint-x');
+    bubble.style.removeProperty('--glint-y');
+  });
+}
+
 const button = document.querySelector<HTMLButtonElement>('#copy-command')!;
 const command = document.querySelector<HTMLElement>('#install-command')!;
 const feedback = document.querySelector<HTMLElement>('#copy-feedback')!;
