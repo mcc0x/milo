@@ -12,6 +12,7 @@ The reader can show where a file link points without reading its target. It refu
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened. Adding an unrelated untracked file does not require recounting edits in tracked files. A working reader reuses the Git status from its current refresh.
 - Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.
+- Printable bases use Unicode 17.0.0 East Asian Width: wide and fullwidth characters take two cells; ambiguous characters take one. Combining marks stay with their base where applicable. Milo omits presentation modifiers such as emoji variation selectors, so they do not change the width.
 
 The crate depends only on `libc`.
 

@@ -807,6 +807,31 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_mixed_width_symbols_repaints_without_shifting_unchanged_columns() {
+        let mut screen = Screen::sized(6, 2);
+        frame(&mut screen);
+        for (top, bottom, changed) in [
+            ("🟢|", "🛠\u{fe0f} |", "\x1b[1;1H\x1b[0m🟢|\x1b[2;1H🛠\x1b[2;3H|"),
+            ("🛠\u{fe0f} |", "🟢|", "\x1b[1;1H\x1b[0m🛠 \x1b[2;1H🟢"),
+            ("🟢|", "🛠\u{fe0f} |", "\x1b[1;1H\x1b[0m🟢\x1b[2;1H🛠 "),
+        ] {
+            screen.clear();
+            assert_eq!(screen.put(0, 0, 6, top, Style::PLAIN), 3);
+            assert_eq!(screen.put(0, 1, 6, bottom, Style::PLAIN), 3);
+            assert_eq!(frame(&mut screen), format!("\x1b[?2026h{changed}\x1b[0m\x1b[?2026l"));
+            assert_eq!(frame(&mut screen), "");
+        }
+    }
+
+    #[test]
+    fn only_the_narrow_symbol_can_be_drawn_in_the_last_column() {
+        let mut screen = Screen::sized(4, 1);
+        assert_eq!(screen.put(3, 0, 1, "🟢", Style::PLAIN), 0);
+        assert_eq!(screen.put(3, 0, 1, "🛠", Style::PLAIN), 1);
+        assert!(frame(&mut screen).contains("\x1b[1;4H\x1b[0m🛠"));
+    }
+
+    #[test]
     fn emoji_skin_tone_is_not_filtered_from_terminal_output() {
         let mut screen = Screen::sized(8, 1);
         screen.put(0, 0, 8, "👍🏽", Style::PLAIN);

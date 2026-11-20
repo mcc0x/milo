@@ -33,52 +33,7 @@ pub fn cell_width(ch: char) -> CellWidth {
         // assigned ranges in Jamo Extended-B (HangulSyllableType.txt, V and T).
         0x1160..=0x11ff | 0xd7b0..=0xd7c6 | 0xd7cb..=0xd7fb => Attach,
         _ if data::is_nonspacing(c) => Attach,
-        // Emoji outside the main blocks that terminals draw two columns wide.
-        0x231a..=0x231b
-        | 0x23e9..=0x23ec
-        | 0x23f0
-        | 0x23f3
-        | 0x25fd..=0x25fe
-        | 0x2614..=0x2615
-        | 0x2648..=0x2653
-        | 0x267f
-        | 0x2693
-        | 0x26a1
-        | 0x26aa..=0x26ab
-        | 0x26bd..=0x26be
-        | 0x26c4..=0x26c5
-        | 0x26ce
-        | 0x26d4
-        | 0x26ea
-        | 0x26f2..=0x26f3
-        | 0x26f5
-        | 0x26fa
-        | 0x26fd
-        | 0x2705
-        | 0x270a..=0x270b
-        | 0x2728
-        | 0x274c
-        | 0x274e
-        | 0x2753..=0x2755
-        | 0x2757
-        | 0x2795..=0x2797
-        | 0x27b0
-        | 0x27bf
-        | 0x2b1b..=0x2b1c
-        | 0x2b50
-        | 0x2b55 => Wide,
-        0x1100..=0x115f
-        | 0x2e80..=0xa4cf
-        | 0xa960..=0xa97c
-        | 0xac00..=0xd7a3
-        | 0xf900..=0xfaff
-        | 0xfe30..=0xfe6f
-        | 0xff00..=0xff60
-        | 0xffe0..=0xffe6
-        | 0x1f300..=0x1f64f
-        | 0x1f680..=0x1f6ff
-        | 0x1f900..=0x1faff
-        | 0x20000..=0x3fffd => Wide,
+        _ if data::is_wide(c) => Wide,
         _ => Narrow,
     }
 }
@@ -127,6 +82,28 @@ mod tests {
         assert_eq!(str_width("\x1b[31m"), 4);
         assert_eq!(str_width("漢字-e\u{0301}"), 6);
         assert_eq!(str_width("か\u{3099}"), 2);
+    }
+
+    #[test]
+    fn only_east_asian_wide_and_fullwidth_scalars_take_two_columns() {
+        for ch in ['🟢', '☰', '𝌆', 'Ａ', '\u{1fa8a}', '\u{2fffd}', '\u{3fffd}'] {
+            assert_eq!(char_width(ch), 2, "{ch:?}");
+        }
+        for ch in ['🛠', '⚒', '🇺', '·', '･', '\u{2e9a}', '\u{2fffe}', '\u{3fffe}'] {
+            assert_eq!(char_width(ch), 1, "{ch:?}");
+        }
+        assert!(matches!(cell_width('\u{3099}'), CellWidth::Attach));
+        for ch in ['\u{200d}', '\u{20e3}', '\u{fe0f}', '\u{e0100}'] {
+            assert!(matches!(cell_width(ch), CellWidth::Skip), "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn panning_steps_over_both_columns_of_wide_emoji_but_not_bare_text_symbols() {
+        let text = "🟢🛠\u{fe0f}|";
+        assert_eq!(byte_at_col(text, 1), "🟢".len());
+        assert_eq!(byte_at_col(text, 2), "🟢".len());
+        assert_eq!(byte_at_col(text, 3), "🟢🛠\u{fe0f}".len());
     }
 
     #[test]
