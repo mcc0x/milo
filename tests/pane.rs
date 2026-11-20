@@ -485,22 +485,75 @@ fn a_closed_pty_stops_a_slow_open_without_waiting_for_git() {
     assert!(terminal.restored());
 }
 
-#[test]
-fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
-    let project = Project::new();
-    fs::write(project.0.join("project/wall.txt"), format!("{}\n", "X".repeat(600)).repeat(200)).unwrap();
+fn wall_reader(project: &Project, cols: u16, rows: u16) -> Terminal {
+    let wall = std::str::from_utf8(&[b'X'; 600]).unwrap();
+    let mut file = String::with_capacity(400 * 601);
+    for row in 0..400 {
+        file.push_str(match row {
+            6 => "PASTE-READY",
+            201 => "ONE-LINE-UP",
+            _ => wall,
+        });
+        file.push('\n');
+    }
+    fs::write(project.0.join("project/wall.txt"), file).unwrap();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
     project.slow_git(&mut command);
     fs::write(project.0.join("go"), "").unwrap();
-    let mut terminal = Terminal::sized(command.args(["view", "wall.txt"]), 600, 200);
-    // Wait for the large file frame, not the small frame drawn while it opens.
+    let mut terminal = Terminal::sized(command.args(["view", "wall.txt"]), cols, rows);
+    // Wait for the file frame, not the small frame drawn while it opens.
     terminal.until("XXXXXXXXXXXXXXXX");
+    terminal
+}
+
+#[test]
+fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
+    let project = Project::new();
+    let mut terminal = wall_reader(&project, 600, 200);
     let pid = i32::try_from(terminal.child.id()).unwrap();
     // SAFETY: This is our own, still-owned child, not a process group.
     assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
     assert_eq!(terminal.wait_for_exit().code(), Some(1));
     assert!(terminal.restored());
     terminal.until("\x1b[?1049l");
+}
+
+#[test]
+fn keyboard_ctrl_c_restores_the_terminal_without_draining_a_blocked_frame() {
+    let project = Project::new();
+    let mut terminal = wall_reader(&project, 600, 200);
+    assert!(!terminal.restored());
+    terminal.master.write_all(b"\x03").unwrap();
+    assert!(terminal.wait_for_exit().success());
+    assert!(terminal.restored());
+    terminal.until("\x1b[?1049l");
+}
+
+#[test]
+fn a_paste_spanning_a_blocked_frame_cannot_quit_or_reorder_keys() {
+    let project = Project::new();
+    let mut terminal = wall_reader(&project, 80, 8);
+    // Scroll one line and start a paste while the terminal is responsive.
+    terminal.master.write_all(b"j\x1b[200~").unwrap();
+    terminal.until("PASTE-READY");
+    terminal.bytes.clear();
+
+    // Enlarge the viewport so it paints more than can fit in the PTY queue.
+    let size = libc::winsize { ws_row: 200, ws_col: 600, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: The slave is open; ioctl reads from the live size record.
+    assert_eq!(unsafe { libc::ioctl(terminal.slave.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) }, 0);
+    let pid = i32::try_from(terminal.child.id()).unwrap();
+    // SAFETY: The PTY is not the child's controlling terminal; signal only this child.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGWINCH) }, 0);
+    terminal.until("XXXXXXXXXXXXXXXX");
+    terminal.master.write_all(b"\x03q\x1b[201~Gk").unwrap();
+
+    // Only G then k, in order, reaches the line just above the last page.
+    terminal.until("ONE-LINE-UP");
+    terminal.master.write_all(b"q").unwrap();
+    terminal.until("\x1b[?1049l");
+    assert!(terminal.wait_for_exit().success());
+    assert!(terminal.restored());
 }
 
 #[test]

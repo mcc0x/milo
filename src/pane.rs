@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::help::Page;
-use crate::keys::{ConfirmClick, Input, Key};
+use crate::keys::{ConfirmClick, Key};
 use crate::preferences::ProjectMode;
 use crate::reader::OpenReader;
 use crate::screen::{Screen, Style, YELLOW};
@@ -379,7 +379,6 @@ fn with_loading<T>(
     screen: &mut Screen,
     dir: Option<&Path>,
     terminal: &mut Session,
-    input: &mut Input,
     delay: Duration,
     open: impl FnOnce() -> T,
 ) -> (T, Option<bool>) {
@@ -390,19 +389,17 @@ fn with_loading<T>(
         scope.spawn(move || {
             let delay = Instant::now() + delay;
             let mut painted = false;
-            let mut keys = Vec::new();
-            while !term::TERMINATED.load(Ordering::Relaxed) {
+            'loading: while !terminal.stopping() {
                 let timeout = if painted { -1 } else { milliseconds(delay.saturating_duration_since(Instant::now())) };
                 let check_size = match terminal.wait_for_open(timeout, ready.as_raw_fd()) {
                     Wait::Woken | Wait::External => return,
                     Wait::Closed => break,
                     Wait::Timeout | Wait::Interrupted => true,
                     Wait::Input => {
-                        input.receive(&mut terminal.keyboard, &mut keys);
-                        if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
-                            break;
-                        }
-                        for key in keys.drain(..) {
+                        for key in terminal.receive() {
+                            if matches!(key, Key::Ctrl(b'c') | Key::Eof) {
+                                break 'loading;
+                            }
                             terminal_reply(screen, key);
                             if let Key::Focus(value) = key {
                                 *focus = Some(value);
@@ -416,7 +413,7 @@ fn with_loading<T>(
                     if !painted || (screen.w, screen.h) != (w, h) {
                         draw_loading(screen, dir, w, h);
                         if let Err(e) = screen.flush(|bytes| terminal.write_while_open(bytes, ready.as_raw_fd())) {
-                            if e.kind() == io::ErrorKind::Interrupted && !term::TERMINATED.load(Ordering::Relaxed) {
+                            if e.kind() == io::ErrorKind::Interrupted && !terminal.stopping() {
                                 return;
                             }
                             break;
@@ -470,7 +467,6 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     let check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
     let mut handoff_click = ConfirmClick::default();
-    let mut input = Input::default();
     let load = |open: &Open<'_>| {
         let started = Instant::now();
         let mut pane = open()?;
@@ -478,8 +474,8 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
         Ok::<_, String>((pane, watcher, pace))
     };
     let (opened, mut focused) = match start {
-        Start::Reading(dir) => with_loading(screen, Some(dir), terminal, &mut input, LOADING_DELAY, || load(open)),
-        Start::Check => with_loading(screen, None, terminal, &mut input, LOADING_DELAY, || load(open)),
+        Start::Reading(dir) => with_loading(screen, Some(dir), terminal, LOADING_DELAY, || load(open)),
+        Start::Check => with_loading(screen, None, terminal, LOADING_DELAY, || load(open)),
         _ => (load(open), None),
     };
     if term::TERMINATED.load(Ordering::Relaxed) {
@@ -490,7 +486,6 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
         pane.key(Key::Focus(value));
     }
     let mut help = None;
-    let mut keys = Vec::new();
     let mut redraw = true;
     let mut frame_due = None;
     let mut tracking = false;
@@ -515,7 +510,12 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
         if std::mem::take(&mut redraw) {
             let want_motion = pane.tracks_hover() || help.is_some();
             if tracking != want_motion {
-                terminal.track_motion(want_motion).map_err(|e| format!("cannot configure mouse tracking: {e}"))?;
+                if let Err(e) = terminal.track_motion(want_motion) {
+                    if terminal.stopping() {
+                        break;
+                    }
+                    return Err(format!("cannot configure mouse tracking: {e}"));
+                }
                 tracking = want_motion;
             }
             if help.is_none() && pace.as_ref().is_some_and(Pace::waiting_for_git) {
@@ -530,7 +530,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                 screen.underline(*y, span.clone());
             }
             if let Err(e) = screen.flush(|bytes| terminal.write(bytes)) {
-                if term::TERMINATED.load(Ordering::Relaxed) {
+                if terminal.stopping() {
                     break;
                 }
                 return Err(format!("cannot write to this terminal: {e}"));
@@ -549,9 +549,8 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
         let timeout_ms = wait.map_or(-1, milliseconds);
         match terminal.wait(timeout_ms, watcher.fd(), pane.external_fd()) {
             Wait::Input => {
-                input.receive(&mut terminal.keyboard, &mut keys);
                 let mut overlay_changed = false;
-                for key in keys.drain(..) {
+                for key in terminal.receive() {
                     if let Key::Hover(x, y) = key {
                         if tracking && !overlay_changed && pane_row_available(screen, &help, &pace, y) {
                             pointer = Some((x, y));
@@ -691,7 +690,7 @@ mod tests {
     fn a_fast_open_does_not_draw_a_loading_frame() {
         let mut screen = Screen::new();
         let (mut terminal, _master, _signals) = Session::test_pty();
-        let result = with_loading(&mut screen, None, &mut terminal, &mut Input::default(), TEST_WAIT, || 42);
+        let result = with_loading(&mut screen, None, &mut terminal, TEST_WAIT, || 42);
         assert_eq!(result, (42, None));
         assert_eq!((screen.w, screen.h), (0, 0));
         assert!(screen.emitted().is_empty());
@@ -702,17 +701,10 @@ mod tests {
         let mut screen = Screen::new();
         let (mut terminal, mut master, _signals) = Session::test_pty();
         master.write_all(b"\x1b[O\x1b[I").unwrap();
-        let ((), focused) = with_loading(
-            &mut screen,
-            None,
-            &mut terminal,
-            &mut Input::default(),
-            LOADING_DELAY,
-            || {
-                let output = read_until(&mut master, "Reading…");
-                assert!(output.contains("Reading…"), "{output:?}");
-            },
-        );
+        let ((), focused) = with_loading(&mut screen, None, &mut terminal, LOADING_DELAY, || {
+            let output = read_until(&mut master, "Reading…");
+            assert!(output.contains("Reading…"), "{output:?}");
+        });
         assert_eq!(focused, Some(true));
     }
 

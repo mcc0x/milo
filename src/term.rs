@@ -9,6 +9,12 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
+use crate::keys::{Input, Key};
+
+// One decoder burst can exceed this threshold. On saturation, leave input on
+// the tty until the frame drains, even if Ctrl-C is behind the queued keys.
+const KEY_BACKLOG: usize = 4096;
+
 /// Redraw at the current size after startup or a resize signal.
 pub static RESIZED: AtomicBool = AtomicBool::new(true);
 /// Wind down after a termination signal, including while waiting on git.
@@ -75,7 +81,10 @@ fn install(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> io::Result<
 
 /// Owns the terminal modes until the pane returns or unwinds.
 pub struct Session {
-    pub keyboard: File,
+    keyboard: File,
+    input: Input,
+    keys: Vec<Key>,
+    cancelled_input: bool,
     output: File,
     signal: PipeReader,
     pending_interrupt: bool,
@@ -113,9 +122,20 @@ impl Session {
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut session =
-            Self { keyboard, output, signal, pending_interrupt: false, cancelled_output: false, saved: Some(saved) };
-        session.write(ENTER)?;
+        let mut session = Self {
+            keyboard,
+            input: Input::default(),
+            keys: Vec::new(),
+            cancelled_input: false,
+            output,
+            signal,
+            pending_interrupt: false,
+            cancelled_output: false,
+            saved: Some(saved),
+        };
+        // There is no reliable distinction between a pasted control byte and a
+        // key until the terminal receives the bracketed-paste mode request.
+        session.write_until(ENTER, None, false)?;
         Ok(session)
     }
 
@@ -123,30 +143,41 @@ impl Session {
         if std::mem::take(&mut self.pending_interrupt) {
             return Wait::Interrupted;
         }
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [watch, external], false)
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [watch, external], false, !self.keys.is_empty())
     }
 
     pub fn wait_for_open(&self, timeout_ms: i32, done: RawFd) -> Wait {
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [Some(done), None], true)
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [Some(done), None], true, !self.keys.is_empty())
     }
 
-    /// Make progress while the terminal is reading, but let a signal interrupt backpressure.
+    pub fn receive(&mut self) -> std::vec::Drain<'_, Key> {
+        if self.keys.is_empty() {
+            self.input.receive(&mut self.keyboard, &mut self.keys);
+        }
+        self.keys.drain(..)
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.cancelled_input || TERMINATED.load(Ordering::Relaxed)
+    }
+
+    /// Make progress while the terminal is reading, but let termination interrupt backpressure.
     pub fn write(&mut self, data: &[u8]) -> io::Result<()> {
         if self.cancelled_output {
-            self.write_until(CANCEL_FRAME, None)?;
+            self.write_until(CANCEL_FRAME, None, true)?;
             self.cancelled_output = false;
         }
-        self.write_until(data, None)
+        self.write_until(data, None, true)
     }
 
     /// The opening thread must be able to hand the terminal back even if it stopped reading.
     pub(crate) fn write_while_open(&mut self, data: &[u8], done: RawFd) -> io::Result<()> {
-        self.write_until(data, Some(done))
+        self.write_until(data, Some(done), true)
     }
 
-    fn write_until(&mut self, mut data: &[u8], done: Option<RawFd>) -> io::Result<()> {
+    fn write_until(&mut self, mut data: &[u8], done: Option<RawFd>, read_input: bool) -> io::Result<()> {
         while !data.is_empty() {
-            if TERMINATED.load(Ordering::Relaxed) {
+            if self.stopping() {
                 return Err(ErrorKind::Interrupted.into());
             }
             match self.output.write(data) {
@@ -154,10 +185,16 @@ impl Session {
                 Ok(n) => data = &data[n..],
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    let keyboard = if read_input && self.keys.len() < KEY_BACKLOG {
+                        self.keyboard.as_raw_fd()
+                    } else {
+                        -1
+                    };
                     let mut fds = [
                         libc::pollfd { fd: self.output.as_raw_fd(), events: libc::POLLOUT, revents: 0 },
                         libc::pollfd { fd: self.signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
                         libc::pollfd { fd: done.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+                        libc::pollfd { fd: keyboard, events: libc::POLLIN, revents: 0 },
                     ];
                     if wait_ready(&mut fds, -1) < 0 {
                         let e = io::Error::last_os_error();
@@ -172,6 +209,17 @@ impl Session {
                         // Keep the wakeup for the pane without leaving the pipe readable
                         // while the terminal is still blocked.
                         self.pending_interrupt = true;
+                    } else if fds[3].revents != 0 {
+                        if fds[3].revents & libc::POLLIN == 0 {
+                            self.cancelled_input = true;
+                            continue;
+                        }
+                        // Use the same decoder as the pane, including an in-progress
+                        // paste or terminal report. Keep other keys for the next wait.
+                        let at = self.keys.len();
+                        self.input.receive(&mut self.keyboard, &mut self.keys);
+                        self.cancelled_input =
+                            self.keys[at..].iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof));
                     }
                 }
                 Err(e) => return Err(e),
@@ -310,7 +358,14 @@ fn drain_signal(mut reader: &PipeReader) {
 
 /// Waits for input, a signal, a watcher, an external source or a timeout.
 /// Signals always take priority; loading also prioritizes completion over keystrokes.
-fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: [Option<RawFd>; 2], opening: bool) -> Wait {
+fn wait_for(
+    keyboard: RawFd,
+    signal: &PipeReader,
+    timeout_ms: i32,
+    extra: [Option<RawFd>; 2],
+    opening: bool,
+    buffered: bool,
+) -> Wait {
     let mut fds = [
         libc::pollfd { fd: keyboard, events: libc::POLLIN, revents: 0 },
         // poll() ignores a negative descriptor.
@@ -318,22 +373,22 @@ fn wait_for(keyboard: RawFd, signal: &PipeReader, timeout_ms: i32, extra: [Optio
         libc::pollfd { fd: extra[1].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
     ];
-    let ready = wait_ready(&mut fds, timeout_ms);
-    if ready == 0 {
-        Wait::Timeout
-    } else if ready < 0 {
+    let ready = wait_ready(&mut fds, if buffered { 0 } else { timeout_ms });
+    if ready < 0 {
         if io::Error::last_os_error().kind() == ErrorKind::Interrupted { Wait::Interrupted } else { Wait::Closed }
     } else if fds[3].revents != 0 {
         drain_signal(signal);
         Wait::Interrupted
     } else if opening && fds[1].revents != 0 {
         Wait::Woken
-    } else if fds[0].revents & libc::POLLIN != 0 {
+    } else if buffered || fds[0].revents & libc::POLLIN != 0 {
         Wait::Input
     } else if fds[0].revents != 0 {
         Wait::Closed
     } else if fds[2].revents != 0 {
         Wait::External
+    } else if ready == 0 {
+        Wait::Timeout
     } else {
         Wait::Woken
     }
@@ -366,15 +421,18 @@ mod tests {
         let (extra, writer) = io::pipe().unwrap();
         let extra = Some(extra.as_raw_fd());
         let (signal, _signal_writer) = io::pipe().unwrap();
-        let wait = |opening| wait_for(keyboard.as_raw_fd(), &signal, 0, [extra, None], opening);
-        assert!(matches!(wait(false), Wait::Timeout));
+        let wait = |opening, buffered| wait_for(keyboard.as_raw_fd(), &signal, 0, [extra, None], opening, buffered);
+        assert!(matches!(wait(false, false), Wait::Timeout));
+        assert!(matches!(wait(false, true), Wait::Input));
 
         wake(writer.as_raw_fd());
-        assert!(matches!(wait(false), Wait::Woken));
+        assert!(matches!(wait(false, false), Wait::Woken));
+        assert!(matches!(wait(false, true), Wait::Input));
+        assert!(matches!(wait(true, true), Wait::Woken));
 
         wake(input.as_raw_fd());
-        assert!(matches!(wait(false), Wait::Input));
-        assert!(matches!(wait(true), Wait::Woken));
+        assert!(matches!(wait(false, false), Wait::Input));
+        assert!(matches!(wait(true, false), Wait::Woken));
     }
 
     #[test]
@@ -383,8 +441,16 @@ mod tests {
         let (watch, changed) = io::pipe().unwrap();
         let (observer, update) = io::pipe().unwrap();
         let (signal, _signal_writer) = io::pipe().unwrap();
-        let wait =
-            || wait_for(keyboard.as_raw_fd(), &signal, 0, [Some(watch.as_raw_fd()), Some(observer.as_raw_fd())], false);
+        let wait = || {
+            wait_for(
+                keyboard.as_raw_fd(),
+                &signal,
+                0,
+                [Some(watch.as_raw_fd()), Some(observer.as_raw_fd())],
+                false,
+                false,
+            )
+        };
         wake(changed.as_raw_fd());
         assert!(matches!(wait(), Wait::Woken));
         wake(update.as_raw_fd());
@@ -421,6 +487,9 @@ mod tests {
         let signal_fd = signal.as_raw_fd();
         let mut terminal = Session {
             keyboard: File::from(OwnedFd::from(keyboard)),
+            input: Input::default(),
+            keys: Vec::new(),
+            cancelled_input: false,
             output,
             signal,
             pending_interrupt: false,
@@ -464,6 +533,9 @@ mod tests {
         }
         let mut terminal = Session {
             keyboard: File::from(OwnedFd::from(keyboard)),
+            input: Input::default(),
+            keys: Vec::new(),
+            cancelled_input: false,
             output: File::from(OwnedFd::from(output)),
             signal,
             pending_interrupt: false,
