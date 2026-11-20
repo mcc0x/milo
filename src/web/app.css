@@ -137,10 +137,12 @@ h1, h2, h3, p, figure { margin: 0; }
 .setting-input :disabled { opacity: .62; }
 .setting-input input[type=number] { inline-size: 5.2rem; font-variant-numeric: tabular-nums; }
 .unit { font-size: .8rem; color: var(--muted); }
-.switch { appearance: none; display: grid; align-content: center; justify-items: start; inline-size: 2.55rem; block-size: 1.45rem; margin: .52rem .14rem; padding: .15rem; border: 1px solid #889fb9; border-radius: 2rem; background: #e4edf7; cursor: pointer; }
-.switch::before { content: ''; inline-size: .97rem; block-size: .97rem; border: 1px solid #8197b0; border-radius: 50%; background: #fff; }
-.switch:checked { justify-items: end; border-color: #245787; background: #286398; }
-.switch:checked::before { border-color: #245787; }
+.switch, .switch-track { display: grid; align-content: center; justify-items: start; inline-size: 2.55rem; block-size: 1.45rem; padding: .15rem; border: 1px solid #889fb9; border-radius: 2rem; background: #e4edf7; }
+.switch { appearance: none; margin: .52rem .14rem; cursor: pointer; }
+.switch::before, .switch-track::before { content: ''; inline-size: .97rem; block-size: .97rem; border: 1px solid #8197b0; border-radius: 50%; background: #fff; }
+.switch:checked, .switch:checked + .switch-track { justify-items: end; border-color: #245787; background: #286398; }
+.switch:checked::before, .switch:checked + .switch-track::before { border-color: #245787; }
+.switch-track { display: none; }
 .choice-strip { display: flex; align-items: stretch; flex: none; max-width: 100%; min-width: 0; margin: 0; padding: .15rem; border: 1px solid var(--line); border-radius: .65rem; background: #dde7f18c; }
 .choice-strip label { position: relative; }
 .choice-strip input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
@@ -238,6 +240,31 @@ dialog p { margin-block-start: .4rem; color: var(--muted); }
 }
 
 @media (pointer: coarse) {
+  .action-menu summary { display: grid; place-items: center; min-inline-size: 44px; min-block-size: 44px; padding: 0; }
+  .action-menu summary:hover, .action-menu[open] summary { background: transparent; }
+  .action-menu summary > span { border-radius: .4rem; padding: .22rem .4rem; }
+  .action-menu summary:hover > span, .action-menu[open] summary > span { background: var(--tint); }
+  .choice-strip label { display: grid; align-items: center; min-inline-size: 44px; min-block-size: 44px; }
+
+  /* Keep the compact field outline behind the larger native input. */
+  .setting-input:has(input[type=number]) { position: relative; }
+  .setting-input:has(input[type=number])::before {
+    content: ''; position: absolute; inset-block-start: 50%; inset-inline-start: 0; translate: 0 -50%;
+    inline-size: max(5.2rem, 44px); block-size: 2.25rem; pointer-events: none;
+    border: 1px solid var(--line); border-radius: .5rem; background: var(--paper);
+  }
+  .setting-input input[type=number] {
+    position: relative; min-inline-size: 44px; min-block-size: 44px;
+    border: none; padding-inline: calc(.45rem + 1px); background: transparent;
+  }
+  .setting-input:has(input[type=number]:disabled)::before { opacity: .62; }
+
+  .setting-input:has(.switch) { display: grid; place-items: center; }
+  .setting-input .switch { grid-area: 1 / 1; inline-size: 44px; block-size: 44px; margin: 0; opacity: 0; }
+  .switch-track { grid-area: 1 / 1; display: grid; pointer-events: none; }
+  .switch:disabled + .switch-track { opacity: .62; }
+  .switch:focus-visible + .switch-track { outline: 2px solid #315fbc; outline-offset: 3px; }
+
   .pane-line .button { min-width: 2.75rem; min-height: 2.75rem; }
   .pane-line > label { min-height: 2.75rem; }
   .button { min-height: 2.75rem; }
