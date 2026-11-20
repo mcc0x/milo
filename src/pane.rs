@@ -129,18 +129,25 @@ const GIT_GRACE: Duration = Duration::from_millis(400);
 const GIT_RETRY: Duration = Duration::from_millis(500);
 const WAITING_FOR_GIT: &str = "Waiting for Git";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NextLook {
+    Idle,
+    Prompt,
+    ReconcileOpen,
+}
+
 /// When to look for changes again, with or without a report from the watcher.
 pub(super) struct Pace {
     idle: Duration,
     ended: Instant,
     took: Duration,
-    reported: bool,
+    next: NextLook,
     git_locked_since: Option<Instant>,
 }
 
 impl Pace {
     fn new(idle: Duration, now: Instant) -> Self {
-        Self { idle, ended: now, took: Duration::ZERO, reported: false, git_locked_since: None }
+        Self { idle, ended: now, took: Duration::ZERO, next: NextLook::Idle, git_locked_since: None }
     }
 
     #[cfg(test)]
@@ -149,7 +156,12 @@ impl Pace {
     }
 
     fn report_change(&mut self) {
-        self.reported = true;
+        if self.next == NextLook::ReconcileOpen {
+            // Opening can do more work than an ordinary check. A real change
+            // need not wait out that estimate, but later checks use their own cost.
+            self.took = Duration::ZERO;
+        }
+        self.next = NextLook::Prompt;
     }
 
     fn waiting_for_git(&self) -> bool {
@@ -170,13 +182,15 @@ impl Pace {
             let due = if self.waiting_for_git() { self.ended + GIT_RETRY } else { since + GIT_GRACE };
             return due.saturating_duration_since(now);
         }
-        let rest = if self.reported { MIN_LOOK_INTERVAL } else { self.idle }.max(self.took * REST);
+        let interval = if self.next == NextLook::Idle { self.idle } else { MIN_LOOK_INTERVAL };
+        let rest = interval.max(self.took * REST);
         rest.saturating_sub(now.saturating_duration_since(self.ended))
     }
 
     /// An unsettled look, say during a checkout, is retried as if a change was reported.
     fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
-        (self.ended, self.took, self.reported) = (ended, ended - started, !settled);
+        (self.ended, self.took) = (ended, ended - started);
+        self.next = if settled { NextLook::Idle } else { NextLook::Prompt };
         self.git_locked_since = None;
     }
 }
@@ -272,10 +286,20 @@ pub(super) fn watch_pane(pane: &mut dyn Pane, check_on_open: bool) -> (Watcher, 
     } else if let Some(timing) = &mut pace {
         // The first snapshot predates the watcher. Look again soon even if
         // edits in that gap left no notification.
-        timing.report_change();
+        timing.next = NextLook::ReconcileOpen;
         if pane.git_busy() {
             timing.block_on_git(Instant::now());
         }
+    }
+    (watcher, pace)
+}
+
+fn watch_opened_pane(pane: &mut dyn Pane, check_on_open: bool, opened: Duration) -> (Watcher, Option<Pace>) {
+    let (watcher, mut pace) = watch_pane(pane, check_on_open);
+    if let Some(timing) = &mut pace
+        && timing.next == NextLook::ReconcileOpen
+    {
+        timing.took = opened;
     }
     (watcher, pace)
 }
@@ -291,9 +315,9 @@ pub(super) fn refresh_watch_after_input(
     if let Some(idle) = watch_idle(watcher, keep_polling) {
         let timing = pace.get_or_insert_with(|| Pace::new(idle, Instant::now()));
         timing.idle = idle;
-        if handoff {
+        if handoff && timing.next == NextLook::Idle {
             // The key's snapshot preceded the new coverage.
-            timing.report_change();
+            timing.next = NextLook::Prompt;
         }
     } else {
         *pace = None;
@@ -448,8 +472,9 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     let mut handoff_click = ConfirmClick::default();
     let mut input = Input::default();
     let load = |open: &Open<'_>| {
+        let started = Instant::now();
         let mut pane = open()?;
-        let (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
+        let (watcher, pace) = watch_opened_pane(pane.as_mut(), check_on_open, started.elapsed());
         Ok::<_, String>((pane, watcher, pace))
     };
     let (opened, mut focused) = match start {
@@ -591,15 +616,18 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                     pace.report_change();
                 }
             }
-            Wait::External => match pane.check_external() {
-                External::Unchanged => {}
-                External::Redraw => redraw = true,
-                External::NewScope => {
-                    (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
-                    help = help.map(|_| pane.help());
-                    redraw = true;
+            Wait::External => {
+                let started = Instant::now();
+                match pane.check_external() {
+                    External::Unchanged => {}
+                    External::Redraw => redraw = true,
+                    External::NewScope => {
+                        (watcher, pace) = watch_opened_pane(pane.as_mut(), check_on_open, started.elapsed());
+                        help = help.map(|_| pane.help());
+                        redraw = true;
+                    }
                 }
-            },
+            }
             Wait::Interrupted if term::RESIZED.load(Ordering::Relaxed) => continue,
             Wait::Timeout | Wait::Interrupted => {}
             Wait::Closed => break,
@@ -896,15 +924,32 @@ mod tests {
 
         // This change precedes the watcher's event stream.
         f.write("source.rs", "first\nsecond\n");
-        let (mut watcher, mut pace) = watch_pane(&mut pane, false);
+        let (mut watcher, mut pace) = watch_opened_pane(&mut pane, false, Duration::from_millis(10));
         let timing = pace.as_ref().unwrap();
-        assert!(timing.until_look(Instant::now() + MIN_LOOK_INTERVAL).is_zero());
+        assert_eq!(timing.until_look(timing.ended), MIN_LOOK_INTERVAL);
+        assert!(timing.until_look(timing.ended + MIN_LOOK_INTERVAL).is_zero());
         assert!(check_watched_pane(&mut pane, &mut watcher, &mut pace, false));
-        assert!(!pace.as_ref().unwrap().reported, "the startup look should return to idle pacing");
+        assert_eq!(pace.as_ref().unwrap().next, NextLook::Idle, "the startup look should return to idle pacing");
 
         let mut screen = Screen::sized(80, 12);
         pane.draw(&mut screen);
         assert!(screen.text().iter().any(|row| row.contains("source.rs") && row.ends_with("+1")));
+    }
+
+    #[test]
+    fn a_slow_open_delays_reconciliation_but_not_a_reported_change() {
+        let f = fixture::Fixture::new();
+        f.write("source.rs", "first\n");
+        f.commit("first");
+        let mut pane = Outline::new(Repo::open(&f.root).unwrap(), false);
+        let (_watcher, pace) = watch_opened_pane(&mut pane, false, Duration::from_secs(3));
+        let mut timing = pace.unwrap();
+        assert_eq!(timing.until_look(timing.ended), Duration::from_secs(12));
+        assert_eq!(timing.until_look(timing.ended + Duration::from_secs(1)), Duration::from_secs(11));
+        assert!(timing.until_look(timing.ended + Duration::from_secs(12)).is_zero());
+        timing.report_change();
+        assert_eq!(timing.until_look(timing.ended), MIN_LOOK_INTERVAL);
+        assert!(timing.until_look(timing.ended + Duration::from_secs(1)).is_zero());
     }
 
     #[cfg(target_os = "macos")]
@@ -927,7 +972,7 @@ mod tests {
         assert_eq!(ignored.dirs, std::collections::HashSet::from([f.root.join("build/generated")]));
         let current = watcher.fd().unwrap();
         assert_ne!(original, current);
-        assert!(pace.as_ref().unwrap().reported);
+        assert_eq!(pace.as_ref().unwrap().next, NextLook::Prompt);
 
         // A force-tracked file under the ignore rule is still source. A
         // post-snapshot write must be noticed even without a wakeup byte.
@@ -938,7 +983,7 @@ mod tests {
         assert!(screen.text().iter().any(|row| row.contains("source.rs") && row.ends_with("+1")));
         assert!(std::sync::Arc::ptr_eq(&ignored, &pane.watch_scope().ignored));
         assert_eq!(watcher.fd(), Some(current), "unchanged exclusions must not restart the stream");
-        assert!(!pace.as_ref().unwrap().reported, "an unchanged scope must not request another check");
+        assert_eq!(pace.as_ref().unwrap().next, NextLook::Idle, "an unchanged scope must not request another check");
     }
 
     #[test]
