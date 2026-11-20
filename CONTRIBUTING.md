@@ -128,6 +128,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | File | Purpose |
 | --- | --- |
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
+| `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
 | `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |

@@ -47,7 +47,9 @@ For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one f
 
 The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, Lua, Swift, SQL, shell, JSON, YAML and TOML by file extension. It colours a file named `Dockerfile`, `Makefile` or `GNUmakefile` in any letter case, and files ending in `.dockerfile` or `.mk`. Working files and files at a commit are recognised the same way. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
 
-When two changed lines look alike, the reader labels hidden differences next to the text: `[tab]` versus `[4 spaces]`, `[LF]` versus `[CRLF]`, or a mark such as `[zero-width space U+200B]`. It highlights the character affected by a changed mark, including a combining accent. Ordinary edits do not label unchanged whitespace or marks. Use the horizontal scroll keys to reach labels on long lines.
+When a removed line and the added line that replaces it look alike, the reader highlights the words that changed. A word is a run of letters, digits and underscores in any script; text written without spaces, such as Chinese or Japanese, is compared one character at a time. Highlighting only adds emphasis: the text shown is the same with or without it. Lines that share too little, lines with many separate changes and lines whose edits span more than about a hundred words keep only their red or green background, as do the remaining lines of an unusually large diff.
+
+The reader also labels hidden differences next to the text: `[tab]` versus `[4 spaces]`, `[LF]` versus `[CRLF]`, or a mark such as `[zero-width space U+200B]`. It highlights the character affected by a changed mark, including a combining accent. Ordinary edits do not label unchanged whitespace or marks. Use the horizontal scroll keys to reach labels on long lines.
 
 ## Reading pictures
 

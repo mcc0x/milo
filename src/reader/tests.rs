@@ -873,3 +873,31 @@ fn lua_swift_sql_dockerfiles_and_makefiles_are_coloured_in_working_and_committed
         check(&mut Reader::at_commit(&f.root.join(path), id).unwrap(), path, before, keyword);
     }
 }
+
+#[test]
+fn each_changed_word_is_emphasised_and_stays_in_place_when_panning() {
+    let f = Fixture::new();
+    f.write("page.txt", "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk\n");
+    f.commit("before");
+    f.write("page.txt", "aaaa BBBB cccc dddd eeee ffff GGGG hhhh iiii jjjj kkkk\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+
+    let mut screen = Screen::sized(60, 5);
+    reader.draw(&mut screen);
+    let out = String::from_utf8(screen.emitted()).unwrap();
+    let emphasised = |out: &str| -> Vec<String> {
+        runs(out).iter().filter(|run| reversed(run.0)).map(|run| format!("{} {}", run.0, run.1)).collect()
+    };
+    assert_eq!(emphasised(&out), ["0;7;31 bbbb", "0;7;31 gggg", "0;7;32 BBBB", "0;7;32 GGGG"]);
+
+    // With the first word panned away and the second cut by the left edge, the rest of it keeps its emphasis.
+    let mut screen = Screen::sized(24, 5);
+    reader.draw(&mut screen);
+    for _ in 0..4 {
+        reader.key(Key::Right);
+        reader.draw(&mut screen);
+    }
+    let out = String::from_utf8(screen.emitted()).unwrap();
+    assert!(screen.text()[2].contains("+‹GG hhhh"), "{:?}", screen.text());
+    assert_eq!(emphasised(&out).last().map(String::as_str), Some("0;7;32 GG"), "{out:?}");
+}
