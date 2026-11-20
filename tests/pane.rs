@@ -789,6 +789,37 @@ fn unattended_skip_is_shared_by_home_and_settings_without_applying_preferences()
 
 #[test]
 fn repeat_clicks_do_not_cross_between_home_and_settings() {
+    // The renderer positions text using CUP and changes its style using SGR.
+    // Every glyph on these menu and control lines occupies one cell.
+    fn painted<'a>(output: &'a str, label: &'a str) -> impl Iterator<Item = (u16, std::ops::Range<u16>)> + 'a {
+        let (mut row, mut col) = (1, 1);
+        output.split("\x1b[").skip(1).filter_map(move |run| {
+            let at = run.find(|ch| ('@'..='~').contains(&ch))?;
+            let (args, tail) = run.split_at(at);
+            let (command, text) = tail.split_at(1);
+            match command {
+                "H" => {
+                    let (y, x) = args.split_once(';')?;
+                    row = y.parse().ok()?;
+                    col = x.parse().ok()?;
+                }
+                "m" => {}
+                _ => return None,
+            }
+            let text = text.split('\x1b').next().unwrap();
+            let start = col;
+            col += u16::try_from(text.chars().count()).unwrap();
+            let offset = text.find(label)?;
+            let left = start + u16::try_from(text[..offset].chars().count()).unwrap();
+            Some((row, left..left + u16::try_from(label.len()).unwrap()))
+        })
+    }
+
+    fn overlap(a: &(u16, std::ops::Range<u16>), b: &(u16, std::ops::Range<u16>)) -> Option<u16> {
+        let left = a.1.start.max(b.1.start);
+        (a.0 == b.0 && left < a.1.end.min(b.1.end)).then_some(left)
+    }
+
     let project = Project::new();
     let milo = env!("CARGO_BIN_EXE_milo");
     assert!(project.command(milo).args(["setup", "--skip-onboarding"]).status().unwrap().success());
@@ -796,31 +827,62 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
 
     for (cols, rows) in [(40, 16), (28, 12)] {
         let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
-        tty.until("Uninstall");
-        // Click the visible Settings label; its cell may also be actionable after navigation.
-        let (col, row) = if cols == 40 { (29, 5) } else { (12, 7) };
+        tty.until("q quit");
+        let (settings, home_quit) = {
+            let home = tty.output();
+            (painted(&home, "Settings").next().unwrap(), painted(&home, "q quit").next().unwrap())
+        };
+
+        // A fresh Settings frame shows which cells would really change a draft
+        // if the repeat were delivered instead of suppressed.
+        let mut probe = Terminal::sized(project.command(milo).arg("setup"), cols, rows);
+        probe.until("q quit");
+        let (col, setup_quit) = {
+            let setup = probe.output();
+            // Plain spaces can separate two cursor writes, so match words.
+            let col = ["Project", "Follow", "Track", "edits", "Outline", "New", "commits", "Tab", "titles", "On", "Off"]
+                .into_iter()
+                .flat_map(|word| painted(&setup, word))
+                .find_map(|target| overlap(&settings, &target))
+                .unwrap_or_else(|| panic!("no actionable Settings overlap with {settings:?} at {cols}×{rows}: {setup:?}"));
+            (col, painted(&setup, "q quit").next().unwrap())
+        };
+        let row = settings.0;
+        probe.click(col, row, "");
+        probe.until("Unsaved changes");
+        probe.master.write_all(b"\x03").unwrap();
+        assert!(probe.wait_for_exit().success());
+
+        let quit_overlap = overlap(&setup_quit, &home_quit);
+        if cols == 28 {
+            assert!(quit_overlap.is_some(), "the repeat must hit both quit buttons in the compact pane");
+        }
+        let quit_col = quit_overlap.unwrap_or(setup_quit.1.start);
+        let quit_row = setup_quit.0;
+        tty.bytes.clear();
         tty.click(col, row, "");
         tty.until("Workflow");
         tty.bytes.clear();
         tty.click(col, row, "2");
         tty.until("Pulse");
-        assert!(!tty.output().contains("Unsaved"), "the repeat must not pin the project");
+        assert!(!tty.output().contains("Unsaved"), "the repeat must not change the draft");
 
         // The quit labels overlap at 28 columns. A double-click must return
         // to Home without quitting it, and the help key must still work.
         tty.bytes.clear();
-        tty.click(15, rows, "");
+        tty.click(quit_col, quit_row, "");
         tty.until(version);
         tty.bytes.clear();
-        tty.click(15, rows, "?");
+        tty.click(quit_col, quit_row, "?");
         tty.until("Milo home");
 
         if cols == 40 {
-            tty.master.write_all(b"q").unwrap();
-            tty.until(version);
-            std::thread::sleep(Duration::from_millis(450));
             tty.bytes.clear();
-            tty.click(col, row, "");
+            tty.master.write_all(b"q").unwrap();
+            tty.until("Settings");
+            let (row, span) = painted(&tty.output(), "Settings").next().unwrap();
+            tty.bytes.clear();
+            tty.click(span.start, row, "");
             tty.until("Workflow");
         }
         tty.master.write_all(b"qq").unwrap();
