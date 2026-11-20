@@ -112,37 +112,39 @@ async function manageMenuApp(page, url, binary, cwd, env) {
     headers: {Authorization: `Bearer ${new URL(url).hash.slice(1)}`},
   });
   assert(response.ok(), 'the editor reports menu app availability');
-  const {workflow} = await response.json();
-  const supported = workflow.menubar_installed !== null;
-  assert.equal(await menu.count(), supported ? 1 : 0, 'the menu app control follows server availability');
+  const {menubar} = await response.json();
+  const menuTab = section(page, 'Menu Bar');
+  assert.equal(await menu.count(), 0, 'Workflow does not contain menu app settings');
+  assert.equal(await menuTab.isVisible(), menubar.installed !== null, 'Menu Bar navigation follows server availability');
   if (process.argv.includes('--menubar')) {
-    assert.equal(workflow.menubar_installed, false, 'the menu-capable binary starts without an app in the fixture home');
+    assert.equal(menubar.installed, false, 'the menu-capable binary starts without an app in the fixture home');
     const bundle = join(env.HOME, 'Applications', 'Milo Usage.app');
     const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
     const previous = await readFile(preferences, 'utf8');
     const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
     await pin.click();
     await status(page, dirty).waitFor({state: 'attached'});
+    await menuTab.click();
 
     try {
       await button(menu, 'Install Milo Usage').click();
       const remove = button(menu, 'Remove Milo Usage…');
       await remove.waitFor();
       assert((await stat(bundle)).isDirectory(), 'the button installed the app');
-      assert(await pin.isChecked(), 'install retained the draft');
+      await status(page, dirty).waitFor({state: 'attached'});
 
       const confirmation = dialog(page, 'Remove Milo Usage?');
       await remove.click();
       await button(confirmation, 'Keep editing').click();
       await confirmation.waitFor({state: 'hidden'});
       assert((await stat(bundle)).isDirectory(), 'cancel left the app installed');
-      assert(await pin.isChecked(), 'cancel retained the draft');
 
       await remove.click();
       await button(confirmation, 'Remove Milo Usage').click();
       await button(menu, 'Install Milo Usage').waitFor();
       await assert.rejects(stat(bundle), {code: 'ENOENT'}, 'confirm removed the app');
       await status(page, dirty).waitFor({state: 'attached'});
+      await section(page, 'Workflow').click();
       assert(await pin.isChecked(), 'removal retained the draft');
       assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app changes did not save the draft');
     } finally {

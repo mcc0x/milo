@@ -204,7 +204,8 @@ impl Editor {
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
             "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{},",
             "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\"}},",
-            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{},\"menubar_installed\":{}}},",
+            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{}}},",
+            "\"menubar\":{{\"installed\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
             "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"auto_arrange\":{}}},",
@@ -779,7 +780,7 @@ mod tests {
         let old_version = editor.version;
         let before = set(&mut editor, "workflow.project_mode", "\"pin\"");
         let state = Value::parse(before.as_bytes()).unwrap();
-        let status = field(field(state, "workflow"), "menubar_installed");
+        let status = field(field(state, "menubar"), "installed");
         match menubar::installed() {
             Some(installed) => assert_eq!(status.boolean(), Some(installed)),
             None => {

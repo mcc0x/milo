@@ -397,8 +397,11 @@ function render() {
     worktree.setAttribute('aria-hidden', 'true');
     context.append(node('span', 'sr-only', `${state.context.worktree ? 'Git worktree' : 'Directory'}: ${path}`));
   }
+  const hasMenuBar = state.menubar.installed !== null;
+  if (page === 'menubar' && !hasMenuBar) page = 'layout';
   for (const tab of navButtons) {
     const name = tab.dataset.page;
+    if (name === 'menubar') tab.hidden = !hasMenuBar;
     if (name === page) tab.setAttribute('aria-current', 'page');
     else tab.removeAttribute('aria-current');
     const dirty = name === 'layout' ? state.groups.layout.dirty :
@@ -408,7 +411,7 @@ function render() {
     dot.replaceChildren(node('span', 'sr-only', ' (unsaved changes)'));
     dot.hidden = !dirty;
   }
-  const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, health: healthView};
+  const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, menubar: menuBarView, health: healthView};
   const panel = byId('settings-panel');
   const openMenu = panel.querySelector('.action-menu[open] > summary')?.id;
   panel.replaceChildren(...views[page]());
@@ -730,7 +733,7 @@ function appearanceView() {
 function workflowView() {
   const disabled = !state.groups.preferences.editable;
   const account = state.groups.account;
-  const cards = [groupCard('preferences', 'Pane workflow', '', [
+  return [groupCard('preferences', 'Pane workflow', '', [
     setting('workflow.project_mode', 'Project tracking', '', 'select',
       {disabled, choices: [['follow', 'Follow shell'], ['pin', 'Pin project']]}),
     setting('workflow.follow_activity', 'Follow file edits', 'Temporarily reveal active files.', 'switch', {disabled}),
@@ -741,12 +744,10 @@ function workflowView() {
   ]), groupCard('account', 'Claude Code', '', [
     setting('account.claude_limits', 'Show Claude Code limits', state.account.claude_status, 'switch', {disabled: !account.editable}),
   ])];
-  const installed = state.workflow.menubar_installed;
-  if (installed !== null) cards.push(menuAppCard(installed));
-  return cards;
 }
 
-function menuAppCard(installed) {
+function menuBarView() {
+  const installed = state.menubar.installed;
   const card = node('section', 'settings-group');
   const header = node('header', 'group-header group-titleline');
   const heading = node('h2', '', 'Menu bar app');
@@ -757,7 +758,7 @@ function menuAppCard(installed) {
   const row = node('div', 'setting');
   const info = node('div', 'setting-info');
   const detail = node('span', 'setting-detail',
-    `${installed ? 'Installed' : 'Not installed'}. View usage in your Mac’s menu bar.`);
+    `${installed ? 'Installed' : 'Not installed'}. Open Milo from your Mac’s menu bar.`);
   detail.id = 'menubar-detail';
   info.append(node('span', 'setting-label', 'Milo Usage'), detail);
   const control = button(installed ? 'Remove Milo Usage…' : 'Install Milo Usage', 'secondary', 'menubar-action', event => {
@@ -772,7 +773,7 @@ function menuAppCard(installed) {
   control.setAttribute('aria-describedby', detail.id);
   row.append(info, control);
   card.append(header, row);
-  return card;
+  return [card];
 }
 
 const healthLabels = {good: 'All good', warning: 'Warning', issue: 'Issue found'};
