@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://usemilo.net">
-    <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. A Git-aware file tree, commit history, diff reader and usage limits in native panes for Superlogical’s Rex terminal.">
+    <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. Additions for Superlogical's multiplexer, Rex.">
   </a><br>
   <a href="https://usemilo.net">
     <picture>

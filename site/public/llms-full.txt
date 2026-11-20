@@ -8,7 +8,7 @@ Source: https://github.com/mcc0x/milo/blob/main/README.md
 
 <p align="center">
   <a href="https://usemilo.net">
-    <img src="https://github.com/mcc0x/milo/blob/main/docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. A Git-aware file tree, commit history, diff reader and usage limits in native panes for Superlogical’s Rex terminal.">
+    <img src="https://github.com/mcc0x/milo/blob/main/docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. Additions for Superlogical's multiplexer, Rex.">
   </a><br>
   <a href="https://usemilo.net">
     <picture>
