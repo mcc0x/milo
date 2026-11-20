@@ -19,6 +19,11 @@ impl History {
                     && detail.next != detail.start
                 {
                     detail.start = detail.next;
+                } else if let Some(TimelineRow::Commit(i)) = self.selected()
+                    && self.open_index() != Some(i)
+                {
+                    self.toggle_files(i);
+                    self.keep_preview_in_view();
                 } else if !unclicked && !cleared {
                     return After::Ignored;
                 }

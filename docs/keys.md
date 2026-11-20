@@ -39,7 +39,7 @@ Click a folder to open or close it, click a file to select it, or double-click a
 | --- | --- |
 | `Enter` | Show or hide a commit's files, show the rest of a long file list, or read the selected file |
 | Left or `h` | From a file, return to its commit; from an open commit, close its file list |
-| Right or `l` | Read the next part of a long subject in the narrow focused History pane |
+| Right or `l` | Open the selected commit's files. In a narrow focused pane, page through a long subject first. |
 | `r` | Reload |
 | `q` | Quit |
 

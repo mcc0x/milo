@@ -40,7 +40,7 @@ impl History {
             key("Enter", "show all"),
             key("Enter", "read"),
             key("← h  ", "parent or close"),
-            key("→ l  ", "more of subject"),
+            key("→ l  ", "open or page text"),
             key("r    ", "reload"),
             key("q    ", "quit"),
             HelpRow::new(),

@@ -561,6 +561,51 @@ fn an_empty_commit_opened_at_the_edge_shows_why_it_has_no_files() {
 }
 
 #[test]
+fn right_and_l_open_the_selected_commit_and_left_and_h_close_it() {
+    let f = Fixture::new();
+    f.write("first.txt", "first file\n");
+    f.commit("first");
+    commit(&f, "second");
+    commit(&f, "third");
+    let mut history = open(&f);
+    draw(&mut history, 40, 2);
+    history.key(Key::Char('j'));
+    history.key(Key::Char('j'));
+    assert!(active_row(&draw(&mut history, 40, 2), "first"));
+
+    for (open, close) in [(Key::Char('l'), Key::Char('h')), (Key::Right, Key::Left)] {
+        assert_eq!(history.key(open), After::Stay);
+        let screen = draw(&mut history, 40, 2);
+        assert!(active_row(&screen, "first") && screen.text()[1].contains("first.txt"));
+        assert_eq!(history.key(open), After::Ignored);
+        assert_eq!(history.key(close), After::Stay);
+        assert!(!draw(&mut history, 40, 2).text().iter().any(|row| row.contains("first.txt")));
+    }
+}
+
+#[test]
+fn a_narrow_subject_takes_precedence_only_until_it_fits_on_one_page() {
+    let f = Fixture::new();
+    commit(&f, "first chapter second chapter final chapter");
+    let mut history = open(&f);
+    assert!(draw(&mut history, 21, 4).text()[3].ends_with('→'));
+
+    assert_eq!(history.key(Key::Char('l')), After::Stay);
+    assert!(draw(&mut history, 21, 4).text()[3].contains("↳ second chapter"));
+    assert_eq!(history.open_index(), None);
+
+    // Cycle back to the start, now with enough room for the whole subject.
+    draw(&mut history, 21, 8);
+    assert_eq!(history.key(Key::Right), After::Stay);
+    let rows = draw(&mut history, 21, 8).text();
+    assert!(rows[5].contains("↳ first chapter") && rows[7].contains("final chapter"), "{rows:?}");
+    assert_eq!(history.open_index(), None);
+
+    assert_eq!(history.key(Key::Char('l')), After::Stay);
+    assert_eq!(history.open_index(), Some(0));
+}
+
+#[test]
 fn a_two_row_focused_pane_keeps_the_open_commit_preview_visible() {
     let f = Fixture::new();
     commit(&f, "first chapter second chapter final chapter");
