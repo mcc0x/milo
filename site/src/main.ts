@@ -192,26 +192,27 @@ for (const bubble of document.querySelectorAll<HTMLElement>('.bubbles li')) {
   });
 }
 
-const button = document.querySelector<HTMLButtonElement>('#copy-command')!;
-const command = document.querySelector<HTMLElement>('#install-command')!;
 const feedback = document.querySelector<HTMLElement>('#copy-feedback')!;
-let copied = 0;
-
-button.addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(command.textContent);
-    button.dataset.state = 'copied';
-    button.textContent = 'Copied';
-    feedback.textContent = 'Install command copied.';
-  } catch {
-    // No clipboard here: select the command so one key press copies it.
-    window.getSelection()?.selectAllChildren(command);
-    button.textContent = 'Selected';
-    feedback.textContent = 'The clipboard is unavailable. Copy the selected command with your keyboard.';
-  }
-  clearTimeout(copied);
-  copied = window.setTimeout(() => {
-    delete button.dataset.state;
-    button.textContent = 'Copy';
-  }, 1800);
-});
+for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-copy]')) {
+  const target = document.getElementById(button.dataset.copy!)!;
+  const label = button.textContent;
+  let reset = 0;
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(target.textContent);
+      button.dataset.state = 'copied';
+      button.textContent = 'Copied';
+      feedback.textContent = 'Copied to clipboard.';
+    } catch {
+      target.hidden = false;
+      window.getSelection()?.selectAllChildren(target);
+      button.textContent = 'Selected';
+      feedback.textContent = 'Clipboard unavailable. Copy the selected text.';
+    }
+    clearTimeout(reset);
+    reset = window.setTimeout(() => {
+      delete button.dataset.state;
+      button.textContent = label;
+    }, 1800);
+  });
+}
