@@ -656,18 +656,42 @@ fn appearance_changes_its_live_sample_without_global_writes() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("appearance never calls Rex"));
     pane.key(Key::Char('2'));
-    let before = frame(&mut pane, 70, 20);
+    let before = frame(&mut pane, 70, 22);
     assert!(before.iter().any(|line| line.contains("●") && line.contains("main.rs")));
     assert!(before.iter().any(|line| line.contains("Claude 5h · 12% left")));
     assert_eq!(pane.key(click_label(&before, "Activity marks")), After::Stay);
-    let rows = frame(&mut pane, 70, 20);
+    let rows = frame(&mut pane, 70, 22);
     assert_eq!(pane.key(click_label(&rows, "Usage display")), After::Stay);
     pane.icon_override = Some(IconMode::Off);
-    let after = frame(&mut pane, 70, 20);
+    let after = frame(&mut pane, 70, 22);
     assert!(after.iter().any(|line| line.contains("Sample (MILO_ICONS override)")));
     assert!(after.iter().any(|line| line.contains("• main.rs")));
     assert!(after.iter().any(|line| line.contains("12%  Claude 5h")));
     assert!(!f.root.join("config").exists());
+}
+
+#[test]
+fn settings_show_all_controls_and_selected_help_before_the_sample() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("drawing does not call Rex"));
+    for (tab, moves, label, detail, summary, sample) in [
+        ('2', 3, "Usage", "Auto uses text in narrow panes", "Auto compact", "Sample"),
+        ('3', 2, "Outline", "Set the initial Outline view.", "with: All files", "What panes"),
+    ] {
+        pane.key(Key::Char(tab));
+        for _ in 0..moves {
+            assert_eq!(pane.key(Key::Down), After::Stay);
+        }
+        for (width, height) in [(18, 16), (80, 18), (18, 24), (80, 24)] {
+            let rows = frame(&mut pane, width, height);
+            assert_eq!(pane.visible.len, pane.rows().len(), "{width}x{height}: {rows:?}");
+            assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(label)), "{rows:?}");
+            let help_text = if width == 18 { summary } else { detail };
+            assert!(rows.iter().any(|row| !row.starts_with('›') && row.contains(help_text)), "{rows:?}");
+            assert_eq!(rows.iter().any(|row| row.contains(sample)), height == 24, "{rows:?}");
+            assert_eq!(pane.key(click_at(&rows, height - 1, "?")), After::Help);
+        }
+    }
 }
 
 #[test]

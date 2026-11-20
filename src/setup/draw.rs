@@ -186,7 +186,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let form_width = if side_by_side { 32 } else { s.w.min(54) };
         let mut form_end = end;
         let mut diagram = None;
-        let mut sample = None;
         if let Some(preview) = &preview {
             if side_by_side {
                 let preview_width = (s.w - form_width - 5).min(48);
@@ -202,9 +201,6 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 form_end = top - 1;
                 diagram = Some(Rect { x: 1, y: top, width, height });
             }
-        } else if matches!(self.panel, Panel::Appearance | Panel::Workflow) && end.saturating_sub(y) >= 13 {
-            form_end = end - 5;
-            sample = Some(form_end + 1);
         }
 
         if let (Some(Rect { x, y, width, height }), Some(preview)) = (diagram, preview)
@@ -218,7 +214,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             };
             preview.draw(s, Rect { x, y: y + 1, width, height }, highlight);
         }
-        let rows_end =
+        let (rows_end, content_end) =
             if let Some(lines) = summary.filter(|_| summary_rows > 0 && summary_rows < form_end.saturating_sub(y)) {
                 let top = (y + rows.len()).min(form_end - summary_rows);
                 for (i, (line, value)) in lines.enumerate() {
@@ -231,9 +227,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                         }
                     }
                 }
-                top
+                (top, top + summary_rows)
             } else {
                 let next = (y + rows.len()).min(form_end);
+                let mut content_end = next;
                 if !narrow
                     && let Some((row, cell)) = selected
                     && next + 1 < form_end
@@ -241,17 +238,21 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     let detail = self.detail(row, cell);
                     for (i, line) in wrap(detail, form_width - 3).take(form_end - next - 1).enumerate() {
                         s.put(2, next + 1 + i, form_width - 3, line, FAINT);
+                        content_end = next + 2 + i;
                     }
                 }
-                form_end
+                (form_end, content_end)
             };
         self.draw_rows(s, y, rows_end, form_width);
 
-        if let Some(top) = sample {
-            if self.panel == Panel::Appearance {
-                self.appearance_sample(s, top);
-            } else {
-                self.workflow_sample(s, top);
+        // A sample is decoration: let the controls and selected help use the space first.
+        let sample_height = 4;
+        if end.saturating_sub(content_end) >= sample_height {
+            let top = end - sample_height;
+            match self.panel {
+                Panel::Appearance => self.appearance_sample(s, top),
+                Panel::Workflow => self.workflow_sample(s, top),
+                _ => {}
             }
         }
     }
