@@ -4,11 +4,11 @@ use std::borrow::Cow;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use super::files::{self, Change, Image, staged};
+use super::files::{Change, Image, staged};
 use super::install::{RunRex, Store, read, settings_path};
 use super::layout::{
     Layout, ListenerEnv, listener_lua, listener_state_matches, lua_path, owns_actions, owns_listener, rex_lua,
@@ -19,6 +19,8 @@ pub(super) const MANAGED: &[u8] = b"-- Managed by milo setup.";
 pub(super) const LAYOUT_DISABLED: &str = "layout-disabled";
 pub(super) const LISTENER_STATE_MISMATCH: &str =
     "Milo's Rex listener was installed with a different XDG_STATE_HOME. Rerun with the original XDG_STATE_HOME.";
+pub(super) const LOADER_CONFLICT: &str =
+    "Milo's lines in Rex settings were moved, copied or changed. Your file was left alone.";
 
 impl Store {
     pub(super) fn rex_file(&self) -> PathBuf {
@@ -50,9 +52,9 @@ impl Store {
     }
 
     pub(super) fn has_layout(&self) -> Result<bool, &'static str> {
-        let path = settings_path(&self.init)?;
-        read_init_prefix(&path, &loader(&self.rex_file()))
-            .map_err(|_| "Could not read Rex settings. No files were changed.")
+        let file = read(&settings_path(&self.init)?)?;
+        let bytes = file.as_ref().map_or(&[][..], |file| file.bytes.as_slice());
+        Ok(checked_loader(bytes, &loader(&self.rex_file()))?.1.is_some())
     }
 
     pub(super) fn listener_env(&self) -> ListenerEnv<'_> {
@@ -176,19 +178,6 @@ fn text_is(file: &Image, test: impl FnOnce(&str) -> bool) -> bool {
     std::str::from_utf8(&file.bytes).is_ok_and(test)
 }
 
-/// A long first line need not be copied into memory just to check for our loader.
-fn read_init_prefix(path: &Path, load: &str) -> io::Result<bool> {
-    let Some((file, _)) = files::open(path)? else { return Ok(false) };
-    let mut file = BufReader::new(file);
-    if without_bom(file.fill_buf()?).starts_with(b"#!") {
-        file.skip_until(b'\n')?;
-    }
-    let limit = 3 + CREATED.len() + load.len() + 4;
-    let mut prefix = Vec::with_capacity(limit + 1);
-    file.take((limit + 1) as u64).read_to_end(&mut prefix)?;
-    Ok(managed(&prefix, load).is_some())
-}
-
 /// Keep Homebrew's version-independent launcher when it points to this exact binary.
 pub(super) fn executable() -> Result<PathBuf, &'static str> {
     let path = env::current_exe().and_then(fs::canonicalize).map_err(|_| "Could not find the full path to milo.")?;
@@ -233,23 +222,23 @@ pub(super) fn loader(path: &Path) -> String {
     format!("pcall(dofile, {})", lua_path(path))
 }
 
-/// Only the first lines can belong to setup; a quoted example farther down cannot.
-pub(super) fn managed(bytes: &[u8], load: &str) -> Option<(std::ops::Range<usize>, bool)> {
+type LoaderBlock = (std::ops::Range<usize>, bool);
+
+pub(super) fn checked_loader(bytes: &[u8], load: &str) -> Result<(usize, Option<LoaderBlock>), &'static str> {
     let start = init_start(bytes);
     let (comment, next) = line(bytes, start);
-    let (call, end) = line(bytes, next);
-    (matches!(comment, MANAGED | CREATED) && call == load.as_bytes()).then_some((start..end, comment == CREATED))
-}
-
-fn plan_init(path: Cow<'_, Path>, load: &str, enable: bool) -> Result<Option<Change>, &'static str> {
-    let original = read(&path)?;
-    let bytes = original.as_ref().map_or(&[][..], |file| file.bytes.as_slice());
-    let start = init_start(bytes);
-    let block = managed(bytes, load);
+    // Only the first two lines after a possible shebang belong to setup.
+    let marker = matches!(comment, MANAGED | CREATED);
+    let block = if marker {
+        let (call, end) = line(bytes, next);
+        (call == load.as_bytes()).then_some((start..end, comment == CREATED))
+    } else {
+        None
+    };
     let other = &bytes[block.as_ref().map_or(start, |(range, _)| range.end)..];
     // An exact loader elsewhere is ambiguous: it may be active, commented out, or quoted.
     // Do not add a second copy or remove the files it may still load.
-    if (block.is_none() && matches!(line(bytes, start).0, MANAGED | CREATED))
+    if (block.is_none() && marker)
         || other.split(|&byte| byte == b'\n').any(|line| {
             let mut line = line.trim_ascii();
             while let Some(rest) = line.strip_prefix(b"--") {
@@ -261,8 +250,15 @@ fn plan_init(path: Cow<'_, Path>, load: &str, enable: bool) -> Result<Option<Cha
             })
         })
     {
-        return Err("Milo's lines in Rex settings were moved, copied or changed. Your file was left alone.");
+        return Err(LOADER_CONFLICT);
     }
+    Ok((start, block))
+}
+
+fn plan_init(path: Cow<'_, Path>, load: &str, enable: bool) -> Result<Option<Change>, &'static str> {
+    let original = read(&path)?;
+    let bytes = original.as_ref().map_or(&[][..], |file| file.bytes.as_slice());
+    let (start, block) = checked_loader(bytes, load)?;
     let after = match (block, enable) {
         (Some((range, created)), false) => {
             let delete = created && matches!(path, Cow::Borrowed(_)) && range == (0..bytes.len());

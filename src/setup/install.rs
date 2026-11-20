@@ -163,7 +163,7 @@ mod tests {
     use super::super::claude::{Claude, OWN_CLAUDE};
     use super::super::files::Change;
     use super::super::layout::{GENERATED, TabPane, WIDTHS, rex_lua};
-    use super::super::rex_files::{LAYOUT_DISABLED, MANAGED, executable, loader, managed};
+    use super::super::rex_files::{LAYOUT_DISABLED, LOADER_CONFLICT, MANAGED, checked_loader, executable, loader};
     use super::*;
     use crate::fixture::Fixture;
     use std::cell::RefCell;
@@ -226,7 +226,8 @@ mod tests {
             }
             store.save(Some(&Layout::default()), None, &|_| true).unwrap();
             let installed = fs::read(&store.init).unwrap();
-            let (block, _) = managed(&installed, &loader(&store.rex_file())).unwrap();
+            let (_, block) = checked_loader(&installed, &loader(&store.rex_file())).unwrap();
+            let (block, _) = block.unwrap();
             assert!(installed[block].starts_with(MANAGED));
             if original.is_some() {
                 assert_eq!(fs::metadata(&store.init).unwrap().permissions().mode() & 0o777, 0o640);
@@ -345,7 +346,7 @@ mod tests {
         assert!(!store.layout().unwrap().1);
         assert!(store.claude() == Claude::Off);
         store.save(Some(&Layout::default()), Some(true), &|_| true).unwrap();
-        assert!(managed(&fs::read(&init).unwrap(), &loader(&store.rex_file())).is_some());
+        assert!(store.has_layout().unwrap());
         assert!(store.claude_files().unwrap().launcher_matches());
         assert!(store.layout().unwrap().1);
         assert!(store.claude() == Claude::On);
@@ -410,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_copied_or_commented_loaders_are_never_changed_or_installed_twice() {
+    fn moved_copied_or_modified_loaders_are_never_changed_or_installed_twice() {
         let fixture = Fixture::folder();
         let store = store(&fixture);
         let load = loader(&store.rex_file());
@@ -420,11 +421,13 @@ mod tests {
             format!("{block}-- My Rex settings\n{block}"),
             format!("-- {load}\n"),
             format!("{block}-- {load}\n"),
+            format!("{}\npcall(dofile, \"changed.lua\")\n", std::str::from_utf8(MANAGED).unwrap()),
         ] {
             fs::write(&store.init, &original).unwrap();
+            assert_eq!(store.has_layout(), Err(LOADER_CONFLICT));
             for layout in [Layout::default(), off()] {
                 let result = store.save(Some(&layout), None, &|_| panic!("ambiguous settings need no Rex calls"));
-                assert!(result.unwrap_err().contains("moved, copied or changed"));
+                assert_eq!(result.unwrap_err(), LOADER_CONFLICT);
                 assert_eq!(fs::read_to_string(&store.init).unwrap(), original);
                 assert!(!store.rex_file().exists());
             }

@@ -13,7 +13,7 @@ use super::claude::{Claude, OWN_CLAUDE};
 use super::install::{RunRex, Saved, Store, read};
 use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
 use super::profiles::Scope;
-use super::rex_files::LISTENER_STATE_MISMATCH;
+use super::rex_files::{LISTENER_STATE_MISMATCH, LOADER_CONFLICT};
 use super::{lock, rex_files};
 use crate::git::discover_worktree;
 use crate::preferences::{IconMode, Preferences, Source};
@@ -184,10 +184,20 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
             .unwrap();
         }
         Ok(_) => out.push_str("Rex: not installed; open milo setup in Rex to add the integration.\n"),
+        Err(LOADER_CONFLICT) => writeln!(
+            out,
+            "Rex loader conflict ({:?}): {LOADER_CONFLICT} Restore a single copy of the original two lines at the top, after any interpreter line.",
+            store.init
+        )
+        .unwrap(),
         Err(why) => writeln!(out, "Rex: {why} Check the managed loader and run milo setup --repair.").unwrap(),
     }
     if store.rex_reload_pending() {
-        out.push_str("Rex reload: pending; run milo setup --repair.\n");
+        if matches!(layout, Err(LOADER_CONFLICT)) {
+            out.push_str("Rex reload: pending; resolve the loader conflict first.\n");
+        } else {
+            out.push_str("Rex reload: pending; run milo setup --repair.\n");
+        }
     }
     let expected = layout.map(|(_, active, _)| active).ok();
     let listener = if store.listener_state_matches() == Ok(false) {
@@ -399,10 +409,11 @@ fn on(value: bool) -> &'static str {
 
 pub(crate) fn repair() -> Result<String, String> {
     let store = store()?;
+    let active = store.has_layout()?;
     if !store.listener_state_matches()? {
         return Err(LISTENER_STATE_MISMATCH.into());
     }
-    if !store.has_layout()? && !store.rex_reload_pending() {
+    if !active && !store.rex_reload_pending() {
         return Err("No managed Rex integration to repair. Run milo setup inside Rex first.".into());
     }
     let before = store.layout();
@@ -413,7 +424,7 @@ pub(crate) fn repair() -> Result<String, String> {
         Err(why) => return Err((*why).into()),
     };
     let saved = store.save_with(Some(&layout), None, &rex::run, |_| {
-        if store.layout() != before || (!store.has_layout()? && !store.rex_reload_pending()) {
+        if (!store.has_layout()? && !store.rex_reload_pending()) || store.layout() != before {
             return Err("The Rex layout changed while preparing repair. Run milo doctor again.");
         }
         Ok(())

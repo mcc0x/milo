@@ -168,6 +168,57 @@ fn doctor_does_not_suggest_stopping_a_listener_when_the_rex_layout_is_unknown() 
 }
 
 #[test]
+fn doctor_and_repair_report_a_loader_conflict_without_stopping_the_listener() {
+    let home = Home::new(&format!("[ \"$1\" = do ] || exit 1\n{STAYS}"));
+    let init = home.root.join("init.lua");
+    let milo = |args: &[&str]| {
+        home.milo(args)
+            .current_dir(&home.root)
+            .env("REX_CONFIG", &init)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap()
+    };
+
+    let uninstalled = milo(&["doctor"]);
+    assert!(uninstalled.status.success(), "{uninstalled:?}");
+    assert!(String::from_utf8(uninstalled.stdout).unwrap().contains("Rex: not installed"));
+    let no_repair = milo(&["setup", "--repair"]);
+    assert!(!no_repair.status.success());
+    assert!(String::from_utf8(no_repair.stderr).unwrap().contains("No managed Rex integration to repair"));
+
+    let contents = "-- Managed by milo setup.\npcall(dofile, \"edited.lua\")\n";
+    fs::write(&init, contents).unwrap();
+    let mut listener = home.milo(&["listen"]).spawn().unwrap();
+    let started = soon(|| home.started());
+    let diagnostic = milo(&["doctor"]);
+    let repair = milo(&["setup", "--repair"]);
+    let pending = home.root.join(".local/state/milo/rex-reload-pending");
+    fs::write(&pending, "").unwrap();
+    let diagnostic_pending = milo(&["doctor"]);
+    let running = listener.try_wait().unwrap().is_none();
+    let stopped = home.milo(&["listen", "--stop"]).status().unwrap().success();
+    if !stopped {
+        let _ = listener.kill();
+    }
+    listener.wait().unwrap();
+
+    assert!(started && running && stopped);
+    for output in [diagnostic, diagnostic_pending] {
+        assert!(output.status.success(), "{output:?}");
+        let report = String::from_utf8(output.stdout).unwrap();
+        assert!(report.contains(&format!("Rex loader conflict ({init:?})")), "{report}");
+        assert!(report.contains("Layout listener: running; expected state unknown"), "{report}");
+        assert!(!report.contains("Rex: not installed") && !report.contains("listen --stop"), "{report}");
+        assert!(!report.contains("setup --repair"), "{report}");
+    }
+    let error = String::from_utf8(repair.stderr).unwrap();
+    assert!(!repair.status.success() && error.contains("moved, copied or changed"), "{error}");
+    assert_eq!(fs::read_to_string(init).unwrap(), contents);
+}
+
+#[test]
 fn starting_without_a_saved_listener_fails_without_launching_rex() {
     let home = Home::new("echo started > \"$HOME/started\"\n");
     fs::remove_file(home.root.join(".config/milo/listener.lua")).unwrap();
