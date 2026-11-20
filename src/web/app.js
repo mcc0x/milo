@@ -10,10 +10,6 @@ const navButtons = [...document.querySelectorAll('[data-page]')];
 const queue = [];
 let page = 'layout';
 let state;
-const compactPreview = matchMedia('(max-width: 45rem)');
-function fitPreview() { byId('preview').open = !compactPreview.matches; }
-compactPreview.addEventListener('change', fitPreview);
-fitPreview();
 let running = false;
 let paused = false;
 let closing = false;
@@ -253,6 +249,10 @@ function updateChrome() {
   byId('discard-all').disabled = !needsWarning || running || closing || !connected;
   byId('save-draft').disabled = running || closing || paused || !connected || queue.length > 0 ||
     !Object.entries(state.groups).some(([key, group]) => canSaveDraft(key, group));
+  const saving = !byId('save-draft').disabled;
+  byId('save-draft').classList.toggle('primary', saving);
+  byId('save-draft').classList.toggle('secondary', !saving);
+  byId('done').classList.toggle('primary', !needsWarning);
   byId('done').disabled = running || closing;
 }
 
@@ -285,7 +285,6 @@ function render() {
     dot.hidden = !dirty;
   }
   byId('preview').hidden = page === 'health';
-  byId('workspace').classList.toggle('without-preview', page === 'health');
   if (page !== 'health') renderPreview();
   const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, health: healthView};
   const panel = byId('settings-panel');
@@ -367,12 +366,13 @@ function groupCard(key, title, description, controls) {
   const heading = node('h2', '', title);
   heading.id = `group-${key}`;
   card.setAttribute('aria-labelledby', heading.id);
-  titleline.append(heading, node('span', 'group-origin', originLabels[group.scope]));
+  titleline.append(heading, scopeActions(key, group));
   header.append(titleline);
   if (description) header.append(node('p', '', description));
   const list = node('div', 'group-controls');
   list.append(...controls);
-  card.append(header, list, groupFooter(key, group));
+  card.append(header, list);
+  if (!group.editable) card.append(node('p', 'setting-note', 'Read-only in this session.'));
   return card;
 }
 
@@ -404,23 +404,43 @@ function showSaveOptions() {
   if (groups.childElementCount) byId('save-options').showModal();
 }
 
-function groupFooter(key, group) {
-  const footer = node('footer', 'group-footer');
-  const extras = node('div', 'button-row');
-  const install = key === 'layout' && state.context.inside_rex && !state.context.installed && (group.save_global || group.save_worktree);
-  if (!group.editable) footer.append(node('p', '', 'Read-only in this session.'));
-  if (install) {
-    footer.append(node('p', '', 'Set up in Rex by saving this layout for a worktree or as the default.'),
-      saveChoices(key, group, 'install', paused));
+function disclosure(label, accessibleName, items) {
+  const details = node('details', 'action-menu');
+  details.name = 'editor-actions';
+  const trigger = node('summary', '', label);
+  trigger.setAttribute('aria-label', accessibleName);
+  const panel = node('div', 'action-menu-items');
+  panel.append(...items);
+  panel.addEventListener('click', () => { details.open = false; });
+  details.append(trigger, panel);
+  return details;
+}
+
+document.addEventListener('pointerdown', event => {
+  const menu = document.querySelector('.action-menu[open]');
+  if (menu && !menu.contains(event.target)) menu.open = false;
+});
+document.addEventListener('keydown', event => {
+  const menu = document.querySelector('.action-menu[open]');
+  if (event.key === 'Escape' && menu) {
+    menu.open = false;
+    menu.firstElementChild.focus();
   }
-  if (group.inherit) {
-    extras.append(button('Use global default', 'text-button', `inherit-${key}`, () => {
-      confirm('Use the global default?', `This removes this worktree’s ${groupLabels[key]} override${group.dirty ? ' and discards the unsaved changes in this group' : ''}.`,
-        'Use global default', () => command('inherit', {group: key}));
-    }, paused));
+});
+
+function scopeActions(key, group) {
+  const row = node('div', 'scope-actions');
+  const label = originLabels[group.scope];
+  row.append(group.inherit ? disclosure(`${label} ▾`, `${label} options`, [
+    button('Remove override…', 'text-button', `inherit-${key}`, () => {
+      confirm('Remove worktree override?', `This worktree will use the global ${groupLabels[key]}${group.dirty ? ' and lose unsaved changes in this group' : ''}.`,
+        'Remove override', () => command('inherit', {group: key}));
+    }, paused),
+  ]) : node('span', 'group-origin', label));
+  if (key === 'layout' && state.context.inside_rex && !state.context.installed && (group.save_global || group.save_worktree)) {
+    row.append(disclosure('Set up in Rex…', 'Set up in Rex', [saveChoices(key, group, 'install', paused)]));
   }
-  if (extras.childElementCount) footer.append(extras);
-  return footer;
+  return row;
 }
 
 function panePicker(editable) {
@@ -663,7 +683,6 @@ function renderPreview() {
   byId('split-help').hidden = !editable || !panes.length;
   if (!panes.length) {
     stage.replaceChildren(shell);
-    byId('preview-detail').textContent = 'Shell only. No Milo panes selected.';
   } else {
     const indexes = panes.map(role => roles.indexOf(role));
     const sections = panes.map(scenePane);
@@ -717,9 +736,6 @@ function renderPreview() {
         grip.el.style.setProperty('--pane-split', `${through * 100}%`);
         grip.update();
       });
-      byId('preview-detail').textContent = showLayout ?
-        `${percent(width)} rail on the ${side} · ${panes.map(role => roleNames[role]).join(', ')}` :
-        'Sample Outline, History and Usage panes.';
     }
 
     rail.append(...heightGrips.map(grip => grip.el));
@@ -727,26 +743,25 @@ function renderPreview() {
     paint();
   }
 
-  const tools = byId('trial-tools');
-  const actions = node('div', 'button-row');
+  const secondary = [];
+  if (showLayout && trial && capabilities.undo) {
+    secondary.push(button('Undo trial', 'text-button', 'undo-layout', () => command('undo'), paused));
+  } else if (showLayout && capabilities.try) {
+    secondary.push(button('Try in Rex', 'text-button', 'try-layout', () => command('try'), paused));
+  }
   if (showLayout && capabilities.capture) {
-    actions.append(button('Capture tab', 'secondary', 'capture', () => {
+    secondary.push(button('Copy layout from Rex tab…', 'text-button', 'capture', () => {
       if (state.groups.layout.dirty || queue.some(item => item.field?.startsWith('layout.'))) {
         confirm('Replace the layout draft?', 'Capture copies the side, order and pane sizes from your Rex tab. It does not move panes or save settings.',
-          'Capture tab', () => command('capture'));
+          'Copy layout', () => command('capture'));
       } else command('capture');
     }, paused));
   }
-  if (showLayout && capabilities.try) actions.append(button('Try in Rex', 'secondary', 'try-layout', () => command('try'), paused));
-  if (showLayout && capabilities.undo) actions.append(button('Undo trial', 'secondary', 'undo-layout', () => command('undo'), paused));
-  if (showLayout && capabilities.refresh) actions.append(button('Refresh tab', 'text-button', 'refresh-tab', () => command('refresh'), paused));
-  tools.replaceChildren();
-  if (trial && showLayout) tools.append(node('p', '', 'Trial running in Rex. Undo it or save the layout to keep it.'));
-  else if (showLayout && context.inside_rex && (capabilities.try || capabilities.capture)) {
-    tools.append(node('p', '', 'Try or capture a layout without saving your settings.'));
-  }
-  if (actions.childElementCount) tools.append(actions);
-  tools.hidden = !tools.childElementCount;
+  if (showLayout && capabilities.refresh) secondary.push(button('Refresh preview', 'text-button', 'refresh-tab', () => command('refresh'), paused));
+  const more = byId('preview-more');
+  more.replaceChildren();
+  if (secondary.length) more.append(disclosure('•••', 'Preview actions', secondary));
+  more.hidden = !secondary.length;
 }
 
 for (const tab of navButtons) {

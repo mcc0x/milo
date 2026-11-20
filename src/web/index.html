@@ -20,6 +20,12 @@
 
   <div class="frame surface" id="editor" hidden>
     <button class="skip-link" id="skip-settings" type="button">Skip to settings</button>
+  <footer class="actionbar" id="actionbar" hidden>
+    <img src="/rex.png" width="20" height="20" alt="">
+    <div id="context" class="context"></div>
+    <span id="connection" class="connection sr-only"></span>
+    <span id="version" class="version"></span>
+  </footer>
     <div class="control-dock">
     <nav class="navigation" aria-label="Settings sections">
       <button type="button" data-page="layout" aria-current="page" aria-controls="settings-panel">
@@ -61,30 +67,20 @@
           <button class="button text-button" id="reconnect" type="button">Reconnect</button>
         </div>
       </div>
-      <div id="workspace" class="workspace">
         <section id="settings-panel" class="settings-panel" tabindex="-1"></section>
-        <details class="preview" id="preview" open>
-          <summary class="preview-heading"><strong id="preview-title">Tab preview</strong><span class="preview-tag">Sample workspace</span></summary>
+    </main>
+    <details class="preview" id="preview" open>
+      <summary class="preview-heading">
+        <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+        <strong id="preview-title">Tab preview</strong><span class="terminal-size" id="terminal-size"></span>
+        <span class="preview-toggle" aria-hidden="true"></span>
+      </summary>
+          <div id="preview-more" hidden></div>
           <div class="terminal">
-            <div class="terminal-bar">
-              <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span>tidebook</span>
-              <span class="terminal-size" id="terminal-size"></span>
-            </div>
             <div class="split-stage" id="split-stage"></div>
           </div>
-          <p class="preview-detail" id="preview-detail"></p>
-          <p class="split-help" id="split-help">Drag the dividers or focus them and press the arrow keys.</p>
-          <div class="trial-tools" id="trial-tools" hidden></div>
-        </details>
-      </div>
-    </main>
-  <footer class="actionbar" id="actionbar" hidden>
-    <img src="/rex.png" width="20" height="20" alt="">
-    <div id="context" class="context"></div>
-    <span id="connection" class="connection sr-only"></span>
-    <span id="version" class="version"></span>
-  </footer>
+          <p class="sr-only" id="split-help">Drag the dividers or focus them and press the arrow keys.</p>
+    </details>
   </div>
 
   <div class="frame opening" id="opening">
