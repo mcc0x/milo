@@ -7,6 +7,7 @@ mod tests;
 mod working_path;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::diff::{Line, LineKind};
 use crate::git::{Commit, Kind, PendingFile, Repo};
@@ -19,7 +20,7 @@ use crate::rex;
 use crate::screen::{Screen, Style};
 use crate::syntax::{Lang, Span, State};
 use crate::ui::{ADD, DEL};
-use crate::watch::Scope;
+use crate::watch::{Ignored, Scope};
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
@@ -57,6 +58,10 @@ struct WorkingFile {
     repo: Repo,
     root: working_path::Root,
     relative: PathBuf,
+    watch_only: Arc<Ignored>,
+    /// Ancestor links can lead to entries elsewhere in the worktree.
+    watch_all: Arc<Ignored>,
+    notified: bool,
     stamp: Option<content::WorkingStamp>,
 }
 
@@ -281,7 +286,15 @@ impl Pane for Reader {
 
     fn watch_scope(&self) -> Scope {
         match &self.source {
-            Source::Working(work) => work.repo.watch_scope(),
+            Source::Working(work) => {
+                let mut scope = work.repo.watch_scope();
+                scope.ignored = Arc::clone(if work.stamp.as_ref().is_some_and(|stamp| stamp.linked_ancestor) {
+                    &work.watch_all
+                } else {
+                    &work.watch_only
+                });
+                scope
+            }
             Source::Committed { .. } => Scope { roots: Vec::new(), ignored: Default::default(), complete: true },
         }
     }
@@ -290,8 +303,19 @@ impl Pane for Reader {
         self.working_repo().is_some_and(Repo::busy)
     }
 
+    fn filesystem_changed(&mut self) {
+        if let Source::Working(work) = &mut self.source {
+            // Attribute changes can affect the patch without changing porcelain status.
+            work.notified = true;
+        }
+    }
+
     fn check(&mut self) -> bool {
-        self.refresh(false);
+        let force = match &mut self.source {
+            Source::Working(work) => std::mem::take(&mut work.notified),
+            Source::Committed { .. } => false,
+        };
+        self.refresh(force);
         self.top = self.top.min(self.last_top());
         true
     }

@@ -44,20 +44,23 @@ impl Location {
 pub(super) struct WorkingStamp {
     entry: Result<Stamp, LookupError>,
     compare: bool,
+    pub(super) linked_ancestor: bool,
 }
 
 impl WorkingStamp {
     fn at<'a>(repo: &Repo, root: &'a Root, relative: &Path) -> (Result<Entry<'a>, LookupError>, Self) {
         let at_path = root.at_path(&repo.root);
-        let entry = at_path.and_then(|_| root.entry(&repo.root, relative));
+        let mut links = 0;
+        let entry = at_path.and_then(|_| root.entry(&repo.root, relative, &mut links));
+        let linked_ancestor = links != 0;
         let compare = at_path == Ok(true)
             && repo.git
             && relative.to_str().is_some()
             && match &entry {
-                Ok(entry) => !entry.linked_ancestor && !entry.is_special(),
+                Ok(entry) => !linked_ancestor && !entry.is_special(),
                 Err(error) => *error == LookupError::Gone,
             };
-        let stamp = Self { entry: entry.as_ref().map(Entry::stamp).map_err(|e| *e), compare };
+        let stamp = Self { entry: entry.as_ref().map(Entry::stamp).map_err(|e| *e), compare, linked_ancestor };
         (entry, stamp)
     }
 }
@@ -86,7 +89,16 @@ impl Reader {
         repo.only(&path);
         let (icons, note) = Self::appearance_for(&repo);
         let note = if repo.git_unavailable() { Some(GIT_UNAVAILABLE) } else { note };
-        let source = Source::Working(Box::new(WorkingFile { repo, root, relative, stamp: None }));
+        let watch_only = repo.reader_filter(&relative);
+        let source = Source::Working(Box::new(WorkingFile {
+            repo,
+            root,
+            relative,
+            watch_only,
+            watch_all: Default::default(),
+            notified: false,
+            stamp: None,
+        }));
         let mut reader = Self::new(path, source, icons, note);
         reader.refresh(true);
         Some(reader)
@@ -144,7 +156,7 @@ impl Reader {
     /// Rebuilds the working file when it or Git has changed, keeping the last good result if git fails.
     pub(super) fn refresh(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
-        let WorkingFile { repo, root, relative, stamp: last } = work.as_mut();
+        let WorkingFile { repo, root, relative, stamp: last, .. } = work.as_mut();
         let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
         // A changed file already needs a fresh status read, even if Git's
         // porcelain entry for it is unchanged. Otherwise use the current poll.

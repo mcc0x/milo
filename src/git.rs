@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::read::{self, Content};
-use crate::watch::{Ignored, Scope};
+use crate::watch::{Events, Ignored, Scope};
 use parse::{Status, parse_files, parse_history, parse_status};
 use pending::{TrackedDiff, tracked_records};
 use run::OutputError;
@@ -434,12 +434,28 @@ impl Repo {
     /// linked worktree. The current status supplies the ignored paths.
     pub fn watch_scope(&self) -> Scope {
         let mut roots = vec![self.root.clone()];
-        roots.extend(self.common_dir.as_ref().filter(|dir| !dir.starts_with(&self.root)).cloned());
+        for dir in [self.common_dir.as_ref(), self.git_dir.as_ref()].into_iter().flatten() {
+            if !roots.iter().any(|root| dir.starts_with(root)) {
+                roots.push(dir.clone());
+            }
+        }
         // Older git versions do not say where their records are. Then only a
         // repository that plainly keeps them inside itself can be trusted.
         let inside = || std::fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
         let complete = !self.git || self.common_dir.is_some() || inside();
         Scope { roots, ignored: Arc::clone(&self.watch_ignored), complete }
+    }
+
+    /// A Reader needs only its file, applicable worktree rules and Git's metadata.
+    pub(crate) fn reader_filter(&self, relative: &Path) -> Arc<Ignored> {
+        let file = self.root.join(relative);
+        // Don't guess how a volume normalizes or folds non-ASCII path names.
+        if !file.as_os_str().as_encoded_bytes().is_ascii() {
+            return Arc::default();
+        }
+        let worktree = self.git.then(|| self.root.clone());
+        let metadata = [self.git.then(|| self.root.join(".git")), self.git_dir.clone(), self.common_dir.clone()];
+        Arc::new(Ignored { events: Events::Reader { file, worktree, metadata }, ..Ignored::default() })
     }
 
     fn exclusions(&self, status: &Status) -> Arc<Ignored> {
@@ -465,7 +481,11 @@ impl Repo {
                 .map(|path| self.root.join(path))
                 .collect()
         };
-        Arc::new(Ignored { dirs: exclusions(&status.ignored_dirs), files: exclusions(&status.ignored_files) })
+        Arc::new(Ignored {
+            dirs: exclusions(&status.ignored_dirs),
+            files: exclusions(&status.ignored_files),
+            ..Ignored::default()
+        })
     }
 
     /// Whether git is in the middle of changing things here, so that what

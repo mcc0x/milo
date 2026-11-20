@@ -24,6 +24,49 @@ pub struct Scope {
 pub struct Ignored {
     pub dirs: HashSet<PathBuf>,
     pub files: HashSet<PathBuf>,
+    pub events: Events,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub enum Events {
+    #[default]
+    All,
+    Reader { file: PathBuf, worktree: Option<PathBuf>, metadata: [Option<PathBuf>; 3] },
+}
+
+#[cfg(target_os = "macos")]
+impl Ignored {
+    fn needs_paths(&self) -> bool {
+        !self.dirs.is_empty() || !self.files.is_empty() || self.events != Events::All
+    }
+
+    fn allows(&self, path: &std::path::Path, is_dir: bool) -> bool {
+        if (!is_dir && self.files.contains(path))
+            || (!self.dirs.is_empty() && path.ancestors().any(|p| self.dirs.contains(p)))
+        {
+            return false;
+        }
+        let Events::Reader { file, worktree, metadata } = &self.events else { return true };
+        // Event paths need not use the same spelling as the reader on
+        // case-insensitive volumes. Prefixes still end at a component.
+        let under = |path: &std::path::Path, base: &std::path::Path| {
+            let mut parts = path.components();
+            base.components().all(|part| {
+                parts.next().is_some_and(|p| {
+                    p.as_os_str().as_encoded_bytes().eq_ignore_ascii_case(part.as_os_str().as_encoded_bytes())
+                })
+            })
+        };
+        under(file, path)
+            || metadata.iter().flatten().any(|dir| under(path, dir) || under(dir, path))
+            || worktree.as_ref().is_some_and(|root| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.as_encoded_bytes();
+                    (name.eq_ignore_ascii_case(b".gitignore") || name.eq_ignore_ascii_case(b".gitattributes"))
+                        && path.parent().is_some_and(|dir| under(dir, root) && under(file, dir))
+                })
+            })
+    }
 }
 
 pub struct Watcher {
@@ -255,7 +298,7 @@ mod imp {
         // SAFETY: The context is held by Stream until its serial callback queue is drained.
         let state = unsafe { &*info.cast::<CallbackState>() };
         let ignored = state.ignored.lock().unwrap_or_else(PoisonError::into_inner);
-        let relevant = if (ignored.dirs.is_empty() && ignored.files.is_empty()) || paths.is_null() || flags.is_null() {
+        let relevant = if !ignored.needs_paths() || paths.is_null() || flags.is_null() {
             true
         } else {
             // SAFETY: Without UseCFTypes, FSEvents supplies `count` C strings and flags.
@@ -269,8 +312,7 @@ mod imp {
                 // SAFETY: FSEvents guarantees the event path is a NUL-terminated string.
                 let path = unsafe { CStr::from_ptr(path) };
                 let path = Path::new(OsStr::from_bytes(path.to_bytes()));
-                (flags & IS_DIR != 0 || !ignored.files.contains(path))
-                    && !path.ancestors().any(|ancestor| ignored.dirs.contains(ancestor))
+                ignored.allows(path, flags & IS_DIR != 0)
             })
         };
         if relevant {
@@ -398,6 +440,9 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use crate::git::Repo;
+    use crate::pane::Pane;
+    use crate::reader::Reader;
+    use crate::screen::Screen;
 
     fn changed(watcher: &Watcher, timeout_ms: i32) -> bool {
         let fd = watcher.fd().expect("the stream should have a notification descriptor");
@@ -418,6 +463,57 @@ mod tests {
         while changed(watcher, 300) {
             assert!(std::time::Instant::now() < deadline, "fixture never settled");
         }
+    }
+
+    #[test]
+    fn reader_wakes_for_its_file_rules_git_and_ancestor_but_not_other_work() {
+        let f = Fixture::folder();
+        let git = f.root.with_file_name("metadata");
+        f.git(&["init", "-q", "--template=", "-b", "main", "--separate-git-dir", git.to_str().unwrap()]);
+        f.write("src/page.txt", "the original text\n");
+        f.write("src/.gitattributes", "page.txt diff\n");
+        f.write("src/other.txt", "old sibling content\n");
+        f.write("unrelated/.gitattributes", "* diff\n");
+        f.commit("first");
+        let mut reader = Reader::open(&f.root.join("src/page.txt")).unwrap();
+        let mut watcher = Watcher::new(reader.watch_scope());
+        let check = |reader: &mut Reader, watcher: &mut Watcher, expected: &str| {
+            assert!(changed(watcher, 30_000), "expected a wake for {expected:?}");
+            reader.filesystem_changed();
+            assert!(reader.check());
+            watcher.refresh(reader.watch_scope());
+            let mut screen = Screen::sized(60, 8);
+            reader.draw(&mut screen);
+            let rows = screen.text();
+            assert!(rows.iter().any(|row| row.contains(expected)), "{expected:?}: {rows:?}");
+            settle(watcher);
+        };
+
+        f.write("src/page.txt", "edited text\n");
+        check(&mut reader, &mut watcher, "+ edited text");
+        f.write("src/other.txt", "new sibling content\n");
+        f.write("unrelated/.gitattributes", "* -diff\n");
+        assert!(!changed(&watcher, 300), "edits unrelated to the Reader must not wake it");
+
+        f.write("src/.gitattributes", "page.txt -diff\n");
+        check(&mut reader, &mut watcher, "This file is not text.");
+        f.write("src/.gitattributes", "page.txt diff\n");
+        check(&mut reader, &mut watcher, "+ edited text");
+        f.write("src/.gitignore", "other.txt\n");
+        check(&mut reader, &mut watcher, "+ edited text");
+        f.commit("second");
+        check(&mut reader, &mut watcher, "1   edited text");
+
+        // Rename only the parent: there need not be an event for its contents.
+        std::fs::rename(f.root.join("src"), f.root.join("moved")).unwrap();
+        check(&mut reader, &mut watcher, "- edited text");
+
+        // A replacement directory link can make the file live at a different
+        // path under the watch root. Do not lose writes to that resolved file.
+        std::os::unix::fs::symlink("moved", f.root.join("src")).unwrap();
+        check(&mut reader, &mut watcher, "1   edited text");
+        f.write("moved/page.txt", "through an ancestor link\n");
+        check(&mut reader, &mut watcher, "through an ancestor link");
     }
 
     #[test]

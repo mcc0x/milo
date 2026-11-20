@@ -33,18 +33,17 @@ impl Root {
         }
     }
 
-    pub(super) fn entry(&self, base: &Path, relative: &Path) -> Result<Entry<'_>, LookupError> {
+    pub(super) fn entry(&self, base: &Path, relative: &Path, links: &mut u8) -> Result<Entry<'_>, LookupError> {
         let name = relative.file_name().ok_or(LookupError::Gone)?;
         let name = CString::new(name.as_bytes()).map_err(|_| LookupError::Unreadable)?;
         let mut dirs = Vec::new();
-        let mut links = 0;
         if let Some(parent) = relative.parent() {
-            walk(&self.dir, base, &mut dirs, parent, &mut links)?;
+            walk(&self.dir, base, &mut dirs, parent, links)?;
         }
         let parent = dirs.pop();
         let dir = parent.as_ref().unwrap_or(&self.dir);
         let stat = stat_at(dir, &name).map_err(LookupError::of)?;
-        Ok(Entry { root: &self.dir, parent, name, stat, linked_ancestor: links != 0 })
+        Ok(Entry { root: &self.dir, parent, name, stat })
     }
 }
 
@@ -120,7 +119,6 @@ pub(super) struct Entry<'a> {
     parent: Option<File>,
     name: CString,
     stat: libc::stat,
-    pub(super) linked_ancestor: bool,
 }
 
 impl Entry<'_> {
