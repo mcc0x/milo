@@ -285,8 +285,7 @@ impl Layout {
         // other row values, and profiles (parsed separately) exactly as chosen.
         if layout.usage_rows == "10"
             && let Some(exe) = fields.executable
-            && shipped_action_body(text, &layout, exe)
-                .is_some_and(|body| body != ACTIONS && TEN_ROW_ACTIONS.contains(&fingerprint(body)))
+            && shipped_action_template(text, &layout, exe) == Some(ActionTemplate::OldTenRows)
         {
             layout.usage_rows = DEFAULT_USAGE_ROWS.to_string();
         }
@@ -485,7 +484,7 @@ pub(super) fn update_actions(
     if old.new_tabs != layout.new_tabs {
         if let Some((len, _)) = legacy_suffix {
             updated.truncate(updated.len() - len);
-        } else if let Some(body) = strip_scoped_footer(&updated, newline) {
+        } else if let Some((body, _)) = scoped_footer(&updated, newline) {
             updated.truncate(body.len());
         } else if legacy.iter().any(|(footer, _)| updated.contains(footer.as_ref()))
             || updated.lines().any(|line| launcher_state(line).is_some())
@@ -509,25 +508,49 @@ pub(super) fn owns_actions(text: &str) -> bool {
     })
 }
 
+/// Report only templates we can prove Milo shipped. Layout and launcher values
+/// can differ without making the template itself stale.
+pub(super) fn actions_template_current(text: &str) -> Option<bool> {
+    let fields = declarations(text)?;
+    let layout = fields.layout()?;
+    shipped_action_template(text, &layout, fields.executable?).map(|template| template == ActionTemplate::Current)
+}
+
 pub(super) fn launcher_matches(text: &str, executable: &Path) -> Option<bool> {
     declarations(text)?.executable.map(|value| value == lua_path(executable))
 }
 
 fn shipped_actions(text: &str, layout: &Layout, exe: &str) -> bool {
-    shipped_action_body(text, layout, exe).is_some()
+    shipped_action_template(text, layout, exe).is_some()
 }
 
-fn shipped_action_body<'a>(text: &'a str, layout: &Layout, exe: &str) -> Option<&'a str> {
+#[derive(PartialEq, Eq)]
+enum ActionTemplate {
+    Current,
+    Old,
+    OldTenRows,
+}
+
+fn shipped_action_template(text: &str, layout: &Layout, exe: &str) -> Option<ActionTemplate> {
     let tail = text.strip_prefix(&actions_prefix(layout, exe))?;
-    let body = strip_scoped_footer(tail, "\n")
-        .or_else(|| tail.strip_suffix(OLD_START_LISTENER))
-        .or_else(|| tail.strip_suffix(START_LISTENER))
-        .unwrap_or(tail);
-    let owns = body == ACTIONS || {
-        let hash = fingerprint(body);
-        TEN_ROW_ACTIONS.contains(&hash) || TWO_ROW_ACTIONS.contains(&hash)
+    let (body, current_footer) = if let Some((body, guard)) = scoped_footer(tail, "\n") {
+        (body, layout.enabled() && guard == LISTENER_GUARD)
+    } else if let Some(body) = tail.strip_suffix(OLD_START_LISTENER).or_else(|| tail.strip_suffix(START_LISTENER)) {
+        (body, false)
+    } else {
+        (tail, !layout.enabled())
     };
-    owns.then_some(body)
+    if body == ACTIONS {
+        return Some(if current_footer { ActionTemplate::Current } else { ActionTemplate::Old });
+    }
+    let hash = fingerprint(body);
+    if TEN_ROW_ACTIONS.contains(&hash) {
+        Some(ActionTemplate::OldTenRows)
+    } else if TWO_ROW_ACTIONS.contains(&hash) {
+        Some(ActionTemplate::Old)
+    } else {
+        None
+    }
 }
 
 /// The installed and temporary layouts must run exactly the same actions.
@@ -568,12 +591,12 @@ pub(super) fn listener_state_matches(text: &str, state_home: &Path) -> bool {
     first == expected && launchers.all(|state| state == expected)
 }
 
-fn strip_scoped_footer<'a>(text: &'a str, nl: &str) -> Option<&'a str> {
+fn scoped_footer<'a>(text: &'a str, nl: &str) -> Option<(&'a str, &'a str)> {
     let (text, call) = text.strip_suffix(nl)?.strip_suffix("end")?.strip_suffix(nl)?.rsplit_once(nl)?;
     launcher_state(call)?;
     let (text, guard) = text.rsplit_once(nl)?;
     let (body, comment) = text.rsplit_once(nl)?;
-    (matches!(guard, LISTENER_GUARD | CHOSEN_LISTENER_GUARD) && comment == LISTENER_COMMENT).then_some(body)
+    (matches!(guard, LISTENER_GUARD | CHOSEN_LISTENER_GUARD) && comment == LISTENER_COMMENT).then_some((body, guard))
 }
 
 fn actions_prefix(layout: &Layout, executable: &str) -> String {
@@ -608,15 +631,21 @@ fn listener_prefix(rex_file: &Path) -> String {
 }
 
 pub(super) fn owns_listener(text: &str, rex_file: &Path) -> bool {
-    text.strip_prefix(&listener_prefix(rex_file)).is_some_and(|body| {
-        body == LISTENER
-            || [
-                0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a,
-                0x1ed2_af59_4c5b_4bf4, 0x7b13_2b45_6752_1e02, 0x3f33_9081_87e5_4505, 0x9a88_3230_71bd_27e5,
-                0x3160_d88f_3615_347e, 0x9f96_0222_5e5f_6597, 0xf4de_b493_7bc8_8ba9,
-            ]
-            .contains(&fingerprint(body))
-    })
+    listener_template_current(text, rex_file).is_some()
+}
+
+pub(super) fn listener_template_current(text: &str, rex_file: &Path) -> Option<bool> {
+    let body = text.strip_prefix(&listener_prefix(rex_file))?;
+    if body == LISTENER {
+        return Some(true);
+    }
+    [
+        0x9a38_08cb_8bb7_54d8, 0x18ff_d6b9_f7bd_6f63, 0x3af5_6341_9c89_8eb8, 0x6814_92ce_bca8_054a,
+        0x1ed2_af59_4c5b_4bf4, 0x7b13_2b45_6752_1e02, 0x3f33_9081_87e5_4505, 0x9a88_3230_71bd_27e5,
+        0x3160_d88f_3615_347e, 0x9f96_0222_5e5f_6597, 0xf4de_b493_7bc8_8ba9,
+    ]
+    .contains(&fingerprint(body))
+    .then_some(false)
 }
 
 #[cfg(test)]
@@ -642,7 +671,7 @@ mod tests {
         assert!(listener_state_matches(&text, Path::new(STATE_HOME)));
         let edited = text.replace('\n', "\r\n") + "\r\n-- keep my comments\r\n";
         assert!(!listener_state_matches(&edited, Path::new("/other/state")));
-        let old = strip_scoped_footer(&text, "\n").unwrap().to_owned() + OLD_START_LISTENER;
+        let old = scoped_footer(&text, "\n").unwrap().0.to_owned() + OLD_START_LISTENER;
         assert!(owns_actions(&old));
         let same_layout = Layout::default();
         let executable = Path::new("/fixture/bin/milo");
@@ -652,6 +681,19 @@ mod tests {
             update_actions(&customized(&old), &same_layout, executable, environment()),
             Some(Some(customized(&text))),
         );
+    }
+
+    #[test]
+    fn doctor_distinguishes_old_and_custom_action_templates_from_saved_values() {
+        let layout = Layout { usage_rows: "10".into(), ..Layout::default() };
+        let current = rex_lua(&layout, Path::new("/elsewhere/milo"), environment());
+        assert_eq!(actions_template_current(&current), Some(true));
+
+        let old = scoped_footer(&current, "\n").unwrap().0.to_owned() + OLD_START_LISTENER;
+        assert_eq!(actions_template_current(&old), Some(false));
+        let old_guard = current.replace(LISTENER_GUARD, CHOSEN_LISTENER_GUARD);
+        assert_eq!(actions_template_current(&old_guard), Some(false));
+        assert_eq!(actions_template_current(&(old + "-- my own Rex code\n")), None);
     }
 
     #[test]

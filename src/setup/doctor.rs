@@ -11,7 +11,9 @@ use std::thread;
 
 use super::claude::{Claude, OWN_CLAUDE};
 use super::install::{RunRex, Saved, Store, read};
-use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
+use super::layout::{
+    Layout, Side, TabPane, actions_template_current, launcher_matches, listener_template_current, probe_lua,
+};
 use super::profiles::{LayoutError, Scope};
 use super::rex_files::{LISTENER_STATE_MISMATCH, LOADER_CONFLICT};
 use super::{lock, rex_files};
@@ -234,36 +236,7 @@ fn report_with_worktree(
             if write_sidebar(&mut out, rail, *scope, live) {
                 health.warn("Live pane sizes differ from your saved layout.");
             }
-            let file = read(&store.rex_file())?;
-            let text = file.as_ref().and_then(|f| std::str::from_utf8(&f.bytes).ok()).unwrap_or("");
-            let status = match launcher_matches(text, &executable) {
-                Some(true) => "matches this binary",
-                Some(false) if owns_actions(text) => {
-                    health.warn("Rex points to a different Milo binary.");
-                    "points elsewhere; run milo setup --repair with the binary you want"
-                }
-                _ => {
-                    health.warn("Rex uses a custom Milo launcher.");
-                    "custom launcher; inspect the local milo declaration in rex.lua"
-                }
-            };
-            writeln!(out, "Rex launcher: {status} ({executable:?})").unwrap();
-            let available = rex::layout_available();
-            match available {
-                Some(false) => health.issue("Rex actions are out of date. Run milo setup --repair."),
-                None => health.warn("Rex actions could not be checked. Check rex whoami and PATH."),
-                Some(true) => {}
-            }
-            writeln!(
-                out,
-                "Server actions: {}",
-                match available {
-                    Some(true) => "loaded",
-                    Some(false) => "not current; run milo setup --repair",
-                    None => "unavailable; check rex whoami and PATH",
-                }
-            )
-            .unwrap();
+            write_rex_installation(&mut out, &mut health, store, &executable, rex::layout_available())?;
         }
         Ok(_) => out.push_str("Rex: not installed; open milo setup in Rex to add the integration.\n"),
         Err(LayoutError::Rex(LOADER_CONFLICT)) => writeln!(
@@ -347,6 +320,80 @@ fn report_with_worktree(
     }
     out.pop();
     Ok((out, health, tools))
+}
+
+fn write_rex_installation(
+    out: &mut String,
+    health: &mut Health,
+    store: &Store,
+    executable: &Path,
+    available: Option<bool>,
+) -> Result<(), &'static str> {
+    let rex_file = store.rex_file();
+    let file = read(&rex_file)?;
+    let text = file.as_ref().and_then(|f| std::str::from_utf8(&f.bytes).ok()).unwrap_or("");
+    let current = actions_template_current(text);
+    let launcher = match launcher_matches(text, executable) {
+        Some(true) => "matches this binary",
+        Some(false) if current.is_some() => {
+            health.warn("Rex points to a different Milo binary.");
+            "points elsewhere; run milo setup --repair with the binary you want"
+        }
+        _ => {
+            health.warn("Rex uses a custom Milo launcher.");
+            "custom launcher; inspect the local milo declaration in rex.lua"
+        }
+    };
+    writeln!(out, "Rex launcher: {launcher} ({executable:?})").unwrap();
+    let actions = match current {
+        Some(true) => "current",
+        Some(false) => {
+            health.issue("The managed Rex actions are out of date. Run milo setup --repair.");
+            "out of date; run milo setup --repair"
+        }
+        None => "custom; left alone",
+    };
+    writeln!(out, "Rex actions file (rex.lua): {actions}").unwrap();
+    let listener = match read(&store.listener_file()) {
+        Ok(Some(file)) => {
+            let current =
+                std::str::from_utf8(&file.bytes).ok().and_then(|text| listener_template_current(text, &rex_file));
+            match current {
+                Some(true) => "current",
+                Some(false) => {
+                    health.issue("The managed Rex listener is out of date. Run milo setup --repair.");
+                    "out of date; run milo setup --repair"
+                }
+                None => "custom; left alone",
+            }
+        }
+        Ok(None) => {
+            health.issue("The Rex listener file is missing. Run milo setup --repair.");
+            "missing; run milo setup --repair"
+        }
+        Err(_) => {
+            health.warn("Milo could not read the Rex listener file.");
+            "unreadable; check listener.lua"
+        }
+    };
+    writeln!(out, "Rex listener file (listener.lua): {listener}").unwrap();
+    let loaded = match available {
+        Some(true) => "loaded",
+        Some(false) if current.is_none() => {
+            health.warn("Not all Milo actions are loaded from your custom Rex configuration.");
+            "not all Milo actions are loaded; inspect your custom rex.lua"
+        }
+        Some(false) => {
+            health.issue("Rex did not load all current Milo actions. Run milo setup --repair.");
+            "not current; run milo setup --repair"
+        }
+        None => {
+            health.warn("Rex actions could not be checked. Check rex whoami and PATH.");
+            "unavailable; check rex whoami and PATH"
+        }
+    };
+    writeln!(out, "Server actions: {loaded}").unwrap();
+    Ok(())
 }
 
 /// Only a choice someone made is spelled out, so a tool left alone goes unnamed.
@@ -555,20 +602,21 @@ pub(crate) fn repair() -> Result<String, String> {
         Ok(())
     })?;
     check_listener(saved)?;
-    if layout.enabled()
-        && rex::layout_available() != Some(true)
-        && (!rex::run(&[OsStr::new("config"), OsStr::new("reload")]) || rex::layout_available() != Some(true))
-    {
-        return Err(
-            "Rex did not load Milo's current actions. Check rex.lua for custom actions and run rex config check."
-                .into(),
-        );
-    }
     if layout.enabled() {
         let file = read(&store.rex_file())?.ok_or("Rex layout is missing.")?;
-        if launcher_matches(std::str::from_utf8(&file.bytes).unwrap_or(""), &rex_files::executable()?) != Some(true) {
+        let text = std::str::from_utf8(&file.bytes).unwrap_or("");
+        if launcher_matches(text, &rex_files::executable()?) != Some(true) {
             return Err(
                 "Rex uses a custom launcher. Update its local milo path in rex.lua; Milo left that code alone.".into(),
+            );
+        }
+        if actions_template_current(text).is_some()
+            && rex::layout_available() != Some(true)
+            && (!rex::run(&[OsStr::new("config"), OsStr::new("reload")]) || rex::layout_available() != Some(true))
+        {
+            return Err(
+                "Rex did not load Milo's current actions. Check for actions that override Milo's in init.lua and run rex config check."
+                    .into(),
             );
         }
     }
@@ -669,6 +717,52 @@ mod tests {
         assert!(report.contains("run milo setup --repair"), "{report}");
         assert!(!report.contains("Saved layout profile"), "{report}");
         assert_eq!(std::fs::read_to_string(store.init).unwrap(), contents);
+    }
+
+    #[test]
+    fn doctor_separates_managed_templates_on_disk_from_loaded_actions() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let executable = rex_files::executable().unwrap();
+        let actions_path = store.rex_file();
+        let listener_path = store.listener_file();
+        let current_actions = std::fs::read_to_string(&actions_path).unwrap();
+        let current_listener = std::fs::read_to_string(&listener_path).unwrap();
+        let check = |available| {
+            let mut report = String::new();
+            let mut health = Health::Good;
+            write_rex_installation(&mut report, &mut health, &store, &executable, available).unwrap();
+            (report, health)
+        };
+
+        let (report, health) = check(Some(false));
+        assert!(report.contains("Rex actions file (rex.lua): current"), "{report}");
+        assert!(report.contains("Rex listener file (listener.lua): current"), "{report}");
+        assert!(report.contains("Server actions: not current"), "{report}");
+        assert!(matches!(health, Health::Issue(_)));
+
+        let before = current_listener.strip_suffix(include_str!("listener.lua")).unwrap();
+        let old_listener = format!("{before}{}", include_str!("listener_0_1_2.lua"));
+        std::fs::write(&listener_path, &old_listener).unwrap();
+        let (report, health) = check(Some(true));
+        assert!(report.contains("Rex listener file (listener.lua): out of date"), "{report}");
+        assert!(report.contains("Server actions: loaded"), "{report}");
+        assert!(matches!(health, Health::Issue(_)));
+        assert_eq!(std::fs::read_to_string(&listener_path).unwrap(), old_listener);
+
+        let custom_actions = current_actions + "\n-- my own Rex actions\n";
+        let custom_listener = old_listener + "\n-- my own listener\n";
+        std::fs::write(&actions_path, &custom_actions).unwrap();
+        std::fs::write(&listener_path, &custom_listener).unwrap();
+        let (report, health) = check(Some(false));
+        assert!(report.contains("Rex actions file (rex.lua): custom; left alone"), "{report}");
+        assert!(report.contains("Rex listener file (listener.lua): custom; left alone"), "{report}");
+        assert!(report.contains("Server actions: not all Milo actions are loaded"), "{report}");
+        assert!(!report.contains("repair"), "{report}");
+        assert!(matches!(health, Health::Warning(_)));
+        assert_eq!(std::fs::read_to_string(&actions_path).unwrap(), custom_actions);
+        assert_eq!(std::fs::read_to_string(&listener_path).unwrap(), custom_listener);
     }
 
     #[test]

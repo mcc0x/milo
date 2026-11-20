@@ -18,12 +18,35 @@ pub(crate) fn layout_available() -> Option<bool> {
     let mut command = Command::new("rex");
     command.args(["--autostart=false", "--timeout", "3s", "actions", "--json"]).env_remove("REX_CLIENT");
     let output = probe_output(&mut command, PROBE_WAIT)?;
-    let [actions] = crate::json::Value::parse(&output)?.fields(["actions"]);
-    Some(
-        actions?
-            .elements()?
-            .any(|action| action.fields(["name"])[0].is_some_and(|name| name.is("milo_remember_layout"))),
-    )
+    layout_catalog(&output)
+}
+
+fn layout_catalog(output: &[u8]) -> Option<bool> {
+    const ACTIONS: [&str; 10] = [
+        "milo_layout",
+        "milo_outline",
+        "milo_history",
+        "milo_usage",
+        "milo_close",
+        "milo_peek_outline",
+        "milo_close_peek",
+        "milo_remember_layout",
+        "milo_reset_layout",
+        "milo_name_session",
+    ];
+    let [actions] = crate::json::Value::parse(output)?.fields(["actions"]);
+    let mut missing = (1u16 << ACTIONS.len()) - 1;
+    for action in actions?.elements()? {
+        if let [Some(name)] = action.fields(["name"])
+            && let Some(index) = ACTIONS.iter().position(|action| name.is(action))
+        {
+            missing &= !(1 << index);
+            if missing == 0 {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
 }
 
 /// The shell that opened setup, even if focus has moved somewhere else.
@@ -378,10 +401,24 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, ShellChange, json, probe_output, reader_command, reader_label};
+    use super::{Frame, ShellChange, json, layout_catalog, probe_output, reader_command, reader_label};
     use std::path::Path;
     use std::process::Command;
     use std::time::Duration;
+
+    #[test]
+    fn doctor_requires_the_current_milo_action_catalog() {
+        let released = r#"{"actions":[
+            {"name":"milo_layout"},{"name":"milo_outline"},{"name":"milo_history"},{"name":"milo_usage"},
+            {"name":"milo_close"},{"name":"milo_peek_outline"},{"name":"milo_close_peek"},
+            {"name":"milo_remember_layout"},{"name":"milo_reset_layout"},{"name":"an_unrelated_action"}]}"#;
+        assert_eq!(layout_catalog(released.as_bytes()), Some(false));
+        let current = released.replace("an_unrelated_action", "milo_name_session");
+        assert_eq!(layout_catalog(current.as_bytes()), Some(true));
+        let partial = current.replace("milo_close_peek", "milo_close");
+        assert_eq!(layout_catalog(partial.as_bytes()), Some(false));
+        assert_eq!(layout_catalog(br#"{"actions":{}}"#), None);
+    }
 
     #[test]
     fn diagnostic_processes_have_a_deadline_even_if_they_close_stdout() {
