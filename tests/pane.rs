@@ -450,6 +450,11 @@ fn follow_shell_promotion_applies_worktree_preferences_before_a_cwd_update() {
         terminal.until(promoted);
         // SAFETY: Signal zero checks whether this test's observer exists without sending a signal.
         assert_eq!(unsafe { libc::kill(pid, 0) } == 0, observer_running, "{pane}");
+        if observer_running {
+            // SAFETY: pid is the test observer whose identity was checked above.
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+            terminal.until("tracking unavailable");
+        }
         terminal.master.write_all(b"q").unwrap();
         assert!(terminal.wait_for_exit().success());
         fs::remove_file(&observer_pid).unwrap();

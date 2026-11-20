@@ -30,7 +30,7 @@ pub fn project(
         git: repo.git,
         pane: make(repo, &prefs),
         make,
-        note: (shell.is_some() && source.is_none()).then_some(NO_CWD),
+        note: (shell.is_some() && source.is_none()).then_some(NO_OBSERVER),
         notice_only: false,
         preference_note,
         source,
@@ -44,6 +44,7 @@ fn panel_preferences(repo: &Repo) -> (Preferences, Option<&'static str>) {
 }
 
 const NO_CWD: &str = "Waiting for shell";
+const NO_OBSERVER: &str = "Shell tracking unavailable";
 const BAD_CWD: &str = "Shell folder unavailable";
 
 struct Project<F> {
@@ -185,7 +186,7 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
             ShellChange::Unreported => self.set_note(Some(NO_CWD)),
             ShellChange::Closed => {
                 self.source = None;
-                self.set_note(Some(NO_CWD))
+                self.set_note(Some(NO_OBSERVER))
             }
             ShellChange::Unchanged => External::Unchanged,
         };
