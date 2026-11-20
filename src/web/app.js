@@ -106,6 +106,7 @@ async function drain() {
       queue.splice(0, 1 + (pending ?? 0));
     } catch (error) {
       localError = error.message;
+      if (action.action === 'doctor') state.doctor = {level: 'warning', note: 'Check could not finish. Try again.'};
       notify(localError, true);
       if (action.action !== 'set') queue.shift();
       // Do not run a queued save or capture after an earlier edit failed.
@@ -535,22 +536,22 @@ function workflowView() {
 }
 
 function healthView() {
-  const card = node('section', 'settings-group');
-  const content = node('div', 'health-content');
-  const heading = node('h2', 'setting-label', 'Local diagnostics');
+  const section = node('section', 'health');
+  const result = state.doctor;
+  const labels = {good: 'All good', warning: 'Warning', issue: 'Issue found'};
+  const heading = node('h2', '', 'Health Check');
   heading.id = 'diagnostics-title';
-  card.setAttribute('aria-labelledby', heading.id);
-  const tools = node('div', 'button-row');
-  tools.append(button('Read diagnostics', 'primary', 'doctor', () => command('doctor'), paused));
-  content.append(heading, node('p', '', 'Check preference scope, Rex integration, automatic arrangement and usage sources. This does not change settings.'), tools);
-  content.append(node('p', '', 'For integration repairs, run milo setup --repair from your shell. Use Done to stop the editor, or press Ctrl+C in the shell if you’ve already closed the tab.'));
-  if (state.doctor) {
-    const report = node('pre', 'report', state.doctor);
-    report.setAttribute('aria-label', 'Diagnostics report');
-    content.append(report);
+  section.append(heading);
+  if (result) {
+    const status = node('div', 'health-result');
+    status.setAttribute('role', 'status');
+    status.dataset.level = result.level || 'warning';
+    status.append(node('strong', '', labels[result.level] || 'Check unavailable'));
+    if (result.note) status.append(node('p', '', result.note));
+    section.append(status);
   }
-  card.append(content);
-  return [card];
+  section.append(button(result ? 'Run again' : 'Run check', 'secondary', 'doctor', () => command('doctor'), paused || running));
+  return [section];
 }
 
 function layoutActions() {

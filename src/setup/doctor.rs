@@ -23,6 +23,28 @@ pub(crate) const TITLE: &str = "Milo doctor";
 pub(crate) const CHECKING: &str = "Checking…";
 
 type Report = Result<String, String>;
+
+#[derive(Default)]
+pub(super) enum Health {
+    #[default]
+    Good,
+    Warning(&'static str),
+    Issue(&'static str),
+}
+
+impl Health {
+    fn warn(&mut self, reason: &'static str) {
+        if matches!(self, Self::Good) {
+            *self = Self::Warning(reason);
+        }
+    }
+
+    fn issue(&mut self, reason: &'static str) {
+        if !matches!(self, Self::Issue(_)) {
+            *self = Self::Issue(reason);
+        }
+    }
+}
 type Probe = Box<dyn FnOnce() -> Report + Send>;
 
 /// The terminal owns one worker across Home and Settings. When a view leaves,
@@ -109,21 +131,27 @@ pub(crate) fn report() -> Result<String, String> {
 pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, String> {
     let target = rex::Target::current();
     if root.is_some() {
-        return report_with_worktree(store, Ok(root), target.as_ref());
+        return report_with_worktree(store, Ok(root), target.as_ref()).map(|(report, _)| report);
     }
     let discovered = discover_worktree(Path::new("."));
     report_with_worktree(store, discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note), target.as_ref())
+        .map(|(report, _)| report)
 }
 
-pub(super) fn report_anchored(store: &Store, root: Option<&Path>, target: Option<&rex::Target>) -> Report {
-    report_with_worktree(store, Ok(root), target)
+pub(super) fn health_anchored(
+    store: &Store,
+    root: Option<&Path>,
+    target: Option<&rex::Target>,
+) -> Result<Health, String> {
+    report_with_worktree(store, Ok(root), target).map(|(_, health)| health)
 }
 
 fn report_with_worktree(
     store: &Store,
     worktree: Result<Option<&Path>, &'static str>,
     target: Option<&rex::Target>,
-) -> Report {
+) -> Result<(String, Health), String> {
+    let mut health = Health::Good;
     let mut out = String::from(TITLE);
     out.push('\n');
     match worktree {
@@ -161,6 +189,7 @@ fn report_with_worktree(
             writeln!(out, "  Narrow usage: {}", if p.usage_large_figures { "large figures" } else { "text" }).unwrap();
         }
         Err(e) => {
+            health.issue("Milo could not read your pane preferences.");
             writeln!(out, "Preferences: unreadable ({:?}). Correct the settings file before saving.", e.to_string())
                 .unwrap()
         }
@@ -170,21 +199,36 @@ fn report_with_worktree(
         Ok((rail, true, scope)) => {
             let executable = rex_files::executable()?;
             let live = LiveSidebar::read(rail, &executable, target);
-            write_sidebar(&mut out, rail, *scope, live);
+            if target.is_some() && matches!(live, LiveSidebar::NotObserved("could not read this Rex tab" | "could not find this Rex tab")) {
+                health.warn("Milo could not inspect the original Rex tab.");
+            }
+            if write_sidebar(&mut out, rail, *scope, live) {
+                health.warn("Live pane sizes differ from your saved layout.");
+            }
             let file = read(&store.rex_file())?;
             let text = file.as_ref().and_then(|f| std::str::from_utf8(&f.bytes).ok()).unwrap_or("");
             let status = match launcher_matches(text, &executable) {
                 Some(true) => "matches this binary",
                 Some(false) if owns_actions(text) => {
+                    health.warn("Rex points to a different Milo binary.");
                     "points elsewhere; run milo setup --repair with the binary you want"
                 }
-                _ => "custom launcher; inspect the local milo declaration in rex.lua",
+                _ => {
+                    health.warn("Rex uses a custom Milo launcher.");
+                    "custom launcher; inspect the local milo declaration in rex.lua"
+                }
             };
             writeln!(out, "Rex launcher: {status} ({executable:?})").unwrap();
+            let available = rex::layout_available();
+            match available {
+                Some(false) => health.issue("Rex actions are out of date. Run milo setup --repair."),
+                None => health.warn("Rex actions could not be checked. Check rex whoami and PATH."),
+                Some(true) => {}
+            }
             writeln!(
                 out,
                 "Server actions: {}",
-                match rex::layout_available() {
+                match available {
                     Some(true) => "loaded",
                     Some(false) => "not current; run milo setup --repair",
                     None => "unavailable; check rex whoami and PATH",
@@ -211,7 +255,11 @@ fn report_with_worktree(
         )
         .unwrap(),
     }
+    if layout.is_err() {
+        health.issue("Milo could not load the Rex configuration. Run milo doctor for details.");
+    }
     if store.rex_reload_pending() {
+        health.warn("Rex has a pending configuration reload.");
         if matches!(layout, Err(LayoutError::Rex(LOADER_CONFLICT))) {
             out.push_str("Rex reload: pending; resolve the loader conflict first.\n");
         } else {
@@ -224,6 +272,12 @@ fn report_with_worktree(
     } else {
         lock::running(&store.state).map_err(|_| "unknown; check access to Milo's state directory")
     };
+    match (&listener, expected) {
+        (Ok(false), Some(true)) => health.issue("The layout listener is stopped. Run milo setup --repair."),
+        (Ok(true), Some(false)) => health.warn("The layout listener is running unexpectedly."),
+        (Err(_), _) => health.warn("Milo could not verify the layout listener."),
+        _ => {}
+    }
     writeln!(
         out,
         "Layout listener: {}",
@@ -244,25 +298,30 @@ fn report_with_worktree(
         Claude::Off => out.push_str("not installed\n"),
         Claude::On if claude.is_ok_and(|files| !files.launcher_matches()) => {
             out.push_str("managed by Milo, but uses an old launcher; turn limits off and back on in setup.\n");
+            health.warn("Claude Code uses an old Milo launcher.");
         }
         Claude::On => out.push_str("managed by Milo\n"),
         Claude::Foreign => out.push_str("user-managed; left alone\n"),
-        Claude::NotOwned => out.push_str(concat!(
-            "no matching ownership note; left alone. ",
-            "If Milo was installed with a different XDG_STATE_HOME, rerun with that value.\n",
-        )),
+        Claude::NotOwned => {
+            health.warn("Claude Code’s status line has no matching ownership note.");
+            out.push_str("no matching ownership note; left alone. If Milo was installed with a different XDG_STATE_HOME, rerun with that value.\n");
+        }
         Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => {
+            health.warn("Milo could not verify Claude Code’s ownership note.");
             writeln!(out, "unknown; check the Claude Code ownership note in Milo's state directory ({:?})", store.state)
                 .unwrap()
         }
-        Claude::Invalid => writeln!(out, "unreadable; check Claude settings ({:?})", store.claude).unwrap(),
+        Claude::Invalid => {
+            health.issue("Milo could not read Claude Code’s settings.");
+            writeln!(out, "unreadable; check Claude settings ({:?})", store.claude).unwrap()
+        }
     }
     for (provider, source) in usage::sources() {
         writeln!(out, "{provider} limits: {}", source.unwrap_or("no local report; see the usage pane for setup hints"))
             .unwrap();
     }
     out.pop();
-    Ok(out)
+    Ok((out, health))
 }
 
 enum LiveUsage {
@@ -351,7 +410,7 @@ fn row_unit(rows: u32) -> &'static str {
     if rows == 1 { "row" } else { "rows" }
 }
 
-fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSidebar) {
+fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSidebar) -> bool {
     let scope = match scope {
         Scope::Global => "global default",
         Scope::Worktree => "worktree override",
@@ -396,7 +455,7 @@ fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSideb
     let (live_width, usage_differs) = match live {
         LiveSidebar::NotObserved(reason) => {
             writeln!(out, "Live sidebar: not observed ({reason})").unwrap();
-            return;
+            return false;
         }
         LiveSidebar::Observed { side, width, usage, usage_differs, .. } => {
             let side = side_name(side);
@@ -419,7 +478,9 @@ fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSideb
              If enabled, turn it off in Rex Settings → Interface → Splits & Focus.\n\
              Then close and re-add the Milo panes to apply the saved sizes.\n",
         );
+        return true;
     }
+    false
 }
 
 fn on(value: bool) -> &'static str {

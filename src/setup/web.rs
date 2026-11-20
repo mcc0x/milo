@@ -14,11 +14,22 @@ const LOST_TAB: &str = "The original Rex tab is no longer available. Reopen Sett
 const PREFS_CHANGED: &str = "Milo's pane preferences changed. Reopen Settings before saving again.";
 const PREFS_READ: &str = "Could not read Milo's pane preferences. They were left alone.";
 
+impl Display for doctor::Health {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (level, note) = match self {
+            Self::Good => ("good", ""),
+            Self::Warning(reason) => ("warning", *reason),
+            Self::Issue(reason) => ("issue", *reason),
+        };
+        write!(f, "{{\"level\":\"{level}\",\"note\":{}}}", Quoted(note))
+    }
+}
+
 pub(crate) struct Editor {
     setup: Setup,
     preferences: Option<PreferenceSnapshot>,
     claude: Option<ClaudeSnapshot>,
-    doctor: Option<String>,
+    doctor: Option<doctor::Health>,
     version: u64,
     directory: Option<String>,
 }
@@ -168,7 +179,7 @@ impl Editor {
         let try_layout = capture && layout.panes.contains(&true);
         let auto_arrange = live && layout_state.editable;
         let root = setup.root.as_deref().map(Path::to_string_lossy);
-        let mut out = String::with_capacity(1350 + self.doctor.as_ref().map_or(0, String::len));
+        let mut out = String::with_capacity(1500);
         write!(out, concat!(
             "{{\"version\":{},\"app_version\":\"", env!("CARGO_PKG_VERSION"), "\",",
             "\"context\":{{\"inside_rex\":{},\"worktree\":{},\"directory\":{},\"installed\":{}}},",
@@ -191,7 +202,7 @@ impl Editor {
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new,
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, live, auto_arrange, setup.dirty(), trial,
-            Optional(self.doctor.as_deref().map(Quoted)),
+            Optional(self.doctor.as_ref()),
         ).expect("writing to a string");
         if let Some((text, style)) = &setup.message {
             write!(out, "{{\"text\":{},\"error\":{}}}", Quoted(text), *style == DEL.bold())
@@ -272,7 +283,7 @@ impl Editor {
             Action::Doctor => {
                 let setup = &self.setup;
                 let target = setup.target.as_ref().filter(|_| self.require_tab().is_ok());
-                self.doctor = Some(doctor::report_anchored(setup.store()?, setup.root.as_deref(), target)?);
+                self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
                 None
             }
             _ => return Err(UNAVAILABLE.into()),
