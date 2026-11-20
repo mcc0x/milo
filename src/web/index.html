@@ -30,27 +30,27 @@
     <nav class="navigation" aria-label="Settings sections">
       <button type="button" data-page="layout" aria-current="page" aria-controls="settings-panel">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 8h18m-7 0v12m0-6h7"/></svg>
-        Layout<span class="nav-draft" hidden></span>
+        <span>Layout<span class="nav-draft" hidden></span></span>
       </button>
       <button type="button" data-page="appearance" aria-controls="settings-panel">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path fill="currentColor" stroke="none" d="M12 4a8 8 0 0 1 0 16Z"/></svg>
-        Appearance<span class="nav-draft" hidden></span>
+        <span>Appearance<span class="nav-draft" hidden></span></span>
       </button>
       <button type="button" data-page="workflow" aria-controls="settings-panel">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 17V7m0 8c8 0 12-2 12-8"/><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/></svg>
-        Workflow<span class="nav-draft" hidden></span>
+        <span>Workflow<span class="nav-draft" hidden></span></span>
       </button>
       <button type="button" data-page="health" aria-controls="settings-panel">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/><path d="M6 12h3l2-4 3 8 2-4h2"/></svg>
-        Health<span class="nav-draft" hidden></span>
+        <span>Health<span class="nav-draft" hidden></span></span>
       </button>
     </nav>
       <div class="dock-actions" aria-label="Draft actions" role="group">
         <button id="discard-all" class="button text-button draft-action" type="button" aria-label="Discard" title="Discard" disabled>
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg><span>Discard</span>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
         </button>
         <button id="save-draft" class="button secondary draft-action" type="button" aria-label="Save" title="Save" disabled>
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 10 4.2 4.2L16.5 5.5"/></svg><span>Save</span>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 10 4.2 4.2L16.5 5.5"/></svg>
         </button>
         <button id="done" class="button primary" type="button" title="Stop the local editor">Done</button>
       </div>
@@ -69,18 +69,6 @@
       </div>
         <section id="settings-panel" class="settings-panel" tabindex="-1"></section>
     </main>
-    <details class="preview" id="preview" open>
-      <summary class="preview-heading">
-        <span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-        <strong id="preview-title">Tab preview</strong><span class="terminal-size" id="terminal-size"></span>
-        <span class="preview-toggle" aria-hidden="true"></span>
-      </summary>
-          <div id="preview-more" hidden></div>
-          <div class="terminal">
-            <div class="split-stage" id="split-stage"></div>
-          </div>
-          <p class="sr-only" id="split-help">Drag the dividers or focus them and press the arrow keys.</p>
-    </details>
   </div>
 
   <div class="frame opening" id="opening">

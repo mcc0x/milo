@@ -2,7 +2,6 @@
 
 const byId = id => document.getElementById(id);
 const token = location.hash.slice(1);
-const roles = ['outline', 'history', 'usage'];
 const roleNames = {outline: 'Outline', history: 'History', usage: 'Usage'};
 const originLabels = {default: 'Built-in defaults', global: 'Global default', worktree: 'Worktree override', account: 'Account settings'};
 const groupLabels = {layout: 'layout', preferences: 'pane preferences', account: 'Claude Code choices'};
@@ -33,10 +32,6 @@ function button(text, style, id, click, disabled = false) {
   el.disabled = disabled;
   el.addEventListener('click', click);
   return el;
-}
-
-function percent(fraction) {
-  return `${Math.round(fraction * 1000) / 10}%`;
 }
 
 function lookup(data, field) {
@@ -284,8 +279,6 @@ function render() {
     dot.replaceChildren(node('span', 'sr-only', ' (unsaved changes)'));
     dot.hidden = !dirty;
   }
-  byId('preview').inert = page === 'health';
-  if (page !== 'health') renderPreview();
   const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, health: healthView};
   const panel = byId('settings-panel');
   panel.replaceChildren(...views[page]());
@@ -457,6 +450,10 @@ function scopeActions(key, group) {
   if (key === 'layout' && state.context.inside_rex && !state.context.installed && (group.save_global || group.save_worktree)) {
     row.append(disclosure('Set up in Rex…', 'Set up in Rex', [saveChoices(key, group, 'install', paused)]));
   }
+  if (key === 'layout') {
+    const actions = layoutActions();
+    if (actions.length) row.append(disclosure('•••', 'Layout actions', actions));
+  }
   return row;
 }
 
@@ -556,221 +553,26 @@ function healthView() {
   return [card];
 }
 
-function terminalLine(text, className) {
-  return node('li', `terminal-line${className ? ` ${className}` : ''}`, text);
-}
-
-function scenePane(role) {
-  const {appearance, workflow} = state;
-  const pane = node('section', 'terminal-pane');
-  pane.id = `preview-${role}`;
-  const heading = node('h3', '', roleNames[role]);
-  if (role === 'usage') {
-    pane.classList.add('terminal-usage');
-    const reading = node('p', `usage-reading terminal-ok${appearance.usage_large_figures ? ' large-figure' : ''}`, '83%');
-    reading.append(node('span', 'sr-only', ' remaining'));
-    pane.append(heading, reading);
-    return pane;
+function layoutActions() {
+  const {layout, capabilities, trial} = state;
+  const actions = [];
+  if (state.groups.layout.editable && layout.ratios) {
+    actions.push(button('Use automatic heights', 'text-button', 'reset-heights', () => edit('layout.ratios', null), paused));
   }
-  const lines = node('ul', 'terminal-lines');
-  const dot = appearance.icons === 'off' ? '' : appearance.icons === 'plain' ? '› ' : '▸ ';
-  if (role === 'outline') {
-    lines.append(terminalLine(`${dot}src`, 'terminal-ok'));
-    const active = terminalLine();
-    active.classList.toggle('terminal-file', workflow.follow_activity);
-    const mark = node('span', `activity-mark${appearance.static_marks ? '' : ' pulse'}`, '● ');
-    mark.setAttribute('aria-hidden', 'true');
-    active.append(node('span', 'sr-only', 'Recent edit: '), mark, document.createTextNode(`tides.ts${appearance.text_git_marks ? ' M' : ''}`));
-    lines.append(active, terminalLine(`${dot}weather.ts${appearance.text_git_marks ? ' +' : ''}`, 'terminal-ok'));
-    if (!workflow.changes_only) lines.append(terminalLine(`${dot}README.md`));
-  } else {
-    if (workflow.history_follow_new) lines.append(terminalLine(`${appearance.text_git_marks ? '+ ' : ''}ea17b Tide charts`, 'terminal-ok'));
-    lines.append(terminalLine('13a8f Weekend forecast'), terminalLine('04c4f Start shore guide'));
+  if (trial && capabilities.undo) {
+    actions.push(button('Undo trial', 'text-button', 'undo-layout', () => command('undo'), paused));
+  } else if (capabilities.try) {
+    actions.push(button('Try in Rex', 'text-button', 'try-layout', () => command('try'), paused));
   }
-  pane.append(heading, lines);
-  return pane;
-}
-
-function sceneShell() {
-  const shell = node('section', 'shell');
-  shell.append(node('h3', '', 'Shell'), node('p', 'shell-line', '$ git status --short'),
-    node('p', 'shell-line terminal-file', ' M src/tides.ts'),
-    node('p', 'shell-line terminal-ok', ' A src/weather.ts'),
-    node('p', 'shell-line', '$ cd charts'),
-    node('p', 'shell-line', state.workflow.project_mode === 'pin' ? 'Project pinned to tidebook' : 'Following tidebook/charts'));
-  return shell;
-}
-
-function grip(orientation, editable, name, controls, axis, read, write, commit) {
-  const el = node('div', `grip ${orientation}`);
-  el.id = `split-${controls}`;
-  if (!editable) {
-    el.setAttribute('aria-hidden', 'true');
-    return {el, update() {}};
-  }
-  el.tabIndex = 0;
-  el.setAttribute('role', 'separator');
-  el.setAttribute('aria-label', name);
-  el.setAttribute('aria-controls', controls);
-  el.setAttribute('aria-orientation', orientation);
-  el.setAttribute('aria-describedby', 'split-help');
-  let drag;
-
-  function update() {
-    const {value, min, max, label} = read();
-    const ariaNumber = n => String(Math.round(n * 10000) / 100);
-    el.setAttribute('aria-valuenow', ariaNumber(value));
-    el.setAttribute('aria-valuemin', ariaNumber(min));
-    el.setAttribute('aria-valuemax', ariaNumber(max));
-    el.setAttribute('aria-valuetext', label);
-  }
-
-  function set(value) {
-    const {min, max} = read();
-    write(Math.min(max, Math.max(min, value)));
-  }
-
-  el.addEventListener('pointerdown', event => {
-    if (!event.isPrimary || event.button !== 0 || drag) return;
-    event.preventDefault();
-    el.focus({preventScroll: true});
-    drag = {id: event.pointerId, at: axis.position(event), from: read().value};
-    el.setPointerCapture(event.pointerId);
-    el.dataset.dragging = '';
-  });
-  el.addEventListener('pointermove', event => {
-    if (drag?.id === event.pointerId) set(drag.from + axis.delta(axis.position(event) - drag.at));
-  });
-  function finish(cancel) {
-    if (!drag) return;
-    const {id, from} = drag;
-    drag = null;
-    delete el.dataset.dragging;
-    if (el.hasPointerCapture(id)) el.releasePointerCapture(id);
-    if (cancel) write(from);
-    else if (Math.abs(read().value - from) > .00005) commit();
-  }
-  for (const [event, cancel] of [['pointerup', false], ['pointercancel', true], ['lostpointercapture', true]]) {
-    el.addEventListener(event, e => { if (e.pointerId === drag?.id) finish(cancel); });
-  }
-  el.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && drag) {
-      event.preventDefault();
-      finish(true);
-      return;
-    }
-    if (drag) return;
-    const {value, min, max} = read();
-    const step = event.shiftKey ? .05 : .01;
-    const next = event.key === 'Home' ? min : event.key === 'End' ? max : event.key === axis.less ?
-      value - step : event.key === axis.more ? value + step : undefined;
-    if (next === undefined) return;
-    event.preventDefault();
-    set(next);
-    if (read().value !== value) commit();
-  });
-  return {el, update};
-}
-
-function renderPreview() {
-  const {layout, preview, context, capabilities, trial} = state;
-  const showLayout = page === 'layout';
-  const editable = showLayout && state.groups.layout.editable;
-  const stage = byId('split-stage');
-  const shell = sceneShell();
-  const rail = node('div', 'rail');
-  const panes = showLayout ? layout.order.filter(role => layout.panes[role]) : roles;
-  const side = showLayout ? layout.side : 'left';
-  const shares = showLayout ? [...preview.shares] : [.41, .34, .25];
-  let width = showLayout ? preview.width : .44;
-
-  byId('preview-title').textContent = showLayout ? 'Tab preview' : 'Pane preview';
-  byId('terminal-size').textContent = showLayout && preview.cols && preview.rows ? `${preview.cols} × ${preview.rows}` : 'Sample tab';
-  byId('split-help').hidden = !editable || !panes.length;
-  if (!panes.length) {
-    stage.replaceChildren(shell);
-  } else {
-    const indexes = panes.map(role => roles.indexOf(role));
-    const sections = panes.map(scenePane);
-    rail.id = 'preview-rail';
-    rail.append(...sections);
-    const left = side === 'left';
-    const widthGrip = grip('vertical', editable, 'Resize Milo rail', rail.id, {
-      position: event => event.clientX,
-      delta: pixels => pixels / Math.max(1, stage.clientWidth) * (left ? 1 : -1),
-      less: left ? 'ArrowLeft' : 'ArrowRight',
-      more: left ? 'ArrowRight' : 'ArrowLeft',
-    }, () => ({value: width, min: Math.min(.08, preview.width), max: Math.max(.92, preview.width), label: `${percent(width)} of the tab`}),
-    value => { width = value; paint(); }, () => edit('layout.width', Number(width.toPrecision(10))));
-    const heightGrips = indexes.slice(0, -1).map((upper, index) => {
-      const lower = indexes[index + 1];
-      const initialTop = shares[upper];
-      const initialBottom = shares[lower];
-      return grip('horizontal', editable, `Resize ${roleNames[roles[upper]]} and ${roleNames[roles[lower]]}`, sections[index].id, {
-        position: event => event.clientY,
-        delta: pixels => pixels / Math.max(1, stage.clientHeight),
-        less: 'ArrowUp',
-        more: 'ArrowDown',
-      }, () => {
-        const pair = shares[upper] + shares[lower];
-        const minimum = Math.min(.07, pair / 4);
-        return {value: shares[upper], min: Math.min(minimum, initialTop, shares[upper]),
-          max: Math.max(shares[upper], pair - Math.min(minimum, initialBottom)),
-          label: `${roleNames[roles[upper]]} ${percent(shares[upper])}, ${roleNames[roles[lower]]} ${percent(shares[lower])}`};
-      },
-      value => {
-        const total = shares[upper] + shares[lower];
-        shares[upper] = value;
-        shares[lower] = total - value;
-        paint();
-      }, () => {
-        const ratios = shares.map(share => Math.round(share * 1e6));
-        const largest = shares.indexOf(Math.max(...shares));
-        ratios[largest] += 1e6 - ratios.reduce((sum, ratio) => sum + ratio, 0);
-        edit('layout.ratios', ratios);
-      });
-    });
-
-    function paint() {
-      stage.style.setProperty('--rail-width', `${width * 100}%`);
-      stage.style.setProperty('--rail-split', `${(left ? width : 1 - width) * 100}%`);
-      widthGrip.update();
-      sections.forEach((section, index) => section.style.setProperty('--pane-size', shares[indexes[index]]));
-      let through = 0;
-      heightGrips.forEach((grip, index) => {
-        through += shares[indexes[index]];
-        grip.el.style.setProperty('--pane-split', `${through * 100}%`);
-        grip.update();
-      });
-    }
-
-    rail.append(...heightGrips.map(grip => grip.el));
-    stage.replaceChildren(...(left ? [rail, widthGrip.el, shell] : [shell, widthGrip.el, rail]));
-    paint();
-  }
-
-  const secondary = [];
-  if (editable && layout.ratios) {
-    secondary.push(button('Use automatic heights', 'text-button', 'reset-heights', () => edit('layout.ratios', null), paused));
-  }
-  if (showLayout && trial && capabilities.undo) {
-    secondary.push(button('Undo trial', 'text-button', 'undo-layout', () => command('undo'), paused));
-  } else if (showLayout && capabilities.try) {
-    secondary.push(button('Try in Rex', 'text-button', 'try-layout', () => command('try'), paused));
-  }
-  if (showLayout && capabilities.capture) {
-    secondary.push(button('Copy layout from Rex tab…', 'text-button', 'capture', () => {
+  if (capabilities.capture) {
+    actions.push(button('Copy layout from Rex tab…', 'text-button', 'capture', () => {
       if (state.groups.layout.dirty || queue.some(item => item.field?.startsWith('layout.'))) {
-        confirm('Replace the layout draft?', 'Capture copies the side, order and pane sizes from your Rex tab. It does not move panes or save settings.',
+        confirm('Replace the layout draft?', 'Copy the side, order and pane sizes from your Rex tab without saving.',
           'Copy layout', () => command('capture'));
       } else command('capture');
     }, paused));
   }
-  if (showLayout && capabilities.refresh) secondary.push(button('Refresh preview', 'text-button', 'refresh-tab', () => command('refresh'), paused));
-  const more = byId('preview-more');
-  more.replaceChildren();
-  if (secondary.length) more.append(disclosure('•••', 'Preview actions', secondary));
-  more.hidden = !secondary.length;
+  return actions;
 }
 
 for (const tab of navButtons) {
@@ -806,7 +608,7 @@ for (const id of ['open-retry', 'reconnect']) byId(id).addEventListener('click',
 window.addEventListener('milo:dev-reload', event => {
   const input = document.activeElement;
   if (running || paused || closing || ended || queue.length || byId('confirm').open ||
-      document.querySelector('[data-dragging]') || (input?.type === 'number' && input.value !== input.dataset.initial)) {
+      (input?.type === 'number' && input.value !== input.dataset.initial)) {
     event.preventDefault();
   } else {
     window.removeEventListener('beforeunload', warnOnUnload);
