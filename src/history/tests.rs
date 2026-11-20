@@ -545,6 +545,20 @@ fn switching_branches_does_not_mark_existing_commits_as_arrivals() {
 }
 
 #[test]
+fn moving_between_detached_commits_does_not_mark_arrivals() {
+    let f = Fixture::new();
+    commit(&f, "older");
+    commit(&f, "already existed");
+    f.git(&["switch", "--detach", "HEAD~1"]);
+    let mut history = open(&f);
+    f.git(&["switch", "--detach", "main"]);
+    history.check();
+    let rows = draw(&mut history, 65, 8).text();
+    let row = rows.iter().find(|row| row.contains("already existed")).unwrap();
+    assert!(!row.starts_with('•'), "{row}");
+}
+
+#[test]
 fn a_commit_that_lands_while_open_appears_marked_on_check() {
     let f = Fixture::new();
     let mut history = open(&f);

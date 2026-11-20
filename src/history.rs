@@ -184,8 +184,9 @@ impl History {
             _ => TimelineRow::Commit(0),
         };
         let mut before: HashMap<_, _> = self.entries.drain(..).map(|e| (e.commit.hash, (e.fresh, e.files))).collect();
-        // Switching branches reveals existing commits; it is not an arrival on the current timeline.
-        let same_branch = self.version.as_ref().is_some_and(|version| version.branch == self.repo.branch());
+        // Detached checkouts share Git's "(detached)" label, not a branch timeline.
+        let branch = self.repo.branch();
+        let same_branch = branch != "(detached)" && self.version.as_ref().is_some_and(|version| version.branch == branch);
         self.entries.extend(commits.into_iter().map(|commit| {
             let (fresh, files) = before.remove(&commit.hash).unwrap_or((same_branch, None));
             Entry { commit, fresh, files }
