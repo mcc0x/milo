@@ -85,9 +85,14 @@ impl History {
         let click_offset = self.clicked.map(|click| click.offset);
         let below_click = click_offset.map_or(self.shown, |offset| self.shown.saturating_sub(offset + 1));
         let selected = self.selected();
-        // An expanded commit needs a second row for its files or empty note.
-        let list_rows =
-            if matches!(selected, Some(TimelineRow::Commit(i)) if self.open_index() == Some(i)) { 2 } else { 1 };
+        // Leave room for the last note at the end, or for an expanded commit's preview.
+        let list_rows = if self.truncated && self.rows[self.cursor + 1..].iter().all(|row| !row.selectable()) {
+            self.rows.len() - self.cursor
+        } else if matches!(selected, Some(TimelineRow::Commit(i)) if self.open_index() == Some(i)) {
+            2
+        } else {
+            1
+        };
         let room = (self.shown / 2)
             .min(DETAIL_ROWS)
             .min(below_click.saturating_sub(list_rows - 1))

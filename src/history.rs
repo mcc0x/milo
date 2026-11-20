@@ -79,6 +79,7 @@ pub struct History {
     repo: Repo,
     version: Option<HistoryVersion>,
     entries: Vec<Entry>,
+    truncated: bool,
     /// First row of the all-pushed suffix, if there are commits on both sides.
     remote_boundary: Option<usize>,
     uncommitted: usize,
@@ -107,6 +108,7 @@ impl History {
             repo: repo.for_history(),
             version: None,
             entries: Vec::new(),
+            truncated: false,
             remote_boundary: None,
             uncommitted: 0,
             open: None,
@@ -168,7 +170,7 @@ impl History {
         let selected = self.selected();
         let uncommitted = self.repo.uncommitted_count();
         if !self.version.as_ref().is_some_and(|version| version.matches(&self.repo)) {
-            let Some(commits) = self.repo.history(LIMIT) else { return };
+            let Some(commits) = self.repo.history(LIMIT + 1) else { return };
             self.replace_commits(commits, selected, uncommitted);
         } else if self.load_files() || self.uncommitted != uncommitted {
             self.uncommitted = uncommitted;
@@ -177,8 +179,10 @@ impl History {
     }
 
     /// Remembers the open commit and the cursor by hash when commits move.
-    fn replace_commits(&mut self, commits: Vec<Commit>, selected: Option<TimelineRow>, uncommitted: usize) {
+    fn replace_commits(&mut self, mut commits: Vec<Commit>, selected: Option<TimelineRow>, uncommitted: usize) {
         self.detail = None;
+        self.truncated = commits.len() > LIMIT;
+        commits.truncate(LIMIT);
         let remap = |i: usize| commits.iter().position(|c| c.hash == self.entries[i].commit.hash);
         let open = self.open.as_ref().and_then(|open| {
             Some(OpenCommit { index: remap(open.index)?, all_files: open.all_files, error: None })
@@ -271,6 +275,8 @@ impl History {
         }
         if self.entries.is_empty() {
             self.rows.push(TimelineRow::Note("No commits yet."));
+        } else if self.truncated {
+            self.rows.push(TimelineRow::Note("Older commits not shown."));
         }
         self.cursor = selected.and_then(|selected| self.rows.iter().position(|&row| row == selected)).unwrap_or(0);
     }

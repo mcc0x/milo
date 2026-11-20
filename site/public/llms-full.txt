@@ -328,6 +328,8 @@ History counts commits to push against the branch's tracked remote branch. `no b
 
 Expand a commit to see its seven-character ID beside the file count. Narrow panes keep that space for the subject instead.
 
+History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room.
+
 A shallow clone has only part of the project's history. If you expand a commit whose parent is beyond the shallow boundary, History says `Shallow history: parent unavailable.` It does not show every file as new. After fetching more history, press `r` to reload. A genuine first commit still shows its added files.
 
 ## Reading files

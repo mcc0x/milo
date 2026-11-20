@@ -1,3 +1,6 @@
+use std::io::{BufWriter, Write};
+use std::process::{Command, Stdio};
+
 use crate::fixture::Fixture;
 use crate::keys::DOUBLE_CLICK;
 
@@ -677,6 +680,59 @@ fn scrolling_keeps_the_cursor_on_screen() {
         let y = rows.iter().position(|row| row.contains(subject)).expect(subject);
         assert!(screen.bar_at(y), "{rows:?}");
     }
+}
+
+#[test]
+fn the_history_cap_note_appears_only_after_overflow_and_never_takes_the_cursor() {
+    let f = Fixture::new();
+    // Generate a linear history without spawning a process for each commit.
+    let mut git = Command::new("git");
+    crate::fixture::isolate_git(&mut git);
+    let mut import = git.current_dir(&f.root).args(["fast-import", "--quiet"]).stdin(Stdio::piped()).spawn().unwrap();
+    let mut stream = BufWriter::new(import.stdin.take().unwrap());
+    for i in 1..=300 {
+        write!(
+            stream,
+            "commit refs/heads/main\ncommitter Milo Test <test@example.com> 981173106 +0000\n\
+             data <<MSG\ncommit {i}: a subject long enough to wrap in the history pane\nMSG\n\n"
+        )
+        .unwrap();
+    }
+    stream.flush().unwrap();
+    drop(stream);
+    assert!(import.wait().unwrap().success());
+
+    let note = "Older commits not shown.";
+    let mut history = open(&f);
+    history.key(Key::Char('G'));
+    let screen = draw(&mut history, 40, 5);
+    assert_eq!(history.entries.len(), 300);
+    assert!(active_row(&screen, "commit 1:"));
+    assert!(!screen.text().iter().any(|row| row.contains(note)));
+
+    commit(&f, "new tip");
+    history.key(Key::Char('r'));
+    history.key(Key::Char('G'));
+    let screen = draw(&mut history, 28, 2);
+    assert_eq!(history.entries.len(), 300);
+    assert!(active_row(&screen, "commit 2:"));
+    assert!(screen.text()[1].contains(note));
+    assert!(!screen.bar_at(1));
+
+    let now = Instant::now();
+    for key in [Key::Down, Key::Click(4, 1), Key::Click(4, 1)] {
+        history.input(key, now);
+    }
+    assert!(active_row(&draw(&mut history, 28, 2), "commit 2:"));
+    assert!(history.open.is_none() && history.reading.is_none());
+
+    f.git(&["switch", "-q", "-c", "short", "HEAD~289"]);
+    history.key(Key::Char('r'));
+    history.key(Key::Char('G'));
+    let screen = draw(&mut history, 40, 5);
+    assert_eq!(history.entries.len(), 12);
+    assert!(active_row(&screen, "commit 1:"));
+    assert!(!screen.text().iter().any(|row| row.contains(note)));
 }
 
 #[test]
