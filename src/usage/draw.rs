@@ -132,14 +132,6 @@ struct Metric<'a> {
 
 impl Metric<'_> {
     fn limit(window: Window, now: i64, source: Source) -> Self {
-        let label = match window.minutes {
-            10_080 => "week".into(),
-            300 => "5h".into(),
-            1440 => "day".into(),
-            n if n.is_multiple_of(1440) => format!("{}d", n / 1440).into(),
-            n if n.is_multiple_of(60) => format!("{}h", n / 60).into(),
-            n => format!("{n}m").into(),
-        };
         let elapsed = window.is_reset(now);
         let when = if elapsed {
             When::Elapsed
@@ -147,10 +139,10 @@ impl Metric<'_> {
             window.resets.map_or(When::Unknown, |at| When::Running(at.saturating_sub(now)))
         };
         Self {
-            label,
+            label: window.label(),
             number: (!elapsed).then(|| Figure::new(window.number(), window.percent)),
             when,
-            age: (!elapsed && now >= window.stale_at(source)).then(|| now.saturating_sub(window.observed)),
+            age: (!elapsed && window.is_stale(now, source)).then(|| now.saturating_sub(window.observed)),
             used: window.percent,
         }
     }
@@ -813,7 +805,7 @@ impl RowWriter<'_> {
 }
 
 /// What was used today, in words, or nothing when nothing was.
-fn activity_text(activity: Activity) -> Option<String> {
+pub(super) fn activity_text(activity: Activity) -> Option<String> {
     let more = if activity.partial { "+" } else { "" };
     (activity.today > 0).then(|| format!("{}{more} tokens today", tokens(activity.today)))
 }

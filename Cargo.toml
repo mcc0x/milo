@@ -18,6 +18,7 @@ web-dev = []
 libc = "0.2"
 
 [lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(milo_menu_payload)'] }
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]

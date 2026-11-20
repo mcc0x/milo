@@ -11,6 +11,7 @@ mod home;
 mod icons;
 mod json;
 mod keys;
+mod menubar;
 mod outline;
 mod pane;
 mod paths;
@@ -51,7 +52,8 @@ milo — file, history, usage, and reader panes for your terminal
 Usage: milo
        milo outline [PATH]
        milo history [PATH]
-       milo usage
+       milo usage [--menu-stream]
+       milo menubar install | uninstall
        milo setup
        milo web [--port PORT] [--no-open]
        milo doctor
@@ -135,7 +137,10 @@ fn command_help(name: &str) -> Option<&'static str> {
     Some(match name {
         "outline" => "Usage: milo outline [PATH]\n\nBrowse files and changes. PATH defaults to the current directory.",
         "history" => "Usage: milo history [PATH]\n\nBrowse recent commits. PATH defaults to the current directory.",
-        "usage" => "Usage: milo usage\n\nSee usage and limits for Claude and Codex.",
+        "usage" => {
+            "Usage: milo usage [--menu-stream]\n\nSee Codex and Claude Code limits and OpenCode activity.\n--menu-stream prints one JSON snapshot per line using global preferences. It refreshes about every 30 seconds or on a newline from stdin, and exits at EOF."
+        }
+        "menubar" => "Usage: milo menubar install | uninstall\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.",
         "view" => "Usage: milo view FILE [--commit ID]\n\nRead a file now or as it was at a Git commit.",
         "setup" => {
             "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
@@ -191,6 +196,8 @@ enum Command<'a> {
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
     Path(&'a OsStr),
     Usage,
+    UsageMenuStream,
+    MenuBar(menubar::Action),
     Home,
     Setup,
     Web { open_browser: bool, port: u16 },
@@ -242,6 +249,11 @@ fn command<'a>(
         return Ok(Command::Help(help));
     }
     Ok(match (name, second) {
+        (Some("menubar"), _) => Command::MenuBar(match option {
+            Some("install") => menubar::Action::Install,
+            Some("uninstall") => menubar::Action::Uninstall,
+            _ => return Err("expected milo menubar install | uninstall".into()),
+        }),
         (Some("outline"), path) => Command::Outline(path),
         (Some("history"), path) => Command::History(path),
         (Some("view"), Some(file)) => {
@@ -283,6 +295,7 @@ fn command<'a>(
         (Some("setup"), Some(flag)) if flag == "--repair" => Command::Repair,
         (Some("setup"), Some(flag)) if flag == "--remove" => Command::Remove,
         (Some("usage"), None) => Command::Usage,
+        (Some("usage"), Some(flag)) if flag == "--menu-stream" => Command::UsageMenuStream,
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
@@ -304,6 +317,7 @@ fn command<'a>(
 /// The runner opens panes after installing signal handlers; tests draw without a terminal.
 fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Result<(), String>) -> Result<(), String> {
     match command {
+        Command::MenuBar(action) => print_report(menubar::run(action)),
         Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
             open_outline(Some(path)).map_err(|why| format!("{why}; see milo --help for commands"))
@@ -336,6 +350,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             Ok(Box::new(reader))
         }),
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
+        Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),
         Command::Web { open_browser, port } => web::run(open_browser, port),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
@@ -520,6 +535,7 @@ mod tests {
             ("--skip-onboarding", None, Command::SkipOnboarding),
             ("setup", Some("--skip-onboarding"), Command::SkipOnboarding),
             ("usage", None, Command::Usage),
+            ("usage", Some("--menu-stream"), Command::UsageMenuStream),
             ("claude-status", None, Command::ClaudeStatus),
             ("listen", None, Command::Listen(false)),
             ("listen", Some("--stop"), Command::Listen(true)),

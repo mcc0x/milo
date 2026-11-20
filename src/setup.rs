@@ -111,6 +111,8 @@ enum Row {
     HistoryFollow,
     TabTitles,
     ClaudeLimits,
+    #[cfg(all(target_os = "macos", milo_menu_payload))]
+    MenuBar,
     SaveClaude,
     SavePrefs,
     UseGlobalPrefs,
@@ -151,6 +153,8 @@ const WORKFLOW: &[Row] = &[
     Row::UseGlobalPrefs,
     Row::ClaudeLimits,
     Row::SaveClaude,
+    #[cfg(all(target_os = "macos", milo_menu_payload))]
+    Row::MenuBar,
 ];
 
 /// The draft is never written when navigating, capturing or trying a layout.
@@ -784,6 +788,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Capture => self.capture(),
             Row::Undo => self.undo(),
             Row::SaveClaude => self.save_claude(),
+            #[cfg(all(target_os = "macos", milo_menu_payload))]
+            Row::MenuBar => crate::menubar::run(crate::menubar::Action::Install)
+                .map(|_| "Milo Usage is open in your menu bar.")
+                .map_err(|_| "Could not open Milo Usage. Run milo menubar install for details."),
             Row::SaveAndExit => return self.save_and_exit(),
             Row::Discard => return self.leave(),
             Row::SaveGlobal | Row::SaveWorktree => {

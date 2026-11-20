@@ -4,6 +4,7 @@ mod activity;
 mod codex;
 mod failures;
 mod layout;
+mod menu_stream;
 mod opencode_activity;
 mod status_line;
 mod tools;

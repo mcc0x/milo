@@ -433,6 +433,16 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/usage.md
 
 A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%, and a tool with nothing known is left out unless you ask to always see it. Run `milo doctor` to see which local source supplied each tool's reading.
 
+## macOS menu bar (local build)
+
+With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to install and open `~/Applications/Milo Usage.app`. Run it again to reopen or upgrade. `milo menubar uninstall` stops the app, unregisters launch at login if enabled, and removes only the app. Neither command needs sudo or a download.
+
+You can also open `milo setup` → **Workflow** → **Install or open Milo Usage**. This action takes effect immediately without saving or discarding any settings draft.
+
+For the local preview, build with `sh macos/build-menu.sh` and use `target/local-menu/milo` as your CLI. The released CLI does not yet include the app. The local builder captures supported provider/config directory overrides from your shell, so rebuild if those paths change and do not distribute a personalized build. The app includes its own reader and does not require Rex.
+
+Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
+
 ## Which tools appear
 
 Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` and `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.

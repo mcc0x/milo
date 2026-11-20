@@ -2,12 +2,14 @@
 
 mod draw;
 mod files;
+mod menu;
 mod omp;
 mod opencode;
 mod sqlite;
 mod status;
 mod time;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::ops::ControlFlow;
@@ -27,6 +29,8 @@ use crate::{paths, preferences, when};
 
 use self::files::{Budget, FileVersion, Reverse, SessionFile, SessionRoot, Sessions, SnapshotVersion, Stream, Tree};
 use self::time::Timestamp;
+
+pub use menu::menu_stream;
 
 const CLOCK_SKEW: i64 = 5 * MINUTE;
 const CODEX_LIVE: i64 = 5 * MINUTE;
@@ -77,6 +81,29 @@ impl Window {
         let rounded = left.round_ties_even() as usize;
         let skip = usize::from(rounded < 100) + usize::from(rounded < 10);
         std::str::from_utf8(&PERCENT_TEXT[rounded][skip..]).expect("the figures are ASCII")
+    }
+
+    /// Whole percentages are the menu protocol's only numeric representation.
+    /// Preserve the distinction between nearly and completely empty/full.
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window percent is in 0..=100")]
+    fn remaining(self) -> u8 {
+        let left = 100.0 - self.percent;
+        if left > 0.0 && left < 100.0 { (left.round_ties_even() as u8).clamp(1, 99) } else { left as u8 }
+    }
+
+    fn label(self) -> Cow<'static, str> {
+        match self.minutes {
+            10_080 => "week".into(),
+            300 => "5h".into(),
+            1440 => "day".into(),
+            n if n.is_multiple_of(1440) => format!("{}d", n / 1440).into(),
+            n if n.is_multiple_of(60) => format!("{}h", n / 60).into(),
+            n => format!("{n}m").into(),
+        }
+    }
+
+    fn is_stale(self, now: i64, source: Source) -> bool {
+        now >= self.stale_at(source)
     }
 
     fn is_reset(self, now: i64) -> bool {
@@ -889,6 +916,15 @@ fn claude_state(claude: Option<&paths::ClaudePaths>) -> Option<PathBuf> {
     claude.map_or_else(paths::state_dir, paths::ClaudePaths::state)
 }
 
+fn claude_sources() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    let claude = paths::claude();
+    (
+        claude.as_ref().map(paths::ClaudePaths::projects),
+        claude.as_ref().map(paths::ClaudePaths::config),
+        claude_state(claude.as_ref()),
+    )
+}
+
 /// Uses the installed providers' directories; tests supply their own directories and time.
 pub struct Usage {
     codex_dir: Option<PathBuf>,
@@ -970,12 +1006,7 @@ impl Usage {
         let (claude, config, state) = if tools[UsageTool::Claude] == Show::Hide {
             (None, None, None)
         } else {
-            let claude = paths::claude();
-            (
-                claude.as_ref().map(paths::ClaudePaths::projects),
-                claude.as_ref().map(paths::ClaudePaths::config),
-                claude_state(claude.as_ref()),
-            )
+            claude_sources()
         };
         let mut usage = Self::from_dirs(codex, claude, state, now);
         usage.claude_config = config;

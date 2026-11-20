@@ -732,6 +732,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 "Use global",
                 "Remove this worktree's pane preferences override.",
             ),
+            #[cfg(all(target_os = "macos", milo_menu_payload))]
+            Row::MenuBar => Cell::action(
+                "Install or open Milo Usage",
+                "Menu bar app",
+                "Show usage in the macOS menu bar. Opens the app if already installed.",
+            ),
             Row::SaveClaude => Cell::action(
                 "Save Claude Code choices",
                 "Save Claude",
