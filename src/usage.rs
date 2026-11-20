@@ -3,6 +3,7 @@
 mod draw;
 mod files;
 mod omp;
+mod sqlite;
 mod status;
 mod time;
 
@@ -643,7 +644,7 @@ pub struct Usage {
     claude_dir: Option<PathBuf>,
     limits_file: Option<PathBuf>,
     claude_config: Option<PathBuf>,
-    omp: omp::Poll,
+    omp: sqlite::Poll<omp::Reports>,
     codex: Codex,
     claude: Claude,
     today: Today,
@@ -662,7 +663,7 @@ impl Usage {
         let home = paths::home();
         let mut usage = Self::for_home(home.as_deref(), when::now()).with_large_figures(prefs.usage_large_figures);
         usage.preference_note = note;
-        usage.omp = omp::Poll::new(omp::database(home.as_deref()), omp::QUERY_WAIT);
+        usage.omp = omp::poll(omp::database(home.as_deref()), sqlite::QUERY_WAIT);
         usage
     }
 
@@ -686,7 +687,7 @@ impl Usage {
             claude_dir,
             limits_file: state.map(|dir| dir.join(SAVED_LIMITS)),
             claude_config: None,
-            omp: omp::Poll::new(None, omp::QUERY_WAIT),
+            omp: omp::poll(None, sqlite::QUERY_WAIT),
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
@@ -768,7 +769,8 @@ pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
     let now = when::now();
     let home = paths::home();
     let mut usage = Usage::for_home(home.as_deref(), now);
-    if let Some(reports) = omp::database(home.as_deref()).and_then(|path| omp::read(&path, now, omp::QUERY_WAIT)) {
+    let saved = omp::database(home.as_deref()).and_then(|path| omp::read(&path, now, sqlite::QUERY_WAIT));
+    if let Some(reports) = saved {
         usage.codex.omp = reports.codex;
         usage.claude.omp = reports.claude;
     }

@@ -396,7 +396,7 @@ mod omp_limits {
     ";
 
     fn sqlite(f: &Fixture) -> Option<PathBuf> {
-        if Command::new(omp::sqlite()).arg("-version").output().is_err() {
+        if Command::new(sqlite::executable()).arg("-version").output().is_err() {
             eprintln!("skipping OMP fixture: sqlite3 is not installed");
             return None;
         }
@@ -406,8 +406,12 @@ mod omp_limits {
     }
 
     fn exec(path: &Path, sql: &str) {
-        let result =
-            Command::new(omp::sqlite()).args(["-batch", "-init", "/dev/null"]).arg(path).arg(sql).output().unwrap();
+        let result = Command::new(sqlite::executable())
+            .args(["-batch", "-init", "/dev/null"])
+            .arg(path)
+            .arg(sql)
+            .output()
+            .unwrap();
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
@@ -487,7 +491,7 @@ mod omp_limits {
             ),
         );
 
-        let bytes = omp::query(omp::sqlite(), &path, TEST_WAIT).unwrap();
+        let bytes = sqlite::query(sqlite::executable(), &path, omp::SQL, TEST_WAIT).unwrap();
         assert!(!omp::SQL.to_ascii_lowercase().contains("auth_credentials"));
         assert!(omp::SQL.trim_start().starts_with("PRAGMA query_only=ON;"));
         assert!(!String::from_utf8_lossy(&bytes).contains("key-only-secret"));
@@ -532,14 +536,14 @@ mod omp_limits {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         assert!(omp::read(&f.root.join("missing.db"), NOW, TEST_WAIT).is_none());
-        assert!(omp::query(f.root.join("missing-sqlite").as_os_str(), &path, TEST_WAIT).is_none());
+        assert!(sqlite::query(f.root.join("missing-sqlite").as_os_str(), &path, omp::SQL, TEST_WAIT).is_none());
         let executable = f.root.join("sqlite-stub");
         let script = |lines: &str| write_executable(&executable, lines);
         script("printf '%s' 'not JSON'");
-        let bytes = omp::query(executable.as_os_str(), &path, TEST_WAIT).unwrap();
+        let bytes = sqlite::query(executable.as_os_str(), &path, omp::SQL, TEST_WAIT).unwrap();
         assert!(omp::parse(&bytes, NOW).is_none());
         script("printf '%s\\n' \"$$\" >\"$0.pid\"; printf '%70000s' x");
-        assert!(omp::query(executable.as_os_str(), &path, TEST_WAIT).is_none());
+        assert!(sqlite::query(executable.as_os_str(), &path, omp::SQL, TEST_WAIT).is_none());
         assert_reaped(&executable);
         exec(&path, "DROP TABLE usage_history;");
         assert!(omp::read(&path, NOW, TEST_WAIT).is_none());
@@ -580,7 +584,7 @@ mod omp_limits {
             assert!(!f.root.join(sidecar).exists());
         }
         // Use a child that would otherwise succeed even on a database without sidecars.
-        assert!(omp::query(std::ffi::OsStr::new("/usr/bin/true"), &path, TEST_WAIT).is_none());
+        assert!(sqlite::query(std::ffi::OsStr::new("/usr/bin/true"), &path, omp::SQL, TEST_WAIT).is_none());
     }
 
     #[test]
@@ -590,7 +594,7 @@ mod omp_limits {
         let db = f.root.join("agent #?% café.db");
         fs::rename(path, &db).unwrap();
         let week = window("anthropic:7d", "0.27", (NOW + DAY) * 1000, 10_080, "null");
-        let mut writer = Command::new(omp::sqlite())
+        let mut writer = Command::new(sqlite::executable())
             .args(["-batch", "-bail", "-init", "/dev/null"])
             .current_dir(&f.root)
             .arg(&db)
@@ -623,7 +627,7 @@ mod omp_limits {
         // Simulate a sidecar disappearing after milo's preflight but before SQLite opens it.
         let stub = f.root.join("sqlite-stub");
         write_executable(&stub, "/bin/rm \"${0%/*}/copy.db-shm\"; exec /usr/bin/sqlite3 \"$@\"");
-        let result = omp::query(stub.as_os_str(), &f.root.join("copy.db"), TEST_WAIT);
+        let result = sqlite::query(stub.as_os_str(), &f.root.join("copy.db"), omp::SQL, TEST_WAIT);
         assert!(!f.root.join("copy.db-shm").exists());
         assert!(result.is_none());
     }
@@ -642,7 +646,7 @@ mod omp_limits {
         write(&f, CODEX, &codex(NOW - 1, 45, reset, &secondary), NOW);
         status::run(STATUS, Vec::new(), Some(&state), NOW - 1);
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path), TEST_WAIT);
+        usage.omp = omp::poll(Some(path), TEST_WAIT);
         assert!(usage.check());
         finish_omp(&mut usage);
         assert_eq!(usage.codex.reported().unwrap().1.label(), "OMP usage database");
@@ -707,7 +711,7 @@ mod omp_limits {
         let week = |fraction| window("openai-codex:primary", fraction, reset, 10_080, "null");
         report(&path, "codex", "openai-codex", NOW * 1000, &format!("[{}]", week("0.25")));
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+        usage.omp = omp::poll(Some(path.clone()), TEST_WAIT);
 
         assert!(usage.check());
         assert_eq!(frame(&mut usage, 22, 2), ["Codex · checking", "Claude · checking"]);
@@ -729,7 +733,7 @@ mod omp_limits {
         let Some(path) = sqlite(&f) else { return };
         report(&path, "claude", "anthropic", NOW * 1000, "[]");
         let mut usage = unopened(&f, NOW);
-        usage.omp = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+        usage.omp = omp::poll(Some(path.clone()), TEST_WAIT);
 
         let checking = ["Codex · checking", "Claude · checking"];
         let settled = ["Codex · no source", "Claude · no limits"];
@@ -761,7 +765,7 @@ mod omp_limits {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         let clock = Instant::now();
-        let mut poll = omp::Poll::new(Some(path), TEST_WAIT);
+        let mut poll = omp::poll(Some(path), TEST_WAIT);
         poll.start(NOW, clock);
         assert!(poll.fd().is_some());
         wait_for(|| poll.collect().is_some());
@@ -782,7 +786,7 @@ mod omp_limits {
         let Some(path) = sqlite(&f) else { return };
         report(&path, "claude", "anthropic", NOW * 1000, "[]");
         let start = Instant::now();
-        let mut poll = omp::Poll::new(Some(path.clone()), TEST_WAIT);
+        let mut poll = omp::poll(Some(path.clone()), TEST_WAIT);
         let mut read = |clock| {
             poll.start(NOW, clock);
             assert!(poll.fd().is_some());
