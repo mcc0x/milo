@@ -10,7 +10,9 @@ use std::io::{self, PipeReader, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, IntoRawFd};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use self::http::{Access, Input, Request, Response, Route};
@@ -73,7 +75,7 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     let bearer = format!("Bearer {token}");
     let url = format!("{origin}/#{token}");
     let access = Access { host: &host, origin: &origin, bearer: &bearer };
-    let mut editor = Editor::open();
+    let editor = Editor::open();
     if STOP.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -94,7 +96,7 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     } else {
         None
     };
-    serve(&listener, &wake.0, &access, &mut editor, launcher).map_err(|error| format!("settings server: {error}"))
+    serve(listener, &wake.0, &access, editor, launcher).map_err(|error| format!("settings server: {error}"))
 }
 
 fn random_token() -> io::Result<String> {
@@ -167,15 +169,69 @@ impl Drop for Signal {
 }
 
 fn serve(
-    listener: &TcpListener,
+    listener: TcpListener,
     wake: &PipeReader,
     access: &Access<'_>,
-    editor: &mut Editor,
+    mut editor: Editor,
+    launcher: Option<Launch>,
+) -> io::Result<()> {
+    let snapshot = Arc::new(editor.state());
+    let (send, jobs) = mpsc::sync_channel::<Mutation>(1);
+    let (replies, receive) = mpsc::sync_channel(1);
+    let (ready, mut notify) = io::pipe()?;
+    let mut mutations = Mutations { send, receive, ready };
+
+    let worker = std::thread::Builder::new().spawn(move || {
+        while let Ok(job) = jobs.recv() {
+            if STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            let reply = job.apply(&mut editor);
+            if replies.send(reply).is_err() || notify.write_all(&[0]).is_err() {
+                break;
+            }
+        }
+    })?;
+    let result = serve_clients(listener, wake, access, snapshot, &mut mutations, launcher);
+    // Pending requests belong to the socket loop and have already been dropped.
+    // Finish only the admitted action, then let the editor undo any active trial.
+    drop(mutations.send);
+    worker.join().map_err(|_| io::Error::other("editor worker panicked"))?;
+    result
+}
+
+struct Mutations {
+    send: SyncSender<Mutation>,
+    receive: Receiver<Completion>,
+    ready: PipeReader,
+}
+
+impl Mutations {
+    fn submit(&self, job: Mutation) -> io::Result<()> {
+        // The poll loop submits only when no other job is in flight.
+        self.send.try_send(job).map_err(|_| io::Error::other("editor worker could not accept an action"))
+    }
+
+    fn complete(&mut self) -> io::Result<Completion> {
+        self.ready.read_exact(&mut [0])?;
+        self.receive.try_recv().map_err(|_| io::Error::other("editor worker did not return a result"))
+    }
+}
+
+fn serve_clients(
+    listener: TcpListener,
+    wake: &PipeReader,
+    access: &Access<'_>,
+    mut snapshot: Arc<String>,
+    mutations: &mut Mutations,
     mut launcher: Option<Launch>,
 ) -> io::Result<()> {
     let mut clients: Vec<Client> = Vec::with_capacity(MAX_CLIENTS);
-    let mut fds = [libc::pollfd { fd: -1, events: libc::POLLIN, revents: 0 }; MAX_CLIENTS + 2];
+    let mut fds = [libc::pollfd { fd: -1, events: libc::POLLIN, revents: 0 }; MAX_CLIENTS + 3];
     fds[1].fd = wake.as_raw_fd();
+    fds[2].fd = mutations.ready.as_raw_fd();
+    let mut active: Option<Client> = None;
+    let mut pending: Option<(Client, Mutation)> = None;
     let mut last_activity = Instant::now();
     let mut closing = false;
     while !STOP.load(Ordering::Relaxed) && last_activity.elapsed() < IDLE_TIMEOUT {
@@ -185,6 +241,13 @@ fn serve(
             break;
         }
         let mut deadline = last_activity + IDLE_TIMEOUT;
+        if let Some((client, _)) = &pending {
+            if client.deadline <= now {
+                pending = None;
+            } else {
+                deadline = deadline.min(client.deadline);
+            }
+        }
         if let Some(launch) = &mut launcher {
             if let Some(check) = launch.poll(now) {
                 deadline = deadline.min(check);
@@ -192,13 +255,15 @@ fn serve(
                 launcher = None;
             }
         }
-        fds[0].fd = if closing || clients.len() == MAX_CLIENTS { -1 } else { listener.as_raw_fd() };
-        for (fd, client) in fds[2..].iter_mut().zip(&clients) {
+        let polled_clients = clients.len();
+        let sockets = polled_clients + usize::from(active.is_some()) + usize::from(pending.is_some());
+        fds[0].fd = if closing || sockets == MAX_CLIENTS { -1 } else { listener.as_raw_fd() };
+        for (fd, client) in fds[3..].iter_mut().zip(&clients) {
             deadline = deadline.min(client.deadline);
             *fd = libc::pollfd { fd: client.socket.as_raw_fd(), events: client.interest(), revents: 0 };
         }
         let timeout = crate::term::milliseconds(deadline.saturating_duration_since(Instant::now()));
-        let ready = crate::term::wait_ready(&mut fds[..clients.len() + 2], timeout);
+        let ready = crate::term::wait_ready(&mut fds[..polled_clients + 3], timeout);
         if STOP.load(Ordering::Relaxed) || fds[1].revents != 0 {
             break;
         }
@@ -212,35 +277,63 @@ fn serve(
         if ready == 0 {
             continue;
         }
-        // Removing a client by swapping with the tail cannot invalidate a readiness entry
-        // we still need; that client has already been visited.
-        for index in (0..clients.len()).rev() {
+        if fds[2].revents != 0 {
+            let completion = mutations.complete()?;
+            let mut client = active.take().expect("completion follows an action");
+            client.reply(completion.response);
+            last_activity = Instant::now();
+            if completion.close {
+                // Only flush the close response; never submit another mutation.
+                clients.clear();
+                clients.push(client);
+                pending = None;
+                closing = true;
+                continue;
+            }
+            if let Some(state) = completion.snapshot {
+                snapshot = state;
+            }
+            clients.push(client);
+            if let Some((client, job)) = pending.take()
+                && client.deadline > Instant::now()
+                && !STOP.load(Ordering::Relaxed)
+            {
+                mutations.submit(job)?;
+                active = Some(client);
+            }
+        }
+        // A tail entry moved by swap_remove was either already visited or appended after poll.
+        for index in (0..polled_clients).rev() {
             if STOP.load(Ordering::Relaxed) {
                 break;
             }
-            if fds[index + 2].revents == 0 {
+            if fds[index + 3].revents == 0 {
                 continue;
             }
             if clients[index].deadline <= Instant::now() {
                 clients.swap_remove(index);
                 continue;
             }
-            match clients[index].step(access, editor) {
-                Ok(Progress::Wait) => {}
-                Ok(Progress::Reply { authenticated, close }) => {
-                    if authenticated {
-                        last_activity = Instant::now();
-                        if let Some(launcher) = &mut launcher {
-                            launcher.connected();
-                        }
-                    }
-                    if close {
-                        // Only flush the close response. No queued request may change the draft after this.
-                        let client = clients.swap_remove(index);
-                        clients.clear();
-                        clients.push(client);
-                        closing = true;
-                        break;
+            let progress = clients[index].step(access, &snapshot);
+            if matches!(progress, Ok(Progress::Reply { authenticated: true } | Progress::Mutate(_))) {
+                last_activity = Instant::now();
+                if let Some(launcher) = &mut launcher {
+                    launcher.connected();
+                }
+            }
+            match progress {
+                Ok(Progress::Wait | Progress::Reply { .. }) => {}
+                Ok(Progress::Mutate(job)) => {
+                    if active.is_none() {
+                        mutations.submit(job)?;
+                        active = Some(clients.swap_remove(index));
+                    } else if pending.is_none() {
+                        // One queued mutation leaves space for independent asset and state reads.
+                        let mut client = clients.swap_remove(index);
+                        client.deadline = Instant::now() + IO_TIMEOUT;
+                        pending = Some((client, job));
+                    } else {
+                        clients[index].reply(Response::busy());
                     }
                 }
                 Ok(Progress::Done) | Err(_) => {
@@ -248,7 +341,7 @@ fn serve(
                 }
             }
         }
-        if !closing && fds[0].revents != 0 {
+        if !closing && !STOP.load(Ordering::Relaxed) && fds[0].revents != 0 {
             match listener.accept() {
                 Ok((socket, peer)) if peer.ip().is_loopback() => clients.push(Client::new(socket)?),
                 Ok(_) => {}
@@ -273,7 +366,8 @@ enum Exchange {
 
 enum Progress {
     Wait,
-    Reply { authenticated: bool, close: bool },
+    Reply { authenticated: bool },
+    Mutate(Mutation),
     Done,
 }
 
@@ -290,30 +384,36 @@ impl Client {
         }
     }
 
-    fn step(&mut self, access: &Access<'_>, editor: &mut Editor) -> io::Result<Progress> {
-        let (response, authenticated, close) = match &mut self.exchange {
+    fn step(&mut self, access: &Access<'_>, snapshot: &Arc<String>) -> io::Result<Progress> {
+        let (response, authenticated) = match &mut self.exchange {
             Exchange::Reading(input) => match input.read_from(&mut self.socket, access)? {
                 Input::Wait => return Ok(Progress::Wait),
                 Input::Disconnected => return Ok(Progress::Done),
-                Input::Rejected(rejection) => (rejection.response(), false, false),
-                Input::Ready(route, body) => {
+                Input::Rejected(rejection) => (rejection.response(), false),
+                Input::Ready(route @ (Route::Action | Route::Close)) => {
+                    return Ok(Progress::Mutate(Mutation { route, request: std::mem::take(input) }));
+                }
+                Input::Ready(route) => {
                     let authenticated = route.authenticated();
-                    let (response, close) = respond(route, body, editor);
-                    (response, authenticated, close)
+                    (respond_read(route, snapshot), authenticated)
                 }
             },
             Exchange::Writing(output) => {
                 return Ok(if output.write_to(&mut self.socket)? { Progress::Done } else { Progress::Wait });
             }
         };
+        self.reply(response);
+        Ok(Progress::Reply { authenticated })
+    }
+
+    fn reply(&mut self, response: Response) {
         self.exchange = Exchange::Writing(response);
         self.deadline = Instant::now() + IO_TIMEOUT;
-        Ok(Progress::Reply { authenticated, close })
     }
 }
 
-fn respond(route: Route, body: &[u8], editor: &mut Editor) -> (Response, bool) {
-    let response = match route {
+fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
+    match route {
         Route::Index => asset(Asset::Index),
         Route::Script => asset(Asset::Script),
         Route::Style => asset(Asset::Style),
@@ -324,30 +424,55 @@ fn respond(route: Route, body: &[u8], editor: &mut Editor) -> (Response, bool) {
         Route::DevScript => Response::asset("text/javascript; charset=utf-8", include_bytes!("web/dev.js")),
         #[cfg(feature = "web-dev")]
         Route::DevVersion => dev::version(),
-        Route::State => Response::json(editor.state()),
-        Route::Action => match editor.action(body) {
-            Ok(state) => Response::json(state),
-            Err(error) => Response::bad_request(&error),
-        },
-        Route::Close => {
-            use crate::setup::web::CloseError;
+        Route::State => Response::json(Arc::clone(snapshot)),
+        Route::Action | Route::Close => unreachable!("mutations run on the editor worker"),
+    }
+}
 
-            let Some(version) = http::close_version(body) else {
-                return (
-                    Response::bad_request("Invalid draft version. Refresh the editor state and try Done again."),
-                    false,
-                );
-            };
-            match editor.close(version) {
-                Ok(()) => return (Response::no_content(), true),
-                Err(CloseError::Stale) => Response::conflict(
-                    "The draft changed in another request. Refresh the editor state and review it before trying Done again.",
-                ),
-                Err(CloseError::Trial(why)) => Response::conflict(&format!(
-                    "The editor is still open. {why} Check the original Rex tab before trying Done again."
-                )),
-            }
+struct Mutation {
+    route: Route,
+    request: Request,
+}
+
+struct Completion {
+    response: Response,
+    snapshot: Option<Arc<String>>,
+    close: bool,
+}
+
+impl Mutation {
+    fn apply(self, editor: &mut Editor) -> Completion {
+        let body = self.request.body();
+        if self.route == Route::Close {
+            let (response, close) = respond_close(body, editor);
+            return Completion { response, snapshot: None, close };
         }
+        let (response, snapshot) = match editor.action(body) {
+            Ok(state) => {
+                let snapshot = Arc::new(state);
+                (Response::json(Arc::clone(&snapshot)), snapshot)
+            }
+            // A failed action may still change what the editor reports.
+            Err(error) => (Response::bad_request(&error), Arc::new(editor.state())),
+        };
+        Completion { response, snapshot: Some(snapshot), close: false }
+    }
+}
+
+fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
+    use crate::setup::web::CloseError;
+
+    let Some(version) = http::close_version(body) else {
+        return (Response::bad_request("Invalid draft version. Refresh the editor state and try Done again."), false);
+    };
+    let response = match editor.close(version) {
+        Ok(()) => return (Response::no_content(), true),
+        Err(CloseError::Stale) => Response::conflict(
+            "The draft changed in another request. Refresh the editor state and review it before trying Done again.",
+        ),
+        Err(CloseError::Trial(why)) => Response::conflict(&format!(
+            "The editor is still open. {why} Check the original Rex tab before trying Done again."
+        )),
     };
     (response, false)
 }
@@ -358,7 +483,7 @@ mod tests {
     use crate::fixture::Fixture;
 
     fn close(editor: &mut Editor, body: &[u8], status: &[u8], should_close: bool) -> Vec<u8> {
-        let (mut response, close) = respond(Route::Close, body, editor);
+        let (mut response, close) = respond_close(body, editor);
         let mut wire = Vec::new();
         while !response.write_to(&mut wire).unwrap() {}
         assert!(wire.starts_with(status), "{}", String::from_utf8_lossy(&wire));
@@ -452,5 +577,134 @@ mod tests {
         assert_eq!(fs::read_to_string("undo.log").unwrap(), "undo\nundo\n");
         drop(editor);
         assert_eq!(fs::read_to_string("undo.log").unwrap(), "undo\nundo\n");
+    }
+
+    #[test]
+    fn reads_serve_the_committed_snapshot_while_an_action_waits_for_rex() {
+        use std::fs;
+        use std::net::SocketAddr;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::thread;
+
+        const TEST: &str = "web::tests::reads_serve_the_committed_snapshot_while_an_action_waits_for_rex";
+        const CHILD: &str = "MILO_TEST_WEB_SLOW_ACTION";
+        if std::env::var_os(CHILD).is_none() {
+            let folder = Fixture::folder();
+            let rex = folder.root.join("rex");
+            folder.write(
+                "rex",
+                concat!(
+                    "#!/bin/sh\n/bin/cat >/dev/null\n",
+                    "for arg do case \"$arg\" in\n",
+                    "milo_operation=context)\n",
+                    "if [ -f pause-context ]; then\n",
+                    "  : > context-entered\n",
+                    "  retries=200\n",
+                    "  until [ -f release-context ]; do\n",
+                    "    [ \"$retries\" -gt 0 ] || exit 1\n",
+                    "    retries=$((retries - 1))\n",
+                    "    /bin/sleep 0.05\n",
+                    "  done\n",
+                    "fi\n",
+                    "printf 'window:test\\nok - 120 40\\n'; exit;;\n",
+                    "esac; done\nexit 1\n",
+                ),
+            );
+            fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, "1")
+                .env("HOME", &folder.root)
+                .env("XDG_CONFIG_HOME", folder.root.join("config"))
+                .env("XDG_STATE_HOME", folder.root.join("state"))
+                .env("PATH", &folder.root)
+                .env("REX_CONFIG", folder.root.join("init.lua"))
+                .env("REX_SESSION", "session:test")
+                .env("REX_BLOCK", "block:shell")
+                .current_dir(&folder.root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        const TEST_WAIT: Duration = Duration::from_secs(2);
+        const BEARER: &str = "Bearer gated-doctor";
+
+        fn request(address: SocketAddr, method: &str, path: &str, body: &str) -> TcpStream {
+            let mut socket = TcpStream::connect_timeout(&address, TEST_WAIT).unwrap();
+            socket.set_read_timeout(Some(TEST_WAIT)).unwrap();
+            socket.set_write_timeout(Some(TEST_WAIT)).unwrap();
+            write!(
+                socket,
+                "{method} {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nAuthorization: {BEARER}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            socket
+        }
+
+        fn reply(mut socket: TcpStream, status: &str) -> String {
+            let mut wire = String::new();
+            socket.read_to_string(&mut wire).unwrap();
+            assert!(wire.starts_with(status), "{wire}");
+            wire.split_once("\r\n\r\n").unwrap().1.to_owned()
+        }
+
+        let editor = Editor::open();
+        let version = editor.version();
+        let original = editor.state();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = address.to_string();
+        let origin = format!("http://{host}");
+        let access = Access { host: &host, origin: &origin, bearer: BEARER };
+        let (wake, writer) = io::pipe().unwrap();
+        thread::scope(|scope| {
+            let browser = scope.spawn(move || {
+                let _stop_on_exit = writer;
+                fs::write("pause-context", "").unwrap();
+                let doctor = format!(r#"{{"version":{version},"action":"doctor"}}"#);
+                let active = request(address, "POST", "/api/action", &doctor);
+                let deadline = Instant::now() + TEST_WAIT;
+                while !std::path::Path::new("context-entered").exists() {
+                    assert!(Instant::now() < deadline, "Doctor did not reach the Rex gate");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // Both reads must complete before the Rex probe is allowed to finish.
+                let state = || reply(request(address, "GET", "/api/state", ""), "HTTP/1.1 200 OK\r\n");
+                assert_eq!(state(), original);
+                let index = reply(request(address, "GET", "/", ""), "HTTP/1.1 200 OK\r\n");
+                assert!(index.contains("Milo"));
+
+                let stale = format!(r#"{{"version":{version}}}"#);
+                let a = request(address, "POST", "/api/close", &stale);
+                let b = request(address, "POST", "/api/close", &stale);
+                let mut fds =
+                    [&a, &b].map(|socket| libc::pollfd { fd: socket.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+                let ready = crate::term::wait_ready(&mut fds, crate::term::milliseconds(TEST_WAIT));
+                assert_eq!(ready, 1, "only an overflow request may finish while Doctor is gated");
+                let (busy, pending) = if fds[0].revents != 0 { (a, b) } else { (b, a) };
+                reply(busy, "HTTP/1.1 503 Service Unavailable\r\n");
+
+                fs::write("release-context", "").unwrap();
+                let updated = reply(active, "HTTP/1.1 200 OK\r\n");
+                assert_ne!(updated, original);
+                assert_eq!(state(), updated);
+                reply(pending, "HTTP/1.1 409 Conflict\r\n");
+                let current = format!(r#"{{"version":{}}}"#, version + 1);
+                reply(request(address, "POST", "/api/close", &current), "HTTP/1.1 204 No Content\r\n");
+            });
+            let result = serve(listener, &wake, &access, editor, None);
+            browser.join().unwrap();
+            result.unwrap();
+        });
     }
 }

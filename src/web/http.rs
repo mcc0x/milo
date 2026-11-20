@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{self, IoSlice, Read, Write};
+use std::sync::Arc;
 
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 16 * 1024;
@@ -14,7 +14,7 @@ const SECURITY_HEADERS: &str = "Cache-Control: no-store\r\n\
     Connection: close\r\n";
 const JSON: &str = "application/json; charset=utf-8";
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Route {
     Index,
     Script,
@@ -188,15 +188,15 @@ struct PendingBody {
     end: usize,
 }
 
-pub(super) enum Input<'a> {
+pub(super) enum Input {
     Wait,
     Disconnected,
     Rejected(Rejection),
-    Ready(Route, &'a [u8]),
+    Ready(Route),
 }
 
 impl Request {
-    pub(super) fn read_from(&mut self, socket: &mut impl Read, access: &Access<'_>) -> io::Result<Input<'_>> {
+    pub(super) fn read_from(&mut self, socket: &mut impl Read, access: &Access<'_>) -> io::Result<Input> {
         let limit = self.pending.as_ref().map_or(MAX_HEAD, |body| body.end);
         let previous = self.bytes.len();
         self.bytes.resize(limit.min(previous + READ_CHUNK), 0);
@@ -235,8 +235,12 @@ impl Request {
         if self.bytes.len() > body.end {
             return Ok(Input::Rejected(Rejection::BadRequest));
         }
-        let body = self.pending.take().expect("body complete");
-        Ok(Input::Ready(body.route, &self.bytes[body.start..]))
+        Ok(Input::Ready(body.route))
+    }
+
+    pub(super) fn body(&self) -> &[u8] {
+        let body = self.pending.as_ref().expect("request is ready");
+        &self.bytes[body.start..body.end]
     }
 }
 
@@ -257,42 +261,58 @@ fn same_secret(header: &str, expected: &str) -> bool {
 
 pub(super) struct Response {
     header: String,
-    body: Cow<'static, [u8]>,
+    body: Body,
     sent: usize,
 }
 
+enum Body {
+    Borrowed(&'static [u8]),
+    Owned(Vec<u8>),
+    Snapshot(Arc<String>),
+}
+
+impl AsRef<[u8]> for Body {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+            Self::Snapshot(state) => state.as_bytes(),
+        }
+    }
+}
+
 impl Response {
-    fn new(status: &str, content_type: Option<&str>, body: Cow<'static, [u8]>) -> Self {
+    fn new(status: &str, content_type: Option<&str>, body: Body) -> Self {
         let mut header = String::with_capacity(SECURITY_HEADERS.len() + 128);
         let _ = write!(header, "HTTP/1.1 {status}\r\n{SECURITY_HEADERS}");
         if status == "401 Unauthorized" {
             header.push_str("WWW-Authenticate: Bearer\r\n");
         }
         if let Some(content_type) = content_type {
-            let _ = write!(header, "Content-Type: {content_type}\r\nContent-Length: {}\r\n", body.len());
+            let _ = write!(header, "Content-Type: {content_type}\r\nContent-Length: {}\r\n", body.as_ref().len());
         }
         header.push_str("\r\n");
         Self { header, body, sent: 0 }
     }
 
     pub(super) fn asset(content_type: &str, body: &'static [u8]) -> Self {
-        Self::new("200 OK", Some(content_type), Cow::Borrowed(body))
+        Self::new("200 OK", Some(content_type), Body::Borrowed(body))
     }
 
     #[cfg(feature = "web-dev")]
     pub(super) fn local_asset(content_type: &str, body: std::io::Result<Vec<u8>>) -> Self {
         match body {
-            Ok(bytes) => Self::new("200 OK", Some(content_type), Cow::Owned(bytes)),
+            Ok(bytes) => Self::new("200 OK", Some(content_type), Body::Owned(bytes)),
             Err(_) => Self::error("503 Service Unavailable", "Cannot read editor source assets"),
         }
     }
 
-    pub(super) fn json(body: String) -> Self {
-        Self::new("200 OK", Some(JSON), Cow::Owned(body.into_bytes()))
+    pub(super) fn json(body: Arc<String>) -> Self {
+        Self::new("200 OK", Some(JSON), Body::Snapshot(body))
     }
 
     pub(super) fn no_content() -> Self {
-        Self::new("204 No Content", None, Cow::Borrowed(b""))
+        Self::new("204 No Content", None, Body::Borrowed(b""))
     }
 
     pub(super) fn bad_request(message: &str) -> Self {
@@ -301,6 +321,13 @@ impl Response {
 
     pub(super) fn conflict(message: &str) -> Self {
         Self::error("409 Conflict", message)
+    }
+
+    pub(super) fn busy() -> Self {
+        Self::error(
+            "503 Service Unavailable",
+            "The editor is busy. Wait for the other action to finish, then try again.",
+        )
     }
 
     fn error(status: &str, message: &str) -> Self {
@@ -317,22 +344,23 @@ impl Response {
             }
         }
         body.push_str("\"}");
-        Self::new(status, Some(JSON), Cow::Owned(body.into_bytes()))
+        Self::new(status, Some(JSON), Body::Owned(body.into_bytes()))
     }
 
     // Keep the fixed assets borrowed; the first write can send headers and body together.
     pub(super) fn write_to(&mut self, socket: &mut impl Write) -> io::Result<bool> {
         let header = self.header.as_bytes();
+        let body = self.body.as_ref();
         let written = if self.sent < header.len() {
-            socket.write_vectored(&[IoSlice::new(&header[self.sent..]), IoSlice::new(&self.body)])
+            socket.write_vectored(&[IoSlice::new(&header[self.sent..]), IoSlice::new(body)])
         } else {
-            socket.write(&self.body[self.sent - header.len()..])
+            socket.write(&body[self.sent - header.len()..])
         };
         match written {
             Ok(0) => Err(io::ErrorKind::WriteZero.into()),
             Ok(count) => {
                 self.sent += count;
-                Ok(self.sent == header.len() + self.body.len())
+                Ok(self.sent == header.len() + body.len())
             }
             Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => Ok(false),
             Err(error) => Err(error),
@@ -443,7 +471,8 @@ mod tests {
         assert!(matches!(request.read_from(&mut head, &ACCESS).unwrap(), Input::Wait));
         assert!(matches!(request.read_from(&mut &b"\n{"[..], &ACCESS).unwrap(), Input::Wait));
         let final_read = request.read_from(&mut &b"}"[..], &ACCESS).unwrap();
-        assert!(matches!(final_read, Input::Ready(Route::Action, body) if body == b"{}"));
+        assert!(matches!(final_read, Input::Ready(Route::Action)));
+        assert_eq!(request.body(), b"{}");
     }
 
     #[test]
@@ -477,7 +506,7 @@ mod tests {
 
         let mut response = Response::asset("text/plain", b"a fixed response body");
         let mut output = ShortWriter::default();
-        for _ in 0..(response.header.len() + response.body.len()).div_ceil(16) + 1 {
+        for _ in 0..(response.header.len() + response.body.as_ref().len()).div_ceil(16) + 1 {
             if response.write_to(&mut output).unwrap() {
                 break;
             }
@@ -490,7 +519,7 @@ mod tests {
     #[test]
     fn error_and_close_have_restrictive_headers() {
         let error = Response::bad_request("quotes \" backslash \\ newline\n");
-        assert_eq!(&*error.body, br#"{"error":"quotes \" backslash \\ newline\u000a"}"#);
+        assert_eq!(error.body.as_ref(), br#"{"error":"quotes \" backslash \\ newline\u000a"}"#);
         for response in [error, Response::no_content()] {
             assert!(response.header.contains("Cache-Control: no-store\r\n"));
             assert!(response.header.contains("Content-Security-Policy: default-src 'none';"));

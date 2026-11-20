@@ -178,7 +178,7 @@ mod tests {
         let bearer = format!("Bearer {token}");
         let url = format!("{origin}/#{token}");
         let access = Access { host: &host, origin: &origin, bearer: &bearer };
-        let mut editor = Editor::test_outside(&folder);
+        let editor = Editor::test_outside(&folder);
         let (wake, writer) = io::pipe().unwrap();
 
         let mut chrome = Command::new(std::env::var_os("MILO_TEST_CHROMIUM").expect("set MILO_TEST_CHROMIUM"));
@@ -206,7 +206,7 @@ mod tests {
             drop(writer);
             connected
         });
-        serve(&listener, &wake, &access, &mut editor, Some(launch)).unwrap();
+        serve(listener, &wake, &access, editor, Some(launch)).unwrap();
         assert!(watcher.join().unwrap(), "Chromium did not authenticate before the handoff expired");
     }
 }
