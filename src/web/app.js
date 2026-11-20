@@ -360,19 +360,33 @@ function updateChrome() {
   const summary = closing ? 'Closing settings…' : paused ? 'Edit not applied' : updatingDraft ? 'Updating draft…' :
     dirty ? `Unsaved changes in ${dirty === 1 ? '1 group' : `${dirty} groups`}` : state.trial ? 'Layout trial active' : 'No unsaved changes';
   if (status.textContent !== summary) status.textContent = summary;
-  byId('discard-all').disabled = !needsWarning || running || closing || !connected;
-  byId('save-draft').disabled = !canRequestSave();
-  const saving = !byId('save-draft').disabled;
-  byId('save-draft').classList.toggle('primary', saving);
-  byId('save-draft').classList.toggle('secondary', !saving);
+  const discard = byId('discard-all');
+  const save = byId('save-draft');
+  const canDiscard = needsWarning && !running && !closing && connected;
+  const canSave = canRequestSave();
+  if ((!canDiscard && document.activeElement === discard) || (!canSave && document.activeElement === save)) {
+    // The current section stays focusable while a draft action is pending or no longer needed.
+    navButtons.find(tab => tab.dataset.page === page)?.focus({preventScroll: true});
+  }
+  discard.disabled = !canDiscard;
+  save.disabled = !canSave;
+  save.classList.toggle('primary', canSave);
+  save.classList.toggle('secondary', !canSave);
   byId('done').disabled = running || closing;
   const menuAction = byId('menubar-action');
   if (menuAction) {
+    const operation = queue.find(item => item.action === 'menubar');
+    const pending = !operation ? '' : operation.value === 'uninstall' ? 'Removing menu app…' :
+      state.menubar.installed ? 'Opening or updating menu app…' : 'Installing menu app…';
+    const live = byId('menubar-status');
+    if (live.textContent !== pending) live.textContent = pending;
     const unavailable = !connected || paused || closing || (running && !queue.length) ||
       queue.some(item => item.action !== 'set');
-    // Keep focus on the action while the installer runs and the button label changes.
-    if (unavailable) menuAction.setAttribute('aria-disabled', 'true');
-    else menuAction.removeAttribute('aria-disabled');
+    // Keep the focused action focusable while the installer runs.
+    for (const control of [menuAction, byId('menubar-remove')]) {
+      if (unavailable) control?.setAttribute('aria-disabled', 'true');
+      else control?.removeAttribute('aria-disabled');
+    }
   }
 }
 
@@ -427,7 +441,7 @@ function render() {
   panel.setAttribute('aria-labelledby', panel.querySelector('h2').id);
   updateChrome();
   if (focusId && (!focus.isConnected || (focus.type === 'number' && focus !== document.activeElement))) {
-    const replacement = byId(focusId);
+    const replacement = byId(focusId) || (focusId === 'menubar-remove' && byId('menubar-action'));
     if (trigger || focus.matches('h2[tabindex="-1"]')) {
       restoreSettingsFocus(replacement, headingId);
     } else if (replacement && !replacement.matches(':disabled, [hidden]')) {
@@ -480,15 +494,19 @@ function setting(field, title, detail, type, options = {}) {
   const id = `field-${field}`;
   control.id = label.htmlFor = id;
   explanation.id = `${id}-detail`;
-  if (detail) control.setAttribute('aria-describedby', explanation.id);
+  info.append(label);
+  if (detail) info.append(explanation);
   control.disabled = Boolean(options.disabled);
   if (type === 'switch') {
+    if (detail) control.setAttribute('aria-describedby', explanation.id);
     control.type = 'checkbox';
     control.className = 'switch';
     control.setAttribute('role', 'switch');
     control.checked = draftValue(field);
     control.addEventListener('change', () => edit(field, control.checked));
   } else {
+    const error = draft?.error || node('span');
+    info.append(error);
     const value = draftValue(field);
     const initial = options.unit ? String(Number((value * 100).toFixed(6))) : String(value);
     control.dataset.initial = initial;
@@ -500,12 +518,26 @@ function setting(field, title, detail, type, options = {}) {
       control.max = options.max;
       control.step = options.step;
       control.required = true;
+      error.id = `${id}-error`;
+      error.setAttribute('aria-live', 'polite');
+      control.setAttribute('aria-describedby', detail ? `${explanation.id} ${error.id}` : error.id);
       control.value = initial;
       const scale = options.unit ? 100 : 1;
+      const showValidation = () => {
+        const message = control.validationMessage;
+        if (error.textContent === message) return;
+        error.textContent = message;
+        error.classList.toggle('setting-detail', Boolean(message));
+        if (message) control.setAttribute('aria-invalid', 'true');
+        else control.removeAttribute('aria-invalid');
+      };
+      control.addEventListener('blur', showValidation);
+      control.addEventListener('invalid', showValidation);
       control.addEventListener('input', () => {
+        if (control.validity.valid) showValidation();
         if (control.valueAsNumber !== Number(control.dataset.initial)) {
           // Keep the actual input: a number field may display incomplete text that .value cannot represent.
-          numericDrafts.set(field, {control, scale});
+          numericDrafts.set(field, {control, scale, error});
         } else {
           numericDrafts.delete(field);
         }
@@ -525,8 +557,6 @@ function setting(field, title, detail, type, options = {}) {
       });
     }
   }
-  info.append(label);
-  if (detail) info.append(explanation);
   wrap.append(control);
   if (type === 'switch') {
     const track = node('span', 'switch-track');
@@ -606,7 +636,13 @@ function showSaveOptions() {
   for (const [key, group] of Object.entries(state.groups)) {
     if (!canSaveDraft(key, group)) continue;
     const title = key === 'preferences' ? 'Appearance and workflow' : groupLabels[key];
-    groups.append(node('h3', '', title[0].toUpperCase() + title.slice(1)), saveChoices(key, group, 'dock'));
+    const section = node('div');
+    const heading = node('h3', '', title[0].toUpperCase() + title.slice(1));
+    heading.id = `save-group-${key}`;
+    section.setAttribute('role', 'group');
+    section.setAttribute('aria-labelledby', heading.id);
+    section.append(heading, saveChoices(key, group, 'dock'));
+    groups.append(section);
   }
   if (groups.childElementCount) {
     const dialog = byId('save-options');
@@ -765,26 +801,38 @@ function menuBarView() {
   const heading = node('h2', '', 'Menu bar app');
   heading.id = 'group-menubar';
   card.setAttribute('aria-labelledby', heading.id);
-  header.append(heading);
+  const live = node('span', 'setting-detail');
+  live.id = 'menubar-status';
+  live.setAttribute('role', 'status');
+  header.append(heading, live);
 
   const row = node('div', 'setting');
   const info = node('div', 'setting-info');
   const detail = node('span', 'setting-detail',
-    `${installed ? 'Installed' : 'Not installed'}. Open Milo from your Mac’s menu bar.`);
+    installed ? 'Installed. Opens Milo and applies the bundled update if needed.' : 'Not installed. Install and open Milo in your Mac’s menu bar.');
   detail.id = 'menubar-detail';
   info.append(node('span', 'setting-label', 'Milo'), detail);
-  const control = button(installed ? 'Remove menu app…' : 'Install menu app', 'secondary', 'menubar-action', event => {
-    if (event.currentTarget.hasAttribute('aria-disabled')) return;
-    if (!installed) {
-      command('menubar', {value: 'install'});
-      return;
-    }
-    confirm('Remove menu app?', 'This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.',
-      'Remove menu app', () => command('menubar', {value: 'uninstall'}));
+  const control = button(installed ? 'Open or update menu app' : 'Install menu app', 'secondary', 'menubar-action', event => {
+    if (!event.currentTarget.hasAttribute('aria-disabled')) command('menubar', {value: 'install'});
   });
   control.setAttribute('aria-describedby', detail.id);
   row.append(info, control);
-  card.append(header, row);
+  const controls = node('div', 'group-controls');
+  controls.append(row);
+  if (installed) {
+    const removal = node('div', 'setting');
+    const note = node('span', 'setting-detail', 'The Milo CLI and your settings will be kept.');
+    note.id = 'menubar-remove-detail';
+    const remove = button('Remove menu app…', 'secondary', 'menubar-remove', event => {
+      if (event.currentTarget.hasAttribute('aria-disabled')) return;
+      confirm('Remove menu app?', 'This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.',
+        'Remove menu app', () => command('menubar', {value: 'uninstall'}));
+    });
+    remove.setAttribute('aria-describedby', note.id);
+    removal.append(note, remove);
+    controls.append(removal);
+  }
+  card.append(header, controls);
   return [card];
 }
 
