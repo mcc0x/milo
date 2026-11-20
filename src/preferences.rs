@@ -271,6 +271,7 @@ impl Preferences {
         }
     }
 
+    #[cfg(test)]
     pub fn resolve(worktree: Option<&Path>) -> io::Result<(Self, Source)> {
         let Some(dir) = paths::config_dir() else { return Ok((Self::default(), Source::Default)) };
         Self::resolve_in(&dir, worktree)
