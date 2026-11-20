@@ -67,6 +67,11 @@ if [ "$(uname -s)" != Darwin ] ||
     { [ "$(uname -m)" != arm64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" != 1 ]; }; then
     fail 'This release requires an Apple Silicon Mac. See https://github.com/mcc0x/milo for source installation.'
 fi
+# Ventura is Darwin 22. Check before downloading or replacing an older binary.
+kernel=$(uname -r) || fail 'Could not determine the macOS version.'
+major=${kernel%%.*}
+case "$major" in ''|*[!0-9]*) fail 'Could not determine the macOS version.' ;; esac
+[ "$major" -ge 22 ] || fail 'This release requires macOS 13 or later.'
 
 version=v0.1.4
 asset=milo-aarch64-apple-darwin

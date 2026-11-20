@@ -152,6 +152,7 @@ cat > "$fixture/tools/uname" <<'EOF'
 case "$*" in
     -s) printf 'Darwin\n' ;;
     -m) printf 'arm64\n' ;;
+    -r) printf '%s\n' "${FIXTURE_KERNEL:-22.0.0}" ;;
     *) exit 1 ;;
 esac
 EOF
@@ -171,6 +172,13 @@ case "${FIXTURE_RELEASE_DOWNLOAD:-ok}" in
 esac
 EOF
 chmod +x "$fixture/tools/uname" "$fixture/tools/curl"
+
+# An unsupported macOS version must leave the previous executable untouched.
+printf 'previous\n' > "$MILO_BIN_DIR/milo"
+expect_failure 'requires macOS 13 or later' env FIXTURE_KERNEL=21.6.0 sh "$release_installer"
+expect_failure 'determine the macOS version' env FIXTURE_KERNEL=unknown sh "$release_installer"
+[ "$(cat "$MILO_BIN_DIR/milo")" = previous ]
+rm "$MILO_BIN_DIR/milo"
 
 expect_uninstall_refusal() {
     expect_failure 'no matching installer receipt' sh "$1" --uninstall
