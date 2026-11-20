@@ -16,7 +16,7 @@ For each tool, milo uses the newest report it can read. When there is room, it a
 
 Milo checks the tails of recent Codex logs, then resumes near the previous end as those logs grow. Ordinary session activity does not clear the last limit report. A new or replaced log, a truncation, or a large burst of new data calls for another bounded tail check.
 
-While a Codex log has been active in the last five minutes, Milo checks known logs about every two seconds, even if the writer keeps the file open. Repeated file notifications don’t trigger a directory walk on every write. Press `r` to discover a new session immediately.
+While a Codex log has been active in the last five minutes, Milo checks known logs about every two seconds, even if the writer keeps the file open. With a native watcher, Milo groups notifications so it doesn’t walk the session directories on every write. Without a watcher, it looks for new Codex and Claude Code sessions on the roughly two-second fallback checks. Press `r` to check immediately.
 
 Milo labels reports as older after five minutes, or ten minutes for oh-my-pi to allow for its provider refresh cadence. This uses the time the provider's window was last observed, not the time Milo read the file.
 

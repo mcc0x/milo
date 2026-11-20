@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fixture::Fixture;
 use crate::fs_ops;
-use crate::pane::{WATCHED, check_watched_pane, watch_pane};
+use crate::pane::{WATCHED, check_watched_pane, check_watched_pane_at, watch_pane};
 use crate::when::HOUR;
 use crate::width::str_width;
 
@@ -201,35 +201,77 @@ fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
 }
 
 #[test]
-fn a_recent_codex_rollout_polls_without_notifications_or_discovery() {
+fn fallback_looks_discover_new_sessions_without_a_native_watcher() {
     let f = Fixture::folder();
-    let now = when::now();
-    fs::create_dir_all(f.root.join("claude")).unwrap();
+    let now = local_noon();
+    let clock = Instant::now();
+    let fallback = Duration::from_secs(2);
+    fs::create_dir_all(f.root.join(STATE)).unwrap();
+    write(&f, CODEX, &codex(now - 1, 64, now + DAY, "null"), now - HOUR);
+    write(&f, CLAUDE, &assistant(now - 1, 1000, 0, 0), now - 1);
+    let mut usage = unopened(&f, now);
+    let (mut watcher, mut pace) = watch_pane(&mut usage, false);
+    watcher.stop_listening();
+    assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || clock));
+    assert!(watcher.scope().complete);
+    assert_eq!(pace.as_ref().unwrap().idle(), fallback);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+    assert_eq!(activity(&usage).today, 1000);
+
+    write(&f, OTHER_CODEX, &codex(now, 82, now + DAY, "null"), now);
+    write(&f, "claude/other/new.jsonl", &assistant(now, 2000, 0, 0), now);
+    assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || clock + fallback));
+    assert!(watcher.fd().is_none());
+    assert!(frame(&mut usage, 100, 2)[0].contains("18%"));
+    assert_eq!(activity(&usage).today, 3000);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_recent_codex_rollout_with_a_live_watcher_polls_without_discovery() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let clock = Instant::now();
+    write(&f, CLAUDE, &assistant(now - 1, 1000, 0, 0), now - 1);
     fs::create_dir_all(f.root.join(STATE)).unwrap();
     write(&f, CODEX, "", now);
     let mut writer = OpenOptions::new().append(true).open(f.root.join(CODEX)).unwrap();
     let mut usage = unopened(&f, now);
-    let (mut watcher, mut pace) = watch_pane(&mut usage, true);
-    let covered = if watcher.fd().is_some() { WATCHED } else { Duration::from_secs(2) };
+    let (mut watcher, mut pace) = watch_pane(&mut usage, false);
+    assert!(watcher.fd().is_some());
+    assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || clock));
     assert_eq!(watcher.scope().roots.len(), 3);
     assert!(!watcher.scope().complete);
     assert_eq!(pace.as_ref().unwrap().idle(), Duration::from_secs(2));
     assert!(usage.codex.reported().is_none());
 
-    let latest = codex(now, 64, now + DAY, "null");
+    let latest = codex(now - 1, 64, now + DAY, "null");
     writer.write_all(latest.as_bytes()).unwrap();
-    write(&f, OTHER_CODEX, &codex(now + 1, 82, now + DAY, "null"), now);
-    check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
+    writer.set_modified(mtime(now)).unwrap();
+    write(&f, OTHER_CODEX, &codex(now, 82, now + DAY, "null"), now);
+    write(&f, "claude/other/new.jsonl", &assistant(now, 2000, 0, 0), now);
+    assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || clock + Duration::from_secs(2)));
     assert_eq!(usage.bytes_read, latest.len() as u64);
     assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
     assert_eq!(pace.as_ref().unwrap().idle(), Duration::from_secs(2));
+    for seconds in [4, 6] {
+        let next = clock + Duration::from_secs(seconds);
+        assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || next));
+        assert_eq!(usage.bytes_read, 0);
+        assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+        assert_eq!(activity(&usage).today, 1000);
+    }
     drop(writer);
 
     usage.fixed_now = Some(now + CODEX_LIVE + MINUTE);
-    check_watched_pane(&mut usage, &mut watcher, &mut pace, true);
+    assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || clock + Duration::from_secs(8)));
     assert!(watcher.scope().complete);
-    assert_eq!(pace.as_ref().unwrap().idle(), covered);
+    assert_eq!(pace.as_ref().unwrap().idle(), WATCHED);
     assert_eq!(usage.bytes_read, 0);
+
+    assert!(check_watched_pane_at(&mut usage, &mut watcher, &mut pace, true, || clock + WATCHED));
+    assert!(frame(&mut usage, 100, 2)[0].contains("18%"));
+    assert_eq!(activity(&usage).today, 3000);
 }
 
 #[test]

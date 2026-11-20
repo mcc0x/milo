@@ -72,6 +72,11 @@ pub trait Pane {
         true
     }
 
+    /// Takes an automatic look with the live listener status, independent of the check cadence.
+    fn check_with_watcher(&mut self, _watching: bool, _started: Instant) -> bool {
+        self.check()
+    }
+
     fn external_fd(&self) -> Option<RawFd> {
         None
     }
@@ -272,18 +277,28 @@ pub(super) fn check_watched_pane(
     pace: &mut Option<Pace>,
     keep_polling: bool,
 ) -> bool {
+    check_watched_pane_at(pane, watcher, pace, keep_polling, Instant::now)
+}
+
+pub(super) fn check_watched_pane_at(
+    pane: &mut dyn Pane,
+    watcher: &mut Watcher,
+    pace: &mut Option<Pace>,
+    keep_polling: bool,
+    clock: impl Fn() -> Instant,
+) -> bool {
     let Some(timing) = pace else { return false };
-    let started = Instant::now();
+    let started = clock();
     if pane.git_busy() {
         return timing.block_on_git(started);
     }
-    let settled = pane.check();
+    let settled = pane.check_with_watcher(watcher.fd().is_some(), started);
     // A snapshot cannot see edits made just after it. If coverage changed,
     // check again under the new scope rather than relying on the old event queue.
     let handoff = watcher.refresh(pane.watch_scope());
     if let Some(idle) = watch_idle(watcher, keep_polling) {
         timing.idle = idle;
-        timing.finish_look(started, Instant::now(), settled && !handoff);
+        timing.finish_look(started, clock(), settled && !handoff);
     } else {
         *pace = None;
     }

@@ -789,6 +789,15 @@ impl Pane for Usage {
         self.refresh(self.now(), Instant::now(), false)
     }
 
+    fn check_with_watcher(&mut self, watching: bool, started: Instant) -> bool {
+        // Without notifications, allow each fallback look to discover sessions.
+        // The discovery rest still applies if a look runs early.
+        if !watching {
+            self.filesystem_changed();
+        }
+        self.refresh(self.now(), started, false)
+    }
+
     fn filesystem_changed(&mut self) {
         self.codex.files.changed();
         self.claude.files.changed();

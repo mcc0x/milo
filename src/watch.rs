@@ -45,6 +45,11 @@ impl Watcher {
         Watcher { listener, scope, native }
     }
 
+    #[cfg(test)]
+    pub(super) fn stop_listening(&mut self) {
+        self.listener = None;
+    }
+
     pub fn scope(&self) -> &Scope {
         &self.scope
     }
