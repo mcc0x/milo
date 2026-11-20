@@ -62,7 +62,7 @@ fn codex_token_count_without_a_limit_report_does_not_erase_the_previous_figure()
     let f = Fixture::folder();
     let previous = codex(NOW - MINUTE, 40, NOW + DAY, "null");
     let stamp = iso(NOW);
-    for limits in ["null", "0", "[]"] {
+    for limits in ["null", "0", "[]", r#"{"limit_id":42}"#, r#"{"limit_id":"another-provider-bucket"}"#] {
         let record = format!(
             "{{\"timestamp\":\"{stamp}Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\
              \"rate_limits\":{limits}}}}}\n"
@@ -190,6 +190,16 @@ fn codex_reads_only_the_newest_plain_sessions_and_reuses_unchanged_tails() {
     assert_eq!(usage.bytes_read, u64::try_from(kept.len() + 3 * empty.len()).unwrap());
     assert!(usage.check());
     assert_eq!(usage.bytes_read, 0);
+}
+
+#[test]
+fn newer_empty_rollouts_do_not_crowd_out_a_saved_report() {
+    let f = Fixture::folder();
+    write(&f, CODEX, &codex(NOW - 1, 23, NOW + DAY, "null"), NOW - 1);
+    for i in 0..files::CODEX_FILES {
+        write(&f, &format!("codex/2026/11/18/rollout-empty-{i}.jsonl"), "", NOW);
+    }
+    assert!(frame(&mut open(&f, NOW), 100, 2)[0].contains("77%"));
 }
 
 fn append(f: &Fixture, data: &str, now: i64) {
@@ -324,6 +334,24 @@ fn codex_large_growth_uses_a_bounded_tail_and_resumes_at_its_new_end() {
 }
 
 #[test]
+fn a_large_append_keeps_an_unterminated_report_only_if_it_commits_the_line() {
+    let large = "x".repeat(usize::try_from(TAIL_BYTES).unwrap());
+    let first = codex(NOW - 2, 23, NOW + DAY, "null");
+    let pending = codex(NOW - 1, 64, NOW + DAY, "null");
+    for (suffix, expected) in [(" \r\n", "36%"), ("invalid\n", "77%")] {
+        let f = Fixture::folder();
+        write(&f, CODEX, &format!("{first}{}", pending.trim_end()), NOW - 1);
+        let mut usage = open(&f, NOW);
+        assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+
+        append(&f, &format!("{suffix}{large}"), NOW);
+        assert!(usage.check());
+        assert!(usage.bytes_read <= TAIL_BYTES);
+        assert!(frame(&mut usage, 100, 2)[0].contains(expected));
+    }
+}
+
+#[test]
 fn codex_preserves_a_report_outside_the_tail_after_chmod() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -359,6 +387,9 @@ fn no_codex_sessions_and_sessions_without_limits_have_different_notes() {
     let f = Fixture::folder();
     let rows = frame(&mut open(&f, NOW), 140, 3);
     assert!(rows[1].split('│').next().unwrap().contains('—'));
+    assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no sessions found · Run Codex");
+    write(&f, CODEX, "", NOW);
+    let rows = frame(&mut open(&f, NOW), 140, 3);
     assert_eq!(rows[2].split_once('│').unwrap().0.trim(), "no sessions found · Run Codex");
     write(&f, CODEX, "{}\n", NOW);
     let rows = frame(&mut open(&f, NOW), 140, 3);

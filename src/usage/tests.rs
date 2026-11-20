@@ -426,7 +426,7 @@ mod omp_limits {
     const SCHEMA: &str = "
         CREATE TABLE cache(key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER);
         CREATE TABLE usage_history(id INTEGER PRIMARY KEY, recorded_at INTEGER, provider TEXT,
-            account_key TEXT, email TEXT, account_id TEXT, limit_id TEXT, label TEXT, window_label TEXT,
+            account_key TEXT NOT NULL, email TEXT, account_id TEXT, limit_id TEXT, label TEXT, window_label TEXT,
             used_fraction REAL, status TEXT, resets_at INTEGER);
     ";
 
@@ -443,7 +443,7 @@ mod omp_limits {
         exec(
             path,
             &format!(
-                r#"INSERT OR REPLACE INTO cache VALUES ('usage_cache:report:{key}',
+                r#"INSERT OR REPLACE INTO cache VALUES ('usage_cache:report:{provider}:default:oauth|account:{key}',
                    '{{"value":{{"provider":"{provider}","fetchedAt":{ms},"limits":{limits}}}}}',0);"#
             ),
         );
@@ -507,17 +507,18 @@ mod omp_limits {
             &path,
             &format!(
                 "INSERT INTO cache VALUES('usage_cache:report:bad','not JSON',0);
-                 INSERT INTO usage_history(provider, recorded_at, limit_id, used_fraction, resets_at, window_label)
-                 VALUES ('anthropic',{now}-2000,'anthropic:5h',0.92,{reset},'5 Hours'),
-                        ('anthropic',{now}-950,'anthropic:7d',0.29,{reset},'7 Day'),
-                        ('anthropic',{now}-900,'anthropic:7d',0.27,{reset},'7 Day'),
-                        ('openai-codex',{now}-2000,'openai-codex:primary',0.8,{reset},'7 days');"
+                 INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, resets_at, window_label)
+                 VALUES ('anthropic','oauth|account:key-only-secret',{now}-2000,'anthropic:5h',0.92,{reset},'5 Hours'),
+                        ('anthropic','oauth|account:key-only-secret',{now}-950,'anthropic:7d',0.29,{reset},'7 Day'),
+                        ('anthropic','oauth|account:key-only-secret',{now}-900,'anthropic:7d',0.27,{reset},'7 Day'),
+                        ('openai-codex','oauth|account:codex',{now}-2000,'openai-codex:primary',0.8,{reset},'7 days');"
             ),
         );
 
-        let bytes = sqlite::query(sqlite::executable(), &path, omp::SQL, TEST_WAIT).unwrap();
-        assert!(!omp::SQL.to_ascii_lowercase().contains("auth_credentials"));
-        assert!(omp::SQL.trim_start().starts_with("PRAGMA query_only=ON;"));
+        let sql = omp::sql(NOW);
+        let bytes = sqlite::query(sqlite::executable(), &path, &sql, TEST_WAIT).unwrap();
+        assert!(!sql.to_ascii_lowercase().contains("auth_credentials"));
+        assert!(sql.trim_start().starts_with("PRAGMA query_only=ON;"));
         assert!(!String::from_utf8_lossy(&bytes).contains("key-only-secret"));
         let reading = omp::parse(&bytes, NOW).unwrap();
         let claude = reading.claude.unwrap();
@@ -542,10 +543,10 @@ mod omp_limits {
         exec(
             &path,
             &format!(
-                "INSERT INTO usage_history(provider, recorded_at, limit_id, used_fraction, resets_at, window_label)
-                 VALUES ('anthropic',{now}-11,'anthropic:7d',0.27,NULL,'7 Day'),
-                        ('anthropic',{now},'anthropic:7d:fable',0.53,NULL,'7 Day'),
-                        ('openai-codex',{now},'openai-codex:primary',0.01,NULL,'7 days');"
+                "INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, resets_at, window_label)
+                 VALUES ('anthropic','oauth|account:recent-empty',{now}-11,'anthropic:7d',0.27,NULL,'7 Day'),
+                        ('anthropic','oauth|account:recent-empty',{now},'anthropic:7d:fable',0.53,NULL,'7 Day'),
+                        ('openai-codex','oauth|account:codex',{now},'openai-codex:primary',0.01,NULL,'7 days');"
             ),
         );
         let reading = omp::read(&path, NOW, TEST_WAIT).unwrap();
@@ -556,18 +557,70 @@ mod omp_limits {
     }
 
     #[test]
+    fn misdated_omp_rows_do_not_displace_eligible_reports_or_history() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = NOW * 1000;
+        let latest = (NOW + CLOCK_SKEW) * 1000 + 999;
+        let claude = window("anthropic:7d", "0.27", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "current", "anthropic", now, &format!("[{claude}]"));
+        report(&path, "future", "anthropic", latest + 1, "[]");
+        exec(
+            &path,
+            &format!(
+                "INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, window_label)
+                 VALUES ('openai-codex','oauth|account:codex',{latest},'openai-codex:primary',0.25,'5 Hours'),
+                        ('openai-codex','oauth|account:codex',{latest}+1,'openai-codex:primary',0.50,'5 Hours');"
+            ),
+        );
+
+        let reports = omp::read(&path, NOW, TEST_WAIT).unwrap();
+        assert_eq!(reports.claude.unwrap().windows.base[1].unwrap().percent, 27.0);
+        assert_eq!(reports.codex.unwrap().windows.base[0].unwrap().percent, 25.0);
+    }
+
+    #[test]
+    fn omp_does_not_combine_usage_from_different_accounts_of_one_provider() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = NOW * 1000;
+        let week = window("anthropic:7d", "0.27", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "claude-current", "anthropic", now - 10, &format!("[{week}]"));
+        exec(
+            &path,
+            &format!(
+                "INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, window_label)
+                 VALUES ('anthropic','oauth|account:claude-current',{now}-9,'anthropic:5h',0.25,'5 Hours'),
+                        ('anthropic','oauth|account:claude-other',{now}-8,'anthropic:7d',0.95,'7 Day'),
+                        ('openai-codex','oauth|account:codex-new',{now}-7,'openai-codex:primary',0.50,'5 Hours'),
+                        ('openai-codex','oauth|account:codex-old',{now}-8,'openai-codex:primary',0.95,'5 Hours'),
+                        ('openai-codex','oauth|account:codex-old',{now}-8,'openai-codex:secondary',0.95,'7 Day');"
+            ),
+        );
+
+        let reports = omp::read(&path, NOW, TEST_WAIT).unwrap();
+        let [five, week] = reports.claude.unwrap().windows.base;
+        assert_eq!(five.unwrap().percent, 25.0);
+        assert_eq!(week.unwrap().percent, 27.0);
+        let [five, week] = reports.codex.unwrap().windows.base;
+        assert_eq!(five.unwrap().percent, 50.0);
+        assert!(week.is_none());
+    }
+
+    #[test]
     fn omp_errors_are_quiet_and_oversized_output_is_cut_off() {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
         assert!(omp::read(&f.root.join("missing.db"), NOW, TEST_WAIT).is_none());
-        assert!(sqlite::query(f.root.join("missing-sqlite").as_os_str(), &path, omp::SQL, TEST_WAIT).is_none());
+        let sql = omp::sql(NOW);
+        assert!(sqlite::query(f.root.join("missing-sqlite").as_os_str(), &path, &sql, TEST_WAIT).is_none());
         let executable = f.root.join("sqlite-stub");
         let script = |lines: &str| write_executable(&executable, lines);
         script("printf '%s' 'not JSON'");
-        let bytes = sqlite::query(executable.as_os_str(), &path, omp::SQL, TEST_WAIT).unwrap();
+        let bytes = sqlite::query(executable.as_os_str(), &path, &sql, TEST_WAIT).unwrap();
         assert!(omp::parse(&bytes, NOW).is_none());
         script("printf '%s\\n' \"$$\" >\"$0.pid\"; printf '%70000s' x");
-        assert!(sqlite::query(executable.as_os_str(), &path, omp::SQL, TEST_WAIT).is_none());
+        assert!(sqlite::query(executable.as_os_str(), &path, &sql, TEST_WAIT).is_none());
         assert_reaped(&executable);
         exec(&path, "DROP TABLE usage_history;");
         assert!(omp::read(&path, NOW, TEST_WAIT).is_none());
@@ -608,7 +661,7 @@ mod omp_limits {
             assert!(!f.root.join(sidecar).exists());
         }
         // Use a child that would otherwise succeed even on a database without sidecars.
-        assert!(sqlite::query(std::ffi::OsStr::new("/usr/bin/true"), &path, omp::SQL, TEST_WAIT).is_none());
+        assert!(sqlite::query(std::ffi::OsStr::new("/usr/bin/true"), &path, &omp::sql(NOW), TEST_WAIT).is_none());
     }
 
     #[test]
@@ -651,7 +704,7 @@ mod omp_limits {
         // Simulate a sidecar disappearing after milo's preflight but before SQLite opens it.
         let stub = f.root.join("sqlite-stub");
         write_executable(&stub, "/bin/rm \"${0%/*}/copy.db-shm\"; exec /usr/bin/sqlite3 \"$@\"");
-        let result = sqlite::query(stub.as_os_str(), &f.root.join("copy.db"), omp::SQL, TEST_WAIT);
+        let result = sqlite::query(stub.as_os_str(), &f.root.join("copy.db"), &omp::sql(NOW), TEST_WAIT);
         assert!(!f.root.join("copy.db-shm").exists());
         assert!(result.is_none());
     }

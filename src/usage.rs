@@ -263,7 +263,7 @@ impl Reading {
         kind?.is("token_count").then_some(())?;
         let [bucket, primary, secondary] =
             limits.filter(|value| value.object())?.fields(["limit_id", "primary", "secondary"]);
-        if bucket.and_then(|v| v.string(32)).is_some_and(|id| id != "codex") {
+        if bucket.is_some_and(|id| !id.null() && !id.is("codex")) {
             return None;
         }
         let windows = Limits::new([primary, secondary].map(|window| Window::codex(window, at.seconds)));
@@ -393,8 +393,12 @@ impl CodexFile {
                 if old.complete.recheck_due(now) {
                     old.complete.recheck_at = None;
                 }
-                // A large append can push the previous report out of the bounded tail.
-                if let Some(pending) = old.pending {
+                // A large append can move the previous line out of the tail.
+                // Keep a formerly unterminated report only if the append finished it.
+                if growing
+                    && let Some(pending) = old.pending
+                    && old.stream.tail_terminated(file, version.len, budget)?
+                {
                     old.complete.append(pending, now);
                 }
                 retained = Some(old.complete);
@@ -485,7 +489,7 @@ impl Codex {
         };
         self.sessions = if self.files.inaccessible {
             CodexSessions::Unreadable
-        } else if self.files.entries.is_empty() && !self.files.partial {
+        } else if self.files.entries.iter().all(|file| file.version.len == 0) && !self.files.partial {
             CodexSessions::Missing
         } else {
             CodexSessions::Present
@@ -501,7 +505,7 @@ impl Codex {
                     CodexFile::read(&file, version, candidate.cached.take(), now, budget).ok()
                 });
             }
-            if candidate.cached.is_none() {
+            if candidate.version.len != 0 && candidate.cached.is_none() {
                 self.sessions = CodexSessions::Unreadable;
             }
         }
@@ -653,9 +657,11 @@ impl ClaudeFile {
         self.samples.expire(cutoff);
         let loaded = self.read(&file, cutoff, budget);
         self.pending = if self.settled() {
-            Sample::parse(self.stream.tail()).and_then(|(sample, id)| {
-                let repeated = id.as_ref().is_some_and(|id| self.samples.identified.contains_key(id.as_ref()));
-                (!repeated).then(|| (sample, id.map(|id| id.into_owned().into_boxed_str())))
+            Sample::parse(self.stream.tail()).map(|(mut sample, id)| {
+                if let Some(previous) = id.as_ref().and_then(|id| self.samples.identified.get(id.as_ref())) {
+                    sample.at = sample.at.min(previous.at);
+                }
+                (sample, id.map(|id| id.into_owned().into_boxed_str()))
             })
         } else {
             None
@@ -713,11 +719,13 @@ impl ClaudeFile {
 
     /// Include a valid unterminated record provisionally until a newline commits it.
     fn identified(&self) -> impl Iterator<Item = (&str, Sample)> {
+        let pending = self.pending.as_ref().and_then(|(sample, id)| Some((id.as_deref()?, *sample)));
         self.samples
             .identified
             .iter()
+            .filter(move |(id, _)| pending.is_none_or(|(pending, _)| id.as_ref() != pending))
             .map(|(id, sample)| (id.as_ref(), *sample))
-            .chain(self.pending.as_ref().and_then(|(sample, id)| Some((id.as_deref()?, *sample))))
+            .chain(pending)
     }
 
     fn anonymous(&self) -> impl Iterator<Item = &Sample> {

@@ -75,6 +75,22 @@ fn multiple_claude_blocks_for_the_same_message_are_not_counted_twice() {
 }
 
 #[test]
+fn an_unterminated_claude_update_replaces_the_previous_count_for_its_message() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let line = |tokens| identified(&assistant(now, tokens, 0, 0), "same-message");
+    write(&f, CLAUDE, &format!("{}{}", line(2000), line(1000).trim_end()), now);
+    let mut usage = open(&f, now);
+    assert_eq!(activity(&usage).today, 1000);
+
+    let mut file = OpenOptions::new().append(true).open(f.root.join(CLAUDE)).unwrap();
+    file.write_all(b"invalid").unwrap();
+    file.set_modified(mtime(now + 1)).unwrap();
+    assert!(usage.check());
+    assert_eq!(activity(&usage).today, 2000);
+}
+
+#[test]
 fn resumed_and_forked_files_share_message_ids_but_not_anonymous_records() {
     let f = Fixture::folder();
     let now = local_noon();

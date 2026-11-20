@@ -285,7 +285,7 @@ fn unchecked_writers_tables_and_rows_stay_unknown() {
     assert_eq!(opencode::read(&path, now, TEST_WAIT), Report::Unreadable);
     fs::remove_file(&path).unwrap();
 
-    let spoil: [Spoil<'_>; 10] = [
+    let spoil: [Spoil<'_>; 13] = [
         ("a newer major release", &|db| {
             db.session("ses_new", "3.0.0", now - HOUR, None);
             db.step("ses_new", now - 20, &FIRST);
@@ -298,11 +298,17 @@ fn unchecked_writers_tables_and_rows_stay_unknown() {
             let table = if db.store == Store::V1 { "message" } else { "session_message" };
             exec(&db.path, &format!("UPDATE {table} SET data='{{' WHERE time_created>={}", (now - MINUTE) * 1000));
         }),
+        ("a JSON scalar instead of a message", &|db| {
+            let table = if db.store == Store::V1 { "message" } else { "session_message" };
+            exec(&db.path, &format!("UPDATE {table} SET data='42' WHERE time_created>={}", (now - MINUTE) * 1000));
+        }),
         // Each of these would vanish into a sum that still looks plausible.
         ("a negative count", &|db| db.assistant("ses_a", now - 20, "", r#""tokens":{"input":-10}"#)),
         ("a fractional count", &|db| db.assistant("ses_a", now - 20, "", r#""tokens":{"cache":{"read":0.5}}"#)),
         ("a count in words", &|db| db.assistant("ses_a", now - 20, "", r#""tokens":{"output":"12abc"}"#)),
         ("counts that are one number", &|db| db.assistant("ses_a", now - 20, "", r#""tokens":5"#)),
+        ("an object instead of a count", &|db| db.assistant("ses_a", now - 20, "", r#""tokens":{"output":{}}"#)),
+        ("a scalar cache count", &|db| db.assistant("ses_a", now - 20, "", r#""tokens":{"cache":10}"#)),
         ("a negative cost", &|db| db.assistant("ses_a", now - 20, r#""cost":-0.25,"#, r#""tokens":{"input":1}"#)),
         ("a cost in words", &|db| db.assistant("ses_a", now - 20, r#""cost":"free","#, r#""tokens":{"input":1}"#)),
         ("a renamed column", &|db| {

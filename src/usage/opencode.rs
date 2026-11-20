@@ -52,10 +52,13 @@ const DATA: &str = "CASE WHEN json_valid(m.data) THEN m.data END AS data";
 /// that one bad row cannot hide inside a sum.
 const TOTALS: &str = "
 SELECT count(*) AS steps, max(at) AS last_ms, coalesce(sum(unverified),0) AS unverified,
-       coalesce(sum(data IS NULL
+       coalesce(sum(json_type(data) IS NOT 'object'
            OR coalesce(json_type(data,'$.tokens'),'null') NOT IN ('object','null')
+           OR coalesce(json_type(data,'$.tokens.cache'),'null') NOT IN ('object','null')
            OR EXISTS (SELECT 1 FROM json_tree(data,'$.tokens')
-                      WHERE type NOT IN ('object','integer','null') OR atom<0)
+                      WHERE (type NOT IN ('integer','null') AND
+                             (type <> 'object' OR fullkey NOT IN ('$.tokens','$.tokens.cache')))
+                             OR atom<0)
            OR coalesce(json_type(data,'$.cost'),'null') NOT IN ('integer','real','null')
            OR coalesce(json_extract(data,'$.cost')<0,0)),0) AS invalid,
        sum(coalesce(json_extract(data,'$.tokens.input'),0)) AS input,
@@ -134,7 +137,9 @@ impl Store {
         let steps = match self {
             Self::V1 => format!(
                 "SELECT m.time_created AS at, CAST(s.version AS INTEGER) IS NOT 1 AS unverified, {DATA} {old}
-                 AND CASE WHEN json_valid(m.data) THEN json_extract(m.data,'$.role')='assistant' ELSE 1 END"
+                 AND CASE WHEN json_valid(m.data)
+                          THEN json_type(m.data) IS NOT 'object' OR json_extract(m.data,'$.role')='assistant'
+                          ELSE 1 END"
             ),
             Self::V2 { legacy: false } => new,
             Self::V2 { legacy: true } => format!(

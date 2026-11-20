@@ -65,6 +65,10 @@ impl FileVersion {
     pub(super) fn modified_second(self) -> i128 {
         self.modified.0
     }
+
+    fn discovery_rank(self) -> (bool, (i128, i128)) {
+        (self.len != 0, self.modified)
+    }
 }
 
 /// Whole-file snapshots also detect in-place rewrites that preserve size and mtime.
@@ -352,17 +356,19 @@ impl Scan {
         true
     }
 
-    /// Keeps just the newest few files as the directory is walked.
+    /// Keep the newest transcripts, with empty files as possible append targets only.
     fn keep(&mut self, limit: usize, dir: &Path, name: &[u8], version: FileVersion) {
+        let rank = version.discovery_rank();
         if self.files.len() == limit {
-            self.partial = true;
-            if self.files.last().is_some_and(|old| old.version.modified > version.modified) {
+            self.partial |= version.len != 0 && self.files.last().is_some_and(|old| old.version.len != 0);
+            if self.files.last().is_some_and(|old| old.version.discovery_rank() > rank) {
                 return;
             }
         }
         let path = dir.join(OsStr::from_bytes(name));
         let at = self.files.partition_point(|old| {
-            old.version.modified > version.modified || (old.version.modified == version.modified && old.path < path)
+            let prior = old.version.discovery_rank();
+            prior > rank || (prior == rank && old.path < path)
         });
         if at < limit {
             if self.files.len() == limit {
@@ -729,6 +735,16 @@ impl Stream {
         let expected = self.tail().last().copied().unwrap_or(b'\n');
         let mut byte = [0];
         Ok(budget.read_at(file, &mut byte, self.offset - 1)? == 1 && byte[0] == expected)
+    }
+
+    /// Before losing the old EOF in a bounded tail read, check whether an
+    /// append actually ended its provisional JSON record.
+    pub(super) fn tail_terminated(&self, file: &File, len: u64, budget: &mut Budget) -> io::Result<bool> {
+        let mut suffix = [0; 64];
+        let cap = usize::try_from((len - self.offset).min(suffix.len() as u64)).unwrap_or(suffix.len());
+        let n = budget.read_at(file, &mut suffix[..cap], self.offset)?;
+        let next = suffix[..n].iter().position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
+        Ok(next.is_some_and(|i| suffix[i] == b'\n' && self.tail().len() + i <= MAX_LINE))
     }
 
     /// Stop at the observed size; bytes appended during the read belong to the next check.
