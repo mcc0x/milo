@@ -6,7 +6,7 @@ name='Milo Usage.app'
 dest=$apps/$name
 helper=Contents/MacOS/MiloUsage
 # Pass the installer path as launch metadata rather than searching a shell PATH.
-launch() { open --env "MILO_MENU_INSTALLER=$4" "$dest"; }
+launch() { open "$dest" --args --installer-path "$4"; }
 fail() { echo "$*" >&2; exit 1; }
 verify() {
     [ ! -L "$1" ] && [ -d "$1" ] && codesign --verify --deep --strict -R '=identifier "net.usemilo.usage.local"' "$1" || fail "Not a verified Milo Usage bundle: $1"
@@ -24,7 +24,12 @@ fi
 stage=$(mktemp -d "$apps/.milo-menu.XXXXXXXX")
 cleanup() {
     if [ -d "$stage/previous" ]; then
-        if [ ! -e "$dest" ]; then mv "$stage/previous" "$dest" || return; else echo "Previous bundle retained in $stage" >&2; return; fi
+        if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+            mv "$stage/previous" "$dest" || return
+        else
+            echo "Previous bundle retained in $stage" >&2
+            return
+        fi
     fi
     rm -rf "$stage"
 }

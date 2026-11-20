@@ -13,7 +13,15 @@ pub(crate) fn installed() -> Option<bool> {
     if !home.is_absolute() { return None; }
     let app = home.join("Applications/Milo Usage.app");
     match std::fs::symlink_metadata(&app) {
-        Ok(info) if info.is_dir() && app.join("Contents/MacOS/MiloUsage").is_file() => Some(true),
+        Ok(info)
+            if info.is_dir()
+                && app
+                    .join("Contents/MacOS/MiloUsage")
+                    .symlink_metadata()
+                    .is_ok_and(|helper| helper.is_file()) =>
+        {
+            Some(true)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
         _ => None,
     }
@@ -34,8 +42,11 @@ pub(crate) fn run(action: Action) -> Result<String, String> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
     if !home.is_absolute() { return Err("HOME must be absolute".into()); }
     let apps = home.join("Applications");
-    if action == Action::Uninstall && !apps.exists() { return Ok("Milo Usage is not installed.".into()); }
-    fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+    if action == Action::Install {
+        fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+    } else if !apps.try_exists().map_err(|e| e.to_string())? {
+        return Ok("Milo Usage is not installed.".into());
+    }
     // Serialize our own upgrades and removals without leaving a lock file behind.
     let lock = fs::File::open(&apps).map_err(|e| e.to_string())?;
     lock.try_lock().map_err(|e| format!("cannot lock Applications for the menu installer: {e}"))?;

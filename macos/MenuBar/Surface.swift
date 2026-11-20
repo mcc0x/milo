@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 struct UsageSnapshot: Codable, Equatable {
@@ -47,8 +48,8 @@ struct UsagePanel: View {
     let refresh: () -> Void
     let openSettings: () -> Void
     let quit: () -> Void
-    let loginEnabled: Bool
-    let toggleLogin: () -> Void
+    let loginStatus: SMAppService.Status
+    let setLoginEnabled: (Bool) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @PanelState private var turn = 0
     @PanelState private var awaitingRefresh = false
@@ -224,9 +225,12 @@ struct UsagePanel: View {
                 .pickerStyle(.menu)
                 Divider()
                 Toggle("Launch at Login", isOn: Binding(
-                    get: { loginEnabled },
-                    set: { if $0 != loginEnabled { toggleLogin() } }
+                    get: { loginStatus == .enabled || loginStatus == .requiresApproval },
+                    set: setLoginEnabled
                 ))
+                if loginStatus == .requiresApproval {
+                    Button("Approve Launch at Login…", action: SMAppService.openSystemSettingsLoginItems)
+                }
                 Divider()
                 Button("Quit Milo", action: quit)
                     .keyboardShortcut("q", modifiers: .command)

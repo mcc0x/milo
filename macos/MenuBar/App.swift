@@ -6,7 +6,7 @@ import SwiftUI
 private final class Model: ObservableObject {
     @Published var snapshot: UsageSnapshot?
     @Published var failure: String?
-    @Published var loginEnabled = SMAppService.mainApp.status == .enabled
+    @Published private(set) var loginStatus = SMAppService.mainApp.status
     @Published var mode = UserDefaults.standard.string(forKey: "badgeMode") ?? "auto" {
         didSet { UserDefaults.standard.set(mode, forKey: "badgeMode"); changed?() }
     }
@@ -40,11 +40,12 @@ private final class Model: ObservableObject {
     // and keep unsaved drafts when the menu app quits. It has its own idle timeout.
     private var independentSettings = false
     init() {
-        if let path = ProcessInfo.processInfo.environment["MILO_MENU_INSTALLER"],
-           path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path),
-           Bundle.main.bundleURL.standardizedFileURL.path == FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/Milo Usage.app").standardizedFileURL.path {
-            UserDefaults.standard.set(path, forKey: "installerPath")
+        let arguments = CommandLine.arguments
+        if arguments.count == 3, arguments[1] == "--installer-path", arguments[2].hasPrefix("/"),
+           FileManager.default.isExecutableFile(atPath: arguments[2]),
+           Bundle.main.bundleURL.resolvingSymlinksInPath().path == FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/Milo Usage.app").resolvingSymlinksInPath().path {
+            UserDefaults.standard.set(arguments[2], forKey: "installerPath")
         }
     }
 
@@ -57,7 +58,7 @@ private final class Model: ObservableObject {
         guard let process = bundledProcess(["web", "--port", "0", "--no-open"]) else { settingsError(); return }
         let defaults = UserDefaults.standard
         independentSettings = false
-        if let path = ProcessInfo.processInfo.environment["MILO_MENU_INSTALLER"] ?? defaults.string(forKey: "installerPath"), path.hasPrefix("/"),
+        if let path = defaults.string(forKey: "installerPath"), path.hasPrefix("/"),
            FileManager.default.isExecutableFile(atPath: path) {
             process.executableURL = URL(fileURLWithPath: path)
             independentSettings = true
@@ -83,12 +84,12 @@ private final class Model: ObservableObject {
             while data.count < 512 && !data.contains(10) {
                 let bytes = pipe.availableData
                 if bytes.isEmpty { break }
-                data.append(bytes)
+                data.append(contentsOf: bytes.prefix(512 - data.count))
             }
-            let link = String(decoding: data.prefix(while: { $0 != 10 }), as: UTF8.self)
+            let link = data.firstIndex(of: 10).map { String(decoding: data[..<$0], as: UTF8.self) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.settings === process, process.isRunning else { return }
-                guard let url = URL(string: link), url.scheme == "http", url.host == "127.0.0.1",
+                guard let link, let url = URL(string: link), url.scheme == "http", url.host == "127.0.0.1",
                       url.port != nil, url.fragment?.isEmpty == false else {
                     self.stopSettings(); self.settingsError(); return
                 }
@@ -166,19 +167,23 @@ private final class Model: ObservableObject {
         if let process = child, process.isRunning { process.terminate() }
         child = nil
     }
-    func toggleLogin() {
+    func refreshLoginStatus() { loginStatus = SMAppService.mainApp.status }
+
+    func setLoginEnabled(_ enabled: Bool) {
+        let service = SMAppService.mainApp
         do {
-            switch SMAppService.mainApp.status {
-            case .enabled: try SMAppService.mainApp.unregister()
-            case .requiresApproval: SMAppService.openSystemSettingsLoginItems()
-            default:
-                try SMAppService.mainApp.register()
-                if SMAppService.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+            let status = service.status
+            let registered = status == .enabled || status == .requiresApproval
+            if enabled && !registered {
+                try service.register()
+                if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+            } else if !enabled && registered {
+                try service.unregister()
             }
         } catch {
             let alert = NSAlert(); alert.messageText = "Couldn’t change Launch at Login"; alert.informativeText = error.localizedDescription; alert.runModal()
         }
-        loginEnabled = SMAppService.mainApp.status == .enabled
+        refreshLoginStatus()
     }
 }
 
@@ -187,7 +192,7 @@ private struct Content: View {
     var body: some View {
         UsagePanel(snapshot: model.snapshot, error: model.failure, badgeMode: $model.mode,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
-                   loginEnabled: model.loginEnabled, toggleLogin: model.toggleLogin).fixedSize()
+                   loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
     }
 }
 
@@ -231,7 +236,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggle() { if popover.isShown { popover.performClose(nil) } else { show() } }
     private func show() {
         guard let button = status?.button else { return }
-        model.loginEnabled = SMAppService.mainApp.status == .enabled
+        model.refreshLoginStatus()
         updateBadge(); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
@@ -244,27 +249,30 @@ private struct MiloMenuApp {
     @MainActor static func main() {
         if CommandLine.arguments.count == 3,
            ["--stop-installed", "--remove-installed"].contains(CommandLine.arguments[1]) {
-            let target = URL(fileURLWithPath: CommandLine.arguments[2]).standardizedFileURL
-            do {
-                if CommandLine.arguments[1] == "--remove-installed" {
-                    guard Bundle.main.bundleURL.standardizedFileURL.path == target.path else { exit(1) }
-                    let service = SMAppService.mainApp
+            let target = URL(fileURLWithPath: CommandLine.arguments[2]).resolvingSymlinksInPath().path
+            let removing = CommandLine.arguments[1] == "--remove-installed"
+            guard let identifier = Bundle.main.bundleIdentifier,
+                  !removing || Bundle.main.bundleURL.resolvingSymlinksInPath().path == target else { exit(1) }
+            let running = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && $0.bundleURL?.resolvingSymlinksInPath().path == target }
+            for app in running { _ = app.terminate() }
+            let deadline = DispatchTime.now() + .seconds(5)
+            while running.contains(where: { !$0.isTerminated }) && DispatchTime.now() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+            guard running.allSatisfy(\.isTerminated) else { exit(1) }
+            if removing {
+                let service = SMAppService.mainApp
+                do {
                     if service.status == .enabled || service.status == .requiresApproval {
                         try service.unregister()
                     }
+                } catch {
+                    FileHandle.standardError.write(Data("Could not unregister login item: \(error.localizedDescription)\n".utf8))
+                    exit(1)
                 }
-                let running = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier!)
-                    .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && $0.bundleURL?.standardizedFileURL.path == target.path }
-                for app in running { _ = app.terminate() }
-                let deadline = Date().addingTimeInterval(5)
-                while running.contains(where: { !$0.isTerminated }) && Date() < deadline {
-                    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-                }
-                exit(running.allSatisfy(\.isTerminated) ? 0 : 1)
-            } catch {
-                FileHandle.standardError.write(Data("Could not unregister login item: \(error.localizedDescription)\n".utf8))
-                exit(1)
             }
+            exit(0)
         }
         signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared; app.setActivationPolicy(.accessory)
