@@ -64,6 +64,7 @@ function enqueue(action) {
     queue.push(action);
   }
   operationWarning = '';
+  byId('operation-status').textContent = '';
   if (!paused) localError = '';
   const checking = action.action === 'doctor';
   if (checking) byId('health-status').textContent = 'Checking health…';
@@ -109,8 +110,10 @@ async function drain() {
     const {pending, ...action} = queue[0];
     try {
       state = await api('/api/action', 'POST', {...action, version: state.version});
-      if (state.message?.error) operationWarning = state.message.text;
-      else if (state.message) notify(state.message.text);
+      if (state.message?.error) {
+        operationWarning = state.message.text;
+        byId('operation-status').textContent = operationWarning;
+      } else if (state.message) notify(state.message.text);
       queue.splice(0, 1 + (pending ?? 0));
       if (action.action === 'doctor') {
         const {level, note} = state.doctor;
