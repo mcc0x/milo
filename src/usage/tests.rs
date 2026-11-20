@@ -200,6 +200,94 @@ fn the_first_usage_look_loads_data_and_missing_roots_use_the_two_second_pace() {
     assert_eq!(pace.as_ref().unwrap().idle(), covered, "recreated roots are watched again when supported");
 }
 
+#[test]
+fn notification_bursts_refresh_known_files_before_discovering_new_sessions() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let clock = Instant::now();
+    fs::create_dir_all(f.root.join(STATE)).unwrap();
+    write(&f, CODEX, &codex(now - 2, 23, now + DAY, "null"), now - 2);
+    write(&f, CLAUDE, &assistant(now - 2, 1000, 0, 0), now - 2);
+    let mut usage = unopened(&f, now);
+    assert!(usage.refresh(now, clock, false));
+    assert!(usage.watch_scope().complete);
+
+    let latest = codex(now - 1, 64, now + DAY, "null");
+    let extra = assistant(now - 1, 2000, 0, 0);
+    for (path, line) in [(CODEX, &latest), (CLAUDE, &extra)] {
+        let mut file = OpenOptions::new().append(true).open(f.root.join(path)).unwrap();
+        file.write_all(line.as_bytes()).unwrap();
+        file.set_modified(mtime(now)).unwrap();
+    }
+    write(&f, "codex/2026/11/19/rollout-new.jsonl", &codex(now, 82, now + DAY, "null"), now);
+    write(&f, "claude/other/new.jsonl", &assistant(now, 4000, 0, 0), now);
+
+    usage.filesystem_changed();
+    assert!(usage.refresh(now, clock + Duration::from_millis(120), false));
+    assert_eq!(usage.bytes_read, (latest.len() + extra.len() + 1) as u64);
+    assert!(frame(&mut usage, 100, 2)[0].contains("36%"));
+    assert_eq!(activity(&usage).today, 3000);
+    assert!(!usage.watch_scope().complete, "a deferred discovery still needs a look");
+    for ms in [240, 360, 480] {
+        usage.filesystem_changed();
+        assert!(usage.refresh(now, clock + Duration::from_millis(ms), false));
+        assert_eq!(usage.bytes_read, 0);
+    }
+
+    assert!(usage.refresh(now, clock + Duration::from_secs(2), false));
+    assert!(frame(&mut usage, 100, 2)[0].contains("18%"));
+    assert_eq!(activity(&usage).today, 7000);
+    assert!(usage.watch_scope().complete);
+}
+
+#[test]
+fn quick_idle_looks_do_not_walk_the_other_store_while_a_root_is_missing() {
+    let f = Fixture::folder();
+    let now = local_noon();
+    let clock = Instant::now();
+    fs::create_dir_all(f.root.join(STATE)).unwrap();
+    write(&f, CLAUDE, &assistant(now, 1000, 0, 0), now);
+    let mut usage = unopened(&f, now);
+    assert!(usage.refresh(now, clock, false));
+    assert!(!usage.watch_scope().complete);
+
+    write(&f, "claude/other/new.jsonl", &assistant(now, 2000, 0, 0), now);
+    for seconds in [2, 4, 6] {
+        assert!(usage.refresh(now, clock + Duration::from_secs(seconds), false));
+        assert_eq!(usage.bytes_read, 0);
+        assert_eq!(activity(&usage).today, 1000);
+    }
+    write(&f, CODEX, &codex(now, 61, now + DAY, "null"), now);
+    assert!(usage.refresh(now, clock + Duration::from_secs(8), false));
+    assert!(frame(&mut usage, 100, 2)[0].contains("39%"));
+    assert!(usage.watch_scope().complete);
+    assert_eq!(activity(&usage).today, 1000);
+
+    assert!(usage.refresh(now, clock + WATCHED, false));
+    assert_eq!(activity(&usage).today, 3000);
+}
+
+#[test]
+fn manual_refresh_and_a_new_local_day_bypass_the_discovery_rest() {
+    let f = Fixture::folder();
+    let midnight = Today::at(NOW, when::local_day(NOW)).since;
+    let before = midnight - 1;
+    let clock = Instant::now();
+    write(&f, CLAUDE, &assistant(before, 1000, 0, 0), before);
+    let mut usage = unopened(&f, before);
+    assert!(usage.refresh(before, clock, false));
+
+    write(&f, "claude/other/manual.jsonl", &assistant(before, 2000, 0, 0), before);
+    assert_eq!(usage.key(Key::Char('r')), After::Stay);
+    assert_eq!(activity(&usage).today, 3000);
+
+    usage.fixed_now = Some(midnight);
+    assert!(!caption(&mut usage).contains("tokens today"));
+    write(&f, "claude/other/today.jsonl", &assistant(midnight, 4000, 0, 0), midnight);
+    assert!(usage.refresh(midnight, clock + Duration::from_millis(120), false));
+    assert_eq!(activity(&usage).today, 4000);
+}
+
 fn claude_report(path: &Path, limits: &str, now: i64) {
     let input = format!("{{\"rate_limits\":{limits}}}");
     assert_eq!(status::run(input.as_bytes(), Vec::new(), Some(path), now), 0);

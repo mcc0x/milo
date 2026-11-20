@@ -135,7 +135,8 @@ fn a_budget_limited_first_load_resumes_backwards_then_reads_new_appends() {
     write(&f, CLAUDE, &format!("{first}{second}"), now - 1);
     let mut claude = Claude::default();
     let root = f.root.join("claude");
-    assert!(!claude.check(Some(&root), today, &mut Budget::new(second.len() as u64 + 3)));
+    let clock = Instant::now();
+    assert!(!claude.check(Some(&root), today, clock, false, &mut Budget::new(second.len() as u64 + 3)));
     assert_eq!(claude.activity(today, now).today, 2000);
     assert!(claude.activity(today, now).partial);
 
@@ -144,7 +145,7 @@ fn a_budget_limited_first_load_resumes_backwards_then_reads_new_appends() {
     file.write_all(append.as_bytes()).unwrap();
     file.set_modified(mtime(now)).unwrap();
     let mut budget = Budget::new(4096);
-    assert!(claude.check(Some(&root), today, &mut budget));
+    assert!(claude.check(Some(&root), today, clock, false, &mut budget));
     assert_eq!(budget.read, (first.len() - 3 + append.len()) as u64);
     assert_eq!(claude.activity(today, now).today, 7000);
     assert!(!claude.activity(today, now).partial);

@@ -22,7 +22,7 @@ use crate::watch::Scope;
 use crate::when::{DAY, MINUTE};
 use crate::{paths, preferences, when};
 
-use self::files::{Budget, FileVersion, Reverse, Sessions, SnapshotVersion, Stream, Tree};
+use self::files::{Budget, FileVersion, Reverse, SessionFile, SessionRoot, Sessions, SnapshotVersion, Stream, Tree};
 use self::time::Timestamp;
 
 const CLOCK_SKEW: i64 = 5 * MINUTE;
@@ -281,23 +281,17 @@ enum CodexSessions {
 /// Keep one snapshot per session alongside the account snapshot from OMP.
 #[derive(Default)]
 struct Codex {
-    files: HashMap<PathBuf, CodexFile>,
+    files: Sessions<CodexFile>,
     omp: Option<Reading>,
     sessions: CodexSessions,
 }
 
 impl Codex {
     /// Drop sessions that vanished and reuse reports from files that did not change.
-    fn check(&mut self, root: Option<&Path>, now: i64, budget: &mut Budget) {
-        let Some(root) = root else {
-            self.files.clear();
-            self.sessions = CodexSessions::Missing;
-            return;
-        };
-        let mut sessions = match Sessions::scan(root, Tree::Codex) {
-            Ok(sessions) => sessions,
+    fn check(&mut self, path: Option<&Path>, now: i64, clock: Instant, force: bool, budget: &mut Budget) {
+        let root = match self.files.refresh(path, Tree::Codex, clock, force) {
+            Ok((root, _)) => root,
             Err(error) => {
-                self.files.clear();
                 self.sessions = if error.kind() == io::ErrorKind::NotFound {
                     CodexSessions::Missing
                 } else {
@@ -306,50 +300,29 @@ impl Codex {
                 return;
             }
         };
-        self.sessions = if sessions.inaccessible {
+        self.sessions = if self.files.inaccessible {
             CodexSessions::Unreadable
-        } else if sessions.files.is_empty() && !sessions.partial {
+        } else if self.files.entries.is_empty() && !self.files.partial {
             CodexSessions::Missing
         } else {
             CodexSessions::Present
         };
-        if sessions.files.len() == self.files.len()
-            && sessions
-                .files
-                .iter()
-                .all(|candidate| self.files.get(&candidate.path).is_some_and(|file| file.version == candidate.version))
-        {
-            return;
-        }
-        let mut previous = std::mem::take(&mut self.files);
-        for candidate in std::mem::take(&mut sessions.files) {
-            let cached = previous.remove(&candidate.path);
-            if let Some(file) = Self::check_file(&sessions, &candidate, cached, now, budget) {
-                self.files.insert(candidate.path, file);
-            } else {
+        for candidate in &mut self.files.entries {
+            if budget.remaining != 0 && !candidate.cached.as_ref().is_some_and(|file| file.version == candidate.version) {
+                candidate.cached = root.open(&candidate.path).and_then(|(file, version)| {
+                    CodexFile::read(&file, version, candidate.cached.take(), now, budget).ok()
+                });
+            }
+            if candidate.cached.is_none() {
                 self.sessions = CodexSessions::Unreadable;
             }
         }
     }
 
-    fn check_file(
-        sessions: &Sessions,
-        candidate: &files::Candidate,
-        cached: Option<CodexFile>,
-        now: i64,
-        budget: &mut Budget,
-    ) -> Option<CodexFile> {
-        if budget.remaining == 0 || cached.as_ref().is_some_and(|file| file.version == candidate.version) {
-            return cached;
-        }
-        let (file, version) = sessions.open(&candidate.path)?;
-        CodexFile::read(&file, version, cached, now, budget).ok()
-    }
-
     /// Different sources can describe the same account, not separate limits to add.
     fn reported(&self) -> Option<(&Reading, Source)> {
         self.files
-            .values()
+            .cached()
             .filter_map(|file| file.reported().map(|r| (r, Source::CodexSession)))
             .chain(self.omp.iter().map(|r| (r, Source::Omp)))
             .max_by_key(|(r, _)| r.at)
@@ -445,15 +418,15 @@ impl ClaudeFile {
     }
 
     /// Rewritten files start over; appends use the existing cursor.
-    fn check(&mut self, sessions: &Sessions, candidate: &files::Candidate, cutoff: i64, budget: &mut Budget) -> bool {
-        if self.version == candidate.version && self.settled() {
+    fn check(&mut self, root: &SessionRoot, path: &Path, candidate: FileVersion, cutoff: i64, budget: &mut Budget) -> bool {
+        if self.version == candidate && self.settled() {
             return true;
         }
         if budget.remaining == 0 {
             return false;
         }
-        let Some((file, version)) = sessions.open(&candidate.path) else {
-            *self = Self::new(candidate.version);
+        let Some((file, version)) = root.open(path) else {
+            *self = Self::new(candidate);
             return true;
         };
         if !version.same_file(self.version) || version != self.version && version.len <= self.version.len {
@@ -541,7 +514,7 @@ impl ClaudeFile {
 /// Local token activity and account limits have separate sources and meanings.
 #[derive(Default)]
 struct Claude {
-    files: HashMap<PathBuf, ClaudeFile>,
+    files: Sessions<ClaudeFile>,
     identified: Vec<Sample>,
     partial: bool,
     saved_version: Option<SnapshotVersion>,
@@ -566,35 +539,30 @@ impl Claude {
             .max_by_key(|(reading, _)| reading.at)
     }
 
-    /// Merge duplicate IDs once per changed scan instead of on every redraw.
-    fn check(&mut self, root: Option<&Path>, cutoff: i64, budget: &mut Budget) -> bool {
-        let Some(mut sessions) = root.and_then(|p| Sessions::scan(p, Tree::Claude { since: cutoff }).ok()) else {
-            self.files.clear();
+    /// Merge duplicate IDs only when a contributing file changes.
+    fn check(&mut self, path: Option<&Path>, cutoff: i64, clock: Instant, force: bool, budget: &mut Budget) -> bool {
+        let Ok((root, mut changed)) = self.files.refresh(path, Tree::Claude { since: cutoff }, clock, force) else {
             self.identified.clear();
             self.partial = false;
             return true;
         };
-        self.partial = sessions.partial;
-        if sessions.files.len() == self.files.len()
-            && sessions.files.iter().all(|candidate| {
-                self.files.get(&candidate.path).is_some_and(|file| file.version == candidate.version && file.settled())
-            })
-        {
-            return true;
-        }
-        let mut previous = std::mem::take(&mut self.files);
+        self.partial = self.files.partial;
         let mut settled = true;
-        for candidate in std::mem::take(&mut sessions.files) {
-            let mut file = previous.remove(&candidate.path).unwrap_or_else(|| ClaudeFile::new(candidate.version));
-            settled &= file.check(&sessions, &candidate, cutoff, budget);
+        for SessionFile { path, version, cached } in &mut self.files.entries {
+            if cached.as_ref().is_some_and(|file| file.version == *version && file.settled()) {
+                continue;
+            }
+            let file = cached.get_or_insert_with(|| ClaudeFile::new(*version));
+            settled &= file.check(&root, path, *version, cutoff, budget);
             self.partial |= !file.settled();
-            self.files.insert(candidate.path, file);
+            changed = true;
         }
         self.partial |= !settled;
-        // Merge once per changed scan, not on each redraw. The number of
-        // contributors is capped by the session and per-file sample limits.
+        if !changed {
+            return settled;
+        }
         let mut unique = HashMap::<&str, Sample>::new();
-        for (id, sample) in self.files.values().flat_map(ClaudeFile::identified) {
+        for (id, sample) in self.files.cached().flat_map(ClaudeFile::identified) {
             unique
                 .entry(id)
                 .and_modify(|old| {
@@ -611,11 +579,11 @@ impl Claude {
     /// Use the current local day even when the underlying transcripts have not changed.
     fn activity(&self, today: i64, now: i64) -> Activity {
         let mut activity = Activity { partial: self.partial, ..Activity::default() };
-        activity.partial |= self.files.values().any(|file| file.samples.incomplete_since.is_some_and(|at| at >= today));
+        activity.partial |= self.files.cached().any(|file| file.samples.incomplete_since.is_some_and(|at| at >= today));
         for sample in self
             .identified
             .iter()
-            .chain(self.files.values().flat_map(ClaudeFile::anonymous))
+            .chain(self.files.cached().flat_map(ClaudeFile::anonymous))
             .filter(|s| (today..=now).contains(&s.at))
         {
             activity.today = activity.today.saturating_add(sample.tokens);
@@ -725,9 +693,8 @@ impl Usage {
     }
 
     /// Give each provider its own I/O allowance so one busy log cannot starve the other.
-    fn refresh(&mut self, now: i64, manual: bool) -> bool {
+    fn refresh(&mut self, now: i64, clock: Instant, manual: bool) -> bool {
         self.collect_omp();
-        let clock = Instant::now();
         if manual {
             self.omp.reload(now, clock);
         } else {
@@ -735,9 +702,10 @@ impl Usage {
         }
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
-        self.check_limits(now, &mut codex_budget, &mut claude_budget);
+        self.check_limits(now, &mut claude_budget);
+        self.codex.check(self.codex_dir.as_deref(), now, clock, manual, &mut codex_budget);
         let cutoff = self.today.since(now);
-        let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, &mut claude_budget);
+        let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, clock, manual, &mut claude_budget);
         #[cfg(test)]
         {
             self.bytes_read = codex_budget.read + claude_budget.read;
@@ -758,7 +726,7 @@ impl Usage {
         true
     }
 
-    fn check_limits(&mut self, now: i64, codex_budget: &mut Budget, claude_budget: &mut Budget) {
+    fn check_limits(&mut self, now: i64, claude_budget: &mut Budget) {
         if let Some(path) = &self.limits_file {
             files::read_cached(
                 path,
@@ -777,7 +745,6 @@ impl Usage {
                 |file, version, budget| status::native(file, version, budget, now),
             );
         }
-        self.codex.check(self.codex_dir.as_deref(), now, codex_budget);
     }
 }
 
@@ -790,7 +757,8 @@ pub fn sources() -> [(&'static str, Option<&'static str>); 2] {
         usage.codex.omp = reports.codex;
         usage.claude.omp = reports.claude;
     }
-    usage.check_limits(now, &mut Budget::new(CODEX_BYTES), &mut Budget::new(CLAUDE_BYTES));
+    usage.check_limits(now, &mut Budget::new(CLAUDE_BYTES));
+    usage.codex.check(usage.codex_dir.as_deref(), now, Instant::now(), true, &mut Budget::new(CODEX_BYTES));
     [
         ("Codex", usage.codex.reported().map(|(_, source)| source.label())),
         ("Claude", usage.claude.reported().map(|(_, source)| source.label())),
@@ -803,7 +771,12 @@ impl Pane for Usage {
     }
 
     fn check(&mut self) -> bool {
-        self.refresh(self.now(), false)
+        self.refresh(self.now(), Instant::now(), false)
+    }
+
+    fn filesystem_changed(&mut self) {
+        self.codex.files.changed();
+        self.claude.files.changed();
     }
 
     fn external_fd(&self) -> Option<RawFd> {
@@ -824,7 +797,8 @@ impl Pane for Usage {
         let paths =
             [self.codex_dir.as_deref(), self.claude_dir.as_deref(), self.limits_file.as_deref().and_then(Path::parent)];
         let mut roots = Vec::new();
-        let mut complete = true;
+        // Deferred discovery needs another look even if no more events arrive.
+        let mut complete = !self.codex.files.pending() && !self.claude.files.pending();
         for path in paths.into_iter().flatten() {
             if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
                 roots.push(path.to_owned());
@@ -839,7 +813,7 @@ impl Pane for Usage {
         match key {
             Key::Char('q') => return After::Leave,
             Key::Char('r') => {
-                self.refresh(self.now(), true);
+                self.refresh(self.now(), Instant::now(), true);
             }
             _ => return After::Ignored,
         }

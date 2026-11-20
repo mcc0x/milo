@@ -10,7 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::fs_ops::{self, READ_FLAGS};
 
@@ -19,6 +19,10 @@ const CLAUDE_FILES: usize = 128;
 const MAX_ENTRIES: usize = 32_768;
 const MAX_LINE: usize = 2 * 1024 * 1024;
 const BLOCK: usize = 32 * 1024;
+
+/// Pathless notifications arrive on writes as well as additions. Coalesce the walks.
+const DISCOVERY_REST: Duration = Duration::from_secs(2);
+const DISCOVERY_IDLE: Duration = Duration::from_secs(30);
 
 /// Incremental transcripts use file identity, length and mtime, not metadata-only changes such as chmod.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,6 +155,7 @@ pub(super) fn read_pipe(input: impl AsFd, max: usize, deadline: Instant) -> Opti
 }
 
 /// Restrict each walk to the layout its provider actually uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tree {
     Codex,
     Claude { since: i64 },
@@ -261,9 +266,9 @@ fn version_at(dir: RawFd, path: &CStr) -> Option<FileVersion> {
 }
 
 /// A candidate is not known to be the same file until it is opened again.
-pub(super) struct Candidate {
-    pub path: PathBuf,
-    pub version: FileVersion,
+struct Candidate {
+    path: PathBuf,
+    version: FileVersion,
 }
 
 /// Cap both the number examined and the number held, independently.
@@ -371,41 +376,167 @@ fn codex_folders(dir: &mut Dir, tree: &Tree, depth: usize) -> Vec<CString> {
     names
 }
 
-/// Keep the root descriptor so later opens are anchored to the directory actually scanned.
-pub(super) struct Sessions {
-    root: File,
-    pub files: Vec<Candidate>,
+/// Discover a bounded set of paths, then check their versions without walking the tree.
+pub(super) struct Sessions<T> {
+    last: Option<Discovery>,
+    pending: bool,
+    pub entries: Vec<SessionFile<T>>,
     pub partial: bool,
     pub inaccessible: bool,
 }
 
-impl Sessions {
-    pub(super) fn scan(root: &Path, tree: Tree) -> io::Result<Self> {
-        Self::scan_with_limit(root, tree, MAX_ENTRIES)
+struct Discovery {
+    root: (u64, u64),
+    tree: Tree,
+    at: Instant,
+}
+
+pub(super) struct SessionFile<T> {
+    pub path: PathBuf,
+    pub version: FileVersion,
+    pub cached: Option<T>,
+}
+
+impl<T> Default for Sessions<T> {
+    fn default() -> Self {
+        Self { last: None, pending: false, entries: Vec::new(), partial: false, inaccessible: false }
+    }
+}
+
+impl<T> Sessions<T> {
+    pub(super) fn changed(&mut self) {
+        self.pending = true;
     }
 
-    fn scan_with_limit(root: &Path, tree: Tree, remaining: usize) -> io::Result<Self> {
-        let root = fs_ops::open_dir(root)?;
-        // Open a separate stream: a duplicate descriptor would share the directory cursor.
-        let dir = open_at(root.as_raw_fd(), c".", libc::O_DIRECTORY).and_then(Dir::new)?;
+    pub(super) fn pending(&self) -> bool {
+        self.pending
+    }
+
+    pub(super) fn cached(&self) -> impl Iterator<Item = &T> {
+        self.entries.iter().filter_map(|file| file.cached.as_ref())
+    }
+
+    pub(super) fn refresh(
+        &mut self,
+        path: Option<&Path>,
+        tree: Tree,
+        clock: Instant,
+        force: bool,
+    ) -> io::Result<(SessionRoot, bool)> {
+        let result = self.check(path, tree, clock, force);
+        if result.is_err() {
+            self.last = None;
+            self.pending = false;
+            self.entries.clear();
+            self.partial = false;
+            self.inaccessible = false;
+        }
+        result
+    }
+
+    /// Returns the root for later reads and whether the selected paths changed.
+    fn check(
+        &mut self,
+        path: Option<&Path>,
+        tree: Tree,
+        clock: Instant,
+        force: bool,
+    ) -> io::Result<(SessionRoot, bool)> {
+        let root = SessionRoot(fs_ops::open_dir(path.ok_or(io::ErrorKind::NotFound)?)?);
+        let metadata = root.0.metadata()?;
+        let identity = (metadata.dev(), metadata.ino());
+        let discover = force
+            || self.last.as_ref().is_none_or(|last| {
+                let elapsed = clock.saturating_duration_since(last.at);
+                last.root != identity
+                    || last.tree != tree
+                    || elapsed >= DISCOVERY_IDLE
+                    || self.pending && elapsed >= DISCOVERY_REST
+            });
+        let count = self.entries.len();
+        if !discover {
+            self.entries.retain_mut(|file| {
+                let Some(version) = root.version(&file.path).filter(|&version| tree.includes(version)) else {
+                    return false;
+                };
+                file.version = version;
+                true
+            });
+            let changed = self.entries.len() != count;
+            self.pending |= changed;
+            return Ok((root, changed));
+        }
+
+        let scan = root.scan(tree, MAX_ENTRIES)?;
+        self.last = Some(Discovery { root: identity, tree, at: clock });
+        self.pending = false;
+        self.partial = scan.partial;
+        self.inaccessible = scan.inaccessible;
+        if scan.files.len() == count && scan.files.iter().zip(&self.entries).all(|(new, old)| new.path == old.path) {
+            for (new, old) in scan.files.into_iter().zip(&mut self.entries) {
+                old.version = new.version;
+            }
+            return Ok((root, false));
+        }
+
+        self.entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        let mut changed = scan.files.len() != count;
+        self.entries = scan
+            .files
+            .into_iter()
+            .map(|Candidate { path, version }| {
+                let cached = match self.entries.binary_search_by(|file| file.path.cmp(&path)) {
+                    Ok(index) => self.entries[index].cached.take(),
+                    Err(_) => {
+                        changed = true;
+                        None
+                    }
+                };
+                SessionFile { path, version, cached }
+            })
+            .collect();
+        Ok((root, changed))
+    }
+}
+
+/// Anchor all checks and reads to the same root, refusing links in every component.
+pub(super) struct SessionRoot(File);
+
+impl SessionRoot {
+    fn scan(&self, tree: Tree, remaining: usize) -> io::Result<Scan> {
+        let dir = open_at(self.0.as_raw_fd(), c".", libc::O_DIRECTORY).and_then(Dir::new)?;
         let mut scan = Scan { remaining, files: Vec::new(), partial: false, inaccessible: false };
         scan.directory(dir, &tree, &mut PathBuf::new(), 0);
-        Ok(Self { root, files: scan.files, partial: scan.partial, inaccessible: scan.inaccessible })
+        Ok(scan)
     }
 
-    /// Refuse links or non-files even if the candidate was replaced after scanning.
+    fn version(&self, path: &Path) -> Option<FileVersion> {
+        self.entry(path, version_at)
+    }
+
     pub(super) fn open(&self, path: &Path) -> Option<(File, FileVersion)> {
+        self.entry(path, |fd, name| {
+            let file = open_at(fd, name, 0).ok()?;
+            let version = FileVersion::opened(&file)?;
+            Some((file, version))
+        })
+    }
+
+    fn entry<T>(&self, path: &Path, read: impl FnOnce(RawFd, &CStr) -> Option<T>) -> Option<T> {
         let mut parts = path.iter().peekable();
         let mut folder = None::<File>;
+        let mut name = [0; libc::PATH_MAX as usize];
         while let Some(part) = parts.next() {
-            let fd = folder.as_ref().unwrap_or(&self.root).as_raw_fd();
-            let name = CString::new(part.as_bytes()).ok()?;
+            let fd = folder.as_ref().unwrap_or(&self.0).as_raw_fd();
+            let bytes = part.as_bytes();
+            let name = name.get_mut(..=bytes.len())?;
+            name[..bytes.len()].copy_from_slice(bytes);
+            name[bytes.len()] = 0;
+            let name = CStr::from_bytes_with_nul(name).ok()?;
             if parts.peek().is_none() {
-                let file = open_at(fd, &name, 0).ok()?;
-                let version = FileVersion::opened(&file)?;
-                return Some((file, version));
+                return read(fd, name);
             }
-            folder = Some(open_at(fd, &name, libc::O_DIRECTORY).ok()?);
+            folder = Some(open_at(fd, name, libc::O_DIRECTORY).ok()?);
         }
         None
     }
@@ -697,7 +828,7 @@ mod tests {
         ] {
             f.write(path, "{}\n");
         }
-        let sessions = Sessions::scan_with_limit(&f.root, Tree::Codex, 4).unwrap();
+        let sessions = SessionRoot(fs_ops::open_dir(&f.root).unwrap()).scan(Tree::Codex, 4).unwrap();
         assert!(sessions.partial);
         assert_eq!(sessions.files.len(), 1);
         assert_eq!(sessions.files[0].path, Path::new(newest));
@@ -712,7 +843,7 @@ mod tests {
             f.write(&format!("unrelated-{i}"), "not read");
         }
         f.write(plain, "{}\n");
-        let sessions = Sessions::scan_with_limit(&f.root, Tree::Codex, 4).unwrap();
+        let sessions = SessionRoot(fs_ops::open_dir(&f.root).unwrap()).scan(Tree::Codex, 4).unwrap();
         assert!(!sessions.partial);
         assert_eq!(sessions.files.len(), 1);
         assert_eq!(sessions.files[0].path, Path::new(plain));
