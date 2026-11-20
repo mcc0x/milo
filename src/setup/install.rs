@@ -40,18 +40,21 @@ pub(super) struct Store {
     pub config: PathBuf,
     pub state: PathBuf,
     pub claude: PathBuf,
+    pub claude_state: Option<PathBuf>,
 }
 
 impl Store {
-    /// Honour Rex's settings override without redirecting milo's own files there.
+    /// Honour tool settings overrides without redirecting Milo's own files there.
     pub fn real() -> Option<Self> {
-        let home = paths::home()?;
+        let claude = paths::claude()?;
         let config = paths::config_dir()?;
         let init = env::var_os("REX_CONFIG")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| config.parent().unwrap_or(Path::new(".")).join("rex/init.lua"));
-        Some(Self { init, config, state: paths::state_dir()?, claude: home.join(".claude/settings.json") })
+        let state = paths::state_dir()?;
+        let claude_state = claude.state_override(&state);
+        Some(Self { init, config, state, claude: claude.settings(), claude_state })
     }
 
     pub fn rex_reload_pending(&self) -> bool {
@@ -182,6 +185,7 @@ mod tests {
             config: root.join("config"),
             state: root.join("state"),
             claude: root.join("settings.json"),
+            claude_state: None,
         }
     }
 

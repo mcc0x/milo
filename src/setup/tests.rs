@@ -11,6 +11,7 @@ fn store(fixture: &Fixture) -> Store {
         config: fixture.root.join("config"),
         state: fixture.root.join("state"),
         claude: fixture.root.join("settings.json"),
+        claude_state: None,
     }
 }
 
@@ -38,25 +39,34 @@ fn choose<R: Fn(&[&OsStr]) -> bool>(pane: &mut Setup<R>, row: Row) -> After {
 // Exercise real config paths and the Rex CLI transport without changing the
 // environment of other tests, or touching the user's config or sessions.
 fn isolated_settings(name: &str) -> Option<PathBuf> {
+    isolated_settings_with_claude(name, None)
+}
+
+fn isolated_settings_with_claude(name: &str, profile: Option<&str>) -> Option<PathBuf> {
     const ROOT: &str = "MILO_TEST_SETTINGS_ROOT";
     if let Some(root) = std::env::var_os(ROOT) {
         return Some(root.into());
     }
     let f = Fixture::folder();
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", name, "--nocapture"])
         .env(ROOT, &f.root)
         .env("HOME", &f.root)
         .env("XDG_STATE_HOME", f.root.join("state"))
         .env_remove("XDG_DATA_HOME")
         .env_remove("OPENCODE_DB")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("REX_CONFIG")
         .env_remove("REX_SESSION")
         .env_remove("REX_BLOCK")
         .env("XDG_CONFIG_HOME", &f.root)
         .env("PATH", &f.root)
-        .current_dir(&f.root)
-        .output()
-        .unwrap();
+        .current_dir(&f.root);
+    if let Some(dir) = profile {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
         "{}\n{}",
@@ -64,6 +74,54 @@ fn isolated_settings(name: &str) -> Option<PathBuf> {
         String::from_utf8_lossy(&output.stderr),
     );
     None
+}
+
+#[test]
+fn claude_setup_and_doctor_use_only_the_selected_profile() {
+    let Some(root) = isolated_settings_with_claude(
+        "setup::tests::claude_setup_and_doctor_use_only_the_selected_profile",
+        Some("alternate"),
+    ) else {
+        return;
+    };
+    let active = Store::real().unwrap();
+    let default = Store { claude: root.join(".claude/settings.json"), claude_state: None, ..active.clone() };
+    let profile = paths::claude().unwrap();
+    assert_eq!(active.claude, root.join("alternate/settings.json"));
+    assert_eq!(active.claude_state_dir(), profile.state().unwrap());
+    assert_ne!(active.claude_note(), default.claude_note());
+
+    let report = doctor::report_for(&active, None).unwrap();
+    assert!(report.contains("Claude status line: not installed"), "{report}");
+    assert!(needs_welcome().unwrap());
+    assert!(!active.state.exists() && !active.claude.exists());
+
+    let no_rex = |_: &[&OsStr]| panic!("Claude settings do not need Rex");
+    let mut pane = Setup::new(Some(active.clone()), false, None, None, no_rex);
+    assert_eq!(choose(&mut pane, Row::ClaudeLimits), After::Stay);
+    assert_eq!(choose(&mut pane, Row::SaveClaude), After::Stay);
+    assert!(active.claude() == Claude::On);
+    assert!(active.claude_note().is_file());
+    assert!(!needs_welcome().unwrap());
+    assert!(!default.claude.exists() && !default.claude_note().exists());
+
+    // The same launcher in another profile isn't owned until Milo installs it there.
+    fs::create_dir_all(default.claude.parent().unwrap()).unwrap();
+    fs::copy(&active.claude, &default.claude).unwrap();
+    let report = doctor::report_for(&default, None).unwrap();
+    assert!(report.contains("Claude status line: no matching ownership note"), "{report}");
+    fs::remove_file(&default.claude).unwrap();
+    default.save(None, Some(true), &no_rex).unwrap();
+    let default_before = fs::read(&default.claude).unwrap();
+    let default_note = fs::read(default.claude_note()).unwrap();
+    let report = doctor::report_for(&active, None).unwrap();
+    assert!(report.contains("Claude status line: managed by Milo"), "{report}");
+
+    let removed = doctor::remove().unwrap();
+    assert!(removed.contains("Removed managed integrations"), "{removed}");
+    assert!(!active.claude.exists() && !active.claude_note().exists());
+    assert_eq!(fs::read(&default.claude).unwrap(), default_before);
+    assert_eq!(fs::read(default.claude_note()).unwrap(), default_note);
 }
 
 #[test]

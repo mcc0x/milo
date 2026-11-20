@@ -22,7 +22,9 @@ Whether a tool is in use here is read from files the tool itself saved. Milo doe
 | Claude Code | `~/.claude.json` has something in it, or a session written today is under `~/.claude/projects`, or the status line or oh-my-pi has saved a limit report. |
 | OpenCode | The file where it keeps its database is a SQLite database. |
 
-Empty folders, empty files, another kind of file under the same name and a `~/.claude` folder that holds only settings do not count, and links are not followed. A report oh-my-pi saved for a tool does count, even when nothing else of the tool is on disk. The looks are the bounded reads described under [Where the figures come from](#where-the-figures-come-from).
+Empty folders, empty files, another kind of file under the same name and a Claude Code directory that holds only settings do not count. Links to individual sources or within the session trees are not followed. A report oh-my-pi saved for a tool does count, even when nothing else of the tool is on disk. The looks are the bounded reads described under [Where the figures come from](#where-the-figures-come-from).
+
+Milo uses `$CODEX_HOME/sessions` instead of `~/.codex/sessions` when Codex has an explicit home. With `CLAUDE_CONFIG_DIR` set, it looks for `.claude.json`, `projects/` and `settings.json` inside that directory, not in the default profile. Run Milo and Claude Code with the same override to see and configure that profile's usage.
 
 A tool that is found but has no figure yet stays out of the way of the tools that have one. When no tool has a figure, the pane shows one quiet block instead of empty places: what each found tool is waiting for, such as `Claude · no saved limits found` and `Run milo setup`, or `No usage to show yet` and the tools Milo looks for when it found none.
 
@@ -56,6 +58,7 @@ While a Codex log has been active in the last five minutes, Milo checks known lo
 Milo labels reports as older after five minutes, or ten minutes for oh-my-pi to allow for its provider refresh cadence. This uses the time the provider's window was last observed, not the time Milo read the file.
 
 **Show Claude Code limits** in `milo setup` adds a status line if you do not already have one. Claude Code calls `milo claude-status` to show a short line and save the reported limits to `~/.local/state/milo/claude-limits.json` (or under an absolute `$XDG_STATE_HOME`). It does not save prompts or replies. You do not need to enable it if Claude Code or oh-my-pi already saves a report.
+Each explicit `CLAUDE_CONFIG_DIR` has its own `claude-limits.json` under Milo's `claude-profiles/` state directory, so a reading from another profile is not used as a fallback.
 
 An unchanged status-line reading confirms the same window, but Milo saves that confirmation at most once a minute per window. A lower figure for the same window or an older reset does not replace or refresh the saved figure.
 If an update leaves out the reset time, it can update a nondecreasing figure without discarding the last known reset.

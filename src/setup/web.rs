@@ -731,6 +731,7 @@ mod tests {
             config: folder.root.join("config"),
             state: folder.root.join("state"),
             claude: folder.root.join("claude.json"),
+            claude_state: None,
         }
     }
 

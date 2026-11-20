@@ -38,6 +38,14 @@ impl Claude {
 }
 
 impl Store {
+    pub(super) fn claude_state_dir(&self) -> &Path {
+        self.claude_state.as_deref().unwrap_or(&self.state)
+    }
+
+    pub(super) fn claude_note(&self) -> PathBuf {
+        self.claude_state_dir().join(OWN_CLAUDE)
+    }
+
     /// Show foreign settings as they are without offering to replace them.
     pub fn claude(&self) -> Claude {
         self.claude_files().map_or(Claude::Invalid, |settings| settings.status())
@@ -46,7 +54,7 @@ impl Store {
     /// Read the ownership note alongside the settings before proposing edits.
     pub(super) fn claude_files(&self) -> Result<ClaudeFiles<'_>, &'static str> {
         let path = settings_path(&self.claude)?;
-        let note_path = self.state.join(OWN_CLAUDE);
+        let note_path = self.claude_note();
         Ok(ClaudeFiles { settings: read(&path)?, path, note: read(&note_path)?, note_path })
     }
 

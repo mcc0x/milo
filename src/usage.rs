@@ -875,6 +875,20 @@ impl OpenCode {
     }
 }
 
+/// Codex resolves an explicit home against its working directory, and never
+/// falls back to the default if that override names an invalid directory.
+fn codex_sessions(home: Option<&Path>) -> Option<PathBuf> {
+    let root = match std::env::var("CODEX_HOME").ok().filter(|dir| !dir.is_empty()) {
+        Some(dir) => std::fs::canonicalize(dir).ok().filter(|dir| dir.is_dir())?,
+        None => home?.join(".codex"),
+    };
+    Some(root.join("sessions"))
+}
+
+fn claude_state(claude: Option<&paths::ClaudePaths>) -> Option<PathBuf> {
+    claude.map_or_else(paths::state_dir, paths::ClaudePaths::state)
+}
+
 /// Uses the installed providers' directories; tests supply their own directories and time.
 pub struct Usage {
     codex_dir: Option<PathBuf>,
@@ -900,9 +914,8 @@ impl Usage {
         let root = preferences::worktree(Path::new("."));
         let (prefs, note) = preferences::Preferences::for_pane(root.as_deref());
         let home = paths::home();
-        let usage = Self::for_home(home.as_deref(), when::now())
-            .with_large_figures(prefs.usage_large_figures)
-            .showing(prefs.usage_tools);
+        let usage = Self::for_home(home.as_deref(), when::now(), prefs.usage_tools)
+            .with_large_figures(prefs.usage_large_figures);
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         usage.preference_note = note;
@@ -952,12 +965,21 @@ impl Usage {
         true
     }
 
-    fn for_home(home: Option<&Path>, now: i64) -> Self {
-        let codex = home.map(|p| p.join(".codex/sessions"));
-        let claude = home.map(|p| p.join(".claude/projects"));
-        let mut usage = Self::from_dirs(codex, claude, paths::state_dir(), now);
-        usage.claude_config = home.map(|p| p.join(".claude.json"));
-        usage
+    fn for_home(home: Option<&Path>, now: i64, tools: UsageTools) -> Self {
+        let codex = (tools[UsageTool::Codex] != Show::Hide).then(|| codex_sessions(home)).flatten();
+        let (claude, config, state) = if tools[UsageTool::Claude] == Show::Hide {
+            (None, None, None)
+        } else {
+            let claude = paths::claude();
+            (
+                claude.as_ref().map(paths::ClaudePaths::projects),
+                claude.as_ref().map(paths::ClaudePaths::config),
+                claude_state(claude.as_ref()),
+            )
+        };
+        let mut usage = Self::from_dirs(codex, claude, state, now);
+        usage.claude_config = config;
+        usage.showing(tools)
     }
 
     /// Tests use the same reader without depending on a real home or clock.
@@ -1048,7 +1070,7 @@ impl Usage {
 /// hidden or absent. Transcripts are found but not read.
 pub fn doctor(tools: UsageTools) -> Vec<String> {
     let home = paths::home();
-    let usage = Usage::for_home(home.as_deref(), when::now()).showing(tools);
+    let usage = Usage::for_home(home.as_deref(), when::now(), tools);
     usage.doctor(omp::database(home.as_deref()), opencode::database(home.as_deref()), sqlite::QUERY_WAIT)
 }
 
@@ -1234,7 +1256,7 @@ fn help_rows(claude: bool, opencode: bool) -> Vec<help::HelpRow> {
 
 /// Claude Code must get a line and a successful exit even if it sent bad data.
 pub fn claude_status() -> i32 {
-    let path = paths::state_dir().map(|dir| dir.join(SAVED_LIMITS));
+    let path = claude_state(paths::claude().as_ref()).map(|dir| dir.join(SAVED_LIMITS));
     status::run_fd(io::stdin(), io::stdout().lock(), path.as_deref(), when::now(), status::INPUT_WAIT)
 }
 

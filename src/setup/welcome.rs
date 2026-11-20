@@ -29,14 +29,21 @@ const NO_CONFIG: &str = "Could not find Milo's settings folder.";
 pub fn needs_welcome() -> Result<bool, String> {
     let state = paths::state_dir().ok_or(NO_STATE)?;
     let config = paths::config_dir().ok_or(NO_CONFIG)?;
-    needs_welcome_in(&state, &config).map_err(|error| format!("Could not check Milo's setup state: {error}"))
+    let claude_state = paths::claude().and_then(|paths| paths.state_override(&state));
+    needs_welcome_in(&state, &config, claude_state.as_deref())
+        .map_err(|error| format!("Could not check Milo's setup state: {error}"))
 }
 
-fn needs_welcome_in(state: &Path, config: &Path) -> io::Result<bool> {
+fn needs_welcome_in(state: &Path, config: &Path, claude_state: Option<&Path>) -> io::Result<bool> {
     for name in [COMPLETE, LEGACY_OFFER, LAYOUT_DISABLED, RELOAD_PENDING, OWN_CLAUDE] {
         if present(&state.join(name))? {
             return Ok(false);
         }
+    }
+    if let Some(dir) = claude_state
+        && present(&dir.join(OWN_CLAUDE))?
+    {
+        return Ok(false);
     }
     for name in ["preferences.conf", "rex.lua", "listener.lua"] {
         if present(&config.join(name))? {
@@ -587,6 +594,7 @@ mod tests {
                 config: fixture.root.join("config"),
                 state: state.clone(),
                 claude: fixture.root.join("settings.json"),
+                claude_state: None,
             }));
             let mut screen = Screen::sized(w, h);
             welcome.draw(&mut screen);
@@ -610,7 +618,7 @@ mod tests {
         let fixture = Fixture::folder();
         let state = fixture.root.join("state");
         let config = fixture.root.join("config");
-        assert!(needs_welcome_in(&state, &config).unwrap());
+        assert!(needs_welcome_in(&state, &config, None).unwrap());
         let mut welcome = Welcome::new(Mode::Icons(state.clone()));
         assert_eq!(welcome.key(Key::Enter), After::Stay);
         assert_eq!(welcome.key(Key::Esc), After::Stay);
@@ -618,7 +626,7 @@ mod tests {
         assert_eq!(welcome.key(Key::Down), After::Stay);
         assert_eq!(welcome.key(Key::Enter), After::Leave);
         assert!(!config.exists());
-        assert!(!needs_welcome_in(&state, &config).unwrap());
+        assert!(!needs_welcome_in(&state, &config, None).unwrap());
         mark_complete(&state).unwrap();
     }
 
@@ -654,9 +662,9 @@ mod tests {
             config.join("layouts/worktree-123456789abcdef0"),
         ] {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            assert!(needs_welcome_in(&state, &config).unwrap());
+            assert!(needs_welcome_in(&state, &config, None).unwrap());
             fs::write(&path, []).unwrap();
-            assert!(!needs_welcome_in(&state, &config).unwrap());
+            assert!(!needs_welcome_in(&state, &config, None).unwrap());
             fs::remove_file(path).unwrap();
         }
     }

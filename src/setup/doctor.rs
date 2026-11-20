@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
-use super::claude::{Claude, OWN_CLAUDE};
+use super::claude::Claude;
 use super::install::{RunRex, Saved, Store, read};
 use super::layout::{
     Layout, Side, TabPane, actions_template_current, launcher_matches, listener_template_current, probe_lua,
@@ -308,10 +308,14 @@ fn report_with_worktree(
             health.warn("Claude Code’s status line has no matching ownership note.");
             out.push_str("no matching ownership note; left alone. If Milo was installed with a different XDG_STATE_HOME, rerun with that value.\n");
         }
-        Claude::Invalid if read(&store.state.join(OWN_CLAUDE)).is_err() => {
+        Claude::Invalid if read(&store.claude_note()).is_err() => {
             health.warn("Milo could not verify Claude Code’s ownership note.");
-            writeln!(out, "unknown; check the Claude Code ownership note in Milo's state directory ({:?})", store.state)
-                .unwrap()
+            writeln!(
+                out,
+                "unknown; check the Claude Code ownership note in Milo's state directory ({:?})",
+                store.claude_state_dir()
+            )
+            .unwrap()
         }
         Claude::Invalid => {
             health.issue("Milo could not read Claude Code’s settings.");
@@ -640,7 +644,7 @@ fn remove_from(store: &Store, run: &RunRex<'_>) -> Result<String, String> {
     let claude = match store.claude() {
         Claude::On => Some(false),
         Claude::Invalid => {
-            let note = read(&store.state.join(OWN_CLAUDE))
+            let note = read(&store.claude_note())
                 .map_err(|_| "Could not verify Claude Code ownership. Check access to Milo's state directory.")?;
             if note.is_some() {
                 return Err(format!(
@@ -701,6 +705,7 @@ mod tests {
             config: fixture.root.join("config"),
             state: fixture.root.join("state"),
             claude: fixture.root.join("settings.json"),
+            claude_state: None,
         }
     }
 
@@ -801,7 +806,7 @@ mod tests {
         let valid = std::fs::read_to_string(&store.claude).unwrap();
         let invalid = format!("{valid}{{");
         std::fs::write(&store.claude, &invalid).unwrap();
-        let note = store.state.join(OWN_CLAUDE);
+        let note = store.claude_note();
 
         let error = remove_from(&store, &run).unwrap_err();
         assert!(error.contains("Could not remove Milo's Claude Code status line"));
@@ -818,7 +823,7 @@ mod tests {
         let fixture = Fixture::folder();
         let store = fixture_store(&fixture);
         std::fs::write(&store.claude, b"{}").unwrap();
-        std::fs::create_dir_all(store.state.join(OWN_CLAUDE)).unwrap(); // Not a readable note, even when run as root.
+        std::fs::create_dir_all(store.claude_note()).unwrap(); // Not a readable note, even when run as root.
 
         let report = report_for(&store, None).unwrap();
         assert!(report.contains(&format!(

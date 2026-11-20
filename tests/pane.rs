@@ -31,6 +31,7 @@ impl Project {
             .env("XDG_STATE_HOME", self.0.join("state"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK");
         command
@@ -840,4 +841,86 @@ fn repeat_clicks_do_not_cross_the_onboarding_handoff() {
         tty.master.write_all(b"qq").unwrap();
         assert!(tty.wait_for_exit().success());
     }
+}
+
+#[test]
+fn usage_and_doctor_read_only_the_selected_provider_directories() {
+    let project = Project::new();
+    let cwd = project.0.join("project").canonicalize().unwrap();
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let command = || {
+        let mut command = project.command(milo);
+        command
+            .env_remove("REX_CONFIG")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("OPENCODE_DB")
+            .env("XDG_DATA_HOME", project.0.join("data"))
+            .env("CODEX_HOME", "codex-override")
+            .env("CLAUDE_CONFIG_DIR", "claude-override");
+        command
+    };
+    let doctor = |command: &mut Command| {
+        let output = command.arg("doctor").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let save = |command: &mut Command, used: u32| {
+        use std::process::Stdio;
+        let mut child = command.args(["claude-status"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        write!(input, r#"{{"rate_limits":{{"seven_day":{{"used_percentage":{used}}}}}}}"#).unwrap();
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("week {}% left\n", 100 - used));
+    };
+
+    let session = "sessions/2026/01/01/rollout-test.jsonl";
+    for (path, used) in [(project.0.join(".codex"), 85), (cwd.join("codex-real"), 25)] {
+        let file = path.join(session);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let row = format!(
+            r#"{{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"primary":{{"used_percent":{used},"window_minutes":10080}}}}}}}}"#
+        );
+        fs::write(file, format!("{row}\n")).unwrap();
+    }
+    std::os::unix::fs::symlink("codex-real", cwd.join("codex-override")).unwrap();
+    save(command().env_remove("CLAUDE_CONFIG_DIR"), 82);
+    let default_save = project.0.join("state/milo/claude-limits.json");
+    let baseline = fs::read(&default_save).unwrap();
+
+    let claude = cwd.join("claude-override");
+    let transcript = claude.join("projects/test/session.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(transcript, "{}\n").unwrap();
+    let report = doctor(&mut command());
+    assert!(report.contains("Codex limits: Codex session log"), "{report}");
+    assert!(report.contains("Claude Code limits: no local report"), "{report}");
+    let report = doctor(command().env("CODEX_HOME", "missing-override"));
+    assert!(!report.contains("Codex limits:"), "{report}");
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() - 60_000;
+    fs::write(
+        claude.join(".claude.json"),
+        format!(
+            r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{now},"utilization":{{"seven_day":{{"utilization":35}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let report = doctor(&mut command());
+    assert!(report.contains("Claude Code limits: Claude Code usage cache"), "{report}");
+
+    save(command().env("CLAUDE_CONFIG_DIR", &claude), 61);
+    assert_eq!(fs::read(&default_save).unwrap(), baseline);
+    let report = doctor(&mut command());
+    assert!(report.contains("Claude Code limits: Milo Claude status line"), "{report}");
+    let report = doctor(command().env("CLAUDE_CONFIG_DIR", "other-claude"));
+    assert!(!report.contains("Claude Code limits:"), "{report}");
+
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 2);
+    pane.until("75%");
+    pane.until("39%");
+    pane.master.write_all(b"q").unwrap();
+    assert!(pane.wait_for_exit().success());
 }

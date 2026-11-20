@@ -599,6 +599,7 @@ mod tests {
             config: fixture.root.join("config"),
             state: fixture.root.join("state"),
             claude: fixture.root.join("claude"),
+            claude_state: None,
             init: fixture.root.join("init"),
         }
     }
