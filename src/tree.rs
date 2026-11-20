@@ -420,6 +420,10 @@ impl Tree {
         }
     }
 
+    pub(crate) fn has_pending_files(&self) -> bool {
+        !self.pending_order.is_empty()
+    }
+
     /// The nearest pending file after (or before) row `from` in tree order,
     /// wrapping around, whether or not its folders are open.
     pub fn next_pending(&self, from: usize, direction: Direction) -> Option<&Rc<str>> {

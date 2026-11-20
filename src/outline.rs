@@ -1083,6 +1083,57 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_jump_in_a_clean_tree_shows_a_timed_notice() {
+        let f = Fixture::new();
+        f.write("clean.txt", "unchanged\n");
+        f.commit("first");
+        let mut o = open(&f);
+        draw(&mut o, 40, 12);
+
+        for changes_only in [false, true] {
+            if changes_only {
+                o.key(Key::Char('c'));
+            }
+            for key in ['n', 'N'] {
+                let selected = o.selected_path();
+                assert_eq!(selected.is_none(), changes_only);
+                assert_eq!(o.key(Key::Char(key)), After::Stay);
+                assert_eq!(o.selected_path(), selected);
+                let at = o.note.as_ref().unwrap().1;
+                let just_before = at + NOTE - Duration::from_millis(1);
+                assert_eq!(draw_at(&mut o, 40, 12, just_before).text()[11], " No changed files");
+                assert_ne!(draw_at(&mut o, 40, 12, at + NOTE).text()[11], " No changed files");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_jump_finds_a_folded_singleton_and_only_notices_on_the_file() {
+        let f = Fixture::new();
+        f.write("src/edit.txt", "before\n");
+        f.write("clean.txt", "unchanged\n");
+        f.commit("first");
+        f.write("src/edit.txt", "after\n");
+
+        for key in ['n', 'N'] {
+            let mut o = open(&f);
+            o.key(Key::Char('c'));
+            o.key(Key::Char('p'));
+            o.key(Key::Enter);
+            assert_eq!(o.selected_path().as_deref(), Some("src/"));
+            assert!(o.tree.row_of("src/edit.txt").is_none());
+            draw(&mut o, 40, 12);
+
+            assert_eq!(o.key(Key::Char(key)), After::Stay);
+            assert_eq!(o.selected_path().as_deref(), Some("src/edit.txt"));
+            assert!(o.note.is_none());
+            assert_eq!(o.key(Key::Char(key)), After::Stay);
+            assert_eq!(o.selected_path().as_deref(), Some("src/edit.txt"));
+            assert_eq!(draw(&mut o, 40, 12).text()[11], " Only changed file");
+        }
+    }
+
+    #[test]
     fn jumps_and_change_columns_follow_a_rename_into_a_closed_folder() {
         let f = Fixture::new();
         let original = "a long line that stays the same\n";

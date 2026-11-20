@@ -107,6 +107,10 @@ impl Outline {
                 let direction = if key == Key::Char('n') { Next } else { Previous };
                 if let Some(path) = self.tree.next_pending(sel, direction).cloned() {
                     self.reveal(path);
+                } else if self.tree.has_pending_files() {
+                    self.say("Only changed file");
+                } else {
+                    self.say("No changed files");
                 }
             }
             Key::Char('}') => self.sel = self.tree.folder_row(sel, Next).unwrap_or(sel),

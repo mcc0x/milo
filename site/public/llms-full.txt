@@ -391,7 +391,7 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | `K` / `J` | Previous or next item in the same folder, skipping nested rows |
 | `p` | Go to the parent folder |
 | `e` | Open every folder; press again to restore your choices |
-| `n` / `N` | Next or previous changed file, including in closed folders |
+| `n` / `N` | Jump to the next or previous changed file, including inside closed folders. If there’s nowhere to jump, the tree says why. |
 | `c` | Switch between the whole tree and changed files only |
 | `r` | Reload |
 | `q` | Quit |
