@@ -418,6 +418,62 @@ fn a_directory_replaced_by_a_link_while_open_does_not_show_its_target() {
 }
 
 #[test]
+fn moved_project_readers_keep_reading_the_original_text_and_picture() {
+    let f = Fixture::new();
+    f.write("sub/file.txt", "original text\n");
+    fs::write(f.root.join("sub/logo.png"), Picture::sample_png(16, 8)).unwrap();
+    f.commit("original project");
+    let mut text = Reader::open(&f.root.join("sub/file.txt")).unwrap();
+    let mut picture = Reader::open(&f.root.join("sub/logo.png")).unwrap();
+    assert!(drawn(&mut text, 60, 6)[1].ends_with("original text"));
+    assert!(drawn(&mut picture, 60, 6)[0].ends_with("16×8"));
+
+    let moved = f.root.with_file_name("moved-project");
+    fs::rename(&f.root, &moved).unwrap();
+    fs::create_dir(&f.root).unwrap();
+    f.git(&["init", "-q", "-b", "main"]);
+    f.write("sub/file.txt", "replacement project text\n");
+    fs::write(f.root.join("sub/logo.png"), Picture::sample_png(64, 32)).unwrap();
+    f.commit("replacement project");
+    f.write("sub/file.txt", "replacement project edit\n");
+
+    fs::write(moved.join("sub/file.txt"), "moved project edit\n").unwrap();
+    fs::write(moved.join("sub/logo.png"), Picture::sample_png(32, 16)).unwrap();
+    assert!(text.check() && picture.check());
+    assert_eq!(drawn(&mut text, 60, 6)[1], " 1   moved project edit");
+    assert!(drawn(&mut picture, 60, 6)[0].ends_with("32×16"));
+}
+
+#[test]
+fn reader_follows_internal_directory_links_without_following_the_final_link() {
+    let f = Fixture::new();
+    f.write("original/sub/file.txt", "first branch\n");
+    f.write("other/file.txt", "second branch\n");
+    symlink("../other/file.txt", f.root.join("other/link.txt")).unwrap();
+    f.commit("shared project files");
+    let sub = f.root.join("original/sub");
+    let shortcut = f.root.join("shortcut");
+    symlink("original/sub", &shortcut).unwrap();
+    let mut text = Reader::open(&shortcut.join("file.txt")).unwrap();
+    assert!(drawn(&mut text, 60, 6)[1].ends_with("first branch"));
+
+    fs::rename(&sub, f.root.join("previous")).unwrap();
+    symlink("../other", &sub).unwrap();
+    assert!(text.check());
+    assert_eq!(drawn(&mut text, 60, 6)[1], " 1   second branch");
+
+    fs::remove_file(&sub).unwrap();
+    symlink(f.root.join("previous"), &sub).unwrap();
+    assert!(text.check());
+    assert_eq!(drawn(&mut text, 60, 6)[1], " 1   first branch");
+
+    fs::remove_file(&sub).unwrap();
+    symlink(f.root.join("other"), &sub).unwrap();
+    let mut link = Reader::open(&shortcut.join("link.txt")).unwrap();
+    assert_eq!(drawn(&mut link, 60, 6)[1], " 1   ../other/file.txt");
+}
+
+#[test]
 fn a_pipe_replacing_a_tracked_file_is_never_read_as_one() {
     let f = Fixture::new();
     f.write("file.txt", "before");

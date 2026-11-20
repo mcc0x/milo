@@ -4,9 +4,8 @@ mod content;
 mod draw;
 #[cfg(test)]
 mod tests;
+mod working_path;
 
-use std::fs::Metadata;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 
 use crate::diff::{Line, LineKind};
@@ -56,21 +55,9 @@ enum Source {
 
 struct WorkingFile {
     repo: Repo,
-    absolute: PathBuf,
-    stamp: Option<Stamp>,
-}
-
-/// Includes file identity and change time: saving by replacement can preserve length and mtime.
-#[derive(PartialEq)]
-struct Stamp {
-    identity: (u64, u64),
-    changed: (i64, i64),
-}
-
-impl Stamp {
-    fn of(metadata: &Metadata) -> Self {
-        Self { identity: (metadata.dev(), metadata.ino()), changed: (metadata.ctime(), metadata.ctime_nsec()) }
-    }
+    root: working_path::Root,
+    relative: PathBuf,
+    stamp: Option<content::WorkingStamp>,
 }
 
 /// A file selected in a pane that can open the reader.

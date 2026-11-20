@@ -1,6 +1,6 @@
 //! Reads regular files and symbolic link targets without following the final link.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
@@ -42,6 +42,11 @@ pub fn file(path: &Path, limit: u64) -> Content {
         }
         Err(e) => return unavailable(e),
     };
+    opened(file, limit)
+}
+
+/// Reads from an already-open, guarded descriptor; does not reopen its path.
+pub(crate) fn opened(file: File, limit: u64) -> Content {
     let size = match file.metadata() {
         Ok(m) if m.is_file() => m.len(),
         Ok(_) => return Content::NotFile,

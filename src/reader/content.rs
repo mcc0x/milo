@@ -3,12 +3,13 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use super::{Body, Reader, Source, Stamp, Text, WorkingFile};
+use super::working_path::{Entry, LookupError, Root, Stamp};
+use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
 use crate::git::{CommitId, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
 use crate::picture::{self, Picture};
-use crate::read::{self, Content};
+use crate::read::Content;
 use crate::syntax;
 
 /// How many bytes to read when there is no diff text to show.
@@ -18,7 +19,7 @@ const NOT_FILE: &str = "Not a file, so there is nothing to show.";
 
 struct Location {
     repo: Repo,
-    absolute: PathBuf,
+    relative: PathBuf,
     path: String,
 }
 
@@ -33,8 +34,31 @@ impl Location {
         }
         let absolute = resolved.join(file.strip_prefix(dir).ok()?);
         let repo = Repo::open(&resolved)?;
-        let path = absolute.strip_prefix(&repo.root).ok()?.to_string_lossy().into_owned();
-        Some(Self { repo, absolute, path })
+        let relative = absolute.strip_prefix(&repo.root).ok()?.to_path_buf();
+        let path = relative.to_string_lossy().into_owned();
+        Some(Self { repo, relative, path })
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) struct WorkingStamp {
+    entry: Result<Stamp, LookupError>,
+    compare: bool,
+}
+
+impl WorkingStamp {
+    fn at<'a>(repo: &Repo, root: &'a Root, relative: &Path) -> (Result<Entry<'a>, LookupError>, Self) {
+        let at_path = root.at_path(&repo.root);
+        let entry = at_path.and_then(|_| root.entry(&repo.root, relative));
+        let compare = at_path == Ok(true)
+            && repo.git
+            && relative.to_str().is_some()
+            && match &entry {
+                Ok(entry) => !entry.linked_ancestor && !entry.is_special(),
+                Err(error) => *error == LookupError::Gone,
+            };
+        let stamp = Self { entry: entry.as_ref().map(Entry::stamp).map_err(|e| *e), compare };
+        (entry, stamp)
     }
 }
 
@@ -57,11 +81,12 @@ fn leaves_project(dir: &Path, resolved: &Path) -> bool {
 impl Reader {
     /// Opens `file`, which git may remember even if its directory is gone.
     pub fn open(file: &Path) -> Option<Self> {
-        let Location { mut repo, absolute, path } = Location::find(file)?;
+        let Location { mut repo, relative, path } = Location::find(file)?;
+        let root = Root::open(&repo.root).ok()?;
         repo.only(&path);
         let (icons, note) = Self::appearance_for(&repo);
         let note = if repo.git_unavailable() { Some(GIT_UNAVAILABLE) } else { note };
-        let source = Source::Working(Box::new(WorkingFile { repo, absolute, stamp: None }));
+        let source = Source::Working(Box::new(WorkingFile { repo, root, relative, stamp: None }));
         let mut reader = Self::new(path, source, icons, note);
         reader.refresh(true);
         Some(reader)
@@ -119,54 +144,79 @@ impl Reader {
     /// Rebuilds the working file when it or Git has changed, keeping the last good result if git fails.
     pub(super) fn refresh(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
-        let metadata = work.absolute.symlink_metadata().ok();
-        let stamp = metadata.as_ref().map(Stamp::of);
+        let WorkingFile { repo, root, relative, stamp: last } = work.as_mut();
+        let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
         // A changed file already needs a fresh status read, even if Git's
         // porcelain entry for it is unchanged. Otherwise use the current poll.
-        let read_status = force || stamp != work.stamp;
-        if !read_status && !work.repo.read_if_changed() {
+        let read_status = force || last.as_ref() != Some(&stamp);
+        if !read_status && !(stamp.compare && repo.read_if_changed()) {
             return;
         }
-        let outside = work
-            .absolute
-            .parent()
-            .and_then(|dir| dir.canonicalize().ok())
-            .is_some_and(|dir| !dir.starts_with(&work.repo.root));
-        // Git cannot diff a tracked file replaced by a pipe or device.
-        if outside || metadata.is_some_and(|m| !m.is_file() && !m.is_symlink()) {
+        let unchanged = || FileDiff { lines: Vec::new(), kind: Kind::None, binary: false };
+        let patch = if stamp.compare {
+            if read_status {
+                repo.read();
+            }
+            let patch = repo.ok().then(|| file_diff(repo, &self.path)).flatten();
+            // Git works by pathname. Do not present its output if that name no
+            // longer refers to the repository and entry we inspected.
+            let (after, observed) = WorkingStamp::at(repo, root, relative);
+            if observed != stamp {
+                entry = after;
+                stamp = WorkingStamp { compare: false, ..observed };
+                Some(unchanged())
+            } else {
+                patch
+            }
+        } else {
+            Some(unchanged())
+        };
+        let note = match &entry {
+            Err(LookupError::Outside) => Some("This path now leads outside the project."),
+            Ok(entry) if entry.is_special() => Some(NOT_FILE),
+            _ => None,
+        };
+        if let Some(note) = note {
             self.kind = Kind::None;
-            self.body = Body::Note(if outside { "This path now leads outside the project." } else { NOT_FILE });
-            work.stamp = stamp;
+            self.body = Body::Note(note);
+            *last = Some(stamp);
             return;
         }
-        if read_status {
-            work.repo.read();
-        }
-        let Some(patch) = work.repo.ok().then(|| work.file_diff(&self.path)).flatten() else {
-            let note = match read::file(&work.absolute, 0) {
+        let Some(patch) = patch else {
+            let note = match working_content(&entry, 0) {
                 Content::Unreadable => "This file cannot be read.",
                 Content::NotFile => NOT_FILE,
-                _ if !work.repo.ok() => return,
+                _ if !repo.ok() => return,
                 Content::Gone => "This file is gone.",
                 _ => "Too large to show.",
             };
             self.kind = Kind::None;
             self.body = Body::Note(note);
-            work.stamp = stamp;
+            *last = Some(stamp);
             return;
         };
         let picture = picture::is_picture(&self.path);
-        let kept = picture && stamp == work.stamp && matches!(self.body, Body::Picture(_));
+        let kept = picture && last.as_ref() == Some(&stamp) && matches!(self.body, Body::Picture(_));
         self.kind = patch.kind;
-        work.stamp = stamp;
+        *last = Some(stamp);
         if kept {
             return;
         }
-        self.body = working_body(&work.absolute, patch, picture, syntax::for_file(&self.path));
+        self.body = working_body(relative, &entry, patch, picture, syntax::for_file(&self.path));
     }
 }
 
-fn working_body(path: &Path, patch: FileDiff, picture: bool, lang: Option<&'static syntax::Lang>) -> Body {
+fn working_content(entry: &Result<Entry<'_>, LookupError>, limit: u64) -> Content {
+    entry.as_ref().map_or_else(|e| e.content(), |entry| entry.read(limit))
+}
+
+fn working_body(
+    path: &Path,
+    entry: &Result<Entry<'_>, LookupError>,
+    patch: FileDiff,
+    picture: bool,
+    lang: Option<&'static syntax::Lang>,
+) -> Body {
     if !picture {
         if patch.binary {
             return Body::Note(NOT_TEXT);
@@ -176,7 +226,7 @@ fn working_body(path: &Path, patch: FileDiff, picture: bool, lang: Option<&'stat
         }
     }
     let line_kind = if patch.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
-    let lines = match read::file(path, if picture { picture::FILE_LIMIT } else { LIMIT }) {
+    let lines = match working_content(entry, if picture { picture::FILE_LIMIT } else { LIMIT }) {
         Content::Gone | Content::Link(_) if !patch.lines.is_empty() => Ok(patch.lines),
         Content::Gone => Err("This file is gone."),
         Content::Unreadable => Err("This file cannot be read."),
@@ -224,25 +274,22 @@ fn byte_lines(bytes: &[u8], kind: LineKind) -> Result<Vec<Line>, &'static str> {
     Ok((1..).zip(text.lines()).map(|(no, line)| Line::new(kind, no, line)).collect())
 }
 
-impl WorkingFile {
-    fn file_diff(&mut self, path: &str) -> Option<FileDiff> {
-        let kind = if self.repo.is_untracked(path) { Kind::Untracked } else { Kind::None };
-        if kind == Kind::Untracked || !self.repo.git {
-            return Some(FileDiff { lines: Vec::new(), kind, binary: false });
-        }
-        let mut diff = diff::parse(&self.repo.file_diff(path, None)?);
-        // A file that looks new may have been moved here; compare it with its old path.
-        if diff.kind == Kind::Added
-            && let Some(from) = self.repo.moved_from(path)
-            && let Some(raw) = self.repo.file_diff(path, Some(&from))
-        {
-            diff = diff::parse(&raw);
-        }
-        if self.repo.is_unmerged(path) {
-            diff.kind = Kind::Conflict;
-        }
-        self.repo.ok().then_some(diff)
+fn file_diff(repo: &mut Repo, path: &str) -> Option<FileDiff> {
+    if repo.is_untracked(path) {
+        return Some(FileDiff { lines: Vec::new(), kind: Kind::Untracked, binary: false });
     }
+    let mut diff = diff::parse(&repo.file_diff(path, None)?);
+    // A file that looks new may have been moved here; compare it with its old path.
+    if diff.kind == Kind::Added
+        && let Some(from) = repo.moved_from(path)
+        && let Some(raw) = repo.file_diff(path, Some(&from))
+    {
+        diff = diff::parse(&raw);
+    }
+    if repo.is_unmerged(path) {
+        diff.kind = Kind::Conflict;
+    }
+    repo.ok().then_some(diff)
 }
 
 /// A patch covers all the lines when there are edits. Otherwise, read the stored file.
