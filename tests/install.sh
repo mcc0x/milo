@@ -46,20 +46,33 @@ EOF
 cat > "$fixture/tools/cargo" <<'EOF'
 #!/bin/sh
 set -eu
-if [ ! -f fixture-source ]; then
-    printf 'Unexpected build source: %s\n' "$PWD" >&2
-    exit 1
-fi
+case "$PWD" in
+    /) kind=fetched ;;
+    *)
+        [ "$PWD" -ef "$CHECKOUT" ] || exit 1
+        kind=checkout
+        ;;
+esac
 case "$1" in
-    -vV) printf 'host: fixture-host\n' ;;
+    -vV) printf 'host: fixture-host-%s\n' "$kind" ;;
     build)
-        mkdir -p target/fixture-host/release
-        cp fixture-source target/fixture-host/release/milo
+        [ "$#:$2:$3:$4:$6:$8:$9" = "9:--release:--locked:--manifest-path:--target-dir:--target:fixture-host-$kind" ]
+        source=${5%/Cargo.toml}
+        [ "$5" = "$source/Cargo.toml" ] && [ "$7" = "$source/target" ]
+        case "$kind:$source" in
+            "fetched:$TMPDIR"/milo.*/source) ;;
+            checkout:/*) [ "$source" -ef "$CHECKOUT" ] || exit 1 ;;
+            *) exit 1 ;;
+        esac
+        mkdir -p "$7/$9/release"
+        cp "$source/fixture-source" "$7/$9/release/milo"
         ;;
     *) exit 1 ;;
 esac
 EOF
 chmod +x "$fixture/tools/git" "$fixture/tools/cargo"
+CHECKOUT=$checkout
+export CHECKOUT
 PATH=$fixture/tools:$PATH
 export PATH
 

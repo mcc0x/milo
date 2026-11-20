@@ -74,16 +74,21 @@ if ! repo=$(checkout_for_script); then
     scratch=$(mktemp -d "${tmp_base%/}/milo.XXXXXXXX")
     trap 'rm -rf "$scratch"' 0
     trap 'exit 1' HUP INT TERM
+    cargo_dir=/
     repo=$scratch/source
     if ! git clone --depth 1 https://github.com/mcc0x/milo "$repo"; then
         fail 'Could not clone milo from GitHub.' \
             'If you already have a clone, change to its directory and run: sh install.sh'
     fi
+else
+    cargo_dir=$repo
 fi
 
-# Pin the host target so Cargo configuration cannot change the output path.
-host=$(cd "$repo" && cargo -vV | sed -n 's/^host: //p')
-(cd "$repo" && cargo build --release --locked --target-dir target --target "$host")
+# Cargo reads configuration from its working directory, not the manifest directory.
+# Keep checkout configuration, but never search the downloaded source or TMPDIR.
+host=$(cd "$cargo_dir" && cargo -vV | sed -n 's/^host: //p')
+(cd "$cargo_dir" && cargo build --release --locked --manifest-path "$repo/Cargo.toml" \
+    --target-dir "$repo/target" --target "$host")
 built=$repo/target/$host/release/milo
 if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$built" "$binary"; then
     printf 'milo is already installed at %s. Nothing to do.\n' "$binary"
