@@ -691,6 +691,14 @@ function layoutView() {
   return [groupCard('layout', 'Panes', '', controls)];
 }
 
+const usageTools = [['codex', 'Codex'], ['claude', 'Claude Code'], ['opencode', 'OpenCode']];
+const usageChoices = [['auto', 'Auto'], ['always', 'Always show'], ['hide', 'Hide']];
+const usageDetails = {
+  auto: 'Shown while it has a figure saved on this Mac.',
+  always: 'Shown even when nothing is known about it.',
+  hide: 'Never shown, and never looked for.',
+};
+
 function appearanceView() {
   const disabled = !state.groups.preferences.editable;
   return [groupCard('preferences', 'Pane appearance', '', [
@@ -702,6 +710,8 @@ function appearanceView() {
       {disabled, choices: [['false', 'Style only'], ['true', 'Text']], examples: {false: 'main.rs', true: 'M main.rs'}}),
     setting('appearance.usage_large_figures', 'Usage display', 'Auto fits the available space.', 'select',
       {disabled, choices: [['false', 'Auto compact'], ['true', 'Large figures']]}),
+    ...usageTools.map(([key, name]) => setting(`appearance.usage_${key}`, `${name} usage`,
+      usageDetails[state.appearance[`usage_${key}`]], 'select', {disabled, choices: usageChoices})),
   ])];
 }
 

@@ -152,6 +152,12 @@ impl Page {
         }
     }
 
+    /// Every row's words, one row to a line.
+    #[cfg(test)]
+    pub fn text(&self) -> String {
+        self.rows.iter().map(|row| row.iter().map(|(text, _)| *text).collect::<String>() + "\n").collect()
+    }
+
     /// Don't cover the pane unless help can show how to close it.
     pub fn fits(s: &Screen) -> bool {
         s.w >= 2 + CLOSE.len() && s.h >= 2

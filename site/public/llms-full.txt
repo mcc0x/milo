@@ -66,7 +66,7 @@ See recent commits and, when the branch tracks a remote branch, how many still n
   <img src="https://github.com/mcc0x/milo/blob/main/docs/img/usage.png" width="860" alt="Codex and Claude Code limits showing percent left, time until reset and an Opus weekly limit">
 </p>
 
-See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
+See how much of each reported limit you have left. Milo reads local reports saved by oh-my-pi, Codex and Claude Code, and the tokens and estimated cost OpenCode recorded today. It shows the tools that have a figure on this Mac, so there is no empty place for one you do not use, and setup can always show or hide each tool. Where the terminal can show pictures, such as in Rex, the pane can draw the logos and large figures as pictures.
 
 ## Reader
 
@@ -158,9 +158,9 @@ Usage starts as a two-row strip in the shared sidebar. Drag a divider in an inst
 
 Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, including the first tab of a new session. Save this switch globally; changing it alone does not replace either the global or worktree layout. If Usage is sized in rows, Milo waits for a Rex client to measure the tab, so a background tab may arrange when you first show it. Tabs opened to run a command and tabs with their own layout are left alone. Turn it off and save globally to stop arranging new tabs. The panes also work on their own outside Rex.
 
-**A sidebar that Rex restores holds shells, not Milo.** On Rex preview.21 (server API 18), stopping the server ends every program in its sessions and saves their layouts. When it starts again, each tab comes back with its panes, names and dividers where they were, but every pane is a new login shell in the folder that pane was in. The Outline, History and Usage panes keep their places and their `milo:` labels with nothing of Milo running in them. Rex decides what a restored pane runs, and Milo does not type a command into those shells: a shell at a prompt is yours and may already hold your input. To get the sidebar back in a tab, run **Milo: Close Panes in This Tab**, then **Milo: Arrange This Tab**; see [Troubleshooting](https://github.com/mcc0x/milo/blob/main/docs/setup.md#troubleshooting) for what that closes. New shell tabs are arranged as before, because the listener starts again with Rex.
+Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Usage shows Codex, Claude Code and OpenCode only while each has a figure to show; choose **Always show** or **Hide** for a tool to [decide that yourself](https://github.com/mcc0x/milo/blob/main/docs/usage.md#which-tools-appear). Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
 
-Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
+**A sidebar that Rex restores holds shells, not Milo.** On Rex preview.21 (server API 18), stopping the server ends every program in its sessions and saves their layouts. When it starts again, each tab comes back with its panes, names and dividers where they were, but every pane is a new login shell in the folder that pane was in. The Outline, History and Usage panes keep their places and their `milo:` labels with nothing of Milo running in them. Rex decides what a restored pane runs, and Milo does not type a command into those shells: a shell at a prompt is yours and may already hold your input. To get the sidebar back in a tab, run **Milo: Close Panes in This Tab**, then **Milo: Arrange This Tab**; see [Troubleshooting](https://github.com/mcc0x/milo/blob/main/docs/setup.md#troubleshooting) for what that closes. New shell tabs are arranged as before, because the listener starts again with Rex.
 
 **Text zoom is separate from split size.** On Rex preview.21 (server API 18), Milo can read a terminal's cell dimensions, but creating or resizing a terminal does not set the font the Mac app renders. The app exposes relative font actions and an app-wide [starting font size](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-typography-font-size), not an absolute per-pane zoom setting. Milo therefore remembers divider positions, not text zoom, for Outline, History and Usage.
 
@@ -419,9 +419,41 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/usage.md
 
 # Usage limits
 
-`milo usage` shows how much of a reported limit is **left**, not how much has been used. The two-row rail gives each provider one line for its most constrained window. When there's room, it adds the reset countdown for a recent reading or when an older reading was last seen. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a taller rail too.
+`milo usage` shows how much of a reported limit is **left**, not how much has been used. It shows the tools that have something to show, and gives the whole pane to them. The two-row rail gives each of two tools one line for its most constrained window, and a tool on its own both rows. When there's room, it adds the reset countdown for a recent reading or when an older reading was last seen. Wide panes can show large figures and provider marks. Choose large figures in setup if you prefer them in a taller rail too.
 
-A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%. Run `milo doctor` to see which local source supplied each provider's reading.
+A reset time is a prediction from the last report, not a new measurement. Once it passes, Milo marks the reset as elapsed until a new reading arrives. No source means **unknown**, never zero or a fresh 100%, and a tool with nothing known is left out unless you ask to always see it. Run `milo doctor` to see which local source supplied each tool's reading.
+
+## Which tools appear
+
+Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` and `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.
+
+| Choice | What the pane does |
+| --- | --- |
+| Auto, the default | Gives the tool a place while it has a figure saved on this Mac: a limit window for Codex or Claude Code, or tokens OpenCode recorded today. Without one the tool takes no room. |
+| Always show | Keeps the tool's place, and says what is unknown and what to do next, such as `Claude · no source` and `Run milo setup`. It never fills in a number. A pane too small for every place still gives its rows to limits first. |
+| Hide | Never shows the tool and does not look for it: its folders are not walked or watched, and its database is not opened. With Codex and Claude Code both hidden, oh-my-pi's database is not opened either. |
+
+Whether a tool is in use here is read from files the tool itself saved. Milo does not run the tool, read its sign-in or use the network to find out.
+
+| Tool | Found when |
+| --- | --- |
+| Codex | A session file `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` has something in it, or oh-my-pi has saved a Codex report. |
+| Claude Code | `~/.claude.json` has something in it, or a session written today is under `~/.claude/projects`, or the status line or oh-my-pi has saved a limit report. |
+| OpenCode | The file where it keeps its database is a SQLite database. |
+
+Empty folders, empty files, another kind of file under the same name and a `~/.claude` folder that holds only settings do not count, and links are not followed. A report oh-my-pi saved for a tool does count, even when nothing else of the tool is on disk. The looks are the bounded reads described under [Where the figures come from](https://github.com/mcc0x/milo/blob/main/docs/usage.md#where-the-figures-come-from).
+
+A tool that is found but has no figure yet stays out of the way of the tools that have one. When no tool has a figure, the pane shows one quiet block instead of empty places: what each found tool is waiting for, such as `Claude · no saved limits found` and `Run milo setup`, or `No usage to show yet` and the tools Milo looks for when it found none.
+
+The frame closes up around what is shown:
+
+- **Two tools with limits** share the pane: side by side when it is wide, one above the other on a rail.
+- **One tool with limits** has the pane to itself. A rail lists its other windows under the tightest one, and a wide pane keeps its windows together at the left.
+- **OpenCode with one of them** takes the second place: the other half of a wide pane, or the lower half of a rail.
+- **OpenCode with both** has one row beneath them, from the third row of a rail or in a wide pane at least nine rows tall. Two rows go to the two limits.
+- **OpenCode alone** fills the two-row rail with today's tokens, then its cost and steps. A larger pane draws the tokens large.
+
+`milo doctor` follows the same rule. It reports a tool that was found or is always shown, and says nothing of one that is absent or hidden beyond the choice itself.
 
 ## Where the figures come from
 
@@ -430,6 +462,7 @@ A reset time is a prediction from the last report, not a new measurement. Once i
 | oh-my-pi | Limits the harness saves for Codex and Claude in `~/.omp/agent/agent.db` (or `$PI_CODING_AGENT_DIR/agent.db`). Milo reads only the usage data, using `/usr/bin/sqlite3` in read-only mode. Automatic reads are at least 20 seconds apart per pane. |
 | Codex | Limit reports in recent Codex session files under `~/.codex/sessions` |
 | Claude Code | Its own saved limits in `~/.claude.json`, or limits sent through the status line if you turn it on in setup. |
+| OpenCode | Today's activity, not limits, from its session database. See [OpenCode activity](https://github.com/mcc0x/milo/blob/main/docs/usage.md#opencode-activity). |
 
 For each tool, milo uses the newest report it can read. When there is room, it also shows **tokens today** from Claude Code's local session files under `~/.claude/projects`. This is local activity since midnight, not a limit. It counts new input, output and cache writes, not cache reads. A `+` after the number means the total may be incomplete.
 
@@ -445,15 +478,30 @@ Milo labels reports as older after five minutes, or ten minutes for oh-my-pi to 
 
 An unchanged status-line reading confirms the same window, but Milo saves that confirmation at most once a minute per window. A lower figure for the same window or an older reset does not replace or refresh the saved figure.
 
+## OpenCode activity
+
+OpenCode saves no limits on this machine, so Milo shows none for it. What it does save is each step's token counts and its own cost estimate. Beneath two tools with limits Milo gives it one line, such as `OpenCode · 48.2k tokens today · $1.37 est.`. A narrower pane drops the cost first, then shortens the rest. Beside one tool, or alone, it also shows the number of steps, when the last one was recorded and the cache reads. [Which tools appear](https://github.com/mcc0x/milo/blob/main/docs/usage.md#which-tools-appear) says where it goes at each size.
+
+| Figure | What it means |
+| --- | --- |
+| Tokens today | New input, output, reasoning and cache writes of the assistant steps OpenCode recorded since local midnight, in every project. Cache reads are left out, as they are for Claude Code. It is activity, not a share of any limit. |
+| Cost | The sum OpenCode recorded for those steps, in US dollars. It is OpenCode's estimate from model prices, not a bill: a subscription or an unpriced model records zero, and Milo shows nothing rather than `$0`. A `+` means some steps recorded no cost. |
+| Limits | Unknown. OpenCode asks its own servers for allowances and budgets when you open them, and does not save the answer. Milo does not ask and does not use OpenCode's saved sign-in. |
+
+Milo reads `~/.local/share/opencode/opencode.db`, or the same file under an absolute `$XDG_DATA_HOME`, or the file `$OPENCODE_DB` names. It uses `/usr/bin/sqlite3` in read-only mode for at most a second, at least 20 seconds apart. The queries return sums and times only: message text never leaves the database, and the tables that hold OpenCode's sign-in are not read. The line can lag OpenCode by about half a minute; press `r` to read now.
+
+The figures were checked against databases written by OpenCode 1.2.0, 1.19.6, 2.2.0 and 2.3.2. They match `opencode stats --days 0`, except that Milo does not count a forked session's copied steps again on the day OpenCode 1 is upgraded to 2. Milo shows nothing, and `milo doctor` reports OpenCode's activity as unknown, when the database has other tables, when a step from today is malformed, when one of today's sessions was created by a version other than 1.x or 2.x, or when OpenCode 1 is still writing to a database OpenCode 2 has upgraded. Title requests are not counted, nor are OpenCode 2's compaction requests, because OpenCode does not record them as steps. [Usage sources](https://github.com/mcc0x/milo/blob/main/docs/usage-sources.md) has the evidence, the limits of this reading, and why Amp and Gemini CLI are not read.
+
 ## What milo does not do
 
-The usage pane reads local data. It does not call the providers, run their tools, sign in, read credentials or guess limits from token counts. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
+The usage pane reads local data. It does not call the providers, run their tools, sign in, read credentials, guess limits from token counts or work out a cost from them. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
 
 ## If a figure is missing
 
+- A tool that is not there at all has no figure saved on this Mac, or is hidden. Run `milo doctor` to see what Milo found, or choose **Always show** for it in setup to keep its place and see what it is waiting for.
 - Make the pane taller and wider to see labels, reset times and hints. Where the terminal can show pictures, including in Rex, milo draws the logos and large figures as pictures. Otherwise it draws with text. Short panes use text either way.
 - Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. Reload does not ask a provider for a fresh reading.
-- `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. A narrow pane may shorten these hints.
+- A tool that is always shown, or found while no tool has a figure, says why it has none. `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. `no tokens recorded today` means OpenCode's database has nothing from today. A narrow pane may shorten these hints.
 - For oh-my-pi, check that `/usr/bin/sqlite3` is available and the harness has saved a report. For Claude Code, see [setup](https://github.com/mcc0x/milo/blob/main/docs/setup.md#claude-code-limits) if neither saved source has a reading.
 
 ---
@@ -496,7 +544,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
-| `milo usage` | Shows available local usage limits and, when there is room, Claude Code activity. |
+| `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID]` | Opens the read-only reader. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
@@ -590,7 +638,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/omp.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It stays read-only.** milo never changes a repository. Every git command it runs only reads.
 
@@ -686,6 +734,12 @@ is opened in its place. That holds for the tabs the test opens one at a time
 and for those it opens back to back, four with no pause between them, three
 times over.
 
+### Adding a usage source
+
+[Usage sources](https://github.com/mcc0x/milo/blob/main/docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
+
+A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
+
 ### Adding a language to the reader
 
 Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. Adding a language normally means changing only the tables:
@@ -778,8 +832,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
-| `src/usage.rs` | Collects the latest limits and today's Claude Code activity. |
-| `src/usage/draw.rs` | Lays out usage figures, reset times, and hints. |
+| `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity, and works out which tools are in use. |
+| `src/usage/draw.rs` | Lays out the tools that have a place, with their figures, reset times, and hints. |
 | `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
 | `src/usage/files.rs` | Scans session files and bounds how much a refresh reads. |
@@ -792,13 +846,18 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
+| `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
+| `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
+| `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
+| `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
 | `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
+| `src/usage/tests/tools.rs` | Checks which tools have a place, and the frame for each combination and choice. |
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
@@ -814,7 +873,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
-| `tests/web-smoke.cjs` | Saves and closes the browser editor of a built binary in Chromium. |
+| `tests/web-smoke.cjs` | Saves layout and usage tool choices in the browser editor of a built binary in Chromium, then closes it. |
 
 ---
 

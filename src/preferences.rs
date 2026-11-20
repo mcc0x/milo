@@ -79,6 +79,97 @@ pub enum Source {
     Worktree,
 }
 
+/// A tool whose figures the usage pane can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageTool {
+    Codex,
+    Claude,
+    OpenCode,
+}
+
+impl UsageTool {
+    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::OpenCode];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    /// The tool's name in the preferences file and in the browser editor's fields.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "usage_codex",
+            Self::Claude => "usage_claude",
+            Self::OpenCode => "usage_opencode",
+        }
+    }
+}
+
+/// Whether the usage pane gives a tool a place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Show {
+    /// Only while the tool has a figure saved on this machine.
+    #[default]
+    Auto,
+    /// Even when all Milo can say about it is that nothing is known.
+    Always,
+    /// Never, and without looking for its data.
+    Hide,
+}
+
+impl Show {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Always, Self::Hide];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Always => "Always show",
+            Self::Hide => "Hide",
+        }
+    }
+
+    pub const fn value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Hide => "hide",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|show| show.value() == value)
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Always,
+            Self::Always => Self::Hide,
+            Self::Hide => Self::Auto,
+        }
+    }
+}
+
+/// One choice for each tool, in `UsageTool::ALL` order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsageTools([Show; 3]);
+
+impl std::ops::Index<UsageTool> for UsageTools {
+    type Output = Show;
+
+    fn index(&self, tool: UsageTool) -> &Show {
+        &self.0[tool as usize]
+    }
+}
+
+impl std::ops::IndexMut<UsageTool> for UsageTools {
+    fn index_mut(&mut self, tool: UsageTool) -> &mut Show {
+        &mut self.0[tool as usize]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub icons: IconMode,
@@ -89,6 +180,7 @@ pub struct Preferences {
     pub project_mode: ProjectMode,
     pub history_follow_new: bool,
     pub usage_large_figures: bool,
+    pub usage_tools: UsageTools,
     /// Whether the Rex listener may title tabs that nobody has named.
     pub tab_titles: bool,
 }
@@ -104,6 +196,7 @@ impl Default for Preferences {
             project_mode: ProjectMode::Follow,
             history_follow_new: false,
             usage_large_figures: false,
+            usage_tools: UsageTools::default(),
             tab_titles: false,
         }
     }
@@ -231,7 +324,11 @@ impl Preferences {
                 "history_follow_new" => self.history_follow_new = boolean()?,
                 "usage_large_figures" => self.usage_large_figures = boolean()?,
                 "tab_titles" => self.tab_titles = boolean()?,
-                _ => {}
+                _ => {
+                    if let Some(tool) = UsageTool::ALL.into_iter().find(|tool| tool.key() == key) {
+                        self.usage_tools[tool] = Show::parse(value).ok_or_else(|| invalid(key))?;
+                    }
+                }
             }
         }
         Ok(())
@@ -245,6 +342,10 @@ impl Preferences {
 
     fn save_in(&self, before: Self, path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
         let boolean = |old, new| (old != new).then(|| bool_value(new));
+        let tool = |tool: UsageTool| {
+            let show = self.usage_tools[tool];
+            (tool.key(), (before.usage_tools[tool] != show).then(|| show.value()))
+        };
         update_guarded(
             path,
             &[
@@ -262,6 +363,9 @@ impl Preferences {
                 ),
                 ("history_follow_new", boolean(before.history_follow_new, self.history_follow_new)),
                 ("usage_large_figures", boolean(before.usage_large_figures, self.usage_large_figures)),
+                tool(UsageTool::Codex),
+                tool(UsageTool::Claude),
+                tool(UsageTool::OpenCode),
                 ("tab_titles", boolean(before.tab_titles, self.tab_titles)),
             ],
             check,
@@ -478,6 +582,46 @@ fn decode_folds(text: &str) -> BTreeMap<String, bool> {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    #[test]
+    fn usage_tool_choices_save_only_what_changed_and_files_without_them_stay_automatic() {
+        let f = Fixture::folder();
+        let config = f.root.join("milo");
+        let root = f.root.join("checkout");
+        let (global_file, local_file) = (config_file(&config, None), config_file(&config, Some(&root)));
+        // A file from before the choices existed, with a tool only a later release knows.
+        let older = "icons = off\nusage_large_figures = true\nusage_gemini = always\n";
+        fs::create_dir_all(&config).unwrap();
+        fs::write(&global_file, older).unwrap();
+        let (before, source) = Preferences::resolve_in(&config, Some(&root)).unwrap();
+        assert_eq!(source, Source::Global);
+        assert!(
+            before.usage_large_figures && UsageTool::ALL.into_iter().all(|tool| before.usage_tools[tool] == Show::Auto)
+        );
+
+        let mut global = before;
+        global.usage_tools[UsageTool::OpenCode] = Show::Hide;
+        global.save_in(before, &global_file, || Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(&global_file).unwrap(), format!("{older}usage_opencode = hide\n"));
+
+        let mut local = global;
+        local.usage_tools[UsageTool::Codex] = Show::Always;
+        local.usage_tools[UsageTool::OpenCode] = Show::Auto;
+        local.save_in(global, &local_file, || Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(&local_file).unwrap(), "usage_codex = always\nusage_opencode = auto\n");
+        assert_eq!(Preferences::resolve_in(&config, None).unwrap(), (global, Source::Global));
+        assert_eq!(Preferences::resolve_in(&config, Some(&root)).unwrap(), (local, Source::Worktree));
+        assert_eq!(Preferences::for_pane_in(&config, Some(&root)), (local, None));
+
+        // A choice Milo does not know is an error to correct, not a tool to show or hide by guesswork.
+        fs::write(&local_file, "usage_claude = sometimes\n").unwrap();
+        let error = Preferences::resolve_in(&config, Some(&root)).unwrap_err();
+        assert!(error.to_string().contains("usage_claude"), "{error}");
+        assert_eq!(
+            Preferences::for_pane_in(&config, Some(&root)),
+            (global, Some("milo doctor: worktree prefs ignored"))
+        );
+    }
 
     #[test]
     fn a_partial_checkout_override_keeps_global_choices() {

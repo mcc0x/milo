@@ -9,7 +9,8 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Child, Command, Stdio};
 
-use super::omp_limits::{exec, report, sqlite, wait_for, wait_omp, window};
+use super::exec;
+use super::omp_limits::{report, sqlite, wait_for, wait_omp, window};
 use super::*;
 
 /// What `healthy` shows: the tightest window of each tool, read a minute ago.
@@ -103,7 +104,7 @@ fn omp_database(f: &Fixture, codex_used: &str, claude_used: &str) -> Option<Path
 
 fn omp_pane(f: &Fixture, db: &Path) -> Usage {
     let mut usage = unopened(f, NOW);
-    usage.omp = omp::Poll::new(Some(db.to_owned()), TEST_WAIT);
+    usage.omp = omp::poll(Some(db.to_owned()), TEST_WAIT);
     usage
 }
 
@@ -111,7 +112,7 @@ fn omp_pane(f: &Fixture, db: &Path) -> Usage {
 struct Writer(Child);
 
 fn writing(f: &Fixture, db: &Path) -> Writer {
-    let mut writer = Command::new(omp::sqlite())
+    let mut writer = Command::new(sqlite::executable())
         .args(["-batch", "-init", "/dev/null"])
         .current_dir(&f.root)
         .arg(db)
@@ -258,7 +259,7 @@ fn a_database_another_program_is_writing_keeps_its_last_reading_without_a_wait()
     // A pane opened meanwhile has nothing to keep, and says so rather than
     // waiting. The pane gives a query one second; these two took a moment.
     assert_eq!(look(&mut omp_pane(&f, &db)), UNKNOWN);
-    assert!(began.elapsed() < 5 * omp::QUERY_WAIT, "a locked database held the pane for {:?}", began.elapsed());
+    assert!(began.elapsed() < 5 * sqlite::QUERY_WAIT, "a locked database held the pane for {:?}", began.elapsed());
     drop(writer);
 
     exec(&db, "UPDATE cache SET value=replace(value,'0.25','0.5');");
