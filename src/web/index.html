@@ -20,6 +20,7 @@
 
   <div class="frame surface" id="editor" hidden>
     <button class="skip-link" id="skip-settings" type="button">Skip to settings</button>
+    <div class="control-dock">
     <nav class="navigation" aria-label="Settings sections">
       <button type="button" data-page="layout" aria-current="page" aria-controls="settings-panel">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 8h18m-7 0v12m0-6h7"/></svg>
@@ -38,15 +39,19 @@
         Health<span class="nav-draft" hidden></span>
       </button>
     </nav>
+      <div class="dock-actions" aria-label="Draft actions" role="group">
+        <button id="discard-all" class="button text-button draft-action" type="button" aria-label="Discard" title="Discard" disabled>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg><span>Discard</span>
+        </button>
+        <button id="save-draft" class="button secondary draft-action" type="button" aria-label="Save" title="Save" disabled>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 10 4.2 4.2L16.5 5.5"/></svg><span>Save</span>
+        </button>
+        <button id="done" class="button primary" type="button" title="Stop the local editor">Done</button>
+      </div>
+    </div>
+    <p class="sr-only" id="draft-status" role="status"></p>
 
     <main class="editor-main">
-      <div class="editor-meta">
-      <div id="context" class="context"></div>
-      <div class="session-meta">
-        <span id="version" class="version" hidden></span>
-        <span id="connection" class="connection" data-state="opening">Connecting</span>
-      </div>
-      </div>
       <header class="section-header">
         <h1 id="section-title" tabindex="-1">Layout</h1>
         <p id="section-description"></p>
@@ -80,6 +85,12 @@
         <section id="settings-panel" class="settings-panel" aria-labelledby="section-title"></section>
       </div>
     </main>
+  <footer class="actionbar" id="actionbar" hidden>
+    <img src="/rex.png" width="20" height="20" alt="">
+    <div id="context" class="context"></div>
+    <span id="connection" class="connection sr-only"></span>
+    <span id="version" class="version"></span>
+  </footer>
   </div>
 
   <div class="frame opening" id="opening">
@@ -91,16 +102,13 @@
     <p>Your local editor has stopped. You can close this tab.</p>
   </main>
 
-  <footer class="actionbar" id="actionbar" hidden>
-    <div class="frame actionbar-inner">
-      <p class="draft-status" id="draft-status" role="status"></p>
-      <div class="button-row">
-        <button id="discard-all" class="button text-button" type="button" hidden>Discard all</button>
-        <button id="done" class="button primary" type="button" title="Stop the local editor">Done</button>
-      </div>
-    </div>
-  </footer>
 
+  <dialog id="save-options" aria-labelledby="save-title">
+    <h2 id="save-title">Save changes</h2>
+    <p>Choose where to save each draft.</p>
+    <div id="save-groups"></div>
+    <form method="dialog" class="dialog-actions button-row"><button class="button secondary">Cancel</button></form>
+  </dialog>
   <dialog id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-note">
     <h2 id="confirm-title"></h2>
     <p id="confirm-note"></p>

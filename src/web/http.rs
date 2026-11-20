@@ -21,6 +21,7 @@ pub(super) enum Route {
     Style,
     Mascot,
     Favicon,
+    RexIcon,
     #[cfg(feature = "web-dev")]
     DevScript,
     #[cfg(feature = "web-dev")]
@@ -127,6 +128,7 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
         ("GET", "/app.css") => Route::Style,
         ("GET", "/milo.webp") => Route::Mascot,
         ("GET", "/favicon.png") => Route::Favicon,
+        ("GET", "/rex.png") => Route::RexIcon,
         #[cfg(feature = "web-dev")]
         ("GET", "/dev.js") => Route::DevScript,
         #[cfg(feature = "web-dev")]

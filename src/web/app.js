@@ -252,8 +252,9 @@ function updateChrome() {
   const summary = closing ? 'Closing settings…' : paused ? 'Edit not applied' : running || queue.length ? 'Updating draft…' :
     dirty ? `Unsaved changes in ${dirty === 1 ? '1 group' : `${dirty} groups`}` : state.trial ? 'Layout trial active' : 'No unsaved changes';
   if (status.textContent !== summary) status.textContent = summary;
-  byId('discard-all').hidden = !needsWarning;
-  byId('discard-all').disabled = running || closing;
+  byId('discard-all').disabled = !needsWarning || running || closing || !connected;
+  byId('save-draft').disabled = running || closing || paused || !connected || queue.length > 0 ||
+    !Object.entries(state.groups).some(([key, group]) => canSaveDraft(key, group));
   byId('done').disabled = running || closing;
 }
 
@@ -261,18 +262,18 @@ function render() {
   const focus = document.activeElement;
   const focusId = focus?.id;
   const unfinished = focus?.type === 'number' && focus.value !== focus.dataset.initial ? focus.value : null;
-  byId('version').textContent = `v${state.app_version}`;
+  byId('version').textContent = `Milo v${state.app_version}`;
   byId('version').hidden = false;
   const locationLabel = node('strong', '', state.context.inside_rex ? 'In Rex' : 'Outside Rex');
-  const path = state.context.worktree;
-  const name = path?.split('/').filter(Boolean).at(-1) || path || 'No Git worktree';
+  const path = state.context.worktree || state.context.directory;
+  const name = path?.split('/').filter(Boolean).at(-1) || path || 'Directory unavailable';
   const worktree = node('span', 'context-worktree', name);
   const context = byId('context');
   context.replaceChildren(locationLabel, worktree);
   if (path) {
     worktree.title = path;
     worktree.setAttribute('aria-hidden', 'true');
-    context.append(node('span', 'sr-only', `Git worktree: ${path}`));
+    context.append(node('span', 'sr-only', `${state.context.worktree ? 'Git worktree' : 'Directory'}: ${path}`));
   }
   for (const tab of navButtons) {
     const name = tab.dataset.page;
@@ -374,9 +375,36 @@ function groupCard(key, title, description, controls) {
   return card;
 }
 
+function canSaveDraft(key, group) {
+  return (group.dirty || (key === 'layout' && state.trial)) &&
+    (group.save_global || group.save_worktree || group.save_account);
+}
+
+function saveChoices(key, group, select, disabled = false) {
+  const choices = node('div', 'button-row');
+  for (const [scope, label] of [['worktree', 'Save for this worktree'], ['global', 'Save as global default'], ['account', 'Save Claude Code choices']]) {
+    if (group[`save_${scope}`]) choices.append(button(label, choices.childElementCount ? 'secondary' : 'primary',
+      `${select}-${key}-${scope}`, () => {
+        if (select === 'dock') byId('save-options').close();
+        command('save', {group: key, scope});
+      }, disabled));
+  }
+  return choices;
+}
+
+function showSaveOptions() {
+  const groups = byId('save-groups');
+  groups.replaceChildren();
+  for (const [key, group] of Object.entries(state.groups)) {
+    if (!canSaveDraft(key, group)) continue;
+    const title = groupLabels[key];
+    groups.append(node('h3', '', title[0].toUpperCase() + title.slice(1)), saveChoices(key, group, 'dock'));
+  }
+  if (groups.childElementCount) byId('save-options').showModal();
+}
+
 function groupFooter(key, group) {
   const footer = node('footer', 'group-footer');
-  const saves = node('div', 'button-row');
   const extras = node('div', 'button-row');
   const install = key === 'layout' && state.context.inside_rex && !state.context.installed && (group.save_global || group.save_worktree);
   const trial = key === 'layout' && state.trial;
@@ -386,13 +414,7 @@ function groupFooter(key, group) {
       'Choose where to save this layout.' : install ?
         'Choose a scope to save this layout and set up the Rex integration.' : 'No unsaved changes in this group.';
   footer.append(node('p', '', note));
-  const save = (label, scope, allowed, style) => {
-    if (!allowed) return;
-    saves.append(button(label, style, `save-${key}-${scope}`, () => command('save', {group: key, scope}), !enabled || paused));
-  };
-  save('Save for this worktree', 'worktree', group.save_worktree, 'primary');
-  save('Save as global default', 'global', group.save_global, group.save_worktree ? 'secondary' : 'primary');
-  save('Save Claude Code choices', 'account', group.save_account, 'primary');
+  const saves = saveChoices(key, group, 'save', !enabled || paused);
   if (group.inherit) {
     extras.append(button('Use global default', 'text-button', `inherit-${key}`, () => {
       confirm('Use the global default?', `This removes this worktree’s ${groupLabels[key]} override${group.dirty ? ' and discards the unsaved changes in this group' : ''}.`,
@@ -743,6 +765,7 @@ for (const tab of navButtons) {
 }
 byId('skip-settings').addEventListener('click', () => byId('section-title').focus());
 byId('done').addEventListener('click', done);
+byId('save-draft').addEventListener('click', showSaveOptions);
 byId('discard-all').addEventListener('click', () => discard('all'));
 byId('confirm-cancel').addEventListener('click', () => byId('confirm').close('cancel'));
 byId('confirm-do').addEventListener('click', () => byId('confirm').close('continue'));

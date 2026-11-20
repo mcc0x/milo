@@ -20,6 +20,7 @@ pub(crate) struct Editor {
     claude: Option<ClaudeSnapshot>,
     doctor: Option<String>,
     version: u64,
+    directory: Option<String>,
 }
 
 impl Editor {
@@ -55,7 +56,8 @@ impl Editor {
         if inside && setup.web_window.is_none() && setup.message.is_none() {
             setup.report(Err(LOST_TAB));
         }
-        let mut editor = Self { setup, preferences: None, claude, doctor: None, version: 1 };
+        let directory = std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned());
+        let mut editor = Self { setup, preferences: None, claude, doctor: None, version: 1, directory };
         if let Err(why) = editor.load_preferences() {
             editor.setup.report(Err(why));
         }
@@ -169,7 +171,7 @@ impl Editor {
         let mut out = String::with_capacity(1350 + self.doctor.as_ref().map_or(0, String::len));
         write!(out, concat!(
             "{{\"version\":{},\"app_version\":\"", env!("CARGO_PKG_VERSION"), "\",",
-            "\"context\":{{\"inside_rex\":{},\"worktree\":{},\"installed\":{}}},",
+            "\"context\":{{\"inside_rex\":{},\"worktree\":{},\"directory\":{},\"installed\":{}}},",
             "\"layout\":{{\"panes\":{{\"outline\":{},\"history\":{},\"usage\":{}}},\"side\":\"{}\",\"width\":{},",
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"outline_share\":{},\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
             "\"preview\":{{\"width\":{},\"shares\":[{},{},{}],\"cols\":{},\"rows\":{}}},",
@@ -179,7 +181,7 @@ impl Editor {
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
             "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"refresh\":{},\"auto_arrange\":{}}},",
             "\"dirty\":{},\"trial\":{},\"doctor\":{},\"message\":"),
-            self.version, setup.inside, Optional(root.as_deref().map(Quoted)), setup.installed,
+            self.version, setup.inside, Optional(root.as_deref().map(Quoted)), Optional(self.directory.as_deref().map(Quoted)), setup.installed,
             show_outline, show_history, show_usage, side, layout.width.parse::<f64>().unwrap_or(0.2),
             first, second, third, layout.outline_share.parse::<f64>().unwrap_or(0.7),
             layout.usage_rows.parse::<u32>().unwrap_or(super::layout::DEFAULT_USAGE_ROWS),
