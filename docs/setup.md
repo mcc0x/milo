@@ -67,6 +67,8 @@ The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to
 
 Layout edits stay in a draft until you save. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default. Appearance and workflow use the same preference files as terminal Settings; Claude Code choices are account-wide. Outside Rex you can still edit and save settings.
 
+In **Health**, run a check of saved settings and the live layout. If the original Rex tab is no longer available, Health warns unless it finds a more serious issue. Saving settings or changing the live layout clears the old result; run the check again for an updated verdict.
+
 While the page is open, it periodically keeps the local session alive only if it has unsaved changes, an active layout trial, or queued edits. This does not save your work, and the session can still time out if the browser suspends the page.
 
 Finish the session with **Done**, or stop the command with `Ctrl-C`. If you only close the browser tab, the private link remains usable until you stop Milo or the session is idle for 15 minutes. Stopping Milo discards unsaved changes and undoes an unkept layout trial; it does not roll back settings you already saved.

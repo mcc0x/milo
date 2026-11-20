@@ -141,9 +141,15 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
 pub(super) fn health_anchored(
     store: &Store,
     root: Option<&Path>,
-    target: Option<&rex::Target>,
+    target: Result<Option<&rex::Target>, &'static str>,
 ) -> Result<Health, String> {
-    report_with_worktree(store, Ok(root), target).map(|(_, health)| health)
+    let (_, health) = report_with_worktree(store, Ok(root), target.ok().flatten())?;
+    // The missing original tab matters more than other warnings, but it
+    // shouldn't hide a definite problem with the installation.
+    Ok(match target {
+        Err(reason) if !matches!(health, Health::Issue(_)) => Health::Warning(reason),
+        _ => health,
+    })
 }
 
 fn report_with_worktree(
