@@ -56,7 +56,40 @@ For a quick look at the tree, use **Milo: Peek Outline** in Rex. It reuses one f
 
 Committed-file lookup requires a UTF-8 path. A working file with a non-UTF-8 name can still be read directly, without a Git diff.
 
-The reader shows the whole file with changed lines marked. It colours Rust, Python, JavaScript, TypeScript (including JSX and TSX), Go, Java, C, C++, C#, PHP, Lua, Swift, SQL, shell, JSON, YAML and TOML by file extension. It colours a file named `Dockerfile`, `Makefile` or `GNUmakefile` in any letter case, and files ending in `.dockerfile` or `.mk`. Working files and files at a commit are recognised the same way. It uses a small scanner, not a full parser. Other languages show as plain text. The working-file reader will not open a file outside the project through a linked folder.
+The reader shows the whole file with changed lines marked, and colours the languages below. Working files and files at a commit are recognised the same way, by file name, in any letter case. It uses a small scanner, not a full parser. Other files show as plain text, as does a script whose `#!` line names a different language from its extension. The working-file reader will not open a file outside the project through a linked folder.
+
+### Languages
+
+| Language | Files | Coloured across lines |
+| --- | --- | --- |
+| Rust | `.rs` | Nested block comments, strings, raw strings |
+| Python | `.py`, `.pyi` | Triple-quoted strings |
+| JavaScript, TypeScript | `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx` | Block comments, template strings |
+| Go | `.go` | Block comments, raw strings |
+| Java | `.java` | Block comments, text blocks |
+| Kotlin | `.kt`, `.kts` | Nested block comments, raw strings |
+| Scala | `.scala`, `.sc`, `.sbt` | Nested block comments, raw strings |
+| Dart | `.dart` | Nested block comments, triple-quoted strings |
+| C, C++ | `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh` | Block comments, C++ raw strings |
+| C# | `.cs` | Block comments, verbatim and raw strings |
+| Swift | `.swift` | Nested block comments, multiline and raw strings |
+| PHP | `.php` | Block comments, strings, heredocs |
+| Ruby | `.rb`, `.rake`, `.gemspec`, `.ru`, `Gemfile`, `Rakefile` | `=begin` comments, heredocs |
+| Elixir | `.ex`, `.exs` | Triple-quoted strings |
+| Lua | `.lua` | Long comments and long strings |
+| Shell | `.sh`, `.bash`, `.zsh` | Quoted strings |
+| SQL | `.sql` | Block comments |
+| HTML, XML, Vue, Svelte | `.html`, `.htm`, `.xhtml`, `.xml`, `.svg`, `.vue`, `.svelte` | Comments, tags, attribute values, and the JavaScript and CSS inside `script` and `style` |
+| CSS, SCSS, Less | `.css`, `.scss`, `.less` | Block comments |
+| Markdown | `.md`, `.markdown`, `.mdx` | Fenced code blocks, comments |
+| JSON | `.json`, `.jsonc` | Block comments |
+| YAML | `.yaml`, `.yml` | Quoted strings |
+| TOML | `.toml` | Multiline strings |
+| Terraform, HCL | `.tf`, `.tfvars`, `.hcl` | Block comments, heredocs |
+| Dockerfile | `Dockerfile`, `.dockerfile` | |
+| Makefile | `Makefile`, `GNUmakefile`, `.mk` | |
+
+Every language has its comments, strings, numbers and reserved words coloured. Markup has tag names, attributes and entities coloured instead, and text between tags is left plain. Markdown has headings, list marks, links, inline code, code blocks and quotes coloured; emphasis and tables stay plain, and a code block is one colour whatever language it holds. Ruby and Elixir strings in quotes are coloured one line at a time. Colour never changes the text shown, and the marks for added, removed and changed words are drawn over it.
 
 When a removed line and the added line that replaces it look alike, the reader highlights the words that changed. A word is a run of letters, digits and underscores in any script; text written without spaces, such as Chinese or Japanese, is compared one character at a time. Highlighting only adds emphasis: the text shown is the same with or without it. Lines that share too little, lines with many separate changes and lines whose edits span more than about a hundred words keep only their red or green background, as do the remaining lines of an unusually large diff.
 

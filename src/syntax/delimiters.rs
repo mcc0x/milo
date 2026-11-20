@@ -14,6 +14,8 @@ pub(super) enum Dialect {
     Javascript,
     Lua,
     Swift,
+    /// `<<LABEL` opens text that runs to a line holding only the label, as in Ruby and HCL.
+    Heredoc,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +54,10 @@ impl Dialect {
                 (end, end.is_none().then_some(Delimiter::CsharpRaw(width)))
             }
             Self::Php if rest.starts_with(b"<<<") => (None, Some(Delimiter::Heredoc(php_label(&rest[3..])?.into()))),
+            Self::Heredoc if rest.starts_with(b"<<") && (from == 0 || b[from - 1] != b'<') => {
+                let (len, label) = heredoc_open(&rest[2..])?;
+                (Some(from + 2 + len), Some(Delimiter::Heredoc(label.into())))
+            }
             Self::Javascript if b[from] == b'`' => {
                 let mut template = Template::default();
                 let end = template.end(b, from + 1);
@@ -237,6 +243,27 @@ fn php_label(after: &[u8]) -> Option<&[u8]> {
         None => tail,
     };
     tail.trim_ascii_start().is_empty().then_some(label)
+}
+
+/// The length and label of what follows `<<`: an optional `~` or `-`, then a
+/// label that is quoted or starts with a capital, which a shifted value seldom does.
+fn heredoc_open(after: &[u8]) -> Option<(usize, &[u8])> {
+    let squiggle = usize::from(matches!(after.first(), Some(b'~' | b'-')));
+    let (quote, start) = match after.get(squiggle) {
+        Some(&quote @ (b'\'' | b'"' | b'`')) => (Some(quote), squiggle + 1),
+        _ => (None, squiggle),
+    };
+    let first = *after.get(start)?;
+    let named = if quote.is_some() { is_word(first) } else { first.is_ascii_uppercase() || first == b'_' };
+    if !named || first.is_ascii_digit() {
+        return None;
+    }
+    let end = word_end(after, start);
+    let label = &after[start..end];
+    match quote {
+        Some(quote) => (after.get(end) == Some(&quote)).then_some((end + 1, label)),
+        None => Some((end, label)),
+    }
 }
 
 /// Inside `${…}` we only track what can hide a closing brace or backtick.

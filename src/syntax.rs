@@ -6,6 +6,8 @@
 
 mod delimiters;
 mod langs;
+mod markdown;
+mod markup;
 
 use delimiters::{Delimiter, Dialect};
 pub use langs::for_file;
@@ -52,6 +54,8 @@ pub struct Lang {
     /// Pairs of delimiters for comments that can cross line breaks.
     block_comments: &'static [(&'static str, &'static str)],
     dialect: Dialect,
+    /// How a line is read: as code, as tags around text, or as prose.
+    grammar: Grammar,
     /// Tried in order, so a longer opener must come before its prefix.
     quotes: &'static [Quote],
     /// Words reserved by the language.
@@ -80,6 +84,21 @@ pub struct Lang {
     caseless: bool,
     /// Reserve keywords only as the first word of a line, after Make's optional `-`.
     leading_keywords: bool,
+    /// A block comment inside another must close before the outer one does.
+    nested_comments: bool,
+    /// Open a block comment only at the start of a line, as Ruby's `=begin` does.
+    leading_block_comments: bool,
+    /// Colour CSS `@rules` as keywords and `#rgb` values as numbers.
+    css: bool,
+}
+
+/// The shape of a file's lines, which decides the walker that reads them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grammar {
+    Code,
+    /// Tags and attributes around text that is not code, as in HTML and XML.
+    Markup,
+    Markdown,
 }
 
 /// What is still open at the start of a line.
@@ -90,6 +109,18 @@ pub enum State {
     Comment(u8, usize),
     Quote(u8),
     Delimited(Delimiter),
+    /// Inside a markup tag, and inside an attribute value if a quote is given.
+    Tag {
+        quote: Option<u8>,
+        raw: Option<markup::Raw>,
+    },
+    /// Inside a markup element whose text is code, with what that code has open.
+    Raw(markup::Raw, Box<State>),
+    /// Inside a Markdown code block that a run of `len` `mark`s closes.
+    Fence {
+        mark: u8,
+        len: usize,
+    },
 }
 
 fn is_word(c: u8) -> bool {
@@ -201,6 +232,13 @@ impl Lang {
     fn walk<const DRAW: bool>(&self, text: &str, state: &mut State, emit: &mut impl FnMut(Span)) {
         let b = text.as_bytes();
         let Some(mut i) = self.resume(b, state, emit) else { return };
+        match self.grammar {
+            Grammar::Code => {}
+            Grammar::Markup => return markup::walk::<DRAW>(text, i, state, emit),
+            Grammar::Markdown => return markdown::walk(text, i, state, emit),
+        }
+        // Only the other grammars leave anything else open.
+        *state = State::Code;
         let indent = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
         if i <= indent {
             i = self.line_start(b, indent, emit);
@@ -218,14 +256,20 @@ impl Lang {
         }
     }
 
+    /// Scans part of a line for another walker. The fixed callback type keeps
+    /// the two walkers from being compiled once for every caller of each other.
+    fn walk_within<const DRAW: bool>(&self, text: &str, state: &mut State, emit: &mut dyn FnMut(Span)) {
+        self.walk::<DRAW>(text, state, &mut |span| emit(span));
+    }
+
     /// Finish any open comment or string, or return `None` if it stays open.
     fn resume(&self, b: &[u8], state: &mut State, emit: &mut impl FnMut(Span)) -> Option<usize> {
         let open = match state {
-            State::Code => return Some(0),
+            State::Code | State::Tag { .. } | State::Raw(..) | State::Fence { .. } => return Some(0),
             State::Comment(k, depth) => self
                 .block_comments
                 .get(usize::from(*k))
-                .map(|(_, close)| (comment_end(b, 0, close, depth, self.nested_comments()), Class::Comment)),
+                .map(|(_, close)| (comment_end(b, 0, close, depth, self.nested_comments), Class::Comment)),
             State::Quote(k) => self.quotes.get(usize::from(*k)).map(|q| (string_end(b, 0, q), Class::Str)),
             State::Delimited(mark) => {
                 let class = mark.class();
@@ -264,19 +308,18 @@ impl Lang {
             emit((i, b.len(), Class::Comment));
             return Some(b.len());
         }
+        if self.leading_block_comments && i != 0 {
+            return None;
+        }
         let k = self.block_comments.iter().position(|(open, _)| begins(rest, open))?;
         let (open, close) = self.block_comments[k];
         let mut depth = 1;
-        let end = comment_end(b, i + open.len(), close, &mut depth, self.nested_comments()).unwrap_or_else(|| {
+        let end = comment_end(b, i + open.len(), close, &mut depth, self.nested_comments).unwrap_or_else(|| {
             *state = State::Comment(u8::try_from(k).expect("block comment index fits in a byte"), depth);
             b.len()
         });
         emit((i, end, Class::Comment));
         Some(end)
-    }
-
-    fn nested_comments(&self) -> bool {
-        matches!(self.dialect, Dialect::Rust | Dialect::Swift)
     }
 
     pub fn lookahead(&self) -> usize {
@@ -338,6 +381,8 @@ impl Lang {
             let end = number_end(b, i);
             emit((i, end, Class::Number));
             end
+        } else if self.css && matches!(c, b'@' | b'#') {
+            Self::css_mark(b, i, emit)
         } else if is_word(c) {
             let end = word_end(b, i);
             if DRAW {
@@ -347,6 +392,23 @@ impl Lang {
         } else {
             i + 1
         }
+    }
+
+    /// An `@rule` name, or a `#rgb` value after a declaration's colon. A
+    /// selector's colon, as in `a:hover #add`, has a name straight after it.
+    fn css_mark(b: &[u8], i: usize, emit: &mut impl FnMut(Span)) -> usize {
+        let end = i + 1 + b[i + 1..].iter().take_while(|&&c| is_word(c) || c == b'-').count();
+        let name = &b[i + 1..end];
+        // Look a short way back, so a long run of marks is not read again from each one.
+        let declared = |b: &[u8]| b.ends_with(b":") || b[b.len().saturating_sub(256)..].windows(2).any(|w| w == b": ");
+        if b[i] == b'@' {
+            if !name.is_empty() {
+                emit((i, end, Class::Keyword));
+            }
+        } else if matches!(name.len(), 3 | 4 | 6 | 8) && name.iter().all(u8::is_ascii_hexdigit) && declared(&b[..i]) {
+            emit((i, end, Class::Number));
+        }
+        end
     }
 
     fn colour_word(&self, text: &str, i: usize, end: usize, emit: &mut impl FnMut(Span)) {
@@ -459,7 +521,7 @@ impl Lang {
 
 #[cfg(test)]
 mod tests {
-    use super::langs::FILE_LANGS;
+    use super::langs::{FILE_LANGS, NAMED_LANGS};
     use super::*;
 
     fn lang(name: &str) -> &'static Lang {
@@ -602,7 +664,7 @@ mod tests {
             "0.1.foo", "*/", "--[==[", "é]]", "]==]", "[=", "--[", "-", "#\"\"\"", "é\"\"\"\"#", "#\"é", "##", "]]",
         ];
         let mut out = Vec::new();
-        for (_, lang) in FILE_LANGS {
+        for (_, lang) in FILE_LANGS.iter().chain(NAMED_LANGS) {
             let mut state = State::Code;
             for text in lines {
                 lang.scan(text, &mut state, &mut out);
@@ -616,10 +678,18 @@ mod tests {
                     valid_spans(text, &out);
                 }
             }
-            for mut state in [State::Comment(u8::MAX, 1), State::Quote(u8::MAX)] {
+            let open = [
+                State::Comment(u8::MAX, 1),
+                State::Quote(u8::MAX),
+                State::Tag { quote: Some(b'"'), raw: None },
+                State::Fence { mark: b'`', len: 3 },
+            ];
+            for mut state in open {
                 lang.scan("é", &mut state, &mut out);
                 valid_spans("é", &out);
-                assert_eq!(state, State::Code);
+                if lang.grammar == Grammar::Code {
+                    assert_eq!(state, State::Code);
+                }
             }
         }
     }

@@ -1,11 +1,12 @@
 //! Defines the code-colouring rules and selects them by file name or extension.
 
-use super::{Dialect, Escape, Lang, Quote};
+use super::{Dialect, Escape, Grammar, Lang, Quote};
 
 const PLAIN: Lang = Lang {
     line_comments: &[],
     block_comments: &[],
     dialect: Dialect::Plain,
+    grammar: Grammar::Code,
     quotes: &[],
     keywords: &[],
     constants: &[],
@@ -20,6 +21,9 @@ const PLAIN: Lang = Lang {
     toml_keys: false,
     caseless: false,
     leading_keywords: false,
+    nested_comments: false,
+    leading_block_comments: false,
+    css: false,
 };
 
 const DOUBLE: Quote = Quote { open: "\"", close: "\"", multiline: false, escape: Escape::Backslash, extra_quotes: 0 };
@@ -31,6 +35,7 @@ const LINE_QUOTES: &[Quote] = &[DOUBLE, Quote { escape: Escape::None, ..SINGLE }
 
 static RUST: Lang = Lang {
     chars: true,
+    nested_comments: true,
     line_comments: &["//"],
     block_comments: C_COMMENTS,
     dialect: Dialect::Rust,
@@ -217,6 +222,7 @@ static LUA: Lang = Lang {
 
 static SWIFT: Lang = Lang {
     directives: true,
+    nested_comments: true,
     line_comments: &["//"],
     block_comments: C_COMMENTS,
     dialect: Dialect::Swift,
@@ -317,6 +323,135 @@ static TOML: Lang = Lang {
     ..PLAIN
 };
 
+const TRIPLE: Quote = Quote { open: "\"\"\"", close: "\"\"\"", multiline: true, ..DOUBLE };
+/// Text between triple quotes with no escapes, which may end in quotes of its own.
+const RAW_TRIPLE: Quote = Quote { escape: Escape::None, extra_quotes: 2, ..TRIPLE };
+
+/// Quoted strings stay on one line, so that a quote inside a pattern cannot
+/// colour the rest of the file. Text that spans lines is usually a heredoc.
+static RUBY: Lang = Lang {
+    spaced_comments: true,
+    leading_block_comments: true,
+    line_comments: &["#"],
+    block_comments: &[("=begin", "=end")],
+    dialect: Dialect::Heredoc,
+    quotes: &[DOUBLE, SINGLE, Quote { open: "`", close: "`", ..DOUBLE }],
+    keywords: &[
+        "alias", "and", "begin", "break", "case", "class", "def", "defined", "do", "else", "elsif", "end", "ensure",
+        "extend", "for", "if", "in", "include", "module", "next", "not", "or", "private", "protected", "public",
+        "raise", "redo", "require", "require_relative", "rescue", "retry", "return", "self", "super", "then", "undef",
+        "unless", "until", "when", "while", "yield",
+    ],
+    constants: &["true", "false", "nil"],
+    ..PLAIN
+};
+
+static KOTLIN: Lang = Lang {
+    chars: true,
+    nested_comments: true,
+    line_comments: &["//"],
+    block_comments: C_COMMENTS,
+    quotes: &[RAW_TRIPLE, DOUBLE, SINGLE],
+    keywords: &[
+        "abstract", "actual", "annotation", "as", "break", "by", "catch", "class", "companion", "const", "constructor",
+        "continue", "crossinline", "data", "do", "else", "enum", "expect", "external", "final", "finally", "for",
+        "fun", "get", "if", "import", "in", "infix", "init", "inline", "inner", "interface", "internal", "is",
+        "lateinit", "noinline", "object", "open", "operator", "out", "override", "package", "private", "protected",
+        "public", "reified", "return", "sealed", "set", "super", "suspend", "tailrec", "this", "throw", "try",
+        "typealias", "val", "var", "vararg", "when", "where", "while",
+    ],
+    constants: &["true", "false", "null"],
+    ..PLAIN
+};
+
+static SCALA: Lang = Lang {
+    chars: true,
+    nested_comments: true,
+    line_comments: &["//"],
+    block_comments: C_COMMENTS,
+    quotes: &[RAW_TRIPLE, DOUBLE, SINGLE],
+    keywords: &[
+        "abstract", "case", "catch", "class", "def", "do", "else", "enum", "export", "extends", "extension", "final",
+        "finally", "for", "given", "if", "implicit", "import", "inline", "lazy", "match", "new", "object", "opaque",
+        "override", "package", "private", "protected", "return", "sealed", "super", "then", "this", "throw", "trait",
+        "try", "type", "using", "val", "var", "while", "with", "yield",
+    ],
+    constants: &["true", "false", "null"],
+    ..PLAIN
+};
+
+static DART: Lang = Lang {
+    nested_comments: true,
+    line_comments: &["//"],
+    block_comments: C_COMMENTS,
+    quotes: &[TRIPLE, Quote { open: "'''", close: "'''", multiline: true, ..SINGLE }, DOUBLE, SINGLE],
+    keywords: &[
+        "abstract", "as", "assert", "async", "await", "base", "break", "case", "catch", "class", "const", "continue",
+        "covariant", "default", "deferred", "do", "dynamic", "else", "enum", "export", "extends", "extension",
+        "external", "factory", "final", "finally", "for", "get", "hide", "if", "implements", "import", "in",
+        "interface", "is", "late", "library", "mixin", "new", "on", "operator", "part", "required", "rethrow",
+        "return", "sealed", "set", "show", "static", "super", "switch", "sync", "this", "throw", "try", "typedef",
+        "var", "void", "when", "while", "with", "yield",
+    ],
+    constants: &["true", "false", "null"],
+    ..PLAIN
+};
+
+static ELIXIR: Lang = Lang {
+    spaced_comments: true,
+    line_comments: &["#"],
+    quotes: &[TRIPLE, Quote { open: "'''", close: "'''", multiline: true, ..SINGLE }, DOUBLE, SINGLE],
+    keywords: &[
+        "after", "alias", "and", "case", "catch", "cond", "def", "defdelegate", "defexception", "defguard", "defimpl",
+        "defmacro", "defmacrop", "defmodule", "defoverridable", "defp", "defprotocol", "defstruct", "do", "else",
+        "end", "fn", "for", "if", "import", "in", "not", "or", "quote", "raise", "receive", "require", "rescue", "try",
+        "unless", "unquote", "use", "when", "with",
+    ],
+    constants: &["true", "false", "nil"],
+    ..PLAIN
+};
+
+/// Terraform and other HCL files.
+static HCL: Lang = Lang {
+    line_comments: &["#", "//"],
+    block_comments: C_COMMENTS,
+    dialect: Dialect::Heredoc,
+    quotes: &[DOUBLE],
+    keywords: &[
+        "data", "dynamic", "else", "endfor", "endif", "for", "if", "in", "locals", "module", "output", "provider",
+        "resource", "terraform", "variable",
+    ],
+    constants: &["true", "false", "null"],
+    ..PLAIN
+};
+
+static CSS: Lang = Lang {
+    css: true,
+    colon_keys: true,
+    block_comments: C_COMMENTS,
+    quotes: C_QUOTES,
+    keywords: &["important"],
+    constants: &["auto", "inherit", "initial", "none", "revert", "unset"],
+    ..PLAIN
+};
+/// SCSS and Less. A `//` after a colon is part of an address, not a comment.
+static SCSS: Lang = Lang { spaced_comments: true, line_comments: &["//"], ..CSS };
+
+const MARKUP_COMMENTS: &[(&str, &str)] = &[("<!--", "-->")];
+/// HTML, XML and the single-file components built on them.
+static MARKUP: Lang = Lang { grammar: Grammar::Markup, block_comments: MARKUP_COMMENTS, names: false, ..PLAIN };
+static MARKDOWN: Lang = Lang { grammar: Grammar::Markdown, block_comments: MARKUP_COMMENTS, names: false, ..PLAIN };
+
+/// The language of a `script` element's text.
+pub(super) fn script() -> &'static Lang {
+    &JAVASCRIPT
+}
+
+/// The language of a `style` element's text.
+pub(super) fn style() -> &'static Lang {
+    &CSS
+}
+
 /// Extensions are listed together when they use the same colouring rules.
 pub(super) const FILE_LANGS: &[(&[&str], &Lang)] = &[
     (&["rs"], &RUST),
@@ -340,10 +475,21 @@ pub(super) const FILE_LANGS: &[(&[&str], &Lang)] = &[
     (&["sql"], &SQL),
     (&["dockerfile"], &DOCKERFILE),
     (&["mk"], &MAKEFILE),
+    (&["rb", "rake", "gemspec", "ru"], &RUBY),
+    (&["kt", "kts"], &KOTLIN),
+    (&["scala", "sc", "sbt"], &SCALA),
+    (&["dart"], &DART),
+    (&["ex", "exs"], &ELIXIR),
+    (&["tf", "tfvars", "hcl"], &HCL),
+    (&["css"], &CSS),
+    (&["scss", "less"], &SCSS),
+    (&["html", "htm", "xhtml", "xml", "svg", "vue", "svelte"], &MARKUP),
+    (&["md", "markdown", "mdx"], &MARKDOWN),
 ];
 
 /// Files known by their whole name.
-const NAMED_LANGS: &[(&[&str], &Lang)] = &[(&["Dockerfile"], &DOCKERFILE), (&["Makefile", "GNUmakefile"], &MAKEFILE)];
+pub(super) const NAMED_LANGS: &[(&[&str], &Lang)] =
+    &[(&["Dockerfile"], &DOCKERFILE), (&["Makefile", "GNUmakefile"], &MAKEFILE), (&["Gemfile", "Rakefile"], &RUBY)];
 
 fn listed_lang(langs: &[(&[&str], &'static Lang)], word: &str) -> Option<&'static Lang> {
     langs.iter().find_map(|(words, lang)| words.iter().any(|w| word.eq_ignore_ascii_case(w)).then_some(*lang))
@@ -373,6 +519,11 @@ impl Lang {
             "lua" | "luajit" => &[&LUA],
             "swift" => &[&SWIFT],
             "make" | "gmake" => &[&MAKEFILE],
+            "ruby" | "jruby" => &[&RUBY],
+            "elixir" => &[&ELIXIR],
+            "scala" | "scala-cli" => &[&SCALA],
+            "dart" => &[&DART],
+            "kotlin" => &[&KOTLIN],
             _ => return false,
         };
         languages.iter().any(|&lang| std::ptr::eq(self, lang))
@@ -437,11 +588,20 @@ mod tests {
             ("GNUmakefile", &MAKEFILE),
             ("build/rules.mk", &MAKEFILE),
             ("Makefile.toml", &TOML),
+            ("README.md", &MARKDOWN),
+            ("Dockerfile.md", &MARKDOWN),
+            ("Gemfile", &RUBY),
+            ("lib/tasks/db.rake", &RUBY),
+            ("build.gradle.kts", &KOTLIN),
+            ("main.tf", &HCL),
+            ("site/index.HTML", &MARKUP),
+            ("App.vue", &MARKUP),
+            ("theme.scss", &SCSS),
         ] {
             assert!(for_file(name).is_some_and(|found| std::ptr::eq(found, lang)), "{name}");
         }
         // A name matches whole, and a dot in a folder's name does not start an extension.
-        let unknown = ["README.md", "LICENSE", "Dockerfiles", "Dockerfile.md", "Makefile.win", "my.Makefile"];
+        let unknown = ["notes.txt", "LICENSE", "Dockerfiles", "Gemfile.lock", "Makefile.win", "my.Makefile"];
         for name in unknown.into_iter().chain(["v1.rs/README", "Makefile/notes"]) {
             assert!(for_file(name).is_none(), "{name}");
         }
@@ -1038,6 +1198,341 @@ mod tests {
                 ("# done", Class::Comment),
             ]
         );
+    }
+
+    #[test]
+    fn ruby_colours_heredocs_block_comments_and_definitions() {
+        assert_eq!(
+            one(&RUBY, "def greet(name) = puts \"hi #{name}\" # say"),
+            [
+                ("def", Class::Keyword),
+                ("greet", Class::Function),
+                ("\"hi #{name}\"", Class::Str),
+                ("# say", Class::Comment)
+            ]
+        );
+        assert_eq!(
+            one(&RUBY, "class Order < Base; items.class; end"),
+            [("class", Class::Keyword), ("Order", Class::Type), ("Base", Class::Type), ("end", Class::Keyword)]
+        );
+        let mut state = State::Code;
+        assert_eq!(
+            pieces(&RUBY, "sql = run(<<~SQL, 42)", &mut state),
+            [("run", Class::Function), ("<<~SQL", Class::Str), ("42", Class::Number)]
+        );
+        let body = "  select 'it' # not a comment";
+        assert_eq!(pieces(&RUBY, body, &mut state), [(body, Class::Str)]);
+        assert_eq!(pieces(&RUBY, "SQL_MORE", &mut state), [("SQL_MORE", Class::Str)]);
+        assert_eq!(pieces(&RUBY, "  SQL", &mut state), [("  SQL", Class::Str)]);
+        assert_eq!(state, State::Code);
+
+        assert_eq!(pieces(&RUBY, "=begin", &mut state), [("=begin", Class::Comment)]);
+        assert_eq!(pieces(&RUBY, "def hidden", &mut state), [("def hidden", Class::Comment)]);
+        assert_eq!(pieces(&RUBY, "=end", &mut state), [("=end", Class::Comment)]);
+        assert_eq!(state, State::Code);
+        // Appending to a list, comparing a class and interpolating are not openers.
+        for line in ["list << item", "x <<y", "class << self", "a =begin", "\"#{count}\" + path"] {
+            pieces(&RUBY, line, &mut state);
+            assert_eq!(state, State::Code, "{line}");
+        }
+        assert!(!one(&RUBY, "a =begin").iter().any(|p| p.1 == Class::Comment));
+        // A quote inside a pattern ends with its line.
+        pieces(&RUBY, "name =~ /don't/", &mut state);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn kotlin_scala_and_dart_colour_raw_strings_and_nested_comments() {
+        let mut state = State::Code;
+        assert_eq!(
+            pieces(&KOTLIN, "val text = \"\"\"a \\ \"quote\"", &mut state),
+            [("val", Class::Keyword), ("\"\"\"a \\ \"quote\"", Class::Str)]
+        );
+        assert_eq!(
+            pieces(&KOTLIN, "// text\"\"\"\".trimIndent()", &mut state),
+            [("// text\"\"\"\"", Class::Str), ("trimIndent", Class::Function)]
+        );
+        assert_eq!(state, State::Code);
+        assert_eq!(
+            one(&KOTLIN, "suspend fun load(id: Int): User? = null // done"),
+            [
+                ("suspend", Class::Keyword),
+                ("fun", Class::Keyword),
+                ("load", Class::Function),
+                ("Int", Class::Type),
+                ("User", Class::Type),
+                ("null", Class::Number),
+                ("// done", Class::Comment),
+            ]
+        );
+        assert_eq!(one(&KOTLIN, "val c = 'x'")[1], ("'x'", Class::Str));
+        for lang in [&KOTLIN, &SCALA, &DART] {
+            let mut state = State::Code;
+            pieces(lang, "/* outer /* inner */ still", &mut state);
+            assert_eq!(
+                pieces(lang, "return */ return", &mut state),
+                [("return */", Class::Comment), ("return", Class::Keyword)]
+            );
+            assert_eq!(state, State::Code);
+        }
+        assert_eq!(
+            one(&SCALA, "case class Point(x: Int) extends Shape"),
+            [
+                ("case", Class::Keyword),
+                ("class", Class::Keyword),
+                ("Point", Class::Function),
+                ("Int", Class::Type),
+                ("extends", Class::Keyword),
+                ("Shape", Class::Type),
+            ]
+        );
+        let mut state = State::Code;
+        pieces(&DART, "final s = '''one", &mut state);
+        assert_eq!(
+            pieces(&DART, "two''' + await load();", &mut state)[..2],
+            [("two'''", Class::Str), ("await", Class::Keyword)]
+        );
+    }
+
+    #[test]
+    fn elixir_and_hcl_colour_their_multiline_text() {
+        let mut state = State::Code;
+        assert_eq!(pieces(&ELIXIR, "  @doc \"\"\"", &mut state), [("\"\"\"", Class::Str)]);
+        assert_eq!(pieces(&ELIXIR, "  def not_code", &mut state), [("  def not_code", Class::Str)]);
+        pieces(&ELIXIR, "  \"\"\"", &mut state);
+        assert_eq!(
+            pieces(&ELIXIR, "  def run(x), do: Enum.map(x, &to_string/1) # go", &mut state),
+            [
+                ("def", Class::Keyword),
+                ("run", Class::Function),
+                ("do", Class::Keyword),
+                ("Enum", Class::Type),
+                ("map", Class::Function),
+                ("1", Class::Number),
+                ("# go", Class::Comment),
+            ]
+        );
+
+        assert_eq!(
+            one(&HCL, "resource \"aws_instance\" \"web\" { count = 2 } // one"),
+            [
+                ("resource", Class::Keyword),
+                ("\"aws_instance\"", Class::Str),
+                ("\"web\"", Class::Str),
+                ("2", Class::Number),
+                ("// one", Class::Comment),
+            ]
+        );
+        let mut state = State::Code;
+        assert_eq!(pieces(&HCL, "  user_data = <<-EOT", &mut state), [("<<-EOT", Class::Str)]);
+        assert_eq!(pieces(&HCL, "    # still text", &mut state), [("    # still text", Class::Str)]);
+        pieces(&HCL, "  EOT", &mut state);
+        assert_eq!(
+            pieces(&HCL, "  enabled = true # yes", &mut state),
+            [("true", Class::Number), ("# yes", Class::Comment)]
+        );
+    }
+
+    #[test]
+    fn css_colours_properties_rules_colours_and_comments() {
+        assert_eq!(
+            one(&CSS, "  background-color: #1a2b3c !important; /* brand */"),
+            [
+                ("background-color", Class::Key),
+                ("#1a2b3c", Class::Number),
+                ("important", Class::Keyword),
+                ("/* brand */", Class::Comment),
+            ]
+        );
+        assert_eq!(one(&CSS, "@media (min-width: 40rem) {"), [("@media", Class::Keyword), ("40rem", Class::Number)]);
+        assert_eq!(
+            one(&CSS, "  margin: calc(1.5em + var(--gap)) auto;"),
+            [
+                ("margin", Class::Key),
+                ("calc", Class::Function),
+                ("1.5em", Class::Number),
+                ("var", Class::Function),
+                ("auto", Class::Number),
+            ]
+        );
+        // A selector is not a property, and an element's name in one is not a colour.
+        assert_eq!(one(&CSS, "a:hover, #add .face {"), []);
+        assert_eq!(one(&CSS, "  content: \"it's\";"), [("content", Class::Key), ("\"it's\"", Class::Str)]);
+        let mut state = State::Code;
+        pieces(&CSS, "/* a: b", &mut state);
+        assert_eq!(pieces(&CSS, "   c: d */ e: f", &mut state), [("   c: d */", Class::Comment)]);
+
+        assert_eq!(
+            one(&SCSS, "$gap: 4px; // http://x"),
+            [("$gap", Class::Key), ("4px", Class::Number), ("// http://x", Class::Comment)]
+        );
+        let font = "  src: url(http://example.com/a.woff);";
+        assert_eq!(one(&SCSS, font)[..2], [("src", Class::Key), ("url", Class::Function)]);
+        assert!(!one(&SCSS, font).iter().any(|p| p.1 == Class::Comment));
+        assert!(!one(&CSS, "  background: url(//cdn/x.png); // not css").iter().any(|p| p.1 == Class::Comment));
+    }
+
+    #[test]
+    fn markup_colours_tags_attributes_comments_and_entities() {
+        assert_eq!(
+            one(&MARKUP, "<a href=\"/x\" class='big' hidden>Don't &amp; \"won't\"</a>"),
+            [
+                ("a", Class::Keyword),
+                ("href", Class::Key),
+                ("\"/x\"", Class::Str),
+                ("class", Class::Key),
+                ("'big'", Class::Str),
+                ("hidden", Class::Key),
+                ("&amp;", Class::Number),
+                ("a", Class::Keyword),
+            ]
+        );
+        assert_eq!(
+            one(&MARKUP, "<!DOCTYPE html><br/>"),
+            [("DOCTYPE", Class::Keyword), ("html", Class::Key), ("br", Class::Keyword)]
+        );
+        assert_eq!(one(&MARKUP, "if a < b && c > d then R&D, &#x2014;"), [("&#x2014;", Class::Number)]);
+        assert_eq!(
+            one(&MARKUP, "<input value=plain disabled>")[1..],
+            [("value", Class::Key), ("disabled", Class::Key)]
+        );
+
+        let mut state = State::Code;
+        assert_eq!(
+            pieces(&MARKUP, "<p>one <!-- two", &mut state),
+            [("p", Class::Keyword), ("<!-- two", Class::Comment)]
+        );
+        assert_eq!(pieces(&MARKUP, "<b>hidden</b>", &mut state), [("<b>hidden</b>", Class::Comment)]);
+        assert_eq!(pieces(&MARKUP, "--> <i>", &mut state), [("-->", Class::Comment), ("i", Class::Keyword)]);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn markup_tags_and_attribute_values_run_over_lines() {
+        let mut state = State::Code;
+        assert_eq!(pieces(&MARKUP, "<path", &mut state), [("path", Class::Keyword)]);
+        assert_eq!(pieces(&MARKUP, "  d=\"M0 0", &mut state), [("d", Class::Key), ("\"M0 0", Class::Str)]);
+        assert_eq!(pieces(&MARKUP, "     L1 1 > it's", &mut state), [("     L1 1 > it's", Class::Str)]);
+        assert_eq!(
+            pieces(&MARKUP, "  z\" fill='red' /> text's", &mut state),
+            [("  z\"", Class::Str), ("fill", Class::Key), ("'red'", Class::Str)]
+        );
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn script_and_style_elements_are_coloured_as_their_own_languages() {
+        let mut state = State::Code;
+        assert_eq!(
+            pieces(&MARKUP, "<script type=\"module\">const a = `one", &mut state),
+            [
+                ("script", Class::Keyword),
+                ("type", Class::Key),
+                ("\"module\"", Class::Str),
+                ("const", Class::Keyword),
+                ("`one", Class::Str),
+            ]
+        );
+        assert_eq!(pieces(&MARKUP, "<b>${x}</b>", &mut state), [("<b>${x}</b>", Class::Str)]);
+        assert_eq!(
+            pieces(&MARKUP, "two`; if (a < b) return; // </b>", &mut state),
+            [("two`", Class::Str), ("if", Class::Keyword), ("return", Class::Keyword), ("// </b>", Class::Comment)]
+        );
+        assert_eq!(
+            pieces(&MARKUP, "let n = 1 </SCRIPT><style>", &mut state),
+            [("let", Class::Keyword), ("1", Class::Number), ("SCRIPT", Class::Keyword), ("style", Class::Keyword)]
+        );
+        assert_eq!(pieces(&MARKUP, "  p { color: #fff; }", &mut state), [("#fff", Class::Number)]);
+        assert_eq!(
+            pieces(&MARKUP, "  color: red; /* x", &mut state),
+            [("color", Class::Key), ("/* x", Class::Comment)]
+        );
+        assert_eq!(
+            pieces(&MARKUP, "*/</style><p class=\"a\">", &mut state)[..2],
+            [("*/", Class::Comment), ("style", Class::Keyword)]
+        );
+        assert_eq!(state, State::Code);
+        // An element closed in its own tag has no text.
+        pieces(&MARKUP, "<script src=\"a.js\"/>", &mut state);
+        assert_eq!(pieces(&MARKUP, "<p>const</p>", &mut state), [("p", Class::Keyword), ("p", Class::Keyword)]);
+    }
+
+    #[test]
+    fn markdown_colours_headings_lists_links_and_inline_code() {
+        assert_eq!(one(&MARKDOWN, "## Don't panic"), [("## Don't panic", Class::Keyword)]);
+        assert_eq!(one(&MARKDOWN, "#hashtag and it's fine"), []);
+        assert_eq!(one(&MARKDOWN, "> quoted `code`"), [("> quoted `code`", Class::Comment)]);
+        assert_eq!(
+            one(&MARKDOWN, "- Run `cargo test` or ``a ` b``, see [the guide](docs/keys.md)."),
+            [
+                ("-", Class::Number),
+                ("`cargo test`", Class::Str),
+                ("``a ` b``", Class::Str),
+                ("[the guide]", Class::Key),
+                ("(docs/keys.md)", Class::Type),
+            ]
+        );
+        assert_eq!(
+            one(&MARKDOWN, "  12. See [spec][rfc] at https://example.com/a_b, not_code"),
+            [
+                ("12.", Class::Number),
+                ("[spec]", Class::Key),
+                ("[rfc]", Class::Key),
+                ("https://example.com/a_b,", Class::Type)
+            ]
+        );
+        assert_eq!(
+            one(&MARKDOWN, "[rfc]: https://example.com"),
+            [("[rfc]", Class::Key), ("https://example.com", Class::Type)]
+        );
+        assert_eq!(one(&MARKDOWN, "a \\` b ` c [x] (y) 3 * 4 - 5"), []);
+        assert_eq!(one(&MARKDOWN, "---"), []);
+    }
+
+    #[test]
+    fn markdown_code_blocks_and_comments_run_over_lines() {
+        let mut state = State::Code;
+        assert_eq!(pieces(&MARKDOWN, "```rust", &mut state), [("```rust", Class::Keyword)]);
+        for line in ["# not a heading", "~~~", "`` ` ``", "    ```` not a closer"] {
+            assert_eq!(pieces(&MARKDOWN, line, &mut state), [(line, Class::Str)]);
+        }
+        assert_eq!(pieces(&MARKDOWN, "", &mut state), []);
+        assert_eq!(pieces(&MARKDOWN, "  ````  ", &mut state), [("  ````  ", Class::Keyword)]);
+        assert_eq!(state, State::Code);
+        // Backticks after the opening run make it inline code, not a block.
+        assert_eq!(pieces(&MARKDOWN, "```inline```", &mut state), [("```inline```", Class::Str)]);
+        assert_eq!(state, State::Code);
+
+        assert_eq!(pieces(&MARKDOWN, "text <!-- note", &mut state), [("<!-- note", Class::Comment)]);
+        assert_eq!(pieces(&MARKDOWN, "# hidden", &mut state), [("# hidden", Class::Comment)]);
+        assert_eq!(pieces(&MARKDOWN, "--> `shown`", &mut state), [("-->", Class::Comment), ("`shown`", Class::Str)]);
+        assert_eq!(state, State::Code);
+    }
+
+    #[test]
+    fn long_runs_of_markdown_and_markup_openers_are_read_once() {
+        // Each opener must not start a fresh search of the rest of the line.
+        const N: usize = 1 << 17;
+        for lang in [&MARKDOWN, &MARKUP, &CSS] {
+            for piece in ["[", "[x](", "`a``", "<", "&", "[a][", "#abc", "<a "] {
+                let text = piece.repeat(N / piece.len());
+                let mut state = State::Code;
+                pieces(lang, &text, &mut state);
+            }
+        }
+    }
+
+    #[test]
+    fn the_readme_is_coloured_and_ends_outside_any_block() {
+        let mut out = Vec::new();
+        let mut state = State::Code;
+        let mut coloured = 0;
+        for text in include_str!("../../README.md").lines() {
+            MARKDOWN.scan(text, &mut state, &mut out);
+            coloured += out.len();
+        }
+        assert_eq!(state, State::Code);
+        assert!(coloured > 20);
     }
 
     #[test]
