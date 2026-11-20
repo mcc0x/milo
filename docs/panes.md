@@ -4,7 +4,7 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 
 If you initialize Git in that folder, open panes pick up the repository and its saved worktree choices without restarting. Switching branches does not erase remembered folder folds or mark the newly visible timeline as newly arrived.
 
-In Follow mode, Outline and History use the local shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If Rex cannot identify the shell or supply its directory, the panes keep the last project and show `Pinned: no shell cwd`.
+In Follow mode, Outline and History use the local shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin.
 
 ## What fits in a pane
 

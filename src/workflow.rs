@@ -26,7 +26,7 @@ pub fn project(
     }
     let source = shell.and_then(ShellObserver::start);
     Box::new(Project {
-        root: source.as_ref().map_or_else(PathBuf::new, |_| repo.root.clone()),
+        root: repo.root.clone(),
         git: repo.git,
         pane: make(repo, &prefs),
         make,
@@ -43,8 +43,8 @@ fn panel_preferences(repo: &Repo) -> (Preferences, Option<&'static str>) {
     Preferences::for_pane(repo.git.then_some(repo.root.as_path()))
 }
 
-const NO_CWD: &str = "Pinned: no shell cwd";
-const BAD_CWD: &str = "Pinned: cannot open cwd";
+const NO_CWD: &str = "Waiting for shell";
+const BAD_CWD: &str = "Shell folder unavailable";
 
 struct Project<F> {
     root: PathBuf,
@@ -128,7 +128,15 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
             self.pane.draw(screen);
         }
         screen.h += 1;
-        screen.put_fit(1, screen.h - 1, screen.w.saturating_sub(2), note, Style::fg(screen::YELLOW));
+        let (width, y, style) = (screen.w.saturating_sub(2), screen.h - 1, Style::fg(screen::YELLOW));
+        let used = screen.put_fit(1, y, width, note, style);
+        const SHOWING: &str = " · showing ";
+        if let Some(project) = self.root.file_name().and_then(OsStr::to_str)
+            && width > used + crate::width::str_width(SHOWING) + 2
+        {
+            let start = used + screen.put(1 + used, y, width - used, SHOWING, style);
+            screen.put_fit(1 + start, y, width - start, project, style);
+        }
     }
 
     fn notice(&self) -> Option<&'static str> {
@@ -310,7 +318,7 @@ mod tests {
         }
 
         let mut pane = Project {
-            root: PathBuf::new(),
+            root: PathBuf::from("/work/strata"),
             git: false,
             pane: Box::new(Due),
             make: |_: Repo, _: &Preferences| -> Box<dyn Pane> { Box::new(Due) },
@@ -323,7 +331,7 @@ mod tests {
         };
         let mut screen = Screen::sized(40, 1);
         pane.draw(&mut screen);
-        assert!(screen.text()[0].contains(NO_CWD));
+        assert_eq!(screen.text()[0].trim(), "Waiting for shell · showing strata");
         assert_eq!(pane.next_frame(), None);
         assert!(matches!(pane.key(Key::Click(1, 0)), After::Ignored));
 

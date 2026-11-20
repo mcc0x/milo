@@ -432,7 +432,7 @@ fn follow_shell_promotion_applies_worktree_preferences_before_a_cwd_update() {
     let metadata = project.0.join("metadata");
     for (pane, prefs_text, promoted, observer_running) in [
         ("outline", "project_mode = pin\n", "all committed", false),
-        ("history", "project_mode = broken\n", "worktree prefs ignored", true),
+        ("history", "project_mode = broken\n", "worktree prefs", true),
     ] {
         fs::write(&prefs, prefs_text).unwrap();
         fs::rename(root.join(".git"), &metadata).unwrap();
@@ -444,7 +444,7 @@ fn follow_shell_promotion_applies_worktree_preferences_before_a_cwd_update() {
             .env("REX_SESSION", "test")
             .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222");
         let mut terminal = Terminal::run(&mut command);
-        terminal.until("Pinned: no shell cwd");
+        terminal.until("Waiting for shell");
         let pid: libc::pid_t = fs::read_to_string(&observer_pid).unwrap().trim().parse().unwrap();
         fs::rename(&metadata, root.join(".git")).unwrap();
         terminal.until(promoted);
