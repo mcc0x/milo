@@ -14,6 +14,7 @@ pub struct Listing {
 
 /// Sorted paths relative to `root`. Folders end in `/` and their contents are
 /// listed only if `open` says to descend. Symbolic links are not followed.
+/// Paths with names the outline cannot represent are omitted and reported.
 /// A truncated listing is sorted too, but doesn't enumerate the rest.
 pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
     let mut listing = Listing::default();
@@ -29,6 +30,11 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
                 continue;
             };
             let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                // A lossy conversion could turn this into a different entry's path.
+                listing.unreadable = true;
+                continue;
+            };
             // Hide Finder's folder metadata in the plain tree.
             if name == ".DS_Store" {
                 continue;
@@ -41,8 +47,11 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
                 listing.truncated = true;
                 break 'walk;
             }
-            let mut path = format!("{dir}{}", name.to_string_lossy());
-            if kind.is_dir() {
+            let is_dir = kind.is_dir();
+            let mut path = String::with_capacity(dir.len() + name.len() + usize::from(is_dir));
+            path.push_str(&dir);
+            path.push_str(name);
+            if is_dir {
                 path.push('/');
                 if open(&path) {
                     dirs.push(path.clone());
@@ -53,4 +62,38 @@ pub fn list(root: &Path, open: impl Fn(&str) -> bool) -> Listing {
     }
     listing.paths.sort_unstable();
     listing
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn an_expanded_tree_does_not_descend_into_directory_links() {
+        let f = Fixture::folder();
+        f.write("real/file", "");
+        symlink("real", f.root.join("link")).unwrap();
+        let listing = list(&f.root, |_| true);
+        assert!(!listing.unreadable && !listing.truncated);
+        assert_eq!(listing.paths, ["link", "real/", "real/file"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_utf8_does_not_alias_a_real_folder() {
+        use std::ffi::OsStr;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let f = Fixture::folder();
+        fs::create_dir(f.root.join(OsStr::from_bytes(b"folder\xff"))).unwrap();
+        f.write("folder\u{fffd}/file", "");
+        let listing = list(&f.root, |_| true);
+        assert!(listing.unreadable);
+        assert!(!listing.truncated);
+        assert_eq!(listing.paths, ["folder\u{fffd}/", "folder\u{fffd}/file"]);
+    }
 }

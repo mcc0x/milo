@@ -64,8 +64,7 @@ pub struct Outline {
     /// The layout last drawn, which clicks and paging refer to.
     painted: Layout,
     opener: OpenReader,
-    /// The path last clicked and when, to tell a double click.
-    clicked: Option<(Rc<str>, Instant)>,
+    clicked: Option<input::Click>,
     /// Something to say in place of the key hint, and when it was said.
     note: Option<(String, Instant)>,
     /// A file being read here, in place of the outline, outside Rex.
@@ -155,8 +154,6 @@ impl Outline {
                         && !self.folds.is_open(p)
                         // Git can begin sending descendant events before a new .git is valid.
                         && !p.eq_ignore_ascii_case(".git/")
-                        // A lossy name may not identify a unique path on disk.
-                        && !p.contains('\u{fffd}')
                 })
                 .map(|p| self.repo.root.join(p))
                 .collect();
@@ -320,7 +317,12 @@ impl Outline {
     /// Opens the reader in this pane, or replaces the floating reader in Rex.
     fn open_file(&mut self, path: &str) {
         match self.opener.open(&self.repo, ReadFile::Working(path)) {
-            Ok(reader) => self.reading = reader,
+            Ok(reader) => {
+                self.reading = reader;
+                if self.reading.is_some() {
+                    self.painted.tree_rows = 0..0;
+                }
+            }
             Err(why) => self.say(why),
         }
     }
@@ -988,6 +990,42 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_input_breaks_a_file_double_click() {
+        let f = Fixture::folder();
+        f.write("page.txt", "a file\n");
+        for intervening in [Key::Down, Key::Click(3, 3), Key::Click(15, 1)] {
+            let mut o = open(&f);
+            let at = Instant::now();
+            draw_at(&mut o, 40, 4, at);
+            let target = Key::Click(3, 1);
+            o.outline_key(target, at);
+            o.outline_key(intervening, at);
+            o.outline_key(target, at);
+            assert!(o.reading.is_none(), "{intervening:?}");
+            o.outline_key(target, at);
+            assert!(o.reading.is_some(), "{intervening:?}");
+        }
+    }
+
+    #[test]
+    fn a_click_after_the_reader_closes_waits_for_a_tree_frame() {
+        let f = Fixture::folder();
+        f.write("a.txt", "first\n");
+        f.write("b.txt", "second\n");
+        let mut o = open(&f);
+        let at = Instant::now();
+        draw_at(&mut o, 40, 4, at);
+        o.outline_key(Key::Enter, at);
+        o.outline_key(Key::Char('q'), at);
+        o.outline_key(Key::Click(3, 2), at);
+        assert_eq!(o.selected_path().as_deref(), Some("a.txt"));
+
+        draw_at(&mut o, 40, 4, at);
+        o.outline_key(Key::Click(3, 2), at);
+        assert_eq!(o.selected_path().as_deref(), Some("b.txt"));
+    }
+
+    #[test]
     fn clicks_after_a_fold_wait_until_new_rows_are_painted() {
         let f = Fixture::folder();
         f.write("a/nested.txt", "nested\n");
@@ -1182,6 +1220,30 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unrepresentable_git_paths_are_not_reported_as_clean() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let f = Fixture::new();
+        fs::write(f.root.join(OsStr::from_bytes(b"invalid-\xff")), "unrepresentable\n").unwrap();
+        let mut o = open(&f);
+        let views = [(3, 1, "!"), (40, 1, "partial listing"), (40, 2, "partial listing"), (70, 8, "partial listing")];
+        for (width, height, notice) in views {
+            let rows = draw(&mut o, width, height).text();
+            assert!(rows[0].contains(notice), "{rows:?}");
+            assert!(rows.iter().all(|r| !r.contains("committed") && !r.contains("No files")), "{rows:?}");
+            o.key(Key::End);
+        }
+
+        f.write("known.txt", "representable\n");
+        o.key(Key::Char('r'));
+        let rows = draw(&mut o, 80, 8).text();
+        assert!(rows[0].contains("1 to commit") && rows[0].contains("partial listing"), "{rows:?}");
+        assert!(rows[1].contains("known.txt"), "{rows:?}");
+    }
+
     #[test]
     fn a_plain_folder_outline_promotes_on_explicit_refresh_even_with_a_gitfile() {
         let f = Fixture::folder();
@@ -1260,6 +1322,18 @@ mod tests {
         fs::rename(away, &f.root).unwrap();
         assert!(o.check());
         assert!(draw(&mut o, 40, 8).text()[1].contains("page.txt"));
+    }
+
+    #[test]
+    fn an_incomplete_plain_listing_warns_even_in_a_short_pane() {
+        let f = Fixture::folder();
+        f.write("page.txt", "a file\n");
+        let mut o = open(&f);
+        o.listing.unreadable = true;
+        let rows = draw(&mut o, 40, 1).text();
+        assert!(rows[0].contains("page.txt") && rows[0].contains("partial listing"), "{rows:?}");
+        let rows = draw(&mut o, 24, 2).text();
+        assert!(rows[0].contains("Cannot list all files") && rows[1].contains("page.txt"), "{rows:?}");
     }
 
     #[test]

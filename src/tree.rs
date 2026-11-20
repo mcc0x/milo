@@ -22,8 +22,8 @@ pub struct Node {
     /// What happened here; for a directory, the strongest kind beneath it.
     pub kind: Kind,
     /// Lines gained and lost, summed over a directory.
-    pub add: u32,
-    pub del: u32,
+    pub add: u64,
+    pub del: u64,
     /// New files whose additions have yet to be measured.
     pub(crate) uncounted: u32,
     untracked: Option<NonZeroU32>,
@@ -210,7 +210,7 @@ impl Folds {
 #[derive(Clone, Copy)]
 pub struct TreeRow {
     pub node: u32,
-    pub depth: u16,
+    pub depth: u32,
 }
 
 #[derive(Default)]
@@ -218,6 +218,8 @@ pub struct Tree {
     nodes: Vec<Node>,
     index: HashMap<Rc<str>, u32>,
     pending_order: Vec<u32>,
+    /// One child cursor per ancestor, so wide trees need no second row buffer.
+    layout_stack: Vec<(u32, usize)>,
     pub rows: Vec<TreeRow>,
 }
 
@@ -296,8 +298,8 @@ impl Tree {
                 if n.kind < file.kind {
                     n.kind = file.kind;
                 }
-                n.add += file.add;
-                n.del += file.del;
+                n.add += u64::from(file.add);
+                n.del += u64::from(file.del);
                 n.uncounted += u32::from(file.lines_pending);
                 n.pending += 1;
             }
@@ -321,11 +323,12 @@ impl Tree {
         if self.node(id).untracked_index() != Some(index) {
             return;
         }
-        let (old_add, old_uncounted) = before;
+        let (old_add, old_uncounted) = (u64::from(before.0), before.1);
+        let add = u64::from(file.add);
         let mut i = id;
         loop {
             let n = self.node_mut(i);
-            n.add = n.add - old_add + file.add;
+            n.add = n.add - old_add + add;
             n.uncounted = n.uncounted - u32::from(old_uncounted) + u32::from(file.lines_pending);
             if i == 0 {
                 break;
@@ -339,18 +342,27 @@ impl Tree {
     /// expanded; `pending_only` drops everything that is not pending.
     pub fn layout(&mut self, open: impl Fn(&str) -> bool, pending_only: bool) {
         self.rows.clear();
-        let Some(root) = self.nodes.first() else { return };
-        let mut stack: Vec<_> = root.children.iter().rev().map(|&node| TreeRow { node, depth: 0 }).collect();
-        while let Some(row) = stack.pop() {
-            let n = &mut self.nodes[row.node as usize];
+        if self.nodes.first().is_none_or(|root| root.children.is_empty()) {
+            return;
+        }
+        let stack = &mut self.layout_stack;
+        stack.push((0, 0));
+        while let Some((parent, next)) = stack.last_mut() {
+            let Some(&node) = self.nodes[*parent as usize].children.get(*next) else {
+                stack.pop();
+                continue;
+            };
+            *next += 1;
+            let n = &mut self.nodes[node as usize];
             if pending_only && n.kind == Kind::None {
                 continue;
             }
-            if n.dir && open(&n.path) {
-                stack.extend(n.children.iter().rev().map(|&node| TreeRow { node, depth: row.depth + 1 }));
-            }
+            let depth = u32::try_from(stack.len() - 1).expect("at most one ancestor per node");
             n.visible_at = self.rows.len();
-            self.rows.push(row);
+            self.rows.push(TreeRow { node, depth });
+            if n.dir && !n.children.is_empty() && open(&n.path) {
+                stack.push((node, 0));
+            }
         }
     }
 
@@ -482,6 +494,25 @@ mod tests {
         let sub = tree.row(1).unwrap();
         assert_eq!((sub.kind, sub.pending, sub.uncommitted), (Kind::Added, 1, false));
         assert_eq!(tree.row(2).unwrap().name(), "c.rs");
+    }
+
+    #[test]
+    fn folder_totals_can_exceed_one_files_line_count() {
+        let mut files =
+            [file("src/a.rs", Kind::Modified, u32::MAX, false), file("src/new.rs", Kind::Untracked, 1, false)];
+        files[0].del = u32::MAX;
+        files[1].del = 2;
+        let mut tree = Tree::build(std::iter::empty(), &files);
+        let max = u64::from(u32::MAX);
+        let totals = |tree: &Tree| {
+            let src = tree.node(tree.index["src/"]);
+            (src.add, src.del)
+        };
+        assert_eq!(totals(&tree), (max + 1, max + 2));
+
+        files[1].add = 3;
+        tree.update_untracked(1, &files[1], (1, false), |_| {});
+        assert_eq!(totals(&tree), (max + 3, max + 2));
     }
 
     #[test]

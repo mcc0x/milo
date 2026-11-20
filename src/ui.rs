@@ -59,13 +59,15 @@ pub fn kind_word(kind: Kind) -> &'static str {
 }
 
 /// Columns "+12 −3" takes for these counts.
-pub fn size_width(add: u32, del: u32) -> usize {
-    let digits = |n: u32| if n > 0 { n.ilog10() as usize + 2 } else { 0 };
+pub fn size_width(add: impl Into<u64>, del: impl Into<u64>) -> usize {
+    let (add, del) = (add.into(), del.into());
+    let digits = |n: u64| if n > 0 { n.ilog10() as usize + 2 } else { 0 };
     digits(add) + digits(del) + (add > 0 && del > 0) as usize
 }
 
 /// Draws "+12 −3" ending just before column `end`. Returns its width.
-pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> usize {
+pub fn size_right(s: &mut Screen, end: usize, y: usize, add: impl Into<u64>, del: impl Into<u64>) -> usize {
+    let (add, del) = (add.into(), del.into());
     let mut used = 0;
     if del > 0 {
         used += signed_right(s, end, y, "−", del, DEL);
@@ -77,7 +79,7 @@ pub fn size_right(s: &mut Screen, end: usize, y: usize, add: u32, del: u32) -> u
     used
 }
 
-fn signed_right(s: &mut Screen, end: usize, y: usize, sign: &str, count: u32, st: Style) -> usize {
+fn signed_right(s: &mut Screen, end: usize, y: usize, sign: &str, count: u64, st: Style) -> usize {
     let end = end.min(s.w);
     let digits = count.ilog10() + 1;
     let used = (digits as usize + 1).min(end);
@@ -87,8 +89,8 @@ fn signed_right(s: &mut Screen, end: usize, y: usize, sign: &str, count: u32, st
     s.put(end - used, y, 1, sign, st);
     if used > 1 {
         // Like clipped text, keep the first digits, not the last ones.
-        let clipped = u32::try_from(digits as usize + 1 - used).expect("a u32 has at most ten digits");
-        s.put_number(end, y, u64::from(count / 10u32.pow(clipped)), st);
+        let clipped = u32::try_from(digits as usize + 1 - used).expect("a u64 has at most twenty digits");
+        s.put_number(end, y, count / 10u64.pow(clipped), st);
     }
     used
 }
@@ -166,7 +168,7 @@ mod tests {
     fn clipped_change_counts_keep_the_sign_and_first_digits() {
         for w in 0..25 {
             for end in 0..25 {
-                for (add, del) in [(12, 345), (u32::MAX, 0), (0, u32::MAX), (1, 1), (0, 0)] {
+                for (add, del) in [(12, 345), (u64::MAX, 0), (0, u64::MAX), (1, 1), (0, 0)] {
                     let mut screen = Screen::sized(w, 1);
                     let actual = size_right(&mut screen, end, 0, add, del);
                     let mut expected = Screen::sized(w, 1);

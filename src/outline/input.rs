@@ -11,6 +11,12 @@ use crate::preferences::Preferences;
 use super::Outline;
 use super::draw::margin;
 
+pub(super) struct Click {
+    path: Rc<str>,
+    cell: (usize, usize),
+    at: Instant,
+}
+
 enum Pointed {
     File(Rc<str>),
     OpenFolder(Rc<str>),
@@ -20,6 +26,9 @@ enum Pointed {
 impl Outline {
     pub(super) fn outline_key(&mut self, key: Key, now: Instant) -> After {
         if let Key::Focus(here) = key {
+            if !here {
+                self.clicked = None;
+            }
             self.attention.focus(here, now);
             return After::Stay;
         }
@@ -37,7 +46,10 @@ impl Outline {
             return After::Leave;
         }
         let by_click = self.by_click;
-        self.by_click &= matches!(key, Key::Click(..));
+        if !matches!(key, Key::Click(..)) {
+            self.clicked = None;
+            self.by_click = false;
+        }
         let changed = match key {
             Key::Char('r') => {
                 if self.repo.git {
@@ -58,6 +70,9 @@ impl Outline {
 
     /// The strip has no cursor: its keys move it a column at a time.
     fn strip_key(&mut self, key: Key) -> bool {
+        if self.painted.body_rows == 0 {
+            return false;
+        }
         let delta = match key {
             Key::Char('l') | Key::Right => Some(1),
             Key::Char('h') | Key::Left => Some(-1),
@@ -100,9 +115,12 @@ impl Outline {
             Key::Char('K') => self.sel = self.tree.sibling_row(sel, Previous).unwrap_or(sel),
             Key::Char('p') => self.sel = self.tree.parent_row(sel).unwrap_or(sel),
             Key::Click(x, y) => {
-                let Some(row) = self.painted.row_at(x, y) else { return false };
+                let Some(row) = self.painted.row_at(x, y) else {
+                    self.clicked = None;
+                    return false;
+                };
                 self.top = self.painted.tree_rows.start;
-                self.click(row, now);
+                self.click(row, (x, y), now);
             }
             Key::Enter | Key::Char(' ' | 'h' | 'l') | Key::Left | Key::Right => self.open_or_close(key),
             _ => return self.tree_scroll(key, self.painted.body_rows),
@@ -176,20 +194,21 @@ impl Outline {
     }
 
     /// Clicks toggle folders, select files, and open files when repeated.
-    fn click(&mut self, row: usize, now: Instant) {
+    fn click(&mut self, row: usize, cell: (usize, usize), now: Instant) {
         let Some(node) = self.tree.row(row) else { return };
         let (path, dir) = (node.path.clone(), node.dir);
-        let again =
-            self.clicked.take().is_some_and(|(p, at)| p == path && now.saturating_duration_since(at) < DOUBLE_CLICK);
+        let again = self.clicked.take().is_some_and(|click| {
+            click.path == path && click.cell == cell && now.saturating_duration_since(click.at) < DOUBLE_CLICK
+        });
         (self.sel, self.by_click) = (row, true);
         match (dir, again) {
             (true, false) => {
                 let open = self.folds.is_open(&path);
-                self.clicked = Some((path.clone(), now));
+                self.clicked = Some(Click { path: path.clone(), cell, at: now });
                 self.set_open(path, !open);
             }
             (true, true) => {} // A double click on a folder is one toggle, not two.
-            (false, false) => self.clicked = Some((path, now)),
+            (false, false) => self.clicked = Some(Click { path, cell, at: now }),
             (false, true) => self.open_file(&path),
         }
     }

@@ -34,6 +34,7 @@ pub(super) struct Layout {
     heading: bool,
     hint: bool,
     wide: bool,
+    partial: bool,
 }
 
 impl Layout {
@@ -49,16 +50,16 @@ impl Layout {
     }
 }
 
-fn arrange(w: usize, h: usize, git: bool, truncated: bool) -> Layout {
+fn arrange(w: usize, h: usize, git: bool, partial: bool) -> Layout {
     if w < 3 || h == 0 {
         return Layout::default();
     }
     let strip = git && h <= STRIP_ROWS;
-    let heading = h >= HEADING_ROWS || truncated && h > 1;
+    let heading = h >= HEADING_ROWS || partial && h > 1;
     let hint = h >= HINT_ROWS;
     let body_top = usize::from(heading);
     let body_rows = h - body_top - usize::from(hint);
-    Layout { strip, width: w, body_top, body_rows, heading, hint, wide: w >= WIDE_COLS, ..Layout::default() }
+    Layout { strip, width: w, body_top, body_rows, heading, hint, wide: w >= WIDE_COLS, partial, ..Layout::default() }
 }
 
 fn draw_partial(s: &mut Screen, width: usize) -> usize {
@@ -81,14 +82,16 @@ impl Outline {
         s.clear();
         self.expire(now);
         self.untracked.start_frame();
-        let mut layout = arrange(s.w, s.h, self.repo.git, self.listing.truncated);
+        let folder_partial = self.listing.truncated || self.listing.unreadable && !self.listing.paths.is_empty();
+        let partial = self.repo.paths_incomplete() || folder_partial;
+        let mut layout = arrange(s.w, s.h, self.repo.git, partial);
         if layout.width == 0 {
             self.painted = layout;
             return;
         }
         if layout.heading {
-            self.draw_heading(s, layout.width);
-        } else if self.listing.truncated {
+            self.draw_heading(s, &layout);
+        } else if partial {
             // Keep room for a file and the warning when there is only one row.
             layout.width -= draw_partial(s, layout.width) + 1;
             if layout.width < 3 {
@@ -97,7 +100,9 @@ impl Outline {
         }
         if layout.strip {
             self.discover_untracked();
-            self.draw_strip(s, &layout);
+            if layout.body_rows > 0 {
+                self.draw_strip(s, &layout);
+            }
         } else {
             let git_unavailable = self.repo.git_unavailable();
             if (self.note.is_some() || git_unavailable) && !layout.hint {
@@ -117,17 +122,31 @@ impl Outline {
     }
 
     /// Names the project and branch beside the work that is waiting, if it fits.
-    fn draw_heading(&self, s: &mut Screen, width: usize) {
+    fn draw_heading(&self, s: &mut Screen, layout: &Layout) {
+        let width = layout.width;
         let branch = self.repo.branch();
         let name_width = ui::project_heading_width(&self.repo.name, branch);
         let summary_width = if self.repo.git {
             let uncommitted = self.pending.partition_point(|file| !file.unpushed);
-            self.draw_summary(s, width, name_width, uncommitted)
+            if layout.partial {
+                let warning = draw_partial(s, width);
+                let known = if !self.pending.is_empty() || !self.repo.ok() {
+                    self.draw_summary(s, width - warning - 1, name_width, uncommitted)
+                } else {
+                    0
+                };
+                warning + known + usize::from(known > 0)
+            } else {
+                self.draw_summary(s, width, name_width, uncommitted)
+            }
         } else if self.listing.truncated {
             draw_partial(s, width)
-        } else if self.listing.unreadable && !self.listing.paths.is_empty() && width >= 24 {
-            let problem = if width >= 45 { "Some files could not be listed" } else { "Cannot list all files" };
-            s.put_right(width - 1, 0, problem, ui::DEL)
+        } else if self.listing.unreadable && !self.listing.paths.is_empty() {
+            match width {
+                45.. => s.put_right(width - 1, 0, "Some files could not be listed", ui::DEL),
+                24.. => s.put_right(width - 1, 0, "Cannot list all files", ui::DEL),
+                _ => draw_partial(s, width),
+            }
         } else {
             0
         };
@@ -209,6 +228,9 @@ impl Outline {
                 }
                 return;
             }
+            if layout.partial {
+                return;
+            }
             let (text, style) = if self.listing.unreadable {
                 ("Cannot read this folder.", ui::DEL)
             } else if self.pending_only {
@@ -248,7 +270,7 @@ impl Outline {
         let node = self.tree.node(row.node);
         let open = node.dir && self.folds.is_open(&node.path);
         let right = columns.draw_details(s, y, node);
-        let indent = (usize::from(row.depth) * 2).min(columns.width / 3);
+        let indent = (row.depth as usize).saturating_mul(2).min(columns.width / 3);
         for guide in (0..indent).step_by(2) {
             s.put(1 + guide, y, 1, "│", FAINT);
         }
@@ -316,7 +338,7 @@ impl Outline {
             return;
         }
         if self.recent.is_empty() {
-            if !layout.heading {
+            if !layout.heading && !layout.partial {
                 s.put_fit(1, 0, w - 2, "Nothing to commit or push.", FAINT);
             }
             return;
@@ -422,7 +444,7 @@ impl ChangeColumns {
         let size = if node.uncounted == 0 {
             ui::size_width(node.add, node.del)
         } else {
-            ui::size_width(0, node.del) + 1 + usize::from(node.del > 0)
+            ui::size_width(0_u64, node.del) + 1 + usize::from(node.del > 0)
         };
         self.size = self.size.max(size);
     }
@@ -432,8 +454,9 @@ impl Columns {
     /// Draws the change and its size when there is room, returning where the name ends.
     fn draw_details(&self, s: &mut Screen, y: usize, node: &Node) -> usize {
         let right = self.width - 1; // The last column belongs to the scroll thumb.
-        let Some(details) = &self.details else { return right };
-        if node.kind == Kind::None {
+        let Some(details) = self.details.filter(|_| node.kind != Kind::None) else { return right };
+        let word_at = right.saturating_sub(details.size + usize::from(details.size > 0) + details.word);
+        if word_at <= 1 {
             return right;
         }
         let add = if node.uncounted == 0 { node.add } else { 0 };
@@ -441,7 +464,6 @@ impl Columns {
         if node.uncounted > 0 {
             s.put(right - used - 1 - usize::from(used > 0), y, 1, "?", FAINT);
         }
-        let word_at = right - details.size - usize::from(details.size > 0) - details.word;
         if !node.dir {
             s.put(word_at, y, details.word, ui::kind_word(node.kind), ui::kind_colour(node.kind));
         }
