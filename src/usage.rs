@@ -748,7 +748,7 @@ impl Usage {
                 &mut self.claude.saved_version,
                 &mut self.claude.status,
                 claude_budget,
-                status::saved,
+                |file, version, budget| status::saved(file, version, budget, now),
             );
         }
         if let Some(path) = &self.claude_config {

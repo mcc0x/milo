@@ -51,10 +51,13 @@ fn window(value: Option<Value<'_>>, minutes: u64, observed: Observed) -> Option<
 }
 
 /// The status helper's own cache can preserve windows from different reports.
-pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
+/// A save dated beyond the allowed clock difference is not a reading: being
+/// the newest, it would outrank every report that follows it.
+pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget, now: i64) -> Option<Reading> {
     let bytes = files::read_small(file, version, MAX_SAVED, budget)?;
     let [saved_at, rate_limits] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits"]);
     let at = saved_at?.integer()?;
+    (at <= now.saturating_add(super::CLOCK_SKEW)).then_some(())?;
     let base = windows(rate_limits?, |value, minutes| window(value, minutes, Observed::Saved(at)));
     base.iter().any(Option::is_some).then_some(Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) })
 }
@@ -168,10 +171,11 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
 }
 
 /// Merge under the directory lock so two status invocations cannot lose a window.
+/// A save that is not a reading is replaced, not merged, so its date goes with it.
 fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
     let previous = fs_ops::open_read(path).ok().and_then(|file| {
         let version = FileVersion::opened(&file)?;
-        saved(file, version, &mut Budget::new(MAX_SAVED + 1))
+        saved(file, version, &mut Budget::new(MAX_SAVED + 1), now)
     });
     let base = previous.map_or([None; 2], |reading| reading.windows.base);
     let merged = std::array::from_fn(|i| newer(base[i], windows[i]));

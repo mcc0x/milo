@@ -26,7 +26,7 @@ fn claude_status_saves_limits_and_prints_a_short_plain_line() {
     let budget = &mut Budget::new(16384);
     let file = fs_ops::open_read(&path).unwrap();
     let version = FileVersion::opened(&file).unwrap();
-    let saved = status::saved(file, version, budget).unwrap();
+    let saved = status::saved(file, version, budget, NOW).unwrap();
     assert_eq!(saved.windows.base[0].unwrap().observed, NOW);
     assert_eq!(saved.windows.base[1].unwrap().resets, Some(1_795_219_200));
 }
@@ -202,6 +202,37 @@ fn claude_status_prints_the_limits_even_when_the_save_cannot_be_made() {
         assert_eq!(status::run(STATUS, &mut output, path, NOW), 0);
         assert_eq!(String::from_utf8(output).unwrap(), "5h 77% · week 39% left\n");
     }
+}
+
+#[test]
+fn a_claude_save_dated_beyond_the_clock_allowance_gives_way_to_another_source_until_replaced() {
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    // Claude Code's own cache, fetched two minutes ago: 18% of the week used.
+    let cache = format!(
+        r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{},"utilization":{{"seven_day":{{"utilization":18}}}}}}}}"#,
+        (NOW - 2 * MINUTE) * 1000
+    );
+    write(&f, ".claude.json", &cache, NOW);
+    let look = |now: i64, with_cache: bool| {
+        let mut usage = unopened(&f, now);
+        usage.claude_config = with_cache.then(|| f.root.join(".claude.json"));
+        usage.check();
+        let source = usage.claude.reported().map(|(reading, source)| (reading.at.seconds, source.label()));
+        (frame(&mut usage, 22, 2).pop().unwrap(), source)
+    };
+
+    // The status line ran while the clock was a second further ahead than is allowed.
+    let ahead = NOW + CLOCK_SKEW + 1;
+    assert_eq!(status::run(STATUS, Vec::new(), Some(&path), ahead), 0);
+    assert_eq!(look(NOW, true), ("Claude week · 82% left".into(), Some((NOW - 2 * MINUTE, "Claude Code usage cache"))));
+    assert_eq!(look(NOW, false), ("Claude · no source".into(), None));
+    // A second later the same save is within the allowance, and is the newest report.
+    assert_eq!(look(NOW + 1, true), ("Claude week · 39% left".into(), Some((ahead, "Milo Claude status line"))));
+
+    // The next report replaces the misdated save rather than keeping its date.
+    assert_eq!(status::run(STATUS, Vec::new(), Some(&path), NOW), 0);
+    assert_eq!(look(NOW, true), ("Claude week · 39% left".into(), Some((NOW, "Milo Claude status line"))));
 }
 
 #[test]
