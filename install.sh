@@ -144,16 +144,12 @@ fi
 (umask 077; printf '%s\n%s\n' "$digest" "$binary" > "$staged_receipt")
 
 check_destination
-if [ -f "$binary" ] && [ -x "$binary" ] && cmp -s "$staged" "$binary"; then
-    message="milo is already installed at $binary. Nothing to do."
-else
-    # The directory form replaces the entry without following a final symlink.
-    /bin/mv -f "$staged" "${bin_dir%/}/"
-    message="Installed milo at $binary."
-fi
+# Always publish the staged inode: matching bytes say nothing about permissions or links.
+# The directory form replaces the entry without following a final symlink.
+/bin/mv -f "$staged" "${bin_dir%/}/"
 # Publish after the binary so an interruption cannot authorize different bytes.
 /bin/mv -f "$staged_receipt" "${bin_dir%/}/"
-printf '%s\n' "$message"
+printf 'Installed milo at %s.\n' "$binary"
 
 active=$(command -v milo || :)
 if [ -n "$active" ] && [ "$active" -ef "$binary" ]; then

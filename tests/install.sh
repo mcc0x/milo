@@ -217,6 +217,21 @@ exercise_uninstall() (
         [ -z "$(find "$MILO_BIN_DIR" -name '.milo.*' -print)" ]
     fi
 
+    # Identical executable bytes do not make an existing inode safe to keep.
+    chmod 775 "$binary"
+    sh "$installer" >/dev/null
+    cmp "$binary" "$payload"
+    [ -n "$(find "$binary" -perm 755 -print)" ]
+
+    # Even with the correct mode, the new executable must not share the old inode.
+    linked_binary="$fixture/$kind linked binary"
+    ln "$binary" "$linked_binary"
+    sh "$installer" >/dev/null
+    [ ! "$binary" -ef "$linked_binary" ]
+    [ -n "$(find "$binary" -perm 755 -links 1 -print)" ]
+    cmp "$binary" "$payload"
+    cmp "$linked_binary" "$payload"
+
     # A receipt copied together with the exact binary is not valid at another destination.
     cp "$binary" "$other/milo"
     cp "$receipt" "$other/.milo-install-receipt"
