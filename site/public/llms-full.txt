@@ -460,7 +460,7 @@ With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to inst
 
 If you have the older `Milo Usage.app`, run the install command again. It migrates the app to `Milo.app`; you don’t need to uninstall first.
 
-You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). Install opens the app. When it’s installed, the control offers removal and asks for confirmation. Removing it keeps the Milo CLI, your settings, and any unsaved Settings draft.
+You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). On current source builds, **Open or update** reopens the installed app or applies the CLI’s bundled update. Removal is a separate, confirmed action. It keeps the Milo CLI, your settings, and any unsaved Settings draft.
 
 The Apple Silicon Homebrew and release binaries include the app starting with v0.1.4. If you prefer to build it from source:
 
