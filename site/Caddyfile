@@ -11,6 +11,11 @@
 		X-Content-Type-Options nosniff
 		-Server
 	}
+	# Vite puts content-hashed files in /assets.
+	header /assets/* {
+		Cache-Control "public, max-age=31536000, immutable"
+		match status 2xx 304
+	}
 	file_server
 
 	handle_errors 404 {
