@@ -486,6 +486,46 @@ fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
 }
 
 #[test]
+fn the_reader_renders_invisible_git_edits_in_working_files_and_commits() {
+    let project = Project::new();
+    project.git(&["init", "-q"]);
+    project.git(&["config", "core.autocrlf", "false"]);
+    let path = project.0.join("project/notes.txt");
+    fs::write(&path, "\tindent\nsame a\nline ending\r\nsame b\ncafe!\nsame c\nhidden!\nsame d\ncode=1\n").unwrap();
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "before"]);
+    fs::write(&path, "    indent\nsame a\nline ending\nsame b\ncafe\u{301}!\nsame c\nhidden\u{200b}!\nsame d\ncode=2\n")
+        .unwrap();
+
+    let check = |args: &[&str]| {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        let mut terminal = Terminal::run(command.args(args));
+        terminal.until("\x1b[0;7;32m2");
+        let out = terminal.output();
+        for text in [
+            " [tab]",
+            " [4 spaces]",
+            " [CRLF]",
+            " [LF]",
+            "\x1b[0;7;31me\x1b",
+            "\x1b[0;7;32me\u{301}\x1b",
+            " [combining acute U+0301]",
+            "\x1b[0;7;32mn\x1b",
+            " [zero-width space U+200B]",
+        ] {
+            assert!(out.contains(text), "{text:?} missing from {out:?}");
+        }
+        terminal.master.write_all(b"q").unwrap();
+        assert!(terminal.wait_for_exit().success());
+    };
+    check(&["view", "notes.txt"]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "after"]);
+    let commit = project.git(&["rev-parse", "HEAD"]);
+    check(&["view", "notes.txt", "--commit", commit.trim()]);
+}
+
+#[test]
 fn a_picture_returns_after_resize_without_further_input() {
     const PLACE: &str = "\x1b_Ga=p,";
     const UPLOAD: &str = "\x1b_Ga=t,";

@@ -32,6 +32,28 @@ fn an_empty_file_uses_the_body_row_not_the_hint_row() {
 }
 
 #[test]
+fn panning_reaches_a_diff_annotation_without_treating_it_as_source_code() {
+    let f = Fixture::new();
+    let stem = "界".repeat(22);
+    f.write("page.rs", &format!("// {stem}e\n"));
+    f.commit("before");
+    f.write("page.rs", &format!("// {stem}e\u{301}\n"));
+
+    let mut reader = Reader::open(&f.root.join("page.rs")).unwrap();
+    assert!(!drawn(&mut reader, 40, 5)[2].contains("[combining acute"));
+    for _ in 0..5 {
+        reader.key(Key::Right);
+        drawn(&mut reader, 40, 5);
+    }
+    let mut screen = Screen::sized(40, 5);
+    reader.draw(&mut screen);
+    assert!(screen.text()[2].ends_with("e\u{301} [combining acute U+0301]"));
+    let out = String::from_utf8(screen.emitted()).unwrap();
+    assert!(out.contains("\x1b[0;3;2;7me\u{301}\x1b"), "{out:?}");
+    assert!(out.contains("\x1b[0;1;7;32m [combining acute U+0301]"), "{out:?}");
+}
+
+#[test]
 fn text_with_a_picture_extension_still_shows_its_edits() {
     let f = Fixture::new();
     f.write("notes.png", "initial notes\n");

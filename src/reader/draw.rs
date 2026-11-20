@@ -59,12 +59,18 @@ impl LinePainter<'_> {
         }
         let lang = self.lang.filter(|_| line.kind != LineKind::Del);
         let (skip, text) = text_for_draw(&line.text, self.pan, self.width + lang.map_or(0, Lang::lookahead));
-        s.put(self.x, y, self.width, &text[skip..], text_style);
+        let used = s.put(self.x, y, self.width, &text[skip..], text_style);
         if let Some(lang) = lang {
             lang.scan(text, &mut state.clone(), self.spans);
             self.draw_code(s, y, skip, text);
         }
         self.draw_edit(s, y, skip, text, &line.changed);
+        if self.pan + self.width > line.width
+            && let Some(label) = line.annotation.get(self.pan.saturating_sub(line.width)..)
+            && !label.is_empty()
+        {
+            s.put(self.x + used, y, self.width - used, label, margin_style.reverse());
+        }
         match line.kind {
             LineKind::Same => {}
             LineKind::Add => s.wash(0, y, s.w - 1, Wash::Added),
@@ -144,7 +150,7 @@ impl Reader {
                 let width = s.w - 1 - x;
                 self.columns = width;
                 if self.pan > 0 {
-                    let longest = shown.iter().map(|line| line.width).max().unwrap_or(0);
+                    let longest = shown.iter().map(Line::display_width).max().unwrap_or(0);
                     self.pan = self.pan.min(longest.saturating_sub(width));
                 }
                 let mut painter = LinePainter { x, width, pan: self.pan, lang: text.lang, spans: &mut self.spans };
