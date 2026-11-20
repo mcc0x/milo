@@ -19,6 +19,7 @@ let paneSnapshot = paneSnapshots[0];
 const fade = 320;
 let activeHarness = 0;
 let userPaused = false;
+let demoVisible = true;
 let nextCue = 0;
 let elapsed = 0;
 let startedAt: number | undefined;
@@ -31,7 +32,7 @@ function show({ phase, focus, say }: typeof scene[number]) {
   demo.dataset.view = focus ?? 'whole';
   reader.hidden = focus !== 'reader';
   renderFrame(frameAt(phase, harness.id));
-  const label = panePicker.hidden ? caption : stillCaption;
+  const label = playback.hidden ? stillCaption : caption;
   const words = say.replace('{agent}', harness.name);
   if (label.dataset.says !== words) {
     label.dataset.says = words;
@@ -41,7 +42,7 @@ function show({ phase, focus, say }: typeof scene[number]) {
     label.dataset.tone = focus === 'agent' ? harness.id : focus ?? 'whole';
     label.replaceChildren(before, strong, after);
     if (!('still' in demo.dataset)) {
-      caption.animate([{ opacity: 0, translate: '0 .35em' }, { opacity: 1, translate: '0 0' }], { duration: 340, easing: 'ease-out' });
+      caption.animate?.([{ opacity: 0, transform: 'translateY(.35em)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: 340, easing: 'ease-out' });
     }
   }
   composer.textContent = '';
@@ -83,7 +84,7 @@ function showPaneSnapshot() {
 function showStill() {
   demo.dataset.still = '';
   demo.classList.remove('scene-out');
-  for (const animation of caption.getAnimations()) animation.cancel();
+  for (const animation of caption.getAnimations?.() ?? []) animation.cancel();
   suspendedAnimations.length = 0;
   renderHarness(harnesses[activeHarness]);
   if (panePicker.hidden) show(still);
@@ -101,21 +102,16 @@ function scheduleCue() {
 }
 
 function syncPlayback() {
-  playback.disabled = reduceMotion.matches;
-  playback.setAttribute('aria-label', reduceMotion.matches ? 'Demo paused for reduced motion' : userPaused ? 'Resume demo' : 'Pause demo');
-  playback.title = playback.getAttribute('aria-label')!;
-  playback.setAttribute('aria-pressed', String(userPaused || reduceMotion.matches));
-  if (userPaused || document.hidden || reduceMotion.matches) {
-    if (startedAt !== undefined) {
-      elapsed = performance.now() - startedAt;
-      startedAt = undefined;
-      clearTimeout(timer);
-    }
-    if ('paused' in demo.dataset) return;
+  if (userPaused || document.hidden || !demoVisible || reduceMotion.matches) {
+    if (startedAt === undefined) return;
+    elapsed = performance.now() - startedAt;
+    startedAt = undefined;
+    clearTimeout(timer);
+    if ('still' in demo.dataset) return;
     demo.dataset.paused = '';
-    // CSS holds the keyframes (including any created by a responsive layout
-    // change). The Web Animations API also catches transitions and the caption.
-    for (const animation of [...demo.getAnimations({ subtree: true }), ...caption.getAnimations()]) {
+    // CSS holds keyframes, including any created by a responsive layout
+    // change. The Web Animations API also catches transitions and the caption.
+    for (const animation of [...(demo.getAnimations?.({ subtree: true }) ?? []), ...(caption.getAnimations?.() ?? [])]) {
       if (animation.playState !== 'running') continue;
       const time = animation.currentTime;
       animation.pause();
@@ -139,6 +135,10 @@ function syncPlayback() {
 
 playback.addEventListener('click', () => {
   userPaused = !userPaused;
+  const action = userPaused ? 'Resume demo' : 'Pause demo';
+  playback.setAttribute('aria-label', action);
+  playback.title = action;
+  playback.toggleAttribute('data-paused', userPaused);
   syncPlayback();
 });
 for (const option of paneOptions) {
@@ -150,16 +150,14 @@ for (const option of paneOptions) {
 }
 
 function syncMotionPreference() {
-  const wasManual = !panePicker.hidden;
-  const manual = reduceMotion.matches && phone.matches;
-  panePicker.hidden = stillCaption.hidden = !manual;
-  playback.hidden = manual;
-  if (manual) demo.setAttribute('aria-describedby', stillCaption.id);
-  else if (wasManual) {
-    demo.removeAttribute('aria-describedby');
-    demo.setAttribute('aria-label', demoLabel);
-  }
-  if (reduceMotion.matches || (wasManual && (userPaused || document.hidden))) showStill();
+  const wasStill = playback.hidden;
+  const reduced = reduceMotion.matches;
+  panePicker.hidden = !(reduced && phone.matches);
+  playback.hidden = reduced;
+  stillCaption.hidden = !reduced;
+  demo.setAttribute('aria-describedby', reduced ? stillCaption.id : caption.id);
+  if (panePicker.hidden) demo.setAttribute('aria-label', demoLabel);
+  if (reduced || (wasStill && (userPaused || document.hidden || !demoVisible))) showStill();
   syncPlayback();
 }
 
@@ -167,26 +165,45 @@ reduceMotion.addEventListener('change', syncMotionPreference);
 phone.addEventListener('change', syncMotionPreference);
 document.addEventListener('visibilitychange', syncPlayback);
 
-if (!reduceMotion.matches) beginLoop();
+demo.dataset.ready = '';
 syncMotionPreference();
 
 // Leave completed icons in the HTML; play their entrance only on the first visit.
-const paneStrip = document.querySelector<HTMLElement>('.feature-panes')!;
-const reveal = new IntersectionObserver(([entry], observer) => {
-  if (!entry.isIntersecting) return;
-  if (!reduceMotion.matches) paneStrip.classList.add('pane-beat');
-  observer.disconnect();
-}, { threshold: 0.25 });
-reveal.observe(paneStrip);
+if ('IntersectionObserver' in window) {
+  const paneStrip = document.querySelector<HTMLElement>('.feature-panes')!;
+  const reveal = new IntersectionObserver(([entry], observer) => {
+    if (!entry.isIntersecting) return;
+    if (!reduceMotion.matches) paneStrip.classList.add('pane-beat');
+    observer.disconnect();
+  }, { threshold: 0.25 });
+  reveal.observe(paneStrip);
+
+  new IntersectionObserver(([entry]) => {
+    demoVisible = entry.isIntersecting;
+    syncPlayback();
+  }).observe(demo);
+}
 
 for (const bubble of document.querySelectorAll<HTMLElement>('.bubbles li')) {
+  let frame = 0;
+  let x = 0;
+  let y = 0;
   bubble.addEventListener('pointermove', event => {
     if (event.pointerType !== 'mouse' || reduceMotion.matches) return;
-    const box = bubble.getBoundingClientRect();
-    bubble.style.setProperty('--glint-x', `${20 + 60 * (event.clientX - box.left) / box.width}%`);
-    bubble.style.setProperty('--glint-y', `${15 + 50 * (event.clientY - box.top) / box.height}%`);
+    x = event.clientX;
+    y = event.clientY;
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const box = bubble.getBoundingClientRect();
+      if (box.width === 0 || box.height === 0) return;
+      bubble.style.setProperty('--glint-x', `${20 + 60 * (x - box.left) / box.width}%`);
+      bubble.style.setProperty('--glint-y', `${15 + 50 * (y - box.top) / box.height}%`);
+    });
   });
   bubble.addEventListener('pointerleave', () => {
+    cancelAnimationFrame(frame);
+    frame = 0;
     bubble.style.removeProperty('--glint-x');
     bubble.style.removeProperty('--glint-y');
   });
@@ -197,6 +214,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-c
   const target = document.getElementById(button.dataset.copy!)!;
   const label = button.textContent;
   let reset = 0;
+  button.hidden = false;
   button.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(target.textContent);
@@ -204,10 +222,14 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-c
       button.textContent = 'Copied';
       feedback.textContent = 'Copied to clipboard.';
     } catch {
-      target.hidden = false;
-      window.getSelection()?.selectAllChildren(target);
-      button.textContent = 'Selected';
-      feedback.textContent = 'Clipboard unavailable. Copy the selected text.';
+      const selection = window.getSelection();
+      selection?.selectAllChildren(target);
+      const selected = selection?.toString() === target.textContent;
+      button.dataset.state = 'failed';
+      button.textContent = selected ? 'Selected' : 'Failed';
+      feedback.textContent = selected
+        ? 'Clipboard unavailable. Copy the selected command.'
+        : 'Clipboard unavailable. Select and copy the command manually.';
     }
     clearTimeout(reset);
     reset = window.setTimeout(() => {

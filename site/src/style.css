@@ -40,6 +40,20 @@ h1, p { margin: 0; }
   outline-offset: 3px;
 }
 
+.skip-link {
+  position: absolute;
+  z-index: 3;
+  inset: .75rem auto auto .75rem;
+  padding: .6rem .9rem;
+  border-radius: .45rem;
+  background: var(--blue);
+  color: white;
+}
+.skip-link:not(:focus) {
+  clip-path: inset(50%);
+  pointer-events: none;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -116,45 +130,28 @@ h1 {
   min-width: 0;
   font: 400 clamp(.75rem, 2.9vw, .875rem)/1.5 var(--mono);
   overflow-wrap: anywhere;
+  -webkit-user-select: all;
   user-select: all;
 }
 
 button[data-copy] {
   flex: none;
-  min-width: 4rem;
+  width: 4rem;
   height: 2.1rem;
-  padding: 0 .9rem;
+  padding: 0;
   border: 0;
   border-radius: .45rem;
   background: #284456;
   color: #fbfcfa;
   cursor: pointer;
   font: 650 .875rem/1 Bricolage, system-ui, sans-serif;
+  touch-action: manipulation;
   transition: background-color .2s ease, scale .12s ease;
 }
+button[data-copy]:hover { background: var(--blue); }
 button[data-copy]:active { scale: .96; }
 button[data-copy][data-state='copied'] { background: #b2d8c3; color: #203b30; }
 button[data-copy][data-state='copied']::before { content: '✓ '; }
-
-.demo-playback {
-  grid-column: 3;
-  grid-row: 1;
-  justify-self: end;
-  min-width: 6.5rem;
-  min-height: 2.5rem;
-  padding: .35rem .55rem;
-  border: 1px solid transparent;
-  border-radius: .45rem;
-  background: transparent;
-  color: var(--secondary);
-  cursor: pointer;
-  font: 650 .875rem/1.15 Bricolage, system-ui, sans-serif;
-}
-.demo-playback:hover, .demo-playback:focus-visible {
-  border-color: #ffffffa8;
-  background: #ffffff63;
-  color: var(--ink);
-}
 
 .source {
   display: flex;
@@ -177,7 +174,7 @@ button[data-copy][data-state='copied']::before { content: '✓ '; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .install button, .source { transition: none; }
+  button[data-copy] { transition: none; }
 }
 
 /* Center the visible lockup, not its transparent canvas, on the icon row. */
@@ -186,7 +183,3 @@ button[data-copy][data-state='copied']::before { content: '✓ '; }
 .social-link { display: grid; place-items: center; width: 44px; height: 44px; color: var(--ink); border-radius: .65rem; }
 .social-link svg { display: block; width: 22px; height: 22px; fill: currentColor; }
 .social-link:hover { background: #ffffff55; }
-.demo-footer { display: flex; justify-content: center; margin-block: .35rem auto; }
-.caption-toggle { appearance: none; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; border-radius: .25rem; }
-.caption-toggle .caption { display: block; text-align: center; }
-.caption-toggle:disabled { cursor: default; opacity: 1; }

@@ -18,6 +18,7 @@ const composerPlaceholder = element('composer-placeholder');
 const composerHint = element('composer-hint');
 let agentSteps: { at: number; node: HTMLElement }[] = [];
 let followTranscript = false;
+let previousFrame: Frame | undefined;
 
 function span(text: string, className = '') {
   const node = document.createElement('span');
@@ -159,20 +160,18 @@ function renderUsage({ usage }: Frame) {
   }
 }
 
-function diffRow(line: DiffLine, numbers: boolean) {
+function diffRow(line: DiffLine) {
   const code = span('', 'diff-code');
   code.append(...line.tokens.map(token => typeof token === 'string' ? token : span(token[0], `term-${token[1]}`)));
   const marker = line.change === 'added' ? '+' : '-';
-  return row(`diff-line diff-${line.change}`, ...(numbers ? [span(String(line.number ?? ''), 'diff-number')] : []), span(marker, 'diff-marker'), code);
+  return row(`diff-line diff-${line.change}`, span(String(line.number ?? ''), 'diff-number'), span(marker, 'diff-marker'), code);
 }
 
-function renderReader(edited: boolean) {
-  const heading = detailRow(fileName('weather.ts', '', '', true), edited ? edit.change : undefined);
+function renderReader() {
+  const heading = detailRow(fileName('weather.ts', '', '', true), edit.change);
   heading.classList.add('reader-heading');
   heading.firstElementChild?.append(span('src', 'term-muted history-dir'));
-  const lines = edited
-    ? weatherDiff.map(line => diffRow(line, true))
-    : [row('diff-line', span('1', 'diff-number term-muted'), span('', 'diff-marker'), span('export const outlook = "clear";', 'diff-code'))];
+  const lines = weatherDiff.map(diffRow);
   reader.replaceChildren(heading, ...lines, row('term-hint term-muted', '↑↓ scroll · q close · ? help'));
 }
 
@@ -241,7 +240,7 @@ export function renderHarness({ id, name, version, model }: typeof harnesses[num
     node.append(...children);
     return { at: order.indexOf(phase), node };
   };
-  const diff = row('agent-diff', ...weatherDiff.map(line => diffRow(line.number ? line : { ...line, number: 1 }, true)));
+  const diff = row('agent-diff', ...weatherDiff.map(line => diffRow(line.number ? line : { ...line, number: 1 })));
   agentSteps = [
     step('prompt', agentLine('request', prompt, request)),
     step('plan', agentLine('response', assistant, 'I’ll add wind speed in km/h and check the forecast output.')),
@@ -264,16 +263,19 @@ export function renderHarness({ id, name, version, model }: typeof harnesses[num
 }
 
 export function renderFrame(frame: Frame) {
-  renderOutline(frame);
-  renderHistory(frame);
-  renderUsage(frame);
+  if (frame.files !== previousFrame?.files || frame.phase === 'edit') renderOutline(frame);
+  if (!previousFrame || frame.ahead !== previousFrame.ahead || frame.toCommit !== previousFrame.toCommit || frame.phase === 'commit') {
+    renderHistory(frame);
+  }
+  if (frame.usage !== previousFrame?.usage) renderUsage(frame);
+  previousFrame = frame;
   const stage = order.indexOf(frame.phase);
   const newTab = frame.phase === 'new-tab';
   demo.toggleAttribute('data-expanded', frame.phase === 'usage');
   demo.toggleAttribute('data-resized', stage >= resize);
   demo.toggleAttribute('data-shell', newTab);
   shellTab.hidden = !newTab;
-  renderReader(stage >= order.indexOf('edit'));
+  if (frame.phase === 'read' && !reader.hasChildNodes()) renderReader();
   for (const { at, node } of agentSteps) {
     const hidden = stage < at;
     if (node.hidden !== hidden) {

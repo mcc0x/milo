@@ -8,6 +8,7 @@
 .hero {
   display: flex;
   flex-direction: column;
+  min-height: 100vh;
   min-height: 100svh;
   padding-block: clamp(1rem, 3vh, 2.5rem);
 }
@@ -43,20 +44,43 @@
 
 /* Under the window: what the scene is showing and its playback control. */
 .demo-footer {
-  display: grid;
-  grid-template-columns: minmax(6.5rem, 1fr) auto minmax(6.5rem, 1fr);
-  align-items: start;
+  display: flex;
+  justify-content: center;
   margin-block: .35rem auto;
 }
 .caption {
-  grid-column: 2;
-  grid-row: 1;
+  min-width: 0;
   min-height: 1.6rem;
   padding-block: .45rem;
   color: var(--ink);
   font-weight: 500;
   font-size: 1.05rem;
   text-align: center;
+}
+.caption-toggle {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  border-radius: .25rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.caption-toggle:hover { background: #ffffff55; }
+.caption-toggle:not([hidden]) { display: inline-flex; align-items: baseline; gap: .45em; min-width: 0; }
+.caption-toggle::after {
+  content: '';
+  flex: none;
+  width: .56em;
+  height: .62em;
+  border-inline: .15em solid var(--blue);
+}
+.caption-toggle[data-paused]::after {
+  border: 0;
+  background: var(--blue);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
 }
 .caption strong { color: var(--blue); font-weight: 780; }
 .caption[data-tone='claude'] strong { color: #703a24; }
@@ -175,6 +199,17 @@
   grid-template-rows: calc(var(--usage-height) + var(--usage-extra, 0px)) auto calc(var(--line) * 13 + 2 * var(--pane-y));
   grid-template-areas: 'outline usage' 'outline agent' 'history agent';
 }
+.demo-fallback {
+  display: grid;
+  grid-area: 1 / 1 / -1 / -1;
+  min-block-size: 100%;
+  place-items: center;
+  padding: 1rem;
+  color: var(--term-muted);
+  text-align: center;
+}
+.terminal[data-ready] .demo-fallback,
+.terminal:not([data-ready]) .terminal-panes > :not(.demo-fallback) { display: none; }
 .terminal[data-expanded] .terminal-panes { --usage-extra: 3rem; }
 .terminal:not([data-still]) .terminal-panes {
   transition: --usage-extra .62s cubic-bezier(.25, .7, .25, 1);
@@ -339,10 +374,7 @@
   .hero, .features, .field-notes, .footer-inner { width: calc(100% - 1.5rem); }
   .hero { padding-block: .9rem; }
   /* Room for two lines, so a longer caption moves nothing below it. */
-  .demo-footer { grid-template-columns: minmax(0, 1fr) auto; column-gap: .35rem; }
-  .caption { grid-column: 1; min-height: calc(2lh + .9rem); font-size: 1rem; text-wrap: balance; }
-  .demo-footer:has(.demo-playback:not([hidden])) .caption { text-align: start; }
-  .demo-footer .demo-playback { grid-column: 2; }
+  .caption { min-height: 3.9rem; min-height: calc(2lh + .9rem); font-size: 1rem; text-wrap: balance; }
   .terminal { --pane-x: .65rem; --line: 1.45em; display: block; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
   .terminal[data-shell] .rex-tab { padding-inline: .85rem; }
   .terminal-panes {
@@ -351,6 +383,10 @@
     flex-direction: column;
     min-height: var(--phone-pane-height);
   }
+  .terminal:not([data-ready]) .terminal-panes {
+    min-height: calc(var(--phone-pane-height) + var(--usage-height) + 1px);
+  }
+  .demo-fallback { flex: 1; }
   .term-pane { display: none; min-height: inherit; border: 0; }
   .terminal .usage {
     display: flex;

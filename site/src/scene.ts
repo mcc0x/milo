@@ -108,28 +108,42 @@ export const pushed: readonly Commit[] = [
 ];
 
 const order = scene.map(step => step.phase);
+const editedAt = order.indexOf('edit');
+const committedAt = order.indexOf('commit');
+const usageAt = order.indexOf('usage');
+
+function outlineAt(pending?: Pending) {
+  const files = pending ? tree.map((file): DemoFile => file.path === edit.path ? { ...edit, pending } : file) : tree;
+  return {
+    files,
+    toCommit: files.filter(file => file.pending === 'commit').length,
+    toPush: files.filter(file => file.pending === 'push').length,
+  };
+}
+
+// Reuse the unchanged pane data so the renderer only redraws affected panes.
+const beforeEdit = outlineAt();
+const afterEdit = outlineAt('commit');
+const afterCommit = outlineAt('push');
+const aheadAfterCommit = [newCommit, ...ahead];
 
 // These are the latest local reports for each provider, not totals for the edit.
 const usageReports = { codex: 17, claude: 31 };
 
-function usageAfter(harness: typeof harnesses[number]['id']): Frame['usage'] {
-  // omp is running a Codex model in this scene, so its report goes under Codex.
-  const provider = harness === 'claude' ? 'claude' : 'codex';
-  return { ...usageReports, [provider]: usageReports[provider] - 2 };
-}
+const reportedAfter = {
+  claude: { ...usageReports, claude: usageReports.claude - 2 },
+  codex: { ...usageReports, codex: usageReports.codex - 2 },
+};
 
 export function frameAt(phase: Phase, harness: typeof harnesses[number]['id']): Frame {
-  const reached = (step: Phase) => order.indexOf(phase) >= order.indexOf(step);
-  const committed = reached('commit');
-  const files = tree.map((file): DemoFile => file.path === edit.path && reached('edit')
-    ? { ...edit, pending: committed ? 'push' : 'commit' }
-    : file);
+  const stage = order.indexOf(phase);
+  const committed = stage >= committedAt;
+  // omp runs a Codex model in this scene, so it changes the Codex report.
+  const provider = harness === 'claude' ? 'claude' : 'codex';
   return {
     phase,
-    files,
-    toCommit: files.filter(file => file.pending === 'commit').length,
-    toPush: files.filter(file => file.pending === 'push').length,
-    ahead: committed ? [newCommit, ...ahead] : ahead,
-    usage: reached('usage') ? usageAfter(harness) : usageReports,
+    ...(committed ? afterCommit : stage >= editedAt ? afterEdit : beforeEdit),
+    ahead: committed ? aheadAfterCommit : ahead,
+    usage: stage >= usageAt ? reportedAfter[provider] : usageReports,
   };
 }

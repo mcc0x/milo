@@ -31,7 +31,8 @@
     <script type="module" src="./main.ts"></script>
   </head>
   <body>
-    <main>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main" tabindex="-1">
       <section class="hero" aria-labelledby="title">
         <header class="masthead">
           <div class="lockup">
@@ -47,14 +48,14 @@
           </div>
           <div class="install">
             <span class="install-prompt" aria-hidden="true">$</span>
-            <code id="install-command">brew install mcc0x/milo/milo</code>
-            <button id="copy-command" data-copy="install-command" type="button" aria-describedby="install-command">Copy</button>
+            <code id="install-command" translate="no">brew install mcc0x/milo/milo</code>
+            <button id="copy-command" data-copy="install-command" type="button" aria-describedby="install-command" hidden>Copy</button>
           </div>
           <p id="copy-feedback" class="visually-hidden" role="status"></p>
         <ul class="bubbles" role="list" aria-label="Integrations">
-          <li><span><img src="./images/claude.png" alt="Claude Code"></span></li>
-          <li><span><img src="./images/omp.svg" alt="OMP"></span></li>
-          <li><span><img src="./images/codex.png" alt="Codex"></span></li>
+          <li><span><img src="./images/claude.png" width="192" height="192" alt="Claude Code"></span></li>
+          <li><span><img src="./images/omp.svg" width="120" height="90" alt="OMP"></span></li>
+          <li><span><img src="./images/codex.png" width="192" height="192" alt="Codex"></span></li>
           <li><span><svg viewBox="0 0 24 30" role="img" aria-label="OpenCode"><path fill="#292828" fill-rule="evenodd" d="M0 0h24v30H0zm6 6v18h12V6z"/><path fill="#a49e9e" d="M6 12h12v12H6z"/></svg></span></li>
         </ul>
         </div>
@@ -66,12 +67,13 @@
           <button type="button" value="history" aria-controls="demo" aria-pressed="false">History</button>
           <button type="button" value="usage" aria-controls="demo" aria-pressed="false">Usage</button>
         </div>
-        <div class="terminal" id="demo" data-view="whole" data-still role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work">
+        <div class="terminal" id="demo" data-view="whole" data-still translate="no" role="img" aria-label="A Rex window with milo’s outline, history and usage panes beside a coding agent at work" aria-describedby="demo-fallback demo-still-caption">
           <div class="rex-titlebar">
             <span class="window-lights"><i></i><i></i><i></i></span>
             <span class="rex-tab">tidebook</span><span>Rex</span>
           </div>
           <div class="terminal-panes">
+            <p class="demo-fallback" id="demo-fallback">The interactive preview needs JavaScript.</p>
             <section class="term-pane outline">
               <div class="pane-body" id="outline-pane"></div>
             </section>
@@ -108,16 +110,16 @@
           </div>
         </div>
         <div class="demo-footer">
-          <button class="caption-toggle" id="demo-playback" type="button" aria-controls="demo" aria-label="Pause demo" aria-pressed="false" title="Pause demo"><span class="caption" id="caption" aria-hidden="true"></span></button>
-          <p class="caption" id="demo-still-caption" role="status" hidden></p>
+          <button class="caption-toggle" id="demo-playback" type="button" aria-controls="demo" aria-label="Pause demo" title="Pause demo" hidden><span class="caption" id="caption" aria-hidden="true"></span></button>
+          <p class="caption" id="demo-still-caption" role="status">All of it stays in view, <strong>beside your work</strong>.</p>
         </div>
       </section>
       <section class="features" aria-labelledby="features-title">
         <h2 id="features-title">What’s in Milo?</h2>
         <p class="feature-intro">Four panes, local settings, and layouts that remember your worktree. Bring your own agent:
-          <span><img src="./images/claude.png" alt="">Claude Code</span>,
-          <span><img class="omp-mark" src="./images/omp.svg" alt="">OMP</span>,
-          <span><img src="./images/codex.png" alt="">Codex</span>, or
+          <span><img src="./images/claude.png" width="192" height="192" alt="">Claude Code</span>,
+          <span><img class="omp-mark" src="./images/omp.svg" width="120" height="90" alt="">OMP</span>,
+          <span><img src="./images/codex.png" width="192" height="192" alt="">Codex</span>, or
           <span><svg viewBox="0 0 24 30" aria-hidden="true"><path fill="#292828" fill-rule="evenodd" d="M0 0h24v30H0zm6 6v18h12V6z"/><path fill="#a49e9e" d="M6 12h12v12H6z"/></svg>OpenCode</span>.
         </p>
         <div class="feature-grid">
@@ -149,11 +151,11 @@
       </section>
       <section class="field-notes" id="companion" aria-labelledby="companion-title">
         <header class="start-intro" id="field-notes">
-          <img class="companions" src="./images/companions.webp" width="544" height="355" alt="Rex with a magnifying glass beside Milo, pointing ahead." loading="lazy">
+          <img class="companions" src="./images/companions.webp" width="544" height="356" alt="Rex with a magnifying glass beside Milo, pointing ahead." loading="lazy">
           <h2 id="companion-title">Your Rex deserves a companion.</h2>
         </header>
-        <div class="brew-pill"><code id="setup-command">brew install mcc0x/milo/milo</code><button type="button" data-copy="setup-command" aria-describedby="setup-command">Copy</button></div>
-        <p>Then run <code>milo</code> in Rex.</p>
+        <div class="brew-pill"><code id="setup-command" translate="no">brew install mcc0x/milo/milo</code><button type="button" data-copy="setup-command" aria-describedby="setup-command" hidden>Copy</button></div>
+        <p>Then run <code translate="no">milo</code> in Rex.</p>
       </section>
     </main>
     <footer class="site-footer" id="open-source">
