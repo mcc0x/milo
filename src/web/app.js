@@ -7,6 +7,8 @@ const originLabels = {default: 'Built-in defaults', global: 'Global default', wo
 const groupLabels = {layout: 'layout', preferences: 'pane preferences', account: 'Claude Code choices'};
 const navButtons = [...document.querySelectorAll('[data-page]')];
 const queue = [];
+const numericDrafts = new Map();
+let saveRequested = false;
 let page = 'layout';
 let state;
 let running = false;
@@ -41,16 +43,42 @@ function lookup(data, field) {
   return field.split('.').reduce((object, key) => object[key], data);
 }
 
-function edit(field, value) {
+function draftValue(field) {
   const previous = queue.findLast(action => action.field === field);
-  const current = previous ? previous.value : lookup(state, field);
+  return previous ? previous.value : lookup(state, field);
+}
+
+function edit(field, value) {
+  const current = draftValue(field);
   if (Object.is(current, value) || (Array.isArray(value) && Array.isArray(current) &&
-    current.length === value.length && current.every((item, i) => item === value[i]))) return;
+    current.length === value.length && current.every((item, i) => item === value[i]))) return false;
   enqueue({action: 'set', field, value});
+  return true;
+}
+
+function applyNumericDraft(field) {
+  const draft = numericDrafts.get(field);
+  if (!draft?.control.validity.valid) return;
+  const {control, scale} = draft;
+  numericDrafts.delete(field);
+  control.dataset.initial = control.value;
+  if (!edit(field, control.valueAsNumber / scale)) updateChrome();
+}
+
+function applyNumericDrafts() {
+  for (const {control} of numericDrafts.values()) {
+    if (!control.reportValidity()) return false;
+  }
+  for (const field of numericDrafts.keys()) applyNumericDraft(field);
+  return true;
 }
 
 function command(action, payload = {}) {
-  enqueue({action, ...payload});
+  if ((action === 'try' || (action === 'save' && payload.group === 'layout')) && !applyNumericDrafts()) return;
+  const replacesLayout = action === 'capture' || (action === 'inherit' && payload.group === 'layout') ||
+    (action === 'discard' && (payload.group === 'layout' || payload.group === 'all'));
+  const replacedNumbers = replacesLayout && numericDrafts.size ? new Map(numericDrafts) : undefined;
+  enqueue({action, ...payload, replacedNumbers});
 }
 
 function enqueue(action) {
@@ -63,6 +91,7 @@ function enqueue(action) {
     if (action.action !== 'set' && (paused || queue.some(item => item.action !== 'set'))) return;
     queue.push(action);
   }
+  if (action.action !== 'set') saveRequested = false;
   operationWarning = '';
   byId('operation-status').textContent = '';
   if (!paused) localError = '';
@@ -107,7 +136,7 @@ async function drain() {
   if (running || paused || !queue.length || closing || ended) return;
   running = true;
   while (queue.length) {
-    const {pending, ...action} = queue[0];
+    const {pending, replacedNumbers, ...action} = queue[0];
     try {
       state = await api('/api/action', 'POST', {...action, version: state.version});
       if (state.message?.error) {
@@ -115,6 +144,11 @@ async function drain() {
         byId('operation-status').textContent = operationWarning;
       } else if (state.message) notify(state.message.text);
       queue.splice(0, 1 + (pending ?? 0));
+      if (replacedNumbers) {
+        for (const [field, draft] of replacedNumbers) {
+          if (numericDrafts.get(field) === draft) numericDrafts.delete(field);
+        }
+      }
       if (action.action === 'doctor') {
         const {level, note} = state.doctor;
         byId('health-status').textContent = `Health check: ${healthLabels[level]}.${note ? ` ${note}` : ''}`;
@@ -122,6 +156,7 @@ async function drain() {
         byId('health-status').textContent = '';
       }
     } catch (error) {
+      saveRequested = false;
       localError = error.message;
       if (action.action === 'doctor') {
         state.doctor = null;
@@ -140,8 +175,11 @@ async function drain() {
       break;
     }
   }
+  const openSave = saveRequested;
+  saveRequested = false;
   running = false;
   render();
+  if (openSave) showSaveOptions();
   if (!paused) void drain();
 }
 
@@ -223,6 +261,7 @@ async function closeSession(version) {
     ended = true;
     state = undefined;
     queue.length = 0;
+    numericDrafts.clear();
     byId('editor').hidden = byId('actionbar').hidden = true;
     byId('closed').hidden = false;
     byId('closed').querySelector('h1').tabIndex = -1;
@@ -239,7 +278,7 @@ async function closeSession(version) {
 function done() {
   if (!state || running || closing) return;
   const version = state.version;
-  const unsaved = state.dirty || state.trial || queue.some(item => item.action !== 'doctor');
+  const unsaved = hasUnsavedChanges();
   confirm('Close the dashboard?', unsaved
     ? 'Closing discards unsaved changes and ends any layout trial. Run milo web in your project to reopen the dashboard.'
     : 'This stops the local editor. Your saved settings stay as they are. Run milo web in your project to reopen the dashboard.',
@@ -272,9 +311,13 @@ function renderConnection() {
   connection.textContent = {closed: 'Closed', ready: 'Local session', offline: 'Not connected', opening: 'Connecting'}[status];
 }
 
+function hasUnsavedChanges() {
+  return state.dirty || state.trial || numericDrafts.size > 0 || queue.some(item => item.action !== 'doctor');
+}
+
 function updateChrome() {
   renderConnection();
-  const needsWarning = Boolean(state && (state.dirty || state.trial || queue.some(item => item.action !== 'doctor')));
+  const needsWarning = Boolean(state && hasUnsavedChanges());
   if (needsWarning !== warned) {
     if (needsWarning) {
       window.addEventListener('beforeunload', warnOnUnload);
@@ -294,7 +337,8 @@ function updateChrome() {
   byId('reconnect').hidden = !localError || paused;
   byId('reconnect').textContent = connected ? 'Refresh editor state' : 'Reconnect';
   byId('retry').disabled = byId('drop-edit').disabled = byId('reconnect').disabled = running || closing;
-  const dirty = Object.values(state.groups).filter(group => group.dirty).length;
+  const dirty = Object.entries(state.groups).filter(([key, group]) =>
+    group.dirty || (key === 'layout' && numericDrafts.size)).length;
   const status = byId('draft-status');
   status.dataset.dirty = String(needsWarning);
   const updatingDraft = queue.some(item => item.action !== 'doctor');
@@ -302,8 +346,7 @@ function updateChrome() {
     dirty ? `Unsaved changes in ${dirty === 1 ? '1 group' : `${dirty} groups`}` : state.trial ? 'Layout trial active' : 'No unsaved changes';
   if (status.textContent !== summary) status.textContent = summary;
   byId('discard-all').disabled = !needsWarning || running || closing || !connected;
-  byId('save-draft').disabled = running || closing || paused || !connected || queue.length > 0 ||
-    !Object.entries(state.groups).some(([key, group]) => canSaveDraft(key, group));
+  byId('save-draft').disabled = !canRequestSave();
   const saving = !byId('save-draft').disabled;
   byId('save-draft').classList.toggle('primary', saving);
   byId('save-draft').classList.toggle('secondary', !saving);
@@ -328,7 +371,6 @@ function render() {
   const trigger = focus?.closest('.action-menu')?.firstElementChild;
   const focusId = trigger?.id || focus?.id;
   const headingId = trigger?.closest('.settings-group')?.getAttribute('aria-labelledby');
-  const unfinished = focus?.type === 'number' && focus.value !== focus.dataset.initial ? focus.value : null;
   const locationLabel = node('strong', '', state.context.inside_rex ? 'In Rex' : 'Outside Rex');
   const path = state.context.worktree || state.context.directory;
   const name = path?.split('/').filter(Boolean).at(-1) || path || 'Directory unavailable';
@@ -356,9 +398,8 @@ function render() {
   panel.replaceChildren(...views[page]());
   panel.setAttribute('aria-labelledby', panel.querySelector('h2').id);
   updateChrome();
-  if (focusId && !focus.isConnected) {
+  if (focusId && (!focus.isConnected || (focus.type === 'number' && focus !== document.activeElement))) {
     const replacement = byId(focusId);
-    if (replacement && unfinished !== null) replacement.value = unfinished;
     if (trigger || focus.matches('h2[tabindex="-1"]')) {
       restoreSettingsFocus(replacement, headingId);
     } else if (replacement && !replacement.matches(':disabled, [hidden]')) {
@@ -406,9 +447,9 @@ function setting(field, title, detail, type, options = {}) {
     row.append(info, choices);
     return row;
   }
-  const control = node('input');
+  const draft = type === 'number' && numericDrafts.get(field);
+  const control = draft ? draft.control : node('input');
   const id = `field-${field}`;
-  const value = lookup(state, field);
   control.id = label.htmlFor = id;
   explanation.id = `${id}-detail`;
   if (detail) control.setAttribute('aria-describedby', explanation.id);
@@ -417,29 +458,41 @@ function setting(field, title, detail, type, options = {}) {
     control.type = 'checkbox';
     control.className = 'switch';
     control.setAttribute('role', 'switch');
-    control.checked = value;
+    control.checked = lookup(state, field);
+    control.addEventListener('change', () => edit(field, control.checked));
   } else {
-    control.type = 'number';
-    control.min = options.min;
-    control.max = options.max;
-    control.step = options.step;
-    control.required = true;
-    control.value = options.unit ? String(Number((value * 100).toFixed(6))) : String(value);
-    control.dataset.initial = control.value;
-    control.addEventListener('keydown', event => {
-      if (event.key === 'Enter' && !event.isComposing) {
-        event.preventDefault();
-        apply();
-      }
-    });
+    const value = draftValue(field);
+    const initial = options.unit ? String(Number((value * 100).toFixed(6))) : String(value);
+    control.dataset.initial = initial;
+    if (draft) {
+      if (control.valueAsNumber === Number(initial)) numericDrafts.delete(field);
+    } else {
+      control.type = 'number';
+      control.min = options.min;
+      control.max = options.max;
+      control.step = options.step;
+      control.required = true;
+      control.value = initial;
+      const scale = options.unit ? 100 : 1;
+      control.addEventListener('input', () => {
+        if (control.valueAsNumber !== Number(control.dataset.initial)) {
+          // Keep the actual input: a number field may display incomplete text that .value cannot represent.
+          numericDrafts.set(field, {control, scale});
+        } else {
+          numericDrafts.delete(field);
+        }
+        saveRequested = false;
+        updateChrome();
+      });
+      control.addEventListener('change', () => applyNumericDraft(field));
+      control.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.isComposing) {
+          event.preventDefault();
+          if (control.reportValidity()) applyNumericDraft(field);
+        }
+      });
+    }
   }
-  function apply() {
-    if (!control.reportValidity()) return;
-    const next = type === 'switch' ? control.checked : control.valueAsNumber / (options.unit ? 100 : 1);
-    if (type === 'number') control.dataset.initial = control.value;
-    edit(field, next);
-  }
-  control.addEventListener('change', apply);
   info.append(label);
   if (detail) info.append(explanation);
   wrap.append(control);
@@ -471,9 +524,35 @@ function groupCard(key, title, description, controls) {
   return card;
 }
 
+function canWriteGroup(group) {
+  return group.save_global || group.save_worktree || group.save_account;
+}
+
 function canSaveDraft(key, group) {
-  return (group.dirty || (key === 'layout' && state.trial)) &&
-    (group.save_global || group.save_worktree || group.save_account);
+  return (group.dirty || (key === 'layout' && state.trial)) && canWriteGroup(group);
+}
+
+function canRequestSave() {
+  if (!connected || closing || paused || saveRequested || (running && !queue.length) ||
+      queue.some(item => item.action !== 'set')) return false;
+  for (const {control} of numericDrafts.values()) {
+    if (!control.validity.valid) return false;
+  }
+  return (numericDrafts.size > 0 && canWriteGroup(state.groups.layout)) ||
+    Object.entries(state.groups).some(([key, group]) => canSaveDraft(key, group)) ||
+    queue.some(({field}) => {
+      const section = field.split('.')[0];
+      const group = section === 'layout' || section === 'account' ? section : 'preferences';
+      return canWriteGroup(state.groups[group]);
+    });
+}
+
+function requestSave() {
+  if (!canRequestSave() || !applyNumericDrafts()) return;
+  if (queue.length) {
+    saveRequested = true;
+    updateChrome();
+  } else showSaveOptions();
 }
 
 function saveChoices(key, group, select, disabled = false) {
@@ -489,6 +568,7 @@ function saveChoices(key, group, select, disabled = false) {
 }
 
 function showSaveOptions() {
+  if (byId('confirm').open) return;
   const groups = byId('save-groups');
   groups.replaceChildren();
   for (const [key, group] of Object.entries(state.groups)) {
@@ -668,7 +748,7 @@ function layoutActions() {
   }
   if (capabilities.capture) {
     actions.push(button('Copy layout from Rex tab…', 'text-button', 'capture', () => {
-      if (state.groups.layout.dirty || queue.some(item => item.field?.startsWith('layout.'))) {
+      if (state.groups.layout.dirty || numericDrafts.size || queue.some(item => item.field?.startsWith('layout.'))) {
         confirm('Replace the layout draft?', 'Copy the side, order and pane sizes from your Rex tab without saving.',
           'Copy layout', () => command('capture'));
       } else command('capture');
@@ -687,7 +767,7 @@ for (const tab of navButtons) {
 }
 byId('skip-settings').addEventListener('click', () => byId('settings-panel').focus());
 byId('done').addEventListener('click', done);
-byId('save-draft').addEventListener('click', showSaveOptions);
+byId('save-draft').addEventListener('click', requestSave);
 byId('save-options').addEventListener('close', event => {
   if (event.target.returnValue !== 'save') restoreSettingsFocus(byId('save-draft'));
 });
@@ -712,9 +792,7 @@ byId('drop-edit').addEventListener('click', () => {
 for (const id of ['open-retry', 'reconnect']) byId(id).addEventListener('click', () => { void connect(); });
 // The dev client may refresh the page once browser-only input has reached the draft.
 window.addEventListener('milo:dev-reload', event => {
-  const input = document.activeElement;
-  if (running || paused || closing || ended || queue.length || byId('confirm').open ||
-      (input?.type === 'number' && input.value !== input.dataset.initial)) {
+  if (running || paused || closing || ended || queue.length || byId('confirm').open || numericDrafts.size) {
     event.preventDefault();
   } else {
     window.removeEventListener('beforeunload', warnOnUnload);
