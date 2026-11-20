@@ -86,4 +86,4 @@ Following file activity and following a shell are different choices. File activi
 
 In history, a hollow dot means uncommitted work. With a remote branch to compare against, a bold dot marks a commit not on that branch, and a faint dot marks one already on it. A regular dot means there is no comparison. The heading says `no branch tracked` if the current branch does not track a remote branch; that does not mean there are no commits to push. A `•` beside a commit means it arrived while the pane was open. Open a commit to see what changed in each file, in the same colours as the outline.
 
-In the reader, added lines have a green background and keep their code colours; removed lines stay in place with a red background. If only part of a line changed, that part is highlighted.
+In the reader, added lines have a green background and keep their code colours; removed lines stay in place with a red background. If only some words of a line changed, those words are highlighted.

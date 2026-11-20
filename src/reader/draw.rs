@@ -96,13 +96,21 @@ impl LinePainter<'_> {
         }
     }
 
-    fn draw_edit(&self, s: &mut Screen, y: usize, skip: usize, text: &str, changed: &Range<usize>) {
-        let start = changed.start.max(skip);
-        let end = changed.end.min(text.len());
-        if start < end {
-            let from = str_width(&text[skip..start]);
+    fn draw_edit(&self, s: &mut Screen, y: usize, skip: usize, text: &str, changed: &[Range<usize>]) {
+        // Continue from the previous range, as for code colours.
+        let (mut at, mut col) = (skip, 0);
+        for range in changed {
+            let (start, end) = (range.start.max(at), range.end.min(text.len()));
+            if start >= end {
+                continue;
+            }
+            col += str_width(&text[at..start]);
+            if col >= self.width {
+                break;
+            }
             let width = str_width(&text[start..end]);
-            s.emphasise(self.x + from, y, width.min(self.width.saturating_sub(from)));
+            s.emphasise(self.x + col, y, width.min(self.width - col));
+            (at, col) = (end, col + width);
         }
     }
 }

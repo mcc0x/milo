@@ -76,6 +76,10 @@ pub struct Lang {
     attributes: bool,
     /// Colour bracketed TOML headers at the start of a line as keys.
     table_headers: bool,
+    /// Match keywords and constants in any letter case.
+    caseless: bool,
+    /// Reserve keywords only as the first word of a line, after Make's optional `-`.
+    leading_keywords: bool,
 }
 
 /// What is still open at the start of a line.
@@ -223,7 +227,10 @@ impl Lang {
                 .get(usize::from(*k))
                 .map(|(_, close)| (comment_end(b, 0, close, depth, self.nested_comments()), Class::Comment)),
             State::Quote(k) => self.quotes.get(usize::from(*k)).map(|q| (string_end(b, 0, q), Class::Str)),
-            State::Delimited(mark) => Some((mark.end(b), Class::Str)),
+            State::Delimited(mark) => {
+                let class = mark.class();
+                Some((mark.end(b), class))
+            }
         };
         let Some((close, class)) = open else {
             *state = State::Code;
@@ -241,6 +248,13 @@ impl Lang {
 
     #[inline]
     fn comment(&self, b: &[u8], i: usize, state: &mut State, emit: &mut impl FnMut(Span)) -> Option<usize> {
+        if let Some((end, open)) = self.dialect.comment(b, i) {
+            if let Some(open) = open {
+                *state = State::Delimited(open);
+            }
+            emit((i, end, Class::Comment));
+            return Some(end);
+        }
         let rest = &b[i..];
         let spaced = !self.spaced_comments || i == 0 || b[i - 1].is_ascii_whitespace();
         let attribute = self.attributes && begins(rest, "#[");
@@ -262,12 +276,12 @@ impl Lang {
     }
 
     fn nested_comments(&self) -> bool {
-        matches!(self.dialect, Dialect::Rust)
+        matches!(self.dialect, Dialect::Rust | Dialect::Swift)
     }
 
     pub fn lookahead(&self) -> usize {
-        // Rust raw strings can start with up to 255 `#` characters.
-        if matches!(self.dialect, Dialect::Rust) { 260 } else { 32 }
+        // A raw string or long bracket can repeat a mark in its opener up to 255 times.
+        if matches!(self.dialect, Dialect::Rust | Dialect::Lua | Dialect::Swift) { 260 } else { 32 }
     }
 
     #[inline]
@@ -345,13 +359,24 @@ impl Lang {
         }
     }
 
-    /// Handle a directive, data field or TOML header at the line's start.
+    /// Handle a directive, leading keyword, data field or TOML header at the line's start.
     fn line_start(&self, b: &[u8], indent: usize, emit: &mut impl FnMut(Span)) -> usize {
-        if self.directives && b.get(indent) == Some(&b'#') {
+        // Swift's `#"raw"#` is a string, not a directive.
+        if self.directives && b.get(indent) == Some(&b'#') && self.dialect.string(b, indent).is_none() {
             let name = indent + 1 + b[indent + 1..].iter().take_while(|c| c.is_ascii_whitespace()).count();
             let end = word_end(b, name);
             emit((indent, end, Class::Keyword));
             return end;
+        }
+        if self.leading_keywords {
+            let start = indent + usize::from(b.get(indent) == Some(&b'-'));
+            let end = word_end(b, start);
+            // Make needs a blank after a directive; `include/x.h:` is a target.
+            let ends = b.get(end).is_none_or(u8::is_ascii_whitespace);
+            if ends && self.keywords.iter().any(|word| word.as_bytes() == &b[start..end]) {
+                emit((start, end, Class::Keyword));
+                return end;
+            }
         }
         if self.table_headers && b.get(indent) == Some(&b'[') {
             let close = if b.get(indent + 1) == Some(&b'[') { "]]" } else { "]" };
@@ -378,11 +403,16 @@ impl Lang {
         0
     }
 
+    /// Whether `word` is in a keyword or constant list, in the letter case this language allows.
+    fn reserves(&self, words: &[&str], word: &str) -> bool {
+        if self.caseless { words.iter().any(|w| w.eq_ignore_ascii_case(word)) } else { listed(words, word) }
+    }
+
     fn classify_word(&self, word: &str, after: &[u8], member: bool, scalar: bool) -> Option<Class> {
-        if (!member || word == "await") && listed(self.keywords, word) {
+        if !self.leading_keywords && (!member || word == "await") && self.reserves(self.keywords, word) {
             return Some(Class::Keyword);
         }
-        if scalar && listed(self.constants, word) {
+        if scalar && self.reserves(self.constants, word) {
             return Some(Class::Number);
         }
         if !self.names {
@@ -541,7 +571,7 @@ mod tests {
         let lines = [
             "", " ", "////", "/*", "", "*/", "'''", "\"\"\"", "'", "\"", "`", "\\", "\\é", "é☕中文", "'unterminated",
             "\"unterminated", "/* unterminated", "", "r##\"raw", "\"##", "<<<TEXT", "TEXT;", "#[", "[[", "0..é",
-            "0.1.foo", "*/",
+            "0.1.foo", "*/", "--[==[", "é]]", "]==]", "[=", "--[", "-", "#\"\"\"", "é\"\"\"\"#", "#\"é", "##", "]]",
         ];
         let mut out = Vec::new();
         for (_, lang) in FILE_LANGS {
@@ -549,6 +579,14 @@ mod tests {
             for text in lines {
                 lang.scan(text, &mut state, &mut out);
                 valid_spans(text, &out);
+            }
+            // Each line also follows a fresh start, so that no earlier opener swallows it.
+            for pair in lines.windows(2) {
+                let mut state = State::Code;
+                for text in pair {
+                    lang.scan(text, &mut state, &mut out);
+                    valid_spans(text, &out);
+                }
             }
             for mut state in [State::Comment(u8::MAX, 1), State::Quote(u8::MAX)] {
                 lang.scan("é", &mut state, &mut out);

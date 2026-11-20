@@ -103,10 +103,10 @@ as part of the automated tests.
 
 ### Adding a language to the reader
 
-Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings whose closing marks depend on the opener. Adding a language normally means changing only the tables:
+Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. Adding a language normally means changing only the tables:
 
 1. Add a `Lang` constant: its line and block comments, its quotes (list a longer opener before any opener it starts with), its keywords and constants.
-2. Map its file extensions in `for_file`.
+2. Map its file extensions in `FILE_LANGS`, or a file name such as `Makefile` in `NAMED_LANGS`.
 3. Add a test with a few idiomatic lines and the classes you expect.
 
 The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly.
@@ -128,6 +128,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | File | Purpose |
 | --- | --- |
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
+| `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
 | `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
@@ -170,8 +171,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
 | `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
 | `src/syntax.rs` | Scans source text to find spans to colour. |
-| `src/syntax/delimiters.rs` | Handles string closers that depend on their openers. |
-| `src/syntax/langs.rs` | Defines language rules and maps them to file extensions. |
+| `src/syntax/delimiters.rs` | Handles string and comment closers that depend on their openers. |
+| `src/syntax/langs.rs` | Defines language rules and maps them to file names and extensions. |
 | `src/term.rs` | Sets and restores terminal modes and waits for events. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
