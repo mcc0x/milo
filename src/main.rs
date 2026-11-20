@@ -37,6 +37,7 @@ mod width;
 mod workflow;
 
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::exit;
 
@@ -370,20 +371,21 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         }
         Command::Listen(stop) => exit(setup::listen(stop)),
         Command::ClaudeStatus => exit(usage::claude_status()),
-        Command::Help(text) => {
-            println!("{}", text.trim_end());
-            Ok(())
-        }
-        Command::Version => {
-            println!("milo {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
+        Command::Help(text) => print_line(text.trim_end()),
+        Command::Version => print_line(concat!("milo ", env!("CARGO_PKG_VERSION"))),
     }
 }
 
 fn print_report(report: Result<String, String>) -> Result<(), String> {
-    println!("{}", report?);
-    Ok(())
+    print_line(&report?)
+}
+
+fn print_line(text: &str) -> Result<(), String> {
+    match writeln!(io::stdout().lock(), "{text}") {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(format!("cannot write output: {e}")),
+    }
 }
 
 fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {

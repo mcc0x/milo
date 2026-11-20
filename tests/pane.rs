@@ -11,6 +11,15 @@ use std::time::{Duration, Instant};
 
 const TEST_WAIT: Duration = Duration::from_secs(60);
 
+#[test]
+fn help_exits_quietly_when_its_pipe_reader_is_gone() {
+    let (reader, writer) = io::pipe().unwrap();
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_milo")).arg("--help").stdout(writer).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty());
+}
+
 struct Project(PathBuf);
 
 impl Project {
