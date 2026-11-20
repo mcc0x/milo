@@ -12,7 +12,7 @@ use std::thread;
 use super::claude::{Claude, OWN_CLAUDE};
 use super::install::{RunRex, Saved, Store, read};
 use super::layout::{Layout, Side, TabPane, launcher_matches, owns_actions, probe_lua};
-use super::profiles::Scope;
+use super::profiles::{LayoutError, Scope};
 use super::rex_files::{LISTENER_STATE_MISMATCH, LOADER_CONFLICT};
 use super::{lock, rex_files};
 use crate::git::discover_worktree;
@@ -156,7 +156,7 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
                 .unwrap()
         }
     }
-    let layout = store.layout_for(root);
+    let layout = store.inspect_layout(root);
     match &layout {
         Ok((rail, true, scope)) => {
             let executable = rex_files::executable()?;
@@ -184,16 +184,26 @@ fn report_with_worktree(store: &Store, worktree: Result<Option<&Path>, &'static 
             .unwrap();
         }
         Ok(_) => out.push_str("Rex: not installed; open milo setup in Rex to add the integration.\n"),
-        Err(LOADER_CONFLICT) => writeln!(
+        Err(LayoutError::Rex(LOADER_CONFLICT)) => writeln!(
             out,
             "Rex loader conflict ({:?}): {LOADER_CONFLICT} Restore a single copy of the original two lines at the top, after any interpreter line.",
             store.init
         )
         .unwrap(),
-        Err(why) => writeln!(out, "Rex: {why} Check the managed loader and run milo setup --repair.").unwrap(),
+        Err(LayoutError::Rex(why)) => {
+            writeln!(out, "Rex: {why} Check the managed loader and run milo setup --repair.").unwrap()
+        }
+        Err(LayoutError::ProfileDirectory(why)) => {
+            writeln!(out, "Rex layout profiles: {why} Check the directory {:?}.", store.config.join("layouts")).unwrap()
+        }
+        Err(LayoutError::Profile { path, reason }) => writeln!(
+            out,
+            "Saved layout profile {path:?}: {reason} Restore a known-good copy, or back up and move this file aside, then reopen Milo Settings to save a layout."
+        )
+        .unwrap(),
     }
     if store.rex_reload_pending() {
-        if matches!(layout, Err(LOADER_CONFLICT)) {
+        if matches!(layout, Err(LayoutError::Rex(LOADER_CONFLICT))) {
             out.push_str("Rex reload: pending; resolve the loader conflict first.\n");
         } else {
             out.push_str("Rex reload: pending; run milo setup --repair.\n");
@@ -529,6 +539,21 @@ mod tests {
             state: fixture.root.join("state"),
             claude: fixture.root.join("settings.json"),
         }
+    }
+
+    #[test]
+    fn doctor_still_recommends_repair_when_the_active_loader_target_is_missing() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        let marker = std::str::from_utf8(rex_files::MANAGED).unwrap();
+        let contents = format!("{marker}\n{}\n", rex_files::loader(&store.rex_file()));
+        std::fs::write(&store.init, &contents).unwrap();
+
+        let report = report_for(&store, Some(&fixture.root)).unwrap();
+        assert!(report.contains("Rex: Could not read the saved Rex layout."), "{report}");
+        assert!(report.contains("run milo setup --repair"), "{report}");
+        assert!(!report.contains("Saved layout profile"), "{report}");
+        assert_eq!(std::fs::read_to_string(store.init).unwrap(), contents);
     }
 
     #[test]

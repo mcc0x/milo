@@ -23,6 +23,21 @@ pub(super) enum Scope {
     Worktree,
 }
 
+#[derive(Debug)]
+pub(super) enum LayoutError {
+    Rex(&'static str),
+    ProfileDirectory(&'static str),
+    Profile { path: PathBuf, reason: &'static str },
+}
+
+impl LayoutError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Rex(reason) | Self::ProfileDirectory(reason) | Self::Profile { reason, .. } => reason,
+        }
+    }
+}
+
 struct Location {
     path: PathBuf,
     owner: String,
@@ -72,13 +87,20 @@ impl Location {
     }
 }
 
-fn selected(config: &Path, root: Option<&Path>) -> Result<Option<(Layout, Scope)>, &'static str> {
+fn selected(config: &Path, root: Option<&Path>) -> Result<Option<(Layout, Scope)>, LayoutError> {
+    let select = |root, scope| {
+        let location = Location::new(config, root).map_err(LayoutError::ProfileDirectory)?;
+        location
+            .load()
+            .map(|profile| profile.map(|(layout, _)| (layout, scope)))
+            .map_err(|reason| LayoutError::Profile { path: location.path, reason })
+    };
     if let Some(root) = root
-        && let Some((layout, _)) = Location::new(config, Some(root))?.load()?
+        && let Some(profile) = select(Some(root), Scope::Worktree)?
     {
-        return Ok(Some((layout, Scope::Worktree)));
+        return Ok(Some(profile));
     }
-    Ok(Location::new(config, None)?.load()?.map(|(layout, _)| (layout, Scope::Global)))
+    select(None, Scope::Global)
 }
 
 fn worktree(cwd: &Path) -> Option<PathBuf> {
@@ -90,7 +112,11 @@ fn worktree(cwd: &Path) -> Option<PathBuf> {
 
 impl Store {
     pub fn layout_for(&self, root: Option<&Path>) -> Result<(Layout, bool, Scope), &'static str> {
-        let (legacy, active) = self.layout()?;
+        self.inspect_layout(root).map_err(LayoutError::message)
+    }
+
+    pub(super) fn inspect_layout(&self, root: Option<&Path>) -> Result<(Layout, bool, Scope), LayoutError> {
+        let (legacy, active) = self.layout().map_err(LayoutError::Rex)?;
         let new_tabs = legacy.new_tabs;
         let (mut layout, scope) = selected(&self.config, root)?.unwrap_or((legacy, Scope::Global));
         layout.new_tabs = new_tabs;
@@ -399,7 +425,9 @@ pub fn layout_profile(args: &[OsString]) -> i32 {
             }
             (Some("read"), [cwd]) => {
                 let config = crate::paths::config_dir().ok_or(BAD_PROFILE)?;
-                if let Some((layout, _)) = selected(&config, worktree(Path::new(cwd)).as_deref())? {
+                if let Some((layout, _)) =
+                    selected(&config, worktree(Path::new(cwd)).as_deref()).map_err(LayoutError::message)?
+                {
                     println!("{}", layout.rail_code());
                 }
             }
@@ -591,5 +619,38 @@ mod tests {
         let mut changes = Vec::new();
         assert_eq!(profile.plan(None, &mut changes), Err(BAD_PROFILE));
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn doctor_names_the_malformed_profile_that_blocks_the_effective_layout() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let worktree = fixture.root.join("project");
+        for root in [None, Some(worktree.as_path())] {
+            let profile = Location::new(&store.config, root).unwrap();
+            std::fs::create_dir_all(profile.path.parent().unwrap()).unwrap();
+            let contents = format!("milo-layout-v1 {}\nnot a layout\n", profile.owner);
+            std::fs::write(&profile.path, &contents).unwrap();
+
+            let report = super::super::doctor::report_for(&store, Some(&worktree)).unwrap();
+            assert!(report.contains(&format!("Saved layout profile {:?}: {BAD_PROFILE}", profile.path)), "{report}");
+            assert!(report.contains("Restore a known-good copy, or back up and move this file aside"), "{report}");
+            assert!(!report.contains("setup --repair"), "{report}");
+            assert_eq!(std::fs::read_to_string(profile.path).unwrap(), contents);
+        }
+    }
+
+    #[test]
+    fn doctor_does_not_suggest_integration_repair_for_an_invalid_profiles_directory() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        std::fs::create_dir(&store.config).unwrap();
+        let path = store.config.join("layouts");
+        std::fs::write(&path, "Keep this").unwrap();
+        let report = super::super::doctor::report_for(&store, Some(&fixture.root)).unwrap();
+        assert!(report.contains(&format!("Check the directory {path:?}.")), "{report}");
+        assert!(!report.contains("setup --repair"), "{report}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "Keep this");
     }
 }
