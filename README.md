@@ -78,7 +78,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID]` | File reader |
 | `milo setup` | Setup screen |
-| `milo web [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) (source build) |
+| `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) (source build) |
 | `milo doctor` | Read-only preference and integration report |
 
 `milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.

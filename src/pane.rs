@@ -485,7 +485,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
                         After::OpenWeb => {
                             drop(pane);
                             terminal.restore();
-                            return crate::web::run(true);
+                            return crate::web::run(true, crate::web::DEFAULT_PORT);
                         }
                         After::Help => {
                             if Page::fits(&screen) {

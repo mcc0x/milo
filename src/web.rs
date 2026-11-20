@@ -49,6 +49,7 @@ impl Asset {
     }
 }
 
+pub(crate) const DEFAULT_PORT: u16 = 6110;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLIENTS: usize = 16;
@@ -56,14 +57,14 @@ const LAUNCHER_CHECK: Duration = Duration::from_millis(100);
 static STOP: AtomicBool = AtomicBool::new(false);
 static WAKE_WRITER: AtomicI32 = AtomicI32::new(-1);
 
-pub(crate) fn run(open_browser: bool) -> Result<(), String> {
+pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     STOP.store(false, Ordering::Relaxed);
     let wake = WakePipe::open().map_err(|error| format!("could not create a termination pipe: {error}"))?;
     let install =
         |signal| Signal::install(signal).map_err(|error| format!("could not handle termination signals: {error}"));
     let _signals = (install(libc::SIGINT)?, install(libc::SIGTERM)?, install(libc::SIGHUP)?, install(libc::SIGQUIT)?);
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .map_err(|error| format!("could not listen on loopback: {error}"))?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .map_err(|error| format!("could not listen on 127.0.0.1:{port}: {error}; use --port 0 for a free port"))?;
     listener.set_nonblocking(true).map_err(|error| format!("could not configure the listener: {error}"))?;
     let host =
         listener.local_addr().map_err(|error| format!("could not read the loopback address: {error}"))?.to_string();

@@ -63,6 +63,8 @@ Run `milo` for Home or `milo setup` to go directly to Settings. Both share the s
 
 With a source build, run `milo web` from the project you want to configure, or choose **Open in browser** from Milo Home. `milo web --no-open` prints the private link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
+The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
+
 Layout edits stay in a draft until you save. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default. Appearance and workflow use the same preference files as terminal Settings; Claude Code choices are account-wide. Outside Rex you can still edit and save settings.
 
 Finish the session with **Done**, or stop the command with `Ctrl-C`. If you only close the browser tab, the private link remains usable until you stop Milo or the session is idle for 15 minutes. Stopping Milo discards unsaved changes and undoes an unkept layout trial; it does not roll back settings you already saved.
