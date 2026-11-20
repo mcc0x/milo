@@ -60,11 +60,13 @@ impl LinePainter<'_> {
         let lang = self.lang.filter(|_| line.kind != LineKind::Del);
         let (skip, text) = text_for_draw(&line.text, self.pan, self.width + lang.map_or(0, Lang::lookahead));
         let used = s.put(self.x, y, self.width, &text[skip..], text_style);
-        if let Some(lang) = lang {
-            lang.scan(text, &mut state.clone(), self.spans);
-            self.draw_code(s, y, skip, text);
+        if used > 0 {
+            if let Some(lang) = lang {
+                lang.scan(text, &mut state.clone(), self.spans);
+                self.draw_code(s, y, skip, text, used);
+            }
+            self.draw_edit(s, y, skip, text, &line.changed, used);
         }
-        self.draw_edit(s, y, skip, text, &line.changed);
         if self.pan + self.width > line.width
             && let Some(label) = line.annotation.get(self.pan.saturating_sub(line.width)..)
             && !label.is_empty()
@@ -78,7 +80,7 @@ impl LinePainter<'_> {
         }
     }
 
-    fn draw_code(&self, s: &mut Screen, y: usize, skip: usize, text: &str) {
+    fn draw_code(&self, s: &mut Screen, y: usize, skip: usize, text: &str, used: usize) {
         // Continue from the previous span so each gap is measured only once.
         let (mut at, mut col) = (skip, 0);
         for &(start, end, class) in &*self.spans {
@@ -87,16 +89,16 @@ impl LinePainter<'_> {
             }
             let start = start.max(skip);
             col += str_width(&text[at..start]);
-            if col >= self.width {
+            if col >= used {
                 break;
             }
             let width = str_width(&text[start..end]);
-            s.paint(self.x + col, y, width.min(self.width - col), class_style(class));
+            s.paint(self.x + col, y, width.min(used - col), class_style(class));
             (at, col) = (end, col + width);
         }
     }
 
-    fn draw_edit(&self, s: &mut Screen, y: usize, skip: usize, text: &str, changed: &[Range<usize>]) {
+    fn draw_edit(&self, s: &mut Screen, y: usize, skip: usize, text: &str, changed: &[Range<usize>], used: usize) {
         // Continue from the previous range, as for code colours.
         let (mut at, mut col) = (skip, 0);
         for range in changed {
@@ -105,11 +107,11 @@ impl LinePainter<'_> {
                 continue;
             }
             col += str_width(&text[at..start]);
-            if col >= self.width {
+            if col >= used {
                 break;
             }
             let width = str_width(&text[start..end]);
-            s.emphasise(self.x + col, y, width.min(self.width - col));
+            s.emphasise(self.x + col, y, width.min(used - col));
             (at, col) = (end, col + width);
         }
     }

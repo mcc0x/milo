@@ -789,6 +789,52 @@ fn single_file_commit_reads_distinguish_rename_destinations_deletions_and_unchan
 }
 
 #[test]
+fn a_non_utf8_working_path_never_shows_its_lossy_siblings_diff() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let f = Fixture::new();
+    f.write("page\u{fffd}.txt", "original sibling\n");
+    f.commit("tracked sibling");
+    let sibling = f.root.join("page\u{fffd}.txt");
+    let raw = f.root.join(OsStr::from_bytes(b"page\xff.txt"));
+    f.write("page\u{fffd}.txt", "edited sibling\n");
+    let mut reader = Reader::open(&raw).unwrap();
+    for (kind, expected) in [(Kind::Modified, "edited sibling"), (Kind::Deleted, "original sibling")] {
+        if kind == Kind::Deleted {
+            fs::remove_file(&sibling).unwrap();
+            reader.refresh(true);
+        }
+        let mut sibling_reader = Reader::open(&sibling).unwrap();
+        assert_eq!(sibling_reader.kind, kind);
+        assert!(drawn(&mut sibling_reader, 60, 6).iter().any(|row| row.ends_with(expected)));
+        assert!(matches!(reader.body, Body::Note(_)));
+    }
+}
+
+#[test]
+fn a_non_utf8_commit_path_cannot_select_a_different_file() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let project = Fixture::new();
+    project.write("page\u{fffd}.txt", "a different file\n");
+    project.commit("valid path");
+    let mut repo = Repo::open(&project.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    let invalid = project.root.join(OsStr::from_bytes(b"page\xff.txt"));
+    let outside = Fixture::folder();
+    for cwd in [&project.root, &outside.root] {
+        assert_eq!(
+            Reader::at_commit_from(cwd, &invalid, id).err(),
+            Some("File paths at a commit must be UTF-8."),
+        );
+    }
+}
+
+#[test]
 fn a_single_file_commit_read_does_not_treat_a_shallow_boundary_as_a_root() {
     let f = Fixture::new();
     f.write("page.txt", "already there\n");
@@ -900,4 +946,20 @@ fn each_changed_word_is_emphasised_and_stays_in_place_when_panning() {
     let out = String::from_utf8(screen.emitted()).unwrap();
     assert!(screen.text()[2].contains("+‹GG hhhh"), "{:?}", screen.text());
     assert_eq!(emphasised(&out).last().map(String::as_str), Some("0;7;32 GG"), "{out:?}");
+}
+
+#[test]
+fn a_wide_edit_clipped_at_the_right_edge_does_not_highlight_empty_cells() {
+    let f = Fixture::new();
+    f.write("page.txt", "abcd界 shared\n");
+    f.commit("before");
+    f.write("page.txt", "abcd新 shared\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    for (width, expected) in [(11, &[][..]), (12, &["界", "新"][..])] {
+        let mut screen = Screen::sized(width, 5);
+        reader.draw(&mut screen);
+        let out = String::from_utf8(screen.emitted()).unwrap();
+        let emphasised: Vec<_> = runs(&out).iter().filter(|run| reversed(run.0)).map(|run| run.1).collect();
+        assert_eq!(emphasised, expected, "{out:?}");
+    }
 }

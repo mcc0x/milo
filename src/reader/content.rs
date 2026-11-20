@@ -20,7 +20,6 @@ const NOT_FILE: &str = "Not a file, so there is nothing to show.";
 struct Location {
     repo: Repo,
     relative: PathBuf,
-    path: String,
 }
 
 impl Location {
@@ -35,8 +34,7 @@ impl Location {
         let absolute = resolved.join(file.strip_prefix(dir).ok()?);
         let repo = Repo::open(&resolved)?;
         let relative = absolute.strip_prefix(&repo.root).ok()?.to_path_buf();
-        let path = relative.to_string_lossy().into_owned();
-        Some(Self { repo, relative, path })
+        Some(Self { repo, relative })
     }
 }
 
@@ -84,9 +82,12 @@ fn leaves_project(dir: &Path, resolved: &Path) -> bool {
 impl Reader {
     /// Opens `file`, which git may remember even if its directory is gone.
     pub fn open(file: &Path) -> Option<Self> {
-        let Location { mut repo, relative, path } = Location::find(file)?;
+        let Location { mut repo, relative } = Location::find(file)?;
         let root = Root::open(&repo.root).ok()?;
-        repo.only(&path);
+        if let Some(path) = relative.to_str() {
+            repo.only(path);
+        }
+        let path = relative.to_string_lossy().into_owned();
         let (icons, note) = Self::appearance_for(&repo);
         let note = if repo.git_unavailable() { Some(GIT_UNAVAILABLE) } else { note };
         let watch_only = repo.reader_filter(&relative);
@@ -125,10 +126,10 @@ impl Reader {
         if cwd_repo.as_ref().is_some_and(Repo::git_unavailable) {
             return Err(GIT_UNAVAILABLE);
         }
-        let (repo, path) = if let Some(repo) = cwd_repo.filter(|r| r.git)
+        let (repo, relative) = if let Some(repo) = cwd_repo.filter(|r| r.git)
             && let Ok(tail) = absolute.strip_prefix(&repo.root)
         {
-            (repo, tail.to_string_lossy().into_owned())
+            (repo, tail.to_path_buf())
         } else {
             const NOT_REPO: &str = "This file is not in a git repository.";
             let location = Location::find(&absolute).ok_or(NOT_REPO)?;
@@ -138,11 +139,12 @@ impl Reader {
             if !location.repo.git {
                 return Err(NOT_REPO);
             }
-            (location.repo, location.path)
+            (location.repo, location.relative)
         };
+        let path = relative.to_str().ok_or("File paths at a commit must be UTF-8.")?;
         let commit = repo.resolve_commit(id).ok_or("No commit with that ID.")?;
-        let changed = repo.changed_file_at(&commit.hash, &path).ok_or("Git did not answer for this commit.")?;
-        Ok(Self::committed(&repo, &path, &commit.hash, commit.time, changed.as_ref()))
+        let changed = repo.changed_file_at(&commit.hash, path).ok_or("Git did not answer for this commit.")?;
+        Ok(Self::committed(&repo, path, &commit.hash, commit.time, changed.as_ref()))
     }
 
     pub(super) fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {
