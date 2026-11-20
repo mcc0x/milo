@@ -175,7 +175,8 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     show_limits: bool,
     panel: Panel,
     selected: usize,
-    exit_from: Option<(Panel, usize)>,
+    save_from: Option<(Panel, Option<Row>)>,
+    exit_from: Option<(Panel, Option<Row>)>,
     visible: draw::Visible,
     modal_click: ConfirmClick,
     diagnostics: doctor::Checks,
@@ -252,6 +253,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             show_limits: claude == Claude::On,
             panel: if inside { Panel::Layout } else { Panel::Workflow },
             selected: 0,
+            save_from: None,
             exit_from: None,
             visible: draw::Visible::default(),
             modal_click: ConfirmClick::default(),
@@ -336,13 +338,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
     }
 
-    fn select_panel(&mut self, panel: Panel, selected: usize) {
+    fn select_panel(&mut self, panel: Panel, row: Option<Row>) {
         let previous = self.panel;
         if previous == Panel::Diagnostics && panel != previous {
             self.diagnostics.discard();
         }
         self.panel = panel;
-        self.selected = selected.min(self.rows().len().saturating_sub(1));
+        self.selected = row.and_then(|row| self.rows().iter().position(|&candidate| candidate == row)).unwrap_or(0);
         self.visible = draw::Visible::default();
         self.modal_click.clear();
         self.message = None;
@@ -351,18 +353,30 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
     }
 
+    fn selected_row(&self) -> Option<Row> {
+        self.rows().get(self.selected).copied()
+    }
+
+    fn open_save(&mut self, kind: SaveKind) {
+        self.save_from = Some((self.panel, self.selected_row()));
+        self.select_panel(Panel::Save(kind), None);
+    }
+
     fn back(&mut self) {
         let (panel, selected) = match self.panel {
-            Panel::Tune => (Panel::Layout, 3),
+            Panel::Tune => (Panel::Layout, Some(Row::Tune)),
             Panel::Exit => self.exit_from.take().expect("exit prompt has an editor to return to"),
-            Panel::Save(_) if self.exit_from.is_some() => (Panel::Exit, 0),
-            Panel::Save(kind) => (kind.panel(), if kind == SaveKind::Layout { 6 } else { 4 }),
-            Panel::Confirm(Confirm::UseGlobal) => (Panel::Layout, 7),
-            Panel::Confirm(Confirm::UseGlobalPrefs(kind)) => (kind.panel(), 5),
-            Panel::Confirm(Confirm::Repair) => (Panel::Health, 1),
-            Panel::Confirm(Confirm::Remove) => (Panel::Health, 2),
-            Panel::Diagnostics => (Panel::Health, 0),
-            _ => (Panel::Layout, 0),
+            Panel::Save(_) if self.exit_from.is_some() => (Panel::Exit, Some(Row::Cancel)),
+            Panel::Save(_) => self.save_from.take().expect("save prompt has an editor to return to"),
+            Panel::Confirm(Confirm::UseGlobal) => {
+                let row = if self.scope == Scope::Worktree { Row::UseGlobal } else { Row::Tune };
+                (Panel::Layout, Some(row))
+            }
+            Panel::Confirm(Confirm::UseGlobalPrefs(kind)) => (kind.panel(), Some(Row::UseGlobalPrefs)),
+            Panel::Confirm(Confirm::Repair) => (Panel::Health, Some(Row::Repair)),
+            Panel::Confirm(Confirm::Remove) => (Panel::Health, Some(Row::Remove)),
+            Panel::Diagnostics => (Panel::Health, Some(Row::Diagnostics)),
+            _ => (Panel::Layout, None),
         };
         self.select_panel(panel, selected);
     }
@@ -375,7 +389,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Health | Panel::Diagnostics => Panel::Layout,
             Panel::Save(_) | Panel::Confirm(_) | Panel::Exit => return,
         };
-        self.select_panel(next, 0);
+        self.select_panel(next, None);
     }
 
     fn layout_dirty(&self) -> bool {
@@ -410,8 +424,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if !self.dirty() {
             return self.leave();
         }
-        self.exit_from = Some((self.panel, self.selected));
-        self.select_panel(Panel::Exit, 0);
+        self.exit_from = Some((self.panel, self.selected_row()));
+        self.select_panel(Panel::Exit, None);
         After::Stay
     }
 
@@ -440,13 +454,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             if self.claude_dirty()
                 && let Err(why) = self.save_claude()
             {
-                self.select_panel(Panel::Exit, 0);
+                self.select_panel(Panel::Exit, None);
                 self.report(Err(why));
                 return After::Stay;
             }
             return self.leave();
         };
-        self.select_panel(Panel::Save(kind), 0);
+        self.select_panel(Panel::Save(kind), None);
         After::Stay
     }
 
@@ -806,9 +820,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 match row {
                     Row::Tree => self.preset(true),
                     Row::Sidebar => self.preset(false),
-                    Row::Tune => self.select_panel(Panel::Tune, 0),
-                    Row::SaveLayout => self.select_panel(Panel::Save(SaveKind::Layout), 0),
-                    Row::UseGlobal => self.select_panel(Panel::Confirm(Confirm::UseGlobal), 0),
+                    Row::Tune => self.select_panel(Panel::Tune, None),
+                    Row::SaveLayout => self.open_save(SaveKind::Layout),
+                    Row::UseGlobal => self.select_panel(Panel::Confirm(Confirm::UseGlobal), None),
                     Row::Pane(pane) => self.layout.toggle(pane),
                     Row::Side => {
                         self.layout.geometry.side = match self.layout.geometry.side {
@@ -837,16 +851,15 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Row::SavePrefs | Row::UseGlobalPrefs => {
                         let kind =
                             if self.panel == Panel::Appearance { SaveKind::Appearance } else { SaveKind::Workflow };
-                        let panel = if row == Row::SavePrefs {
-                            Panel::Save(kind)
+                        if row == Row::SavePrefs {
+                            self.open_save(kind);
                         } else {
-                            Panel::Confirm(Confirm::UseGlobalPrefs(kind))
-                        };
-                        self.select_panel(panel, 0);
+                            self.select_panel(Panel::Confirm(Confirm::UseGlobalPrefs(kind)), None);
+                        }
                     }
-                    Row::Diagnostics => self.select_panel(Panel::Diagnostics, 0),
-                    Row::Repair => self.select_panel(Panel::Confirm(Confirm::Repair), 0),
-                    Row::Remove => self.select_panel(Panel::Confirm(Confirm::Remove), 0),
+                    Row::Diagnostics => self.select_panel(Panel::Diagnostics, None),
+                    Row::Repair => self.select_panel(Panel::Confirm(Confirm::Repair), None),
+                    Row::Remove => self.select_panel(Panel::Confirm(Confirm::Remove), None),
                     _ => self.change_pref(row),
                 }
                 return After::Stay;
@@ -946,7 +959,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
 impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn click(&mut self, x: usize, y: usize) -> After {
         if let Some((panel, _)) = self.visible.tab_at(x, y) {
-            self.select_panel(panel, 0);
+            self.select_panel(panel, None);
             return After::Stay;
         }
         let panel = self.panel;
@@ -987,7 +1000,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             return After::Stay;
         }
         let action = match key {
-            Key::Enter | Key::Char(' ') => self.rows().get(self.selected).copied(),
+            Key::Enter | Key::Char(' ') => self.selected_row(),
             Key::Click(x, y) => return self.click(x, y),
             Key::Ctrl(b'i') if !modal => {
                 self.next_panel();
@@ -995,7 +1008,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             }
             Key::Char(digit @ '1'..='4') if !modal => {
                 let panel = SECTIONS[usize::from(digit as u8 - b'1')];
-                self.select_panel(panel, 0);
+                self.select_panel(panel, None);
                 return After::Stay;
             }
             Key::Char('a') if self.inside && matches!(self.panel, Panel::Layout | Panel::Tune) => {

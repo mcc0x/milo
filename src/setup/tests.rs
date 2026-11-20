@@ -240,6 +240,7 @@ fn usage_tool_choices_cycle_in_appearance_and_save_to_the_chosen_scope() {
 
     // A worktree can show a tool the global choice hides, and keeps inheriting the rest.
     assert_eq!(pane.panel, Panel::Appearance);
+    assert!(pane.selected_row() == Some(opencode));
     choose(&mut pane, opencode);
     choose(&mut pane, Row::UsageTool(UsageTool::Codex));
     pane.key(Key::Char('s'));
@@ -472,7 +473,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Exit,
     ];
     for panel in panels {
-        pane.select_panel(panel, 0);
+        pane.select_panel(panel, None);
         for selected in 0..pane.rows().len() {
             pane.selected = selected;
             let rows = frame(&mut pane, 18, 8);
@@ -486,15 +487,21 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
 fn the_save_shortcut_opens_a_scope_chooser_without_writing() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), true, None, None, |_| true);
+    assert_eq!(pane.key(Key::Up), After::Stay);
+    assert!(pane.selected_row() == Some(Row::Tree));
     assert_eq!(pane.key(Key::Char('s')), After::Stay);
     let rows = frame(&mut pane, 80, 18);
     assert!(rows.iter().any(|row| row.contains("On save:")));
     assert!(rows.iter().any(|row| row.contains("As global default")));
     assert!(!rows.iter().any(|row| row.contains("For this worktree")));
     assert_eq!(pane.key(Key::Enter), After::Stay); // Back is the initial choice.
+    assert_eq!(pane.panel, Panel::Layout);
+    assert!(pane.selected_row() == Some(Row::Tree));
     assert!(!f.root.join("init.lua").exists());
     pane.key(Key::Char('s'));
     assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+    assert_eq!(pane.panel, Panel::Layout);
+    assert!(pane.selected_row() == Some(Row::Tree));
     assert!(pane.installed);
     assert!(f.root.join("init.lua").exists());
 }
@@ -538,7 +545,14 @@ fn worktree_scope_and_inheritance_only_change_after_explicit_confirmation() {
     choose(&mut pane, Row::Tune);
     choose(&mut pane, Row::AutoArrange);
     pane.key(Key::Char('s'));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert_eq!(pane.panel, Panel::Tune);
+    assert!(pane.selected_row() == Some(Row::AutoArrange));
+    pane.key(Key::Char('s'));
     assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    assert_eq!(pane.panel, Panel::Tune);
+    assert!(pane.selected_row() == Some(Row::AutoArrange));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
     assert_eq!(pane.scope, Scope::Worktree);
     assert_eq!(pane.saved.as_ref().unwrap().panes, [true, false, false]);
     assert!(!pane.saved.as_ref().unwrap().new_tabs, "auto-arrange is global");
@@ -547,10 +561,57 @@ fn worktree_scope_and_inheritance_only_change_after_explicit_confirmation() {
     assert_eq!(choose(&mut pane, Row::UseGlobal), After::Stay);
     assert_eq!(pane.key(Key::Enter), After::Stay);
     assert_eq!(pane.scope, Scope::Worktree);
+    assert!(pane.selected_row() == Some(Row::UseGlobal));
     choose(&mut pane, Row::UseGlobal);
     assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
     assert_eq!(pane.scope, Scope::Global);
+    assert_eq!(pane.panel, Panel::Layout);
+    assert!(pane.selected_row() == Some(Row::Tune));
     assert_eq!(pane.layout.panes, [true, true, true]);
+}
+
+#[test]
+fn preference_prompts_return_to_the_clicked_control_in_each_section() {
+    let Some(root) = isolated_settings("setup::tests::preference_prompts_return_to_the_clicked_control_in_each_section")
+    else {
+        return;
+    };
+    let worktree = root.join("worktree");
+    let mut pane = Setup::new(None, false, None, Some(worktree.clone()), |_| panic!("outside Rex"));
+    const SAVE: &str = "Save pane preferences for";
+    const INHERIT: &str = "Use global pane preferences";
+    for (tab, section, change) in
+        [('2', Panel::Appearance, "Activity marks"), ('3', Panel::Workflow, "Follow new commits")]
+    {
+        pane.key(Key::Char(tab));
+        let rows = frame(&mut pane, 80, 24);
+        assert_eq!(pane.key(click_label(&rows, change)), After::Stay);
+        let rows = frame(&mut pane, 80, 24);
+        assert_eq!(pane.key(click_label(&rows, SAVE)), After::Stay);
+        assert_eq!(pane.key(Key::Esc), After::Stay);
+        assert_eq!(pane.panel, section);
+        assert!(pane.selected_row() == Some(Row::SavePrefs));
+        let rows = frame(&mut pane, 80, 24);
+        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(SAVE)), "{rows:?}");
+        assert_eq!(pane.key(Key::Enter), After::Stay);
+        assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+        assert_eq!(pane.panel, section);
+        assert!(pane.selected_row() == Some(Row::SavePrefs));
+        assert_eq!(pane.prefs_scope, Source::Worktree);
+
+        let rows = frame(&mut pane, 80, 24);
+        assert_eq!(pane.key(click_label(&rows, INHERIT)), After::Stay);
+        assert_eq!(pane.key(Key::Enter), After::Stay);
+        assert_eq!(pane.panel, section);
+        assert!(pane.selected_row() == Some(Row::UseGlobalPrefs));
+        let rows = frame(&mut pane, 80, 24);
+        assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(INHERIT)), "{rows:?}");
+        assert_eq!(pane.key(Key::Enter), After::Stay);
+        assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+        assert_eq!(pane.panel, section);
+        assert!(pane.selected_row() == Some(Row::UseGlobalPrefs));
+        assert_eq!(pane.prefs_scope, Source::Default);
+    }
 }
 
 #[test]
