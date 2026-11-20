@@ -6,7 +6,7 @@ A reset time is a prediction from the last report, not a new measurement. Once i
 
 ## macOS menu bar (local build)
 
-With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to install and open `~/Applications/Milo Usage.app`. Run it again to reopen or upgrade. `milo menubar uninstall` stops the app, unregisters launch at login if enabled, and removes only the app. Neither command needs sudo or a download.
+With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to install and open `~/Applications/Milo.app`. Run it again to reopen or upgrade. `milo menubar uninstall` stops the app, unregisters launch at login if enabled, and removes only the app. Neither command needs sudo or a download.
 
 You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). Install opens the app. When it’s installed, the control offers removal and asks for confirmation. Removing it keeps the Milo CLI, your settings, and any unsaved Settings draft.
 

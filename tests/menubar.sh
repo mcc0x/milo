@@ -3,15 +3,15 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)
 cli=${1:-"$repo/target/local-menu/milo"}
-app=${2:-"$repo/target/local-menu/Milo Usage.app"}
-helper=Contents/MacOS/MiloUsage
+app=${2:-"$repo/target/local-menu/Milo.app"}
+helper=Contents/MacOS/Milo
 requirement='=identifier "net.usemilo.usage.local"'
 codesign --verify --deep --strict -R "$requirement" "$app"
 codesign --verify --strict "$app/Contents/Resources/Tools/milo"
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 export HOME="$root/home"
 apps=$HOME/Applications
-dest="$apps/Milo Usage.app"
+dest="$apps/Milo.app"
 "$cli" menubar uninstall
 test ! -e "$apps"
 mkdir -p "$apps" "$root/other"
@@ -30,7 +30,8 @@ cat >"$root/helper.c" <<'C'
 #include <string.h>
 
 int main(int argc, char **argv) {
-    const char *target = getenv("MILO_FIXTURE_DEST");
+    const char *target = getenv("MILO_FIXTURE_STOP_DEST");
+    if (!target) target = getenv("MILO_FIXTURE_DEST");
     const char *log_path = getenv("MILO_FIXTURE_LOG");
     if (argc != 3 || !target || strcmp(argv[2], target) || !log_path)
         return 2;
@@ -52,12 +53,12 @@ make_bundle() {
     printf '%s\n' "$2" >"$1/Contents/Resources/revision"
     codesign --force --sign - "$1"
 }
-previous="$root/previous/Milo Usage.app"
-current="$root/current/Milo Usage.app"
+previous="$root/previous/Milo.app"
+current="$root/current/Milo.app"
 make_bundle "$previous" previous
 make_bundle "$current" current
 archive=$root/menu.tar.gz
-COPYFILE_DISABLE=1 /usr/bin/tar -czf "$archive" -C "$root/current" 'Milo Usage.app'
+COPYFILE_DISABLE=1 /usr/bin/tar -czf "$archive" -C "$root/current" 'Milo.app'
 sha=$(shasum -a 256 <"$current/$helper" | cut -d' ' -f1)
 export MILO_FIXTURE_DEST="$dest" MILO_FIXTURE_LOG="$root/lifecycle" MILO_FIXTURE_CLI="$cli"
 
@@ -116,3 +117,14 @@ open
 open
 --remove-installed
 LOG
+
+# Roll back to the original bundle name, then migrate without leaving two apps.
+legacy="$apps/Milo Usage.app"
+cp -R "$previous" "$legacy"
+export MILO_FIXTURE_STOP_DEST="$legacy"
+if operation install open; then exit 1; fi
+test ! -e "$dest"
+cmp "$previous/Contents/Resources/revision" "$legacy/Contents/Resources/revision"
+operation install
+test ! -e "$legacy"
+cmp "$current/Contents/Resources/revision" "$dest/Contents/Resources/revision"

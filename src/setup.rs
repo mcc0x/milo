@@ -712,9 +712,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.report_text(
             result
                 .map(|message| {
-                    if install { Cow::Borrowed("Milo Usage is installed and open.") } else { Cow::Owned(message) }
+                    if install { Cow::Borrowed("Milo is installed and open.") } else { Cow::Owned(message) }
                 })
-                .map_err(|why| Cow::Owned(format!("Milo Usage: {why}"))),
+                .map_err(|why| Cow::Owned(format!("Milo: {why}"))),
         );
     }
 

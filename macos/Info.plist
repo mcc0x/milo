@@ -2,9 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>net.usemilo.usage.local</string>
-<key>CFBundleName</key><string>Milo Usage</string>
-<key>CFBundleDisplayName</key><string>Milo Usage</string>
-<key>CFBundleExecutable</key><string>MiloUsage</string>
+<key>CFBundleName</key><string>Milo</string>
+<key>CFBundleDisplayName</key><string>Milo</string>
+<key>CFBundleExecutable</key><string>Milo</string>
 <key>CFBundleIconFile</key><string>Milo.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>

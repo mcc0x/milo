@@ -118,7 +118,7 @@ async function manageMenuApp(page, url, binary, cwd, env) {
   assert.equal(await menuTab.isVisible(), menubar.installed !== null, 'Menu Bar navigation follows server availability');
   if (process.argv.includes('--menubar')) {
     assert.equal(menubar.installed, false, 'the menu-capable binary starts without an app in the fixture home');
-    const bundle = join(env.HOME, 'Applications', 'Milo Usage.app');
+    const bundle = join(env.HOME, 'Applications', 'Milo.app');
     const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
     const previous = await readFile(preferences, 'utf8');
     const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
@@ -127,21 +127,21 @@ async function manageMenuApp(page, url, binary, cwd, env) {
     await menuTab.click();
 
     try {
-      await button(menu, 'Install Milo Usage').click();
-      const remove = button(menu, 'Remove Milo Usage…');
+      await button(menu, 'Install menu app').click();
+      const remove = button(menu, 'Remove menu app…');
       await remove.waitFor();
       assert((await stat(bundle)).isDirectory(), 'the button installed the app');
       await status(page, dirty).waitFor({state: 'attached'});
 
-      const confirmation = dialog(page, 'Remove Milo Usage?');
+      const confirmation = dialog(page, 'Remove menu app?');
       await remove.click();
       await button(confirmation, 'Keep editing').click();
       await confirmation.waitFor({state: 'hidden'});
       assert((await stat(bundle)).isDirectory(), 'cancel left the app installed');
 
       await remove.click();
-      await button(confirmation, 'Remove Milo Usage').click();
-      await button(menu, 'Install Milo Usage').waitFor();
+      await button(confirmation, 'Remove menu app').click();
+      await button(menu, 'Install menu app').waitFor();
       await assert.rejects(stat(bundle), {code: 'ENOENT'}, 'confirm removed the app');
       await status(page, dirty).waitFor({state: 'attached'});
       await section(page, 'Workflow').click();

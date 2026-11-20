@@ -44,7 +44,7 @@ private final class Model: ObservableObject {
         if arguments.count == 3, arguments[1] == "--installer-path", arguments[2].hasPrefix("/"),
            FileManager.default.isExecutableFile(atPath: arguments[2]),
            Bundle.main.bundleURL.resolvingSymlinksInPath().path == FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/Milo Usage.app").resolvingSymlinksInPath().path {
+                .appendingPathComponent("Applications/Milo.app").resolvingSymlinksInPath().path {
             UserDefaults.standard.set(arguments[2], forKey: "installerPath")
         }
     }
@@ -228,7 +228,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateBadge() {
         guard let button = status?.button else { return }
         let reading = badgeReading(model.snapshot, mode: model.mode)
-        let label = reading.map { "\($0.provider.name), \($0.window.label): \($0.window.remaining)% left" } ?? "Milo Usage"
+        let label = reading.map { "\($0.provider.name), \($0.window.label): \($0.window.remaining)% left" } ?? "Milo"
         button.title = reading.map { " \($0.window.remaining)%" } ?? ""
         status.length = reading == nil ? NSStatusItem.variableLength : 67
         button.toolTip = label; button.setAccessibilityLabel(label)

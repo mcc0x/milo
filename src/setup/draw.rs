@@ -292,7 +292,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Panel::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global?",
                     Panel::Confirm(Confirm::Repair) => "Repair?",
                     Panel::Confirm(Confirm::Remove) => "Remove?",
-                    Panel::Confirm(Confirm::RemoveMenuBar) => "Remove Usage?",
+                    Panel::Confirm(Confirm::RemoveMenuBar) => "Remove app?",
                     _ => self.panel.title(),
                 }
             } else {
@@ -755,13 +755,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             ),
             Row::MenuBar => match self.menu_installed {
                 Some(false) => Cell::action(
-                    "Install Milo Usage menu bar app",
-                    "Install Usage",
+                    "Install Milo menu bar app",
+                    "Install app",
                     "Install and open the separate macOS menu bar app.",
                 ),
                 Some(true) => Cell::action(
-                    "Remove Milo Usage menu bar app…",
-                    "Remove Usage…",
+                    "Remove Milo menu bar app…",
+                    "Remove app…",
                     "Remove only the menu bar app, not the Milo CLI or pane settings.",
                 ),
                 None => unreachable!("the menu bar action is hidden when unavailable"),
@@ -805,7 +805,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Cell::action("Remove integration", "Remove now", "Apply removal now.")
                 }
                 Panel::Confirm(Confirm::RemoveMenuBar) => {
-                    Cell::action("Remove app now", "Remove app now", "Remove Milo Usage from the menu bar.")
+                    Cell::action("Remove app now", "Remove app now", "Remove Milo from the menu bar.")
                 }
                 _ => unreachable!("only confirmation pages have a continue row"),
             },
@@ -837,7 +837,7 @@ impl Panel {
             Self::Confirm(Confirm::UseGlobal | Confirm::UseGlobalPrefs(_)) => "Use global default?",
             Self::Confirm(Confirm::Repair) => "Repair integration?",
             Self::Confirm(Confirm::Remove) => "Remove integration?",
-            Self::Confirm(Confirm::RemoveMenuBar) => "Remove Milo Usage?",
+            Self::Confirm(Confirm::RemoveMenuBar) => "Remove Milo?",
             Self::Exit => "Unsaved changes",
         }
     }

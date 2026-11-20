@@ -11,12 +11,12 @@ pub(crate) fn installed() -> Option<bool> {
     }
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
     if !home.is_absolute() { return None; }
-    let app = home.join("Applications/Milo Usage.app");
+    let app = home.join("Applications/Milo.app");
     match std::fs::symlink_metadata(&app) {
         Ok(info)
             if info.is_dir()
                 && app
-                    .join("Contents/MacOS/MiloUsage")
+                    .join("Contents/MacOS/Milo")
                     .symlink_metadata()
                     .is_ok_and(|helper| helper.is_file()) =>
         {
@@ -32,7 +32,7 @@ pub(crate) fn run(_: Action) -> Result<String, String> {
     Err(if cfg!(target_os = "macos") {
         "This Milo build has no menu app. From a checkout, run sh macos/build-menu.sh and use target/local-menu/milo."
     } else {
-        "Milo Usage requires macOS 13 or later."
+        "Milo requires macOS 13 or later."
     }.into())
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn run(action: Action) -> Result<String, String> {
     if action == Action::Install {
         fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
     } else if !apps.try_exists().map_err(|e| e.to_string())? {
-        return Ok("Milo Usage is not installed.".into());
+        return Ok("Milo is not installed.".into());
     }
     // Serialize our own upgrades and removals without leaving a lock file behind.
     let lock = fs::File::open(&apps).map_err(|e| e.to_string())?;

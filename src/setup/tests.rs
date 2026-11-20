@@ -844,13 +844,13 @@ fn workflow_shows_only_the_available_menu_bar_app_action() {
     let rows = frame(&mut pane, 80, 20);
     assert!(!rows.iter().any(|row| row.contains("menu bar app")));
     for (installed, label, short) in [
-        (false, "Install Milo Usage menu bar app", "Install Usage"),
-        (true, "Remove Milo Usage menu bar app…", "Remove Usage…"),
+        (false, "Install Milo menu bar app", "Install app"),
+        (true, "Remove Milo menu bar app…", "Remove app…"),
     ] {
         pane.menu_installed = Some(installed);
         pane.select_panel(Panel::Workflow, Some(Row::MenuBar));
         let rows = frame(&mut pane, 80, 20);
-        assert_eq!(rows.iter().filter(|row| row.contains("Milo Usage menu bar app")).count(), 1);
+        assert_eq!(rows.iter().filter(|row| row.contains("Milo menu bar app")).count(), 1);
         assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(label)));
         let rows = frame(&mut pane, 18, 8);
         let row = rows.iter().find(|row| row.starts_with('›')).unwrap();
@@ -865,7 +865,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     else {
         return;
     };
-    let app = home.join("Applications/Milo Usage.app");
+    let app = home.join("Applications/Milo.app");
     fs::create_dir_all(app.parent().unwrap()).unwrap();
     fs::write(&app, "Not a Milo app").unwrap();
     let f = Fixture::folder();
@@ -888,7 +888,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     pane.menu_installed = Some(true);
 
     let rows = frame(&mut pane, 80, 20);
-    let remove = click_label(&rows, "Remove Milo Usage menu bar app…");
+    let remove = click_label(&rows, "Remove Milo menu bar app…");
     assert_eq!(pane.key(remove), After::Stay);
     assert_eq!(pane.panel, Panel::Confirm(Confirm::RemoveMenuBar));
     assert!(pane.selected_row() == Some(Row::Cancel));
@@ -904,7 +904,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
     assert_eq!(pane.panel, Panel::Workflow);
     let (message, style) = pane.message.as_ref().unwrap();
-    assert!(message.starts_with("Milo Usage:"), "{message}");
+    assert!(message.starts_with("Milo:"), "{message}");
     assert!(*style == DEL.bold());
     assert!(!pane.rows().contains(&Row::MenuBar));
     assert_eq!(fs::read_to_string(&app).unwrap(), "Not a Milo app");

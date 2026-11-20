@@ -772,15 +772,15 @@ function menuBarView() {
   const detail = node('span', 'setting-detail',
     `${installed ? 'Installed' : 'Not installed'}. Open Milo from your Mac’s menu bar.`);
   detail.id = 'menubar-detail';
-  info.append(node('span', 'setting-label', 'Milo Usage'), detail);
-  const control = button(installed ? 'Remove Milo Usage…' : 'Install Milo Usage', 'secondary', 'menubar-action', event => {
+  info.append(node('span', 'setting-label', 'Milo'), detail);
+  const control = button(installed ? 'Remove menu app…' : 'Install menu app', 'secondary', 'menubar-action', event => {
     if (event.currentTarget.hasAttribute('aria-disabled')) return;
     if (!installed) {
       command('menubar', {value: 'install'});
       return;
     }
-    confirm('Remove Milo Usage?', 'This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.',
-      'Remove Milo Usage', () => command('menubar', {value: 'uninstall'}));
+    confirm('Remove menu app?', 'This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.',
+      'Remove menu app', () => command('menubar', {value: 'uninstall'}));
   });
   control.setAttribute('aria-describedby', detail.id);
   row.append(info, control);

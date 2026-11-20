@@ -64,7 +64,7 @@ impl Removal {
     fn choices(self) -> &'static [&'static str] {
         match self {
             Self::Milo => &["Cancel", "Uninstall Milo"],
-            Self::MenuApp => &["Cancel", "Remove Milo Usage"],
+            Self::MenuApp => &["Cancel", "Remove menu app"],
         }
     }
 }
@@ -328,7 +328,7 @@ impl Pane for Home {
                     self.show_guarded(View::Report(Report::new(doctor::TITLE, result)), click)
                 }
                 APP_ROW if self.menu_app == Some(false) => self.show_guarded(
-                    View::Report(Report::new("Install Milo Usage", menubar::run(MenuAppAction::Install))),
+                    View::Report(Report::new("Install menu app", menubar::run(MenuAppAction::Install))),
                     click,
                 ),
                 APP_ROW if self.menu_app == Some(true) => self.confirm_removal(Removal::MenuApp, click),
@@ -452,7 +452,7 @@ fn draw_confirm(s: &mut Screen, body: usize, removal: Removal, selected: usize) 
             "Removes Milo and its managed Rex and Claude Code integrations. Saved preferences and open panes will stay.",
         ),
         Removal::MenuApp => (
-            "Remove Milo Usage?",
+            "Remove menu app?",
             "Removes only the menu bar app. The Milo CLI and saved settings will stay.",
         ),
     };
@@ -727,10 +727,10 @@ mod tests {
         let mut wide = Screen::sized(60, 20);
         home.draw(&mut wide);
         let lines = wide.text();
-        assert!(lines.iter().any(|line| line.contains("Remove Milo Usage?")));
+        assert!(lines.iter().any(|line| line.contains("Remove menu app?")));
         assert!(lines.iter().any(|line| line.contains("Milo CLI")));
         assert!(lines.iter().any(|line| line.contains("settings will stay.")));
-        assert!(lines.iter().any(|line| line.trim() == "Remove Milo Usage"));
+        assert!(lines.iter().any(|line| line.trim() == "Remove menu app"));
         assert_eq!(home.key(Key::Enter), After::Stay);
         assert!(matches!(home.view, View::Menu));
 
