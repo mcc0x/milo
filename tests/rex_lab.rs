@@ -19,12 +19,11 @@
 //! process that is killed cannot clean up: stop the server named in the
 //! folder's `bin/rex` and remove the folder.
 //!
-//! The listener now and then leaves a new tab without a rail, though its
-//! shell is ready and the app has measured it. The test then opens another
-//! tab, as a person would, and prints the miss. `MILO_TEST_STRICT_TABS=1`
-//! makes the first miss fail the test instead.
+//! A new shell tab gets its rail or the test fails; no tab is opened in the
+//! place of one that did not. Besides the tabs it opens one at a time, the
+//! test opens several back to back, with no pause between them, more than once.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -35,10 +34,12 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(60);
-/// A rail normally appears well within a second of its tab.
-const PATIENCE: Duration = Duration::from_secs(5);
-/// More missed tabs than this in one run means new tabs are not being arranged.
-const MISSES: usize = 4;
+/// A rail normally appears well within a second of its tab. A tab still
+/// without one after this long has been passed over, not kept waiting.
+const PATIENCE: Duration = Duration::from_secs(10);
+/// How many tabs are opened back to back, and how many times that is done.
+const BURST: usize = 4;
+const BURSTS: usize = 3;
 const RAIL: [&str; 3] = ["milo:outline", "milo:history", "milo:usage"];
 const SAVED_WIDTH: &str = "0.200000";
 
@@ -174,8 +175,6 @@ struct Lab {
     names: RefCell<BTreeMap<String, String>>,
     /// Tabs Milo has no business arranging, which must stay one pane.
     alone: RefCell<Vec<String>>,
-    /// How many new tabs the listener left without a rail.
-    missed: Cell<usize>,
 }
 
 impl Lab {
@@ -197,8 +196,8 @@ impl Lab {
         // starts, and how long that takes, do not depend on the machine.
         fs::write(root.join("home/.zshenv"), "unsetopt global_rcs\n").unwrap();
         fs::write(root.join("home/.zshrc"), "").unwrap();
-        let (names, alone, missed) = Default::default();
-        let mut lab = Self { root, rex, milo, server: None, app: None, names, alone, missed };
+        let (names, alone) = Default::default();
+        let mut lab = Self { root, rex, milo, server: None, app: None, names, alone };
         for path in [&lab.rex, &lab.milo, &lab.root] {
             assert!(!path.to_string_lossy().contains('\''), "cannot quote {} for sh", path.display());
         }
@@ -354,53 +353,39 @@ impl Lab {
         view
     }
 
-    /// Waits a few seconds for the listener to give `tab` its worktree's rail.
-    fn gets_rail(&self, tab: &str, dir: &Path) -> bool {
+    /// Waits for the listener to give each tab its worktree's rail. A tab it
+    /// leaves as it was fails the test.
+    fn get_rails(&self, tabs: &[(&str, &Path)]) {
         let began = Instant::now();
-        while !self.view().tab(tab).has_rail_for(dir) {
-            if began.elapsed() >= PATIENCE {
-                return false;
+        loop {
+            let view = self.view();
+            let bare: Vec<_> = tabs.iter().filter(|(tab, dir)| !view.tab(tab).has_rail_for(dir)).collect();
+            if bare.is_empty() {
+                return;
             }
+            assert!(began.elapsed() < PATIENCE, "the listener left new tabs without a rail: {bare:?} in {view:?}");
             std::thread::sleep(Duration::from_millis(100));
         }
-        true
     }
 
-    /// Counts a new tab the listener left as it was, which the module's notes
-    /// explain. More than a few in one run is not that race.
-    fn miss(&self, what: &str, dir: &Path) {
-        let strict = std::env::var_os("MILO_TEST_STRICT_TABS").is_some();
-        assert!(!strict, "the listener left {what} in {} without a rail", dir.display());
-        self.missed.set(self.missed.get() + 1);
-        assert!(self.missed.get() <= MISSES, "the listener left {} new tabs without a rail", self.missed.get());
-        eprintln!("the listener left {what} in {} without a rail; opening another", dir.display());
-    }
-
-    /// Opens shell tabs in `dir`, as the app's New Tab does, until one gets its rail.
+    /// Opens a shell tab in `dir`, as the app's New Tab does, and sees it get its rail.
     fn rail_tab(&self, session: &str, dir: &Path) -> String {
-        loop {
-            let tab = self.new_tab(session, dir);
-            if self.gets_rail(&tab, dir) {
-                return tab;
-            }
-            self.miss("a new tab", dir);
-            self.rex(&["window", "close", "-s", session, &tab]);
-            self.names.borrow_mut().remove(&tab);
-        }
+        let tab = self.new_tab(session, dir);
+        self.get_rails(&[(&tab, dir)]);
+        tab
     }
 
-    /// Makes sessions in `dir` until the first tab of one gets its rail, and
-    /// returns the IDs of that session and tab.
+    /// Makes a session in `dir`, sees its first tab get its rail, and returns
+    /// the IDs of that session and tab.
     fn rail_session(&self, name: &str, tab_name: &str, dir: &Path) -> [String; 2] {
-        loop {
-            let ids = self.new_session(name, tab_name, dir);
-            if self.gets_rail(&ids[1], dir) {
-                return ids;
-            }
-            self.miss("a new session's first tab", dir);
-            self.rex(&["session", "kill", &ids[0]]);
-            self.names.borrow_mut().retain(|id, _| !ids.contains(id));
-        }
+        let ids = self.new_session(name, tab_name, dir);
+        self.get_rails(&[(&ids[1], dir)]);
+        ids
+    }
+
+    fn close_tab(&self, session: &str, tab: &str) {
+        self.rex(&["window", "close", "-s", session, tab]);
+        self.names.borrow_mut().remove(tab);
     }
 
     /// Makes a session whose first tab has a name, and returns both IDs.
@@ -649,6 +634,25 @@ impl Scene {
         tabs
     }
 
+    /// Tabs opened one straight after another, as holding down the New Tab
+    /// key opens them, each get their own worktree's rail. Each round closes
+    /// its tabs, so the next begins as it did.
+    fn tabs_opened_back_to_back_each_get_their_rail(&self) {
+        let Self { lab, first, second, session } = self;
+        for _ in 0..BURSTS {
+            let dirs = (0..BURST).map(|tab| if tab % 2 == 0 { first } else { second });
+            let tabs: Vec<(String, &Path)> = dirs.map(|dir| (lab.new_tab(session, dir), dir.as_path())).collect();
+            let tabs: Vec<(&str, &Path)> = tabs.iter().map(|(tab, dir)| (tab.as_str(), *dir)).collect();
+            lab.get_rails(&tabs);
+            let view = lab.check();
+            for (tab, _) in &tabs {
+                assert_eq!(view.tab(tab).left, SAVED_WIDTH);
+                lab.close_tab(session, tab);
+            }
+        }
+        lab.check();
+    }
+
     /// A new session's first tab is arranged, under the name it was made
     /// with. A tab opened to run a command is not.
     fn a_new_session_gets_a_rail_and_a_command_tab_does_not(&self) -> String {
@@ -734,9 +738,6 @@ impl Scene {
         assert_eq!(lab.remembered_width(second), if running { "0.400000" } else { "0.330000" });
         lab.check();
         assert_eq!(lab.listeners().len(), 1);
-        if lab.missed.get() > 0 {
-            eprintln!("new tabs the listener left without a rail in this run: {}", lab.missed.get());
-        }
     }
 }
 
@@ -745,6 +746,7 @@ impl Scene {
 fn rails_follow_their_worktree_through_new_tabs_resizes_renames_and_a_restart() {
     let mut scene = Scene::start();
     let [one, two] = scene.new_tabs_get_their_worktrees_rail();
+    scene.tabs_opened_back_to_back_each_get_their_rail();
     let other_session = scene.a_new_session_gets_a_rail_and_a_command_tab_does_not();
     let wide = scene.a_drag_is_remembered_for_its_worktree(&one);
     let before = scene.given_names_are_kept(&wide);

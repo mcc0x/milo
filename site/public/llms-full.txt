@@ -628,9 +628,10 @@ start another server, and it checks that the lab's terminals and listener use
 the lab's home and server too, so the Rex you are working in is never asked
 anything. Set `MILO_TEST_REX` if `rex` is not on your path. The test prints
 whether the restarted server ran Milo again in the panes it restored; that is
-Rex's choice. It also prints each new tab the listener left without a rail,
-and opens another as a person would. `MILO_TEST_STRICT_TABS=1` fails the test
-on the first such tab instead.
+Rex's choice. A new shell tab that does not get its rail fails the test: none
+is opened in its place. That holds for the tabs the test opens one at a time
+and for those it opens back to back, four with no pause between them, three
+times over.
 
 ### Adding a language to the reader
 
