@@ -4,14 +4,17 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)
 cli=${1:-"$repo/target/local-menu/milo"}
 app=${2:-"$repo/target/local-menu/Milo.app"}
+case "$app" in /*) ;; *) app=$PWD/$app ;; esac
 helper=Contents/MacOS/Milo
 requirement='=identifier "net.usemilo.usage.local"'
 codesign --verify --deep --strict -R "$requirement" "$app"
 codesign --verify --strict "$app/Contents/Resources/Tools/milo"
+test ! -e "$app/Contents/Resources/ProfilePaths.plist"
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 export HOME="$root/home"
 apps=$HOME/Applications
 dest="$apps/Milo.app"
+profile=$apps/.milo-menu-profile.plist
 "$cli" menubar uninstall
 test ! -e "$apps"
 mkdir -p "$apps" "$root/other"
@@ -22,14 +25,20 @@ test -L "$dest"
 test -f "$dest/keep"
 rm "$dest"
 
-# Real code signing and verification, with a harmless helper executable. Override
-# only the OS launch command in the test shell, not in the shipped installer.
+# Real signing and profile encoding with a harmless stand-in for quit, removal
+# and Launch Services. No fixture touches the real user's home or login items.
 cat >"$root/helper.c" <<'C'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 int main(int argc, char **argv) {
+    const char *writer = getenv("MILO_FIXTURE_PROFILE_WRITER");
+    if (argc == 3 && writer && !strcmp(argv[1], "--install-profile")) {
+        execl(writer, writer, argv[1], argv[2], (char *)NULL);
+        return 2;
+    }
     const char *target = getenv("MILO_FIXTURE_STOP_DEST");
     if (!target) target = getenv("MILO_FIXTURE_DEST");
     const char *log_path = getenv("MILO_FIXTURE_LOG");
@@ -60,36 +69,92 @@ make_bundle "$current" current
 archive=$root/menu.tar.gz
 COPYFILE_DISABLE=1 /usr/bin/tar -czf "$archive" -C "$root/current" 'Milo.app'
 sha=$(shasum -a 256 <"$current/$helper" | cut -d' ' -f1)
-export MILO_FIXTURE_DEST="$dest" MILO_FIXTURE_LOG="$root/lifecycle" MILO_FIXTURE_CLI="$cli"
+fixture_cli="$root/Milo CLI"
+cp "$cli" "$fixture_cli"
+mkdir "$root/install & project"
+cwd=$(CDPATH= cd -- "$root/install & project" && pwd -P)
+export MILO_FIXTURE_DEST="$dest" MILO_FIXTURE_LOG="$root/lifecycle" MILO_FIXTURE_PROFILE="$profile"
+export MILO_FIXTURE_PROFILE_WRITER="$app/$helper"
+export CODEX_HOME='alternate & Codex'
+export CLAUDE_CONFIG_DIR="$root/Claude profile"
+export PI_CODING_AGENT_DIR=''
+export OPENCODE_DB='alternate.db'
+export XDG_CONFIG_HOME=config XDG_STATE_HOME=state XDG_DATA_HOME=data
+export OPENAI_API_KEY='not-a-real-openai-token' ANTHROPIC_API_KEY='not-a-real-anthropic-token'
 
-operation() {
+operation() (
+    cd "$cwd"
     MILO_FIXTURE_FAILURE=${2-} /bin/sh -c '
-        open() {
-            [ "$#" = 4 ] && [ "$1" = "$MILO_FIXTURE_DEST" ] &&
-                [ "$2" = --args ] && [ "$3" = --installer-path ] &&
-                [ "$4" = "$MILO_FIXTURE_CLI" ] || return 2
+        env() {
+            [ "$#" = 3 ] && [ "$1" = -i ] && [ "$2" = /usr/bin/open ] &&
+                [ "$3" = "$MILO_FIXTURE_DEST" ] && [ -f "$MILO_FIXTURE_PROFILE" ] || return 2
             printf "open\n" >>"$MILO_FIXTURE_LOG"
             [ "${MILO_FIXTURE_FAILURE-}" != open ]
         }
         installer=$1; shift
         . "$installer"
-    ' fixture "$repo/src/menubar.sh" "$1" "$apps" "$sha" "$cli" <"$archive"
-}
+    ' fixture "$repo/src/menubar.sh" "$1" "$apps" "$sha" "$fixture_cli" <"$archive"
+)
+
+read_profile() { /usr/bin/plutil -extract "$1" raw -o - "$profile"; }
+
+# An unsafe profile location is neither followed nor replaced.
+ln -s "$root/other/keep" "$profile"
+if operation install; then exit 1; fi
+test -L "$profile"
+test ! -s "$root/other/keep"
+rm "$profile"
+touch "$profile"
+chmod 644 "$profile"
+if operation install; then exit 1; fi
+test "$(stat -f %Lp "$profile")" = 644
+rm "$profile"
 
 if operation install open; then exit 1; fi
 test ! -e "$dest"
+test ! -e "$profile"
 operation install
 codesign --verify --deep --strict -R "$requirement" "$dest"
+test "$(stat -f %Lp "$profile")" = 600
+test "$(read_profile paths.CODEX_HOME)" = "$cwd/$CODEX_HOME"
+test "$(read_profile paths.CLAUDE_CONFIG_DIR)" = "$CLAUDE_CONFIG_DIR"
+test "$(read_profile paths.OPENCODE_DB)" = "$OPENCODE_DB"
+test "$(read_profile paths.XDG_CONFIG_HOME)" = "$cwd/config"
+test "$(read_profile paths.XDG_STATE_HOME)" = "$cwd/state"
+test "$(read_profile paths.XDG_DATA_HOME)" = "$cwd/data"
+test "$(read_profile installer.path)" = "$fixture_cli"
+test "$(read_profile installer.digest)" = "$(openssl dgst -sha256 -binary "$fixture_cli" | base64)"
+if read_profile paths.PI_CODING_AGENT_DIR >/dev/null 2>&1; then exit 1; fi
+if grep -Eq 'not-a-real|API_KEY|<key>PATH</key>' "$profile"; then exit 1; fi
 identity=$(stat -f %i "$dest")
+profile_identity=$(stat -f %i "$profile")
 operation install
 test "$identity" = "$(stat -f %i "$dest")"
+test "$profile_identity" = "$(stat -f %i "$profile")"
+
+# A changed environment updates even the current release. A launch failure
+# restores the previous settings and does not replace the unchanged app.
+unset CODEX_HOME
+export OPENCODE_DB=':memory:'
+export PI_CODING_AGENT_DIR='alternate Pi'
+cp "$profile" "$root/original-profile"
+if operation install open; then exit 1; fi
+cmp "$root/original-profile" "$profile"
+test "$identity" = "$(stat -f %i "$dest")"
+operation install
+test "$identity" = "$(stat -f %i "$dest")"
+test "$(read_profile paths.OPENCODE_DB)" = ':memory:'
+test "$(read_profile paths.PI_CODING_AGENT_DIR)" = "$cwd/$PI_CODING_AGENT_DIR"
+if read_profile paths.CODEX_HOME >/dev/null 2>&1; then exit 1; fi
 printf 'tampered\n' >"$dest/Contents/Resources/revision"
 if operation uninstall; then exit 1; fi
 cp "$current/Contents/Resources/revision" "$dest/Contents/Resources/revision"
 if operation uninstall --remove-installed; then exit 1; fi
 test "$identity" = "$(stat -f %i "$dest")"
+test -f "$profile"
 operation uninstall
 test ! -e "$dest"
+test ! -e "$profile"
 operation uninstall
 
 cp -R "$previous" "$dest"
@@ -98,6 +163,7 @@ if operation install --stop-installed; then exit 1; fi
 cmp "$previous/Contents/Resources/revision" "$dest/Contents/Resources/revision"
 if operation install open; then exit 1; fi
 cmp "$previous/Contents/Resources/revision" "$dest/Contents/Resources/revision"
+test ! -e "$profile"
 operation install
 cmp "$current/Contents/Resources/revision" "$dest/Contents/Resources/revision"
 operation uninstall
@@ -107,6 +173,10 @@ test -f "$root/other/keep"
 diff -u - "$MILO_FIXTURE_LOG" <<'LOG'
 open
 open
+open
+--stop-installed
+open
+--stop-installed
 open
 --remove-installed
 --remove-installed
@@ -124,6 +194,7 @@ cp -R "$previous" "$legacy"
 export MILO_FIXTURE_STOP_DEST="$legacy"
 if operation install open; then exit 1; fi
 test ! -e "$dest"
+test ! -e "$profile"
 cmp "$previous/Contents/Resources/revision" "$legacy/Contents/Resources/revision"
 operation install
 test ! -e "$legacy"

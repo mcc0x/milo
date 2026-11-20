@@ -1,6 +1,101 @@
 import AppKit
+import CryptoKit
+import Darwin
 import ServiceManagement
 import SwiftUI
+
+private struct MenuProfile: Codable {
+    private static let pathKeys = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "OPENCODE_DB", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"]
+
+    struct Installer: Codable {
+        let path: String
+        let digest: Data
+
+        private static func hash(_ path: String) -> Data? {
+            guard MenuProfile.validPath(path, absolute: true),
+                  let file = MenuProfile.openRegularFile(path) else { return nil }
+            defer { try? file.close() }
+            do {
+                var hash = SHA256()
+                while let data = try file.read(upToCount: 64 * 1024), !data.isEmpty { hash.update(data: data) }
+                return Data(hash.finalize())
+            } catch {
+                return nil
+            }
+        }
+
+        init?(path: String) {
+            guard let digest = Self.hash(path) else { return nil }
+            self.path = path
+            self.digest = digest
+        }
+
+        var executable: URL? {
+            guard FileManager.default.isExecutableFile(atPath: path),
+                  Self.hash(path) == digest else { return nil }
+            return URL(fileURLWithPath: path)
+        }
+    }
+
+    let paths: [String: String]
+    let installer: Installer
+
+    static func write(installer path: String) throws {
+        guard let installer = Installer(path: path) else { throw CocoaError(.fileReadUnknown) }
+        let source = ProcessInfo.processInfo.environment
+        let cwd = FileManager.default.currentDirectoryPath
+        var paths: [String: String] = [:]
+        for key in pathKeys {
+            guard let value = source[key], validPath(value) else { continue }
+            // Relative OpenCode database names (and :memory:) are not cwd-relative.
+            paths[key] = key == "OPENCODE_DB" || value.hasPrefix("/") ? value : cwd + "/" + value
+        }
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .xml
+        try FileHandle.standardOutput.write(contentsOf: encoder.encode(Self(paths: paths, installer: installer)))
+    }
+
+    static func installed() -> Self? {
+        let apps = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: apps.path),
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              ((attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o022) & 0o022 == 0,
+              Bundle.main.bundleURL.resolvingSymlinksInPath().path ==
+                apps.appendingPathComponent("Milo.app", isDirectory: true).resolvingSymlinksInPath().path,
+              let file = openRegularFile(apps.appendingPathComponent(".milo-menu-profile.plist").path, privateProfile: true)
+        else { return nil }
+        defer { try? file.close() }
+        guard let data = try? file.readToEnd() else { return nil }
+        return try? PropertyListDecoder().decode(Self.self, from: data)
+    }
+
+    func applyPaths(to environment: inout [String: String]) {
+        for key in Self.pathKeys {
+            if let path = paths[key], Self.validPath(path, absolute: key != "OPENCODE_DB") {
+                environment[key] = path
+            }
+        }
+    }
+
+    private static func validPath(_ path: String, absolute: Bool = false) -> Bool {
+        !path.isEmpty && !path.utf8.contains(0) && (!absolute || path.hasPrefix("/"))
+    }
+
+    private static func openRegularFile(_ path: String, privateProfile: Bool = false) -> FileHandle? {
+        let flags = O_RDONLY | O_NONBLOCK | O_CLOEXEC | (privateProfile ? O_NOFOLLOW : 0)
+        let fd = open(path, flags)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              !privateProfile || (info.st_uid == getuid() && info.st_mode & 0o777 == 0o600)
+        else {
+            close(fd)
+            return nil
+        }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+}
 
 @MainActor
 private final class Model: ObservableObject {
@@ -14,21 +109,15 @@ private final class Model: ObservableObject {
     private var child: Process?
     private var input: FileHandle?
     private let reader = DispatchQueue(label: "net.usemilo.usage.frames", qos: .utility)
-    private static let pathKeys = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "OPENCODE_DB", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"]
 
     private var settings: Process?
     private var settingsURL: URL?
+    private let profile = MenuProfile.installed()
 
     private func bundledProcess(_ arguments: [String]) -> Process? {
         guard let tool = Bundle.main.url(forResource: "milo", withExtension: nil, subdirectory: "Tools") else { return nil }
         var environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
-        // Launch Services need not inherit a shell environment. The local builder records
-        // only provider/config paths, never the shell's tokens or other variables.
-        if let url = Bundle.main.url(forResource: "ProfilePaths", withExtension: "plist"),
-           let data = try? Data(contentsOf: url),
-           let profile = try? PropertyListDecoder().decode([String:String].self, from: data) {
-            for key in Self.pathKeys { environment[key] = profile[key] }
-        }
+        profile?.applyPaths(to: &environment)
         let process = Process()
         process.executableURL = tool; process.arguments = arguments
         process.environment = environment
@@ -39,15 +128,6 @@ private final class Model: ObservableObject {
     // A menu-launched editor belongs to the browser: allow it to finish a removal
     // and keep unsaved drafts when the menu app quits. It has its own idle timeout.
     private var independentSettings = false
-    init() {
-        let arguments = CommandLine.arguments
-        if arguments.count == 3, arguments[1] == "--installer-path", arguments[2].hasPrefix("/"),
-           FileManager.default.isExecutableFile(atPath: arguments[2]),
-           Bundle.main.bundleURL.resolvingSymlinksInPath().path == FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/Milo.app").resolvingSymlinksInPath().path {
-            UserDefaults.standard.set(arguments[2], forKey: "installerPath")
-        }
-    }
 
     func openSettings() {
         if settings?.isRunning == true {
@@ -56,11 +136,10 @@ private final class Model: ObservableObject {
         }
         settingsURL = nil
         guard let process = bundledProcess(["web", "--port", "0", "--no-open"]) else { settingsError(); return }
-        let defaults = UserDefaults.standard
         independentSettings = false
-        if let path = defaults.string(forKey: "installerPath"), path.hasPrefix("/"),
-           FileManager.default.isExecutableFile(atPath: path) {
-            process.executableURL = URL(fileURLWithPath: path)
+        // A replaced installer path must not turn Settings into a launcher for another program.
+        if let executable = profile?.installer.executable {
+            process.executableURL = executable
             independentSettings = true
         }
         let output = Pipe()
@@ -247,6 +326,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 private struct MiloMenuApp {
     @MainActor static func main() {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--install-profile" {
+            do { try MenuProfile.write(installer: CommandLine.arguments[2]) } catch { exit(1) }
+            exit(0)
+        }
         if CommandLine.arguments.count == 3,
            ["--stop-installed", "--remove-installed"].contains(CommandLine.arguments[1]) {
             let target = URL(fileURLWithPath: CommandLine.arguments[2]).resolvingSymlinksInPath().path

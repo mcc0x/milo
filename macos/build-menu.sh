@@ -2,8 +2,7 @@
 # Build a self-contained, ad-hoc signed macOS app. Does not install or launch it.
 set -eu
 case "${1-}:$#" in
-    :0) portable=false ;;
-    --release:1) portable=true ;;
+    :0|--release:1) ;;
     *) echo 'Usage: sh macos/build-menu.sh [--release]' >&2; exit 2 ;;
 esac
 [ "$(uname -s)" = Darwin ] || { echo 'The menu app requires macOS.' >&2; exit 1; }
@@ -36,20 +35,7 @@ iconutil -c icns "$tmp/Milo.iconset" -o "$resources/Milo.icns"
 cp "$repo/macos/Info.plist" "$app/Contents/Info.plist"
 version=$("$resources/Tools/milo" --version)
 /usr/bin/plutil -insert CFBundleShortVersionString -string "${version#milo }" "$app/Contents/Info.plist"
-# Finder and login items do not inherit a shell's exported provider paths. Keep
-# only the supported paths in this local bundle, not tokens or logs. Never ship it.
-if [ "$portable" = false ]; then
-python3 - "$resources/ProfilePaths.plist" <<'PY'
-import os, plistlib, sys
-keys = ('CODEX_HOME','CLAUDE_CONFIG_DIR','PI_CODING_AGENT_DIR','OPENCODE_DB','XDG_CONFIG_HOME','XDG_STATE_HOME','XDG_DATA_HOME')
-values = {key:os.environ[key] for key in keys if os.environ.get(key)}
-for key in ('CODEX_HOME','CLAUDE_CONFIG_DIR','PI_CODING_AGENT_DIR'):
-    if key in values:
-        values[key] = os.path.abspath(values[key])
-with open(sys.argv[1], 'wb') as stream:
-    plistlib.dump(values, stream)
-PY
-fi
+# Both local and release archives are portable. The installer captures profile paths.
 codesign --force --sign - "$resources/Tools/milo"
 codesign --force --sign - "$app"
 codesign --verify --strict "$resources/Tools/milo"
