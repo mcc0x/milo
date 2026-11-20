@@ -177,7 +177,8 @@ pub(super) fn query(executable: &OsStr, path: &Path, sql: &str, wait: Duration) 
     }
     let deadline = Instant::now() + wait;
     let child = Command::new(executable)
-        .args(["-batch", "-safe", "-bail", "-nofollow", "-readonly", "-json", "-init", "/dev/null", "--"])
+        // The database operand always starts with "file:". Older SQLite CLIs reject "--".
+        .args(["-batch", "-safe", "-bail", "-nofollow", "-readonly", "-json", "-init", "/dev/null"])
         .arg(read_only_uri(&path))
         .arg(sql)
         .stdin(Stdio::null())
