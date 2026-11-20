@@ -315,7 +315,13 @@ function setting(field, title, detail, type, options = {}) {
       radio.id = `field-${field}-${key}`;
       radio.checked = key === String(value);
       radio.addEventListener('change', () => edit(field, typeof value === 'boolean' ? key === 'true' : key));
-      choice.append(radio, node('span', '', text));
+      const caption = node('span', '', text);
+      if (options.examples) {
+        const sample = node('code', 'git-example', options.examples[key]);
+        sample.setAttribute('aria-hidden', 'true');
+        caption.append(sample);
+      }
+      choice.append(radio, caption);
       choices.append(choice);
     }
     info.append(node('span', 'setting-label', title));
@@ -513,8 +519,8 @@ function appearanceView() {
       {disabled, choices: [['nerd', 'Nerd Font'], ['plain', 'Plain'], ['off', 'Off']]}),
     setting('appearance.static_marks', 'Activity marks', '', 'select',
       {disabled, choices: [['false', 'Pulse'], ['true', 'Static']]}),
-    setting('appearance.text_git_marks', 'Git status marks', 'Text adds letters and signs beside changed files and commits.', 'select',
-      {disabled, choices: [['false', 'Style only'], ['true', 'Text']]}),
+    setting('appearance.text_git_marks', 'Git status marks', '', 'select',
+      {disabled, choices: [['false', 'Style only'], ['true', 'Text']], examples: {false: 'main.rs', true: 'M main.rs'}}),
     setting('appearance.usage_large_figures', 'Usage display', 'Auto fits the available space.', 'select',
       {disabled, choices: [['false', 'Auto compact'], ['true', 'Large figures']]}),
   ])];
