@@ -643,6 +643,27 @@ mod tests {
     }
 
     #[test]
+    fn saving_replaces_the_listener_an_earlier_release_installed_unless_it_was_edited() {
+        let fixture = Fixture::folder();
+        let store = store(&fixture);
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        let current = fs::read_to_string(store.listener_file()).unwrap();
+        // Every release starts the file with the same lines naming the saved layout.
+        let first_lines = current.strip_suffix(include_str!("listener.lua")).unwrap();
+        let released = format!("{first_lines}{}", include_str!("listener_0_1_2.lua"));
+        assert_ne!(released, current);
+
+        fs::write(store.listener_file(), &released).unwrap();
+        store.save(Some(&Layout::default()), None, &|_| true).unwrap();
+        assert_eq!(fs::read_to_string(store.listener_file()).unwrap(), current);
+
+        let edited = released + "-- Keep my notes here.\n";
+        fs::write(store.listener_file(), &edited).unwrap();
+        assert!(store.save(Some(&Layout::default()), None, &|_| true).unwrap_err().contains("listener file"));
+        assert_eq!(fs::read_to_string(store.listener_file()).unwrap(), edited);
+    }
+
+    #[test]
     fn an_unconditional_launcher_followed_by_user_code_is_left_alone() {
         let fixture = Fixture::folder();
         let store = store(&fixture);

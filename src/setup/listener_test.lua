@@ -208,6 +208,44 @@ processes.slow, sizes.slow = project, measured
 emit("terminal.size_changed", "slow")
 assert(#splits == 0)
 
+-- A terminal starts as a copy of the Rex server. A measurement that arrives
+-- while that copy is in the foreground has met no command: the tab is arranged
+-- once its shell appears, and left alone if the copy becomes a command instead.
+local starting = {
+  child = { pid = 7, name = "rex", path = "/opt/rex" },
+  foreground = { pid = 7, name = "rex", argv0 = "/opt/rex", path = "/opt/rex" },
+}
+processes.slow = starting
+created("slow")
+emit("terminal.size_changed", "slow")
+assert(#splits == 0)
+processes.slow = project
+emit("terminal.process_changed", "slow")
+assert(#splits == 1 and splits[1].anchor_id == "slow")
+splits, processes.slow = {}, starting
+created("slow")
+processes.slow = { child = { pid = 7, name = "build", path = "/bin/build" }, foreground = { pid = 7, argv0 = "build" } }
+emit("terminal.process_changed", "slow")
+processes.slow = project
+emit("terminal.process_changed", "slow")
+assert(#splits == 0)
+
+-- A shell copies itself as it starts and as it draws its prompt. A copy in the
+-- foreground when the measurement arrives is the same shell. A login shell
+-- that another program started in the tab is not.
+local login = { pid = 1, path = "/usr/bin/login" }
+local own = { pid = 2, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" }
+local function copy(pid) return { pid = pid, argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" } end
+for _, other in ipairs({ false, true }) do
+  splits, sizes.slow = {}, { rows = 24 }
+  processes.slow = { child = login, foreground = own, ancestors = { login } }
+  created("slow")
+  local between = other and { { pid = 3, argv0 = "su", path = "/usr/bin/su" }, own, login } or { own, login }
+  processes.slow, sizes.slow = { child = login, foreground = copy(4), ancestors = between }, measured
+  emit("terminal.size_changed", "slow")
+  assert(#splits == (other and 0 or 1))
+end
+
 -- Close and exit events remove outstanding work, including keep-open terminals.
 for _, event in ipairs({ "block_closed", "terminal.child_exited", "window_closed", "session_destroyed" }) do
   processes.slow = nil

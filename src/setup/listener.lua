@@ -90,21 +90,41 @@ local function forget(session_id, block_id, expected)
   if not next(tabs) then waiting[session_id] = nil end
 end
 
+local function login_shell(process)
+  local name = process.argv0
+  return name and name:sub(1, 1) == "-" and process.path ~= "/usr/bin/login"
+end
+
+-- A shell copies itself to run parts of its startup and its prompt. A copy
+-- in the foreground is still the tab's shell, which is the outermost of them.
+local function front_shell(process)
+  local shell = process.foreground
+  if not login_shell(shell) then return end
+  for _, parent in ipairs(process.ancestors or {}) do
+    if not login_shell(parent) or parent.path ~= shell.path then break end
+    shell = parent
+  end
+  return shell
+end
+
 local function shell(tab)
   local process = rex.call(terminal .. ".process", tab.ctx)
   if not process then return end
   if type(process.last_exit) == "table" then return nil, true end
   local foreground = process.foreground
-  local name = foreground and foreground.argv0
-  if not name then return end
-  if name:sub(1, 1) == "-" and foreground.path ~= "/usr/bin/login" then
-    if tab.shell and tab.shell.pid ~= foreground.pid then return nil, true end
-    tab.shell = foreground
-    return foreground
+  if not (foreground and foreground.argv0) then return end
+  local front = front_shell(process)
+  if front then
+    if tab.shell and tab.shell.pid ~= front.pid then return nil, true end
+    tab.shell = front
+    return front
   end
+  local child = process.child
+  -- A terminal's process is a copy of the Rex server until it becomes login,
+  -- the shell or a command. A tab that is still starting has run nothing.
+  if not tab.shell and child and child.pid == foreground.pid and child.name == "rex" then return end
   -- On macOS the terminal starts under /usr/bin/login. Before we see the
   -- shell it can be in the foreground; once we see a shell, a command wins.
-  local child = process.child
   return nil, tab.shell ~= nil or not (child and child.path == "/usr/bin/login")
 end
 

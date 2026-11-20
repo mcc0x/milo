@@ -600,6 +600,14 @@ exception: its IDs are transient and are the only blocks its undo may close.
 over global defaults. `workflow.rs` and `rex_shell.lua` follow only the shell
 explicitly supplied by a managed pane. Ordinary manual pane launches stay pinned.
 
+An installation keeps the Lua files it was saved with until its next save, and
+a save replaces only files it recognises as Milo's. Before changing
+`actions.lua` or `listener.lua`, add the fingerprint (`fingerprint` in
+`layout.rs`, the 64-bit FNV-1a of the file) of the version being replaced to
+the list beside it, or installations holding that version are told their file
+was left alone. `listener_0_1_2.lua` is the listener of releases 0.1.1 and
+0.1.2, kept so that a test can save over it.
+
 Run `cargo test setup::` for generation, screen and installation tests. The
 tests use throwaway settings and a stand-in for Rex. With Lua 5.1 installed,
 run `cargo test --locked --bin milo rex_lua_fixtures -- --ignored` for the
@@ -702,6 +710,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
 | `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
 | `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs. |
+| `src/setup/listener_0_1_2.lua` | Keeps the listener of releases 0.1.1 and 0.1.2 for the test that saves over it. |
 | `src/setup/listener_test.lua` | Checks the new-tab and new-session handlers with a stand-in for Rex. |
 | `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
