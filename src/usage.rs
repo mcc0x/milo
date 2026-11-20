@@ -309,7 +309,8 @@ impl Codex {
             CodexSessions::Present
         };
         for candidate in &mut self.files.entries {
-            if budget.remaining != 0 && !candidate.cached.as_ref().is_some_and(|file| file.version == candidate.version) {
+            if budget.remaining != 0 && !candidate.cached.as_ref().is_some_and(|file| file.version == candidate.version)
+            {
                 candidate.cached = root.open(&candidate.path).and_then(|(file, version)| {
                     CodexFile::read(&file, version, candidate.cached.take(), now, budget).ok()
                 });
@@ -425,7 +426,14 @@ impl ClaudeFile {
     }
 
     /// Rewritten files start over; appends use the existing cursor.
-    fn check(&mut self, root: &SessionRoot, path: &Path, candidate: FileVersion, cutoff: i64, budget: &mut Budget) -> bool {
+    fn check(
+        &mut self,
+        root: &SessionRoot,
+        path: &Path,
+        candidate: FileVersion,
+        cutoff: i64,
+        budget: &mut Budget,
+    ) -> bool {
         if self.version == candidate && self.settled() {
             return true;
         }
