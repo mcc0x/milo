@@ -71,7 +71,7 @@ In **Health**, run a check of saved settings and the live layout. If the origina
 
 While the page is open, it periodically keeps the local session alive only if it has unsaved changes, an active layout trial, or queued edits. This does not save your work, and the session can still time out if the browser suspends the page.
 
-Finish the session with **Done**, or stop the command with `Ctrl-C`. If you only close the browser tab, the private link remains usable until you stop Milo or the session is idle for 15 minutes. Stopping Milo discards unsaved changes and undoes an unkept layout trial; it does not roll back settings you already saved.
+**Done** closes the editor only after undoing any active layout trial. If undo fails, the editor stays open so you can retry. Stopping Milo with `Ctrl-C` or letting it time out only attempts to undo the trial. Closing the browser tab alone leaves the private link usable until Milo stops or the session is idle for 15 minutes. When the session ends, unsaved drafts are discarded; saved settings stay as they are.
 
 For UI development, run `cargo run --features web-dev -- web` from the Milo checkout and use the browser tab it opens. Edits to `src/web/app.css` apply in place; changes to `index.html`, `app.js`, or the mascot reload the page against the same in-memory settings draft. Finish any pending input first. Rust changes still require restarting the command. Normal builds serve embedded assets and do not watch the checkout.
 

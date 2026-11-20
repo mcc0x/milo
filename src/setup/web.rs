@@ -34,6 +34,11 @@ pub(crate) struct Editor {
     directory: Option<String>,
 }
 
+pub(crate) enum CloseError {
+    Stale,
+    Trial(&'static str),
+}
+
 impl Editor {
     pub(crate) fn open() -> Self {
         let inside = rex::inside();
@@ -150,8 +155,19 @@ impl Editor {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn version(&self) -> u64 {
         self.version
+    }
+
+    pub(crate) fn close(&mut self, version: u64) -> Result<(), CloseError> {
+        if version != self.version {
+            return Err(CloseError::Stale);
+        }
+        if self.setup.trial.is_some() {
+            self.setup.undo().map_err(CloseError::Trial)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn state(&self) -> String {

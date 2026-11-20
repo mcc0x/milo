@@ -342,13 +342,25 @@ fn respond(route: Route, body: &[u8], editor: &mut Editor) -> (Response, bool) {
             Ok(state) => Response::json(state),
             Err(error) => Response::bad_request(&error),
         },
-        Route::Close => match http::close_version(body) {
-            Some(version) if version == editor.version() => return (Response::no_content(), true),
-            Some(_) => Response::conflict(
-                "The draft changed in another request. Refresh the editor state and review it before trying Done again.",
-            ),
-            None => Response::bad_request("Invalid draft version. Refresh the editor state and try Done again."),
-        },
+        Route::Close => {
+            use crate::setup::web::CloseError;
+
+            let Some(version) = http::close_version(body) else {
+                return (
+                    Response::bad_request("Invalid draft version. Refresh the editor state and try Done again."),
+                    false,
+                );
+            };
+            match editor.close(version) {
+                Ok(()) => return (Response::no_content(), true),
+                Err(CloseError::Stale) => Response::conflict(
+                    "The draft changed in another request. Refresh the editor state and review it before trying Done again.",
+                ),
+                Err(CloseError::Trial(why)) => Response::conflict(&format!(
+                    "The editor is still open. {why} Check the original Rex tab before trying Done again."
+                )),
+            }
+        }
     };
     (response, false)
 }
@@ -384,5 +396,74 @@ mod tests {
 
         let current = format!(r#"{{"version":{}}}"#, editor.version());
         close(&mut editor, current.as_bytes(), b"HTTP/1.1 204 No Content\r\n", true);
+    }
+
+    #[test]
+    fn close_waits_for_the_active_trial_to_undo() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Give the Rex CLI probe an isolated environment without changing it for other tests.
+        const CHILD: &str = "MILO_TEST_WEB_TRIAL_CLOSE";
+        if std::env::var_os(CHILD).is_none() {
+            let folder = Fixture::folder();
+            let rex = folder.root.join("rex");
+            fs::write(
+                &rex,
+                concat!(
+                    "#!/bin/sh\n/bin/cat >/dev/null\n",
+                    "for arg do case \"$arg\" in\n",
+                    "milo_operation=context) printf 'window:test\\nok - 120 40\\n'; exit;;\n",
+                    "milo_operation=trial) echo 'ok window:test tiled outline=block:test'; exit;;\n",
+                    "milo_operation=undo) echo undo >> undo.log; if [ -f allow-undo ]; then echo ok; ",
+                    "else echo blocked; fi; exit;;\n",
+                    "esac; done\nexit 1\n",
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "web::tests::close_waits_for_the_active_trial_to_undo", "--nocapture"])
+                .env(CHILD, "1")
+                .env("HOME", &folder.root)
+                .env("XDG_CONFIG_HOME", folder.root.join("config"))
+                .env("XDG_STATE_HOME", folder.root.join("state"))
+                .env("PATH", &folder.root)
+                .env("REX_CONFIG", folder.root.join("init.lua"))
+                .env("REX_SESSION", "session:test")
+                .env("REX_BLOCK", "block:shell")
+                .current_dir(&folder.root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let mut editor = Editor::open();
+        let seen = editor.version();
+        let request = format!(r#"{{"version":{seen},"action":"try"}}"#);
+        let active = editor.action(request.as_bytes()).unwrap();
+        assert!(active.contains(r#""trial":true"#));
+
+        let stale = format!(r#"{{"version":{seen}}}"#);
+        close(&mut editor, stale.as_bytes(), b"HTTP/1.1 409 Conflict\r\n", false);
+        assert!(matches!(fs::metadata("undo.log"), Err(error) if error.kind() == io::ErrorKind::NotFound));
+
+        let current = format!(r#"{{"version":{}}}"#, editor.version());
+        let rejected = close(&mut editor, current.as_bytes(), b"HTTP/1.1 409 Conflict\r\n", false);
+        assert!(String::from_utf8_lossy(&rejected).contains("The editor is still open. Could not undo every pane"));
+        assert_eq!(editor.state(), active);
+        assert_eq!(fs::read_to_string("undo.log").unwrap(), "undo\n");
+
+        fs::write("allow-undo", "").unwrap();
+        close(&mut editor, current.as_bytes(), b"HTTP/1.1 204 No Content\r\n", true);
+        assert_eq!(fs::read_to_string("undo.log").unwrap(), "undo\nundo\n");
+        drop(editor);
+        assert_eq!(fs::read_to_string("undo.log").unwrap(), "undo\nundo\n");
     }
 }
