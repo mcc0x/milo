@@ -41,20 +41,26 @@ fn part(c: char) -> Part {
     }
 }
 
-/// Where the word starting at `from` ends.
-fn word_end(text: &str, from: usize) -> usize {
+/// Where the word starting at `from` ends, if it fits in the remaining allowance.
+fn word_end(text: &str, from: usize, allowance: usize) -> Option<usize> {
     let mut chars = text[from..].char_indices();
-    let Some((_, first)) = chars.next() else { return from };
+    let Some((_, first)) = chars.next() else { return Some(from) };
+    if first.len_utf8() > allowance {
+        return None;
+    }
     let kind = part(first);
     let mut joined = first == JOINER;
     for (at, c) in chars {
         let next = part(c);
         if next != Part::Mark && !joined && !(next == kind && matches!(kind, Part::Letter | Part::Space)) {
-            return from + at;
+            return Some(from + at);
+        }
+        if at + c.len_utf8() > allowance {
+            return None;
         }
         joined = c == JOINER;
     }
-    text.len()
+    Some(text.len())
 }
 
 /// A word boundary before the character that precedes `at`, found without reading the line from its start.
@@ -90,8 +96,11 @@ fn push_word(text: &str, at: usize, words: &mut Vec<Word>, budget: &mut usize) -
     if words.len() == MAX_WORDS {
         return None;
     }
-    let end = word_end(text, at);
-    *budget = budget.saturating_sub(end - at);
+    let Some(end) = word_end(text, at, *budget) else {
+        *budget = 0;
+        return None;
+    };
+    *budget -= end - at;
     // FNV-1a.
     let hash =
         text.as_bytes()[at..end].iter().fold(0x811c_9dc5, |hash, &b| (hash ^ u32::from(b)).wrapping_mul(0x0100_0193));
@@ -222,21 +231,23 @@ impl Words {
         })
     }
 
-    fn same(&mut self, old: &str, new: &str, i: usize, j: usize) -> bool {
+    fn same(&mut self, old: &str, new: &str, i: usize, j: usize) -> Option<bool> {
         let (a, b) = (&self.old[i], &self.new[j]);
         // Unequal hashes settle it; equal ones cost a look at the bytes.
         let alike = a.hash == b.hash && a.at.len() == b.at.len();
-        self.budget = self.budget.saturating_sub(1 + if alike { a.at.len() } else { 0 });
-        alike && old.as_bytes()[a.at.clone()] == new.as_bytes()[b.at.clone()]
+        let left = self.budget.checked_sub(1 + if alike { a.at.len() } else { 0 });
+        self.budget = left.unwrap_or(0);
+        left?;
+        Some(alike && old.as_bytes()[a.at.clone()] == new.as_bytes()[b.at.clone()])
     }
 
     /// Marks the words of a shortest edit between the two lists as changed.
     fn edits(&mut self, old: &str, new: &str) -> Option<()> {
         let (mut lo, mut old_hi, mut new_hi) = (0, self.old.len(), self.new.len());
-        while lo < old_hi && lo < new_hi && self.same(old, new, lo, lo) {
+        while lo < old_hi && lo < new_hi && self.same(old, new, lo, lo)? {
             lo += 1;
         }
-        while lo < old_hi && lo < new_hi && self.same(old, new, old_hi - 1, new_hi - 1) {
+        while lo < old_hi && lo < new_hi && self.same(old, new, old_hi - 1, new_hi - 1)? {
             old_hi -= 1;
             new_hi -= 1;
         }
@@ -260,10 +271,9 @@ impl Words {
         // The first words differ, or they would have been set aside with the other shared words.
         self.reached.push(0);
         for d in 1..=MAX_EDITS {
-            if self.budget == 0 {
-                return None;
-            }
-            self.budget = self.budget.saturating_sub(d + 1);
+            let left = self.budget.checked_sub(d + 1);
+            self.budget = left.unwrap_or(0);
+            left?;
             let row = d * (d - 1) / 2;
             for j in 0..=d {
                 let Some((mut x, _)) = step(&self.reached[row..row + d], j, n, m) else {
@@ -271,7 +281,7 @@ impl Words {
                     continue;
                 };
                 let mut y = x + d - 2 * j;
-                while x < n && y < m && self.same(old, new, lo + x, lo + y) {
+                while x < n && y < m && self.same(old, new, lo + x, lo + y)? {
                     x += 1;
                     y += 1;
                 }
@@ -465,5 +475,18 @@ mod tests {
         words.budget = 3;
         assert_eq!(changed(&mut words, "let a = 1;", "let b = 2;"), None);
         assert_eq!(changed(&mut words, "one", "two"), None);
+    }
+
+    #[test]
+    fn the_allowance_applies_to_single_runs_and_individual_comparisons() {
+        let mut words = Words::new();
+        // A single insertion can otherwise bypass the search and its budget check.
+        words.budget = 3;
+        assert_eq!(changed(&mut words, "", "ação"), None);
+        assert_eq!(words.budget, 0);
+
+        words.budget = 9;
+        assert_eq!(changed(&mut words, "lead", "lead!"), None);
+        assert_eq!(words.budget, 0);
     }
 }

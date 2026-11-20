@@ -50,7 +50,7 @@ impl Line {
 }
 
 /// Expands tabs and drops control characters, translating the edits to display bytes.
-fn clean(line: &str, changed: &mut [Range<usize>]) -> (String, usize) {
+fn clean(line: &str, changed: &mut Vec<Range<usize>>) -> (String, usize) {
     if line.bytes().all(|b| matches!(b, b' '..=b'~')) {
         return (line.to_owned(), line.len());
     }
@@ -74,6 +74,7 @@ fn clean(line: &str, changed: &mut [Range<usize>]) -> (String, usize) {
     for end in ends {
         *end = s.len();
     }
+    changed.retain(|range| !range.is_empty());
     (s, col)
 }
 
@@ -596,6 +597,15 @@ mod tests {
             assert_eq!(changed(&lines[1]), [new_edit]);
             assert!(lines[0].annotation.is_empty());
             assert_eq!(lines[1].annotation, label);
+        }
+    }
+
+    #[test]
+    fn a_control_only_edit_has_a_label_but_no_empty_emphasis_range() {
+        let lines = pair("\x07", "\x08");
+        for (line, label) in lines.iter().zip([" [control U+0007]", " [control U+0008]"]) {
+            assert!(line.text.is_empty() && line.changed.is_empty());
+            assert_eq!(line.annotation, label);
         }
     }
 
