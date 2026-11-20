@@ -59,6 +59,11 @@ const MAX_CLIENTS: usize = 16;
 static STOP: AtomicBool = AtomicBool::new(false);
 static WAKE_WRITER: AtomicI32 = AtomicI32::new(-1);
 
+// Browsers omit the default port in both Host and Origin.
+fn http_authority(address: std::net::SocketAddr) -> String {
+    if address.port() == 80 { address.ip().to_string() } else { address.to_string() }
+}
+
 pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     STOP.store(false, Ordering::Relaxed);
     let wake = WakePipe::open().map_err(|error| format!("could not create a termination pipe: {error}"))?;
@@ -68,8 +73,8 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|error| format!("could not listen on 127.0.0.1:{port}: {error}; use --port 0 for a free port"))?;
     listener.set_nonblocking(true).map_err(|error| format!("could not configure the listener: {error}"))?;
-    let host =
-        listener.local_addr().map_err(|error| format!("could not read the loopback address: {error}"))?.to_string();
+    let address = listener.local_addr().map_err(|error| format!("could not read the loopback address: {error}"))?;
+    let host = http_authority(address);
     let origin = format!("http://{host}");
     let token = random_token().map_err(|error| format!("could not generate a session token: {error}"))?;
     let bearer = format!("Bearer {token}");
@@ -242,11 +247,7 @@ fn serve_clients(
         }
         let mut deadline = last_activity + IDLE_TIMEOUT;
         if let Some((client, _)) = &pending {
-            if client.deadline <= now {
-                pending = None;
-            } else {
-                deadline = deadline.min(client.deadline);
-            }
+            deadline = deadline.min(client.deadline);
         }
         if let Some(launch) = &mut launcher {
             if let Some(check) = launch.poll(now) {
@@ -274,6 +275,11 @@ fn serve_clients(
             }
             return Err(error);
         }
+        if pending.as_ref().is_some_and(|(client, _)| client.deadline <= Instant::now()) {
+            let (mut client, _) = pending.take().expect("expired pending request");
+            client.reply(Response::busy());
+            clients.push(client);
+        }
         if ready == 0 {
             continue;
         }
@@ -295,7 +301,6 @@ fn serve_clients(
             }
             clients.push(client);
             if let Some((client, job)) = pending.take()
-                && client.deadline > Instant::now()
                 && !STOP.load(Ordering::Relaxed)
             {
                 mutations.submit(job)?;
@@ -489,6 +494,46 @@ mod tests {
         assert!(wire.starts_with(status), "{}", String::from_utf8_lossy(&wire));
         assert_eq!(close, should_close);
         wire
+    }
+
+    #[test]
+    fn session_authority_matches_browser_origin_serialization() {
+        assert_eq!(http_authority((Ipv4Addr::LOCALHOST, 80).into()), "127.0.0.1");
+        assert_eq!(http_authority((Ipv4Addr::LOCALHOST, 6110).into()), "127.0.0.1:6110");
+    }
+
+    #[test]
+    fn expired_queued_actions_receive_busy_without_being_submitted() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = address.to_string();
+        let origin = format!("http://{host}");
+        let access = Access { host: &host, origin: &origin, bearer: "Bearer test" };
+        let (wake, stop) = io::pipe().unwrap();
+        let (ready, _notify) = io::pipe().unwrap();
+        let (send, jobs) = mpsc::sync_channel(1);
+        let (_replies, receive) = mpsc::sync_channel(1);
+        let mut worker = Mutations { send, receive, ready };
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve_clients(listener, &wake, &access, Arc::default(), &mut worker, None));
+            let _stop_on_exit = stop;
+            let request = || {
+                let mut socket = TcpStream::connect(address).unwrap();
+                write!(socket, "POST /api/action HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nAuthorization: Bearer test\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+                socket
+            };
+            let _active = request();
+            jobs.recv_timeout(IO_TIMEOUT).unwrap();
+            let mut pending = request();
+            pending.set_read_timeout(Some(IO_TIMEOUT * 2)).unwrap();
+            let mut reply = String::new();
+            pending.read_to_string(&mut reply).unwrap();
+            assert!(reply.starts_with("HTTP/1.1 503 Service Unavailable\r\n"), "{reply}");
+            assert!(jobs.try_recv().is_err());
+            drop(_stop_on_exit);
+            server.join().unwrap().unwrap();
+        });
     }
 
     #[test]
