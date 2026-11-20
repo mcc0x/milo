@@ -9,6 +9,10 @@ export type Commit = { title: string; age: string; files?: readonly DemoFile[] }
 // What the person asks the agent for; it is typed into the composer first.
 export const request = 'Add wind speed to the weekend forecast.';
 
+// What the whole window is, for someone who cannot see it. A phone that shows
+// one pane at a time swaps this for that pane's name.
+export const demoLabel = 'A Rex window with milo’s outline, history and usage panes beside a coding agent at work';
+
 export type Pane = 'outline' | 'history' | 'usage' | 'reader' | 'agent';
 
 // Each pass shows a different coding agent in the same Rex layout.

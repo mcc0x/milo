@@ -1,9 +1,3 @@
-@font-face {
-  font-family: 'Terminal Symbols';
-  src: url('./fonts/terminal-symbols.woff2') format('woff2');
-  font-display: block;
-}
-
 .hero, .features, .field-notes, .footer-inner { width: min(calc(100% - 3rem), 78rem); margin-inline: auto; }
 .hero {
   display: flex;

@@ -1,24 +1,46 @@
 import { edit, newCommit, pushed, request, scene, weatherDiff, type harnesses, type Change, type Commit, type DiffLine, type Frame, type Phase } from './scene';
-import './agent.css';
-import './usage.css';
 
 export const element = (id: string) => document.getElementById(id)!;
-const demo = element('demo');
-const outline = element('outline-pane');
-const history = element('history-pane');
-const reader = element('reader-content');
-const agentPane = element('agent-pane');
-const agentSession = element('agent-session');
-const agentBanner = element('agent-banner');
-const transcript = element('agent-transcript');
-const activity = element('agent-activity');
-const composerModel = element('composer-model');
-const composerPrompt = element('composer-prompt');
-const composerPlaceholder = element('composer-placeholder');
-const composerHint = element('composer-hint');
+// The demo's elements. This module also loads where there is no document, so
+// they are found when the page mounts.
+let demo: HTMLElement;
+let outline: HTMLElement;
+let history: HTMLElement;
+let reader: HTMLElement;
+let agentPane: HTMLElement;
+let agentSession: HTMLElement;
+let agentBanner: HTMLElement;
+let transcript: HTMLElement;
+let activity: HTMLElement;
+let composerModel: HTMLElement;
+let composerPrompt: HTMLElement;
+let composerPlaceholder: HTMLElement;
+let composerHint: HTMLElement;
+let shellTab: HTMLElement;
 let agentSteps: { at: number; node: HTMLElement }[] = [];
 let followTranscript = false;
 let previousFrame: Frame | undefined;
+
+/** Finds the demo in the document and forgets what an earlier mount drew. */
+export function connectTerminal() {
+  demo = element('demo');
+  outline = element('outline-pane');
+  history = element('history-pane');
+  reader = element('reader-content');
+  agentPane = element('agent-pane');
+  agentSession = element('agent-session');
+  agentBanner = element('agent-banner');
+  transcript = element('agent-transcript');
+  activity = element('agent-activity');
+  composerModel = element('composer-model');
+  composerPrompt = element('composer-prompt');
+  composerPlaceholder = element('composer-placeholder');
+  composerHint = element('composer-hint');
+  shellTab = demo.querySelector<HTMLElement>('.rex-tab-new')!;
+  agentSteps = [];
+  followTranscript = false;
+  previousFrame = undefined;
+}
 
 function span(text: string, className = '') {
   const node = document.createElement('span');
@@ -32,23 +54,6 @@ function row(className: string, ...contents: (string | Node)[]) {
   div.className = `term-line ${className}`;
   div.append(...contents);
   return div;
-}
-
-const originalTab = demo.querySelector('.rex-tab')!;
-const shellTab = span('zsh', 'rex-tab rex-tab-new');
-shellTab.hidden = true;
-originalTab.after(shellTab);
-
-const shellPane = document.createElement('div');
-shellPane.className = 'term-pane shell-pane';
-shellPane.append(row('shell-prompt', 'tidebook ', span('main', 'term-blue'), ' › ', span('', 'composer-caret')));
-agentPane.after(shellPane);
-
-for (const [provider, countdown] of [['codex', '38m'], ['claude', '1h 24m']]) {
-  const detail = document.createElement('small');
-  detail.className = 'usage-reset term-muted';
-  detail.textContent = `Resets in ${countdown}`;
-  element(`${provider}-usage`).after(detail);
 }
 
 const symbols = {
