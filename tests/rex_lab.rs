@@ -551,7 +551,7 @@ impl Lab {
             state.strip_prefix("{\"version\":").and_then(|rest| rest.split(',').next()?.parse().ok()).unwrap();
         editor.act(r#""action":"set","field":"layout.auto_arrange","value":true"#);
         let saved = editor.act(r#""action":"save","group":"layout","scope":"global""#);
-        assert!(saved.contains("Saved the global default.") && saved.contains("\"error\":false"), "{saved}");
+        assert!(saved.contains("\"auto_arrange\":true") && saved.contains("\"error\":false"), "{saved}");
         self.rex(&["window", "close", "-s", session, &id(&made, "window_id")]);
         let health = self.milo(&["doctor"]);
         assert!(health.contains("Server actions: loaded") && health.contains("Layout listener: running"), "{health}");
@@ -795,25 +795,66 @@ impl Scene {
         assert_eq!(lab.listeners().len(), 1);
     }
 
-    /// When Rex brings a rail back as shells, arranging the tab adds nothing,
-    /// for every pane of the rail is still there. Closing Milo's panes and
-    /// arranging again is the way back: the rail then runs Milo at the width
-    /// its worktree remembers, and its drags are remembered once more.
-    fn a_restored_rail_of_shells_is_rebuilt_by_closing_and_arranging(&self, restored: &str) {
+    /// Refusing an unconfirmed rebuild, cancelling, and then confirming all
+    /// exercise the same restored blocks on the disposable server.
+    fn a_restored_rail_needs_confirmation_to_rebuild(&self, restored: &str) {
         let Self { lab, second, session, .. } = self;
         let view = lab.view();
         if view.tab(restored).rail_runs("milo") {
             return;
         }
         let shell = view.tab(restored).panes.last().unwrap().block.clone();
-        let act = |action: &str| lab.rex(&["do", action, "-s", session, "-b", &shell]);
-        act("milo_layout");
-        assert!(lab.view().tab(restored).rail_runs("shell"), "{:?}", lab.view().tab(restored));
-        act("milo_close");
-        assert!(soon(|| lab.view().tab(restored).panes.len() == 1), "{:?}", lab.view().tab(restored));
-        act("milo_layout");
+        let unchanged = || {
+            let after = lab.view();
+            let tab = after.tab(restored);
+            assert!(tab.rail_runs("shell"), "{tab:?}");
+            assert!(
+                tab.panes.iter().map(|pane| &pane.block).eq(view.tab(restored).panes.iter().map(|pane| &pane.block))
+            );
+        };
+        let report = lab
+            .command(&lab.milo)
+            .current_dir(second)
+            .env("REX_SESSION", session)
+            .env("REX_BLOCK", &shell)
+            .arg("doctor")
+            .output()
+            .unwrap();
+        let report = String::from_utf8(report.stdout).unwrap();
+        assert!(report.contains("Live sidebar: restored shells, not Milo panes."), "{report}");
+        let arrange = lab.rex_output(&["do", "milo_layout", "-s", session, "-b", &shell]).unwrap();
+        assert!(!arrange.status.success());
+        let error = String::from_utf8(arrange.stderr).unwrap();
+        assert!(error.contains("in a connected Rex app to confirm the rebuild"), "{error}");
+        unchanged();
+
+        // The lab's measuring client isn't a Rex app and cannot answer a
+        // real picker. Stub only the answer in a one-off copy of its Lua.
+        let generated = lab.read("home/.config/milo/rex.lua");
+        let answer = |reply: &str| {
+            let script = lab.root.join("restore-reply.lua");
+            let lua = format!(
+                r#"local rex = setmetatable({{ args = {{}}, ui = {{ pick = function(prompt)
+                    assert(prompt.title == "Rebuild Milo sidebar?")
+                    assert(prompt.items[2].subtitle:find("Closes 3 restored shells", 1, true))
+                    {reply}
+                end }} }}, {{ __index = rex }})
+                {generated}"#
+            );
+            fs::write(&script, lua).unwrap();
+            lab.rex(&["do", script.to_str().unwrap(), "--action", "milo_layout", "-s", session, "-b", &shell]);
+        };
+        answer("return nil, 'cancelled'");
+        unchanged();
+        answer("return 'rebuild'");
         lab.get_rails(&[(restored, second)]);
-        assert_eq!(lab.view().tab(restored).left, lab.remembered_width(second));
+        let rebuilt = lab.view();
+        let tab = rebuilt.tab(restored);
+        assert_eq!(tab.left, lab.remembered_width(second));
+        assert_eq!(tab.panes.last().unwrap().block, shell);
+        for label in RAIL {
+            assert_ne!(tab.pane(label).block, view.tab(restored).pane(label).block);
+        }
         lab.drag_rail(session, lab.view().tab(restored), "0.36");
         lab.remembers(second, "0.360000");
         lab.check();
@@ -832,5 +873,5 @@ fn rails_follow_their_worktree_through_new_tabs_resizes_renames_and_a_restart() 
     let before = scene.given_names_are_kept(&wide);
     let [fresh, barrier] = scene.a_restart_brings_everything_back(&before, &other_session);
     scene.a_restored_rail_is_remembered_only_if_milo_runs_in_it(&two, &other_session, [&fresh, &barrier]);
-    scene.a_restored_rail_of_shells_is_rebuilt_by_closing_and_arranging(&two);
+    scene.a_restored_rail_needs_confirmation_to_rebuild(&two);
 }

@@ -7,6 +7,9 @@ for _, role in ipairs(roles) do
   role_by_label[label], role_by_label[trial_label] = role, role
 end
 local role_by_letter = { o = "outline", h = "history", u = "usage" }
+local shell_flavor = terminal .. ".shell"
+local shell_names = { bash = true, csh = true, dash = true, fish = true, ksh = true,
+  sh = true, tcsh = true, zsh = true }
 local peek_label = "milo:peek:outline"
 -- The server may not have inherited the XDG settings of the shell that
 -- installed this file. Read and write the same profiles as that installation.
@@ -123,13 +126,13 @@ end
 -- area, but the rail must contain only Milo roles in a vertical stack.
 local function inspect_rail(layer)
   if not layer then return nil, "no_tab" end
-  local found, total = {}, 0
+  local found, blocks, total = {}, {}, 0
   for _, block in ipairs(layer.blocks or {}) do
     local role = role_by_label[block.label]
     if role then
       if block.label == trial_labels[role] then return nil, "trial" end
       if block.creator_name ~= terminal or found[role] then return nil, "mixed" end
-      found[role], total = block.block_id, total + 1
+      found[role], blocks[role], total = block.block_id, block, total + 1
     end
   end
   if total == 0 then return nil end
@@ -154,10 +157,81 @@ local function inspect_rail(layer)
     local node = side == "l" and root.before or root.after
     if column(node, 1, order, shares) and #order == total then
       return { side = side, width = side == "l" and root.ratio or 1 - root.ratio,
-        order = order, shares = shares, present = found }
+        order = order, shares = shares, present = found, blocks = blocks,
+        work = node_id(side == "l" and root.after or root.before) }
     end
   end
   return nil, "mixed"
+end
+
+local function restored_shell(process)
+  local child, front = process.child, process.foreground
+  if not (type(child) == "table" and type(front) == "table"
+    and type(child.pid) == "number" and child.pid > 0 and type(front.pid) == "number" and front.pid > 0
+    and type(front.user_id) == "number" and shell_names[front.name]
+    and type(front.path) == "string" and front.path:sub(1, 1) == "/"
+    and type(front.cwd) == "string" and front.cwd:sub(1, 1) == "/"
+    and type(front.argv0) == "string" and login_shell(front)) then return end
+  local invoked = type(front.invoked_path) == "string" and front.invoked_path:match("([^/]+)$")
+  if front.argv0 ~= "-" .. front.name and (not invoked or front.argv0 ~= "-" .. invoked) then return end
+  local ancestors = process.ancestors or {}
+  -- macOS starts the shell under login. On other Unix systems it can
+  -- be the PTY's direct child. A nested shell is not the original shell.
+  if child.pid == front.pid and #ancestors == 0 and child.path == front.path and child.user_id == front.user_id then
+    return { pid = front.pid, path = front.path, cwd = front.cwd, user = front.user_id }
+  elseif child.path == "/usr/bin/login" and #ancestors == 1
+    and ancestors[1].pid == child.pid and ancestors[1].path == child.path and front.pid ~= child.pid then
+    return { pid = front.pid, path = front.path, cwd = front.cwd, user = front.user_id, login = child.pid }
+  end
+end
+
+local function rail_processes(ctx, rail)
+  local shells, running = {}, 0
+  for _, role in ipairs(rail.order) do
+    local block = rail.blocks[role]
+    if block.flavor ~= shell_flavor then return "unverified" end
+    local process = terminal_call(ctx, block.block_id, "process")
+    if not process or type(process.last_exit) == "table" then return "unverified" end
+    local child = process.child
+    if child and (child.path == milo or child.invoked_path == milo) then
+      running = running + 1
+    else
+      shells[role] = restored_shell(process)
+      if not shells[role] then return "unverified" end
+    end
+  end
+  if running == #rail.order then return "running" end
+  if running == 0 then return "restored", shells end
+  return "unverified"
+end
+
+-- Rex's foreground reply doesn't reveal background jobs. Check that the
+-- shell has no children and nothing else still holds its controlling tty.
+-- Never use local process IDs for blocks from another host or account.
+local function quiet_rail(rail, shells, host)
+  if type(host) ~= "string" or host == "" then return false end
+  for _, role in ipairs(rail.order) do
+    if rail.blocks[role].host_id ~= host then return false end
+  end
+  local result = rex.exec({ "/bin/ps", "-A", "-o", "pid=,ppid=,tty=" }, { timeout = 2, env = { LC_ALL = "C" } })
+  if not result or not result.ok or type(result.stdout) ~= "string" then return false end
+  local processes = {}
+  for line in result.stdout:gmatch("[^\r\n]+") do
+    local pid, parent, tty = line:match("^%s*(%d+)%s+(%d+)%s+(%S+)%s*$")
+    if not pid then return false end
+    processes[tonumber(pid)] = { parent = tonumber(parent), tty = tty }
+  end
+  for _, shell in pairs(shells) do
+    local process = processes[shell.pid]
+    if not process or process.tty:match("^%?+$") or process.tty == "-"
+      or (shell.login and (not processes[shell.login] or process.parent ~= shell.login)) then return false end
+    for pid, other in pairs(processes) do
+      if pid ~= shell.pid and pid ~= shell.login
+        and (other.parent == shell.pid or (shell.login and other.parent == shell.login)
+          or other.tty == process.tty) then return false end
+    end
+  end
+  return true
 end
 
 local function rail_code(rail)
@@ -217,7 +291,7 @@ local function pane(role, cwd, shell, origin, trial)
     command = { milo, role, "--shell", shell }
   end
   return rex.layout.block{
-    flavor = terminal .. ".shell", label = origin and peek_label or trial and trial_labels[role] or labels[role],
+    flavor = shell_flavor, label = origin and peek_label or trial and trial_labels[role] or labels[role],
     options = { command = command, cwd = cwd },
   }
 end
@@ -342,6 +416,74 @@ local function fill_rail(ctx, selected, live, cwd, shell, rows)
   end
 end
 
+local unverified_rail = "Milo could not verify what is running in this sidebar. Check its panes and close only shells you no longer need, then run Milo: Arrange This Tab again."
+
+local function rebuild_rail(ctx, window_id, live, shells, source, cwd, shell, selected, layer)
+  local function require_panes(layout)
+    if not next(layout.wanted) then raise("Choose panes in Milo Settings before rebuilding the sidebar.") end
+  end
+  require_panes(selected)
+  if not live.work or not rect_for(layer.layout, source) then raise("Focus a shell outside the sidebar, then try again.") end
+  local server = rex.call("server.status")
+  local host = server and server.host_id
+  local function require_quiet(rail, processes)
+    if not quiet_rail(rail, processes, host) then
+      raise("Milo could not verify that the restored shells are idle. Finish any jobs in them, then try again. If needed, close only the shells you no longer need before arranging.")
+    end
+  end
+  require_quiet(live, shells)
+  local count = #live.order
+  local answer, why = rex.ui.pick{ title = "Rebuild Milo sidebar?", items = {
+    { id = "keep", title = "Keep shells", subtitle = "Choose this if there is anything in them you want to keep." },
+    { id = "rebuild", title = "Rebuild sidebar", icon = "terminal",
+      subtitle = "Closes " .. count .. " restored " .. (count == 1 and "shell" or "shells") .. " and discards their input and scrollback." },
+  } }
+  if not answer and why ~= "cancelled" then
+    raise("Run Milo: Arrange This Tab in a connected Rex app to confirm the rebuild. Without an app, check the restored shells and close only those you no longer need before arranging.")
+  end
+  if answer ~= "rebuild" then return end
+
+  selected = effective(cwd)
+  require_panes(selected)
+  local changed = "The tab or a restored shell changed. Check the sidebar, then run Milo: Arrange This Tab again."
+  local window = tab(ctx)
+  if not window or window.window_id ~= window_id or window.zoomed_block_id then raise(changed) end
+  local current, path, follows = anchor(ctx, window, true)
+  if current ~= source or path ~= cwd or follows ~= shell then raise(changed) end
+  local _, rows = tab_cells(ctx, tiled(window), source)
+
+  -- Recheck the whole rail after confirmation, then recheck again before
+  -- each close: another client can change panes while a Rex call is pending.
+  local work_ctx = { session_id = ctx.session_id, block_id = source }
+  for _, role in ipairs(live.order) do
+    local current, session = tab(work_ctx)
+    if not current or current.window_id ~= window_id or current.zoomed_block_id then raise(changed) end
+    local rail = inspect_rail(tiled(current))
+    if not rail or rail.work ~= live.work or rail.side ~= live.side then raise(changed) end
+    for _, name in ipairs(roles) do
+      if rail.present[name] ~= live.present[name] then raise(changed) end
+    end
+    local verdict, processes = rail_processes(ctx, rail)
+    if verdict ~= "restored" then raise(changed) end
+    for name, info in pairs(processes) do
+      local before = shells[name]
+      if info.pid ~= before.pid or info.login ~= before.login or info.path ~= before.path
+        or info.cwd ~= before.cwd or info.user ~= before.user then raise(changed) end
+    end
+    require_quiet(rail, processes)
+    if type(session.revision) ~= "number" or view(ctx).revision ~= session.revision then raise(changed) end
+    local done, err = close_block(ctx, live.present[role])
+    if not done then raise(err or "Rex could not close a restored shell.") end
+    live.present[role] = nil
+  end
+  window = tab(work_ctx)
+  layer = window and tiled(window)
+  if not layer or window.window_id ~= window_id or window.zoomed_block_id
+    or node_id(layer.layout) ~= live.work then raise(changed) end
+  local made, _, err = make_rail(ctx, selected, cwd, shell, live.work, rows)
+  if not made then raise(err or "Rex could not rebuild the sidebar. Run Milo: Arrange This Tab to try again.") end
+end
+
 local function arrange(ctx, one)
   local window = tab(ctx)
   if not window then raise("no_tab") end
@@ -359,6 +501,15 @@ local function arrange(ctx, one)
   local layer = tiled(window)
   local live, why = inspect_rail(layer)
   if why then raise(why) end
+  if live then
+    local verdict, shells = rail_processes(ctx, live)
+    if verdict == "restored" then
+      if one then raise("Run Milo: Arrange This Tab to rebuild the restored sidebar.") end
+      return rebuild_rail(ctx, window_id, live, shells, source, cwd, shell, selected, layer)
+    elseif verdict ~= "running" then
+      raise(unverified_rail)
+    end
+  end
   local _, rows = tab_cells(ctx, layer, source)
   if live then
     if one then
@@ -675,6 +826,8 @@ local function diagnose(ctx, window, layer)
   if window.zoomed_block_id then return "zoomed" end
   local live, why = inspect_rail(layer)
   if not live then return why or "no_rail" end
+  local verdict = rail_processes(ctx, live)
+  if verdict ~= "running" then return verdict end
   local selected = profile(trial_profile)
   if not selected then return "unavailable" end
 

@@ -33,8 +33,8 @@ const LISTENER: &str = include_str!("listener.lua");
 // mistake a hand-edited ten-row setting for that old default.
 const TEN_ROW_ACTIONS: [u64; 4] =
     [0x97cf_a17d_8775_e350, 0x560c_5b9a_caa8_625d, 0x2438_eceb_d658_d06f, 0x1d1f_8dd4_6b14_c588];
-const TWO_ROW_ACTIONS: [u64; 4] =
-    [0x5b89_2e57_9222_edf1, 0xe209_f094_9daa_1761, 0x87e4_ca78_9f5c_8cc4, 0x362f_dbba_f3ce_0622];
+const TWO_ROW_ACTIONS: [u64; 5] =
+    [0x5b89_2e57_9222_edf1, 0xe209_f094_9daa_1761, 0x87e4_ca78_9f5c_8cc4, 0x362f_dbba_f3ce_0622, 0x188c_0438_8a9c_b066];
 
 pub(super) fn probe_lua(layout: &Layout, executable: &Path) -> String {
     let mut lua = actions_prefix(layout, &lua_path(executable));

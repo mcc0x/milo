@@ -233,6 +233,9 @@ fn report_with_worktree(
             if target.is_some() && matches!(live, LiveSidebar::NotObserved("could not read this Rex tab" | "could not find this Rex tab")) {
                 health.warn("Milo could not inspect the original Rex tab.");
             }
+            if matches!(live, LiveSidebar::Restored) {
+                health.warn("Rex restored the Milo sidebar as shells.");
+            }
             if write_sidebar(&mut out, rail, *scope, live) {
                 health.warn("Live pane sizes differ from your saved layout.");
             }
@@ -428,6 +431,7 @@ enum LiveUsage {
 
 enum LiveSidebar {
     NotObserved(&'static str),
+    Restored,
     Observed { side: Side, width: f64, usage: LiveUsage, expected_rows: Option<u32>, usage_differs: bool },
 }
 
@@ -450,6 +454,8 @@ impl LiveSidebar {
     fn parse(reply: &str) -> Option<Self> {
         let reason = match reply {
             "no_tab" => "could not find this Rex tab",
+            "restored" => return Some(Self::Restored),
+            "unverified" => "pane processes could not be verified; inspect them before closing any panes",
             "no_rail" => "no Milo sidebar in this tab",
             "mixed" => "Milo panes are not in one sidebar",
             "trial" => "a setup trial is active",
@@ -527,7 +533,7 @@ fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSideb
 
     let expected_rows = match &live {
         LiveSidebar::Observed { expected_rows, .. } => *expected_rows,
-        LiveSidebar::NotObserved(_) => None,
+        LiveSidebar::NotObserved(_) | LiveSidebar::Restored => None,
     };
     out.push_str("Saved Usage: ");
     if !saved.chosen(TabPane::Usage) {
@@ -551,6 +557,13 @@ fn write_sidebar(out: &mut String, saved: &Layout, scope: Scope, live: LiveSideb
     let (live_width, usage_differs) = match live {
         LiveSidebar::NotObserved(reason) => {
             writeln!(out, "Live sidebar: not observed ({reason})").unwrap();
+            return false;
+        }
+        LiveSidebar::Restored => {
+            out.push_str(
+                "Live sidebar: restored shells, not Milo panes.\n\
+                 Finish any work in those shells, then run Milo: Arrange This Tab in Rex and confirm the rebuild.\n",
+            );
             return false;
         }
         LiveSidebar::Observed { side, width, usage, usage_differs, .. } => {
@@ -1017,6 +1030,18 @@ mod tests {
         assert!(no_size.contains("Live Usage: row count unavailable"));
         assert!(!no_usage.contains("Autobalance"));
         assert!(!no_size.contains("Autobalance"));
+    }
+
+    #[test]
+    fn doctor_distinguishes_restored_shells_from_an_unverified_sidebar() {
+        let saved = Layout::default();
+        let restored = sidebar(&saved, Scope::Global, "restored");
+        assert!(restored.contains("Live sidebar: restored shells, not Milo panes."));
+        assert!(restored.contains("Milo: Arrange This Tab in Rex and confirm the rebuild."));
+        assert!(!restored.contains("Autobalance"));
+        let unknown = sidebar(&saved, Scope::Global, "unverified");
+        assert!(unknown.contains("pane processes could not be verified"));
+        assert!(!unknown.contains("confirm the rebuild"));
     }
 
     #[test]

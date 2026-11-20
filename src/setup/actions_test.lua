@@ -3,7 +3,7 @@ local file = assert(io.open(assert(arg[1]), "r"))
 local code = file:read("*a")
 file:close()
 local prefix = [[
-local milo, column_width, outline_share, usage_rows = "milo", 0.2, 0.7, 2
+local milo, column_width, outline_share, usage_rows = "/test/bin/milo", 0.2, 0.7, 2
 local chosen = { outline = true, history = true, usage = true }
 local trial_profile = "v1 l 0.37 0.7 10 huo 110 230000 770000 0"
 ]]
@@ -13,6 +13,9 @@ local editor = { block_id = "block:editor", creator_name = "editor" }
 local outline = { block_id = "block:outline", label = "milo:outline", creator_name = terminal }
 local usage = { block_id = "block:usage", label = "milo:usage", creator_name = terminal }
 local history = { block_id = "block:history", label = "milo:history", creator_name = terminal }
+for _, block in ipairs{ outline, usage, history } do
+  block.flavor, block.host_id = terminal .. ".shell", "host:local"
+end
 local function leaf(block, rect)
   return { block_id = block.block_id, rect = rect or {0, 0, 1, 1} }
 end
@@ -23,22 +26,26 @@ local rail = tree("vertical", 0.27, leaf(usage), tree("vertical", 0.4, leaf(hist
 local work = tree("vertical", 0.6, leaf(shell), leaf(editor))
 local tiled = { kind = "tiled", layout = tree("horizontal", 0.68, work, rail), blocks = { shell, editor, usage, history, outline } }
 local window = { window_id = "window:work", focused_block_id = shell.block_id, layers = { tiled } }
-local session = { active_window_id = window.window_id, windows = { window } }
+local session = { active_window_id = window.window_id, windows = { window }, revision = 1 }
 local ctx = { session_id = "session:1", block_id = shell.block_id }
 local actions, commands, closed, focus, floats, splits = {}, {}, {}, {}, {}, {}
 local sizes, profile_reply = {}, { stdout = "", ok = true }
 local relabeled = {}
 local named, title_reply, rename_reply, rename_error = {}, { ok = true, stdout = "" }, { revision = 2 }, nil
+local running = { child = { path = "/test/bin/milo", pid = 80 } }
+local processes = { [outline.block_id] = running, [history.block_id] = running, [usage.block_id] = running }
+local pick_answer, on_close, ps_reply
 rex = {
   action = function(action) actions[action.name] = action.run end,
   exec = function(argv)
+    if argv[1] == "/bin/ps" then return ps_reply end
     commands[#commands + 1] = argv
     if argv[2] == "tab-title" then return title_reply end
     return argv[3] == "read" and profile_reply or { ok = true, stdout = "" }
   end,
   call = function(name, args)
     if name == terminal .. ".process" then
-      assert(args.block_id == shell.block_id)
+      if args.block_id ~= shell.block_id then return processes[args.block_id] end
       return { foreground = { argv0 = "editor", cwd = "/unrelated" },
         ancestors = { { argv0 = "-zsh", cwd = "/my project" } } }
     elseif name == terminal .. ".size" then
@@ -46,11 +53,15 @@ rex = {
     elseif name == "block.close" then
       assert(args.keep_last)
       closed[#closed + 1] = args.block_id
+      if on_close then on_close(args.block_id) end
+    elseif name == "server.status" then
+      return { host_id = "host:local" }
     elseif name == "session.create" or name == "session.destroy" or name == "session.set_label" then
       error("an action changed a session through " .. name)
     end
     return {}
   end,
+  ui = { pick = function(args) return assert(pick_answer, "unexpected picker")(args) end },
   session = {
     view = function() return session end,
     new_split = function(args)
@@ -396,3 +407,124 @@ assert(not ok and why == "Could not name this session." and #named == 2)
 title_reply.stdout, rename_reply, rename_error = "milo\n", nil, "not_found"
 ok, why = pcall(actions.milo_name_session, ctx)
 assert(not ok and why == "not_found" and #named == 3)
+
+local function mac_shell(pid, login)
+  local wrapper = { pid = login, name = "login", path = "/usr/bin/login", user_id = 0 }
+  return { child = wrapper, ancestors = { wrapper },
+    foreground = { pid = pid, user_id = 501, name = "zsh", argv0 = "-zsh", path = "/bin/zsh", cwd = "/my project" } }
+end
+local linux_shell = { pid = 33, user_id = 501, name = "bash", argv0 = "-bash",
+  path = "/usr/bin/bash", cwd = "/my project" }
+local function restore_rail()
+  tiled.layout, tiled.blocks = saved_rail, { shell, editor, usage, history, outline }
+  processes[outline.block_id] = mac_shell(11, 10)
+  processes[history.block_id] = mac_shell(21, 20)
+  processes[usage.block_id] = { foreground = linux_shell, child = linux_shell }
+  ps_reply = { ok = true, stdout = "10 1 ttys000\n11 10 ttys000\n20 1 ttys001\n21 20 ttys001\n33 1 pts/2\n" }
+end
+
+restore_rail()
+local close_count, add_count = #closed, #splits
+assert(observe() == "restored") -- Doctor is read-only and does not compare shell sizes.
+local function aborted(message, action)
+  local done, err = pcall(actions[action or "milo_layout"], ctx)
+  assert(not done and err:find(message, 1, true), tostring(err))
+  assert(#closed == close_count and #splits == add_count)
+end
+local picked = 0
+local function inspect_prompt(prompt)
+  picked = picked + 1
+  assert(prompt.title == "Rebuild Milo sidebar?")
+  assert(prompt.items[1].id == "keep" and prompt.items[2].id == "rebuild")
+  assert(prompt.items[2].subtitle:find("Closes 3 restored shells", 1, true))
+  assert(prompt.items[2].subtitle:find("discards their input and scrollback", 1, true))
+end
+pick_answer = function(prompt) inspect_prompt(prompt); return nil, "cancelled" end
+actions.milo_layout(ctx)
+pick_answer = function(prompt) inspect_prompt(prompt); return "keep" end
+actions.milo_layout(ctx)
+pick_answer = function(prompt) inspect_prompt(prompt); return nil, "no_client" end
+aborted("in a connected Rex app to confirm")
+aborted("Run Milo: Arrange This Tab to rebuild", "milo_outline")
+assert(picked == 3)
+
+-- A busy, nested, unreadable, or mixed rail does not ask to close anything.
+local idle_outline = processes[outline.block_id]
+local function unsupported(process)
+  processes[outline.block_id] = process
+  assert(observe() == "unverified")
+  aborted("could not verify what is running")
+  assert(picked == 3)
+end
+unsupported(nil)
+unsupported(running)
+unsupported{ child = idle_outline.child, ancestors = { idle_outline.foreground, idle_outline.child },
+  foreground = { pid = 12, name = "sleep", path = "/bin/sleep", argv0 = "sleep", cwd = "/my project", user_id = 501 } }
+unsupported{ child = idle_outline.child, ancestors = { idle_outline.foreground, idle_outline.child },
+  foreground = { pid = 12, name = "zsh", path = "/bin/zsh", argv0 = "-zsh", cwd = "/my project", user_id = 501 } }
+processes[outline.block_id] = idle_outline
+outline.flavor = terminal .. ".other"
+aborted("could not verify what is running")
+outline.flavor = terminal .. ".shell"
+outline.host_id = "host:remote"
+aborted("could not verify that the restored shells are idle")
+outline.host_id = "host:local"
+
+-- Rex still reports the shell in the foreground with a background job.
+local quiet_ps = ps_reply.stdout
+ps_reply.stdout = quiet_ps .. "22 21 ??\n"
+aborted("could not verify that the restored shells are idle")
+ps_reply.stdout = quiet_ps .. "22 1 ttys001\n"
+aborted("could not verify that the restored shells are idle")
+ps_reply.stdout = quiet_ps
+assert(picked == 3)
+
+-- Recheck the identity, membership, and any newly started jobs after the picker yields.
+pick_answer = function() processes[outline.block_id] = mac_shell(51, 50); return "rebuild" end
+aborted("a restored shell changed")
+processes[outline.block_id] = idle_outline
+pick_answer = function() outline.label = "user shell"; return "rebuild" end
+aborted("a restored shell changed")
+outline.label = "milo:outline"
+pick_answer = function() ps_reply.stdout = quiet_ps .. "22 21 ttys001\n"; return "rebuild" end
+aborted("could not verify that the restored shells are idle")
+ps_reply.stdout = quiet_ps
+
+local function remove(node, id)
+  if not node.split then
+    if node.block_id ~= id then return node end
+    return
+  end
+  local split = node.split
+  local before, after = remove(split.before, id), remove(split.after, id)
+  if not before then return after end
+  if not after then return before end
+  return tree(split.direction, split.ratio, before, after)
+end
+on_close = function(id)
+  tiled.layout = remove(tiled.layout, id)
+  for i, block in ipairs(tiled.blocks) do
+    if block.block_id == id then table.remove(tiled.blocks, i); break end
+  end
+  session.revision = session.revision + 1
+end
+
+-- Confirmation replaces only those three shells and rebuilds against the
+-- preserved work area, even if the action was run from a shell being closed.
+pick_answer = function(prompt)
+  inspect_prompt(prompt)
+  profile_reply.stdout = "v1 r 0.32 0.7 2 uho 111 438000 292000 270000"
+  return "rebuild"
+end
+actions.milo_layout{ session_id = ctx.session_id, block_id = usage.block_id }
+assert(#closed == close_count + 3 and #splits == add_count + 1)
+assert(closed[close_count + 1] == usage.block_id and closed[close_count + 2] == history.block_id
+  and closed[close_count + 3] == outline.block_id)
+assert(#tiled.blocks == 2 and tiled.blocks[1] == shell and tiled.blocks[2] == editor)
+made = splits[#splits]
+assert(made.anchor_id == work.split.split_id and made.side == "after")
+near(1 - made.ratio, .32)
+near(1 - made.layout.ratio, .438)
+near(made.layout.before.ratio * made.layout.ratio, .27)
+assert(made.layout.before.before.label == usage.label and made.layout.before.after.label == history.label
+  and made.layout.after.label == outline.label)
