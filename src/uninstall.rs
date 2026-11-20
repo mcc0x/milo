@@ -124,7 +124,7 @@ impl Installation {
             return Err(unsupported(path, "this is a checkout or build product, not an installed copy"));
         }
         if let Some(keg) = Brew::keg_for(path) {
-            return Brew::find(path, keg).map(Self::Homebrew);
+            return Brew::find(path, keg, homebrew_bin).map(Self::Homebrew);
         }
         // Never interpret an unexpected package-manager layout as a custom standalone install.
         if path.ancestors().filter_map(Path::file_name).any(|name| name == "Cellar" || name == "Caskroom")
@@ -178,14 +178,16 @@ impl Brew {
             .is_some_and(|tap| tap.is(TAP))
     }
 
-    fn find(path: &Path, keg: &Path) -> Result<Self, String> {
+    fn find(path: &Path, keg: &Path, homebrew_bin: &Path) -> Result<Self, String> {
+        // A receipt describes a keg, not a trustworthy program to execute.
+        let cellar = homebrew_bin.parent().and_then(|prefix| prefix.join("Cellar").canonicalize().ok());
+        if cellar.is_none() || cellar.as_deref() != keg.ancestors().nth(2) {
+            return Err(unsupported(path, "this is not the configured Homebrew Cellar; use your package manager"));
+        }
         if !Self::official(keg) {
             return Err(unsupported(path, "the Homebrew receipt does not identify the official Milo formula"));
         }
-        // Use the brew belonging to the Cellar, not another installation on PATH.
-        // This also covers Intel layouts with the Cellar in /usr/local/Homebrew.
-        let repository = keg.ancestors().nth(3).ok_or_else(|| unsupported(path, "could not locate Homebrew"))?;
-        let executable = repository.join("bin/brew");
+        let executable = homebrew_bin.join("brew");
         let output = brew_command(&executable).args(["--prefix", "--installed", FORMULA]).output().map_err(|e| {
             unsupported(
                 path,
@@ -354,7 +356,8 @@ esac
         let (f, prefix) = brew_fixture();
         let path = prefix.join("Cellar/milo/1/bin/milo");
         let running = id(&path);
-        let install = standalone(&path, running, &f.root, None).unwrap();
+        assert!(matches!(standalone(&path, running, &f.root, None), Err(e) if e.contains("configured Homebrew Cellar")));
+        let install = Installation::find(&path, running, Some(&f.root), None, &prefix.join("bin")).unwrap();
         assert!(matches!(install, Installation::Homebrew(_)));
         install.remove(&path, running).unwrap();
         assert!(!path.exists());
@@ -366,15 +369,16 @@ esac
         let (f, prefix) = brew_fixture();
         let path = prefix.join("Cellar/milo/1/bin/milo");
         let running = id(&path);
-        let install = standalone(&path, running, &f.root, path.parent()).unwrap();
+        let classify = || Installation::find(&path, running, Some(&f.root), path.parent().map(Path::as_os_str), &prefix.join("bin"));
+        let install = classify().unwrap();
         fs::remove_file(prefix.join("opt/milo")).unwrap();
         symlink("../Cellar/milo/2", prefix.join("opt/milo")).unwrap();
         assert!(install.remove(&path, running).is_err());
-        assert!(matches!(standalone(&path, running, &f.root, path.parent()), Err(e) if e.contains("not the active")));
+        assert!(matches!(classify(), Err(e) if e.contains("not the active")));
         symlink("../Cellar/milo/1", prefix.join("opt/temp")).unwrap();
         fs::rename(prefix.join("opt/temp"), prefix.join("opt/milo")).unwrap();
         f.write("brew prefix/Cellar/milo/1/INSTALL_RECEIPT.json", r#"{"source":{"tap":"external/milo"}}"#);
-        assert!(matches!(standalone(&path, running, &f.root, path.parent()), Err(e) if e.contains("receipt")));
+        assert!(matches!(classify(), Err(e) if e.contains("receipt")));
         assert!(path.exists());
     }
 
