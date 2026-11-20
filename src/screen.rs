@@ -2,6 +2,7 @@
 
 use std::io::{self, Write};
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use crate::picture::Picture;
 use crate::width::{CellWidth, cell_width, char_width, str_width};
@@ -185,6 +186,7 @@ const BLANK: Cell = Cell::new(' ', Style::PLAIN);
 /// Trailing half of a double-width character.
 const CONT: Glyph = Glyph(0);
 const SYNC_ON: &[u8] = b"\x1b[?2026h";
+const PICTURE_RESIZE_DELAY: Duration = Duration::from_millis(80);
 
 /// Where a picture sits on the screen, in cells.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,6 +208,8 @@ struct Pictures {
     wanted: Vec<Placement>,
     uploaded: Vec<Placement>,
     hidden: bool,
+    /// The end of the current resize burst, while picture uploads are held.
+    resize_due: Option<Instant>,
     /// Data for pictures in `wanted` that are not already on the terminal.
     data: Vec<u8>,
 }
@@ -213,7 +217,15 @@ struct Pictures {
 impl Default for Pictures {
     fn default() -> Self {
         // Most terminals draw a cell about twice as tall as it is wide.
-        Self { able: None, cell: (8, 16), wanted: Vec::new(), uploaded: Vec::new(), hidden: false, data: Vec::new() }
+        Self {
+            able: None,
+            cell: (8, 16),
+            wanted: Vec::new(),
+            uploaded: Vec::new(),
+            hidden: false,
+            resize_due: None,
+            data: Vec::new(),
+        }
     }
 }
 
@@ -287,7 +299,26 @@ impl Screen {
         for old in self.pictures.uploaded.drain(..) {
             delete_picture(&mut self.out, old.id, 'I');
         }
+        self.pictures.wanted.clear();
+        self.pictures.data.clear();
         self.pictures.hidden = false;
+    }
+
+    pub(crate) fn resize_interactive(&mut self, w: usize, h: usize, now: Instant) {
+        // The first picture can go out immediately. Once erased, wait for
+        // the last resize before encoding and uploading it all over again.
+        if self.pictures.resize_due.is_some() || !self.pictures.uploaded.is_empty() {
+            self.pictures.resize_due = Some(now + PICTURE_RESIZE_DELAY);
+        }
+        self.resize(w, h);
+    }
+
+    pub(crate) fn picture_redraw_due(&self) -> Option<Instant> {
+        self.pictures.resize_due
+    }
+
+    pub(crate) fn resume_pictures(&mut self) {
+        self.pictures.resize_due = None;
     }
 
     pub fn clear(&mut self) {
@@ -340,6 +371,9 @@ impl Screen {
     /// tall, in the frame being drawn. Its data goes to the terminal once.
     pub fn show_picture(&mut self, picture: &Picture, x: usize, y: usize, cols: usize, rows: usize) {
         let pictures = &mut self.pictures;
+        if pictures.resize_due.is_some() {
+            return;
+        }
         let at = Placement { id: picture.id, x, y, cols, rows };
         if let Some(wanted) = pictures.wanted.iter_mut().find(|wanted| wanted.id == at.id) {
             *wanted = at;
@@ -859,6 +893,36 @@ mod tests {
         let replaced = frame(&mut screen);
         assert!(replaced.contains(&format!("a=d,d=I,i={},", a.id)));
         assert!(!replaced.contains("a=t") && replaced.contains(&format!("a=p,i={},", b.id)));
+    }
+
+    #[test]
+    fn interactive_resize_repaints_text_and_uploads_only_the_settled_picture() {
+        let picture = Picture::sample(40, 20);
+        let start = Instant::now();
+        let mut screen = Screen::new();
+        screen.resize_interactive(20, 6, start);
+        screen.show_picture(&picture, 2, 1, 5, 2);
+        assert!(screen.picture_redraw_due().is_none());
+        assert_eq!(frame(&mut screen).matches("a=t,f=100,").count(), 1);
+
+        for (step, width) in (21..=23).enumerate() {
+            let now = start + Duration::from_millis(10 * step as u64);
+            screen.resize_interactive(width, 6, now);
+            assert_eq!(screen.picture_redraw_due(), Some(now + PICTURE_RESIZE_DELAY));
+            screen.put(0, 0, width, "heading", Style::PLAIN);
+            screen.show_picture(&picture, width - 7, 1, 5, 2);
+            let resized = frame(&mut screen);
+            assert!(resized.contains("heading"), "{resized:?}");
+            assert!(!resized.contains("a=t") && !resized.contains("a=p"), "{resized:?}");
+            assert_eq!(resized.matches("a=d,d=I,").count(), usize::from(step == 0));
+        }
+
+        screen.resume_pictures();
+        screen.show_picture(&picture, 16, 1, 5, 2);
+        let settled = frame(&mut screen);
+        assert_eq!(settled.matches("a=t,f=100,").count(), 1);
+        assert!(settled.contains("\x1b[2;17H\x1b_Ga=p,i=1,c=5,r=2,"), "{settled:?}");
+        assert!(frame(&mut screen).is_empty());
     }
 
     #[test]

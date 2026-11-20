@@ -486,6 +486,43 @@ fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
 }
 
 #[test]
+fn a_picture_returns_after_resize_without_further_input() {
+    const PLACE: &str = "\x1b_Ga=p,";
+    const UPLOAD: &str = "\x1b_Ga=t,";
+    let project = Project::new();
+    fs::write(project.0.join("project/resize.png"), include_bytes!("../src/usage/marks/codex.png")).unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut terminal = Terminal::run(command.args(["view", "resize.png"]));
+    terminal.until("\x1b_Gi=31,s=1,v=1,a=q");
+    terminal.master.write_all(b"\x1b_Gi=31;OK\x1b\\").unwrap();
+    terminal.until(PLACE);
+    // Let the initial 120 ms watcher recheck finish before exercising the idle deadline.
+    std::thread::sleep(Duration::from_millis(200));
+    terminal.bytes.clear();
+
+    let size = libc::winsize { ws_row: 24, ws_col: 72, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: The descriptor and the size record both remain valid for ioctl.
+    assert_eq!(unsafe { libc::ioctl(terminal.slave.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) }, 0);
+    let pid = i32::try_from(terminal.child.id()).unwrap();
+    // This PTY is not the child's controlling terminal, so notify it explicitly.
+    // SAFETY: This is the test's still-running child, not a process group.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGWINCH) }, 0);
+    // The fallback file check is no sooner than every two seconds.
+    let until = Instant::now() + Duration::from_millis(1500);
+    while !terminal.output().contains(PLACE) {
+        assert!(terminal.read(until), "picture did not return while idle: {:?}", terminal.output());
+    }
+    let output = terminal.output();
+    let (_, resized) = output.split_once("\x1b[2J").expect("resize must erase the display");
+    let (text, settled) = resized.split_once("\x1b[?2026l").expect("resize must flush the text frame");
+    assert!(text.contains("resize.png") && !text.contains(UPLOAD) && !text.contains(PLACE), "{text:?}");
+    assert_eq!(settled.matches(UPLOAD).count(), 1);
+    assert!(settled.contains(PLACE));
+    terminal.master.write_all(b"q").unwrap();
+    assert!(terminal.wait_for_exit().success());
+}
+
+#[test]
 fn a_failed_open_restores_the_terminal_before_printing_the_error() {
     let project = Project::new();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));

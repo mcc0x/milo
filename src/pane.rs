@@ -397,11 +397,14 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         if term::RESIZED.swap(false, Ordering::Relaxed) || screen.w == 0 {
             let (w, h) = terminal.size();
-            screen.resize(w, h);
+            screen.resize_interactive(w, h, Instant::now());
             pointer = None;
             if !Page::fits(&screen) {
                 help = None;
             }
+            redraw = true;
+        } else if screen.picture_redraw_due().is_some_and(|due| due <= Instant::now()) {
+            screen.resume_pictures();
             redraw = true;
         }
         if std::mem::take(&mut redraw) {
@@ -434,6 +437,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
             .map(|pace| pace.until_look(now))
             .into_iter()
             .chain(frame_due.map(|due: Instant| due.saturating_duration_since(now)))
+            .chain(screen.picture_redraw_due().map(|due| due.saturating_duration_since(now)))
             .min();
         let timeout_ms = wait.map_or(-1, milliseconds);
         match terminal.wait(timeout_ms, watcher.fd(), pane.external_fd()) {
