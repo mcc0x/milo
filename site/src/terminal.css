@@ -262,7 +262,7 @@
   .hero { width: calc(100% - 1.5rem); padding-block: .9rem; }
   /* Room for two lines, so a longer caption moves nothing below it. */
   .demo-footer { grid-template-columns: minmax(0, 1fr) auto; column-gap: .35rem; }
-  .caption { grid-column: 1; min-height: 3.1rem; font-size: 1rem; text-wrap: balance; }
+  .caption { grid-column: 1; min-height: calc(2lh + .9rem); font-size: 1rem; text-wrap: balance; }
   .demo-footer:has(.demo-playback:not([hidden])) .caption { text-align: start; }
   .demo-footer .demo-playback { grid-column: 2; }
   .terminal { --pane-x: .65rem; --line: 1.45em; display: block; border-radius: .65rem; font-size: clamp(.72rem, 3.05vw, .8125rem); line-height: 1.45; }
