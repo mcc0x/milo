@@ -74,7 +74,10 @@ impl Draft {
         let write = || {
             let dir = private_dir(&self.state, "drafts")?;
             let path = self.path();
-            let (temp, mut file) = Temp::create(dir.join(format!(".draft-{}", std::process::id())))?;
+            let staged = dir.join(format!(".draft-{}", std::process::id()));
+            // A process of the same number may have died while writing one.
+            let _ = fs::remove_file(&staged);
+            let (temp, mut file) = Temp::create(staged)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             temp.replace(&path)

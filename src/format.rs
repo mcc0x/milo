@@ -7,12 +7,13 @@
 //! so a project cannot choose the program, and nothing is installed or fetched.
 
 use std::ffi::{OsStr, OsString};
-use std::io::{Read, Write as _};
+use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::term;
@@ -22,6 +23,8 @@ const WAIT: Duration = Duration::from_secs(10);
 /// More formatted text than this cannot be a file milo shows.
 const OUTPUT_LIMIT: usize = 2 << 20;
 const ERROR_LIMIT: usize = 4096;
+/// How long a stopped formatter's pipes are given to close.
+const PIPE_GRACE: Duration = Duration::from_millis(500);
 /// The longest part of a formatter's complaint that is shown.
 const MESSAGE_WIDTH: usize = 100;
 
@@ -215,21 +218,30 @@ fn arguments(tool: &Tool, draft: &Draft<'_>) -> Vec<OsString> {
     args
 }
 
+/// What a pipe carried, up to a limit, and whether that was all of it.
+struct Piped {
+    kept: Vec<u8>,
+    whole: bool,
+}
+
 /// Reads to the end so the writer is never left waiting, keeping at most `limit` bytes.
-fn read_capped(mut pipe: impl Read, limit: usize) -> Option<Vec<u8>> {
-    let mut kept = Vec::new();
+fn read_capped(pipe: Option<impl io::Read>, limit: usize) -> Piped {
+    let mut read = Piped { kept: Vec::new(), whole: true };
+    let Some(mut pipe) = pipe else { return Piped { whole: false, ..read } };
     let mut chunk = [0; 1 << 14];
-    let mut whole = true;
     loop {
         match pipe.read(&mut chunk) {
             Ok(0) => break,
-            Ok(read) if whole && kept.len() + read <= limit => kept.extend_from_slice(&chunk[..read]),
-            Ok(_) => whole = false,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(count) => {
+                let room = limit - read.kept.len();
+                read.kept.extend_from_slice(&chunk[..count.min(room)]);
+                read.whole &= count <= room;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
-    whole.then_some(kept)
+    read
 }
 
 /// The first line a formatter wrote about its failure, without anything that could move the cursor.
@@ -257,33 +269,57 @@ fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) ->
         .process_group(0)
         .spawn()
         .map_err(|_| Failure::NotStarted)?;
-    let (mut stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
-    let (status, out, err) = std::thread::scope(|scope| {
-        // Written from its own thread: a formatter may answer before it has read everything.
-        scope.spawn(|| stdin.take().map(|mut pipe| pipe.write_all(draft.text.as_bytes())));
-        let out = scope.spawn(|| stdout.and_then(|pipe| read_capped(pipe, OUTPUT_LIMIT)));
-        let err = scope.spawn(|| stderr.and_then(|pipe| read_capped(pipe, ERROR_LIMIT)));
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline && !term::TERMINATED.load(Ordering::Relaxed) => {
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                _ => break None,
-            }
-        };
-        if status.is_none() {
+    let group = libc::pid_t::try_from(child.id()).ok().filter(|&group| group > 1);
+    let stop = || {
+        if let Some(group) = group {
             // SAFETY: The child leads a process group of its own, so this reaches only it and what it started.
-            unsafe { libc::killpg(libc::pid_t::try_from(child.id()).unwrap_or(0).max(1), libc::SIGKILL) };
-            let _ = child.wait();
+            unsafe { libc::killpg(group, libc::SIGKILL) };
         }
-        (status, out.join().ok().flatten(), err.join().ok().flatten())
-    });
+    };
+    // Written from its own thread: a formatter may answer before it has read everything.
+    if let Some(mut pipe) = child.stdin.take() {
+        let text = draft.text.to_owned();
+        std::thread::spawn(move || pipe.write_all(text.as_bytes()));
+    }
+    // Read from threads that can be left behind: a helper that outlives the
+    // formatter and keeps a pipe open must not keep the pane waiting.
+    let (send, receive) = mpsc::channel();
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let answer = send.clone();
+    std::thread::spawn(move || answer.send((true, read_capped(out, OUTPUT_LIMIT))));
+    std::thread::spawn(move || send.send((false, read_capped(err, ERROR_LIMIT))));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline && !term::TERMINATED.load(Ordering::Relaxed) => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            _ => break None,
+        }
+    };
+    if status.is_none() {
+        stop();
+        let _ = child.wait();
+    }
+    let (mut out, mut err) = (None, None);
+    for _ in 0..2 {
+        // Once the formatter is stopped its pipes close at once, unless something escaped the group.
+        let patience = if status.is_some() { deadline.saturating_duration_since(Instant::now()) } else { PIPE_GRACE };
+        match receive.recv_timeout(patience.max(PIPE_GRACE)) {
+            Ok((true, read)) => out = Some(read),
+            Ok((false, read)) => err = Some(read),
+            Err(_) => {
+                stop();
+                return Err(Failure::TimedOut);
+            }
+        }
+    }
     let status = status.ok_or(Failure::TimedOut)?;
     if !status.success() {
-        return Err(Failure::Refused(complaint(&err.unwrap_or_default())));
+        return Err(Failure::Refused(complaint(&err.map(|read| read.kept).unwrap_or_default())));
     }
-    let text = out.and_then(|bytes| String::from_utf8(bytes).ok()).ok_or(Failure::NoText)?;
+    let text =
+        out.filter(|read| read.whole).and_then(|read| String::from_utf8(read.kept).ok()).ok_or(Failure::NoText)?;
     // An empty answer to text that was not empty is a formatter that printed elsewhere.
     if text.contains('\0') || text.trim().is_empty() != draft.text.trim().is_empty() {
         return Err(Failure::NoText);
@@ -432,8 +468,9 @@ pub(crate) mod tests {
         assert_eq!(format(&f, &bin, "a.go", &big).unwrap().len(), 1 << 20);
         stand_in(&bin, "gofmt", "cat >/dev/null; head -c 4194304 /dev/zero | tr '\\0' y");
         assert_eq!(format(&f, &bin, "a.go", "x").unwrap_err(), "gofmt gave back nothing usable.");
+        // Only the start of a long complaint is kept, and its first line is cut to fit a row.
         stand_in(&bin, "gofmt", "cat >/dev/null; head -c 1048576 /dev/zero | tr '\\0' e >&2; exit 1");
-        assert_eq!(format(&f, &bin, "a.go", "x").unwrap_err(), "gofmt could not format this.");
+        assert_eq!(format(&f, &bin, "a.go", "x").unwrap_err(), format!("gofmt: {}", "e".repeat(MESSAGE_WIDTH)));
     }
 
     #[test]
@@ -464,19 +501,24 @@ pub(crate) mod tests {
     fn a_formatter_that_does_not_finish_is_stopped_with_what_it_started() {
         let f = Fixture::folder();
         let bin = f.root.join("bin");
-        // The helper keeps the pipes open, so stopping only the formatter would wait for it.
-        stand_in(&bin, "gofmt", "sleep 600 &\necho $! > helper\nsleep 600");
-        let Support::Ready(tool, program) = support("a.go", Some(bin.as_os_str())) else { panic!("not found") };
-        let started = Instant::now();
-        let failure = run_within(tool, &program, &draft(&f, "a.go", "x"), Duration::from_millis(300)).err().unwrap();
-        assert_eq!(failure.sentence(tool.name), "gofmt took too long and was stopped.");
-        assert!(started.elapsed() < Duration::from_secs(30));
-        let helper: libc::pid_t = fs::read_to_string(f.root.join("helper")).unwrap().trim().parse().unwrap();
-        let gone = (0..500).any(|_| {
-            std::thread::sleep(Duration::from_millis(10));
-            // SAFETY: Signal 0 only asks whether the process still exists.
-            unsafe { libc::kill(helper, 0) != 0 }
-        });
-        assert!(gone, "the helper outlived its formatter");
+        // First the formatter itself never ends. Then it ends at once, but a
+        // helper it started keeps its pipes open. Stopping only the formatter
+        // would leave the pane waiting on the helper both times.
+        for script in ["sleep 600 &\necho $! > helper\nsleep 600", "cat\nsleep 600 &\necho $! > helper"] {
+            stand_in(&bin, "gofmt", script);
+            let Support::Ready(tool, program) = support("a.go", Some(bin.as_os_str())) else { panic!("not found") };
+            let started = Instant::now();
+            let failure =
+                run_within(tool, &program, &draft(&f, "a.go", "x"), Duration::from_millis(300)).err().unwrap();
+            assert_eq!(failure.sentence(tool.name), "gofmt took too long and was stopped.");
+            assert!(started.elapsed() < Duration::from_secs(30));
+            let helper: libc::pid_t = fs::read_to_string(f.root.join("helper")).unwrap().trim().parse().unwrap();
+            let gone = (0..500).any(|_| {
+                std::thread::sleep(Duration::from_millis(10));
+                // SAFETY: Signal 0 only asks whether the process still exists.
+                unsafe { libc::kill(helper, 0) != 0 }
+            });
+            assert!(gone, "the helper outlived its formatter: {script:?}");
+        }
     }
 }

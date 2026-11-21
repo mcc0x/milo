@@ -394,7 +394,7 @@ The reader only reads until you ask it to edit. Press `e`, or open the file with
 
 The draft is yours alone until you save: the file on disk is not touched by typing, pasting, undoing or formatting. While you edit, the reader shows the draft with its code colours and no change marks. When you stop, it shows the file again at the same lines, with a fresh diff, and Outline still has the file selected.
 
-The editor is for small changes. It has one cursor and no selection or search. The cursor moves one character at a time, so an accent written as a separate mark takes a key press of its own.
+The editor is for small changes. It has one cursor and no selection or search, and it edits a file that exists: it does not make a new one. The cursor moves one character at a time, so an accent written as a separate mark takes a key press of its own.
 
 ### What can be edited
 
@@ -435,7 +435,7 @@ A save writes in place, not through a temporary file; that is what keeps the fil
 
 ### Leaving unsaved changes
 
-`Esc`, `Ctrl-Q` and `Ctrl-C` stop editing. With unsaved changes they ask `Unsaved edits: s save · d discard · Esc back` first. `q` is a letter while you edit.
+`Esc`, `Ctrl-Q` and `Ctrl-C` stop editing. With unsaved changes they ask `Unsaved edits: s save · d discard · Esc back` first. `q` is a letter while you edit. If the terminal has stopped taking output, `Ctrl-C` ends the reader at once, as it always has; the draft is then kept as described next.
 
 A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. One draft is kept for each file, and a later one replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
 

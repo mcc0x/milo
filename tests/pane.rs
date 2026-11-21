@@ -1255,8 +1255,20 @@ fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
     fs::write(project.0.join("project/page.txt"), "data\n").unwrap();
     let block = "block:11111111-1111-1111-1111-111111111111";
     let rex = project.0.join("rex");
-    fs::write(&rex, format!("#!/bin/sh\ncat >/dev/null\necho open >> \"$HOME/opens\"\necho {block}\n")).unwrap();
-    fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\ncat >/dev/null\necho open >> \"$HOME/opens\"\necho {block}\n"
+    );
+    fs::write(&rex, script).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+    // A sibling test's new process can hold the script open for writing for a moment.
+    let until = Instant::now() + TEST_WAIT;
+    while let Err(error) = project.command(&rex).arg("ready").status() {
+        assert!(
+            error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < until,
+            "cannot run stand-in rex: {error}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
     let mut paths = vec![project.0.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
     let in_rex = |args: &[&str], block: &str| {
@@ -1302,10 +1314,12 @@ fn formatting_runs_an_installed_formatter_on_the_draft_and_saves_only_when_asked
     let project = Project::new();
     let file = project.0.join("project/a.go");
     fs::write(&file, "package main\n").unwrap();
+    // A program that already exists stands in for the formatter: `rev` turns each line
+    // around, and a link to it is not a file some other test's new process could hold open.
+    let rev = ["/usr/bin/rev", "/bin/rev"].into_iter().find(|rev| Path::new(rev).is_file()).expect("no rev");
     let tools = project.0.join("tools");
     fs::create_dir(&tools).unwrap();
-    fs::write(tools.join("gofmt"), "#!/bin/sh\ntr a-z A-Z\n").unwrap();
-    fs::set_permissions(tools.join("gofmt"), fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(rev, tools.join("gofmt")).unwrap();
     let mut paths = vec![tools.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
 
@@ -1315,17 +1329,17 @@ fn formatting_runs_an_installed_formatter_on_the_draft_and_saves_only_when_asked
     tty.shows("^F format");
     tty.master.write_all(b"\x06").unwrap();
     tty.shows("Formatted with gofmt");
-    tty.shows("PACKAGE MAIN");
+    tty.shows("niam egakcap");
     tty.shows("unsaved");
     assert_eq!(fs::read_to_string(&file).unwrap(), "package main\n");
     tty.master.write_all(b"\x1a").unwrap();
     tty.shows("package main");
     tty.hides("unsaved");
     tty.master.write_all(b"\x06").unwrap();
-    tty.shows("PACKAGE MAIN");
+    tty.shows("niam egakcap");
     tty.master.write_all(b"\x13").unwrap();
     tty.shows("Saved");
-    assert_eq!(fs::read_to_string(&file).unwrap(), "PACKAGE MAIN\n");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "niam egakcap\n");
     // Esc and a letter sent together would read as one key, so Ctrl-Q stops editing here.
     tty.master.write_all(b"\x11q").unwrap();
     assert!(tty.wait_for_exit().success());
@@ -1339,19 +1353,29 @@ fn formatting_runs_an_installed_formatter_on_the_draft_and_saves_only_when_asked
     tty.shows("Not installed: gofmt.");
     tty.master.write_all(b"\x11q").unwrap();
     assert!(tty.wait_for_exit().success());
-    assert_eq!(fs::read_to_string(&file).unwrap(), "PACKAGE MAIN\n");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "niam egakcap\n");
 }
 
 #[test]
 fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
-    if !Command::new("rustfmt").arg("--version").output().is_ok_and(|output| output.status.success()) {
+    let project = Project::new();
+    // The project's stand-in home has no Rust toolchains, so say where the real ones are.
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let toolchains = |command: &mut Command| {
+        for (name, folder) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
+            command.env(name, std::env::var_os(name).map_or_else(|| home.join(folder), PathBuf::from));
+        }
+    };
+    let mut rustfmt = project.command("rustfmt");
+    toolchains(&mut rustfmt);
+    if !rustfmt.arg("--version").output().is_ok_and(|output| output.status.success()) {
         // The formatter is optional; the stand-in above covers the pane without it.
         return;
     }
-    let project = Project::new();
     let file = project.0.join("project/main.rs");
     fs::write(&file, "fn  main( ){let x=1;}\n").unwrap();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    toolchains(&mut command);
     let mut tty = Terminal::run(command.args(["view", "main.rs", "--edit"]));
     tty.shows("^F format");
     tty.master.write_all(b"\x06").unwrap();
