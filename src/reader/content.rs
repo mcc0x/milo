@@ -270,9 +270,8 @@ impl Reader {
         };
         if let Some(note) = note {
             self.kind = Kind::None;
-            self.body = Body::Note(note);
             *last = Some(stamp);
-            self.clear_change();
+            self.replace_body(Body::Note(note));
             return;
         }
         let Some(patch) = patch else {
@@ -284,9 +283,8 @@ impl Reader {
                 _ => "Too large to show.",
             };
             self.kind = Kind::None;
-            self.body = Body::Note(note);
             *last = Some(stamp);
-            self.clear_change();
+            self.replace_body(Body::Note(note));
             return;
         };
         let picture = picture::is_picture(&self.path);
@@ -296,8 +294,8 @@ impl Reader {
         if kept {
             return;
         }
-        self.body = working_body(relative, &entry, patch, picture, syntax::for_file(&self.path));
-        self.clear_change();
+        let body = working_body(relative, &entry, patch, picture, syntax::for_file(&self.path));
+        self.replace_body(body);
     }
 }
 

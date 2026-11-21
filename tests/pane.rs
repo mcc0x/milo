@@ -409,6 +409,91 @@ fn a_git_that_cannot_give_whole_paths_still_names_a_project_by_its_folder() {
 }
 
 #[test]
+fn outline_search_distinguishes_closed_paths_and_escape_restores_the_tree() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    fs::create_dir_all(root.join("docs/chapter")).unwrap();
+    fs::create_dir_all(root.join("src/reference")).unwrap();
+    fs::write(root.join("docs/chapter/guide.md"), "first guide\n").unwrap();
+    fs::write(root.join("src/reference/guide.md"), "second guide\n").unwrap();
+    for i in 0..20 {
+        fs::write(root.join(format!("note-{i:02}.txt")), "").unwrap();
+    }
+    fs::write(root.join("zz-target.txt"), "previous selection\n").unwrap();
+    fs::write(root.join("zzz-after.txt"), "").unwrap();
+    project.git(&["init", "-q", "--template="]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "fixture"]);
+
+    let mut tty = Terminal::sized(project.command(env!("CARGO_BIN_EXE_milo")).arg("outline"), 80, 12);
+    tty.shows("all committed");
+    let visible = |tty: &Terminal| tty.screen()[1..11].iter().map(|s| s.trim_end().to_owned()).collect::<Vec<_>>();
+    tty.master.write_all(b"\rGk").unwrap();
+    tty.shows("zzz-after.txt");
+    let before = visible(&tty);
+    assert!(before.iter().any(|s| s.contains("zz-target.txt")));
+    tty.master.write_all(b"/absent\r").unwrap();
+    tty.shows("No matches");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("zzz-after.txt");
+    assert_eq!(visible(&tty), before);
+
+    tty.master.write_all(b"/Guide.md").unwrap();
+    tty.shows("docs/chapter/guide.md");
+    tty.shows("src/reference/guide.md");
+    tty.master.write_all(b"\x1b[B\r").unwrap();
+    tty.shows("second guide");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("zzz-after.txt");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("previous selection");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
+fn outline_search_pastes_utf8_in_a_plain_folder_and_takes_touch_controls() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    fs::create_dir(root.join("buried")).unwrap();
+    fs::write(root.join("buried/ω.txt"), "found it\n").unwrap();
+    fs::write(root.join("buried/.DS_Store"), "").unwrap();
+    let mut tty = Terminal::sized(project.command(env!("CARGO_BIN_EXE_milo")).arg("outline"), 22, 12);
+    tty.shows("/ find");
+    tty.click(2, 12, "");
+    tty.shows("Find files");
+    tty.shows("buried/ω.txt");
+    assert!(!tty.screen().iter().any(|row| row.contains(".DS_Store")));
+    tty.master.write_all("ω界".as_bytes()).unwrap();
+    tty.shows("No matches");
+    tty.master.write_all(b"\x7f").unwrap();
+    tty.shows("buried/ω.txt");
+    tty.master.write_all("\x15\x1b[200~BURIED/Ω.TXT\nq\x1b[201~".as_bytes()).unwrap();
+    tty.shows("BURIED/Ω.TXT");
+    tty.shows("buried/ω.txt");
+
+    let size = libc::winsize { ws_row: 5, ws_col: 34, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: The slave is open; ioctl reads from the live size record.
+    assert_eq!(unsafe { libc::ioctl(tty.slave.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) }, 0);
+    let pid = i32::try_from(tty.child.id()).unwrap();
+    // SAFETY: The PTY is not the child's controlling terminal; signal only this child.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGWINCH) }, 0);
+    tty.shows("Esc back");
+    tty.shows("Enter open");
+    tty.click(26, 1, "");
+    tty.hides("Esc back");
+    tty.master.write_all(b"/").unwrap();
+    tty.shows("buried/ω.txt");
+    tty.shows("Enter open");
+    tty.click(2, 5, "");
+    tty.shows("found it");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
 fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
     let project = Project::new();
     let root = project.0.join("project");

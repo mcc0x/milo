@@ -3,6 +3,7 @@
 mod attention;
 mod draw;
 mod input;
+mod search;
 mod untracked;
 
 use std::collections::{HashMap, HashSet};
@@ -66,6 +67,8 @@ pub struct Outline {
     painted: Layout,
     opener: OpenReader,
     clicked: Option<input::Click>,
+    search: Option<search::Search>,
+    search_walk: Option<std::thread::JoinHandle<walk::Listing>>,
     /// Something to say in place of the key hint, and when it was said.
     note: Option<(String, Instant)>,
     /// A file being read here, in place of the outline, outside Rex.
@@ -122,6 +125,8 @@ impl Outline {
             painted: Layout::default(),
             opener: OpenReader::new(inside_rex),
             clicked: None,
+            search: None,
+            search_walk: None,
             note: None,
             reading: None,
         };
@@ -229,7 +234,7 @@ impl Outline {
     fn reload(&mut self) {
         let Some(old) = self.load() else { return };
         let now = Instant::now();
-        let following = self.follow_activity && self.attention.following(now);
+        let following = self.follows_activity(now);
         let newest = self.mark_files(&old, now).filter(|_| following).map(str::to_owned);
         if let Some(newest) = newest {
             self.follow(&newest);
@@ -315,6 +320,10 @@ impl Outline {
         self.say(format!("following {name}"));
     }
 
+    fn follows_activity(&self, now: Instant) -> bool {
+        self.search.is_none() && self.follow_activity && self.attention.following(now)
+    }
+
     /// Shows a line in place of the key hint for a few seconds.
     fn say(&mut self, text: impl Into<String>) {
         self.note = Some((text.into(), Instant::now()));
@@ -324,6 +333,8 @@ impl Outline {
         self.scan_untracked(now, false);
         if let Some(reader) = &mut self.reading {
             reader.draw(screen);
+        } else if self.search.is_some() {
+            self.draw_search(screen, now);
         } else {
             self.draw_outline(screen, now);
         }
@@ -340,11 +351,15 @@ impl Pane for Outline {
     }
 
     fn editing(&self) -> bool {
-        self.reading.as_ref().is_some_and(Pane::editing)
+        self.search.is_some() || self.reading.as_ref().is_some_and(Pane::editing)
     }
 
     fn paste(&mut self, text: Option<&str>) -> After {
-        self.reading.as_mut().map_or(After::Ignored, |reader| reader.paste(text))
+        if let Some(reader) = &mut self.reading {
+            reader.paste(text)
+        } else {
+            self.search.as_mut().map_or(After::Ignored, |search| search.paste(text))
+        }
     }
 
     fn notice(&self) -> Option<&'static str> {
@@ -413,6 +428,9 @@ impl Pane for Outline {
         if let Some(reader) = &self.reading {
             return [sweep, reader.next_frame()].into_iter().flatten().min();
         }
+        if self.search.is_some() {
+            return [sweep, self.search_walk.as_ref().map(|_| search::WALK_FRAME)].into_iter().flatten().min();
+        }
         let mark = self.attention.next_mark_frame(now, self.static_marks);
         let note = self.note.as_ref().map(|(_, at)| NOTE.saturating_sub(now.saturating_duration_since(*at)));
         let counts = (self.painted.body_rows > 0).then(|| self.untracked.next_frame()).flatten();
@@ -458,6 +476,7 @@ impl Pane for Outline {
             key("↑↓   ", "move (k j)"),
             key("Enter", "toggle folder"),
             key("Enter", "open file"),
+            key("/    ", "find file or path"),
             key("Space", "toggle folder"),
             key("←    ", "close or parent"),
             key("→    ", "open folder"),
@@ -470,6 +489,14 @@ impl Pane for Outline {
             rows.extend([key("n N  ", "next/prev change"), key("c    ", "changed only")]);
         }
         rows.extend([key("r    ", "reload"), key("q    ", "quit")]);
+        rows.extend([
+            HelpRow::new(),
+            heading("Find files"),
+            key("↑↓   ", "select a result"),
+            key("←→   ", "pan long paths"),
+            key("Enter", "open file"),
+            key("Esc  ", "back to tree"),
+        ]);
         if self.repo.git {
             rows.extend([
                 HelpRow::new(),
@@ -508,6 +535,41 @@ mod tests {
         let mut screen = Screen::sized(w, h);
         o.draw(&mut screen);
         screen
+    }
+
+    #[test]
+    fn outline_search_respects_changes_only_and_can_start_in_the_strip() {
+        let f = Fixture::new();
+        f.write(".gitignore", "ignored.rs\n");
+        f.write("src/clean.rs", "");
+        f.write("src/dirty.rs", "");
+        f.commit("first");
+        f.write("src/dirty.rs", "pending\n");
+        f.write("src/ignored.rs", "ignored\n");
+        let mut o = open(&f);
+        o.folds.set("src/", false, false);
+        o.refold(o.selected_path());
+        o.key(Key::Char('c'));
+        assert!(!o.folds.is_open("src/"));
+        assert!(draw(&mut o, 40, 7).text().iter().any(|row| row.contains("dirty.rs")));
+
+        o.key(Key::Char('/'));
+        o.paste(Some(".RS"));
+        let matches = draw(&mut o, 40, 7).text();
+        assert!(matches[0].contains(".RS"));
+        assert!(matches.iter().any(|row| row.contains("src/dirty.rs")));
+        assert!(!matches.iter().any(|row| row.contains("clean.rs") || row.contains("ignored.rs")));
+        o.key(Key::Esc);
+        assert_eq!(o.selected_path().as_deref(), Some("src/"));
+        assert!(!o.folds.is_open("src/"));
+
+        draw(&mut o, 40, 12);
+        o.key(Key::Char('c'));
+        o.key(Key::Char('/'));
+        o.paste(Some(".rs"));
+        let matches = draw(&mut o, 40, 12).text();
+        assert!(matches.iter().any(|row| row.contains("src/clean.rs")));
+        assert!(!matches.iter().any(|row| row.contains("ignored.rs")));
     }
 
     fn draw_at(o: &mut Outline, w: usize, h: usize, now: Instant) -> Screen {
@@ -961,8 +1023,8 @@ mod tests {
         let f = Fixture::folder();
         f.write("page.txt", "a file\n");
         let mut o = open(&f);
-        assert_eq!(draw(&mut o, 60, 12).text()[11], " Enter open · e open all · q quit · ? help");
-        assert_eq!(draw(&mut o, 24, 12).text()[11], " Enter open · ? help");
+        assert_eq!(draw(&mut o, 60, 12).text()[11], " / find · Enter open · e open all · q quit · ? help");
+        assert_eq!(draw(&mut o, 24, 12).text()[11], " / find · ? help");
     }
 
     #[test]

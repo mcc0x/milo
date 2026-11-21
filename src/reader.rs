@@ -1,6 +1,7 @@
 //! Shows one file with code colours and a line diff, and edits a working text file when asked.
 
 mod buffer;
+mod changes;
 mod content;
 mod disk;
 mod draw;
@@ -28,6 +29,7 @@ use crate::screen::{Screen, Style};
 use crate::syntax::{self, Lang, Span, State};
 use crate::ui::{ADD, DEL};
 use crate::watch::{Ignored, Scope};
+use changes::{Folds, Review};
 use disk::{ReadOnly, SaveError};
 use edit::{Editor, Place, Step};
 pub use rescue::take_note as take_rescue_note;
@@ -51,6 +53,7 @@ pub struct Reader {
     /// Reveal the first change once the viewport has room for the file.
     opening: bool,
     top: usize,
+    review: Review,
     /// The current change can share its viewport top with other changes.
     current_change: Option<usize>,
     change_notice: Option<(JumpNotice, Instant)>,
@@ -177,6 +180,7 @@ struct Text {
     starts: Vec<(usize, State)>,
     /// Start of each block of changed lines, before adding viewing context.
     changes: Vec<usize>,
+    folds: Folds,
     digits: usize,
     added: u32,
     removed: u32,
@@ -189,9 +193,11 @@ impl Text {
         });
         let mut starts = Vec::new();
         let mut changes = Vec::new();
+        let mut folds = Folds::default();
         let mut state = State::default();
         let (mut last, mut added, mut removed) = (1, 0, 0);
         let mut previous = LineKind::Same;
+        let mut end_of_change = None;
         for (i, line) in lines.iter().enumerate() {
             last = last.max(line.number);
             match line.kind {
@@ -200,7 +206,11 @@ impl Text {
                 LineKind::Same => {}
             }
             if previous == LineKind::Same && line.kind != LineKind::Same {
+                let start = end_of_change.map_or(0, |end| end + LEAD);
+                folds.push(start, i.saturating_sub(LEAD));
                 changes.push(i);
+            } else if previous != LineKind::Same && line.kind == LineKind::Same {
+                end_of_change = Some(i);
             }
             previous = line.kind;
             // Removed lines are not part of the file's syntax.
@@ -212,7 +222,10 @@ impl Text {
                 }
             }
         }
-        Self { lines, lang, starts, changes, digits: last.ilog10() as usize + 1, added, removed }
+        if let Some(end) = end_of_change.filter(|_| previous == LineKind::Same) {
+            folds.push(end + LEAD, lines.len());
+        }
+        Self { lines, lang, starts, changes, folds, digits: last.ilog10() as usize + 1, added, removed }
     }
 }
 
@@ -235,6 +248,7 @@ impl Reader {
             spans: Vec::new(),
             opening: true,
             top: 0,
+            review: Review::default(),
             current_change: None,
             change_notice: None,
             pan: 0,
@@ -261,7 +275,7 @@ impl Reader {
             && let Some(first) = text.changes.first()
         {
             self.current_change = Some(0);
-            self.top = first.saturating_sub(self.lead());
+            self.top = self.folds().row_at(*first).saturating_sub(self.lead());
         }
     }
 
@@ -270,7 +284,7 @@ impl Reader {
     }
 
     fn last_top(&self) -> usize {
-        self.body.lines().len().saturating_sub(self.rows.max(1))
+        self.folds().row_count(self.body.lines().len()).saturating_sub(self.rows.max(1))
     }
 
     /// Forgets the position among the changes. What was said about the file itself stays its full time.
@@ -285,6 +299,7 @@ impl Reader {
         let top = self.top.saturating_add_signed(delta).min(self.last_top());
         if top != self.top {
             self.top = top;
+            self.review.moved();
             self.clear_change();
         }
     }
@@ -295,7 +310,7 @@ impl Reader {
         {
             let total = text.changes.len();
             let (lead, last) = (self.lead(), self.last_top());
-            let at = |line: &usize| line.saturating_sub(lead).min(last);
+            let at = |line: &usize| self.folds().row_at(*line).saturating_sub(lead).min(last);
             let index = match direction {
                 Direction::Next => {
                     let next = self
@@ -309,9 +324,10 @@ impl Reader {
                     before.checked_sub(1).unwrap_or(total - 1)
                 }
             };
+            self.top = at(&text.changes[index]);
+            self.review.moved();
             self.opening = false;
             self.current_change = Some(index);
-            self.top = at(&text.changes[index]);
             JumpNotice::At { number: index + 1, total }
         } else {
             if let Some((JumpNotice::NoChanges, until)) = self.change_notice
@@ -361,11 +377,21 @@ impl Pane for Reader {
             key("b    ", "page up"),
             key("n N  ", "next/prev change"),
             key("←→   ", "scroll (h l)"),
+        ];
+        if self.can_fold() {
+            rows.extend([
+                key("c    ", "changes only/full"),
+                key("Tab  ", "choose next fold"),
+                key("Enter", "expand fold"),
+                note("Or click a fold."),
+            ]);
+        }
+        rows.extend([
             key("g G  ", "top/bottom"),
             key("q Esc", "close"),
             HelpRow::new(),
             heading("Editing"),
-        ];
+        ]);
         match self.read_only {
             None => {
                 let name = self.path.rsplit('/').next().unwrap_or_default();
@@ -483,6 +509,10 @@ impl Reader {
             Key::Char('e') => return self.edit(now),
             Key::Char('n') => return self.jump(Direction::Next, now),
             Key::Char('N') => return self.jump(Direction::Previous, now),
+            Key::Char('c') => return self.toggle_changes(),
+            Key::Ctrl(b'i') => return self.next_fold(),
+            Key::Enter => return self.expand_fold(self.focused_fold()),
+            Key::Click(x, y) => return self.click_fold(x, y),
             Key::Char('l') | Key::Right => self.pan(Direction::Next),
             Key::Char('h') | Key::Left => self.pan(Direction::Previous),
             _ => {
@@ -560,10 +590,19 @@ impl Reader {
 
     /// The file line at the top of the view, counted from zero and skipping removed lines.
     fn top_line(&self) -> usize {
+        self.line_number_at(self.source_top())
+    }
+
+    fn line_number_at(&self, row: usize) -> usize {
         let lines = self.body.lines();
-        let from = self.top.min(lines.len().saturating_sub(1));
+        let from = row.min(lines.len().saturating_sub(1));
         let shown = lines[from..].iter().chain(lines[..from].iter().rev()).find(|line| line.kind != LineKind::Del);
         shown.map_or(0, |line| line.number as usize - 1)
+    }
+
+    fn source_row(&self, number: usize) -> usize {
+        let lines = self.body.lines();
+        lines.iter().position(|l| l.kind != LineKind::Del && l.number as usize > number).unwrap_or(lines.len())
     }
 
     fn apply(&mut self, step: Step, now: Instant) -> After {
@@ -614,10 +653,7 @@ impl Reader {
         self.opening = false;
         self.clear_change();
         self.pan = 0;
-        let lines = self.body.lines();
-        self.top =
-            lines.iter().position(|l| l.kind != LineKind::Del && l.number as usize > line).unwrap_or(lines.len());
-        self.top = self.top.min(self.last_top());
+        self.set_source_top(self.source_row(line));
         self.change_notice = said.map(|text| (JumpNotice::Said { lead: "", text }, Instant::now() + CHANGE_NOTICE));
     }
 }
