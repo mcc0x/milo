@@ -6,6 +6,8 @@ import { PHASE_PRODUCTION_BUILD } from 'next/constants';
 // the directory the Caddyfile serves. Keep that key out of comments.
 export default (phase: string): NextConfig => ({
   output: 'export',
+  trailingSlash: true,
+  devIndicators: false,
   // Only a build writes to dist/. `next dev` keeps its own files in .next/.
   ...(phase === PHASE_PRODUCTION_BUILD && { distDir: 'dist' }),
 });

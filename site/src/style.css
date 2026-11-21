@@ -13,15 +13,30 @@
 
 body {
   margin: 0;
-  /* Soft lavender, porcelain blue and mint from Milo's approved banner. */
-  background:
-    radial-gradient(ellipse at 100% 0%, #cbf6f3 0%, transparent 55%),
-    radial-gradient(ellipse at 0% 100%, #e1d8fc 0%, transparent 60%),
-    radial-gradient(ellipse at 100% 100%, #e2d9fd 0%, transparent 60%),
-    linear-gradient(120deg, #d8defb, var(--page) 55%, #d9ebfd);
+  isolation: isolate;
+  background: var(--page);
   color: var(--ink);
   font: 400 1rem/1.5 Bricolage, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Keep the horizon in view as the page scrolls; stretch the open sky, not the illustrated edges. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -4px;
+  z-index: -1;
+  pointer-events: none;
+  border-image: url('./images/meadow/desktop.webp') 224 0 416 fill / 14.583vw 0 27.083vw / 0 stretch;
+  filter: blur(2px);
+  opacity: .72;
+}
+@media (max-width: 600px) and (orientation: portrait) {
+  body::before {
+    border-image-source: url('./images/meadow/mobile.webp');
+    border-image-slice: 410 0 825 fill;
+    border-image-width: 56.63vw 0 113.95vw;
+  }
 }
 
 h1, p { margin: 0; }
@@ -75,7 +90,8 @@ h1 {
 .subtext {
   max-width: 62ch;
   margin-top: .25rem;
-  color: var(--secondary);
+  color: var(--ink);
+  font-weight: 500;
   font-size: 1rem;
   line-height: 1.45;
   text-wrap: balance;
