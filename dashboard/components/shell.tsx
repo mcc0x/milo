@@ -61,14 +61,14 @@ function Navigation({page, navigate}: {page: Page; navigate: (page: Page) => voi
   );
 }
 
-function Footer() {
+function SessionBar() {
   const {state, connected, ended, localError, running, closing, reopenNote, done} = useEditor();
   const status = ended ? 'closed' : connected ? 'ready' : localError ? 'offline' : 'opening';
   const context = state?.context;
   const path = context?.worktree || context?.directory;
   const name = path?.split('/').filter(Boolean).at(-1) || path || 'Directory unavailable';
   return (
-    <footer className="actionbar" id="actionbar" hidden={!state}>
+    <section className="actionbar" aria-label="Project session" id="actionbar" hidden={!state}>
       <img src="/rex.png" width="20" height="20" alt=""/>
       <div className="session-info">
         <div id="context" className="context">
@@ -82,7 +82,7 @@ function Footer() {
         <p id="reopen-panes" className="reopen-panes" hidden={!reopenNote}>{reopenNote}</p>
       </div>
       <button id="done" className="button secondary" type="button" disabled={running || closing} onClick={done}>Done</button>
-    </footer>
+    </section>
   );
 }
 
@@ -200,7 +200,7 @@ function SettingsPanel({page}: {page: Page}) {
   );
 }
 
-function EditorShell() {
+function EditorShell({devVersion}: {devVersion?: string}) {
   const {state, ended, canSave, canDiscard, focusOwner, applyNumericDrafts, command, openingMessage, canOpenRetry, connect, toast} = useEditor();
   const [selectedPage, setSelectedPage] = useState<Page>('layout');
   const pendingNavigation = useRef(false);
@@ -284,8 +284,11 @@ function EditorShell() {
       <div className="frame surface" id="editor" hidden={!state}>
         <button className="skip-link" id="skip-settings" type="button" onClick={() => document.getElementById('settings-panel')?.focus()}>Skip to settings</button>
         <Navigation page={page} navigate={navigate}/>
+        <SessionBar/>
         <Feedback page={page}/>
-        <Footer/>
+        <footer className="version-badge"><img src="/favicon.png" width="24" height="24" alt="Milo"/>
+          <span>v{state?.milo_version ?? devVersion}</span>
+        </footer>
       </div>
       <div className="frame opening" id="opening" hidden={Boolean(state) || ended}>
         <p id="opening-message" role="status" tabIndex={-1}>{openingMessage}</p>
@@ -304,6 +307,6 @@ function EditorShell() {
   );
 }
 
-export default function Dashboard() {
-  return <SessionProvider><EditorShell/></SessionProvider>;
+export default function Dashboard({devVersion}: {devVersion?: string}) {
+  return <SessionProvider><EditorShell devVersion={devVersion}/></SessionProvider>;
 }

@@ -43,6 +43,7 @@ export const healthLabels = {good: 'All good', warning: 'Warning', issue: 'Issue
 
 export interface SessionState {
   version: number;
+  milo_version: string;
   context: {inside_rex: boolean; worktree: string | null; directory: string | null; installed: boolean};
   layout: {
     panes: Record<PaneRole, boolean>;

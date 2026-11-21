@@ -19,7 +19,7 @@ const button = (page, name) => page.getByRole('button', {name, exact: true});
 const dialog = (page, name) => page.getByRole('dialog', {name, exact: true});
 const number = (page, name) => page.getByRole('spinbutton', {name, exact: true});
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
-const reopenNote = page => page.getByRole('contentinfo').getByText('Reopen panes to apply.', {exact: true});
+const reopenNote = page => page.getByRole('region', {name: 'Project session'}).getByText('Reopen panes to apply.', {exact: true});
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, tool, name) =>
@@ -478,10 +478,10 @@ async function confirmFromMobileFooter(browser, url, exited) {
   const dock = await page.locator('.control-dock').boundingBox();
   assert(dock && dock.x >= 0 && dock.x + dock.width <= 260, 'navigation and draft controls fit at narrow widths');
   await page.setViewportSize(viewport);
-  const done = button(page.getByRole('contentinfo'), 'Done');
+  const done = button(page.getByRole('region', {name: 'Project session'}), 'Done');
   const box = await done.boundingBox();
   assert(box && box.x >= 0 && box.x + box.width <= viewport.width &&
-    box.y >= 0 && box.y + box.height <= viewport.height, 'mobile footer Done fits in the viewport');
+    box.y >= 0 && box.y + box.height <= viewport.height, 'mobile session Done fits in the viewport');
 
   const confirmation = dialog(page, 'Close the dashboard?');
   await done.tap();
@@ -493,7 +493,7 @@ async function confirmFromMobileFooter(browser, url, exited) {
   await button(confirmation, 'Discard and close').tap();
   await page.getByRole('heading', {name: 'Settings closed', exact: true}).waitFor();
   const result = await Promise.race([exited, delay(timeout, null, {ref: false})]);
-  assert.deepEqual(result, [0, null], 'confirming from the mobile footer stops Milo cleanly');
+  assert.deepEqual(result, [0, null], 'confirming from the session bar stops Milo cleanly');
   console.log('Mobile Done: cancel retained the draft, confirm closed the editor');
 }
 

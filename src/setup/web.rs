@@ -190,7 +190,7 @@ impl Editor {
             UsageAccount::ALL.map(|account| prefs.usage_accounts[account].value());
         let mut out = String::with_capacity(1600);
         write!(out, concat!(
-            "{{\"version\":{},",
+            "{{\"version\":{},\"milo_version\":\"", env!("CARGO_PKG_VERSION"), "\",",
             "\"context\":{{\"inside_rex\":{},\"worktree\":{},\"directory\":{},\"installed\":{}}},",
             "\"layout\":{{\"panes\":{{\"outline\":{},\"history\":{},\"usage\":{}}},\"side\":\"{}\",\"width\":{},",
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
