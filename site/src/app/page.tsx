@@ -14,13 +14,16 @@ import { Bubble } from './bubble';
 import { CopyAnnouncer, CopyButton, CopyStatus } from './copy';
 import { Demo } from './demo/demo';
 import './fonts';
-import { PaneStrip } from './pane-strip';
+
+function FeatureIcon({ name }: { name: string }) {
+  return <img className="milo-feature-icon" src={`/icons/milo/${name}.webp`} width={48} height={48} loading="lazy" decoding="async" alt="" />;
+}
 
 const title = 'milo — The little things that make Rex feel like home';
 const description = 'A file tree, commit history, diffs, and agent usage, right where you want them. Milo remembers how you like your panes.';
 const preview = {
   url: 'https://usemilo.net/milo-preview.jpg',
-  alt: 'Milo’s blue cat mascot and wordmark above the tagline: The little things that make Rex feel like home.',
+  alt: 'Milo — Your Git workspace, inside Rex. A file tree, commit history and agent session sit above the Milo and Rex mascots.',
 };
 
 export const metadata: Metadata = {
@@ -35,7 +38,7 @@ export const metadata: Metadata = {
     url: 'https://usemilo.net/',
     title,
     description,
-    images: { ...preview, type: 'image/jpeg', width: 1200, height: 630 },
+    images: { ...preview, type: 'image/jpeg', width: 1280, height: 640 },
   },
   twitter: { card: 'summary_large_image', title, description, images: preview },
 };
@@ -101,27 +104,27 @@ export default function Home() {
             <span><svg viewBox="0 0 24 30" aria-hidden="true">{openCodePaths}</svg>OpenCode</span>.
           </p>
           <div className="feature-grid">
-            <PaneStrip>
+            <article className="feature feature-panes">
               <h3 className="visually-hidden">Workspace panes</h3>
               <dl>
-                <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v14h5M5 7h5" /><rect x="11" y="4" width="8" height="6" rx="1.5" /><rect className="pane-leaf" x="11" y="14" width="8" height="6" rx="1.5" /></svg>Outline</dt><dd>A Git-aware file tree that points out what changed.</dd></div>
-                <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="5" r="2.3" /><circle cx="7" cy="19" r="2.3" /><circle className="pane-commit" cx="17" cy="6" r="2.3" /><path d="M7 8v9m0-3c6 0 10-1 10-6" /></svg>History</dt><dd>Browse commits and see what’s waiting to be pushed.</dd></div>
-                <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6C9 4 6 4 3 5v13c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1zm0 0v13" /><path className="pane-ink" d="m15 10 3-.6" pathLength="1" /></svg>Reader</dt><dd>Open a file or read its diff without leaving your tab.</dd></div>
-                <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18a9 9 0 1 1 16 0" /><path className="pane-needle" d="m12 14 4-5" /><circle cx="12" cy="15" r="1.5" /></svg>Usage</dt><dd>Check your agent limits and when they reset.</dd></div>
+                <div><dt><FeatureIcon name="outline" />Outline</dt><dd>A Git-aware file tree that points out what changed.</dd></div>
+                <div><dt><FeatureIcon name="history" />History</dt><dd>Browse commits and see what’s waiting to be pushed.</dd></div>
+                <div><dt><FeatureIcon name="reader" />Reader</dt><dd>Open a file or read its diff without leaving your tab.</dd></div>
+                <div><dt><FeatureIcon name="usage" />Usage</dt><dd>Check your agent limits and when they reset.</dd></div>
               </dl>
-            </PaneStrip>
+            </article>
             <article className="feature feature-memory">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><g className="layout-window"><rect x="2" y="4" width="20" height="16" rx="2.5" /><path d="M2 8h20" /><path className="layout-divider" d="M10 8v12" /></g></svg>
+              <FeatureIcon name="layouts" />
               <h3>Layouts</h3>
               <p>Save a default or a layout per worktree. Turn on automatic arrangement to reuse your pane sizes in new shell tabs.</p>
             </article>
             <article className="feature feature-settings">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h5m5 0h8M3 17h10m5 0h3" /><circle cx="10.5" cy="7" r="2.5" /><circle cx="15.5" cy="17" r="2.5" /></svg>
+              <FeatureIcon name="settings" />
               <h3>Settings</h3>
               <p>Choose your panes with <code>milo setup</code> or in your browser with <code>milo web</code>. Both come with the CLI.</p>
             </article>
             <article className="feature feature-menu">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3" /><path d="M2 10h20m-6-3h3" /></svg>
+              <FeatureIcon name="menu-bar" />
               <h3>Menu bar <small>macOS</small></h3>
               <p>See remaining usage and open Settings without Rex. Add it with <code>milo menubar install</code>.</p>
             </article>

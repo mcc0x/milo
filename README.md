@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://usemilo.net">
-    <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo, usemilo.net. Additions for Superlogical's multiplexer, Rex.">
+    <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo — Your Git workspace, inside Rex. Browse files, commits and diffs, edit code, track agent usage, save pane layouts, and get alerts in Discord or Telegram.">
   </a><br>
   <a href="https://usemilo.net">
     <picture>
