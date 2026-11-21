@@ -145,15 +145,18 @@ impl Session {
         Ok(session)
     }
 
-    pub fn wait(&mut self, timeout_ms: i32, watch: Option<RawFd>, external: Option<RawFd>) -> Wait {
+    /// Waits on the keyboard and on what the pane waits for: in `extra`, its
+    /// watcher, an external source and a check it left running.
+    pub fn wait(&mut self, timeout_ms: i32, extra: [Option<RawFd>; 3]) -> Wait {
         if std::mem::take(&mut self.pending_interrupt) {
             return Wait::Interrupted;
         }
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [watch, external], false, !self.keys.is_empty())
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, extra, false, !self.keys.is_empty())
     }
 
     pub fn wait_for_open(&self, timeout_ms: i32, done: RawFd) -> Wait {
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, [Some(done), None], true, !self.keys.is_empty())
+        let extra = [Some(done), None, None];
+        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, extra, true, !self.keys.is_empty())
     }
 
     pub fn receive(&mut self) -> std::vec::Drain<'_, Key> {
@@ -384,6 +387,8 @@ pub enum Wait {
     /// The extra descriptor became readable.
     Woken,
     External,
+    /// A check that was left running has its answer.
+    Checked,
     Timeout,
     Interrupted,
     Closed,
@@ -394,13 +399,13 @@ fn drain_signal(mut reader: &PipeReader) {
     while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
 }
 
-/// Waits for input, a signal, a watcher, an external source or a timeout.
+/// Waits for input, a signal, a watcher, an external source, a finished check or a timeout.
 /// Signals always take priority; loading also prioritizes completion over keystrokes.
 fn wait_for(
     keyboard: RawFd,
     signal: &PipeReader,
     timeout_ms: i32,
-    extra: [Option<RawFd>; 2],
+    extra: [Option<RawFd>; 3],
     opening: bool,
     buffered: bool,
 ) -> Wait {
@@ -409,12 +414,13 @@ fn wait_for(
         // poll() ignores a negative descriptor.
         libc::pollfd { fd: extra[0].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: extra[1].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: extra[2].unwrap_or(-1), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: signal.as_raw_fd(), events: libc::POLLIN, revents: 0 },
     ];
     let ready = wait_ready(&mut fds, if buffered { 0 } else { timeout_ms });
     if ready < 0 {
         if io::Error::last_os_error().kind() == ErrorKind::Interrupted { Wait::Interrupted } else { Wait::Closed }
-    } else if fds[3].revents != 0 {
+    } else if fds[4].revents != 0 {
         drain_signal(signal);
         Wait::Interrupted
     } else if opening && fds[1].revents != 0 {
@@ -425,6 +431,8 @@ fn wait_for(
         Wait::Closed
     } else if fds[2].revents != 0 {
         Wait::External
+    } else if fds[3].revents != 0 {
+        Wait::Checked
     } else if ready == 0 {
         Wait::Timeout
     } else {
@@ -459,7 +467,8 @@ mod tests {
         let (extra, writer) = io::pipe().unwrap();
         let extra = Some(extra.as_raw_fd());
         let (signal, _signal_writer) = io::pipe().unwrap();
-        let wait = |opening, buffered| wait_for(keyboard.as_raw_fd(), &signal, 0, [extra, None], opening, buffered);
+        let wait =
+            |opening, buffered| wait_for(keyboard.as_raw_fd(), &signal, 0, [extra, None, None], opening, buffered);
         assert!(matches!(wait(false, false), Wait::Timeout));
         assert!(matches!(wait(false, true), Wait::Input));
 
@@ -484,7 +493,7 @@ mod tests {
                 keyboard.as_raw_fd(),
                 &signal,
                 0,
-                [Some(watch.as_raw_fd()), Some(observer.as_raw_fd())],
+                [Some(watch.as_raw_fd()), Some(observer.as_raw_fd()), None],
                 false,
                 false,
             )
@@ -496,6 +505,20 @@ mod tests {
         (&observer).read_exact(&mut [0]).unwrap();
         drop(update);
         assert!(matches!(wait(), Wait::External));
+        wake(input.as_raw_fd());
+        assert!(matches!(wait(), Wait::Input));
+    }
+
+    #[test]
+    fn a_finished_check_wakes_the_pane_once_its_keys_are_read() {
+        let (keyboard, input) = io::pipe().unwrap();
+        let (check, done) = io::pipe().unwrap();
+        let (signal, _signal_writer) = io::pipe().unwrap();
+        let wait = || wait_for(keyboard.as_raw_fd(), &signal, 0, [None, None, Some(check.as_raw_fd())], false, false);
+        assert!(matches!(wait(), Wait::Timeout));
+        // The check's thread closes its end when the answer is ready.
+        drop(done);
+        assert!(matches!(wait(), Wait::Checked));
         wake(input.as_raw_fd());
         assert!(matches!(wait(), Wait::Input));
     }
@@ -554,8 +577,8 @@ mod tests {
             writing.join().unwrap().unwrap();
             assert!(drained, "the writer did not consume the signal byte while blocked");
         });
-        assert!(matches!(terminal.wait(0, None, None), Wait::Interrupted));
-        assert!(matches!(terminal.wait(0, None, None), Wait::Timeout));
+        assert!(matches!(terminal.wait(0, [None; 3]), Wait::Interrupted));
+        assert!(matches!(terminal.wait(0, [None; 3]), Wait::Timeout));
     }
 
     #[test]

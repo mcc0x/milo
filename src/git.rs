@@ -92,7 +92,7 @@ impl PendingFile {
 }
 
 /// A Git diff's openable changes and any names the panes cannot represent.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct DiffFiles {
     pub(crate) files: Vec<PendingFile>,
     pub(crate) unrepresented: usize,
@@ -148,7 +148,7 @@ impl Ends {
 }
 
 /// The default branch to try in place of an upstream, even before it exists.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct StandIn {
     name: String,
     oid: Option<String>,
@@ -161,7 +161,7 @@ impl StandIn {
     }
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Comparison {
     upstream: Option<String>,
     stand_in: Option<StandIn>,
@@ -174,6 +174,7 @@ impl Comparison {
 }
 
 /// A poll keeps the same status and comparison for the subsequent read.
+#[derive(Clone)]
 struct Snapshot {
     raw: Vec<u8>,
     status: Option<Status>,
@@ -181,7 +182,7 @@ struct Snapshot {
     shallow: Option<DiffStamp>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 enum ReadFor {
     #[default]
     Pending,
@@ -207,20 +208,21 @@ impl HistoryVersion {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Unpushed {
     ends: Ends,
     diff: DiffFiles,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Tracked {
     index: Option<DiffStamp>,
-    paths: String,
+    /// Shared, so that a copy of the repository does not copy every path.
+    paths: Arc<str>,
     incomplete: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Repo {
     pub root: PathBuf,
     pub name: String,
@@ -251,6 +253,14 @@ pub struct Repo {
     unpushed: Unpushed,
     pending_tracked: Option<TrackedDiff>,
     tracked: Tracked,
+}
+
+/// What a refresh brings back to the pane that asked for it.
+pub(crate) struct Refreshed {
+    /// The copy that was refreshed, to take the place of the one copied.
+    pub(crate) repo: Repo,
+    /// The pending files to load, unless nothing moved or Git could not answer.
+    pub(crate) pending: Option<Vec<PendingFile>>,
 }
 
 struct GitDirs {
@@ -618,6 +628,19 @@ impl Repo {
         changed
     }
 
+    /// A *refresh* is a poll and, when the repository moved, everything a load
+    /// reads from Git, done on a copy of the repository so that it can run away
+    /// from the pane loop. `files` are the pending files on screen.
+    pub(crate) fn refreshed(mut self, files: &[PendingFile]) -> Refreshed {
+        let pending = if self.poll(files) {
+            self.read();
+            self.pending().filter(|_| self.tracked().is_some())
+        } else {
+            None
+        };
+        Refreshed { repo: self, pending }
+    }
+
     /// Takes in the repository's status and comparison base, keeping both on failure.
     pub fn read(&mut self) {
         if !self.git {
@@ -744,9 +767,14 @@ impl Repo {
                     (paths, true)
                 }
             };
-            self.tracked = Tracked { index, paths, incomplete };
+            self.tracked = Tracked { index, paths: paths.into(), incomplete };
         }
         Some(self.tracked.paths.split_terminator('\0'))
+    }
+
+    /// The tracked paths last listed, without asking Git again.
+    pub(crate) fn listed(&self) -> impl Iterator<Item = &str> {
+        self.tracked.paths.split_terminator('\0')
     }
 
     pub fn is_untracked(&self, path: &str) -> bool {
@@ -1405,7 +1433,7 @@ mod tests {
         f.write(".git/index", "corrupt index");
         assert!(repo.tracked().is_none());
         assert!(!repo.ok());
-        assert_eq!(repo.tracked.paths, "page.txt\0");
+        assert_eq!(&*repo.tracked.paths, "page.txt\0");
         assert_eq!(repo.tracked.index, previous);
     }
 
