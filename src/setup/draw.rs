@@ -41,6 +41,9 @@ impl RowHit {
     }
 }
 
+/// Each row on screen has a place in `Visible::rows`: enough for the longest list.
+const ROWS: usize = if super::WORKFLOW.len() > TUNE.len() { super::WORKFLOW.len() } else { TUNE.len() };
+
 #[derive(Default)]
 pub(super) struct Visible {
     current: bool,
@@ -48,7 +51,7 @@ pub(super) struct Visible {
     y: usize,
     pub(super) len: usize,
     pub(super) scroll_limit: usize,
-    rows: [RowHit; TUNE.len()],
+    rows: [RowHit; ROWS],
     tab_y: usize,
     tabs: [Range<usize>; SECTIONS.len()],
     footer: help::HintHits<'static>,
@@ -297,6 +300,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Panel::Confirm(Confirm::Remove) => "Remove?",
                     Panel::Confirm(Confirm::RemoveMenuBar) => "Remove app?",
                     Panel::Confirm(Confirm::MirrorAlerts) => "Mirror?",
+                    Panel::Confirm(Confirm::Presence) => "Discord?",
+                    Panel::Confirm(Confirm::PresenceDetails(_)) => "Show names?",
+                    Panel::Confirm(Confirm::PresenceApp) => "Your app?",
                     _ => self.panel.title(),
                 }
             } else {
@@ -354,7 +360,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             }
             Panel::Layout if self.trial.is_some() => "Undo this trial, or save the layout you tried to keep its panes.",
             Panel::Layout => return None,
-            Panel::Tune => return None,
+            Panel::Tune | Panel::Presence => return None,
             Panel::Appearance => return None,
             Panel::Workflow => return None,
             Panel::Alerts => "Rex's own notifications stay as they are. Each choice here is saved as you make it.",
@@ -393,11 +399,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     }
                 }
             }
+            Panel::Confirm(Confirm::Presence) => self.presence_view.as_ref()?.setting.public(),
+            Panel::Confirm(Confirm::PresenceDetails(details)) => {
+                let own = self.presence_view.as_ref().is_some_and(|status| status.setting.application.is_some());
+                crate::presence::public(details, own)
+            }
+            Panel::Confirm(Confirm::PresenceApp) => crate::presence::APPLICATION_HELP,
         })
     }
 
     fn footer(&self, s: &mut Screen) -> help::HintHits<'static> {
-        let back = self.panel.modal() || matches!(self.panel, Panel::Tune | Panel::Diagnostics | Panel::Alerts);
+        let back = self.panel.modal()
+            || matches!(self.panel, Panel::Tune | Panel::Alerts | Panel::Presence | Panel::Diagnostics);
         let exit = match (back, s.w) {
             (true, 26..) => "Esc back",
             (true, 18..=23) => "back",
@@ -580,6 +593,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Capture if self.trial.is_some() => "Undo the current trial first.",
             Row::Capture if self.target.is_none() => "Open setup from a tiled Rex shell to use this action.",
             Row::SaveWorktree => self.root.as_deref().and_then(|root| root.to_str()).unwrap_or(cell.detail),
+            Row::Presence | Row::PresenceOpen => match &self.presence_view {
+                Some(status) if status.setting.enabled => &self.presence_note,
+                Some(_) => cell.detail,
+                None => "Could not read the saved Discord presence choice. Milo will leave it alone.",
+            },
             Row::ClaudeLimits | Row::SaveClaude => match self.claude {
                 Claude::Foreign => "Milo will leave your Claude Code status line alone.",
                 Claude::NotOwned => "You already added Milo to this Claude Code status line.",
@@ -850,6 +868,69 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 ),
                 None => unreachable!("the menu bar action is hidden when unavailable"),
             },
+            Row::PresenceOpen => Cell::toggle(
+                "Discord presence…",
+                "Discord",
+                self.presence_view.as_ref().is_some_and(|status| status.setting.enabled),
+                "Optionally show “In a Rex session” on your Discord profile. Off until you turn it on. Enter opens its choices.",
+            ),
+            Row::Presence => Cell::toggle(
+                "Discord presence",
+                "Discord",
+                self.presence_view.as_ref().is_some_and(|status| status.setting.enabled),
+                "Show “In a Rex session” on your Discord profile while Rex is in use. Off until you turn it on, and it asks first.",
+            ),
+            Row::PresenceDetails => {
+                use crate::presence::Details;
+                let details = self.presence_view.as_ref().map_or(Details::Generic, |status| status.setting.details);
+                Cell::choice(
+                    "Presence shows",
+                    "Shows",
+                    details.label(),
+                    match details {
+                        Details::Generic => "Only the fixed line: no session, project or other names. Enter moves on to the session name.",
+                        Details::Session => "Also the name of the Rex session in front. Enter moves on to the project name instead.",
+                        Details::Project => "Also the folder name of the Git project in the focused pane of the session in front. Enter moves on to both names.",
+                        Details::Both => "Also the session's name and the project's folder name. Enter goes back to no names.",
+                    },
+                )
+                .with_short_value(match details {
+                    Details::Generic => "Generic",
+                    Details::Session => "Session",
+                    Details::Project => "Project",
+                    Details::Both => "Both",
+                })
+            }
+            Row::PresenceApp => {
+                if self.presence_view.as_ref().is_some_and(|status| status.setting.application.is_some()) {
+                    Cell::choice(
+                        "Presence application",
+                        "App",
+                        "Your own",
+                        "Shown under the name and icon of your own Discord application. Enter goes back to Milo's.",
+                    )
+                    .with_short_value("Own")
+                } else {
+                    Cell::choice(
+                        "Presence application",
+                        "App",
+                        "Milo",
+                        "Shown under Milo's name and icon. Enter asks for the ID of a Discord application of your own to use instead.",
+                    )
+                }
+            }
+            Row::PresenceId => Cell::choice(
+                "Application ID",
+                "App ID",
+                if crate::presence::application_id(&self.application_draft).is_some() {
+                    "Ready"
+                } else if self.application_draft.is_empty() {
+                    "Needed"
+                } else {
+                    "Typing"
+                },
+                "The 17 to 19 digit ID of a Discord application you created. Its name and icon are what Discord shows. Type the digits. Enter here clears them.",
+            ),
             Row::RemoveMenuBar => Cell::action(
                 "Remove Milo menu bar app…",
                 "Remove app…",
@@ -899,6 +980,21 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Panel::Confirm(Confirm::MirrorAlerts) => {
                     Cell::action("Turn mirroring on", "Turn on", "Start sending the chosen alerts now.")
                 }
+                Panel::Confirm(Confirm::Presence) => Cell::action(
+                    "Show it on my Discord profile",
+                    "Show on Discord",
+                    "Saves the choice and starts showing it while Rex is in use.",
+                ),
+                Panel::Confirm(Confirm::PresenceDetails(_)) => Cell::action(
+                    "Show these names on Discord",
+                    "Show names",
+                    "Saves the choice. Discord shows the names from now on.",
+                ),
+                Panel::Confirm(Confirm::PresenceApp) => Cell::action(
+                    "Use this application",
+                    "Use this app",
+                    "Saves the ID. Discord shows your application's name and icon in place of Milo's.",
+                ),
                 _ => unreachable!("only confirmation pages have a continue row"),
             },
         }
@@ -910,7 +1006,7 @@ impl Panel {
         match self {
             Self::Layout | Self::Tune => Some(0),
             Self::Appearance => Some(1),
-            Self::Workflow | Self::Alerts => Some(2),
+            Self::Workflow | Self::Alerts | Self::Presence => Some(2),
             Self::Health | Self::Diagnostics => Some(3),
             Self::Save(_) | Self::Confirm(_) | Self::Exit => None,
         }
@@ -920,6 +1016,7 @@ impl Panel {
         match self {
             Self::Layout => "Layout",
             Self::Tune => "Customize panes",
+            Self::Presence => "Discord presence",
             Self::Appearance => "Appearance",
             Self::Workflow => "Workflow",
             Self::Alerts => "Mirror Rex alerts",
@@ -932,6 +1029,9 @@ impl Panel {
             Self::Confirm(Confirm::Remove) => "Remove integration?",
             Self::Confirm(Confirm::RemoveMenuBar) => "Remove menu app?",
             Self::Confirm(Confirm::MirrorAlerts) => "Mirror Rex alerts?",
+            Self::Confirm(Confirm::Presence) => "Turn on Discord presence?",
+            Self::Confirm(Confirm::PresenceDetails(_)) => "Show these names on Discord?",
+            Self::Confirm(Confirm::PresenceApp) => "Use your own Discord application?",
             Self::Exit => "Unsaved changes",
         }
     }

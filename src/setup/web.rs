@@ -1,4 +1,4 @@
-//! The local browser edits a versioned draft; only explicit saves touch settings.
+//! The local browser edits a versioned draft and applies explicit changes to global integrations.
 
 use std::fmt::{self, Display, Write as _};
 
@@ -6,7 +6,7 @@ use super::claude::ClaudeSnapshot;
 use super::*;
 use crate::json::{self, Value};
 use crate::menubar;
-use crate::preferences::Show;
+use crate::preferences::{Show, UsageAccount};
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
 const UNAVAILABLE: &str = "That choice is unavailable in this Settings session.";
@@ -52,6 +52,7 @@ impl Editor {
         let mut editor = Self::new(store, inside, target, root, window, rex::run);
         editor.setup.alerts = Alerts::real();
         editor.setup.refresh_alerts();
+        editor.setup.presence = editor.setup.presence.take().map(presence::Control::starting_helper);
         editor
     }
 
@@ -185,6 +186,8 @@ impl Editor {
         let auto_arrange = live && layout_state.editable;
         let root = setup.root.as_deref().map(Path::to_string_lossy);
         let [usage_codex, usage_claude, usage_opencode] = UsageTool::ALL.map(|tool| prefs.usage_tools[tool].value());
+        let [usage_deepseek, usage_openrouter, usage_devin, usage_copilot] =
+            UsageAccount::ALL.map(|account| prefs.usage_accounts[account].value());
         let mut out = String::with_capacity(1600);
         write!(out, concat!(
             "{{\"version\":{},",
@@ -192,7 +195,8 @@ impl Editor {
             "\"layout\":{{\"panes\":{{\"outline\":{},\"history\":{},\"usage\":{}}},\"side\":\"{}\",\"width\":{},",
             "\"order\":[\"{}\",\"{}\",\"{}\"],\"usage_rows\":{},\"ratios\":{},\"auto_arrange\":{}}},",
             "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{},",
-            "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\"}},",
+            "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\",",
+            "\"usage_deepseek\":\"{}\",\"usage_openrouter\":\"{}\",\"usage_devin\":\"{}\",\"usage_copilot\":\"{}\"}},",
             "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{}}},",
             "\"menubar\":{{\"installed\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
@@ -206,6 +210,7 @@ impl Editor {
             Optional(layout.geometry.shares.map(Ratios)), layout.new_tabs,
             icons, prefs.static_marks, prefs.text_git_marks, prefs.usage_large_figures,
             usage_codex, usage_claude, usage_opencode,
+            usage_deepseek, usage_openrouter, usage_devin, usage_copilot,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
             Optional(menubar::installed()),
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
@@ -228,6 +233,37 @@ impl Editor {
         match (&setup.alerts, &setup.alert_summary) {
             (Some(alerts), Some(summary)) => alerts_state(&mut out, alerts, summary),
             _ => out.push_str("null"),
+        }
+        out.push_str(",\"presence\":");
+        // Read now, not when the editor opened: the helper's state changes on its own.
+        match setup.presence.as_ref().and_then(|control| control.status().ok()) {
+            Some(status) => {
+                let setting = status.setting;
+                let own = setting.application.is_some();
+                // An ID is text: it is too long a number for a browser to keep exact.
+                write!(
+                    out,
+                    concat!(
+                        "{{\"enabled\":{},\"details\":\"{}\",\"application_id\":{},\"official_id\":\"{}\",",
+                        "\"status\":{},\"help\":{},\"public\":{{"
+                    ),
+                    setting.enabled,
+                    setting.details.value(),
+                    Optional(setting.application.map(|id| format!("\"{id}\""))),
+                    presence::OFFICIAL_APPLICATION,
+                    Quoted(&status.sentence()),
+                    Quoted(presence::APPLICATION_HELP),
+                )
+                .expect("writing to a string");
+                // What each choice of names would make public, to show before it is chosen.
+                for (i, details) in presence::Details::ALL.into_iter().enumerate() {
+                    let comma = if i == 0 { "" } else { "," };
+                    write!(out, "{comma}\"{}\":{}", details.value(), Quoted(presence::public(details, own)))
+                        .expect("writing to a string");
+                }
+                out.push_str("}}");
+            }
+            None => out.push_str("null"),
         }
         out.push('}');
         out
@@ -310,6 +346,14 @@ impl Editor {
                 let target = if setup.inside { self.require_tab().map(|()| setup.target.as_ref()) } else { Ok(None) };
                 self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
                 None
+            }
+            Action::Presence(edit) if self.setup.presence.is_some() => {
+                // One global choice, saved at once like the menu app, and no part of a draft.
+                let result = match edit {
+                    Some(change) => self.setup.change_presence(change),
+                    None => self.setup.disable_presence(),
+                };
+                Some(result.map(Cow::Owned))
             }
             Action::Menubar(action) if menubar::installed().is_some() => {
                 // Install also opens an existing app, replacing it only when the bundled copy differs.
@@ -436,6 +480,8 @@ enum Action {
     Doctor,
     Menubar(menubar::Action),
     Alerts(AlertChange),
+    /// Change Discord presence, or with `None` turn it off.
+    Presence(Option<presence::Change>),
 }
 
 impl Action {
@@ -480,6 +526,22 @@ impl Action {
             }
             [Some(field), Some(value), None, None] if action.is("alerts") => {
                 Self::Alerts(AlertChange::parse(field, value)?)
+            }
+            [None, Some(value), None, None] if action.is("presence") => {
+                Self::Presence(match value.string(3)?.as_ref() {
+                    "on" => Some(presence::Change::Enable),
+                    "off" => None,
+                    _ => return None,
+                })
+            }
+            [Some(field), Some(value), None, None] if action.is("presence") => {
+                let value = value.string(19)?;
+                Self::Presence(Some(match field.string(11)?.as_ref() {
+                    "details" => presence::Change::Details(presence::Details::parse(&value)?),
+                    "application" if value == "official" => presence::Change::Application(None),
+                    "application" => presence::Change::Application(Some(presence::application_id(&value)?)),
+                    _ => return None,
+                }))
             }
             [None, None, None, None] => match action.string(7)?.as_ref() {
                 "capture" => Self::Capture,
@@ -602,6 +664,7 @@ enum Edit {
     TextGitMarks(bool),
     UsageLargeFigures(bool),
     UsageTool(UsageTool, Show),
+    UsageAccount(UsageAccount, Show),
     ProjectMode(ProjectMode),
     FollowActivity(bool),
     ChangesOnly(bool),
@@ -658,8 +721,13 @@ impl Edit {
             "account.claude_limits" => Self::ClaudeLimits(value.boolean()?),
             field if field.starts_with("appearance.usage_") => {
                 let key = &field["appearance.".len()..];
-                let tool = UsageTool::ALL.into_iter().find(|tool| tool.key() == key)?;
-                Self::UsageTool(tool, Show::parse(value.string(6)?.as_ref())?)
+                let show = || Show::parse(value.string(6)?.as_ref());
+                if let Some(tool) = UsageTool::ALL.into_iter().find(|tool| tool.key() == key) {
+                    Self::UsageTool(tool, show()?)
+                } else {
+                    let account = UsageAccount::ALL.into_iter().find(|account| account.key() == key)?;
+                    Self::UsageAccount(account, show()?)
+                }
             }
             field => Self::Pane(pane_named(field.strip_prefix("layout.panes.")?)?, value.boolean()?),
         })
@@ -700,6 +768,7 @@ impl Edit {
             Self::TextGitMarks(on) => prefs.text_git_marks = on,
             Self::UsageLargeFigures(on) => prefs.usage_large_figures = on,
             Self::UsageTool(tool, show) => prefs.usage_tools[tool] = show,
+            Self::UsageAccount(account, show) => prefs.usage_accounts[account] = show,
             Self::ProjectMode(mode) => prefs.project_mode = mode,
             Self::FollowActivity(on) => prefs.follow_activity = on,
             Self::ChangesOnly(on) => prefs.changes_only = on,
@@ -1135,6 +1204,36 @@ mod tests {
     }
 
     #[test]
+    fn online_accounts_start_hidden_in_the_editor_and_a_choice_is_saved_without_touching_the_tools() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), None);
+        let before = editor.state();
+        let appearance = field(Value::parse(before.as_bytes()).unwrap(), "appearance");
+        for key in ["usage_deepseek", "usage_openrouter", "usage_devin", "usage_copilot"] {
+            assert!(field(appearance, key).is("hide"), "{key}");
+        }
+        let request = r#""action":"set","field":"appearance.usage_deepseek","value":"on""#;
+        assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION);
+
+        set(&mut editor, "appearance.usage_deepseek", "\"auto\"");
+        set(&mut editor, "appearance.usage_copilot", "\"always\"");
+        assert!(!store.config.exists(), "a draft writes nothing");
+        action(&mut editor, r#""action":"save","group":"preferences","scope":"global""#).unwrap();
+        let saved = PreferenceSnapshot::load(&store.config, None).unwrap().prefs;
+        let accounts = UsageAccount::ALL.map(|account| saved.usage_accounts[account]);
+        assert_eq!(accounts, [Show::Auto, Show::Hide, Show::Hide, Show::Always]);
+        assert!(UsageTool::ALL.into_iter().all(|tool| saved.usage_tools[tool] == Show::Auto));
+
+        // Hiding it again is saved too, so the provider is no longer contacted.
+        let mut later = outside(store.clone(), None);
+        set(&mut later, "appearance.usage_deepseek", "\"hide\"");
+        action(&mut later, r#""action":"save","group":"preferences","scope":"global""#).unwrap();
+        let saved = PreferenceSnapshot::load(&store.config, None).unwrap().prefs;
+        assert_eq!(saved.usage_accounts[UsageAccount::DeepSeek], Show::Hide);
+    }
+
+    #[test]
     fn account_saves_are_separate_and_never_overwrite_a_changed_status_line() {
         let f = Fixture::folder();
         let store = fixture_store(&f);
@@ -1287,5 +1386,93 @@ mod tests {
         let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
         assert!(field(alerts, "destination").null());
         assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(false));
+    }
+
+    #[test]
+    fn discord_presence_is_one_saved_choice_that_only_an_explicit_action_changes() {
+        const ID: &str = "1234567890123456789";
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let file = store.config.join("discord.conf");
+        let mut editor = outside(store, None);
+        // Enabled, the details, the person's own application, the status line, and what a choice makes public.
+        let presence = |json: &str, shown: &str| {
+            let state = Value::parse(json.as_bytes()).unwrap();
+            let presence = field(state, "presence");
+            let id = field(presence, "application_id");
+            (
+                field(presence, "enabled").boolean().unwrap(),
+                field(presence, "details").string(8).unwrap().into_owned(),
+                (!id.null()).then(|| id.string(19).unwrap().into_owned()),
+                field(presence, "status").string(400).unwrap().into_owned(),
+                field(field(presence, "public"), shown).string(900).unwrap().into_owned(),
+            )
+        };
+        let start = editor.state();
+        let (enabled, details, id, status, public) = presence(&start, "generic");
+        assert!(!enabled && id.is_none());
+        assert_eq!(details, "generic");
+        assert_eq!(status, "Milo is not connected to Discord and shows nothing there.");
+        assert_eq!(public, presence::public(presence::Details::Generic, false));
+        // The page holds what every choice would make public before any is turned on.
+        for choice in presence::Details::ALL {
+            assert_eq!(presence(&start, choice.value()).4, presence::public(choice, false));
+        }
+        let official = field(field(Value::parse(start.as_bytes()).unwrap(), "presence"), "official_id");
+        assert!(official.is("1573574411418599586"));
+
+        let draft = set(&mut editor, "workflow.tab_titles", "true");
+        for request in [
+            r#""action":"presence""#,
+            r#""action":"presence","value":"yes""#,
+            r#""action":"presence","value":true"#,
+            r#""action":"presence","value":"1234567890123456789""#,
+            r#""action":"presence","field":"details","value":"titles""#,
+            r#""action":"presence","field":"details","value":true"#,
+            r#""action":"presence","field":"application","value":1234567890123456789"#,
+            r#""action":"presence","field":"application","value":"12345678901234567890""#,
+            r#""action":"presence","field":"token","value":"secret""#,
+            r#""action":"presence","value":"off","group":"preferences""#,
+        ] {
+            assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION, "{request}");
+        }
+        assert_eq!(editor.state(), draft);
+        assert!(!file.exists());
+
+        // Turning it on needs no application ID: Milo's own is used.
+        let on = action(&mut editor, r#""action":"presence","value":"on""#).unwrap();
+        let (enabled, details, id, ..) = presence(&on, "generic");
+        assert!(enabled && id.is_none());
+        assert_eq!(details, "generic");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "presence = true\n");
+        let state = Value::parse(on.as_bytes()).unwrap();
+        assert!(field(field(state, "message"), "text").string(400).unwrap().starts_with("Discord presence is on."));
+        assert_eq!(field(state, "dirty").boolean(), Some(true), "the pane preference draft is kept");
+        assert!(!editor.setup.store().unwrap().config.join("preferences.conf").exists());
+
+        let both = action(&mut editor, r#""action":"presence","field":"details","value":"both""#).unwrap();
+        assert_eq!(presence(&both, "both").1, "both");
+        let own = action(&mut editor, &format!(r#""action":"presence","field":"application","value":"{ID}""#)).unwrap();
+        let (_, _, id, _, public) = presence(&own, "both");
+        assert_eq!(id.as_deref(), Some(ID), "the ID survives as text");
+        assert_eq!(public, presence::public(presence::Details::Both, true), "the notice names the person's own application");
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\ndetails = both\n"));
+
+        let off = action(&mut editor, r#""action":"presence","value":"off""#).unwrap();
+        let (enabled, details, id, status, _) = presence(&off, "both");
+        assert!(!enabled);
+        assert_eq!((details.as_str(), id.as_deref()), ("both", Some(ID)), "the choices are remembered for next time");
+        assert_eq!(status, "Milo is not connected to Discord and shows nothing there.");
+
+        let reset = action(&mut editor, r#""action":"presence","field":"application","value":"official""#).unwrap();
+        assert!(presence(&reset, "generic").2.is_none());
+        action(&mut editor, r#""action":"presence","field":"details","value":"generic""#).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "presence = false\n");
+
+        // Another surface changed the choice; the page shows what is saved now.
+        fs::write(&file, "presence = true\ndetails = project\n").unwrap();
+        let (enabled, details, ..) = presence(&editor.state(), "project");
+        assert!(enabled);
+        assert_eq!(details, "project");
     }
 }

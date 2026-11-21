@@ -9,6 +9,10 @@ export type Commit = { title: string; age: string; files?: readonly DemoFile[] }
 // What the person asks the agent for; it is typed into the composer first.
 export const request = 'Add wind speed to the weekend forecast.';
 
+// What the whole window is, for someone who cannot see it. A phone that shows
+// one pane at a time swaps this for that pane's name.
+export const demoLabel = 'A Rex window with milo’s outline, history and usage panes beside a coding agent at work';
+
 export type Pane = 'outline' | 'history' | 'usage' | 'reader' | 'agent';
 
 // Each pass shows a different coding agent in the same Rex layout.
@@ -17,6 +21,7 @@ export const harnesses = [
   { id: 'codex', name: 'Codex', version: '0.170.0', model: 'GPT-5.6 Sol high' },
   { id: 'omp', name: 'omp', version: '19.0.0', model: 'GPT-5.6 Sol high' },
 ] as const;
+export type Harness = typeof harnesses[number];
 
 // One pass of the demo, in milliseconds from its start. Each effect follows
 // its cause by a beat: the agent's edit appears, then the outline marks the
@@ -135,7 +140,7 @@ const reportedAfter = {
   codex: { ...usageReports, codex: usageReports.codex - 2 },
 };
 
-export function frameAt(phase: Phase, harness: typeof harnesses[number]['id']): Frame {
+export function frameAt(phase: Phase, harness: Harness['id']): Frame {
   const stage = order.indexOf(phase);
   const committed = stage >= committedAt;
   // omp runs a Codex model in this scene, so it changes the Codex report.

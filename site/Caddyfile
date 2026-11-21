@@ -11,15 +11,25 @@
 		X-Content-Type-Options nosniff
 		-Server
 	}
-	# Vite puts content-hashed files in /assets.
-	header /assets/* {
+	# Next.js names every file under /_next/static by its content or its build.
+	header /_next/static/* {
 		Cache-Control "public, max-age=31536000, immutable"
 		match status 2xx 304
 	}
+	# The file server answers //… with the home page, but the page's router
+	# cannot parse such an address and replaces the page with an error.
+	@slashes expression `{http.request.orig_uri.path}.startsWith("//")`
+	redir @slashes / 308
 	file_server
 
+	# An error response starts over: without these it goes out uncompressed and bare.
 	handle_errors 404 {
 		rewrite /404.html
+		encode gzip zstd
+		header {
+			X-Content-Type-Options nosniff
+			-Server
+		}
 		file_server
 	}
 }

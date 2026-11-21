@@ -1403,3 +1403,126 @@ fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
     tty.shows("Saved");
     assert_eq!(fs::read_to_string(&file).unwrap(), "fn main() {\n    let x = 1;\n}\n");
 }
+
+/// The installed binary has no way to send a key anywhere but its provider:
+/// the loopback stand-in that unit tests use is not compiled into it, and the
+/// variable that once selected it does nothing. Saved answers stand in for
+/// the providers here, so this test sends no request at all.
+#[test]
+fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_its_key() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::Stdio;
+
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let binary = fs::read(milo).unwrap();
+    let holds = |text: &str| binary.windows(text.len()).any(|window| window == text.as_bytes());
+    assert!(holds("MILO_DEEPSEEK_API_KEY") && holds("proto = \"=https\""));
+    assert!(!holds("MILO_TEST_USAGE_PORT"), "the binary must not know a transport override");
+    assert!(!holds("proto = \"=http\""), "the binary must not be able to ask over plain HTTP");
+
+    // A receiver that would see any request the old override could have redirected.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = std::sync::Arc::new(AtomicU32::new(0));
+    let counted = received.clone();
+    std::thread::spawn(move || {
+        for _ in listener.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let project = Project::new();
+    let command = || {
+        let mut command = project.command(milo);
+        command
+            .env_remove("REX_CONFIG")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("OPENCODE_DB")
+            .env_remove("CODEX_HOME")
+            .env("XDG_DATA_HOME", project.0.join("data"))
+            .env("MILO_TEST_USAGE_PORT", port.to_string())
+            // Should a request be made after all, curl's proxy sends it to the counter, not to a provider.
+            .env("HTTPS_PROXY", format!("http://127.0.0.1:{port}"))
+            .env("https_proxy", format!("http://127.0.0.1:{port}"))
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env("MILO_OPENROUTER_API_KEY", "sk-or-not-a-real-key");
+        command
+    };
+    let config = project.0.join("config/milo");
+    fs::create_dir_all(&config).unwrap();
+    let keys = config.join("usage-accounts.conf");
+    fs::write(&keys, "MILO_DEEPSEEK_API_KEY = sk-not-a-real-key\n").unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+
+    // Keys alone turn nothing on: the pane and doctor say nothing of the accounts.
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
+    // The pane moves the cursor across spaces, so only single words arrive whole.
+    pane.until("show");
+    pane.master.write_all(b"rq").unwrap();
+    assert!(pane.wait_for_exit().success());
+    let report = command().arg("doctor").output().unwrap();
+    assert!(!String::from_utf8_lossy(&report.stdout).contains("DeepSeek"));
+    assert!(!project.0.join("state/milo/accounts").exists());
+
+    // Answers saved moments ago, as another pane would have left them: none is due a request.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let later = now + 3600;
+    let saved = project.0.join("state/milo/accounts");
+    fs::create_dir_all(&saved).unwrap();
+    let reading = format!(
+        r#"{{"observed":{now},"figure":{{"kind":"balance","unit":"cny","value":110}},"details":[{{"kind":"granted","unit":"cny","value":10}}],"depleted":false}}"#
+    );
+    fs::write(saved.join("deepseek.json"), format!(r#"{{"version":1,"asked":{now},"next":{later},"reading":{reading}}}"#))
+        .unwrap();
+    fs::write(
+        saved.join("openrouter.json"),
+        format!(r#"{{"version":1,"asked":{now},"next":{later},"failure":"limited"}}"#),
+    )
+    .unwrap();
+    fs::write(config.join("preferences.conf"), "usage_deepseek = auto\nusage_openrouter = always\n").unwrap();
+
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
+    pane.until("granted");
+    pane.until("limited");
+    assert!(!pane.output().contains('%'), "{}", pane.output());
+    pane.master.write_all(b"q").unwrap();
+    assert!(pane.wait_for_exit().success());
+
+    let report = command().arg("doctor").output().unwrap();
+    let report = String::from_utf8(report.stdout).unwrap();
+    assert!(report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"), "{report}");
+    assert!(report.contains("DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from "), "{report}");
+    assert!(report.contains("  last answer: ¥110.00 balance, "), "{report}");
+    assert!(report.contains("  last attempt: the provider rate limited the request"), "{report}");
+    assert!(!report.contains("not-a-real-key"), "{report}");
+
+    let mut stream = command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut lines = BufReader::new(stream.stdout.take().unwrap()).lines();
+    // Each account is looked at on a thread of its own, even when a saved
+    // answer spares the request, and the stream does not hold a line back for
+    // one: an account still being looked at reads "Asking the provider" until
+    // a later line, a second apart. Both looks only read a file here, so the
+    // line with both must come within a few.
+    let settled = |line: &String| line.contains("deepseek") && !line.contains("Asking the provider");
+    let line = lines
+        .by_ref()
+        .take(10)
+        .map(Result::unwrap)
+        .inspect(|line| eprintln!("menu stream: {line}"))
+        .find(settled)
+        .expect("a line with both accounts' saved answers");
+    assert!(
+        line.contains(r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#),
+        "{line}"
+    );
+    assert!(line.contains(r#"{"id":"openrouter","name":"OpenRouter","windows":[],"detail":"Rate limited"}"#), "{line}");
+    drop(stream.stdin.take());
+    assert!(stream.wait().unwrap().success());
+
+    // Nothing was sent to the loopback receiver, with or without accounts turned on.
+    assert_eq!(received.load(Ordering::SeqCst), 0);
+    for name in ["deepseek.json", "openrouter.json"] {
+        assert!(!fs::read_to_string(saved.join(name)).unwrap().contains("not-a-real-key"));
+    }
+}

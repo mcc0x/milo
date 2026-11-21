@@ -18,7 +18,7 @@ use super::profiles::{LayoutError, Scope};
 use super::rex_files::{LISTENER_STATE_MISMATCH, LOADER_CONFLICT};
 use super::{lock, rex_files};
 use crate::git::discover_worktree;
-use crate::preferences::{IconMode, Preferences, Show, Source, UsageTool, UsageTools};
+use crate::preferences::{IconMode, Preferences, Show, Source, UsageAccount, UsageAccounts, UsageTool, UsageTools};
 use crate::{rex, usage};
 
 pub(crate) const TITLE: &str = "Milo doctor";
@@ -134,8 +134,8 @@ pub(crate) fn report() -> Result<String, String> {
 /// tools saved. That look opens their files and databases, so health checks
 /// alone do not run it.
 pub(super) fn full_report(store: &Store, root: Option<&Path>) -> Result<String, String> {
-    let (mut report, tools) = inspect(store, root)?;
-    for line in usage::doctor(tools) {
+    let (mut report, (tools, accounts)) = inspect(store, root)?;
+    for line in usage::doctor(tools, accounts) {
         report.push('\n');
         report.push_str(&line);
     }
@@ -147,7 +147,10 @@ pub(super) fn report_for(store: &Store, root: Option<&Path>) -> Result<String, S
     inspect(store, root).map(|(report, _)| report)
 }
 
-fn inspect(store: &Store, root: Option<&Path>) -> Result<(String, UsageTools), String> {
+/// What the resolved preferences let the usage pane look at.
+type Shown = (UsageTools, UsageAccounts);
+
+fn inspect(store: &Store, root: Option<&Path>) -> Result<(String, Shown), String> {
     let target = rex::Target::current();
     let discovered;
     let worktree = if root.is_some() {
@@ -177,9 +180,9 @@ fn report_with_worktree(
     store: &Store,
     worktree: Result<Option<&Path>, &'static str>,
     target: Option<&rex::Target>,
-) -> Result<(String, Health, UsageTools), String> {
+) -> Result<(String, Health, Shown), String> {
     let mut health = Health::Good;
-    let mut tools = UsageTools::default();
+    let mut tools = Shown::default();
     let mut out = String::from(TITLE);
     out.push('\n');
     match worktree {
@@ -216,7 +219,10 @@ fn report_with_worktree(
             .unwrap();
             writeln!(out, "  Narrow usage: {}", if p.usage_large_figures { "large figures" } else { "text" }).unwrap();
             writeln!(out, "  Usage tools: {}", usage_tools(p.usage_tools)).unwrap();
-            tools = p.usage_tools;
+            if p.usage_accounts.any() {
+                writeln!(out, "  Usage accounts: {}", usage_accounts(p.usage_accounts)).unwrap();
+            }
+            tools = (p.usage_tools, p.usage_accounts);
             writeln!(out, "  Rex tab titles: {}", on(p.tab_titles)).unwrap();
         }
         Err(e) => {
@@ -297,6 +303,33 @@ fn report_with_worktree(
         }
     )
     .unwrap();
+    let presence = crate::presence::Control::at(store.config.clone(), store.state.clone());
+    match presence.status() {
+        Ok(status) if !status.setting.enabled => out.push_str("Discord presence: off\n"),
+        Ok(status) => {
+            let setting = status.setting;
+            let application = match setting.application {
+                Some(own) => format!("your own application {own}"),
+                None => "Milo's application".to_owned(),
+            };
+            writeln!(
+                out,
+                "Discord presence: on, under {application}, details {}. {}",
+                setting.details.value(),
+                status.sentence()
+            )
+            .unwrap()
+        }
+        Err(_) => {
+            health.warn("Milo could not read the Discord presence setting.");
+            writeln!(
+                out,
+                "Discord presence: unreadable, so it will not start. milo presence disable stops a helper that is still running. Then correct or remove {:?}.",
+                presence.file()
+            )
+            .unwrap();
+        }
+    }
     out.push_str("Claude status line: ");
     let claude = store.claude_files();
     match claude.as_ref().map_or(Claude::Invalid, |files| files.status()) {
@@ -419,6 +452,21 @@ fn usage_tools(tools: UsageTools) -> String {
         _ if UsageTool::ALL.into_iter().any(|tool| tools[tool] == Show::Auto) => "others automatic",
         _ => "",
     });
+    out.truncate(out.trim_end_matches("; ").len());
+    out
+}
+
+/// The accounts someone turned on. A hidden account is the default and goes unnamed.
+fn usage_accounts(accounts: UsageAccounts) -> String {
+    let mut out = String::new();
+    for account in UsageAccount::ALL {
+        let choice = match accounts[account] {
+            Show::Hide => continue,
+            Show::Auto => "shown once it has a figure",
+            Show::Always => "always shown",
+        };
+        write!(out, "{} {choice}; ", account.label()).unwrap();
+    }
     out.truncate(out.trim_end_matches("; ").len());
     out
 }

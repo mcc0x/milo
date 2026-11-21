@@ -25,6 +25,12 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   user asks for that name.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
+- Discord presence is off unless the user turned it on, and it publishes on
+  their Discord profile. `milo presence` reports it without changing anything.
+  Run `milo presence enable`, `details`, `application` or `disable` only when
+  the user asks, and never pass `--yes` for them: it skips the notice of what
+  becomes public. Never raise the details to `session`, `project` or `both`
+  on your own: they show the session's name or the project's folder name.
 
 ## Commands
 
@@ -38,6 +44,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
+| `milo presence [status]` | Says whether the optional Discord presence is on and what Discord shows now. |
 | `milo listen [--stop]` | Starts or stops layout memory, automatic new-tab arrangement and tab titles; normally managed by setup. |
 | `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
 

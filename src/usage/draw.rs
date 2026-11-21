@@ -18,7 +18,7 @@ use crate::when::{self, Detail};
 use crate::width::str_width;
 
 use self::figure::Figure;
-use super::{Activity, CodexSessions, Limits, Source, Usage, Window, opencode};
+use super::{Activity, CodexSessions, Limits, Source, Usage, Window, accounts, opencode};
 
 const SIDE_BY_SIDE: usize = 64;
 /// Space for two useful summaries beside each other when a third tool is required.
@@ -373,6 +373,47 @@ impl Hint {
         state: "unknown",
         next: Some("Run milo doctor"),
     };
+    const ASKING: Self = Self { full: "asking the provider", short: "checking", state: "checking", next: None };
+    const NO_RECENT_ANSWER: Self =
+        Self { full: "no recent answer", short: "no answer", state: "no answer", next: Some("Press r to ask again") };
+
+    /// Why an account has no figure, and where to look next.
+    const fn account(failure: accounts::Failure) -> Self {
+        use accounts::Failure;
+        const DOCTOR: Option<&str> = Some("Run milo doctor");
+        match failure {
+            Failure::NoKey => Self { full: "no key set", short: "no key", state: "no key", next: DOCTOR },
+            Failure::NoScope => {
+                Self { full: "account not named", short: "no account", state: "no account", next: DOCTOR }
+            }
+            Failure::OpenFile => Self {
+                full: "settings file not private",
+                short: "file not private",
+                state: "not private",
+                next: DOCTOR,
+            },
+            Failure::BadSetting => {
+                Self { full: "setting cannot be sent", short: "unusable setting", state: "bad setting", next: DOCTOR }
+            }
+            Failure::Refused => {
+                Self { full: "key was refused", short: "key refused", state: "refused", next: Some("Check the key") }
+            }
+            Failure::Denied => {
+                Self { full: "access was denied", short: "access denied", state: "denied", next: DOCTOR }
+            }
+            Failure::Limited => Self { full: "rate limited", short: "rate limited", state: "limited", next: None },
+            Failure::Unreachable => Self {
+                full: "could not reach provider",
+                short: "unreachable",
+                state: "offline",
+                next: Some("Press r to try again"),
+            },
+            Failure::Unexpected => {
+                Self { full: "reply not understood", short: "unknown reply", state: "unknown", next: DOCTOR }
+            }
+            Failure::Nothing => Self { full: "no usage reported", short: "no usage", state: "no usage", next: None },
+        }
+    }
 
     const fn no_limits(tool: Tool) -> Self {
         Self { full: "no limits to show", short: "no limits", state: "no limits", next: Some(tool.open()) }
@@ -1094,6 +1135,157 @@ impl<'a> Harness<'a> {
     }
 }
 
+/// An account's place in the frame. Its figure is money or a count the
+/// provider reported, never a share of a limit, so it is written in words on
+/// one row: beneath the tools, or in rows of its own when no tool has a place.
+struct AccountRow {
+    name: &'static str,
+    short: &'static str,
+    show: Show,
+    status: accounts::Status,
+    hint: Option<Hint>,
+}
+
+/// Why an account has no figure to show, if it has none.
+fn account_hint(status: accounts::Status) -> Option<Hint> {
+    match status {
+        accounts::Status::Reading(..) => None,
+        accounts::Status::Checking => Some(Hint::ASKING),
+        accounts::Status::Failed(failure) => Some(Hint::account(failure)),
+        accounts::Status::Outdated => Some(Hint::NO_RECENT_ANSWER),
+    }
+}
+
+/// What the provider said besides the figure, the most useful first.
+fn account_details(status: accounts::Status) -> impl Iterator<Item = String> {
+    let reading = match status {
+        // Parts of an old answer are left out: the figure and its age are enough.
+        accounts::Status::Reading(reading, None) => Some(reading),
+        _ => None,
+    };
+    let depleted = reading.filter(|reading| reading.depleted).map(|_| "too low for requests".to_owned());
+    depleted.into_iter().chain(reading.into_iter().flat_map(|r| r.details).flatten().map(accounts::Figure::text))
+}
+
+/// An account in one sentence for the menu: its figure with what else the
+/// provider said, an old figure with its age, or why there is none.
+pub(super) fn account_text(status: accounts::Status) -> String {
+    match (status, account_hint(status)) {
+        (accounts::Status::Reading(reading, Some(age)), _) => {
+            format!("{} · {} ago", reading.figure.text(), compact_time(age))
+        }
+        (accounts::Status::Reading(reading, None), _) => {
+            let mut text = reading.figure.text();
+            for detail in account_details(status) {
+                text.push_str(" · ");
+                text.push_str(&detail);
+            }
+            text
+        }
+        (_, hint) => {
+            // These fixed captions are ASCII, so the first byte is the first letter.
+            let words = hint.map_or("", |hint| hint.full);
+            let mut text = words.to_owned();
+            text[..words.len().min(1)].make_ascii_uppercase();
+            text
+        }
+    }
+}
+
+impl AccountRow {
+    fn new(account: &accounts::Account, now: i64) -> Self {
+        let status = account.status(now);
+        let (name, short) = (account.which.label(), account.which.short());
+        Self { name, short, show: account.show, status, hint: account_hint(status) }
+    }
+
+    /// Auto gives a place only to a figure, as it does for a tool.
+    fn placed(&self) -> bool {
+        self.show == Show::Always || self.hint.is_none()
+    }
+
+    fn details(&self) -> impl Iterator<Item = String> {
+        account_details(self.status)
+    }
+
+    /// The name and what follows it, from the fullest wording to the barest.
+    /// `details` adds what else the provider said where no other row will.
+    /// An old figure is never worded without saying that it is old.
+    fn wordings(&self, details: bool) -> Vec<(&'static str, String)> {
+        let (name, short) = (self.name, self.short);
+        match (&self.status, &self.hint) {
+            (accounts::Status::Reading(reading, Some(age)), _) => {
+                let (figure, amount, age) = (reading.figure.text(), reading.figure.amount(), compact_time(*age));
+                vec![
+                    (name, format!(" · {figure} · {age} ago")),
+                    (name, format!(" {figure} · {age} ago")),
+                    (name, format!(" {amount} last")),
+                    (short, format!(" {amount} last")),
+                    (name, " · old".into()),
+                    (short, String::new()),
+                ]
+            }
+            (accounts::Status::Reading(reading, None), _) => {
+                let (figure, amount) = (reading.figure.text(), reading.figure.amount());
+                let details: Vec<String> = self.details().filter(|_| details).collect();
+                let mut wordings: Vec<_> = (0..=details.len())
+                    .rev()
+                    .map(|count| {
+                        let mut text = format!(" · {figure}");
+                        for detail in &details[..count] {
+                            text.push_str(" · ");
+                            text.push_str(detail);
+                        }
+                        (name, text)
+                    })
+                    .collect();
+                wordings.extend([
+                    (name, format!(" {figure}")),
+                    (name, format!(" {amount}")),
+                    (short, format!(" {amount}")),
+                ]);
+                wordings
+            }
+            (_, Some(hint)) => vec![
+                (name, format!(" · {}", hint.full)),
+                (name, format!(" · {}", hint.short)),
+                (name, format!(" · {}", hint.state)),
+                (name, String::new()),
+                (short, String::new()),
+            ],
+            (_, None) => Vec::new(),
+        }
+    }
+
+    /// One row: the longest wording that fits, or nothing when even the barest does not.
+    fn line(&self, screen: &mut Screen, area: Area, row: usize, details: bool) {
+        let wordings = self.wordings(details);
+        let fitting = wordings.iter().find(|(name, text)| name.len() + str_width(text) <= area.w);
+        if let Some((name, text)) = fitting.filter(|_| row < area.h) {
+            let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
+            writer.add(name, Style::PLAIN.bold());
+            writer.add(text, FAINT);
+        }
+    }
+
+    /// With the pane to themselves, accounts are listed from the top. One
+    /// alone has the rows below for what else its provider said.
+    fn alone(rows: &[&Self], screen: &mut Screen, area: Area) {
+        if let [row] = rows {
+            row.line(screen, area, 0, area.h == 1);
+            match &row.hint {
+                Some(hint) => area.note(screen, 1, hint.next.unwrap_or_default()),
+                None if area.h > 1 => flow(screen, area, 1, row.details()),
+                None => {}
+            }
+            return;
+        }
+        for (i, row) in rows.iter().enumerate() {
+            row.line(screen, area, i, true);
+        }
+    }
+}
+
 /// Two places beside each other, with a line between them.
 fn beside(screen: &mut Screen, area: Area) -> [Area; 2] {
     let (left, right) = area.split(1);
@@ -1128,9 +1320,10 @@ fn halves(screen: &mut Screen, area: Area) -> [Area; 2] {
     [Area { h: upper, ..area }, Area { y: area.y + upper + rule, h: area.h - upper - rule, ..area }]
 }
 
-/// One quiet block when no tool has a place: what each tool Milo found is
-/// waiting for, or that no enabled source has a reading.
-fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], checking: bool, tools: UsageTools) {
+/// One quiet block when nothing has a place: what each tool Milo found and
+/// each account that is turned on is waiting for, or that no enabled source
+/// has a reading.
+fn quiet(screen: &mut Screen, area: Area, waiting: &[(&str, &Hint)], checking: bool, tools: UsageTools) {
     let title = |screen: &mut Screen, [long, short]: [&str; 2]| {
         if let Some(text) = [long, short].into_iter().find(|text| str_width(text) <= area.w) {
             screen.put(area.x, area.y, area.w, text, Style::PLAIN);
@@ -1146,7 +1339,7 @@ fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], c
             area.note(screen, 1, brief);
         }
     };
-    let count = waiting.iter().flatten().count();
+    let count = waiting.len();
     if count == 0 {
         let any_enabled = UsageTool::ALL.into_iter().any(|tool| tools[tool] != Show::Hide);
         if checking {
@@ -1160,12 +1353,12 @@ fn quiet(screen: &mut Screen, area: Area, waiting: [Option<(&str, &Hint)>; 3], c
         return;
     }
     // A lone tool has room for its next step. The title gives way to both.
-    let next = waiting.iter().flatten().next().filter(|_| count == 1).and_then(|(_, hint)| hint.next);
+    let next = waiting.first().filter(|_| count == 1).and_then(|(_, hint)| hint.next);
     let mut row = usize::from(area.h > count + usize::from(next.is_some()));
     if row != 0 {
         title(screen, NO_USAGE);
     }
-    for (name, hint) in waiting.into_iter().flatten() {
+    for (name, hint) in waiting {
         let text = hint.words().into_iter().find(|text| name.len() + 3 + text.len() <= area.w);
         if row < area.h && name.len() <= area.w {
             let mut writer = RowWriter { screen, x: area.x, y: area.y + row, left: area.w };
@@ -1227,6 +1420,22 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     let rows = h - usize::from(footer);
     let pad = usize::from(w >= 24);
     let placed = harness.as_ref().filter(|_| presence[2].placed(opencode));
+    let accounts: Vec<AccountRow> = usage.accounts.iter().map(|account| AccountRow::new(account, now)).collect();
+    let listed: Vec<&AccountRow> = accounts.iter().filter(|row| row.placed()).collect();
+    // An account's figure is not a limit either. Under tools it has a row of
+    // its own at the foot of the pane, once every tool above has the rows it
+    // needs: limits keep their places first, then OpenCode, then accounts.
+    let tools_placed = count + usize::from(placed.is_some());
+    let least = match (text, count) {
+        (_, 0) if placed.is_none() => rows,
+        (true, 2) if placed.is_some() => 3,
+        (true, 2) => 1 + usize::from(w < THREE_SUMMARIES),
+        (true, _) => tools_placed,
+        (false, _) if tools_placed == 2 && !split => 7,
+        (false, _) => 3,
+    };
+    let beneath_accounts = listed.len().min(rows.saturating_sub(least));
+    let rows = rows - beneath_accounts;
     // Harness activity is not a provider's limit. Beneath two tools with
     // limits it has one row, above the key hints and in line with them.
     // Beside panels it waits for a pane two rows taller than the hints need,
@@ -1248,7 +1457,7 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
     let rail = Area { x: pad, w: w - 2 * pad, ..area };
     let activity = || usage.claude.activity(today, now);
     match (limits, placed) {
-        ([Some(codex), Some(claude)], _) if text && rail.h == 1 && beneath.is_some() => {
+        ([Some(codex), Some(claude)], _) if text && rail.h == 1 && (beneath.is_some() || beneath_accounts > 0) => {
             let [left, right] = beside(screen, rail);
             codex.summary(screen, left, false, false, Activity::default);
             claude.summary(screen, right, false, false, activity);
@@ -1293,16 +1502,19 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
         }
         ([None, None], Some(harness)) if text => harness.summary(screen, rail, now),
         ([None, None], Some(harness)) => harness.panel(screen, area.inset(), now),
+        ([None, None], None) if !listed.is_empty() => AccountRow::alone(&listed, screen, rail),
         ([None, None], None) => {
-            let waiting = [
-                reports[0].as_ref().and_then(Report::waiting),
-                reports[1].as_ref().and_then(Report::waiting),
-                match &harness {
+            let waiting: Vec<(&str, &Hint)> = reports
+                .iter()
+                .filter_map(|report| report.as_ref().and_then(Report::waiting))
+                .chain(match &harness {
                     Some(Harness::Unknown(hint)) => Some((Harness::NAMES[0], hint)),
                     _ => None,
-                },
-            ];
-            quiet(screen, rail, waiting, checking || usage.opencode.poll.checking(), tools);
+                })
+                .chain(accounts.iter().filter_map(|row| Some((row.name, row.hint.as_ref()?))))
+                .collect();
+            let checking = checking || usage.opencode.poll.checking() || usage.accounts.checking();
+            quiet(screen, rail, &waiting, checking, tools);
         }
     }
     if let Some(harness) = beneath {
@@ -1312,6 +1524,10 @@ pub(super) fn usage(screen: &mut Screen, usage: &Usage, today: i64, now: i64) {
             }
         }
         harness.line(screen, line, true);
+    }
+    let foot = Area { x: inset, y: rows, w: w.saturating_sub(2 * inset), h: beneath_accounts };
+    for (i, row) in listed.iter().take(beneath_accounts).enumerate() {
+        row.line(screen, foot, i, true);
     }
     if footer {
         help::draw_hint(screen, "r reload", &["q quit"], "? help");

@@ -1,14 +1,24 @@
 # Usage sources: what was checked
 
-This is the evidence behind what `milo usage` reads from each coding harness, and what it leaves unknown. [Usage limits](usage.md) describes the pane itself.
+This is the evidence behind what `milo usage` reads from each coding harness and asks of each provider, and what it leaves unknown. [Usage limits](usage.md) describes the pane itself.
 
-A source is added only when all of these hold:
+There are two kinds of source. A **tool** is a harness that saves usage on this machine. An **account** is a figure only a provider's service holds. They follow different rules, and neither borrows from the other.
+
+A tool is added only when all of these hold:
 
 - **It is already on disk.** Milo reads what the tool saved. It does not call a provider, run the tool, read its saved sign-in, or open an account page.
 - **Its format was checked against a pinned release**, in source and in a database or file that release wrote, and the test fixtures come from that release.
 - **Each read is bounded** in time, bytes or both, and never changes the tool's files.
 - **Each figure keeps its own meaning.** The table below is the vocabulary. A figure that a source cannot support stays unknown; it is never shown as zero, estimated from another kind, or filled in from a plan's published allowance.
 - **A tool that is not in use takes no room.** Whether a tool is in use on this machine is decided from the same bounded reads, apart from whether it has a figure. An adapter says what counts as found, and an empty folder or an empty file never does. [Which tools appear](usage.md#which-tools-appear) has the rule for each tool.
+
+An account is added only when all of these hold:
+
+- **The provider documents the endpoint** and the fields Milo reads, for the kind of key a person can make for themselves. Endpoints found by watching an app, a dashboard's own API, and anything that needs a browser session are out.
+- **The user turned it on and named a key for Milo.** Nothing on the machine can say an account is in use without reading someone's secrets, so there is no detection: every account starts hidden, and a hidden account is never asked about. Milo does not reuse a key a harness saved or one in another tool's environment variable.
+- **One read-only request, bounded** in time and bytes, to the provider's own host, at an interval the provider's limits allow, with any announced wait honoured.
+- **The figure keeps the provider's unit.** A balance, a spend and a count of credits are not quotas. They never become a percentage, never drive the menu bar badge or an alert, and are never added to a harness's figures: the same upstream account can sit behind several harnesses.
+- **The answer's shape is checked**, and anything else is unknown. Where the provider publishes only a schema and no test account was available, that is said below.
 
 | Kind | What it is | What it is not |
 | --- | --- | --- |
@@ -18,14 +28,24 @@ A source is added only when all of these hold:
 | Scope | Which account, project, session, model and period a figure covers | |
 | Age | When the tool observed the figure, not when Milo read the file | |
 | Provenance | The file, table and field it came from, and the release that wrote it | |
+| Balance | Prepaid money the provider says is on the account | A quota, or a spend |
+| Spend | Money the provider says a key or account consumed in a period | A share of a subscription |
+| Credits, ACUs | A provider's own unit of consumption, counted for a period | Money, or what is left of an allowance |
 
 ## Summary
 
-| Harness | Tokens | Cost | Quota | Decision |
+Ranked by how well the documented source fits one person's usage pane.
+
+| Source | Kind | What can be read | Who can read it | Decision |
 | --- | --- | --- | --- | --- |
-| OpenCode | Today's assistant steps, from its local database | OpenCode's own estimate for those steps, when it recorded one | Unknown: fetched from its servers on demand, never saved | **Shipped**, for the checked releases below |
-| Gemini CLI | Feasible: saved per message in local session logs | Unknown: no currency is recorded | Unknown: fetched with the signed-in account and kept in memory | **Not shipped.** A tokens-only adapter is feasible; see the open decisions |
-| Amp | Only in thread files that early-2026 releases saved | Unknown locally | Unknown: `amp usage` asks the server with the account's key | **Not shipped.** Current releases save no usage locally |
+| OpenCode | Harness, local | Tokens and its own cost estimate for today. Quota: unknown, never saved | Anyone, no credential | **Shipped** (earlier), for the checked releases below |
+| DeepSeek | Upstream API, remote | Balance in CNY or USD, granted part, whether it can pay for requests | Any API key | **Shipped**, hidden until turned on |
+| OpenRouter | Upstream API, remote | Left of the key's spending limit, or the key's spend; spend today and this month | Any API key. Account credits need a management key | **Shipped**, hidden until turned on |
+| GitHub Copilot | Harness, remote | AI credits consumed this month. Allowance left: not in the API | Personal plans, fine-grained token with Plan read. Organization seats: admins only | **Shipped** as consumption, hidden until turned on. Schema only, not verified live |
+| Devin | Harness, remote | ACUs consumed in the billing day. Remaining: not reported | Enterprise plans, `ViewOrgConsumption`. Others get 403 | **Shipped** as consumption, hidden until turned on. Schema only, not verified live |
+| Gemini CLI | Harness, local | Tokens per message in session logs. Cost, quota: unknown | Anyone, no credential | **Deferred.** Needs the open decisions and a fixture from a real release |
+| Cursor | Harness, remote | Team spend and events through the Admin API. One person's plan usage: no documented source | Enterprise team admins, with a key that can also change the team | **Deferred.** No documented personal source |
+| Amp | Harness | Nothing current locally; `amp usage` asks the server with the saved key | No documented HTTP endpoint | **Deferred.** Unsupported |
 
 ## OpenCode
 
@@ -122,3 +142,61 @@ Amp's CLI is closed source. Checked: the official docs, and the published npm pa
 **Feasible:** token counts from thread files that old releases left behind. That is history, not current use, so it would mislead in a pane about today. **Unknown:** cost, credits, quota, and all usage on current releases.
 
 **Decisions needed:** none that Milo can settle. A current adapter needs Amp to save a usage snapshot locally, separate from the credentials file. Anything that reuses the API key is ruled out.
+
+Rechecked for this review: the [pricing page](https://ampcode.com/docs/pricing) (modified 2026-11-17) still names only user settings, workspace settings and `amp usage` as ways to see a balance. Amp is a harness that resells model usage as credits and can also route to a linked ChatGPT or Claude subscription or your own keys, so a figure for Amp would be Amp credits, not the upstream account's. No HTTP endpoint for the balance is documented, and running `amp usage` would have Milo run the tool with the user's saved key. **Unsupported**; nothing was built.
+
+## DeepSeek
+
+An upstream API, not a harness: OpenCode, Claude Code and others can all spend the same DeepSeek balance.
+
+- **Documented.** [`GET https://api.deepseek.com/user/balance`](https://api-docs.deepseek.com/api/get-user-balance/) with `Authorization: Bearer <API key>` returns `is_available` and `balance_infos[]`, each with `currency` (`CNY` or `USD`), `total_balance`, `granted_balance` and `topped_up_balance` as decimal strings.
+- **Read.** The first currency's total as the figure, its granted part and a second currency's total as details, and `is_available: false` as "too low for requests". A currency outside the documented two, a negative amount or an empty list is unknown.
+- **Not available.** Spend, tokens, a per-period figure, when a grant expires.
+- **Credential.** Any API key of the account. DeepSeek has no read-only key, so the key Milo is given can also spend the balance.
+- **Limits.** The [rate limit page](https://api-docs.deepseek.com/quick_start/rate_limit) documents concurrency for model requests and none for this endpoint. Milo asks at most every 5 minutes.
+- **Verified.** Parsing against the documented example; the request, headers and failures against a loopback server. Not called live: no key was used.
+
+## OpenRouter
+
+An upstream router. Any harness given the same key spends against it, so the figure is the key's, shown under OpenRouter's name only.
+
+- **Documented.** [`GET https://openrouter.ai/api/v1/key`](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key) with the key itself returns `data.limit`, `limit_remaining`, `limit_reset`, `usage`, `usage_daily`, `usage_weekly` and `usage_monthly`, in US dollars. [`GET /api/v1/credits`](https://openrouter.ai/docs/api/api-reference/credits/get-credits) returns the account's purchased and used credits but requires a management key.
+- **Read.** `limit_remaining` when the key has a limit, else `usage`; `usage_daily` and `usage_monthly` as details. The reference does not say where OpenRouter's day and month begin, so Milo repeats them as the provider's "today" and "this month".
+- **Not read.** `/credits`: a management key can create and delete keys, which is more than a usage pane should hold. The key's label, creator and workspace identifiers in the reply are not kept. A spending limit is money, so what is left of it is shown in dollars and never as a share.
+- **Verified.** Parsing against the documented example with identifiers replaced; requests and failures against a loopback server. Not called live.
+
+## GitHub Copilot
+
+A harness with its own billing unit. Since June 2026 Copilot usage is [measured in GitHub AI credits](https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-individuals), with a monthly allowance per plan.
+
+- **Documented.** [`GET /users/{username}/settings/billing/ai_credit/usage`](https://docs.github.com/en/rest/billing/usage#get-billing-ai-credit-usage-report-for-a-user) returns `timePeriod` and `usageItems[]` with `unitType`, `grossQuantity`, `netQuantity` and amounts, for the current month by default. It is [open to fine-grained personal access tokens](https://docs.github.com/en/rest/authentication/endpoints-available-for-fine-grained-personal-access-tokens) with read access to the user's Plan.
+- **Read.** The sum of `grossQuantity`, as AI credits consumed in the reported month, valid until that month ends in UTC. Items in more than one `unitType` are not added, and the report is then unknown.
+- **Plan restriction.** The page states that user endpoints cover only usage billed to a personal account. A seat billed through an organization returns nothing here, and the organization endpoints need an administrator. An empty report is therefore shown as "no usage reported", never as zero.
+- **Not available.** The allowance left and its reset: the report has consumption only, and Milo does not fill in a plan's published allowance.
+- **Not used.** The `copilot_internal` endpoints that editors call. They are undocumented and take the editor's own sign-in.
+- **Not verified live.** GitHub publishes a schema without example values. The fixture's `unitType`, `sku` and `model` strings are placeholders, and the product filter is not used because its accepted values are not listed. No token was used.
+
+## Devin
+
+A harness. ACUs are its own compute unit, not an upstream model account.
+
+- **Documented.** [`GET https://api.devin.ai/v3/organizations/{org_id}/consumption/daily`](https://docs.devin.ai/api-reference/v3/consumption/organizations-consumption-daily) with `time_after` and `time_before` in Unix seconds returns `total_acus` and `consumption_by_date[]`. The enterprise variant advises bounds aligned to the billing day, which starts at 08:00 UTC, to match the dashboard.
+- **Read.** `total_acus` for the current billing day, valid until that day ends.
+- **Plan restriction.** The page states that the consumption API is for Enterprise plans and that Teams and self-serve organizations receive `403`, which Milo shows as "access was denied". It needs a service user or [personal access token](https://docs.devin.ai/api-reference/personal-access-tokens) with `ViewOrgConsumption`. A personal access token carries all of its owner's permissions, so a service user limited to that permission is the safer key.
+- **Scope.** The whole organization, not one person. The per-user variant needs a user identifier Milo has no documented way to learn from the key's owner alone, so it is not used.
+- **Not available.** ACUs left in a plan or cycle. The cycle list is an enterprise-level endpoint.
+- **Not verified live.** Schema only; no Enterprise account was available. No rate limit is published beyond the `429` response, so Milo asks at most every 15 minutes and honours `Retry-After`.
+
+## Cursor
+
+A harness with its own plans. Checked: the [API overview](https://cursor.com/docs/api), the [Admin API](https://cursor.com/docs/account/teams/admin-api) and the [CLI configuration reference](https://cursor.com/docs/cli/reference/configuration).
+
+- **Documented, for teams.** `POST /teams/spend` returns each member's `spendCents`, `overallSpendCents` and spending limits for the billing cycle; `/teams/daily-usage-data` and `/teams/filtered-usage-events` return request counts and events, aggregated hourly, with polling advised at most once an hour and a default limit of 20 requests a minute.
+- **Why it is not built.** The overview lists the Admin and Analytics APIs as available to Enterprise teams. Keys are made by a team administrator with the `admin:*` scope, and the same API removes members and sets spend limits. That is a team-wide, write-capable credential, and what it returns is every member's spend, not the usage left on the plan of the person at the keyboard.
+- **No documented personal source.** The user API key the overview describes is for the Cloud Agents API and the SDKs. The CLI configuration reference lists no status-line command that would hand a figure to another program. Third-party guides describe one, and an in-session `/usage` command; neither is in the reference pages checked, and neither is documentation to build on. The dashboard's own requests and the editor's local databases are private and were not inspected.
+- **Blocker.** A documented way for one person to read their own plan usage: a personal read-only endpoint, or a status line or file the CLI writes.
+
+## Others considered
+
+- **Anthropic and OpenAI organization usage and cost APIs.** Not rechecked for this review. They report an organization's API spend to its administrators. Claude Code and Codex subscription limits already come from local reports, and an API spend beside them would invite reading one as the other.
+- **Windsurf, Kiro, Zed, Cline, Aider and similar.** Not assessed. Each would need the same evidence as a tool or an account above.

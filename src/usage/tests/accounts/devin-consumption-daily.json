@@ -1,0 +1,10 @@
+{
+  "total_acus": 12.5,
+  "consumption_by_date": [
+    {
+      "date": 1795075200,
+      "acus": 12.5,
+      "acus_by_product": {"devin": 9.0, "automation": 1.5, "cascade": 0.0, "terminal": 2.0, "review": null}
+    }
+  ]
+}

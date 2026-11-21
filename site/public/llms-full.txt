@@ -78,6 +78,10 @@ Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside 
 
 On an Apple Silicon Mac running macOS 13 or later, run `milo menubar install`. The Homebrew and release binaries include the app; it only runs if you install it. See [menu bar setup and removal](https://github.com/mcc0x/milo/blob/main/docs/usage.md#macos-menu-bar).
 
+## Discord presence
+
+Optionally show **In a Rex session** on your Discord profile, under Milo's name and icon, while a Rex app has a session open. It is off until you turn it on with `milo presence enable`, in Settings or in the browser editor, and each of them says what becomes public first. Nothing about your sessions, projects, files or commands is sent unless you also choose to show the name of the session in front, its Git project's folder name, or both. No bot, token or sign-in is involved, and you can use a Discord application of your own instead of Milo's. See [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) for setup, privacy and limits.
+
 ## Reader
 
 <p align="center">
@@ -102,12 +106,13 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
+| `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
 
 `milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
 
 ## Documentation
 
-[Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) · [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) · [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md) · [Pane behaviour](https://github.com/mcc0x/milo/blob/main/docs/panes.md) · [How it works](https://github.com/mcc0x/milo/blob/main/docs/internals.md)
+[Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) · [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) · [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md) · [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) · [Pane behaviour](https://github.com/mcc0x/milo/blob/main/docs/panes.md) · [How it works](https://github.com/mcc0x/milo/blob/main/docs/internals.md)
 
 [Contributing](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md) · [MIT licence](https://github.com/mcc0x/milo/blob/main/LICENSE)
 
@@ -291,6 +296,8 @@ The same choices are under **Alerts** in `milo web`, and under **Workflow → Mi
 ## Remove milo
 
 The menu app and CLI uninstall separately. If you want both gone, run `milo menubar uninstall` **before** removing the CLI. This stops the app and unregisters launch at login. Skip this step if you want to keep using the menu bar.
+
+If [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) is on, **Uninstall Milo** in Home turns it off and takes the activity down. Before removing the binary any other way, run `milo presence disable`.
 
 From Home, choose **Uninstall Milo** to review and confirm removal of the CLI and its managed integrations. **Health → Remove integration** and `milo setup --remove` only disconnect the managed integrations; they do not remove the executable. For manual removal:
 
@@ -678,6 +685,10 @@ If the CLI that installed the app has changed or moved, **Browser settings…** 
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 
+Hover over the percentage to see which provider and limit it represents, how much is left, and when it resets if known. Open the menu to see that same window first. Icon-only mode keeps the usual provider order.
+
+Low-quota notifications are **off by default**. In **More options → Low-quota alerts**, choose 10%, 20%, or 30% remaining and allow notifications when macOS asks. Milo alerts only when a visible provider’s fresh reading moves from above your threshold to at or below it, at most once for that provider and reset time. Starting below the threshold is silent. Stale, elapsed, hidden, and unknown-reset readings do not trigger alerts. Choose **Off** to stop them.
+
 ![Milo’s native menu with example Codex and Claude limits and the Settings button](https://github.com/mcc0x/milo/blob/main/docs/img/menu-bar.webp)
 
 Choose **Browser settings…** to open the [local browser editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
@@ -755,17 +766,164 @@ Milo reads `~/.local/share/opencode/opencode.db`, or the same file under an abso
 
 The figures were checked against databases written by OpenCode 1.2.0, 1.19.6, 2.2.0 and 2.3.2. They match `opencode stats --days 0`, except that Milo does not count a forked session's copied steps again on the day OpenCode 1 is upgraded to 2. Milo shows nothing, and `milo doctor` reports OpenCode's activity as unknown, when the database has other tables, when a step from today is malformed, when one of today's sessions was created by a version other than 1.x or 2.x, or when OpenCode 1 is still writing to a database OpenCode 2 has upgraded. Title requests are not counted, nor are OpenCode 2's compaction requests, because OpenCode does not record them as steps. [Usage sources](https://github.com/mcc0x/milo/blob/main/docs/usage-sources.md) has the evidence, the limits of this reading, and why Amp and Gemini CLI are not read.
 
+## Accounts asked online
+
+Some figures exist only on a provider's servers. Milo can ask for four of them, and asks for none until you turn that account on. Each is hidden by default: with the choice left at **Hide**, Milo does not read the key, does not contact the provider and shows nothing, whatever keys are in your environment.
+
+| Account | What the provider reports | What it is not |
+| --- | --- | --- |
+| DeepSeek | The prepaid API **balance**, in yuan or dollars, and the part of it that was granted | A limit, or what you spent |
+| OpenRouter | What is **left of the key's spending limit** in dollars, or what the key has used when it has no limit; and its spend today and this month | Your account's credit balance, which needs a management key Milo does not ask for |
+| Devin | **ACUs** your organization consumed in Devin's current billing day, which starts at 08:00 UTC | What is left of a plan. Enterprise plans only |
+| Copilot | GitHub **AI credits** your personal account consumed this calendar month | What is left of the monthly allowance, which the API does not report. Not for seats billed to an organization |
+
+These are money and counts, so they are written out in words, such as `DeepSeek · ¥110.00 balance` or `Devin · 12.5 ACUs today`. They are never drawn as a percentage or a large figure, never pick the menu bar badge and never raise a low-quota alert. An answer older than two refreshes is marked with its age; one older than a day, or from a billing day or month that has ended, is dropped.
+
+**Turn an account on** under **Appearance** in `milo web`, or in `~/.config/milo/preferences.conf` (a worktree can have its own choice, like the tools):
+
+```
+usage_deepseek = auto
+usage_openrouter = always
+usage_devin = hide
+usage_copilot = hide
+```
+
+**Auto** asks the provider and gives the account a place once it has a figure. **Always show** also keeps the place to say why there is none, such as `no key set`, `key was refused` or `rate limited`. Terminal Settings (`milo setup`) does not list accounts yet.
+
+**Give Milo a key of its own.** Milo reads only these names, from the environment of the shell that starts the pane, or from `~/.config/milo/usage-accounts.conf`:
+
+| Account | Settings | The key |
+| --- | --- | --- |
+| DeepSeek | `MILO_DEEPSEEK_API_KEY` | An API key from the DeepSeek platform |
+| OpenRouter | `MILO_OPENROUTER_API_KEY` | An ordinary API key; one with its own spending limit shows what is left of it |
+| Devin | `MILO_DEVIN_API_KEY`, `MILO_DEVIN_ORG` (`org-…`) | A service user key or personal access token with the `ViewOrgConsumption` permission |
+| Copilot | `MILO_GITHUB_TOKEN`, `MILO_GITHUB_USER` | A fine-grained personal access token with read access to the account's **Plan** |
+
+```
+# ~/.config/milo/usage-accounts.conf — chmod 600
+MILO_DEEPSEEK_API_KEY = sk-…
+```
+
+The file must be a plain file of yours that no one else can read, or Milo ignores it and says so. The environment wins over the file. The macOS menu bar app does not inherit your shell's environment, so it needs the file. Milo does not look at `DEEPSEEK_API_KEY`, `GH_TOKEN` or any key another tool keeps: a key reaches a provider only because you named it for Milo. Prefer a key made for this, with the least access the provider offers. A DeepSeek key can also spend the balance, so treat the file like the key itself.
+
+**What is sent and kept.** One `GET` over HTTPS to the provider's own host, through `/usr/bin/curl`, with the key passed on curl's standard input rather than its command line. Redirects are not followed. DeepSeek and OpenRouter are asked at most every 5 minutes, Devin and Copilot every 15. `r` asks again, but no sooner than 30 seconds after the last request and never inside a rate limit the provider announced. A refused key is not offered again for 30 minutes unless you press `r`. The figures and times of the last answer are saved under `~/.local/state/milo/accounts/` so that every pane and the menu share one request; the key is never written there.
+
+**Where it appears.** Limits keep their rows first, then OpenCode, then accounts: one row each at the foot of the pane, or the whole pane when no tool has a place. The menu lists each account with its figure in words.
+
+Using DeepSeek or OpenRouter through OpenCode shows two different things: OpenCode's estimate of what today's steps cost, and what the provider says is left. Milo shows each under its own name and does not combine them.
+
 ## What milo does not do
 
-The usage pane reads local data. It does not call the providers, run their tools, sign in, read credentials, guess limits from token counts or work out a cost from them. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
+For the tools above, the usage pane reads local data. It does not call their providers, run the tools, sign in, read their saved credentials, guess limits from token counts or work out a cost from them. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
+
+The one exception is an [account you turn on](https://github.com/mcc0x/milo/blob/main/docs/usage.md#accounts-asked-online). For that account alone Milo sends one request to the provider's documented endpoint, with a key you set for Milo. It never turns a balance, a spend or a count of credits into a percentage, never adds figures from different accounts together, and never uses a key another tool saved.
 
 ## If a figure is missing
 
 - A tool that is not there at all has no figure saved on this Mac, or is hidden. Run `milo doctor` to see what Milo found, or choose **Always show** for it in setup to keep its place and see what it is waiting for.
 - Make the pane taller and wider to see labels, reset times and hints. Where the terminal can show pictures, including in Rex, milo draws the logos and large figures as pictures. Otherwise it draws with text. Short panes use text either way.
-- Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. Reload does not ask a provider for a fresh reading.
+- Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. For a tool, reload does not ask a provider for a fresh reading; for an account you turned on, it asks again at most every 30 seconds.
 - A tool that is always shown, or found while no tool has a figure, says why it has none. `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. `no tokens recorded today` means OpenCode's database has nothing from today. A narrow pane may shorten these hints.
 - For oh-my-pi, check that `/usr/bin/sqlite3` is available and the harness has saved a report. For Claude Code, see [setup](https://github.com/mcc0x/milo/blob/main/docs/setup.md#claude-code-limits) if neither saved source has a reading.
+- An account that is turned on but missing has no figure yet and is set to Auto. Run `milo doctor`: it names the setting each account reads, where it found the key, and what the last answer or failure was, without asking the provider again. Choose **Always show** to see the reason in the pane. On a two-row rail with two limits, raise **Usage height** to give an account a row.
+
+---
+
+Source: https://github.com/mcc0x/milo/blob/main/docs/presence.md
+
+# Discord presence
+
+Milo can show on your Discord profile that you are using Rex. It is off until you turn it on, and while it is off Milo starts nothing for it and never contacts Discord.
+
+## What becomes public
+
+While presence is on and a Rex app has a session open on this computer, the Discord app shows this as your activity:
+
+- **Milo's name and icon**, from Milo's public Discord application
+- one fixed line under it: **In a Rex session**
+
+Anyone who can see your Discord activity sees it, and so can tell when you are using Rex. Discord decides who that is and may add how long the activity has been up. Use Discord's own activity privacy settings to narrow it.
+
+That is all, unless you choose to show more. There are four choices of **details**, and the first is the default:
+
+| Details | Adds a second line | For example |
+| --- | --- | --- |
+| `generic` | nothing | |
+| `session` | the name of the Rex session in front | Session: release-notes |
+| `project` | the folder name of the Git project in that session's focused pane | Project: milo |
+| `both` | both names | Project: milo · Session: release-notes |
+
+A session's name is whatever you or a coding agent called it, and often describes the work, so read it as others would before showing it. A project's name is the folder name of its Git repository: never its path, its remote address or a branch.
+
+Whatever you choose, Milo never sends a tab title, a file name, a path, a remote address, a command, a terminal title or anything a terminal shows. Each name is cut to one short line of plain text. A name that could be a path or an address, one with a `/`, a `\` or a `user@host:` form, is left out whole.
+
+Every place you can turn presence on, or choose to show a name, says what that makes public before it does. Turning presence on does not turn names on, and a choice saved by an earlier Milo keeps showing only what it showed then.
+
+### Which session is “in front”
+
+Names come only from the session the Rex app on this computer is showing: the one whose active tab has its focused pane held by that app. Rex has no call that names the session an app is looking at, so Milo goes by that. If two sessions fit, or none does, Milo shows no name at all rather than the name of the wrong session, and `milo presence` says so. This happens once the app has shown more than one session, or while only a phone or another computer is attached. Outside a Git project there is no project name.
+
+With `generic`, Milo asks Rex one thing: whether any Rex app has a session open. It looks at no session. With a name chosen, it also asks which session is in front and, only for the names you chose, that session's label and the folder its focused pane is working in.
+
+## Turn it on
+
+Nothing needs creating first: Milo shows the activity under its own Discord application. An application ID is public, not a password. Milo holds no bot, token or client secret, and never signs in to Discord.
+
+Use any one of these:
+
+- `milo presence enable`. It says what becomes public and asks before turning anything on. `--yes` answers for you in a script.
+- `milo setup`, then **Workflow → Discord presence**.
+- `milo web`, then **Workflow → Discord presence → Turn on…**.
+
+All three read and write the same saved choice, `discord.conf` in Milo's settings folder. It is one choice for your account on this computer, not a per-worktree preference, and it is saved at once without the **Save** step that pane preferences use.
+
+To show a name, choose it in the same place: `milo presence details session`, `project`, `both` or back to `generic`; **Presence shows** in Settings; or **Shows** in the browser editor. While presence is on, a choice that adds a name asks first, and one that removes a name takes it down at once.
+
+### Your own application
+
+To show a name and icon of your choosing in place of Milo's:
+
+1. Open <https://discord.com/developers/applications>, choose **New Application** and name it. The name is what Discord shows, as in “Playing Rex”. An app icon is optional. No bot is needed.
+2. Copy the **Application ID** from its General Information page. It is a number of 17 to 19 digits.
+3. Give it to Milo: `milo presence application APPLICATION_ID`, **Presence application** in Settings, or **Use my own** in the browser editor. A terminal's paste is not read in Settings, so the command is easier for a copied ID.
+
+`milo presence application official`, or the same control in Settings and the browser editor, goes back to Milo's. An application ID you saved with an earlier Milo is kept until you do.
+
+## Check it and turn it off
+
+`milo presence` says whether presence is on, which application and details it uses, and what Discord is showing now, names included. The same line appears under **Discord presence** in Settings, in the browser editor and in `milo doctor`.
+
+| It says | Meaning |
+| --- | --- |
+| Discord is showing “In a Rex session”. | The activity is up, with any names it lists. |
+| …with no name: Milo has none it can be sure of. | Names are chosen, but [no one session is in front](https://github.com/mcc0x/milo/blob/main/docs/presence.md#which-session-is-in-front) or it has no name to show. |
+| Nothing is shown until a Rex app opens a session. | Rex is running, but no Rex app has a session open. |
+| The Discord app is not running here. | Milo looks for it every 10 seconds while Rex is in use. |
+| Discord does not know this application ID. | Check the ID, or go back to Milo's application. |
+| Milo's presence helper is not running. | See [when it runs](https://github.com/mcc0x/milo/blob/main/docs/presence.md#when-it-runs). |
+| Discord did not accept the activity. | Discord answered with an error. Nothing is shown until presence is turned on again or Rex restarts. |
+
+`milo presence disable`, or the same switch in Settings or the browser editor, takes the activity down at once, closes Milo's connection to Discord and stops the helper. Nothing then runs until you turn presence on again. Your choice of details and application is kept.
+
+## When it runs
+
+While presence is on, one small helper process does the work. Rex tells it when the first Rex app opens a session and when the last one leaves; it puts the activity up and takes it down to match. However many tabs, sessions and Milo panes are open, there is one helper and one connection to Discord, so nothing competes to set your activity.
+
+With names chosen, Rex also tells the helper when a tab, a pane, a session's name or a pane's program changes. The helper waits a second for such changes to settle, and tells Discord only if the line it would show is different. Changing the details or the application replaces the helper: the old activity is taken down before the new one is put up.
+
+The helper starts when you turn presence on while Rex is running, and whenever Rex loads Milo's saved layout, which is each time Rex starts once you have saved a layout in `milo setup` with at least one pane or with **Arrange new shell tabs** on. It ends when the Rex server stops. Without a saved layout, run `milo presence enable` again after starting Rex.
+
+If Discord is not running, or quits, the helper waits and puts the activity back within about 10 seconds of Discord returning. Quitting Rex or turning presence off takes the activity down. So does **Uninstall Milo** in Home, which also turns presence off, so a later install starts with it off. If you remove the binary another way, run `milo presence disable` first. Rex itself is never slowed or changed by any of this: the helper only listens.
+
+## Platforms and limits
+
+- Presence talks to the **Discord desktop app** on the same computer and account as Milo, through the [local connection Discord documents](https://docs.discord.com/developers/topics/rpc). The browser and mobile versions of Discord have none, and nothing is shown through them alone.
+- Milo's prebuilt release is for Apple Silicon Macs. A source build on Linux looks for Discord's socket in `XDG_RUNTIME_DIR` as Discord documents; a Discord installed as a Flatpak or Snap keeps its socket elsewhere and is not found.
+- Only a Rex app with a session open counts. Scripts, the `rex` command and Milo's own listener do not, and a Rex app left open counts for as long as it has a session open, whether or not you are at the keyboard.
+- Presence follows the Rex server on this computer. Sessions on another host do not start it there, and names are never taken from them.
+- Names are shown only [when one session is plainly in front](https://github.com/mcc0x/milo/blob/main/docs/presence.md#which-session-is-in-front). Expect the fixed line alone after you have looked at several sessions.
+- The fixed line's wording cannot be changed. To change the name or icon, use [an application of your own](https://github.com/mcc0x/milo/blob/main/docs/presence.md#your-own-application).
+- If Discord rejects an application ID, Milo stops asking until you turn presence on again or Rex restarts.
 
 ---
 
@@ -798,6 +956,12 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   user asks for that name.
 - Use `milo setup --repair` or `--remove` only when asked to change the
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
+- Discord presence is off unless the user turned it on, and it publishes on
+  their Discord profile. `milo presence` reports it without changing anything.
+  Run `milo presence enable`, `details`, `application` or `disable` only when
+  the user asks, and never pass `--yes` for them: it skips the notice of what
+  becomes public. Never raise the details to `session`, `project` or `both`
+  on your own: they show the session's name or the project's folder name.
 
 ## Commands
 
@@ -811,6 +975,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
+| `milo presence [status]` | Says whether the optional Discord presence is on and what Discord shows now. |
 | `milo listen [--stop]` | Starts or stops layout memory, automatic new-tab arrangement and tab titles; normally managed by setup. |
 | `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
 
@@ -896,6 +1061,8 @@ Then run the program and look at what you changed. Text checks cannot tell you w
 
 When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
 
+The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
+
 Describe the pull request under the headings in `.github/pull_request_template.md`: **What changed** and **Verification**. GitHub fills them in when you open a pull request in the browser. A body passed on the command line (`gh pr create --body` or `--body-file`) replaces the template, so write the same headings yourself. Add **Compatibility** when a user or packager has to act.
 
 A pull request that changes anything you can see (the website, a terminal pane, the macOS app or any other visible surface) must show real screenshots of the affected UI under **Screenshots** in its description. Show before and after when it changes an existing design, and desktop and mobile when both are affected. A change with nothing to see needs no screenshot; leave the section out.
@@ -924,7 +1091,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -1039,11 +1206,23 @@ A secret goes from standard input or the browser editor to `secret.rs` and from 
 
 To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
 
+### Changing Discord presence
+
+[Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) publishes an activity to Discord. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
+
+A second line is shown only for the *details* a person chose: the name of the session in front, the folder name of the Git project in its focused pane, or both. The default shows neither, and a choice saved by an earlier release must go on showing only what it showed. `src/rex_presence.lua` may look at sessions only for a name that was chosen, and never reads a tab's or terminal's title, a screen, a command line or a status text. Every name goes through `src/presence/label.rs`, which keeps one short line of plain text and drops whole anything that could be a path or an address. Never show a path, a remote address, a branch, a file name or a command, by default or behind a setting. When the script cannot tell which one session is in front, it reports none, and no name is shown. `presence::public` says what each choice shows, and every surface shows that text before turning presence on or adding a name.
+
+`presence::Control` is the only way to read or change the choice, so `milo presence`, Settings and the browser editor cannot disagree. One helper holds `presence.lock` for as long as it runs; a second gives up rather than set the activity in turn. A change to the details or the application replaces the helper, which takes the old activity down first.
+
+No test may reach a real Discord. The helper looks for Discord's socket in one folder, the first of `XDG_RUNTIME_DIR`, `TMPDIR`, `TMP` and `TEMP` that is set, so a test that starts a helper gives it an environment in which the first of those names a folder of the test's own, and listens there as a stand-in. Do the same when trying a build by hand, and do not publish to your own Discord account from a test. With Rex installed, `cargo test --test rex_lab -- --ignored discord_presence` checks the watch on a disposable Rex server. What a real Discord app then displays can only be checked by hand with a test application and account.
+
 ### Adding a usage source
 
 [Usage sources](https://github.com/mcc0x/milo/blob/main/docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
 
 A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
+
+An account is different: its figure exists only on a provider's servers, so nothing on disk says it is in use. It needs an entry in `UsageAccount`, which starts hidden, and an adapter in `src/usage/accounts.rs` that names the documented endpoint, the `MILO_…` settings it reads, how often it may be asked, and how to read the reply into a `Figure` with its own `Kind` and `Unit`. Never give an account a limit window: a balance, a spend or a count of credits must not become a percentage or reach the menu bar badge. Never read a key another tool saved, and never test against the real provider. Unit tests serve fixtures from a loopback port through `Sources::test`. That stand-in and the plain-HTTP address it uses are compiled only under `cfg(test)`: an installed binary has no setting, variable or file that sends a key anywhere but the provider's HTTPS host, and `tests/pane.rs` checks the built binary for that. Do not add one.
 
 ### Adding a language to the reader
 
@@ -1069,6 +1248,8 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 ### Checking failures and speed
 
 `src/usage/tests/failures.rs` breaks each local usage source in five ways: missing, rotated, locked, stale, and written in a shape Milo does not know. The pane may then show only a figure the source reported, marked as old once it is; a source that cannot be read is unknown. A new source goes through the same five tests with its own files, using the helpers there.
+
+`src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
 `tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame that shows the file and the frame after each key, through a real terminal:
 
@@ -1132,6 +1313,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
+| `src/presence.rs` | Keeps the one Discord presence choice, says what each choice makes public, and turns it on, off, and into a status for every settings surface. |
+| `src/presence/discord.rs` | Speaks Discord's local RPC protocol: the socket, the frames, the fixed activity and its optional second line. |
+| `src/presence/helper.rs` | Runs the single background process that shows the activity while a Rex app has a session open, and the chosen names of what is in front. |
+| `src/presence/label.rs` | Makes a session or project name fit to show, or leaves it out. |
 | `src/read.rs` | Reads regular files and the names that file links point to. |
 | `src/reader.rs` | Keeps reader state, handles navigation and updates, and starts and ends an edit. |
 | `src/reader/buffer.rs` | Holds the lines of a draft with their endings, and its undo history. |
@@ -1143,7 +1328,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
-| `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
+| `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
+| `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
@@ -1154,7 +1340,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs and titles unnamed ones. |
 | `src/setup/listener_0_1_2.lua` | Keeps the listener of releases 0.1.1 and 0.1.2 for the test that saves over it. |
 | `src/setup/listener_test.lua` | Checks the new-tab, new-session and tab-title handlers with a stand-in for Rex. |
-| `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
+| `src/setup/lock.rs` | Keeps saves, listeners and presence helpers from overlapping and stops the listener or helper. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
 | `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
@@ -1168,6 +1354,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
 | `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity, and works out which tools are in use. |
+| `src/usage/accounts.rs` | Asks providers about accounts the user turned on, and keeps each figure in its own unit. |
 | `src/usage/draw.rs` | Lays out the tools that have a place, with their figures, reset times, and hints. |
 | `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
@@ -1180,11 +1367,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/marks/codex.svg` | Wraps the original Codex bitmap in SVG. |
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
+| `src/usage/http.rs` | Sends one bounded GET through curl with the key on standard input. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
 | `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
+| `src/usage/tests/accounts.rs` | Checks accounts against a loopback provider: units, visibility, keys, limits, and stale answers. |
+| `src/usage/tests/accounts/` | Holds replies in the shape each provider documents, with made-up values. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
@@ -1203,13 +1393,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |
+| `tests/presence.rs` | Runs `milo presence` and its helper against stand-ins for Discord and Rex, frame by frame. |
 | `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
 | `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
-| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, and edits a file in its floating reader. |
+| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
-| `tests/web-smoke.cjs` | Saves layout and usage tool choices in the browser editor of a built binary in Chromium, then closes it. |
+| `tests/web-smoke.cjs` | Saves layout and usage tool choices and turns Discord presence, its names and its application on and off in the browser editor of a built binary in Chromium, then closes it. |
 
 ---
 

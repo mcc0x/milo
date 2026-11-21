@@ -299,7 +299,7 @@ fn reader_command(exe: &Path, file: &Path, commit: Option<&str>) -> String {
 pub struct ShellObserver {
     child: Child,
     output: ChildStdout,
-    frame: Frame,
+    frame: Frame<ShellChange>,
 }
 
 pub enum ShellChange {
@@ -347,6 +347,93 @@ impl Drop for ShellObserver {
     }
 }
 
+/// What the presence helper learns about Rex: whether a Rex app has a
+/// session open and, only when asked for, what is in front.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AppActivity {
+    Unchanged,
+    Active(Front),
+    Idle,
+    /// The script ended, as it does when the Rex server stops.
+    Closed,
+}
+
+/// The one session that a Rex app on this computer is showing. Both parts
+/// are unknown unless the script was asked for them and could tell.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Front {
+    /// The session's label, as Rex holds it.
+    pub session: Option<String>,
+    /// Where the program in that session's focused pane is working.
+    pub directory: Option<PathBuf>,
+}
+
+/// Which parts of `Front` the script may ask Rex about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrontParts {
+    pub session: bool,
+    pub directory: bool,
+}
+
+/// A local Rex script that says when the first Rex app attaches to a
+/// session and when the last one leaves, without periodic CLI calls.
+pub struct AppObserver {
+    child: Child,
+    output: ChildStdout,
+    frame: Frame<AppActivity>,
+}
+
+impl AppObserver {
+    /// `rex` is the program to run, since the Rex server's own path leaves it out.
+    /// With no `parts`, the script asks Rex for nothing but its connected apps.
+    pub fn start(rex: &OsStr, parts: FrontParts) -> Option<Self> {
+        let args = format!(r#"{{"session":{},"directory":{}}}"#, parts.session, parts.directory);
+        let mut child = Command::new(rex)
+            .args(["--autostart=false", "do", "--all", "--fail-fast", "--args", &args, "-e"])
+            .arg(include_str!("rex_presence.lua"))
+            // The script hears every session, whichever pane or app started the helper.
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
+            .env_remove("REX_CLIENT")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let output = child.stdout.take().expect("observer stdout was piped");
+        let observer = Self { child, output, frame: Frame::default() };
+        // SAFETY: The file descriptor is an open, privately owned pipe read end.
+        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        (nonblocking == 0).then_some(observer)
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.output.as_raw_fd()
+    }
+
+    pub fn read(&mut self) -> AppActivity {
+        self.frame.drain(&mut self.output)
+    }
+}
+
+impl Drop for AppObserver {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The `rex` to run from a process that Rex may have started with a path
+/// that leaves `rex` out: the one on the path, or else that Rex itself.
+pub fn program() -> OsString {
+    let on_path =
+        std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("rex").is_file()));
+    match parent_program() {
+        Some(parent) if !on_path && parent.file_name() == Some(OsStr::new("rex")) => parent.into_os_string(),
+        _ => "rex".into(),
+    }
+}
+
 /// Use real block IDs, never CLI labels, positions or suffixes.
 fn exact_block(id: &OsStr) -> Option<&str> {
     exact_id(id, "block:")
@@ -364,38 +451,90 @@ pub(crate) fn exact_id<'a>(id: &'a OsStr, kind: &str) -> Option<&'a str> {
     .then_some(id)
 }
 
-#[derive(Default)]
-struct Frame {
-    line: Vec<u8>,
-    oversized: bool,
+/// What an observer script prints: an update a line, of which the latest counts.
+trait Report: Sized {
+    const UNCHANGED: Self;
+    const CLOSED: Self;
+    fn decode(line: &[u8]) -> Option<Self>;
+    fn unchanged(&self) -> bool;
 }
 
-impl Frame {
-    fn drain(&mut self, input: &mut impl io::Read) -> ShellChange {
-        let mut latest = ShellChange::Unchanged;
+impl Report for ShellChange {
+    const UNCHANGED: Self = Self::Unchanged;
+    const CLOSED: Self = Self::Closed;
+
+    fn decode(line: &[u8]) -> Option<Self> {
+        decode_change(line)
+    }
+
+    fn unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+impl Report for AppActivity {
+    const UNCHANGED: Self = Self::Unchanged;
+    const CLOSED: Self = Self::Closed;
+
+    fn decode(line: &[u8]) -> Option<Self> {
+        let report = line.strip_prefix(b"milo-rex ")?;
+        if report == b"idle" {
+            return Some(Self::Idle);
+        }
+        let mut words = report.split(|&b| b == b' ');
+        if words.next()? != b"active" {
+            return None;
+        }
+        // A name or folder the script left out, or wrote in a way that cannot be read, is not known.
+        let mut field = || words.next().filter(|word| *word != b"-").and_then(unhex);
+        let session = field().and_then(|label| String::from_utf8(label).ok());
+        let directory = field().map(|path| PathBuf::from(OsString::from_vec(path))).filter(|path| path.is_absolute());
+        Some(Self::Active(Front { session, directory }))
+    }
+
+    fn unchanged(&self) -> bool {
+        *self == Self::Unchanged
+    }
+}
+
+struct Frame<T> {
+    line: Vec<u8>,
+    oversized: bool,
+    report: std::marker::PhantomData<T>,
+}
+
+impl<T> Default for Frame<T> {
+    fn default() -> Self {
+        Self { line: Vec::new(), oversized: false, report: std::marker::PhantomData }
+    }
+}
+
+impl<T: Report> Frame<T> {
+    fn drain(&mut self, input: &mut impl io::Read) -> T {
+        let mut latest = T::UNCHANGED;
         let mut bytes = [0; 8192];
         // Coalesce queued updates without letting a busy producer starve input.
         for _ in 0..8 {
             match input.read(&mut bytes) {
-                Ok(0) if matches!(latest, ShellChange::Unchanged) => return ShellChange::Closed,
+                Ok(0) if latest.unchanged() => return T::CLOSED,
                 Ok(0) => break,
                 Ok(n) => {
                     let update = self.read(&bytes[..n]);
-                    if !matches!(update, ShellChange::Unchanged) {
+                    if !update.unchanged() {
                         latest = update;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => return ShellChange::Closed,
+                Err(_) => return T::CLOSED,
             }
         }
         latest
     }
 
-    fn read(&mut self, mut bytes: &[u8]) -> ShellChange {
+    fn read(&mut self, mut bytes: &[u8]) -> T {
         const LINE_LIMIT: usize = b"milo-cwd ".len() + 2 * 16384;
-        let mut latest = ShellChange::Unchanged;
+        let mut latest = T::UNCHANGED;
         while !bytes.is_empty() {
             let newline = bytes.iter().position(|&b| b == b'\n');
             let fragment = &bytes[..newline.unwrap_or(bytes.len())];
@@ -405,7 +544,7 @@ impl Frame {
             }
             let Some(end) = newline else { break };
             if !self.oversized
-                && let Some(update) = decode_change(&self.line)
+                && let Some(update) = T::decode(&self.line)
             {
                 latest = update;
             }
@@ -422,7 +561,15 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
     if code == b"-" {
         return Some(ShellChange::Unreported);
     }
-    if !code.len().is_multiple_of(2) || !code.starts_with(b"2f") {
+    if !code.starts_with(b"2f") {
+        return None;
+    }
+    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(unhex(code)?))))
+}
+
+/// The bytes a script wrote as lowercase hex, which may hold anything but a NUL.
+fn unhex(code: &[u8]) -> Option<Vec<u8>> {
+    if !code.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(code.len() / 2);
@@ -438,7 +585,7 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
         }
         bytes.push(byte);
     }
-    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(bytes))))
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -520,6 +667,26 @@ mod tests {
         assert!(parse("block:01a1f929-dc65-7cc5-9ba2-cac3108697bf"));
         assert!(!parse("block:01a1f929dc65-7-cc5-9ba2-cac3108697bf"));
         assert!(!parse("block:------------------------------------"));
+    }
+
+    #[test]
+    fn an_app_report_names_what_is_in_front_only_in_whole_readable_fields() {
+        use super::{AppActivity, Front};
+        let mut decoder = Frame::<AppActivity>::default();
+        let front = |session: Option<&str>, directory: Option<&str>| {
+            AppActivity::Active(Front { session: session.map(str::to_owned), directory: directory.map(Into::into) })
+        };
+        assert_eq!(decoder.read(b"milo-rex idle\n"), AppActivity::Idle);
+        assert_eq!(decoder.read(b"milo-rex active\n"), front(None, None));
+        assert_eq!(decoder.read(b"milo-rex active - -\n"), front(None, None));
+        // "a b" and "/p q", with the spaces inside the fields and not between them.
+        assert_eq!(decoder.read(b"milo-rex active 612062 2f702071\n"), front(Some("a b"), Some("/p q")));
+        assert_eq!(decoder.read(b"milo-rex active - 2f70\n"), front(None, Some("/p")));
+        // A label that is not text, a folder that is not a whole path, and a broken field are all unknown.
+        assert_eq!(decoder.read(b"milo-rex active ff 70\n"), front(None, None));
+        assert_eq!(decoder.read(b"milo-rex active 6g 2f7\n"), front(None, None));
+        // Anything else the script or Rex prints is not a report.
+        assert_eq!(decoder.read(b"listening: 8 handlers\nmilo-rex busy\n"), AppActivity::Unchanged);
     }
 
     #[test]

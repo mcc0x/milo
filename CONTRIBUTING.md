@@ -37,6 +37,8 @@ Then run the program and look at what you changed. Text checks cannot tell you w
 
 When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
 
+The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
+
 Describe the pull request under the headings in `.github/pull_request_template.md`: **What changed** and **Verification**. GitHub fills them in when you open a pull request in the browser. A body passed on the command line (`gh pr create --body` or `--body-file`) replaces the template, so write the same headings yourself. Add **Compatibility** when a user or packager has to act.
 
 A pull request that changes anything you can see (the website, a terminal pane, the macOS app or any other visible surface) must show real screenshots of the affected UI under **Screenshots** in its description. Show before and after when it changes an existing design, and desktop and mobile when both are affected. A change with nothing to see needs no screenshot; leave the section out.
@@ -65,7 +67,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -180,11 +182,23 @@ A secret goes from standard input or the browser editor to `secret.rs` and from 
 
 To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
 
+### Changing Discord presence
+
+[Discord presence](docs/presence.md) publishes an activity to Discord. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
+
+A second line is shown only for the *details* a person chose: the name of the session in front, the folder name of the Git project in its focused pane, or both. The default shows neither, and a choice saved by an earlier release must go on showing only what it showed. `src/rex_presence.lua` may look at sessions only for a name that was chosen, and never reads a tab's or terminal's title, a screen, a command line or a status text. Every name goes through `src/presence/label.rs`, which keeps one short line of plain text and drops whole anything that could be a path or an address. Never show a path, a remote address, a branch, a file name or a command, by default or behind a setting. When the script cannot tell which one session is in front, it reports none, and no name is shown. `presence::public` says what each choice shows, and every surface shows that text before turning presence on or adding a name.
+
+`presence::Control` is the only way to read or change the choice, so `milo presence`, Settings and the browser editor cannot disagree. One helper holds `presence.lock` for as long as it runs; a second gives up rather than set the activity in turn. A change to the details or the application replaces the helper, which takes the old activity down first.
+
+No test may reach a real Discord. The helper looks for Discord's socket in one folder, the first of `XDG_RUNTIME_DIR`, `TMPDIR`, `TMP` and `TEMP` that is set, so a test that starts a helper gives it an environment in which the first of those names a folder of the test's own, and listens there as a stand-in. Do the same when trying a build by hand, and do not publish to your own Discord account from a test. With Rex installed, `cargo test --test rex_lab -- --ignored discord_presence` checks the watch on a disposable Rex server. What a real Discord app then displays can only be checked by hand with a test application and account.
+
 ### Adding a usage source
 
 [Usage sources](docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
 
 A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
+
+An account is different: its figure exists only on a provider's servers, so nothing on disk says it is in use. It needs an entry in `UsageAccount`, which starts hidden, and an adapter in `src/usage/accounts.rs` that names the documented endpoint, the `MILO_…` settings it reads, how often it may be asked, and how to read the reply into a `Figure` with its own `Kind` and `Unit`. Never give an account a limit window: a balance, a spend or a count of credits must not become a percentage or reach the menu bar badge. Never read a key another tool saved, and never test against the real provider. Unit tests serve fixtures from a loopback port through `Sources::test`. That stand-in and the plain-HTTP address it uses are compiled only under `cfg(test)`: an installed binary has no setting, variable or file that sends a key anywhere but the provider's HTTPS host, and `tests/pane.rs` checks the built binary for that. Do not add one.
 
 ### Adding a language to the reader
 
@@ -210,6 +224,8 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 ### Checking failures and speed
 
 `src/usage/tests/failures.rs` breaks each local usage source in five ways: missing, rotated, locked, stale, and written in a shape Milo does not know. The pane may then show only a figure the source reported, marked as old once it is; a source that cannot be read is unknown. A new source goes through the same five tests with its own files, using the helpers there.
+
+`src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
 `tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame that shows the file and the frame after each key, through a real terminal:
 
@@ -273,6 +289,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
+| `src/presence.rs` | Keeps the one Discord presence choice, says what each choice makes public, and turns it on, off, and into a status for every settings surface. |
+| `src/presence/discord.rs` | Speaks Discord's local RPC protocol: the socket, the frames, the fixed activity and its optional second line. |
+| `src/presence/helper.rs` | Runs the single background process that shows the activity while a Rex app has a session open, and the chosen names of what is in front. |
+| `src/presence/label.rs` | Makes a session or project name fit to show, or leaves it out. |
 | `src/read.rs` | Reads regular files and the names that file links point to. |
 | `src/reader.rs` | Keeps reader state, handles navigation and updates, and starts and ends an edit. |
 | `src/reader/buffer.rs` | Holds the lines of a draft with their endings, and its undo history. |
@@ -284,7 +304,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
-| `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
+| `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
+| `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
@@ -295,7 +316,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/listener.lua` | Remembers divider changes on managed rails and optionally arranges new shell tabs and titles unnamed ones. |
 | `src/setup/listener_0_1_2.lua` | Keeps the listener of releases 0.1.1 and 0.1.2 for the test that saves over it. |
 | `src/setup/listener_test.lua` | Checks the new-tab, new-session and tab-title handlers with a stand-in for Rex. |
-| `src/setup/lock.rs` | Keeps saves and listeners from overlapping and stops the listener. |
+| `src/setup/lock.rs` | Keeps saves, listeners and presence helpers from overlapping and stops the listener or helper. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
 | `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
@@ -309,6 +330,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
 | `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity, and works out which tools are in use. |
+| `src/usage/accounts.rs` | Asks providers about accounts the user turned on, and keeps each figure in its own unit. |
 | `src/usage/draw.rs` | Lays out the tools that have a place, with their figures, reset times, and hints. |
 | `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
@@ -321,11 +343,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/marks/codex.svg` | Wraps the original Codex bitmap in SVG. |
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
+| `src/usage/http.rs` | Sends one bounded GET through curl with the key on standard input. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
 | `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
+| `src/usage/tests/accounts.rs` | Checks accounts against a loopback provider: units, visibility, keys, limits, and stale answers. |
+| `src/usage/tests/accounts/` | Holds replies in the shape each provider documents, with made-up values. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
@@ -344,10 +369,11 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |
+| `tests/presence.rs` | Runs `milo presence` and its helper against stand-ins for Discord and Rex, frame by frame. |
 | `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
 | `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
-| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, and edits a file in its floating reader. |
+| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
-| `tests/web-smoke.cjs` | Saves layout and usage tool choices in the browser editor of a built binary in Chromium, then closes it. |
+| `tests/web-smoke.cjs` | Saves layout and usage tool choices and turns Discord presence, its names and its application on and off in the browser editor of a built binary in Chromium, then closes it. |

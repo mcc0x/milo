@@ -19,6 +19,7 @@ mod pane;
 mod paths;
 mod picture;
 mod preferences;
+mod presence;
 mod read;
 mod reader;
 mod rex;
@@ -61,6 +62,7 @@ Usage: milo
        milo web [--port PORT] [--no-open]
        milo doctor
        milo setup --repair | --remove
+       milo presence [status] | enable | details DETAILS | application ID | disable
        milo view FILE [--commit ID | --edit]
        milo PATH
        milo [setup] --skip-onboarding
@@ -76,6 +78,7 @@ milo setup saves a Rex layout and can enable Claude Code usage limits.
 milo web opens local Settings in your browser. Use --no-open to print the link without opening it.
 milo doctor explains local preferences, integration health and usage sources.
 milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose. It is off until you turn it on.
+milo presence shows or changes the optional Discord Rich Presence, which is off until you turn it on.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -173,6 +176,7 @@ fn command_help(name: &str) -> Option<&'static str> {
         "doctor" => {
             "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
         }
+        "presence" => presence::HELP,
         "listen" => {
             "Usage: milo listen [--stop]\n\nStart or stop the Rex listener that remembers sidebar sizes, arranges new tabs and titles tabs."
         }
@@ -231,6 +235,7 @@ enum Command<'a> {
     Remove,
     Listen(bool),
     Alerts(Option<&'a OsStr>, &'a [OsString]),
+    Presence(presence::Request),
     ClaudeStatus,
     Help(&'static str),
     Version,
@@ -264,7 +269,7 @@ fn command<'a>(
             Command::ShellOutline(block)
         });
     }
-    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "alerts")) {
+    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "alerts" | "presence")) {
         return Err("too many arguments; see milo --help".to_string());
     }
     if rest.is_empty()
@@ -322,6 +327,7 @@ fn command<'a>(
         (Some("setup"), Some(flag)) if flag == "--remove" => Command::Remove,
         (Some("usage"), None) => Command::Usage,
         (Some("usage"), Some(flag)) if flag == "--menu-stream" => Command::UsageMenuStream,
+        (Some("presence"), action) => Command::Presence(presence::Request::parse(action, rest)?),
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
@@ -402,8 +408,15 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
                 run(Start::Loaded, &destination)
             }
         }
-        Command::Listen(stop) => exit(setup::listen(stop)),
         Command::Alerts(action, rest) => alerts::command(action, rest),
+        Command::Presence(request) => print_report(presence::command(request)),
+        Command::Listen(stop) => {
+            if !stop {
+                // Rex runs this as it starts, which is when presence should come up too.
+                presence::start_with_rex();
+            }
+            exit(setup::listen(stop))
+        }
         Command::ClaudeStatus => exit(usage::claude_status()),
         Command::Help(text) => print_line(text.trim_end()),
         Command::Version => print_line(concat!("milo ", env!("CARGO_PKG_VERSION"))),
@@ -447,6 +460,9 @@ fn main() {
     }
     if first.as_deref() == Some(OsStr::new("tab-title")) {
         exit(titles::command(&args.collect::<Vec<_>>()));
+    }
+    if first.as_deref() == Some(OsStr::new(presence::HELPER_COMMAND)) {
+        exit(presence::helper(&args.collect::<Vec<_>>()));
     }
     let second = args.next();
     let rest: Vec<_> = args.collect();
