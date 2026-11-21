@@ -927,7 +927,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     .into_iter()
                     .find(|&destination| Some(destination) != settings.destination && saved[destination as usize]);
                 match other {
-                    Some(destination) => self.change_alerts(|alerts| alerts.choose(destination)),
+                    Some(destination) => self.change_alerts(|alerts| alerts.choose_for_review(destination)),
                     None => self.report(Err(NO_OTHER_DESTINATION)),
                 }
             }
@@ -1220,8 +1220,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     return After::Stay;
                 }
                 Panel::Confirm(Confirm::MirrorAlerts) => {
+                    let scope = alerts::ConsentFor::All;
+                    // Changing panels refreshes the summary. Use the one the question actually showed.
+                    let reviewed = self.alert_summary.as_ref().and_then(|summary| summary.consent.token(scope));
                     self.select_panel(Panel::Alerts, Some(Row::AlertsOn));
-                    self.change_alerts(Alerts::enable);
+                    self.change_alerts(|alerts| {
+                        let token = reviewed.ok_or("No saved destination can be reviewed. Nothing was turned on.")?;
+                        alerts.enable_reviewed(scope, token)
+                    });
                     return After::Stay;
                 }
                 Panel::Confirm(confirm @ (Confirm::Presence | Confirm::PresenceDetails(_) | Confirm::PresenceApp)) => {

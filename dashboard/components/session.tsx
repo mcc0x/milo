@@ -17,7 +17,11 @@ type FocusOwner = {element: HTMLElement; id: string; headingId?: string; heading
 type Confirmation = {title: string; note: string; label: string};
 type Toast = {text: string; error: boolean};
 export type TelegramChat = {id: string; title: string};
-type HostedConnectRequest = {action: 'start'; provider: AlertDestination} | {action: 'claim'; deviceKey: string};
+type HostedConnectRequest =
+  | {action: 'start'; provider: AlertDestination}
+  | {action: 'preview'; provider: AlertDestination; deviceKey: string; finishCode?: string};
+type HostedSaveRequest = {provider: AlertDestination; deviceKey: string; finishCode?: string; label: string};
+type HostedSaveResult = {status: number; cleanupConfirmed?: boolean};
 
 type Snapshot = {
   state: SessionState | undefined;
@@ -50,6 +54,7 @@ interface SessionActions {
   command(action: string, payload?: Payload): void;
   findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   hostedConnect(request: HostedConnectRequest, signal: AbortSignal): Promise<{status: number; data: unknown}>;
+  saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult>;
   confirm(title: string, note: string, label: string, action: () => void): void;
   discard(group: GroupKey | 'all'): void;
   notify(text: string, error?: boolean): void;
@@ -327,7 +332,44 @@ function createEditor(): Editor {
 
   async function hostedConnect(request: HostedConnectRequest, signal: AbortSignal) {
     const response = await sessionFetch('/api/hosted-connect', 'POST', request, signal);
+    if (!response.ok) await response.body?.cancel();
     return {status: response.status, data: response.ok ? await response.json() as unknown : null};
+  }
+
+  async function saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult> {
+    if (!state || !connected || running || paused || closing || ended || queue.length) return {status: 409};
+    running = true;
+    localError = '';
+    operationWarning = '';
+    publish();
+    try {
+      const response = await sessionFetch('/api/hosted-connect', 'POST', {...request, action: 'save', version: state.version}, signal);
+      const {status} = response;
+      if (status === 200) {
+        state = await response.json() as SessionState;
+        if (state.message?.text) setToast(state.message.text, state.message.error);
+        return {status};
+      }
+      let cleanupConfirmed: boolean | undefined;
+      if (status === 410) {
+        const data: unknown = await response.json().catch(() => null);
+        cleanupConfirmed = !!data && typeof data === 'object' && 'cleanupConfirmed' in data && data.cleanupConfirmed === true;
+      } else {
+        await response.body?.cancel();
+      }
+      // Stale or failed writes may leave the editor's publicly visible state changed.
+      if ((status === 409 || status === 410 || status === 500) && !signal.aborted) {
+        try { state = await api<SessionState>('/api/state', 'GET', undefined, signal); } catch { /* Keep the save status. */ }
+      }
+      return {status, cleanupConfirmed};
+    } catch {
+      return {status: 502};
+    } finally {
+      running = false;
+      syncNumericDrafts();
+      if (!paused) void drain();
+      publish();
+    }
   }
 
   async function keepDraftAlive() {
@@ -571,7 +613,8 @@ function createEditor(): Editor {
   return {
     start, subscribe, getSnapshot: () => snapshot, getServerSnapshot: () => initialSnapshot,
     actions: {
-      draftValue, edit, command, findTelegramChats, hostedConnect, confirm, discard, notify, trackNumericDraft, commitNumericDraft,
+      draftValue, edit, command, findTelegramChats, hostedConnect, saveHostedConnection, confirm, discard, notify,
+      trackNumericDraft, commitNumericDraft,
       applyNumericDraft, applyNumericDrafts, hasNumericDraft: field => numericDrafts.has(field),
       connect, dropEdit, done, requestSave, finishSave, finishConfirmation,
     },

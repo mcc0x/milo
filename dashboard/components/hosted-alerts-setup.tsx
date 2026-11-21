@@ -5,30 +5,72 @@ import { useSession, type AlertDestination } from "./session";
 
 const providerSetup = {
   telegram: {
-    url: /^https:\/\/t\.me\/[A-Za-z0-9_]{5,32}\?start=[A-Za-z0-9_-]{43}$/,
     description: "Send alerts to your private chat with Milo’s Telegram bot.",
-    instructions: "Press Start in Milo’s Telegram chat, then come back and check the connection.",
+    instructions: "Press Start in Milo’s Telegram chat and confirm the pairing.",
     manual: "Use your own bot",
   },
   discord: {
-    url: /^http:\/\/(?:127\.0\.0\.1|localhost):6120\/discord\/start\/[A-Za-z0-9_-]{43}$/,
     description: "Let Milo post alerts to a Discord channel you choose.",
-    instructions: "Choose a channel and authorize Milo in Discord, then come back and check the connection.",
+    instructions: "Choose a channel and authorize Milo in Discord.",
     manual: "Use your own webhook",
   },
-} satisfies Record<AlertDestination, {url: RegExp; description: string; instructions: string; manual: string}>;
+} satisfies Record<AlertDestination, {description: string; instructions: string; manual: string}>;
+
+type RelayMode = "production" | "local";
+const keyPattern = /^[A-Za-z0-9_-]{43}$/;
+const finishPattern = /^[0-9A-F]{8}$/;
+const telegramLink = /^https:\/\/t\.me\/[A-Za-z0-9_]{5,32}\?start=([A-Za-z0-9_-]{43})$/;
+const productionDiscordLink = /^https:\/\/connect\.usemilo\.net\/discord\/start\/([A-Za-z0-9_-]{43})$/;
+const localDiscordLink = /^http:\/\/(?:127\.0\.0\.1|localhost):6120\/discord\/start\/([A-Za-z0-9_-]{43})$/;
+const telegramMaxId = "9223372036854775807";
+const discordMaxId = "18446744073709551615";
+
+function exact(pattern: RegExp, value: string) {
+  const match = pattern.exec(value);
+  return match?.[0] === value ? match : undefined;
+}
+
+function idWithin(value: string, max: string) {
+  return !!exact(/^[1-9][0-9]*$/, value) &&
+    (value.length < max.length || (value.length === max.length && value <= max));
+}
+
+function fields(data: unknown, names: string[]): data is Record<string, unknown> {
+  return data !== null && typeof data === "object" && !Array.isArray(data) &&
+    Object.keys(data).length === names.length && names.every(name => Object.hasOwn(data, name));
+}
+
+function pairing(data: unknown, provider: AlertDestination): { deviceKey: string; url: string; mode: RelayMode } | undefined {
+  if (!fields(data, ["deviceKey", "url", "mode"])) return;
+  const { deviceKey, url, mode } = data;
+  if (typeof deviceKey !== "string" || !exact(keyPattern, deviceKey) || typeof url !== "string" ||
+    (mode !== "production" && mode !== "local")) return;
+  const pattern = provider === "telegram" ? telegramLink : mode === "production" ? productionDiscordLink : localDiscordLink;
+  const link = exact(pattern, url);
+  if (link && link[1] !== deviceKey) return { deviceKey, url, mode };
+}
+
+function reviewLabel(data: unknown, provider: AlertDestination) {
+  if (!fields(data, ["provider", "chat", "label"]) || data.provider !== provider) return;
+  const { chat, label } = data;
+  if (typeof chat !== "string" || typeof label !== "string") return;
+  const channelLabel = "Discord channel · ";
+  const valid = provider === "telegram" ? idWithin(chat, telegramMaxId) && label === `Telegram DM · ${chat}` :
+    chat === "" && label.startsWith(channelLabel) && idWithin(label.slice(channelLabel.length), discordMaxId);
+  if (valid) return label;
+}
 
 type Step =
   | { kind: "choose"; note?: string }
   | { kind: "starting" }
-  | { kind: "waiting"; note?: string; checking?: boolean; openManually: boolean }
-  | { kind: "review"; label: string }
+  | { kind: "waiting"; mode: RelayMode; note?: string; checking?: boolean; openManually: boolean }
+  | { kind: "review"; label: string; note?: string; saving?: boolean }
   | { kind: "manual" };
 
 type Connection = {
   request?: AbortController;
   pair?: { deviceKey: string; url: string };
-  proposal?: { credential: string; chat: string };
+  proposal?: { deviceKey: string; finishCode?: string };
 };
 
 function clearConnection(connection: Connection) {
@@ -38,20 +80,20 @@ function clearConnection(connection: Connection) {
   connection.proposal = undefined;
 }
 
-export default function HostedAlertsSetup({ provider, label, busy, replacingActive, save, forget, children }: {
+export default function HostedAlertsSetup({ provider, label, busy, replacingActive, forget, children }: {
   provider: AlertDestination;
   label: string;
   busy: boolean;
   replacingActive: boolean;
-  save: (credential: string, chat: string) => void;
   forget?: () => void;
   children: ReactNode;
 }) {
-  const { hostedConnect } = useSession();
+  const { hostedConnect, saveHostedConnection } = useSession();
   const [step, setStep] = useState<Step>({ kind: "choose" });
-  // React state and the DOM get only the review label, never either key or the webhook.
+  // Keep the device key, launch URL and credentials out of render state and markup.
   const connection = useRef<Connection>({});
   const panel = useRef<HTMLDivElement>(null);
+  const finishField = useRef<HTMLInputElement>(null);
   const previousStep = useRef(step.kind);
   const setup = providerSetup[provider];
   const replacementNotice = `Saving this replacement turns off forwarding to ${label}. Turn it back on when you’re ready.`;
@@ -84,18 +126,16 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
     try {
       const { status, data } = await hostedConnect({ action: "start", provider }, request.signal);
       if (request.signal.aborted) return;
-      if (status !== 200 || !data || typeof data !== "object" ||
-        !("deviceKey" in data) || typeof data.deviceKey !== "string" || !data.deviceKey ||
-        !("url" in data) || typeof data.url !== "string" || !setup.url.test(data.url)) {
-        throw new Error();
-      }
-      current.pair = { deviceKey: data.deviceKey, url: data.url };
+      const pair = status === 200 && pairing(data, provider);
+      if (!pair) throw new Error();
+      const { deviceKey, url, mode } = pair;
+      current.pair = { deviceKey, url };
       const opened = popup && !popup.closed;
       if (opened) {
-        popup?.location.replace(data.url);
+        popup?.location.replace(url);
         popup = null;
       }
-      setStep({ kind: "waiting", openManually: !opened, note: opened ? undefined : `Use Open ${label} to continue.` });
+      setStep({ kind: "waiting", mode, openManually: !opened, note: opened ? undefined : `Use Open ${label} to continue.` });
     } catch {
       if (!request.signal.aborted) {
         current.pair = undefined;
@@ -119,33 +159,43 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
     panel.current?.querySelector<HTMLElement>("[data-setup-focus]")?.focus();
   }
 
-  async function check() {
+  async function check(replacement?: string) {
     const current = connection.current;
     if (busy || step.kind !== "waiting" || !current.pair || current.request) return;
     const { deviceKey } = current.pair;
+    const field = finishField.current;
+    let finishCode: string | undefined;
+    if (step.mode === "production") {
+      if (!field) return;
+      finishCode = (replacement ?? field.value).trim().toUpperCase();
+      if (!exact(finishPattern, finishCode)) {
+        if (replacement !== undefined) field.value = "";
+        setStep({ ...step, note: "Enter the eight-character finish code to check the connection." });
+        field.focus();
+        return;
+      }
+      field.value = finishCode;
+    }
     const request = new AbortController();
     current.request = request;
     setStep({ ...step, note: "Checking the connection…", checking: true });
     try {
-      const { status, data } = await hostedConnect({ action: "claim", deviceKey }, request.signal);
+      const { status, data } = await hostedConnect({ action: "preview", provider, deviceKey, finishCode }, request.signal);
       if (request.signal.aborted) return;
-      if (status === 202 && data && typeof data === "object" && "pending" in data && data.pending === true) {
+      if (status === 202 && fields(data, ["pending"]) && data.pending === true) {
         setStep({ ...step, note: `Not connected yet. Finish in ${label} and check again.` });
+      } else if (status === 400 && step.mode === "production") {
+        setStep({ ...step, note: "The finish code did not match. Check the code and try again." });
+        finishField.current?.select();
       } else if (status === 404) {
         current.pair = undefined;
         setStep({ kind: "choose", note: "This connection expired or was already used. Start a new one or use your own credentials." });
-      } else if (status === 200 && data && typeof data === "object" &&
-        "provider" in data && data.provider === provider &&
-        "credential" in data && typeof data.credential === "string" && data.credential &&
-        "chat" in data && typeof data.chat === "string" &&
-        (provider === "telegram" ? data.credential.startsWith("milorelay_") && /^[0-9]+$/.test(data.chat) : data.chat === "") &&
-        "label" in data && typeof data.label === "string" && data.label.trim() &&
-        !data.label.includes(data.credential) && !data.label.includes(deviceKey)) {
-        current.proposal = { credential: data.credential, chat: data.chat };
-        current.pair = undefined;
-        setStep({ kind: "review", label: data.label });
       } else {
-        throw new Error();
+        const approved = status === 200 && reviewLabel(data, provider);
+        if (!approved) throw new Error();
+        current.proposal = { deviceKey, finishCode };
+        current.pair = undefined;
+        setStep({ kind: "review", label: approved });
       }
     } catch {
       if (!request.signal.aborted) setStep({ ...step, note: "Couldn’t check the connection. Try again, or cancel and use your own credentials." });
@@ -154,11 +204,33 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
     }
   }
 
-  function saveProposal() {
-    const proposal = connection.current.proposal;
-    if (busy || !proposal) return;
-    cancel();
-    save(proposal.credential, proposal.chat);
+  async function saveProposal() {
+    const current = connection.current;
+    const proposal = current.proposal;
+    if (busy || step.kind !== "review" || current.request || !proposal) return;
+    const request = new AbortController();
+    current.request = request;
+    setStep({ ...step, saving: true, note: "Saving the destination…" });
+    try {
+      const { deviceKey, finishCode } = proposal;
+      const { status, cleanupConfirmed } = await saveHostedConnection({ provider, deviceKey, finishCode, label: step.label }, request.signal);
+      if (request.signal.aborted) return;
+      if (status === 200) {
+        cancel();
+      } else if (status === 404 || status === 410) {
+        const note = status === 404 ? "This connection expired. Start a new one." : cleanupConfirmed ?
+          "Could not save the destination. Milo removed the new credential. Start a new connection to try again." :
+          "Could not save the destination or confirm cleanup. Remove the connection in the provider, then start a new connection.";
+        clearConnection(current);
+        setStep({ kind: "choose", note });
+      } else {
+        const note = status === 409 ? "Settings changed. Review the destination and try Save again." :
+          "Couldn’t save the destination. Your proposed destination hasn’t changed. Try Save again.";
+        setStep({ ...step, note });
+      }
+    } finally {
+      if (current.request === request) current.request = undefined;
+    }
   }
 
   return (
@@ -200,18 +272,47 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
             <p className="setting-detail">{replacingActive ? replacementNotice : "Saving does not turn forwarding on."}</p>
           </div>
           <div className="button-row">
-            <button type="button" className="button primary" aria-label={`Save ${label}`} disabled={busy} onClick={saveProposal}>Save</button>
-            <button type="button" className="button text-button" onClick={cancel}>Cancel</button>
+            <button type="button" className="button primary" aria-label={`Save ${label}`} disabled={busy || step.saving}
+              onClick={saveProposal}>Save</button>
+            <button type="button" className="button text-button" disabled={step.saving} onClick={cancel}>Cancel</button>
           </div>
         </>
       ) : (
         <>
-          {step.kind === "waiting" ? <p className="setting-detail">{setup.instructions}</p> : null}
+          {step.kind === "waiting" ? (
+            <>
+              <p className="setting-detail" id={`alerts-${provider}-instructions`}>{setup.instructions} {step.mode === "production" ?
+                `Copy the finish code ${provider === "telegram" ? "from the bot’s reply" : "from the confirmation page"}, then return to this tab and paste it to review. If you type it, choose Check connection.` :
+                "Then come back and check the connection."}</p>
+              {step.mode === "production" ? (
+                <div className="secret-form alerts-form">
+                  <div className="alerts-field">
+                    <label className="setting-label" htmlFor={`alerts-${provider}-finish`}>Finish code</label>
+                    <input id={`alerts-${provider}-finish`} ref={finishField} type="password" autoComplete="one-time-code"
+                      autoCapitalize="characters" spellCheck={false} readOnly={step.checking} disabled={busy}
+                      aria-describedby={`alerts-${provider}-instructions`} data-setup-focus
+                      onKeyDown={event => { if (event.key === "Enter") void check(); }}
+                      onPaste={event => {
+                        event.preventDefault();
+                        void check(event.clipboardData.getData("text/plain"));
+                      }}
+                      onInput={event => {
+                        if (event.currentTarget !== document.activeElement) return;
+                        const inputType = event.nativeEvent instanceof InputEvent ? event.nativeEvent.inputType : "";
+                        if (!inputType || inputType === "insertReplacementText" || inputType === "insertFromPaste") {
+                          void check(event.currentTarget.value);
+                        }
+                      }} />
+                  </div>
+                </div>
+              ) : null}
+            </>
+          ) : null}
           <div className="button-row">
             {step.kind === "waiting" ? (
               <>
                 <button type="button" className="button primary" disabled={busy} aria-disabled={step.checking}
-                  data-setup-focus onClick={check}>Check connection</button>
+                  data-setup-focus={step.mode === "local" ? "" : undefined} onClick={() => void check()}>Check connection</button>
                 {step.openManually ? <button type="button" className="button text-button" disabled={step.checking}
                   onClick={openPairingPage}>Open {label}</button> : null}
               </>
@@ -221,7 +322,7 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
         </>
       )}
       <p className="setting-detail alerts-setup-note" role="status">{step.kind === "starting" ? `Opening ${label}…` :
-        step.kind === "choose" || step.kind === "waiting" ? step.note : null}</p>
+        step.kind === "manual" ? null : step.note}</p>
     </div>
   );
 }

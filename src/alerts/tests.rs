@@ -15,6 +15,7 @@ use crate::json::Value;
 
 const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
 const LINK: &str = "https://discord.com/api/webhooks/1234567890/SYNTHETIC_synthetic-SYNTHETIC0";
+const CAPABILITY: &str = "milorelay_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq";
 
 /// A terminal event as `rex events --all --json` prints it.
 fn line(block: &str, name: &str, payload: &str) -> String {
@@ -344,13 +345,13 @@ fn only_a_stand_in_on_this_machine_can_replace_a_destination() {
 #[test]
 fn the_request_speaks_only_https_and_keeps_its_body_whole() {
     let body = message::body(Destination::Discord, "", "say \"hi\" \\ @\u{200b}here", Some(Kind::Error));
-    let request = send::request("https://discord.com/api/webhooks/1/abc", &body);
+    let request = send::request("https://discord.com/api/webhooks/1/abc", &body).options;
     assert!(request.contains("proto = \"=https\"\n") && request.contains("max-redirs = 0\n"), "{request}");
     assert!(request.starts_with("url = \"https://discord.com/api/webhooks/1/abc\"\n"));
     // curl reads the value back as it was written: one line, quotes and backslashes escaped.
     let data = request.lines().find_map(|line| line.strip_prefix("data-raw = \"")).unwrap().strip_suffix('"').unwrap();
     assert_eq!(data.replace("\\\"", "\"").replace("\\\\", "\\"), body);
-    assert!(send::request("http://127.0.0.1:9/x", "{}").contains("proto = \"=http\"\n"));
+    assert!(send::request("http://127.0.0.1:9/x", "{}").options.contains("proto = \"=http\"\n"));
 }
 
 #[test]
@@ -482,9 +483,10 @@ fn saving_another_destination_while_mirroring_does_not_move_the_alerts() {
     let saved = alerts.set_discord(LINK).unwrap();
     assert!(saved.contains("Alerts still go to Telegram chat -1001234567890"), "{saved}");
     assert_eq!(alerts.settings().unwrap().destination, Some(Destination::Telegram));
-    // Saving the one in use again, or switching by name, is the user's own choice.
+    // Changing the recipient disarms the active destination.
     alerts.set_telegram(TOKEN, "@synthetic_channel").unwrap();
     assert_eq!(alerts.settings().unwrap().telegram_chat, "@synthetic_channel");
+    assert!(!alerts.settings().unwrap().active(Destination::Telegram));
     assert!(alerts.choose(Destination::Discord).unwrap().contains("the Discord channel"));
     assert_eq!(alerts.settings().unwrap().destination, Some(Destination::Discord));
 }
@@ -524,6 +526,133 @@ fn scoped_forwarding_and_legacy_selection_do_not_change_each_other() {
     alerts.disable().unwrap();
     alerts.set_forwarding(telegram, true).unwrap();
     assert_eq!(active(), [true, false]);
+}
+
+#[test]
+fn manual_replacement_disarms_only_the_changed_destination() {
+    const NEW_TOKEN: &str = "654321:SYNTHETICsyntheticSYNTHETIC11";
+    const NEW_LINK: &str = "https://discord.com/api/webhooks/1234567891/SYNTHETIC_synthetic-SYNTHETIC1";
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    let active = || {
+        let settings = alerts.settings().unwrap();
+        Destination::ALL.map(|destination| settings.active(destination))
+    };
+    alerts.set_telegram(TOKEN, "42").unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+    alerts.set_telegram(TOKEN, "42").unwrap();
+    alerts.set_discord(LINK).unwrap();
+    assert_eq!(active(), [true, true]);
+
+    alerts.set_telegram(TOKEN, "43").unwrap();
+    assert_eq!(active(), [false, true]);
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_telegram(NEW_TOKEN, "43").unwrap();
+    assert_eq!(active(), [false, true]);
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_discord(NEW_LINK).unwrap();
+    assert_eq!(active(), [true, false]);
+
+    alerts.set_forwarding(discord, true).unwrap();
+    alerts.disable().unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.enable().unwrap();
+    assert_eq!(active(), [true, false]);
+}
+
+#[test]
+fn restoring_a_different_chat_cannot_reuse_a_verified_telegram_binding() {
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+    let verified = alerts.settings().unwrap();
+    let secret = alerts.target_secret(&verified, telegram).unwrap();
+    assert_eq!(secret, format!("{CAPABILITY}:42"));
+    assert!(alerts.message_request(telegram, &secret, "42", "test", None).is_some());
+
+    std::fs::write(alerts.file(), verified.render().replace("telegram_chat = 42", "telegram_chat = 43")).unwrap();
+    let restored = alerts.settings().unwrap();
+    assert_eq!(restored.telegram_chat, "43");
+    assert!(alerts.set_forwarding(telegram, true).unwrap_err().contains("Connect Telegram again"));
+    assert!(alerts.test_destination(telegram).unwrap_err().contains("Connect Telegram again"));
+    assert!(alerts.message_request(telegram, &secret, &restored.telegram_chat, "test", None).is_none());
+    assert!(restored.active(discord));
+    assert!(alerts.target_secret(&restored, discord).is_ok());
+}
+
+#[test]
+fn legacy_unbound_telegram_capability_requires_repair() {
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let telegram = Destination::Telegram;
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.secrets.set(telegram, CAPABILITY).unwrap();
+    assert!(alerts.summary().unwrap().note.contains("Connect Telegram again"));
+    assert!(alerts.enable().unwrap_err().contains("Connect Telegram again"));
+    assert!(alerts.test_destination(telegram).unwrap_err().contains("Connect Telegram again"));
+    assert!(alerts.message_request(telegram, CAPABILITY, "42", "test", None).is_none());
+    assert!(alerts.set_telegram(CAPABILITY, "42").is_err());
+}
+
+#[test]
+fn the_alert_transaction_holds_the_config_lock_through_a_credential_write() {
+    let f = Fixture::folder();
+    let alerts = Alerts::at(&f.root, &f.root);
+    let probe = crate::fs_ops::open_dir(&f.root).unwrap();
+    alerts
+        .locked(|edit| {
+            assert!(matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+            edit.save_discord(LINK, false)?;
+            assert!(matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+            Ok(())
+        })
+        .unwrap();
+    assert!(probe.try_lock().is_ok());
+}
+
+#[test]
+fn failed_forget_revoke_never_rearms_the_forgotten_provider() {
+    let f = Fixture::folder();
+    let mut alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+
+    alerts.relay = None;
+    assert!(alerts.forget(telegram).unwrap_err().contains("Could not disconnect"));
+    let reopened = store(&f);
+    reopened.enable().unwrap();
+    let settings = reopened.settings().unwrap();
+    assert_eq!(Destination::ALL.map(|destination| settings.active(destination)), [false, true]);
+    assert_eq!(reopened.secret(telegram).unwrap(), format!("{CAPABILITY}:42"));
+}
+
+#[test]
+fn failed_uninstall_revoke_leaves_mirroring_durably_disabled() {
+    let f = Fixture::folder();
+    let mut alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+
+    // No request can be sent in the wrong relay environment.
+    alerts.relay = None;
+    assert!(alerts.locked(|edit| edit.remove()).unwrap_err().contains("Could not disconnect"));
+    let reopened = store(&f);
+    assert!(!reopened.settings().unwrap().has_active());
+    assert!(reopened.enable().is_err());
+    assert_eq!(reopened.secret(telegram).unwrap(), format!("{CAPABILITY}:42"));
 }
 
 #[test]

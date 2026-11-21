@@ -1398,6 +1398,14 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert_eq!(pane.key(Key::Esc), After::Stay);
     assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
     choose(&mut pane, Row::AlertsOn);
+    let review = frame(&mut pane, 80, 24).join("\n");
+    assert!(review.contains("Telegram chat -1001234567890") && review.contains("Events: blocked, error, bell"));
+    pane.alerts.as_ref().unwrap().set_content(alerts::Content::Metadata).unwrap();
+    choose(&mut pane, Row::Continue);
+    assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("Review them again"));
+
+    choose(&mut pane, Row::AlertsOn);
     choose(&mut pane, Row::Continue);
     assert!(saved(&pane).enabled);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Rex alert mirroring is on."));
@@ -1407,6 +1415,24 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
     // None of this is a draft to save or discard on the way out.
     assert!(!pane.dirty());
+}
+
+#[test]
+fn choosing_a_legacy_destination_in_settings_does_not_reroute_active_alerts() {
+    let f = Fixture::folder();
+    let config = f.root.join("alerts");
+    let alerts = Alerts::at(&config, &f.root.join("alert-state"));
+    alerts.set_telegram("123456:SYNTHETICsyntheticSYNTHETIC00", "42").unwrap();
+    alerts.set_discord("https://discord.com/api/webhooks/12345/SYNTHETICsyntheticSYNTHETIC00").unwrap();
+    fs::write(config.join("alerts.conf"), "enabled = true\ndestination = telegram\ntelegram_chat = 42\n").unwrap();
+
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("alerts do not call Rex"));
+    pane.alerts = Some(alerts);
+    choose(&mut pane, Row::Alerts);
+    choose(&mut pane, Row::AlertsDestination);
+    let settings = pane.alerts.as_ref().unwrap().settings().unwrap();
+    assert!(settings.active(alerts::Destination::Telegram) && !settings.active(alerts::Destination::Discord));
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("Turn mirroring off"));
 }
 
 #[test]

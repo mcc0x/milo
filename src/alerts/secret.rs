@@ -11,8 +11,8 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::Destination;
-use crate::{fs_ops, preferences};
+use super::{Destination, relay};
+use crate::fs_ops;
 
 const SECURITY: &str = "/usr/bin/security";
 const SERVICE: &str = "net.usemilo.alerts";
@@ -22,6 +22,13 @@ const SECRET_LIMIT: u64 = 512;
 /// Names a keychain file of a test's own, so that tests leave the user's
 /// alone. A release build does not read it.
 const TEST_KEYCHAIN: &str = "MILO_ALERTS_KEYCHAIN";
+
+/// A hosted Telegram entry holds the capability and its verified recipient.
+/// Old entries held only the capability; they can be revoked but cannot send.
+pub(super) fn telegram_binding(entry: &str) -> Option<(&str, Option<&str>)> {
+    let (capability, chat) = entry.split_once(':').map_or((entry, None), |(capability, chat)| (capability, Some(chat)));
+    relay::valid_capability(capability).then_some((capability, chat))
+}
 
 pub(crate) enum Store {
     /// The user's default keychain, or the keychain file named.
@@ -165,13 +172,15 @@ fn read_file(path: &Path) -> io::Result<Vec<(String, String)>> {
 
 /// Replaces the file with one made private before anything is written to it.
 fn write_file(path: &Path, secrets: &[(String, String)]) -> io::Result<()> {
-    preferences::locked(path, |dir| {
-        let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(".milo-alerts-{}", std::process::id())))?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        for (name, secret) in secrets {
-            writeln!(file, "{name} = {secret}")?;
-        }
-        drop(file);
-        temp.replace(path)
-    })
+    // AlertsEdit already holds the transaction lock, even if config and state share a directory.
+    let dir = path.parent().ok_or(ErrorKind::InvalidInput)?;
+    fs::create_dir_all(dir)?;
+    let _directory = fs_ops::open_dir(dir)?;
+    let (temp, mut file) = fs_ops::Temp::create(dir.join(format!(".milo-alerts-{}", std::process::id())))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    for (name, secret) in secrets {
+        writeln!(file, "{name} = {secret}")?;
+    }
+    drop(file);
+    temp.replace(path)
 }
