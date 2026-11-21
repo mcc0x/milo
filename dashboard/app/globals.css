@@ -270,9 +270,28 @@ h1, h2, h3, p, figure { margin: 0; }
 }
 #error { min-block-size: 1.5em; overflow: auto; overflow-wrap: anywhere; }
 #error-actions { flex: none; margin-block-start: .45rem; }
+.menu-app { display: grid; align-content: start; gap: .9rem; }
+.menu-app .integration-heading > button { margin-inline-start: auto; }
+.menu-app-name { display: flex; align-items: center; gap: .5rem; }
+.menu-app-identity { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .5rem .7rem; }
+.menu-app-identity img { flex: none; border-radius: .65rem; }
+@media (max-width: 35rem) {
+  .menu-app-identity { grid-template-columns: auto minmax(0, 1fr); }
+  .menu-app-identity #menubar-action { grid-column: 2; justify-self: start; }
+}
+.menu-app #menubar-status:empty { margin: 0; height: 0; }
 .settings-panel:has(.health) { align-content: stretch; }
-.health { display: grid; place-content: center; justify-items: center; gap: .75rem; padding: 1rem; text-align: center; }
-.health h2 { font-size: 1.35rem; letter-spacing: -.035em; }
+.health { display: grid; grid-template-rows: auto 1fr; gap: .5rem; }
+.health-body { display: grid; place-content: center; justify-items: center; gap: .5rem; text-align: center; }
+.health-summary { display: flex; align-items: center; justify-content: center; gap: .35rem; }
+.health-refresh { display: grid; place-items: center; width: 2rem; height: 2rem; padding: 0; background: var(--tint); color: var(--blue); border: 0; border-radius: 50%; }
+.health-note { max-width: 38ch; }
+.health-mark { display: grid; place-items: center; width: 2.45rem; height: 2.45rem; border-radius: 50%; background: var(--tint); color: var(--blue); }
+.health[data-level="good"] .health-mark { background: #daeee4; color: #236147; }
+.health[data-level="warning"] .health-mark { background: #fbecd3; color: #805118; }
+.health[data-level="issue"] .health-mark { background: #f9e4df; color: #9b382e; }
+.health-result:empty { position: absolute; }
+.health h2 { justify-self: start; font-size: 1rem; letter-spacing: -.02em; }
 .health .button { border-radius: 2rem; padding-inline: 1.1rem; }
 .health-result { max-width: 38ch; }
 .health-result strong { font-size: 1.1rem; }

@@ -176,12 +176,12 @@ async function manageMenuApp(page, url, env) {
   // Hold menu app replies so the dashboard is exercised without opening apps
   // or touching the logged-in user's services, even with a packaged installer.
   await page.route('**/api/action', intercept);
-  const install = button(menu, 'Install menu app');
-  const update = button(menu, 'Open or update menu app');
-  const remove = button(menu, 'Remove menu app…');
+  const install = button(menu, 'Install');
+  const update = button(menu, 'Open Milo');
+  const remove = button(menu, 'Uninstall');
   const confirmation = dialog(page, 'Remove menu app?');
   const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
-  const perform = async (activate, pending, active, next) => {
+  const perform = async (activate, pending, active, next, focus = next) => {
     let complete;
     gate = new Promise(resolve => { complete = resolve; });
     try {
@@ -195,7 +195,7 @@ async function manageMenuApp(page, url, env) {
       complete();
     }
     await next.and(page.locator(':not([aria-disabled])')).waitFor();
-    assert(await next.evaluate(el => el === document.activeElement), 'completed action restores focus');
+    assert(await focus.evaluate(el => el === document.activeElement), 'completed action retains keyboard focus');
   };
 
   try {
@@ -203,7 +203,7 @@ async function manageMenuApp(page, url, env) {
     await status(page, dirty).waitFor({state: 'attached'});
     await menuTab.click();
     assert.equal(await remove.count(), 0, 'nothing to remove before installation');
-    await perform(() => install.click(), 'Installing menu app…', install, update);
+    await perform(() => install.click(), 'Installing menu app…', install, update, remove);
     await remove.waitFor();
     await perform(() => update.click(), 'Opening or updating menu app…', update, update);
     assert.equal(await confirmation.count(), 0, 'opening the installed app does not ask for removal');

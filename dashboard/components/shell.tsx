@@ -168,16 +168,26 @@ function Health() {
   const checking = queue.some(item => item.action === 'doctor');
   const result = checking ? null : state.doctor;
   return (
-    <section className="health">
+    <section className="health" data-level={result?.level}>
       <h2 id="diagnostics-title">Health Check</h2>
-      {result ? <div className="health-result" data-level={result.level}>
-        <strong>{healthLabels[result.level]}</strong>
-        {result.note ? <p>{result.note}</p> : null}
-      </div> : null}
-      <button className="button secondary" id="doctor" type="button" aria-disabled={checking || undefined}
+      <div className="health-body">
+      <span className="health-mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d={result?.level === 'good' ? 'm5 12 4 4L19 6' : result ? 'M12 5v8m0 5h.01' : 'M2 12h5l3-7 4 14 3-7h5'}/>
+        </svg>
+      </span>
+      <div className="health-summary">
+      <div className="health-result" role="status" data-level={result?.level}>
+        {checking ? <strong>Checking…</strong> : result && <strong>{healthLabels[result.level]}</strong>}
+      </div>
+      <button className={result || checking ? 'health-refresh' : 'button secondary'} id="doctor" type="button"
+        aria-label={result ? 'Run health check again' : checking ? 'Checking…' : undefined} title={result ? 'Run again' : undefined} aria-disabled={checking || undefined}
         disabled={!checking && (paused || running)} onClick={() => { if (!checking) command('doctor'); }}>
-        {checking ? 'Checking…' : result ? 'Run again' : 'Run check'}
+        {checking || result ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 5v5h-5M20 10a8 8 0 1 0-.7 6"/></svg> : 'Run check'}
       </button>
+      </div>
+      {result?.note && <p className="setting-detail health-note">{result.note}</p>}
+      </div>
     </section>
   );
 }

@@ -1,6 +1,5 @@
 "use client";
 
-import { SettingRow } from "./controls";
 import { useSession } from "./session";
 
 export default function MenuBar() {
@@ -13,39 +12,41 @@ export default function MenuBar() {
     queue.some(item => item.action !== "set");
   if (installed === null) return null;
 
+  const primaryAction = (
+    <button type="button" className="button primary" id="menubar-action"
+      aria-describedby="menubar-detail menubar-timing" aria-disabled={unavailable || undefined}
+      onClick={() => { if (!unavailable) command("menubar", { value: "install" }); }}>
+      {installed ? "Open Milo" : "Install"}
+    </button>
+  );
   return (
-    <section className="settings-group" aria-labelledby="group-menubar">
-      <header className="group-header group-titleline">
-        <div>
-          <h2 id="group-menubar">Menu bar app</h2>
-          <p className="setting-detail" id="menubar-timing">Applies immediately</p>
-        </div>
-        <span className="setting-detail" id="menubar-status" role="status">{pending}</span>
-      </header>
-      <div className="group-controls">
-        <SettingRow label="Milo" detailId="menubar-detail" detail={installed ?
-          "Installed. Opens Milo and applies the bundled update if needed." :
-          "Not installed. Install and open Milo in your Mac’s menu bar."}>
-          <button type="button" className="button secondary" id="menubar-action"
-            aria-describedby="menubar-detail menubar-timing" aria-disabled={unavailable || undefined}
-            onClick={() => { if (!unavailable) command("menubar", { value: "install" }); }}>
-            {installed ? "Open or update menu app" : "Install menu app"}
-          </button>
-        </SettingRow>
+    <section className="menu-app" aria-labelledby="group-menubar">
+      <header className="integration-heading">
+        <h2 id="group-menubar">Menu bar app</h2>
+        <p className="setting-detail" id="menubar-timing">Applies immediately</p>
         {installed ? (
-          <div className="setting">
-            <span className="setting-detail" id="menubar-remove-detail">The Milo CLI and your settings will be kept.</span>
-            <button type="button" className="button secondary" id="menubar-remove"
-              aria-describedby="menubar-remove-detail menubar-timing" aria-disabled={unavailable || undefined} onClick={() => {
-                if (!unavailable) confirm("Remove menu app?",
-                  "This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.",
-                  "Remove menu app", () => command("menubar", { value: "uninstall" }));
-              }}>
-              Remove menu app…
-            </button>
+          <button type="button" className="button danger" id="menubar-remove"
+            aria-describedby="menubar-timing" aria-disabled={unavailable || undefined}
+            onClick={() => {
+              if (!unavailable) confirm("Remove menu app?",
+                "This removes only the menu bar app. The Milo CLI, saved settings and current draft will be kept.",
+                "Remove menu app", () => command("menubar", { value: "uninstall" }));
+            }}>Uninstall</button>
+        ) : primaryAction}
+      </header>
+      <div className="menu-app-identity">
+        <img src="/favicon.png" width="42" height="42" alt="" />
+        <div>
+          <div className="menu-app-name"><strong>Milo</strong>
+            <span className="integration-state" data-state={installed ? "on" : "off"}>{installed ? "Installed" : "Not installed"}</span>
           </div>
-        ) : null}
+          <p className="setting-detail" id="menubar-detail">{installed
+            ? "Opens the menu bar app and updates it if needed."
+            : "Check usage and open settings from your Mac’s menu bar."}</p>
+        </div>
+        {installed && primaryAction}
       </div>
+      <p className="setting-detail" id="menubar-status" role="status">{pending}</p>
     </section>
   );
 }
