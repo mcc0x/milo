@@ -2,13 +2,13 @@
 
 > milo provides small terminal panes for a live file tree, Git history, usage, and a file reader that can edit a working text file when asked. The panes work on their own or alongside your shell in Rex.
 
-milo writes to the project it displays only when you save a file you edited in its reader. The v0.1.4 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+milo writes to the project it displays only when you save a file you edited in its reader. The v0.1.5 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
 ## Using milo
 
 - [Full documentation](https://usemilo.net/llms-full.txt): The main-branch guides and agent instructions in one text file.
 - [README](README.md): Installation, a picture of each pane and the main commands.
-- [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.4/install.sh): Downloads the v0.1.4 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
+- [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.5/install.sh): Downloads the v0.1.5 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
 - [Source installer](install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
 - [Agent skill](skills/milo/SKILL.md): How to check milo and open a reader in the user's terminal, including at a Git commit.
 - [Setup and removal](docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
