@@ -208,12 +208,13 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
     const current = connection.current;
     const proposal = current.proposal;
     if (busy || step.kind !== "review" || current.request || !proposal) return;
+    // Closing this view invalidates its response handler, not the session's Save.
     const request = new AbortController();
     current.request = request;
     setStep({ ...step, saving: true, note: "Saving the destination…" });
     try {
       const { deviceKey, finishCode } = proposal;
-      const { status, cleanupConfirmed } = await saveHostedConnection({ provider, deviceKey, finishCode, label: step.label }, request.signal);
+      const { status, cleanupConfirmed } = await saveHostedConnection({ provider, deviceKey, finishCode, label: step.label });
       if (request.signal.aborted) return;
       if (status === 200) {
         cancel();

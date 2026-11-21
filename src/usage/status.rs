@@ -24,6 +24,56 @@ pub(super) const INPUT_WAIT: Duration = Duration::from_millis(250);
 const LOCK_WAIT: Duration = Duration::from_millis(100);
 const WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct AccountId(u128);
+
+impl AccountId {
+    fn uuid(value: Value<'_>) -> Option<Self> {
+        let uuid = value.string(36)?;
+        let bytes = uuid.as_bytes();
+        if bytes.len() != 36 {
+            return None;
+        }
+        let mut id = 0_u128;
+        for (i, &byte) in bytes.iter().enumerate() {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                (byte == b'-').then_some(())?;
+            } else {
+                id = (id << 4) | u128::from(char::from(byte).to_digit(16)?);
+            }
+        }
+        Some(Self(id))
+    }
+}
+
+/// Claude's status input does not name its account. Only the active profile's
+/// OAuth account can identify it, not the session, model or reset times.
+fn active_account(oauth: Option<Value<'_>>) -> Option<AccountId> {
+    let [uuid] = oauth?.fields(["accountUuid"]);
+    AccountId::uuid(uuid?)
+}
+
+pub(super) struct Saved {
+    reading: Reading,
+    account: Option<AccountId>,
+}
+
+impl Saved {
+    pub(super) fn for_account(&self, current: Option<AccountId>) -> Option<&Reading> {
+        (self.account == current).then_some(&self.reading)
+    }
+}
+
+pub(super) struct Native {
+    pub(super) reading: Option<Reading>,
+    pub(super) account: Option<AccountId>,
+}
+
+pub(super) struct SaveTo<'a> {
+    pub(super) path: &'a Path,
+    pub(super) config: Option<&'a Path>,
+}
+
 /// A saved window can be older than the file if a later report omitted it.
 #[derive(Clone, Copy)]
 enum Observed {
@@ -51,22 +101,33 @@ fn window(value: Option<Value<'_>>, minutes: u64, observed: Observed) -> Option<
 }
 
 /// The status helper's own cache can preserve windows from different reports.
-pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
+pub(super) fn saved(file: File, version: FileVersion, budget: &mut Budget) -> Option<Saved> {
     let bytes = files::read_small(file, version, MAX_SAVED, budget)?;
-    let [saved_at, rate_limits] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits"]);
+    let [saved_at, rate_limits, account] = Value::parse(&bytes)?.fields(["saved_at", "rate_limits", "account"]);
+    let account = match account {
+        Some(account) => Some(AccountId(u128::from_str_radix(&account.string(32)?, 16).ok()?)),
+        None => None,
+    };
     let at = saved_at?.integer()?;
     let base = windows(rate_limits?, |value, minutes| window(value, minutes, Observed::Saved(at)));
-    base.iter().any(Option::is_some).then_some(Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) })
+    base.iter()
+        .any(Option::is_some)
+        .then_some(Saved { reading: Reading { at: time::Timestamp::seconds(at), windows: Limits::new(base) }, account })
 }
 
 /// Only inspect normal configurations up to 4 MiB; the cache is a top-level field.
-pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget) -> Option<Reading> {
+pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget) -> Option<Native> {
     let bytes = files::read_small(file, version, MAX_CONFIG, budget)?;
-    let [cache, current] = Value::parse(&bytes)?.fields(["cachedUsageUtilization", "oauthAccount"]);
-    let [at, usage, account] = cache?.fields(["fetchedAtMs", "utilization", "accountUuid"]);
-    if let Some(account) = account {
-        let [current] = current?.fields(["accountUuid"]);
-        (account.string(128)? == current?.string(128)?).then_some(())?;
+    let [cache, oauth] = Value::parse(&bytes)?.fields(["cachedUsageUtilization", "oauthAccount"]);
+    let account = active_account(oauth);
+    Some(Native { reading: cache.and_then(|cache| native_reading(cache, account)), account })
+}
+
+fn native_reading(cache: Value<'_>, current: Option<AccountId>) -> Option<Reading> {
+    let [at, usage, account] = cache.fields(["fetchedAtMs", "utilization", "accountUuid"]);
+    match account {
+        Some(uuid) => (Some(AccountId::uuid(uuid)?) == current).then_some(())?,
+        None => current.is_none().then_some(())?,
     }
     let at = time::Timestamp::millis(at?)?;
     let usage = usage.filter(|value| value.object() || value.null())?;
@@ -83,20 +144,31 @@ pub(super) fn native(file: File, version: FileVersion, budget: &mut Budget) -> O
 }
 
 /// A stalled stdin must not leave Claude waiting for its status line.
-pub(super) fn run_fd(input: impl AsFd, output: impl Write, path: Option<&Path>, now: i64, wait: Duration) -> i32 {
+pub(super) fn run_fd(
+    input: impl AsFd,
+    output: impl Write,
+    target: Option<SaveTo<'_>>,
+    now: i64,
+    wait: Duration,
+) -> i32 {
     let input = files::read_pipe(input, MAX_INPUT, Instant::now() + wait);
-    run(input.as_deref().unwrap_or_default(), output, path, now)
+    render(input.as_deref().unwrap_or_default(), output, target, now)
+}
+
+#[cfg(test)]
+pub(super) fn run(input: &[u8], output: impl Write, path: Option<&Path>, now: i64) -> i32 {
+    render(input, output, path.map(|path| SaveTo { path, config: None }), now)
 }
 
 /// Even malformed input gets an empty, successful status line.
-pub(super) fn run(input: &[u8], mut output: impl Write, path: Option<&Path>, now: i64) -> i32 {
-    let line = capture(input, path, now).unwrap_or_default();
+pub(super) fn render(input: &[u8], mut output: impl Write, target: Option<SaveTo<'_>>, now: i64) -> i32 {
+    let line = capture(input, target, now).unwrap_or_default();
     let _ = writeln!(output, "{line}");
     0
 }
 
 /// Prefer usage figures for the line and cache; otherwise show the model name.
-fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
+fn capture(input: &[u8], target: Option<SaveTo<'_>>, now: i64) -> Option<String> {
     if input.len() > MAX_INPUT {
         return None;
     }
@@ -106,9 +178,9 @@ fn capture(input: &[u8], path: Option<&Path>, now: i64) -> Option<String> {
         let [five, week] = windows;
         let label = |w: Window| if w.is_reset(now) { ("reset elapsed", "") } else { (w.number(), " left") };
         if (five.is_some() || week.is_some())
-            && let Some(path) = path
+            && let Some(target) = target
         {
-            let _ = save(path, now, windows);
+            let _ = save(target, now, windows);
         }
         match (five, week) {
             (Some(a), Some(b)) if a.is_reset(now) || b.is_reset(now) => {
@@ -144,8 +216,8 @@ fn model_name(model: Value<'_>) -> Option<String> {
     Some(safe)
 }
 
-fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
-    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+fn save(target: SaveTo<'_>, now: i64, windows: BaseWindows) -> io::Result<()> {
+    let dir = target.path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(dir)?;
     // The file is replaced on each save, so take the lock on its directory.
     let lock = fs_ops::open_dir(dir)?;
@@ -162,24 +234,40 @@ fn save(path: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
             Err(TryLockError::Error(error)) => return Err(error),
         }
     }
-    let done = merge_save(path, dir, now, windows);
+    let done = merge_save(target, dir, now, windows);
     done.and(lock.unlock())
 }
 
+fn configured_account(path: &Path) -> io::Result<Option<AccountId>> {
+    let file = match fs_ops::open_read(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let invalid = io::ErrorKind::InvalidData;
+    let version = FileVersion::opened(&file).ok_or(invalid)?;
+    let bytes = files::read_small(file, version, MAX_CONFIG, &mut Budget::new(MAX_CONFIG + 1)).ok_or(invalid)?;
+    let [oauth] = Value::parse(&bytes).filter(|value| value.object()).ok_or(invalid)?.fields(["oauthAccount"]);
+    Ok(active_account(oauth))
+}
+
 /// Merge under the directory lock so two status invocations cannot lose a window.
-/// A save that is not a reading is replaced, not merged, so its date goes with it.
-fn merge_save(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
-    let previous = fs_ops::open_read(path).ok().and_then(|file| {
+/// A save for another account or with an invalid date contributes no windows.
+fn merge_save(target: SaveTo<'_>, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
+    let account = target.config.map(configured_account).transpose()?.flatten();
+    let previous = fs_ops::open_read(target.path).ok().and_then(|file| {
         let version = FileVersion::opened(&file)?;
-        saved(file, version, &mut Budget::new(MAX_SAVED + 1)).filter(|reading| reading.visible_at() <= now)
+        saved(file, version, &mut Budget::new(MAX_SAVED + 1))
     });
+    let previous =
+        previous.as_ref().and_then(|saved| saved.for_account(account)).filter(|reading| reading.visible_at() <= now);
     let base = previous.map_or([None; 2], |reading| reading.windows.base);
     let merged = std::array::from_fn(|i| newer(base[i], windows[i]));
     if merged == base {
         return Ok(());
     }
     let at = previous.map_or(now, |reading| now.max(reading.at.seconds));
-    write_limits(path, dir, at, merged)
+    write_limits(target.path, dir, at, merged, account)
 }
 
 /// An older or smaller report must not roll back a known nondecreasing window.
@@ -209,12 +297,16 @@ fn newer(previous: Option<Window>, incoming: Option<Window>) -> Option<Window> {
 }
 
 /// A replacement makes the next read see both windows from the same save.
-fn write_limits(path: &Path, dir: &Path, now: i64, windows: BaseWindows) -> io::Result<()> {
+fn write_limits(path: &Path, dir: &Path, now: i64, windows: BaseWindows, account: Option<AccountId>) -> io::Result<()> {
     static SERIAL: AtomicU32 = AtomicU32::new(0);
     let temporary =
         dir.join(format!(".claude-limits-{}-{}", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)));
     let (temp, mut file) = Temp::create(temporary)?;
-    write!(file, "{{\"saved_at\":{now},\"rate_limits\":{{")?;
+    write!(file, "{{\"saved_at\":{now}")?;
+    if let Some(AccountId(id)) = account {
+        write!(file, ",\"account\":\"{id:032x}\"")?;
+    }
+    write!(file, ",\"rate_limits\":{{")?;
     for (i, (key, window)) in WINDOWS.into_iter().zip(windows).enumerate() {
         if i > 0 {
             write!(file, ",")?;

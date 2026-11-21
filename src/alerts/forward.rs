@@ -299,7 +299,7 @@ impl Target<'_> {
 
 #[derive(Default)]
 struct Delivery {
-    /// When each of the last minute's messages was sent.
+    /// When each of the last minute's messages was sent or may have been sent.
     sent_at: VecDeque<Instant>,
     sent: u32,
     /// Alerts dropped since the last message that was sent.
@@ -377,7 +377,15 @@ impl Delivery {
                     }
                     return;
                 }
-                Outcome::Wait(wait) => {
+                Outcome::Uncertain(_) => {
+                    // The message might count toward Telegram's rate limit.
+                    self.sent_at.push_back(Instant::now());
+                    self.refusals = 0;
+                    let reason = outcome.reason(destination, target.hosted_telegram);
+                    self.note(target, &format!("The last alert was not retried: {reason}."));
+                    return;
+                }
+                Outcome::Wait(wait) | Outcome::Unavailable(wait) => {
                     self.not_before = Some(Instant::now() + wait);
                     if wait > LONGEST_WAIT {
                         break;
@@ -386,10 +394,11 @@ impl Delivery {
                 }
                 Outcome::Failed(_) => Duration::from_secs(1) * 3_u32.pow(attempt),
             };
-            self.note(target, &format!("Trying again: {}.", outcome.reason(destination, target.hosted_telegram)));
-            if attempt + 1 < ATTEMPTS {
-                target.pause(wait);
+            if attempt + 1 == ATTEMPTS {
+                break;
             }
+            self.note(target, &format!("Trying again: {}.", outcome.reason(destination, target.hosted_telegram)));
+            target.pause(wait);
         }
         self.unsent += 1;
         self.note(target, "The last alert could not be delivered and was dropped.");
@@ -518,4 +527,72 @@ fn a_full_queue_drops_only_that_destinations_copy() {
         .collect();
     assert_eq!(kinds, [Kind::Bell, Kind::Blocked]);
     assert_eq!(dropped.map(AtomicU32::into_inner), [1, 0]);
+}
+
+#[cfg(test)]
+#[test]
+fn a_relay_outage_retries_only_telegram_and_only_up_to_the_limit() {
+    use super::event::Kind;
+    use super::relay::{
+        Origin,
+        tests::{CAPABILITY, with_replies},
+    };
+    use crate::fixture::Fixture;
+
+    let retry = (503, r#"{"retry_after":1}"#);
+    let replies =
+        [(503, r#"{"retry_after":3}"#), (204, ""), (204, ""), retry, retry, retry, (503, r#"{"retry_after":61}"#)];
+    let (_, wire) = with_replies(&replies, |origin| {
+        let fixture = Fixture::folder();
+        let mut alerts = Alerts::at(&fixture.root.join("config"), &fixture.root.join("state"));
+        alerts.relay = Some(Origin::Test(origin.to_owned()));
+        alerts.stand_in = Some(origin.to_owned());
+        alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+        alerts.set_discord("https://discord.com/api/webhooks/1234567891/synthetic_SYNTHETICsynthetic-01").unwrap();
+        for destination in Destination::ALL {
+            alerts.set_forwarding(destination, true).unwrap();
+        }
+        let settings = alerts.settings().unwrap();
+        let status = Status { file: alerts.state_dir().join("alerts.status"), notes: Mutex::default() };
+        let cancelled = AtomicBool::new(false);
+        let [telegram, discord] = Destination::ALL.map(|destination| Target {
+            alerts: &alerts,
+            settings: &settings,
+            status: &status,
+            destination,
+            secret: alerts.target_secret(&settings, destination).unwrap(),
+            hosted_telegram: destination == Destination::Telegram,
+            cancelled: &cancelled,
+        });
+        let alert = Alert { kind: Kind::Blocked, waiting: None, app: None, text: String::new() };
+        let mut telegram_delivery = Delivery::default();
+        let began = Instant::now();
+        std::thread::scope(|scope| {
+            let sender = scope.spawn(|| telegram_delivery.deliver(&alert, &telegram));
+            while !note(alerts.state_dir()).contains("Trying again: the Telegram relay is not ready") {
+                assert!(began.elapsed() < Duration::from_secs(2), "Telegram did not begin waiting");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut discord_delivery = Delivery::default();
+            discord_delivery.deliver(&alert, &discord);
+            assert_eq!(discord_delivery.sent, 1);
+            sender.join().unwrap();
+        });
+        assert!(began.elapsed() >= Duration::from_secs(3));
+        assert_eq!((telegram_delivery.sent, telegram_delivery.unsent), (1, 0));
+
+        telegram_delivery.deliver(&alert, &telegram);
+        assert_eq!((telegram_delivery.sent, telegram_delivery.unsent), (1, 1));
+        assert!(note(alerts.state_dir()).contains("The last alert could not be delivered and was dropped."));
+        assert!(!telegram_delivery.within_rate(&telegram));
+
+        let mut long_wait = Delivery::default();
+        long_wait.deliver(&alert, &telegram);
+        assert_eq!((long_wait.sent, long_wait.unsent), (0, 1));
+        assert!(!long_wait.within_rate(&telegram));
+    });
+    assert!(wire[0].starts_with("POST /v1/send "));
+    assert!(wire[1].starts_with("POST /api/v10/webhooks/"));
+    assert_eq!(wire[2], wire[0]);
+    assert!(wire[3..].iter().all(|request| request == &wire[0]));
 }

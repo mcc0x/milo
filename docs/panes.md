@@ -5,6 +5,7 @@ Run the panes in a Unix terminal with 256 colours. Outline and history start in 
 If you initialize Git in that folder, open panes pick up the repository and its saved worktree choices without restarting. Switching branches does not erase remembered folder folds or mark the newly visible timeline as newly arrived.
 
 In Follow mode, Outline and History use the local shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin.
+If Git temporarily cannot identify the shell's project, the pane keeps the last project and retries without another `cd`.
 If shell tracking itself stops, the notice changes to **Shell tracking unavailable**. Reopen the pane to reconnect.
 
 ## What fits in a pane
@@ -155,7 +156,7 @@ A save writes in place, not through a temporary file; that is what keeps the fil
 
 A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. If milo has no state folder, because neither that variable nor `HOME` names one, the line says the edits were lost.
 
-The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before: saving other edits, or undoing the restore and then saving or leaving, keeps it. One draft is kept for each file, so a reader that is ended again with unsaved changes to that file replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
+The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before. If you defer or undo the restore and then the reader is closed from outside with new edits, both drafts are kept. After saving or deleting the offered draft, stop and start editing to see the next one. A process that is killed outright, or a machine that loses power, keeps nothing.
 
 In Rex, opening another file from Outline or History replaces the floating reader. While that reader has unsaved changes, the pane says `The open reader has unsaved edits.` and leaves it alone.
 

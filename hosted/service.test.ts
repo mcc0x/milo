@@ -217,6 +217,38 @@ async function claimTelegram(service: Service, fixture: TelegramFixture) {
   return { Authorization: `Bearer ${credential}` };
 }
 
+test("only a confirmed Telegram 403 revokes the private chat's stored bindings", async () => {
+  using ledger = testLedger();
+  const auth = ["x", "y"].map((suffix) => {
+    const credential = `milorelay_prod_${ledger.store.issuer}${suffix.repeat(27)}`;
+    ledger.store.insert(createHash("sha256").update(credential).digest("hex"), 123);
+    return { Authorization: `Bearer ${credential}` };
+  });
+  const responses = [
+    new Response("<html>Forbidden</html>", { status: 403 }),
+    Response.json({ error_code: 403 }, { status: 403 }),
+    Response.json({ ok: false, error_code: 403 }, { status: 502 }),
+    Response.json({ ok: false, error_code: 403 }, { status: 403 }),
+  ];
+  const fixture = telegramFixture({ alert: async () => responses.shift()! });
+  let now = 0;
+  const service = await createService({
+    origin: PRODUCTION_ORIGIN, telegram, bindingStore: ledger.store, fetch: fixture.fetch, now: () => now,
+  });
+  await service.pollTelegram();
+  const send = (binding: Record<string, string>) =>
+    publicApi(service, "send", { text: "Rex: a program finished" }, client, binding);
+  for (let i = 0; i < 3; i++) {
+    expect((await send(auth[0])).status).toBe(502);
+    expect(ledger.store.load(10)).toHaveLength(2);
+    now += 1000;
+  }
+  expect((await send(auth[0])).status).toBe(401);
+  expect(ledger.store.load(10)).toEqual([]);
+  expect((await send(auth[1])).status).toBe(401);
+  expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(4);
+});
+
 test("a confirmed Telegram DM survives restart but a forgotten binding stays revoked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "milo-relay-"));
   const fixture = telegramFixture();
@@ -614,6 +646,34 @@ test("a throttled send says how long to wait in the body Milo's sender reads", a
   expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(1);
 });
 
+test("only definitive Telegram errors are reported as rejected, and ambiguous sends are never replayed", async () => {
+  let now = 0;
+  const fixture = telegramFixture({ alert: async ({ text }) => {
+    switch (text) {
+      case "invalid message": return Response.json({ ok: false, error_code: 400 }, { status: 400 });
+      case "bot credentials": return Response.json({ ok: false, error_code: 401 }, { status: 401 });
+      case "timeout after send": throw new DOMException("Fixture deadline", "TimeoutError");
+      case "server error": return Response.json({ ok: false, error_code: 500 }, { status: 500 });
+      case "unconfirmed throttling": return new Response(null, { status: 429, headers: { "Retry-After": "1" } });
+      default: return new Response("<html>OK</html>");
+    }
+  } });
+  const service = await createService({ telegram, fetch: fixture.fetch, now: () => now });
+  const auth = await claimTelegram(service, fixture);
+  for (const [text, status] of [
+    ["invalid message", 422], ["bot credentials", 422], ["timeout after send", 502],
+    ["server error", 502], ["unconfirmed throttling", 502], ["unreadable success", 502],
+  ] as const) {
+    const response = await api(service, "send", { text }, auth);
+    expect(response.status).toBe(status);
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(await response.json()).not.toHaveProperty("retry_after");
+    expect(fixture.calls.filter(({ body }) => body.parse_mode && body.text === text)).toHaveLength(1);
+    now += 1000;
+  }
+  expect((await removeBinding(service, auth)).status).toBe(204);
+});
+
 test("Discord bounds concurrent exchanges and drains expired webhook cleanup in batches", async () => {
   let now = 0;
   let exchanges = 0;
@@ -695,16 +755,24 @@ test("production Telegram pauses sends until its poll catches up and applies ver
   const service = await createService({ origin: PRODUCTION_ORIGIN, bindingStore: ledger.store, telegram,
     fetch: fixture.fetch, telegramCanSend: () => fresh, onTelegramBacklog: () => { backlogs++; } });
   const text = { text: "Rex: a program finished" };
-  expect((await publicApi(service, "send", text, client, auth)).status).toBe(503);
+  const blockedSend = async () => {
+    const response = await publicApi(service, "send", text, client, auth);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toHaveProperty("retry_after", 5);
+    expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(0);
+  };
+  await blockedSend();
   for (let i = 0; i < 20; i++) fixture.message("A normal private message");
   expect(await service.pollTelegram()).toBe(-1);
   expect(backlogs).toBe(1);
-  expect((await publicApi(service, "send", text, client, auth)).status).toBe(503);
+  await blockedSend();
   expect(await service.pollTelegram()).toBe(0);
   fresh = false;
-  expect((await publicApi(service, "send", text, client, auth)).status).toBe(503);
+  await blockedSend();
   fresh = true;
   expect((await publicApi(service, "send", text, client, auth)).status).toBe(204);
+  expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(1);
   fixture.message("/stop");
   expect(await service.pollTelegram()).toBe(0);
   expect(backlogs).toBe(2);

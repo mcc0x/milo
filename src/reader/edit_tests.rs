@@ -292,6 +292,43 @@ fn compare_does_not_authorize_overwrite_at_a_moved_project_path() {
 }
 
 #[test]
+fn editing_pauses_working_reader_refresh_but_still_checks_for_a_save_conflict() {
+    let f = Fixture::new();
+    f.write("notes.txt", "one\n");
+    f.commit("first");
+    let mut reader = open(&f, "notes.txt");
+    let watching = reader.watch_scope();
+    assert!(!watching.roots.is_empty());
+
+    reader.key(Key::Char('e'));
+    let idle = reader.watch_scope_after_input(&watching).unwrap();
+    assert!(idle.complete && idle.roots.is_empty());
+    assert!(reader.watch_scope_after_input(&idle).is_none());
+    typed(&mut reader, "mine ");
+
+    f.write("notes.txt", "theirs\n");
+    reader.filesystem_changed();
+    assert!(reader.check());
+    assert_eq!(reader.body.lines()[0].text, "one");
+    assert_eq!(draft(&reader), "mine one\n");
+
+    f.write(".git/index.lock", "");
+    assert!(!reader.git_busy());
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: c compare · o overwrite · Esc back");
+    assert_eq!(fs::read_to_string(f.root.join("notes.txt")).unwrap(), "theirs\n");
+    fs::remove_file(f.root.join(".git/index.lock")).unwrap();
+
+    reader.key(Key::Esc);
+    reader.key(Key::Esc);
+    reader.key(Key::Char('d'));
+    assert!(!reader.editing());
+    assert!(!reader.watch_scope_after_input(&idle).unwrap().roots.is_empty());
+    let rows = drawn(&mut reader, 60, 5);
+    assert!(rows.iter().any(|row| row.contains("+ theirs")), "{rows:?}");
+}
+
+#[test]
 fn saving_and_closing_a_changed_file_asks_first_and_then_closes() {
     let f = Fixture::folder();
     f.write("notes.txt", "one\n");
@@ -529,6 +566,41 @@ fn a_reader_closed_from_outside_keeps_its_draft_for_the_next_edit() {
     assert_eq!(fs::read_to_string(&file).unwrap(), "unsaved one\ntwo\n");
     drop(reader);
     assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+}
+
+#[test]
+fn deferring_or_undoing_a_kept_draft_does_not_lose_either_edit_on_external_close() {
+    for defer in [true, false] {
+        let f = Fixture::folder();
+        f.write("notes.txt", "one\n");
+        let mut reader = editing(&f, "notes.txt");
+        typed(&mut reader, "first ");
+        drop(reader);
+
+        let mut reader = editing(&f, "notes.txt");
+        if defer {
+            reader.key(Key::Esc);
+        } else {
+            reader.key(Key::Char('r'));
+            reader.key(Key::Ctrl(b'z'));
+        }
+        typed(&mut reader, "second ");
+        drop(reader);
+
+        let file = f.root.join("notes.txt");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
+        let mut reader = editing(&f, "notes.txt");
+        reader.key(Key::Char('r'));
+        assert_eq!(draft(&reader), "first one\n");
+        reader.key(Key::Ctrl(b's'));
+        reader.key(Key::Esc);
+        reader.key(Key::Char('e'));
+        reader.key(Key::Char('r'));
+        assert_eq!(draft(&reader), "second one\n");
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "second one\n");
+        assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+    }
 }
 
 #[test]

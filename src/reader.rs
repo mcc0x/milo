@@ -423,7 +423,7 @@ impl Pane for Reader {
 
     fn watch_scope(&self) -> Scope {
         match &self.source {
-            Source::Working(work) => {
+            Source::Working(work) if self.editor.is_none() => {
                 if work.stamp.as_ref().is_some_and(|stamp| !stamp.at_root_path) {
                     // Keep polling the held directory, not the possibly
                     // unrelated directory now at its old pathname.
@@ -437,23 +437,35 @@ impl Pane for Reader {
                 });
                 scope
             }
-            Source::Committed { .. } => Scope { roots: Vec::new(), ignored: Default::default(), complete: true },
+            _ => Scope { roots: Vec::new(), ignored: Default::default(), complete: true },
         }
+    }
+
+    fn watch_scope_after_input(&self, current: &Scope) -> Option<Scope> {
+        let idle = current.complete && current.roots.is_empty();
+        (matches!(self.source, Source::Working(_)) && idle != self.editor.is_some()).then(|| self.watch_scope())
     }
 
     fn git_busy(&self) -> bool {
         let Source::Working(work) = &self.source else { return false };
-        work.repo.busy() && work.root.at_path(&work.repo.root) == Ok(true)
+        self.editor.is_none() && work.repo.busy() && work.root.at_path(&work.repo.root) == Ok(true)
     }
 
     fn filesystem_changed(&mut self) {
-        if let Source::Working(work) = &mut self.source {
+        if self.editor.is_none()
+            && let Source::Working(work) = &mut self.source
+        {
             // Attribute changes can affect the patch without changing porcelain status.
             work.notified = true;
         }
     }
 
     fn check(&mut self) -> bool {
+        // Nothing on disk changes the draft view. Saving checks the held file
+        // independently, and closing the editor refreshes the diff.
+        if self.editor.is_some() {
+            return true;
+        }
         let force = match &mut self.source {
             Source::Working(work) => std::mem::take(&mut work.notified),
             Source::Committed { .. } => false,
@@ -635,6 +647,7 @@ impl Reader {
         // cheap check, like the file it had already read.
         if let Source::Working(work) = &mut self.source {
             work.stamp = None;
+            work.notified = false;
         }
         self.refresh(true);
         self.opening = false;

@@ -27,8 +27,36 @@ fn claude_status_saves_limits_and_prints_a_short_plain_line() {
     let file = fs_ops::open_read(&path).unwrap();
     let version = FileVersion::opened(&file).unwrap();
     let saved = status::saved(file, version, budget).unwrap();
+    let saved = saved.for_account(None).unwrap();
     assert_eq!(saved.windows.base[0].unwrap().observed, NOW);
     assert_eq!(saved.windows.base[1].unwrap().resets, Some(1_795_219_200));
+}
+
+#[test]
+fn a_legacy_save_or_native_cache_is_not_attributed_to_a_known_account() {
+    let f = Fixture::folder();
+    let path = f.root.join(STATE).join(SAVED_LIMITS);
+    status::run(STATUS, Vec::new(), Some(&path), NOW);
+    let cache = format!(
+        r#"{{"oauthAccount":{{"accountUuid":"{CLAUDE_ACCOUNT}"}},
+            "cachedUsageUtilization":{{"fetchedAtMs":{},"utilization":{{"seven_day":{{"utilization":18}}}}}}}}"#,
+        NOW * 1000
+    );
+    write(&f, ".claude.json", &cache, NOW);
+    let mut usage = unopened(&f, NOW);
+    usage.claude_config = Some(f.root.join(".claude.json"));
+    assert!(usage.check());
+    assert!(usage.claude.reported(NOW).is_none());
+
+    let target = status::SaveTo { path: &path, config: usage.claude_config.as_deref() };
+    let new = br#"{"rate_limits":{"seven_day":{"used_percentage":5}}}"#;
+    status::render(new, Vec::new(), Some(target), NOW);
+    assert!(usage.check());
+    let (reading, source) = usage.claude.reported(NOW).unwrap();
+    assert_eq!(source.label(), "Milo Claude status line");
+    assert!(reading.windows.base[0].is_none());
+    let week = reading.windows.base[1].unwrap();
+    assert_eq!((week.percent, week.resets), (5.0, None));
 }
 
 #[test]
