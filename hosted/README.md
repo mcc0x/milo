@@ -1,10 +1,18 @@
-# Milo local pairing relay
+# Milo pairing relay
 
-This prototype runs alongside the local Milo dashboard on the same machine as the browser. It listens only on `127.0.0.1:6120`. Do not deploy it, expose it through a tunnel or reverse proxy, or point it at shared production provider apps. No provider calls are made with an unconfigured environment. Milo’s existing manual Telegram and Discord setup still works without this process.
+Only **Connect with Milo** needs the relay. The settings dashboard remains local. Discord uses the relay for initial OAuth; subsequent alerts go directly from the device to the authorized webhook. Telegram alerts pass through the relay to the confirmed private DM. Manual bot and webhook setup do not need the relay.
+
+## Production operator checklist
+
+- Production accepts the canonical origin `https://connect.usemilo.net`. Register `https://connect.usemilo.net/discord/callback` on the production Discord application, enable `webhook.incoming`, and publish the privacy and terms URLs. Use a different bot and application for development. Do not forward production tokens to a PR environment.
+- Build `hosted/Dockerfile` with the repository root as build context. Mount a dedicated writable volume at `/data`. Configure one replica with no sleeping or deployment overlap. Never run two long pollers for the same Telegram bot. Use `/readyz` as the deployment gate, not a successful TCP connection.
+- The production image sets `MILO_RELAY_ORIGIN=https://connect.usemilo.net` and `MILO_RELAY_DATA_DIR=/data`. Set `RAILWAY_RUN_UID=0` for the volume bootstrap; it must drop privileges before the HTTP service starts. Railway supplies `PORT`. Set at least one provider: `MILO_TELEGRAM_BOT_TOKEN` enables production polling; `MILO_DISCORD_CLIENT_ID` **and** `MILO_DISCORD_CLIENT_SECRET` enable Discord with its canonical callback. Keep these variables on `connect`, not `site`. Do not copy `.env`, databases, or credentials into images or commit them to IaC.
+- Before making the feature available, verify certificate issuance, authorized Discord channel selection, Telegram confirmation and delivery, individual revocation, a restart with the volume retained, and healthy delivery by the other provider. Use private test destinations with non-sensitive content. Never paste pairing links, callback URLs, request bodies, cookies or bearer headers into logs, issues or screenshots.
+- Restoring an old database can restore revoked bindings. If the current volume is lost or compromised, start with an **empty** volume and have Telegram users pair again; rotate compromised provider secrets separately. Rolling the server binary back does not revoke credentials. Stop the relay rather than falling back to a version that does not enforce the same pairing and revocation rules.
 
 ## Run locally
 
-Use a current Bun release. From the repository root:
+Use Bun 1.4.5 or later. Start the local relay as below. Launch the development Milo dashboard with `MILO_RELAY_ORIGIN=http://127.0.0.1:6120 milo web`; a normally launched client uses the official HTTPS endpoint.
 
 ```sh
 cd hosted
@@ -29,25 +37,26 @@ In the [Discord Developer Portal](https://discord.com/developers/applications), 
 
 - `MILO_DISCORD_CLIENT_ID`: the OAuth2 client ID.
 - `MILO_DISCORD_CLIENT_SECRET`: the OAuth2 client secret (not a bot token).
-- `MILO_DISCORD_REDIRECT_URI`: the exact registered loopback callback above.
+- `MILO_DISCORD_REDIRECT_URI`: the exact registered callback for this environment.
 
-Milo’s single-use local launcher opens Discord’s consent dialog for `webhook.incoming` only. Choose an authorized server and channel in the dialog. Complete one pairing at a time in the same browser; the callback checks single-use OAuth state and a short-lived, HttpOnly browser cookie. The relay exchanges the code on the server with PKCE and gives Milo only the selected channel’s webhook credential. It never installs a bot, reads messages, or keeps OAuth access or refresh tokens. Review the destination and save it in Milo, then enable forwarding separately.
+Milo opens Discord’s consent dialog for `webhook.incoming` only. Choose an authorized server and channel. Complete one pairing at a time in the same browser; the callback checks single-use OAuth state and a short-lived, HttpOnly browser cookie. The relay exchanges the code on the server with PKCE and gives Milo only the selected channel’s webhook credential. It never installs a bot, reads channel history, or keeps OAuth access or refresh tokens. Complete the confirmation in the initiating dashboard before saving, then enable forwarding separately.
 
 To revoke a claimed webhook, remove it from the channel’s **Edit Channel → Integrations → Webhooks** settings; clearing the local credential alone does not delete the Discord webhook. Read [Discord OAuth2 for webhooks](https://docs.discord.com/developers/topics/oauth2#webhooks), the [Developer Policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy), and the [Developer Terms](https://support-dev.discord.com/hc/en-us/articles/8562894815383-Discord-Developer-Terms-of-Service). Add your public Privacy Policy and Terms of Service URLs under the application’s **General Information** before making it available to users.
 
 ## Data lifetime and request limits
 
-- Keep pairing URLs private; they are single-use. A pairing expires after ten minutes and its result can be claimed only once. A confirmed but unclaimed Telegram pairing creates no relay capability.
-- Confirmed Telegram bindings survive relay restarts. The relay stores only capability digests and verified DM IDs in a private, bot-specific SQLite file under `~/.local/state/milo/relay`. No bot tokens, message bodies, or raw capabilities are stored there. Forget a destination to revoke one binding, or send `/stop` or `/delete` to the bot to revoke the whole DM. Pending pairs are memory-only; restart their setup after a relay restart.
+- Keep pairing URLs and finish codes private. An unfinished pairing expires after ten minutes. Production uses an eight-character code delivered to the consenting Discord browser or verified Telegram DM. Five incorrect codes invalidate the pairing. Checking a connection only previews its destination; the device obtains a credential when you choose Save. A lost response may be retried within the pairing lifetime.
+- Confirmed Telegram bindings survive restarts. The relay stores capability digests and verified DM IDs in a private, bot-specific SQLite file on the volume (locally under `~/.local/state/milo/relay`). No bot tokens, message bodies, or raw capabilities are stored there. Forget a destination to revoke one binding, or send `/stop` or `/delete` to revoke the DM. Pending pairs are memory-only.
 - The relay attempts to delete an expired, unclaimed Discord webhook. If it is stopped or Discord rejects deletion, remove orphaned webhooks manually in the channel settings. A claimed webhook stays with the device and is not affected by relay restart. Providers and recipients may retain previously sent messages.
-- The single local listener allows at most 128 in-progress pairs and 128 active Telegram capabilities. It rate-limits starts (12/minute), claims (240/minute), and sends (one per second per DM across its capabilities, plus a shared cap). A throttled API call gets `429` with `Retry-After`.
-- This is a trusted-machine prototype. The loopback JSON API rejects browser `Origin` headers and requires Milo’s same-origin local proxy for dashboard calls. It does not defend against hostile local processes. Don’t share machine or browser access with untrusted users while it is running.
+- Pairing and delivery are bounded and rate-limited. A throttled request receives `429` with `Retry-After`. Treat ingress, credential storage, the TLS provider and relay host as trusted infrastructure. Per-client throttling does not replace upstream DDoS protection. Restrict operator access to logs and volumes; do not enable request body or authorization-header capture.
+- The public listener expects [Railway's TLS ingress and `X-Real-IP` header](https://docs.railway.com/networking/public-networking/specs-and-limits). Do not add a raw TCP proxy or untrusted private-network peers: the application cannot authenticate a proxy by checking for an HTTP header.
+- The JSON API is called by the Milo backend, not directly from a browser origin. These checks do not protect against other processes with access to your local session, or compromised bot credentials or devices.
 
 ## Test without provider access
 
 ```sh
 cd hosted
-bun test service.test.ts
+bun test
 ```
 
 The tests use local fetch stand-ins only; no credentials, accounts, or provider messages are needed.

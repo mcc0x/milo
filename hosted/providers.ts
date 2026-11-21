@@ -1,6 +1,19 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 export type ProviderFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export type DiscordConfig = { clientId: string; clientSecret: string; redirectUri: string };
+
+type TelegramReply = { status: number; result?: unknown; retryAfter?: number };
+type TelegramApi = (
+  method: string, payload?: Record<string, unknown>, timeout?: number, signal?: AbortSignal,
+) => Promise<TelegramReply>;
+
+type TelegramBootstrap = {
+  signal?: AbortSignal;
+  report: (message: string) => void;
+  wait?: (delay: number, signal: AbortSignal) => Promise<unknown>;
+};
 
 export function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -8,15 +21,15 @@ export function object(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-export function telegramApi(fetch: ProviderFetch, token: string) {
-  return async (method: string, payload: Record<string, unknown> = {}, timeout = 8_000) => {
+export function telegramApi(fetch: ProviderFetch, token: string): TelegramApi {
+  return async (method: string, payload: Record<string, unknown> = {}, timeout = 8_000, signal?: AbortSignal) => {
     try {
       const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         redirect: "error",
-        signal: AbortSignal.timeout(timeout),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
       });
       const data = object(await response.json().catch(() => undefined));
       if (response.ok && data?.ok === true) return { status: 200, result: data.result };
@@ -32,6 +45,46 @@ export function telegramApi(fetch: ProviderFetch, token: string) {
       return { status: 502 };
     }
   };
+}
+
+export async function verifyTelegramBot(tg: TelegramApi, botId: number, {
+  signal, report, wait = (delay, signal) => sleep(delay, undefined, { signal }),
+}: TelegramBootstrap) {
+  const budget = new AbortController();
+  const deadline = setTimeout(() => budget.abort(), 45_000).unref();
+  const probeSignal = signal ? AbortSignal.any([signal, budget.signal]) : budget.signal;
+  async function probe(method: "getWebhookInfo" | "getMe") {
+    for (let attempt = 0; attempt < 3 && !probeSignal.aborted; attempt++) {
+      const reply = await tg(method, {}, undefined, probeSignal);
+      if (probeSignal.aborted) break;
+      if (reply.status !== 429 && (reply.status < 500 || reply.status >= 600)) return reply;
+      if (attempt < 2) await wait(Math.max(reply.retryAfter ?? 0, 2 ** attempt) * 1000, probeSignal);
+    }
+  }
+  const reportTransient = () => {
+    if (!signal?.aborted) report("Telegram disabled: temporary provider errors prevented verification.");
+  };
+  try {
+    const webhook = await probe("getWebhookInfo");
+    if (!webhook) return reportTransient();
+    const url = object(webhook.result)?.url;
+    if (webhook.status !== 200 || url !== "") {
+      report(typeof url === "string" && url !== "" ? "Telegram disabled: existing webhook left untouched."
+        : "Telegram disabled: webhook status could not be verified.");
+      return;
+    }
+    const identity = await probe("getMe");
+    if (!identity) return reportTransient();
+    const me = object(identity.result);
+    if (identity.status === 200 && me?.is_bot === true && me.id === botId &&
+        typeof me.username === "string" && /^[A-Za-z0-9_]{5,32}$/.test(me.username)) return me.username;
+    report("Telegram disabled: bot identity could not be verified.");
+  } catch (error) {
+    if (!probeSignal.aborted) throw error;
+    reportTransient();
+  } finally {
+    clearTimeout(deadline);
+  }
 }
 
 export async function discordExchange(fetch: ProviderFetch, config: DiscordConfig, code: string, verifier: string) {
