@@ -30,6 +30,8 @@ In Milo, start Telegram pairing, open the official `t.me` link, press **Start** 
 
 Send `/stop` or `/delete` to the bot from that DM to revoke all its relay capabilities and remove associated pending confirmations. Removing the binding from a Milo installation revokes only that installation’s capability. A new claim does not invalidate an existing binding. Revocation does not delete messages already delivered to Telegram or cancel a send already in flight.
 
+A relay send also revokes the chat's bindings when Telegram explicitly rejects the DM with a Bot API `403` error. A bare HTTP `403` from upstream is not evidence that the chat revoked access.
+
 `milo alerts forget telegram`, replacing the connection and removing Milo's integrations all stop, with the connection kept, when the relay cannot confirm its revocation. `milo alerts forget telegram --local-only` is the way out when the relay that issued it is gone for good; see the operator checklist for what it does and does not do.
 
 Register your own accessible privacy policy link in [@BotFather](https://t.me/BotFather) before operating a bot for anyone else. Review the [Telegram Bot Developer Terms](https://telegram.org/tos/bot-developers#4-privacy), the [standard bot privacy policy](https://telegram.org/privacy-tpa), and the [Bot API](https://core.telegram.org/bots/api). Do not rely on the standard policy unless it actually describes your deployment. BotFather’s group privacy setting is not a privacy policy link.

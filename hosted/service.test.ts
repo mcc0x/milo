@@ -217,6 +217,38 @@ async function claimTelegram(service: Service, fixture: TelegramFixture) {
   return { Authorization: `Bearer ${credential}` };
 }
 
+test("only a confirmed Telegram 403 revokes the private chat's stored bindings", async () => {
+  using ledger = testLedger();
+  const auth = ["x", "y"].map((suffix) => {
+    const credential = `milorelay_prod_${ledger.store.issuer}${suffix.repeat(27)}`;
+    ledger.store.insert(createHash("sha256").update(credential).digest("hex"), 123);
+    return { Authorization: `Bearer ${credential}` };
+  });
+  const responses = [
+    new Response("<html>Forbidden</html>", { status: 403 }),
+    Response.json({ error_code: 403 }, { status: 403 }),
+    Response.json({ ok: false, error_code: 403 }, { status: 502 }),
+    Response.json({ ok: false, error_code: 403 }, { status: 403 }),
+  ];
+  const fixture = telegramFixture({ alert: async () => responses.shift()! });
+  let now = 0;
+  const service = await createService({
+    origin: PRODUCTION_ORIGIN, telegram, bindingStore: ledger.store, fetch: fixture.fetch, now: () => now,
+  });
+  await service.pollTelegram();
+  const send = (binding: Record<string, string>) =>
+    publicApi(service, "send", { text: "Rex: a program finished" }, client, binding);
+  for (let i = 0; i < 3; i++) {
+    expect((await send(auth[0])).status).toBe(502);
+    expect(ledger.store.load(10)).toHaveLength(2);
+    now += 1000;
+  }
+  expect((await send(auth[0])).status).toBe(401);
+  expect(ledger.store.load(10)).toEqual([]);
+  expect((await send(auth[1])).status).toBe(401);
+  expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(4);
+});
+
 test("a confirmed Telegram DM survives restart but a forgotten binding stays revoked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "milo-relay-"));
   const fixture = telegramFixture();

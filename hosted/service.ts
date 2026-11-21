@@ -518,7 +518,7 @@ export async function createService({
         binding.nextSend = Math.max(binding.nextSend, now() + retry * 1000);
         return rateLimited(retry);
       }
-      if (response.status === 403) {
+      if (response.status === 403 && response.confirmedError) {
         if (chats.get(binding.chat) === binding) revokeChat(binding.chat);
         return error(401, "Telegram binding is missing or revoked.");
       }
