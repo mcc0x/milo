@@ -12,7 +12,7 @@ const groupKeys = ['layout', 'preferences', 'account'] as const;
 type Payload = {field?: string; value?: unknown; group?: GroupKey | 'all'; scope?: Scope};
 type QueuedAction = Payload & {action: string};
 type NumericDraft = {control: HTMLInputElement; scale: number};
-type PendingAction = {request: QueuedAction; pending?: number; replacedNumbers?: Map<string, NumericDraft>};
+type PendingAction = {request: QueuedAction; pending?: number; replacedNumbers?: Map<string, NumericDraft>; onApplied?: () => void};
 type FocusOwner = {element: HTMLElement; id: string; headingId?: string; heading: boolean};
 type Confirmation = {title: string; note: string; label: string};
 type Toast = {text: string; error: boolean};
@@ -55,10 +55,10 @@ type Snapshot = {
 interface SessionActions {
   draftValue<T>(field: string): T;
   edit(field: string, value: unknown): boolean;
-  command(action: string, payload?: Payload): void;
+  command(action: string, payload?: Payload, onApplied?: () => void): void;
   findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   hostedConnect(request: HostedConnectRequest, signal: AbortSignal): Promise<{status: number; data: unknown}>;
-  saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult>;
+  saveHostedConnection(request: HostedSaveRequest): Promise<HostedSaveResult>;
   /** Asks for a bundle or a preview. Nothing is saved. Rejects with the editor's own words. */
   readTransfer<T>(request: TransferRead): Promise<T>;
   /** Applies an import or takes the last one back. Resolves to what went wrong, or to nothing. */
@@ -276,17 +276,17 @@ function createEditor(): Editor {
     }
   }
 
-  function command(action: string, payload: Payload = {}) {
+  function command(action: string, payload: Payload = {}, onApplied?: () => void) {
     if ((action === 'try' || (action === 'save' && payload.group === 'layout')) && !applyNumericDrafts()) return;
     const replacesLayout = action === 'capture' || (action === 'inherit' && payload.group === 'layout') ||
       (action === 'discard' && (payload.group === 'layout' || payload.group === 'all'));
     const replaced = replacesLayout && numericDrafts.size ? new Map(numericDrafts) : undefined;
-    enqueue({action, ...payload}, replaced);
+    enqueue({action, ...payload}, replaced, onApplied);
   }
 
-  function enqueue(request: QueuedAction, replacedNumbers?: Map<string, NumericDraft>) {
+  function enqueue(request: QueuedAction, replacedNumbers?: Map<string, NumericDraft>, onApplied?: () => void) {
     if (!state || closing || ended) return;
-    const queued: PendingAction = {request, replacedNumbers};
+    const queued: PendingAction = {request, replacedNumbers, onApplied};
     if (paused && request.action === 'discard' && request.group === 'all') {
       queued.pending = queue.length;
       queue.unshift(queued);
@@ -339,19 +339,27 @@ function createEditor(): Editor {
   }
 
   async function hostedConnect(request: HostedConnectRequest, signal: AbortSignal) {
+    const before = state;
     const response = await sessionFetch('/api/hosted-connect', 'POST', request, signal);
     if (!response.ok) await response.body?.cancel();
+    if (response.status === 409 && request.provider === 'telegram') {
+      const refreshed = await api<SessionState>('/api/state', 'GET', undefined, signal).catch(() => null);
+      if (refreshed && !signal.aborted && state === before) {
+        state = refreshed;
+        publish();
+      }
+    }
     return {status: response.status, data: response.ok ? await response.json() as unknown : null};
   }
 
-  async function saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult> {
+  async function saveHostedConnection(request: HostedSaveRequest): Promise<HostedSaveResult> {
     if (!state || !connected || running || paused || closing || ended || queue.length) return {status: 409};
     running = true;
     localError = '';
     operationWarning = '';
     publish();
     try {
-      const response = await sessionFetch('/api/hosted-connect', 'POST', {...request, action: 'save', version: state.version}, signal);
+      const response = await sessionFetch('/api/hosted-connect', 'POST', {...request, action: 'save', version: state.version});
       const {status} = response;
       if (status === 200) {
         state = await response.json() as SessionState;
@@ -366,8 +374,8 @@ function createEditor(): Editor {
         await response.body?.cancel();
       }
       // Stale or failed writes may leave the editor's publicly visible state changed.
-      if ((status === 409 || status === 410 || status === 500) && !signal.aborted) {
-        try { state = await api<SessionState>('/api/state', 'GET', undefined, signal); } catch { /* Keep the save status. */ }
+      if (status === 409 || status === 410 || status === 500) {
+        try { state = await api<SessionState>('/api/state'); } catch { /* Keep the save status. */ }
       }
       return {status, cleanupConfirmed};
     } catch {
@@ -443,7 +451,7 @@ function createEditor(): Editor {
     if (!state || running || paused || !queue.length || closing || ended) return;
     running = true;
     while (queue.length) {
-      const {request, pending, replacedNumbers} = queue[0];
+      const {request, pending, replacedNumbers, onApplied} = queue[0];
       try {
         state = await api<SessionState>('/api/action', 'POST', {...request, version: state.version});
         queue.splice(0, 1 + (pending ?? 0));
@@ -482,6 +490,7 @@ function createEditor(): Editor {
         setToast(localError, true);
         break;
       }
+      if (!state.message?.error) onApplied?.();
     }
     const openSave = saveRequested;
     saveRequested = false;

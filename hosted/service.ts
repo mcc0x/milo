@@ -10,6 +10,7 @@ export const PORT = 6120;
 export const MAX_BODY = 32 * 1024;
 const MAX_PAIR_BODY = 1024;
 export const PRODUCTION_ORIGIN = "https://connect.usemilo.net";
+export const TELEGRAM_RETRY_AFTER = 5;
 const CALLBACK = "/discord/callback";
 const FINISH = "/discord/finish";
 const TTL = 10 * 60_000;
@@ -498,7 +499,8 @@ export async function createService({
     if (bindings.get(hashed) !== binding) return error(401, "Telegram binding is missing or revoked.");
     if (!tg || !username) return error(503, "Telegram is not enabled.");
     if (production && (!telegramCaughtUp || telegramCanSend?.() === false)) {
-      return error(503, "Telegram is not ready; try again later.");
+      return json({ error: "Telegram is not ready; try again later.", retry_after: TELEGRAM_RETRY_AFTER },
+        503, { "Retry-After": String(TELEGRAM_RETRY_AFTER) });
     }
     const time = now();
     if (binding.nextSend > time) return rateLimited(Math.ceil((binding.nextSend - time) / 1000));
@@ -513,16 +515,18 @@ export async function createService({
         chat_id: binding.chat, text, parse_mode: "HTML", link_preview_options: { is_disabled: true },
       }, undefined, signal);
       if (response.status === 200) return plain(null, 204);
-      if (response.status === 429) {
+      if (response.status === 429 && response.confirmedError) {
         const retry = response.retryAfter ?? 1;
         binding.nextSend = Math.max(binding.nextSend, now() + retry * 1000);
         return rateLimited(retry);
       }
-      if (response.status === 403) {
+      if (response.status === 403 && response.confirmedError) {
         if (chats.get(binding.chat) === binding) revokeChat(binding.chat);
         return error(401, "Telegram binding is missing or revoked.");
       }
-      return error(502, "Telegram could not deliver this message.");
+      if (response.confirmedError && response.status < 500) return error(422, "Telegram rejected this message.");
+      // A timeout, unreadable answer or upstream server error may follow a successful send.
+      return error(502, "Telegram delivery could not be confirmed.");
     } finally {
       sendActive--;
       binding.sending = false;

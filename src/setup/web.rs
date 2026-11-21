@@ -99,6 +99,15 @@ impl Editor {
         Ok(out)
     }
 
+    pub(crate) fn check_telegram_reconnect(&mut self) -> Result<(), String> {
+        let alerts = self.setup.alerts.as_ref().ok_or(UNAVAILABLE)?;
+        let result = alerts.check_telegram_reconnect();
+        if result.is_err() {
+            self.setup.refresh_alerts();
+        }
+        result
+    }
+
     pub(crate) fn save_hosted_connection(
         &mut self,
         version: u64,
@@ -112,6 +121,11 @@ impl Editor {
         }
         let alerts = self.setup.alerts.as_ref().ok_or_else(|| Local(UNAVAILABLE.into()))?;
         let saved = alerts.locked(|edit| {
+            if request.provider() == alerts::Destination::Telegram
+                && let Err(error) = edit.check_telegram_reconnect()
+            {
+                return Ok(Err(Local(error)));
+            }
             let claim = match request.run() {
                 Ok(Connected::Claimed(claim)) => claim,
                 Ok(Connected::Pending) => return Ok(Err(Pending)),
@@ -761,6 +775,7 @@ enum AlertChange {
     Discord(String),
     Test(Option<alerts::Destination>),
     Forget(alerts::Destination),
+    ForgetTelegramLocally,
     /// Reads again whether mirroring is running and what it last noted.
     Refresh,
 }
@@ -798,6 +813,7 @@ impl AlertChange {
             "discord" => Self::Discord(value.string(256)?.into_owned()),
             "test" => Self::Test(if value.null() { None } else { Some(destination(value)?) }),
             "forget" => Self::Forget(destination(value)?),
+            "forget_local" if destination(value)? == alerts::Destination::Telegram => Self::ForgetTelegramLocally,
             "refresh" if value.null() => Self::Refresh,
             field => Self::Kind(alerts::Kind::parse(field.strip_prefix("events.")?)?, value.boolean()?),
         })
@@ -815,6 +831,7 @@ impl AlertChange {
             Self::Test(Some(destination)) => alerts.test_destination(destination),
             Self::Test(None) => alerts.test(),
             Self::Forget(destination) => alerts.forget(destination),
+            Self::ForgetTelegramLocally => alerts.forget_incompatible_telegram(),
             Self::Refresh => Ok(String::new()),
         }
     }
@@ -837,7 +854,7 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
         out,
         concat!(
             "{{\"enabled\":{},\"running\":{},\"destination\":{},\"consent\":{},",
-            "\"telegram\":{{\"saved\":{},\"active\":{},\"chat\":{},\"consent\":{}}},",
+            "\"telegram\":{{\"saved\":{},\"active\":{},\"chat\":{},\"consent\":{},\"needs_local_forget\":{}}},",
             "\"discord\":{{\"saved\":{},\"active\":{},\"consent\":{}}},\"events\":{{"
         ),
         settings.enabled,
@@ -848,6 +865,7 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
         settings.active(alerts::Destination::Telegram),
         Quoted(&settings.telegram_chat),
         consent(alerts::ConsentFor::Destination(alerts::Destination::Telegram)),
+        summary.telegram_needs_local_forget,
         discord,
         settings.active(alerts::Destination::Discord),
         consent(alerts::ConsentFor::Destination(alerts::Destination::Discord)),
@@ -1612,6 +1630,7 @@ mod tests {
             ("test", "true"),
             ("test", "\"other\""),
             ("forget", "\"x\""),
+            ("forget_local", "\"discord\""),
             ("enabled", "true"),
             ("destination", "\"telegram\""),
             ("forwarding", r#"{"destination":"telegram","enabled":true}"#),
@@ -1653,6 +1672,31 @@ mod tests {
         assert!(field(alerts, "destination").null());
         assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(false));
         assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
+    }
+
+    #[test]
+    fn browser_telegram_reconnect_reports_an_incompatible_binding_and_accepts_local_forget() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const CAPABILITY: &str = concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        let config = f.root.join("alerts");
+        let state_dir = f.root.join("alert-state");
+        let alerts = Alerts::at(&config, &state_dir);
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(config.join("alerts.conf"), "enabled = false\ndestination = telegram\ntelegram_chat = 42\n").unwrap();
+        let secrets = state_dir.join("alerts-secrets");
+        fs::write(&secrets, format!("telegram = {CAPABILITY}:42\n")).unwrap();
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600)).unwrap();
+        editor.setup.alerts = Some(alerts);
+        assert!(editor.check_telegram_reconnect().unwrap_err().contains("Forget on this Mac"));
+        let state = editor.state();
+        assert!(state.contains(r#""needs_local_forget":true"#) && !state.contains(CAPABILITY));
+        let state = change_alert(&mut editor, "forget_local", "\"telegram\"").unwrap();
+        assert!(state.contains(r#""needs_local_forget":false"#) && state.contains("this machine only"));
+        editor.check_telegram_reconnect().unwrap();
     }
 
     #[test]

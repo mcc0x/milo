@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::git::Repo;
 use crate::help::Page;
@@ -35,6 +35,7 @@ pub fn project(
         preference_note,
         source,
         last_dir: None,
+        retry: None,
         focus: None,
     })
 }
@@ -46,6 +47,7 @@ fn panel_preferences(repo: &Repo) -> (Preferences, Option<&'static str>) {
 const NO_CWD: &str = "Waiting for shell";
 const NO_OBSERVER: &str = "Shell tracking unavailable";
 const BAD_CWD: &str = "Shell folder unavailable";
+const DISCOVERY_FAILED: &str = "Could not identify shell project";
 
 struct Project<F> {
     root: PathBuf,
@@ -54,6 +56,7 @@ struct Project<F> {
     make: F,
     source: Option<ShellObserver>,
     last_dir: Option<PathBuf>,
+    retry: Option<(PathBuf, Instant)>,
     note: Option<&'static str>,
     notice_only: bool,
     preference_note: Option<&'static str>,
@@ -62,12 +65,21 @@ struct Project<F> {
 
 impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Project<F> {
     fn observe(&mut self, dir: PathBuf) -> External {
+        self.retry = None;
         if self.last_dir.as_ref() == Some(&dir) {
             return self.set_note(None);
         }
         let Some(repo) = Repo::open(&dir) else {
             return self.set_note(Some(BAD_CWD));
         };
+        // A failed discovery inside the current checkout isn't evidence that
+        // the shell left it. Rex reports cwd changes, not Git availability.
+        if repo.git_unavailable()
+            || (!repo.git && self.git && repo.root.starts_with(&self.root) && self.root.join(".git").exists())
+        {
+            self.retry = Some((dir, Instant::now() + Duration::from_secs(5)));
+            return self.set_note(Some(DISCOVERY_FAILED));
+        }
         self.last_dir = Some(dir);
         if self.root == repo.root && self.git == repo.git {
             return self.set_note(None);
@@ -161,6 +173,11 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
     }
 
     fn check(&mut self) -> bool {
+        if self.retry.as_ref().is_some_and(|(_, due)| Instant::now() >= *due)
+            && let Some((dir, _)) = self.retry.take()
+        {
+            self.observe(dir);
+        }
         let settled = self.pane.check();
         self.sync_promotion();
         settled
@@ -183,9 +200,13 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         };
         let update = match self.source.as_mut().map_or(ShellChange::Unchanged, ShellObserver::read) {
             ShellChange::Directory(dir) => self.observe(dir),
-            ShellChange::Unreported => self.set_note(Some(NO_CWD)),
+            ShellChange::Unreported => {
+                self.retry = None;
+                self.set_note(Some(NO_CWD))
+            }
             ShellChange::Closed => {
                 self.source = None;
+                self.retry = None;
                 self.set_note(Some(NO_OBSERVER))
             }
             ShellChange::Unchanged => External::Unchanged,
@@ -244,6 +265,7 @@ mod tests {
             make,
             source: None,
             last_dir: None,
+            retry: None,
             note: None,
             notice_only: false,
             preference_note: None,
@@ -251,6 +273,20 @@ mod tests {
         };
         *pane.pane.reader_opener().unwrap() = OpenReader::Floating { block: Some("block:previous".into()) };
         assert!(matches!(pane.observe(first.root.join("src")), External::Unchanged));
+        // Break only this fixture's Git discovery while the shell moves. The
+        // previous worktree stays visible and recovers without a second cd.
+        let config = first.root.join(".git/config");
+        let original = std::fs::read(&config).unwrap();
+        std::fs::create_dir(first.root.join("nested")).unwrap();
+        std::fs::write(&config, "[broken\n").unwrap();
+        assert!(matches!(pane.observe(first.root.join("nested")), External::Redraw));
+        assert_eq!(pane.root, first.root);
+        assert_eq!(pane.note, Some(DISCOVERY_FAILED));
+        std::fs::write(&config, original).unwrap();
+        pane.retry.as_mut().unwrap().1 = Instant::now();
+        pane.check();
+        assert_eq!(pane.note, None);
+        assert_eq!(pane.last_dir, Some(first.root.join("nested")));
         assert!(matches!(pane.observe(second.root.clone()), External::NewScope));
         assert_eq!(pane.watch_scope().roots.first(), Some(&pane.root));
         assert!(matches!(
@@ -277,6 +313,7 @@ mod tests {
             make,
             source: None,
             last_dir: None,
+            retry: None,
             note: None,
             notice_only: false,
             preference_note: None,
@@ -333,6 +370,7 @@ mod tests {
             make: |_: Repo, _: &Preferences| -> Box<dyn Pane> { Box::new(Due) },
             source: None,
             last_dir: None,
+            retry: None,
             note: Some(NO_CWD),
             notice_only: false,
             preference_note: None,

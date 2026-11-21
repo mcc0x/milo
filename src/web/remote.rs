@@ -7,15 +7,15 @@
 //! session key are checked exactly as they are for a local editor.
 
 use std::ffi::OsStr;
-use std::io::{self, PipeReader, Write as _};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::io::{self, PipeReader, Read, Write as _};
+use std::net::{Ipv4Addr, TcpListener};
 use std::os::fd::AsRawFd;
 use std::process::Child;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::launch::Launch;
-use super::{FORWARD_TARGET, STOP};
+use super::{FORWARD_TARGET, STOP, http_authority};
 use crate::rex::{self, RemoteEditor};
 
 /// How long the host's editor may take to print its link.
@@ -82,10 +82,14 @@ fn interrupt(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn loopback_origin(port: u16) -> String {
+    format!("http://{}", http_authority((Ipv4Addr::LOCALHOST, port).into()))
+}
+
 /// The session key and the host's port, from the two lines the host's editor
 /// printed. The link must be the one this computer asked for, to the letter.
 fn handoff(screen: &str, local_port: u16) -> Option<(&str, u16)> {
-    let prefix = format!("http://127.0.0.1:{local_port}/#");
+    let prefix = format!("{}/#", loopback_origin(local_port));
     let mut lines = screen.lines().map(str::trim_end);
     let token = lines.find_map(|line| {
         line.strip_prefix(&prefix)
@@ -112,9 +116,54 @@ fn pause(wake: &PipeReader, wait: Duration) -> bool {
     !STOP.load(Ordering::Relaxed)
 }
 
-fn listening(port: u16) -> bool {
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+/// Wait for this Rex process to report that it owns the selected port. A
+/// successful TCP connection alone might be to an unrelated local process.
+fn wait_forward(output: &mut (impl Read + AsRawFd), wake: &PipeReader, port: u16) -> io::Result<bool> {
+    let deadline = Instant::now() + FORWARD_WAIT;
+    let origin = loopback_origin(port);
+    let mut fds = [
+        libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+    ];
+    let mut line = [0; 128];
+    let mut filled = 0;
+    while !STOP.load(Ordering::Relaxed) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let ready = crate::term::wait_ready(&mut fds, crate::term::milliseconds(left));
+        if STOP.load(Ordering::Relaxed) {
+            break;
+        }
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if fds[1].revents == 0 {
+            continue;
+        }
+        let read = output.read(&mut line[filled..])?;
+        if read == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        filled += read;
+        if let Some(end) = line[..filled].iter().position(|&byte| byte == b'\n') {
+            let line = std::str::from_utf8(&line[..end]).unwrap_or_default();
+            let url = line.trim_end_matches(['\r', '/']);
+            if url == origin || (port == 80 && url == "http://127.0.0.1:80") {
+                return Ok(true);
+            }
+            break;
+        }
+        if filled == line.len() {
+            break;
+        }
+    }
+    if STOP.load(Ordering::Relaxed) { Ok(false) } else { Err(io::ErrorKind::InvalidData.into()) }
 }
 
 pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String> {
@@ -152,18 +201,18 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
     let failed = |error: io::Error| format!("could not start the Rex forward: {error}");
     carried.forward = Some(carried.editor.forward(port, host_port).map_err(failed)?);
     carried.watch = Some(carried.editor.watch().map_err(failed)?);
-    let started = Instant::now();
-    while !listening(port) {
-        let ended = carried.forward.as_mut().is_some_and(|forward| !matches!(forward.try_wait(), Ok(None)));
-        if ended || started.elapsed() >= FORWARD_WAIT {
-            return Err(format!("the Rex forward to {host} did not start listening on 127.0.0.1:{port}"));
-        }
-        if !pause(wake, CHECK) {
-            return Ok(());
-        }
+    let output = carried
+        .forward
+        .as_mut()
+        .and_then(|forward| forward.stdout.as_mut())
+        .expect("Rex forward stdout was piped");
+    let ready = wait_forward(output, wake, port)
+        .map_err(|error| format!("the Rex forward to {host} did not start listening on 127.0.0.1:{port}: {error}"))?;
+    if !ready {
+        return Ok(());
     }
 
-    let url = format!("http://127.0.0.1:{port}/#{token}");
+    let url = format!("{}/#{token}", loopback_origin(port));
     {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "{url}")
@@ -202,7 +251,8 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{FORWARD_TARGET, handoff};
+    use super::{FORWARD_TARGET, TcpListener, handoff, io, wait_forward};
+    use std::io::Write as _;
 
     #[test]
     fn only_the_link_this_computer_asked_for_is_taken_from_the_hosts_terminal() {
@@ -219,5 +269,31 @@ mod tests {
         assert_eq!(handoff(&screen.replace("51234", "0"), 7001), None);
         assert_eq!(handoff(&screen.replace("51234", "99999"), 7001), None);
         assert_eq!(handoff(&format!("http://127.0.0.1:7001/#{token}\n"), 7001), None);
+    }
+
+    #[test]
+    fn the_default_http_port_is_omitted_from_the_handoff() {
+        let token = "0123456789abcdef".repeat(4);
+        let screen = format!("http://127.0.0.1/#{token}\n{FORWARD_TARGET}51234\n");
+        assert_eq!(handoff(&screen, 80), Some((token.as_str(), 51234)));
+        assert_eq!(handoff(&screen, 81), None);
+    }
+
+    #[test]
+    fn a_loopback_listener_is_not_enough_without_rexs_readiness_report() {
+        let unrelated = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = unrelated.local_addr().unwrap().port();
+        let (wake, _signal) = io::pipe().unwrap();
+        for (report, result) in [
+            (String::new(), Err(io::ErrorKind::UnexpectedEof)),
+            (format!("http://0.0.0.0:{port}/\n"), Err(io::ErrorKind::InvalidData)),
+            ("http://127.0.0.1:0/\n".into(), Err(io::ErrorKind::InvalidData)),
+            (format!("http://127.0.0.1:{port}/\n"), Ok(true)),
+        ] {
+            let (mut output, mut rex) = io::pipe().unwrap();
+            rex.write_all(report.as_bytes()).unwrap();
+            drop(rex);
+            assert_eq!(wait_forward(&mut output, &wake, port).map_err(|error| error.kind()), result, "{report:?}");
+        }
     }
 }

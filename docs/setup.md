@@ -148,9 +148,9 @@ Milo checks that the host answers, starts `milo web` there in a Rex session of i
 
 The protections are the same as for a local editor:
 
-- The editor on the host listens only on the host’s `127.0.0.1`, and the forward listens only on your computer’s `127.0.0.1`. Nothing listens on a network address.
+- The editor on the host listens only on the host’s `127.0.0.1`, and the forward listens only on your computer’s `127.0.0.1`. Nothing listens on a network address. Milo waits for Rex to confirm that its forward is listening before opening or printing the private link.
 - The host’s editor is told the one address the page will have on your computer before it starts. It accepts that exact `Host` and `Origin` and no other, including its own port on the host.
-- Every request still needs the session key in the link. Don’t share the link.
+- Every settings request still needs the session key in the link. Don’t share the link.
 
 **Done** in the page, `Ctrl-C` in the terminal, or 15 minutes without use ends the editor on the host, and Milo then closes the forward and removes the `milo-settings` session. If the host cannot confirm that, Milo says so and names the session to look for.
 
@@ -249,6 +249,10 @@ In the browser, choose **Set up destination** (or **Manage destinations**). For 
 Each saved destination has its own forwarding switch and test button. Turn on both switches to send each alert to both places, or test either destination without enabling forwarding. Forgetting one leaves the other connected.
 
 Changing the recipient or replacing its credential turns off forwarding to that provider until you approve it again. Re-saving identical manual credentials leaves forwarding unchanged. If another editor changes what will be sent while confirmation is open, review the updated details. An old preview Telegram credential without a verifiable chat identity must be paired again; Milo will not guess which DM it belongs to.
+
+If Milo cannot disconnect a saved Telegram credential using the current relay (for example, one from the old production preview), use its original relay if possible. Otherwise, choose **Forget on this Mac** in Telegram’s destination settings, or run `milo alerts forget telegram --local-only`, before reconnecting. This stops Telegram forwarding and removes its credential on this device only; it does not revoke the old connection remotely or change Discord. To revoke all Milo connections to that chat, send `/stop` to Milo’s bot in the original chat while the issuing relay is available.
+
+See the [Telegram recovery screen](img/telegram-recovery.webp) and the [local-only removal confirmation on mobile](img/telegram-recovery-mobile.webp).
 
 **Connect with Milo (requires the hosted service).** The official endpoint is `https://connect.usemilo.net`; the settings dashboard still runs on your device. If the service is not available, use manual setup. For Telegram, confirm in a private DM with Milo’s bot. For Discord, authorize a webhook for your channel. Copy the finish code from the bot’s reply or the confirmation page, then paste it **only in the Milo dashboard where you started pairing**. Pasting or selecting browser autofill opens the destination review. If you type the code, choose **Check connection**. Never send the code to someone who shared a pairing link. The destination is saved only when you choose **Save**; forwarding is enabled separately.
 

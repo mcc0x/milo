@@ -599,11 +599,13 @@ async function checkHostedConnections(page, destination) {
   };
   const hostedPath = '**/api/hosted-connect';
   const actionPath = '**/api/action';
+  const statePath = '**/api/state';
   const responses = [];
   const saved = [];
   const scoped = [];
   const alertConsents = {telegram: 'a'.repeat(32), discord: 'b'.repeat(32)};
   let hostedRequests = 0;
+  const editorState = route => route.fulfill({json: state});
   const hosted = async route => {
     const request = route.request();
     assert.equal(request.method(), 'POST');
@@ -614,11 +616,13 @@ async function checkHostedConnections(page, destination) {
     const body = request.postDataJSON();
     assert.deepEqual(body, next.request);
     if (!next.save) return route.fulfill(await next.response);
+    if (next.waitForSave) await next.waitForSave;
     const {provider, chat} = next.save;
     saved.push(body);
     const alerts = {...state.alerts};
     alerts.destination ??= provider;
-    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider], ...(chat ? {chat} : {})};
+    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider],
+      ...(provider === 'telegram' ? {chat, needs_local_forget: false} : {})};
     state = {...state, version: state.version + 1, alerts, message: null};
     await route.fulfill({json: state});
   };
@@ -640,6 +644,13 @@ async function checkHostedConnections(page, destination) {
       const provider = providers.find(({provider}) => provider === value);
       assert(provider && alerts[value].saved, 'the test targets a saved provider');
       message = {text: `${provider.name} accepted the test message.`, error: false};
+    } else if (field === 'forget_local') {
+      assert.equal(value, 'telegram', 'local forget is scoped to Telegram');
+      assert(alerts.telegram.needs_local_forget);
+      scoped.push({field, value});
+      alerts.telegram = {saved: false, active: false, chat: '', consent: null, needs_local_forget: false};
+      alerts.destination = 'discord';
+      message = {text: 'Removed from this machine only.', error: false};
     } else {
       assert.fail(`unexpected alert action during hosted setup: ${field}`);
     }
@@ -798,8 +809,24 @@ async function checkHostedConnections(page, destination) {
           await status(wizard, 'Your proposed destination hasn’t changed').waitFor();
           await proposal.waitFor();
           assert.equal(saved.length, index, 'a transient Save failure retains the reviewed destination');
-          responses.push({request, save: {provider, chat}});
-          await approve.click();
+          if (index === 0) {
+            let releaseSave;
+            const waitForSave = new Promise(resolve => { releaseSave = resolve; });
+            responses.push({request, save: {provider, chat}, waitForSave});
+            try {
+              await approve.click();
+              await status(wizard, 'Saving the destination').waitFor();
+              await button(wizard, 'Close destinations').click();
+              await page.locator('#alerts-provider-setup').waitFor({state: 'detached'});
+            } finally {
+              releaseSave();
+            }
+            await button(destination, 'Manage destinations').click();
+            await button(page, name).click();
+          } else {
+            responses.push({request, save: {provider, chat}});
+            await approve.click();
+          }
           await wizard.getByText(chat ? `Saved destination · ${chat}` : 'Saved destination', {exact: true}).waitFor();
           assert.equal(await proposal.count(), 0, 'saving clears the proposal');
         }
@@ -843,11 +870,45 @@ async function checkHostedConnections(page, destination) {
       {field: 'forwarding', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: false}},
     ]);
+
+    // Another local editor restored an old credential just before the user tried to reconnect.
+    await button(manager, 'Telegram').click();
+    const telegram = dialog(page, 'Destinations / Telegram');
+    const connect = button(telegram, 'Connect with Milo');
+    const launchCount = launches.length;
+    state = {...state, alerts: {...state.alerts, telegram: {...state.alerts.telegram, needs_local_forget: true}}};
+    await page.route(statePath, editorState);
+    responses.push({request: {action: 'start', provider: 'telegram'}, response: {status: 409}});
+    await connect.click();
+    const forgetLocal = button(telegram, 'Forget on this Mac');
+    await forgetLocal.waitFor();
+    assert.equal(await connect.count(), 0, 'legacy Telegram cannot start another pairing');
+    assert.equal(launches.length, launchCount, 'the blocked start does not open a provider page');
+    await forgetLocal.click();
+    const forget = dialog(page, 'Forget Telegram on this Mac?');
+    await forget.getByText(/does not revoke the connection on the relay/).waitFor();
+    await forget.getByText(/send \/stop/).waitFor();
+    const actionsBeforeCancel = scoped.length;
+    await button(forget, 'Keep editing').click();
+    assert.equal(scoped.length, actionsBeforeCancel);
+    await forgetLocal.click();
+    await button(forget, 'Forget on this Mac').click();
+    await connect.waitFor();
+    assert.deepEqual(scoped.at(-1), {field: 'forget_local', value: 'telegram'});
+    await button(telegram, 'Back to destinations').click();
+    assert(await manager.getByRole('switch', {name: 'Forward to Discord'}).isChecked(),
+      'forgetting Telegram locally keeps Discord forwarding');
+    await button(manager, 'Discord').click();
+    const discord = dialog(page, 'Destinations / Discord');
+    assert.equal(await button(discord, 'Forget on this Mac').count(), 0, 'Discord has no local-only removal action');
+    await button(discord, 'Forget Discord…').waitFor();
+    await button(discord, 'Back to destinations').click();
     await button(manager, 'Close destinations').click();
   } finally {
     await context.unroute(outsideEditor, openProvider);
     await page.unroute(hostedPath, hosted);
     await page.unroute(actionPath, alertAction);
+    await page.unroute(statePath, editorState);
   }
 }
 
@@ -861,6 +922,8 @@ async function checkTelegramWizard(page, destination) {
   const fakeToken = 'smoke-test-token-not-a-credential';
   const chatId = '-1001234567890';
   const providerError = 'provider diagnostic must not appear in the dashboard';
+  const rejectedChat = '@not-a-channel';
+  const saveError = 'Enter a valid Telegram chat ID or @channel.';
   const replies = [
     {json: {chats: [{id: '42', title: 'Direct chat'}, {id: chatId, title: 'Build room'}]}},
     {json: {chats: []}},
@@ -885,10 +948,17 @@ async function checkTelegramWizard(page, destination) {
   };
   const saveTelegram = async route => {
     const action = route.request().postDataJSON();
-    if (action.action !== 'alerts' || action.field !== 'telegram') return route.fallback();
+    if (action.action !== 'alerts') return route.fallback();
+    if (action.field === 'refresh') {
+      state = {...state, version: state.version + 1};
+      return route.fulfill({json: state});
+    }
+    if (action.field !== 'telegram') return route.fallback();
     received.push(action);
+    if (action.value.chat === rejectedChat) return route.fulfill({status: 400, json: {error: saveError}});
     state = {...state, version: state.version + 1, alerts: {...state.alerts,
-      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat}}};
+      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat,
+        consent: null, needs_local_forget: false}}};
     await route.fulfill({json: state});
   };
   // No discovery or Telegram save reaches Telegram, even with a packaged editor.
@@ -943,8 +1013,13 @@ async function checkTelegramWizard(page, destination) {
       await status(wizard, text).waitFor();
       assert.equal(await wizard.getByText(providerError).count(), 0, 'lookup never displays provider errors');
       await manual.click();
-      await manualChat.fill(index === 2 ? '@public_channel' : '-1009876543210');
+      await manualChat.fill(index === 2 ? rejectedChat : '-1009876543210');
       if (index === 2) {
+        await save.click();
+        await status(wizard, saveError).waitFor();
+        assert.equal(await token.inputValue(), fakeToken, 'a refused save retains the bot token');
+        assert.equal(await manualChat.inputValue(), rejectedChat, 'a refused save retains the chat to correct');
+        await manualChat.fill('@public_channel');
         await save.click();
         await wizard.getByText('Saved destination · @public_channel', {exact: true}).waitFor();
         await assertReset();
@@ -957,7 +1032,7 @@ async function checkTelegramWizard(page, destination) {
       }
     }
     assert.equal(lookups, replies.length);
-    assert.deepEqual(received, [chatId, '@public_channel'].map((chat, index) => ({
+    assert.deepEqual(received, [chatId, rejectedChat, '@public_channel'].map((chat, index) => ({
       action: 'alerts', field: 'telegram', value: {token: fakeToken, chat}, version: initialVersion + index,
     })), 'discovered and manual chat IDs use the same Telegram save action');
     await button(wizard, 'Close destinations').click();

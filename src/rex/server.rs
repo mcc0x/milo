@@ -164,9 +164,9 @@ impl RemoteEditor {
         self.rex("10s")
             .args(["forward", "open", "--no-open", "--bind", "127.0.0.1", "-s", &self.session, "-p"])
             .arg(local_port.to_string())
-            .arg(host_port.to_string())
+            .arg(format!("127.0.0.1:{host_port}"))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
     }
