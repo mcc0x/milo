@@ -92,9 +92,10 @@ local function retitle(window_id)
   local key = cwd .. "\n" .. (agent or "")
   local changed = key ~= record.key
   -- Recheck file-backed answers on events even when this shell has not
-  -- moved. Answers without grounds still wait for a new cwd or agent.
+  -- moved, and ask again for one that is no longer kept. Answers without
+  -- grounds still wait for a new cwd or agent.
   if changed or record.cached then
-    local title, cached = titles.ask(cwd, agent, not changed)
+    local title, cached = titles.ask(cwd, agent)
     record.cached = cached
     if changed or (title ~= nil and title ~= record.title) then
       record.key, record.title, record.refused = key, title, nil

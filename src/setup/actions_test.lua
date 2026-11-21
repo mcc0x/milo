@@ -331,7 +331,7 @@ assert(ask("/off") == "" and ask("/off") == "" and ask("/off", "claude") == "" a
 -- titles on, the answer differs by agent, and each is asked for once.
 write(override, "tab_titles = true\n")
 title_reply.stdout = "=milo" .. grounds
-assert(ask("/off", nil, true) == "milo" and started(1))
+assert(ask("/off") == "milo" and started(1))
 title_reply.stdout = "=milo · omp" .. grounds
 assert(ask("/off", "omp") == "milo · omp" and started(1))
 assert(ask("/off") == "milo" and ask("/off", "omp") == "milo · omp" and started(0))
@@ -357,7 +357,6 @@ title_reply.stdout = "=milo · omp" .. grounds
 assert(ask("/kept", "omp") == "milo · omp" and started(1))
 title_reply.stdout = "=\n"
 assert(ask("/uncached") == "" and started(1))
-assert(ask("/uncached", nil, true) == nil and started(0))
 assert(ask("/kept") == "" and started(1))
 assert(ask("/kept", "omp") == "milo · omp" and started(0))
 title_reply.stdout = "=milo" .. grounds

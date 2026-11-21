@@ -622,6 +622,19 @@ choose("")
 titling.on = false
 changed()
 assert(here.label == "Window 00000009" and there.label == "Window 0000000a" and titling.asks == asks + 5)
+
+-- A listener keeps answers for a limited number of folders and then starts
+-- again. A tab that stayed where it was is asked about afresh, so it still
+-- follows the choice.
+titling.on = true
+choose("tab_titles = true\n")
+changed()
+assert(here.label == "project")
+for n = 1, 4097 do moved("there", "/elsewhere/" .. n) end
+titling.on = false
+choose("")
+changed()
+assert(here.label == "Window 00000009", "an answer that is no longer kept must be asked for again")
 titling.on = true
 assert(os.remove(choice))
 

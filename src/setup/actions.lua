@@ -634,9 +634,8 @@ if ... == "listener" then
     return true
   end
 
-  local function ask(cwd, agent, cached_only)
+  local function ask(cwd, agent)
     local answer = answers[cwd]
-    if cached_only and not answer then return end
     if answer and not stands(answer) then answers[cwd], kept, answer = nil, kept - 1, nil end
     local who = agent or ""
     local known = answer and (answer.untitled and "" or answer.titles[who])
@@ -650,8 +649,10 @@ if ... == "listener" then
     -- For the same files, keep the earlier readings: they were taken before Milo read them.
     if not (answer and same_files(answer.grounds, grounds)) then
       if answer then kept = kept - 1 end
-      -- A listener can outlive many folders. Start again rather than grow without end.
-      if kept >= 256 then answers, kept = {}, 0 end
+      -- A listener can outlive many folders. Start again rather than grow without end,
+      -- but only once it holds as many folders as Rex's default limits allow tabs:
+      -- starting again makes every open tab ask once more.
+      if kept >= 4096 then answers, kept = {}, 0 end
       answer = { grounds = grounds, titles = {} }
       answers[cwd], kept = answer, kept + 1
     end
