@@ -151,6 +151,8 @@ export default function Home() {
             <a className="source" href="https://github.com/mcc0x/milo/releases">Releases</a>
             <a className="source" href="https://github.com/mcc0x/milo/issues">Issues</a>
             <a className="source" href="https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md">Contribute</a>
+            <a className="source" href="/terms/">Terms</a>
+            <a className="source" href="/privacy/">Privacy</a>
           </nav>
         </div>
       </footer>

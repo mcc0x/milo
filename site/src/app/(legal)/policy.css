@@ -1,0 +1,7 @@
+body:has(.policy) { margin: 0; background: #edf4fa; color: #182f42; font: 400 1rem/1.6 Bricolage, system-ui, sans-serif; }
+.policy { box-sizing: border-box; width: min(100%, 43rem); margin: 0 auto; padding: clamp(1.4rem,5vw,4rem) 1.35rem; }
+.policy h1 { margin: 1.2rem 0 .6rem; font-size: clamp(2rem,5vw,3rem); line-height: 1.12; letter-spacing: -.045em; }
+.policy h2 { margin: 1.55rem 0 .3rem; font-size: 1.12rem; }
+.policy p { margin: .4rem 0; }
+.policy a { color: #204e80; text-underline-offset: .18em; }
+.policy footer { margin-top: 2rem; display: flex; gap: 1rem; font-size: .88rem; }

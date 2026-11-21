@@ -1,0 +1,6 @@
+{
+  "name": "milo-railway-infrastructure",
+  "private": true,
+  "type": "module",
+  "dependencies": { "railway": "3.17.0" }
+}
