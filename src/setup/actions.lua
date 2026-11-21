@@ -397,7 +397,13 @@ local function fill_rail(ctx, selected, live, cwd, shell, rows)
         if positions[existing] < positions[role] then predecessor = existing end
       end
       local neighbour = successor or predecessor
-      local before = successor ~= nil
+      -- A pane that was closed left its room to one of its neighbours. Take
+      -- the room back from the one that holds more than its own share.
+      if successor and predecessor then
+        local function spare(other) return live.shares[other] - (desired[other] or live.shares[other]) end
+        if spare(predecessor) > spare(successor) then neighbour = predecessor end
+      end
+      local before = neighbour == successor
       local share = desired[role] / (desired[role] + (desired[neighbour] or live.shares[neighbour]))
       local height = live.shares[neighbour]
       if role == "usage" and not (selected.shares and selected.shares.usage > 0) then

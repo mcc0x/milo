@@ -233,6 +233,17 @@ made = splits[#splits]
 assert(made.direction == "vertical" and made.anchor_id == history.block_id and made.layout.label == usage.label)
 near((1 - made.ratio) * 0.2, 2 / 80)
 
+-- A pane that comes back takes its room from the neighbour that was left
+-- with it, not from a Usage strip that is only as tall as it should be.
+tiled.layout = tree("horizontal", 0.8, leaf(shell), tree("vertical", 0.96, leaf(outline), leaf(usage)))
+tiled.blocks = { shell, outline, usage }
+sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50 }
+actions.milo_history(ctx)
+made = splits[#splits]
+assert(made.direction == "vertical" and made.anchor_id == outline.block_id and made.side == "after")
+assert(made.layout.label == history.label)
+near(made.ratio, 0.7)
+
 -- A headless tab can still have an explicit terminal size without a client owner.
 tiled.layout, tiled.blocks = leaf(shell), { shell }
 sizes[shell.block_id] = { columns = 80, rows = 12 }
