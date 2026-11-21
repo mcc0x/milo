@@ -4,6 +4,7 @@ mod alerts;
 mod diff;
 #[cfg(test)]
 mod fixture;
+mod format;
 mod fs_ops;
 mod git;
 mod help;
@@ -60,7 +61,7 @@ Usage: milo
        milo web [--port PORT] [--no-open]
        milo doctor
        milo setup --repair | --remove
-       milo view FILE [--commit ID]
+       milo view FILE [--commit ID | --edit]
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
@@ -117,10 +118,20 @@ Reader (also opened by milo view):
   Space / b     page down/up
   g G           top/bottom
   n N           next/previous block of changed lines
+  e             edit a working text file
   q or Esc      close
 
-Ctrl-C quits. Press ? for help when the pane has room. The outline,
-history and reader support the mouse wheel, Page Up/Down and Home/End.
+Editing in the reader (also opened by milo view FILE --edit):
+  Ctrl-S        save
+  Ctrl-Z Ctrl-Y undo, redo
+  Ctrl-F        format with an installed formatter; undo takes it back
+  Esc           stop editing; asks first if there are unsaved changes
+  Ctrl-G        help
+
+Ctrl-C quits; while a file is being edited it stops editing, and asks first
+if there are unsaved edits. Press ? for help
+when the pane has room. The outline, history and reader support the mouse
+wheel, Page Up/Down and Home/End.
 
 Changed files are those waiting to be committed or pushed. Yellow is edited,
 green new, red removed, cyan moved, and magenta in conflict. Uncommitted
@@ -130,6 +141,9 @@ The reader colours supported code and marks added and removed lines. It
 shows a picture as a picture where the terminal can draw one.
 Use milo view FILE --commit ID to see the file as of that commit, not as
 it is now. ID is a full or abbreviated Git commit ID in hex.
+The reader only reads until you press e. Edits are a draft until saved, and
+a save never replaces a file that changed on disk without asking. Files at
+a commit, links, pictures and files that are not UTF-8 text stay read-only.
 
 Choose icons in setup, or override them for one launch with MILO_ICONS=plain
 or MILO_ICONS=off.
@@ -144,8 +158,12 @@ fn command_help(name: &str) -> Option<&'static str> {
         "usage" => {
             "Usage: milo usage [--menu-stream]\n\nSee Codex and Claude Code limits and OpenCode activity.\n--menu-stream prints one JSON snapshot per line using global preferences. It refreshes about every 30 seconds or on a newline from stdin, and exits at EOF."
         }
-        "menubar" => "Usage: milo menubar install | uninstall\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.",
-        "view" => "Usage: milo view FILE [--commit ID]\n\nRead a file now or as it was at a Git commit.",
+        "menubar" => {
+            "Usage: milo menubar install | uninstall\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings."
+        }
+        "view" => {
+            "Usage: milo view FILE [--commit ID | --edit]\n\nRead a file now or as it was at a Git commit. --edit starts editing a working text file; in the reader, e does the same."
+        }
         "setup" => {
             "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
         }
@@ -199,6 +217,7 @@ enum Command<'a> {
     ShellHistory(&'a OsStr),
     PeekOutline(&'a OsStr),
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
+    Edit(&'a OsStr),
     Path(&'a OsStr),
     Usage,
     UsageMenuStream,
@@ -265,14 +284,15 @@ fn command<'a>(
         (Some("view"), Some(file)) => {
             let commit = match rest {
                 [] => None,
+                [flag] if flag == "--edit" => return Ok(Command::Edit(file)),
                 [flag, id] if flag == "--commit" => {
                     Some(id.to_str().and_then(CommitId::parse).ok_or("commit ID must be 4 to 64 hex digits")?)
                 }
-                _ => return Err("expected milo view FILE [--commit ID]".to_string()),
+                _ => return Err("expected milo view FILE [--commit ID | --edit]".to_string()),
             };
             Command::View { file, commit }
         }
-        (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID]".to_string()),
+        (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID | --edit]".to_string()),
         (Some("setup"), None) => Command::Setup,
         (Some("web"), first_flag) => {
             let mut open_browser = true;
@@ -354,6 +374,13 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             } else {
                 Reader::open(path).ok_or_else(|| format!("{} is not in a directory", path.display()))?
             };
+            Ok(Box::new(reader))
+        }),
+        Command::Edit(file) => run(Start::Reading(file_dir(Path::new(file))), &|| {
+            let path = Path::new(file);
+            let mut reader = Reader::open(path).ok_or_else(|| format!("{} is not in a directory", path.display()))?;
+            // A file that cannot be edited opens for reading and says why.
+            reader.edit(std::time::Instant::now());
             Ok(Box::new(reader))
         }),
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),

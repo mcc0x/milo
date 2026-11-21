@@ -9,7 +9,8 @@ use crate::git::Kind;
 use crate::width::{CellWidth, cell_width, char_width};
 use words::Words;
 
-const TAB: usize = 4;
+/// Columns between tab stops wherever a file's text is shown.
+pub(crate) const TAB: usize = 4;
 
 /// What happened to a line relative to the version compared against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
