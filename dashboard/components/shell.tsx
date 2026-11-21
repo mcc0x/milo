@@ -1,39 +1,31 @@
 'use client';
 
 import {useEffect, useLayoutEffect, useRef, useState} from 'react';
-import Alerts from './alerts';
-import Appearance from './appearance';
+import Integrations from './integrations';
+import Panes from './panes';
 import {SaveChoices} from './controls';
 import Layout from './layout-settings';
 import MenuBar from './menu-bar';
 import {restoreSettingsFocus, SessionProvider, useEditor, useSession} from './session';
 import {groupLabels, healthLabels, type SessionState} from './session-state';
-import Workflow from './workflow';
+import Usage from './usage-settings';
 
 const tabs = [
-  {id: 'layout', label: 'Layout', heading: 'group-layout', icon: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 8h18m-7 0v12m0-6h7"/></>},
-  {id: 'appearance', label: 'Appearance', heading: 'group-preferences', icon: <><circle cx="12" cy="12" r="8"/><path fill="currentColor" stroke="none" d="M12 4a8 8 0 0 1 0 16Z"/></>},
-  {id: 'workflow', label: 'Workflow', heading: 'group-preferences', icon: <><path d="M6 17V7m0 8c8 0 12-2 12-8"/><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/></>},
-  {id: 'alerts', label: 'Alerts', heading: 'group-alerts', icon: <path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2Zm4 5h4"/>},
-  {id: 'menubar', label: 'Menu Bar', heading: 'group-menubar', icon: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 10h18m-5-3h2"/></>},
-  {id: 'health', label: 'Health', heading: 'diagnostics-title', icon: <><path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/><path d="M6 12h3l2-4 3 8 2-4h2"/></>},
+  {id: 'layout', label: 'Layout', icon: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 8h18m-7 0v12m0-6h7"/></>},
+  {id: 'panes', label: 'Panes', icon: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16m0-8h12"/></>},
+  {id: 'usage', label: 'Usage', icon: <path d="M4 4v15h16M8 15v-4m5 4V6m5 9V9"/>},
+  {id: 'integrations', label: 'Integrations', icon: <path d="m8 12 4 4m-6 2 4-4m3-8 2-2m2 6 2-2M8 10l6 6 4-4-6-6z"/>},
+  {id: 'menubar', label: 'Menu Bar', icon: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 10h18m-5-3h2"/></>},
+  {id: 'health', label: 'Health', icon: <path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM6 12h3l2-4 3 8 2-4h2"/>},
 ] as const;
 
 type Page = (typeof tabs)[number]['id'];
-const views = {layout: Layout, appearance: Appearance, workflow: Workflow, alerts: Alerts, menubar: MenuBar, health: Health};
+const views = {layout: Layout, panes: Panes, usage: Usage, integrations: Integrations, menubar: MenuBar, health: Health};
 const connectionLabels = {closed: 'Closed', ready: 'Local session', offline: 'Not connected', opening: 'Connecting'};
 
 function isAvailable(page: Page, state: SessionState | undefined) {
-  if (page === 'alerts') return Boolean(state?.alerts);
   if (page === 'menubar') return state != null && state.menubar.installed !== null;
   return true;
-}
-
-function isDirty(page: Page, groups: SessionState['groups'] | undefined) {
-  if (!groups) return false;
-  if (page === 'layout') return groups.layout.dirty;
-  if (page === 'appearance') return groups.preferences.dirty;
-  return page === 'workflow' && (groups.preferences.dirty || groups.account.dirty);
 }
 
 function Navigation({page, navigate}: {page: Page; navigate: (page: Page) => void}) {
@@ -42,10 +34,10 @@ function Navigation({page, navigate}: {page: Page; navigate: (page: Page) => voi
     <div className="control-dock">
       <nav className="navigation" aria-label="Settings sections">
         {tabs.map(tab => (
-          <button key={tab.id} type="button" data-page={tab.id} aria-current={tab.id === page ? 'page' : undefined}
-            aria-controls="settings-panel" hidden={!isAvailable(tab.id, state)} onClick={() => navigate(tab.id)}>
+          <button key={tab.id} id={`nav-${tab.id}`} type="button" data-page={tab.id} aria-current={tab.id === page ? 'page' : undefined}
+            aria-controls="settings-panel" title={tab.label} hidden={!isAvailable(tab.id, state)} onClick={() => navigate(tab.id)}>
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">{tab.icon}</svg>
-            <span>{tab.label}<span className="nav-draft" hidden={!isDirty(tab.id, state?.groups)}><span className="sr-only"> (unsaved changes)</span></span></span>
+            <span>{tab.label}</span>
           </button>
         ))}
       </nav>
@@ -144,7 +136,7 @@ function Dialogs() {
         <p>Choose where to save each draft.</p>
         <div id="save-groups">
           {state ? saveOptions.map(key => {
-            const title = key === 'preferences' ? 'Appearance and workflow' : groupLabels[key];
+            const title = groupLabels[key];
             return (
               <div key={key} role="group" aria-labelledby={`save-group-${key}`}>
                 <h3 id={`save-group-${key}`}>{title[0].toUpperCase() + title.slice(1)}</h3>
@@ -195,14 +187,14 @@ function SettingsPanel({page}: {page: Page}) {
   const View = views[page];
   return (
     <section id="settings-panel" className="settings-panel" tabIndex={-1}
-      aria-labelledby={state ? tabs.find(tab => tab.id === page)?.heading : undefined}>
+      aria-labelledby={`nav-${page}`}>
       {state ? <View/> : null}
     </section>
   );
 }
 
 function EditorShell({devVersion}: {devVersion?: string}) {
-  const {state, ended, canSave, canDiscard, focusOwner, applyNumericDrafts, command, openingMessage, canOpenRetry, connect, toast} = useEditor();
+  const {state, ended, canSave, canDiscard, focusOwner, applyNumericDrafts, openingMessage, canOpenRetry, connect, toast} = useEditor();
   const [selectedPage, setSelectedPage] = useState<Page>('layout');
   const pendingNavigation = useRef(false);
   const closedHeading = useRef<HTMLHeadingElement>(null);
@@ -277,7 +269,6 @@ function EditorShell({devVersion}: {devVersion?: string}) {
       pendingNavigation.current = true;
       setSelectedPage(next);
     }
-    if (next === 'alerts' && state?.alerts) command('alerts', {field: 'refresh', value: null});
   }
 
   return (

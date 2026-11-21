@@ -57,7 +57,7 @@ async function withMilo(binary, cwd, env, run) {
 async function openEditor(context, url) {
   const page = await context.newPage();
   await page.goto(url);
-  await page.getByRole('heading', {name: 'Panes', exact: true}).waitFor();
+  await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
   return page;
 }
 
@@ -85,7 +85,7 @@ async function saveNumbers(page, cwd) {
 }
 
 async function chooseUsageTools(page, binary, cwd, env) {
-  await section(page, 'Appearance').click();
+  await section(page, 'Usage').click();
   for (const tool of usageTools) {
     assert(await usageChoice(page, tool, 'Auto').isChecked(), `${tool} starts on Auto`);
   }
@@ -130,7 +130,8 @@ async function chooseUsageTools(page, binary, cwd, env) {
   await width.fill(before);
   assert.equal(await reopenNote(page).count(), 0, 'undoing browser-only input does not revive the instruction');
 
-  await section(page, 'Workflow').click();
+  await section(page, 'Integrations').click();
+  await button(page, 'Rex automation').click();
   await page.getByRole('switch', {name: 'Title Rex tabs', exact: true}).check();
   await status(page, dirty).waitFor({state: 'attached'});
   await button(page, 'Save').click();
@@ -142,7 +143,7 @@ async function chooseUsageTools(page, binary, cwd, env) {
 }
 
 async function manageMenuApp(page, url, env) {
-  await section(page, 'Workflow').click();
+  await section(page, 'Panes').click();
   const menu = page.getByRole('region', {name: 'Menu bar app', exact: true});
   const readState = async () => {
     const response = await page.request.get(new URL('/api/state', url).href, {
@@ -153,7 +154,7 @@ async function manageMenuApp(page, url, env) {
   };
   const {menubar} = await readState();
   const menuTab = section(page, 'Menu Bar');
-  assert.equal(await menu.count(), 0, 'Workflow does not contain menu app settings');
+  assert.equal(await menu.count(), 0, 'menu app settings have their own section');
   assert.equal(await menuTab.isVisible(), menubar.installed !== null, 'Menu Bar navigation follows server availability');
   const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
   const previous = await readFile(preferences, 'utf8');
@@ -223,7 +224,7 @@ async function manageMenuApp(page, url, env) {
   } finally {
     await page.unroute('**/api/action', intercept);
   }
-  await section(page, 'Workflow').click();
+  await section(page, 'Panes').click();
   assert(await pin.isChecked(), 'menu app operations retained the draft');
   assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app operations did not save the draft');
   await button(page, 'Discard').click();
@@ -283,7 +284,8 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   const last = opcode => discord.frames.filter(([code, payload]) => code === opcode &&
     (opcode === 0 || payload.includes('"activity"'))).map(([, payload]) => JSON.parse(payload)).at(-1);
   const shown = () => last(1)?.args.activity;
-  await section(page, 'Workflow').click();
+  await section(page, 'Integrations').click();
+  await button(page, 'Discord presence').click();
   const card = page.getByRole('region', {name: 'Discord presence', exact: true});
   const turnOn = button(card, 'Turn on…');
   const question = dialog(page, 'Turn on Discord presence?');
@@ -360,13 +362,13 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
 }
 
 async function usageToolsPersisted(page) {
-  await section(page, 'Appearance').click();
+  await section(page, 'Usage').click();
   const expected = [['Codex', 'Auto'], ['Claude Code', 'Always show'], ['OpenCode', 'Hide']];
   for (const [tool, name] of expected) {
     assert(await usageChoice(page, tool, name).isChecked(), `${tool} persisted as ${name}`);
   }
   await section(page, 'Layout').click();
-  await page.getByRole('heading', {name: 'Panes', exact: true}).waitFor();
+  await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
 }
 
 async function pressAfterNumberEdit(page) {
@@ -387,8 +389,8 @@ async function pressAfterNumberEdit(page) {
   console.log('Rail side: the first press after a number edit was not lost');
 
   await field.fill('');
-  await button(page, 'Appearance').click();
-  assert.equal(await page.getByRole('heading', {name: 'Panes', exact: true}).count(), 1,
+  await button(page, 'Usage').click();
+  assert.equal(await page.getByRole('heading', {name: 'Pane layout', exact: true}).count(), 1,
     'an invalid number keeps Layout open');
   assert(await field.evaluate(input => input === document.activeElement && !input.validity.valid),
     'the invalid Rail width is focused');
@@ -498,7 +500,8 @@ async function confirmFromMobileFooter(browser, url, exited) {
 }
 
 async function checkAlerts(page) {
-  await section(page, 'Alerts').click();
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
   const mirror = page.getByRole('region', {name: 'Mirror Rex alerts'});
   assert(await button(mirror, 'Turn on…').isDisabled(), 'a fresh profile cannot enable mirroring without a destination');
   assert(await button(mirror, 'Send test').isDisabled(), 'a test cannot contact an unconfigured destination');
@@ -506,10 +509,13 @@ async function checkAlerts(page) {
   await content.getByRole('radio', {name: 'Also program text'}).click();
   await page.getByText(/up to 300 characters/i).first().waitFor();
   await page.reload();
-  await section(page, 'Alerts').click();
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
   assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
   await content.getByRole('radio', {name: 'Kind and program name'}).click();
   await page.getByText(/no text from the program/i).first().waitFor();
+  await button(page, 'Back to integrations').click();
+  await button(page, 'Alert forwarding').waitFor();
   await section(page, 'Layout').click();
 }
 

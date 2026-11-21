@@ -35,7 +35,7 @@ Choose **Browser settings…** to open the [local browser editor](setup.md#brows
 
 ## Which tools appear
 
-Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` and `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.
+Milo gives a tool a place once it has a figure, and no place before that. If you use Codex and Claude Code but not OpenCode, the pane has two places and nothing for OpenCode: no label, no dash and no empty row. Each tool has its own choice under **Appearance** in `milo setup` or **Usage** in `milo web`, saved globally or for a worktree like the other pane preferences. Reopen the pane to apply a change.
 
 | Choice | What the pane does |
 | --- | --- |
@@ -119,7 +119,7 @@ Some figures exist only on a provider's servers. Milo can ask for four of them, 
 
 These are money and counts, so they are written out in words, such as `DeepSeek · ¥110.00 balance` or `Devin · 12.5 ACUs today`. They are never drawn as a percentage or a large figure, never pick the menu bar badge and never raise a low-quota alert. An answer older than two refreshes is marked with its age; one older than a day, or from a billing day or month that has ended, is dropped.
 
-**Turn an account on** under **Appearance** in `milo web`, or in `~/.config/milo/preferences.conf` (a worktree can have its own choice, like the tools):
+**Turn an account on** under **Usage** in `milo web`, or in `~/.config/milo/preferences.conf` (a worktree can have its own choice, like the tools):
 
 ```
 usage_deepseek = auto

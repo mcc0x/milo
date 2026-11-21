@@ -211,7 +211,7 @@ export function Disclosure({ id, label, accessibleName, children }: {
 const saveScopes = [
   ['worktree', 'Save for this worktree'],
   ['global', 'Save as global default'],
-  ['account', 'Save Claude Code choices'],
+  ['account', 'Save to active Claude profile'],
 ] as const;
 
 export function SaveChoices({ group, available, select, onSave, disabled }: {
@@ -279,6 +279,19 @@ export function GroupCard({ group, title, actions, children }: {
       </header>
       <div className="group-controls">{children}</div>
       {!settings.editable ? <p className="setting-note">Read-only in this session.</p> : null}
+    </section>
+  );
+}
+
+export function SettingSection({ id, title, children }: {
+  id: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section aria-labelledby={id}>
+      <h3 id={id} className="setting-subheading">{title}</h3>
+      <div className="group-controls">{children}</div>
     </section>
   );
 }

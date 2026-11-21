@@ -1,0 +1,46 @@
+.integrations {
+  display: grid;
+  min-width: 0;
+  gap: 1.15rem;
+}
+
+.integrations-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integrations-list > li + li {
+  border-block-start: 1px solid var(--line);
+}
+
+.integration-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  padding: .55rem .65rem;
+  border: 0;
+  border-radius: .5rem;
+  background: transparent;
+  text-align: start;
+}
+
+.integration-row:hover:not(:disabled) {
+  background: var(--tint);
+}
+
+.integration-row:focus-visible {
+  outline-offset: -2px;
+}
+
+.integration-row:disabled {
+  opacity: 1;
+}
+
+.integration-chevron {
+  margin-inline-start: .75rem;
+  color: var(--blue);
+  font-size: 1.2rem;
+  line-height: 1;
+}

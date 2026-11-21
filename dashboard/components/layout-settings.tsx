@@ -1,6 +1,6 @@
 'use client';
 
-import { ChoiceSetting, Disclosure, GroupCard, NumberInput, SwitchSetting } from './controls';
+import { ChoiceSetting, Disclosure, GroupCard, NumberInput } from './controls';
 import { useSession } from './session';
 import type { PaneRole } from './session-state';
 
@@ -86,7 +86,7 @@ export default function LayoutSettings() {
   const disabled = !state.groups.layout.editable;
 
   return (
-    <GroupCard group="layout" title="Panes" actions={<LayoutActions />}>
+    <GroupCard group="layout" title="Pane layout" actions={<LayoutActions />}>
       <PanePicker disabled={disabled} />
       <ChoiceSetting field="layout.side" label="Rail side" value={draftValue<'left' | 'right'>('layout.side')}
         choices={sides} disabled={disabled} onChange={value => edit('layout.side', value)} />
@@ -94,11 +94,6 @@ export default function LayoutSettings() {
         value={draftValue<number>('layout.width')} drafts={session} min={0.000001} max={99.999999} step="any" disabled={disabled} />
       <NumberInput field="layout.usage_rows" label="Usage height" detail="Rows. Changing this restores automatic pane heights."
         value={draftValue<number>('layout.usage_rows')} drafts={session} min={1} max={4294967295} step={1} disabled={disabled} />
-      {state.capabilities.auto_arrange ? (
-        <SwitchSetting field="layout.auto_arrange" label="Arrange new shell tabs"
-          detail="This switch is global. New command tabs and tabs with an existing layout are skipped."
-          checked={draftValue<boolean>('layout.auto_arrange')} onChange={value => edit('layout.auto_arrange', value)} />
-      ) : null}
     </GroupCard>
   );
 }
