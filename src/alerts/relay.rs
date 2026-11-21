@@ -626,6 +626,16 @@ mod tests {
     }
 
     #[test]
+    fn the_relay_s_rate_limit_says_how_long_to_wait() {
+        let throttled = r#"{"error":"Too many requests; try again later.","retry_after":35}"#;
+        let (outcome, _) = with_replies(&[(429, throttled)], |origin| {
+            let request = Origin::Test(origin.to_owned()).send_request(CAPABILITY, "text").unwrap();
+            send::post(&request, None)
+        });
+        assert_eq!(outcome, send::Outcome::Wait(Duration::from_secs(35)));
+    }
+
+    #[test]
     fn a_saved_relay_capability_sends_only_to_the_relay_and_is_revoked_when_replaced_or_forgotten() {
         let replies = [(204, ""), (204, ""), (200, "{}"), (401, "")];
         let (_, wire) = with_replies(&replies, |origin| {
