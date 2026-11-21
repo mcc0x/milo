@@ -232,7 +232,7 @@ impl<'a> Forwarder<'a> {
             return None;
         }
         let text = message::text(alert, settings.content, self.unsent, destination);
-        let body = message::body(destination, &settings.telegram_chat, &text);
+        let body = message::body(destination, &settings.telegram_chat, &text, Some(alert.kind));
         let address = self.alerts.address(destination, secret);
         for attempt in 0..ATTEMPTS {
             // Checked before every request, so that turning mirroring off

@@ -518,7 +518,7 @@ impl Alerts {
         let settings = self.editable()?;
         let destination = settings.destination.ok_or(NO_DESTINATION)?;
         let secret = self.secret(destination)?;
-        let body = message::body(destination, &settings.telegram_chat, message::TEST);
+        let body = message::body(destination, &settings.telegram_chat, message::TEST, None);
         match send::post(&self.address(destination, &secret), &body, None) {
             send::Outcome::Sent => Ok(format!("{} accepted the test message.", describe(&settings))),
             outcome => Err(format!("The test message was not delivered: {}.", outcome.reason(destination))),

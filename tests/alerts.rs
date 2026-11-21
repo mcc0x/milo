@@ -107,9 +107,9 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     Some(Request { path, body: String::from_utf8(body).ok()? })
 }
 
-/// The `text` or `content` string of a request body, with its escapes undone.
+/// The Telegram text or Discord embed description, with its escapes undone.
 fn text_of(body: &str) -> String {
-    let start = ["\"text\":\"", "\"content\":\""]
+    let start = ["\"description\":\"", "\"text\":\""]
         .iter()
         .find_map(|key| body.find(key).map(|at| at + key.len()))
         .unwrap_or_else(|| panic!("no message in {body}"));

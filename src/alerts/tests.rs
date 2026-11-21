@@ -219,20 +219,25 @@ fn field<'a>(body: &'a str, name: &str) -> Value<'a> {
 #[test]
 fn each_destination_is_told_how_to_read_the_text_and_to_notify_nobody_by_name() {
     let text = "Rex: \"quoted\" \\ back\nline";
-    let discord = message::body(Destination::Discord, "", text);
-    assert_eq!(field(&discord, "content").string(100).unwrap(), text);
+    let discord = message::body(Destination::Discord, "", text, Some(Kind::Blocked));
+    let mut embeds = field(&discord, "embeds").elements().unwrap();
+    let [title, description, color] = embeds.next().unwrap().fields(["title", "description", "color"]);
+    assert!(title.unwrap().is("Needs attention"));
+    assert_eq!(description.unwrap().string(100).unwrap(), text);
+    assert_eq!(color.unwrap().unsigned(), Some(0xe5a53b));
+    assert!(embeds.next().is_none());
     let [parse] = field(&discord, "allowed_mentions").fields(["parse"]);
     assert_eq!(parse.unwrap().elements().unwrap().count(), 0);
-    assert_eq!(field(&discord, "flags").unsigned(), Some(4));
+    assert!(Value::parse(discord.as_bytes()).unwrap().fields(["content", "flags"]).iter().all(Option::is_none));
 
-    let group = message::body(Destination::Telegram, "-1001234567890", text);
+    let group = message::body(Destination::Telegram, "-1001234567890", text, None);
     assert_eq!(field(&group, "chat_id").integer(), Some(-1_001_234_567_890));
     assert_eq!(field(&group, "text").string(100).unwrap(), text);
     let [off] = field(&group, "link_preview_options").fields(["is_disabled"]);
     assert_eq!(off.unwrap().boolean(), Some(true));
     // Telegram reads the text as HTML, in which a program's words are marked as code.
     assert!(field(&group, "parse_mode").is("HTML"));
-    let channel = message::body(Destination::Telegram, "@synthetic_channel", text);
+    let channel = message::body(Destination::Telegram, "@synthetic_channel", text, None);
     assert_eq!(field(&channel, "chat_id").string(40).unwrap(), "@synthetic_channel");
 }
 
@@ -319,7 +324,7 @@ fn only_a_stand_in_on_this_machine_can_replace_a_destination() {
 
 #[test]
 fn the_request_speaks_only_https_and_keeps_its_body_whole() {
-    let body = message::body(Destination::Discord, "", "say \"hi\" \\ @\u{200b}here");
+    let body = message::body(Destination::Discord, "", "say \"hi\" \\ @\u{200b}here", None);
     let request = send::request("https://discord.com/api/webhooks/1/abc", &body);
     assert!(request.contains("proto = \"=https\"\n") && request.contains("max-redirs = 0\n"), "{request}");
     assert!(request.starts_with("url = \"https://discord.com/api/webhooks/1/abc\"\n"));

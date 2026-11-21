@@ -15,8 +15,7 @@ pub(crate) const TEST: &str =
     "Milo test: Rex alert mirroring can reach this destination. This is not a Rex alert, and nothing else was sent.";
 /// How much of a program's own text is sent, in characters.
 const TEXT_LIMIT: usize = 300;
-/// Discord's `SUPPRESS_EMBEDS`: no preview is fetched for a link in the text.
-const NO_EMBEDS: u32 = 1 << 2;
+const MILO_BLUE: u32 = 0x4582f9;
 
 /// The message for one alert, in the destination's own mark-up. `unsent`
 /// counts alerts dropped since the last one sent.
@@ -93,7 +92,7 @@ fn plain(text: &str) -> String {
 }
 
 /// The JSON a destination's send request takes.
-pub(crate) fn body(destination: Destination, chat: &str, text: &str) -> String {
+pub(crate) fn body(destination: Destination, chat: &str, text: &str, kind: Option<Kind>) -> String {
     match destination {
         // A public channel is named as a string; any other chat by its number.
         Destination::Telegram => {
@@ -104,7 +103,18 @@ pub(crate) fn body(destination: Destination, chat: &str, text: &str) -> String {
             )
         }
         Destination::Discord => {
-            format!("{{\"content\":{},\"allowed_mentions\":{{\"parse\":[]}},\"flags\":{NO_EMBEDS}}}", json(text))
+            let (title, color) = match kind {
+                Some(Kind::Blocked) => ("Needs attention", 0xe5a53b),
+                Some(Kind::Error) => ("Program error", 0xd95363),
+                Some(Kind::Done) => ("Finished", 0x369b73),
+                Some(Kind::Notification) => ("Notification", MILO_BLUE),
+                Some(Kind::Bell) => ("Terminal bell", MILO_BLUE),
+                None => ("Connection test", MILO_BLUE),
+            };
+            format!(
+                "{{\"embeds\":[{{\"author\":{{\"name\":\"Milo\"}},\"title\":\"{title}\",\"color\":{color},\"description\":{}}}],\"allowed_mentions\":{{\"parse\":[]}}}}",
+                json(text)
+            )
         }
     }
 }
