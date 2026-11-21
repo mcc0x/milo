@@ -497,6 +497,22 @@ async function confirmFromMobileFooter(browser, url, exited) {
   console.log('Mobile Done: cancel retained the draft, confirm closed the editor');
 }
 
+async function checkAlerts(page) {
+  await section(page, 'Alerts').click();
+  const mirror = page.getByRole('region', {name: 'Mirror Rex alerts'});
+  assert(await button(mirror, 'Turn on…').isDisabled(), 'a fresh profile cannot enable mirroring without a destination');
+  assert(await button(mirror, 'Send test').isDisabled(), 'a test cannot contact an unconfigured destination');
+  const content = mirror.getByRole('group', {name: 'Content', exact: true});
+  await content.getByRole('radio', {name: 'Also program text'}).click();
+  await page.getByText(/up to 300 characters/i).first().waitFor();
+  await page.reload();
+  await section(page, 'Alerts').click();
+  assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
+  await content.getByRole('radio', {name: 'Kind and program name'}).click();
+  await page.getByText(/no text from the program/i).first().waitFor();
+  await section(page, 'Layout').click();
+}
+
 async function main() {
   assert(process.argv[2], 'Pass the path to a packaged Milo binary');
   const binary = resolve(process.argv[2]);
@@ -530,8 +546,7 @@ async function main() {
     desktop.setDefaultTimeout(timeout);
     await withMilo(binary, cwd, env, async url => {
       const page = await openEditor(desktop, url);
-      const dev = await page.request.get(new URL('/dev/version', url).href);
-      assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
+      await checkAlerts(page);
       await page.clock.install();
       await saveNumbers(page, cwd);
       await chooseUsageTools(page, binary, cwd, env);

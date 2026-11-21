@@ -1,7 +1,6 @@
 //! Serves the settings editor on an ephemeral loopback address for this invocation only.
 
-#[cfg(feature = "web-dev")]
-mod dev;
+mod assets;
 mod http;
 mod launch;
 
@@ -18,39 +17,6 @@ use std::time::{Duration, Instant};
 use self::http::{Access, Input, Request, Response, Route};
 use self::launch::Launch;
 use crate::setup::web::Editor;
-
-#[cfg(not(feature = "web-dev"))]
-fn asset(name: Asset) -> Response {
-    let bytes: &[u8] = match name {
-        Asset::Index => include_bytes!("web/index.html"),
-        Asset::Script => include_bytes!("web/app.js"),
-        Asset::Style => include_bytes!("web/app.css"),
-        Asset::Mascot => include_bytes!("web/milo.webp"),
-    };
-    Response::asset(name.mime(), bytes)
-}
-
-#[cfg(feature = "web-dev")]
-use dev::asset;
-
-#[derive(Clone, Copy)]
-enum Asset {
-    Index,
-    Script,
-    Style,
-    Mascot,
-}
-
-impl Asset {
-    fn mime(self) -> &'static str {
-        match self {
-            Self::Index => "text/html; charset=utf-8",
-            Self::Script => "text/javascript; charset=utf-8",
-            Self::Style => "text/css; charset=utf-8",
-            Self::Mascot => "image/webp",
-        }
-    }
-}
 
 pub(crate) const DEFAULT_PORT: u16 = 6110;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -419,16 +385,7 @@ impl Client {
 
 fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
-        Route::Index => asset(Asset::Index),
-        Route::Script => asset(Asset::Script),
-        Route::Style => asset(Asset::Style),
-        Route::Mascot => asset(Asset::Mascot),
-        Route::Favicon => Response::asset("image/png", include_bytes!("web/favicon.png")),
-        Route::RexIcon => Response::asset("image/png", include_bytes!("web/rex.png")),
-        #[cfg(feature = "web-dev")]
-        Route::DevScript => Response::asset("text/javascript; charset=utf-8", include_bytes!("web/dev.js")),
-        #[cfg(feature = "web-dev")]
-        Route::DevVersion => dev::version(),
+        Route::Static(asset) => asset.response(),
         Route::State => Response::json(Arc::clone(snapshot)),
         Route::Action | Route::Close => unreachable!("mutations run on the editor worker"),
     }

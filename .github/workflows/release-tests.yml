@@ -27,6 +27,25 @@ jobs:
       - name: Verify the source package builds
         run: cargo +1.91.0 package --locked
 
+  dashboard:
+    name: Dashboard production export
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/package.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: dashboard
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
   docs-bundle:
     name: Published documentation matches source
     runs-on: ubuntu-latest
@@ -77,6 +96,8 @@ jobs:
           persist-credentials: false
       - name: Test installers
         run: sh tests/install.sh
+      - name: Verify the embedded dashboard matches its source
+        run: node dashboard/scripts/bundle.mjs --check
       - name: Test release build on Apple Silicon
         run: |
           test "$(uname -m)" = arm64
