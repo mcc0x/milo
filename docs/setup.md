@@ -93,7 +93,7 @@ The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to
 
 Use **Layout** for pane order and sizes, **Panes** for Outline, History and shared appearance, and **Usage** for tools, accounts and display. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default; Claude Code choices apply to the active profile. Outside Rex you can still edit and save settings.
 
-**Integrations** groups Rex automation, Discord presence and alert forwarding. Rex automation uses drafts; presence and forwarding apply immediately. **Menu Bar** manages the optional macOS app, and **Health** checks for problems.
+**Integrations** groups Rex automation, Discord presence and alert forwarding. Rex automation uses drafts; presence and forwarding apply immediately. **Menu Bar** manages the optional macOS app. **Hosts** names the computer these settings belong to and copies settings to or from [another Rex host](#several-rex-hosts). **Health** checks for problems and shows the host and its Rex version.
 
 After saving, the confirmation names the destination: global defaults, the current worktree, or the active Claude profile. If open panes still use the old preferences, the browser keeps **Reopen panes to apply** in the project bar after the confirmation fades. Editing again clears the reminder.
 
@@ -106,6 +106,84 @@ While the page is open, it periodically keeps the local session alive only if it
 **Done** closes the editor only after undoing any active layout trial. If undo fails, the editor stays open so you can retry. Stopping Milo with `Ctrl-C` or letting it time out only attempts to undo the trial. Closing the browser tab alone leaves the private link usable until Milo stops or the session is idle for 15 minutes. When the session ends, unsaved drafts are discarded; saved settings stay as they are.
 
 The dashboard ships inside `milo`: using it needs no Node runtime, account, or internet connection. For UI development, use Node 26 and Bun: `cd dashboard && bun install --frozen-lockfile && bun run dev`. Open the private URL printed in the terminal. Next.js Fast Refresh updates the interface against a real local Milo session. `MILO_BIN` selects the backend executable (default `milo` on PATH); `MILO_PROJECT` selects the project to edit; `PORT` selects the development port (default `6110`). Stop the development server with `Ctrl-C`.
+
+## Several Rex hosts
+
+Each Rex host has its own Milo: its own binary, settings, state and integrations. Nothing is shared or synchronised on its own. Three things make several hosts feel like one setup: Milo says which host you are looking at, you can open another host’s settings from the computer you are using, and you can copy the settings you choose from one host to another. With a single host nothing changes.
+
+Several Rex apps attached to one server, such as a Mac and a phone, are one host: they share one Milo and one set of settings.
+
+### Which host this is
+
+`milo doctor`, **Health** and **Hosts** in the browser editor name the computer Milo runs on, the first part of Rex’s ID for that host, the version and API revision of its Rex server, and whether a Rex app is open on that computer:
+
+```
+Host: studio (Rex host d4744373)
+Rex server: 0.1.0-preview.21, API 18; rex command: the same
+Rex compatibility: checked with API 18. This is the Rex API Milo was checked with.
+Rex apps: open on this computer
+```
+
+Milo’s Rex files are checked against API revision 18. A newer server is noted and is no warning, because Rex keeps older calls working. Health warns in two cases: the server is older than that revision, or the `rex` command and the server are different versions. In the second case, restart or update Rex before saving a layout, because Milo validates its Rex files with the command and the server is what reads them.
+
+The computer’s name stays on that computer and in the pages its editor serves. It is not sent to Telegram, Discord or the relay.
+
+### Open another host’s settings
+
+On the computer you are using, run:
+
+```sh
+milo web --host studio                       # a label from `rex hosts`, or an address as for `rex -S`
+milo web --host studio --project /home/you/src/app   # that worktree's settings; the path is on the host
+```
+
+Milo checks that the host answers, starts `milo web` there in a Rex session of its own named `milo-settings`, and carries it to your computer with `rex forward`. It then prints the private link and opens it. The page says `studio · forwarded` in its session bar, and **Hosts** and **Health** show that host, so you can tell which settings you are editing.
+
+The protections are the same as for a local editor:
+
+- The editor on the host listens only on the host’s `127.0.0.1`, and the forward listens only on your computer’s `127.0.0.1`. Nothing listens on a network address.
+- The host’s editor is told the one address the page will have on your computer before it starts. It accepts that exact `Host` and `Origin` and no other, including its own port on the host.
+- Every request still needs the session key in the link. Don’t share the link.
+
+**Done** in the page, `Ctrl-C` in the terminal, or 15 minutes without use ends the editor on the host, and Milo then closes the forward and removes the `milo-settings` session. If the host cannot confirm that, Milo says so and names the session to look for.
+
+The host needs the same version of `milo` on the search path of its login shell, and you need to be able to reach it with `rex -S`. If `milo web` runs on a host where every connected Rex app is on another device, it opens no browser there and prints this command instead.
+
+### Copy settings to another host
+
+Choose what travels. Nothing is exported unless you name it:
+
+```sh
+milo settings export appearance,layout --output milo-settings.txt   # or workflow, usage, all
+milo settings export all --scope all --output milo-settings.txt     # global defaults and this worktree's own
+```
+
+Move the file however you like. On the other host:
+
+```sh
+milo settings import milo-settings.txt           # shows every change; saves nothing
+milo settings import milo-settings.txt --apply   # makes those changes
+milo settings undo                               # takes the last import back
+```
+
+The same steps are under **Hosts** in the browser editor: tick the groups, **Create bundle**, paste it into **Import** on the other host, **Preview**, then **Import**. With `milo web --host` you can do both ends from one computer.
+
+| Group | What it carries |
+| --- | --- |
+| `appearance` | Icons, Git text marks, static or animated activity marks |
+| `workflow` | Project following, changed files only, follow writes, follow new commits |
+| `usage` | Whether Codex, Claude Code and OpenCode show, and large figures |
+| `layout` | Panes, side, order and proportions of the saved rail |
+
+**What never travels.** Tokens, webhook links, alert destinations, provider account keys and their on/off choices, Discord presence, the menu app, Claude Code status-line setup, **Title Rex tabs**, **Arrange new shell tabs**, the Rex integration files and everything in the state folder. A bundle that names any of these is imported without them, and the preview lists each line it left out. Set those up on each host.
+
+**Projects at different paths.** A bundle holds no path from the host it came from. For a worktree it records the folder name, the folder below your home if it is there, and the ID of the commit the repository’s history starts from. An import applies a project’s settings to a worktree only when that worktree starts from the same commit: the one you run the command in, or the one at the same place below your home. A folder with the same name is never enough. To choose a worktree yourself, use `--map NAME=DIR`, or **Apply to** in the browser preview. A shallow clone has no starting commit to compare, so map it by hand.
+
+**Conflicts.** The global defaults are replaced setting by setting; settings you did not export, comments and unknown lines in the file stay. A layout is replaced whole. An import is all or nothing: if a settings file changes between the preview and the import, nothing is written and you are asked to preview again.
+
+**Undo.** `milo settings undo`, or **Undo import** under **Hosts**, restores exactly the files the last import replaced. If a setting it changed has been changed again since, nothing is undone and Milo says so. Only the last import is kept.
+
+**Limits.** One worktree’s settings travel per export, the one you run it in. Importing a layout saves the layout; it does not install the Rex integration on a host that has none, so run `milo setup` there once. Panes that are open read the new settings when you reopen them. A bundle written by a newer Milo is refused with a request to update.
 
 ## Rex actions
 

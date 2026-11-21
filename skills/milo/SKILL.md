@@ -44,6 +44,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
+| `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
+| `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Copies chosen pane settings to another host as a file. `import` only previews until `--apply`. Never carries tokens, destinations, accounts or integrations. |
 | `milo presence [status]` | Says whether the optional Discord presence is on and what Discord shows now. |
 | `milo listen [--stop]` | Starts or stops layout memory, automatic new-tab arrangement and tab titles; normally managed by setup. |
 | `milo claude-status` | Status-line helper called by Claude Code, not a pane. |
