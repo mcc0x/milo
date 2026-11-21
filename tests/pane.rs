@@ -800,7 +800,17 @@ fn uninstall_keeps_the_executable_when_the_owned_claude_status_line_cannot_be_re
         command.env_remove("REX_CONFIG");
         command
     };
-    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    // A sibling test's new process can hold the copy open for writing for a moment.
+    let until = Instant::now() + TEST_WAIT;
+    let skipped = loop {
+        match command().args(["setup", "--skip-onboarding"]).status() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            status => break status.unwrap(),
+        }
+    };
+    assert!(skipped.success());
     let settings = project.0.join(".claude/settings.json");
     fs::create_dir(settings.parent().unwrap()).unwrap();
     let invalid = br#"{"statusLine":{"type":"command","command":"milo claude-status"}"#;
