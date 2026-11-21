@@ -1,0 +1,44 @@
+.alert-settings { display: grid; min-width: 0; gap: 1.05rem; }
+.alerts-heading { margin-block-end: .25rem; font-size: .9rem; font-weight: 730; }
+
+.alerts-destination { display: grid; gap: .45rem; }
+.alerts-destination-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .2rem .65rem;
+}
+.alerts-destination-line > p, .alerts-destinations .setting-info { overflow-wrap: anywhere; }
+.alerts-status {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  margin: 0;
+  font-weight: 650;
+}
+.alerts-status::before {
+  content: '';
+  width: .42rem;
+  height: .42rem;
+  flex: none;
+  border-radius: 50%;
+  background: #627791;
+}
+.alerts-status[data-running='true'] { color: #236147; }
+.alerts-status[data-running='true']::before { background: #267659; }
+
+.alerts-destinations { margin-block-start: .65rem; padding-block-start: .55rem; }
+.alerts-destinations > h4 { margin: 0; }
+.alerts-destinations .setting { flex-wrap: wrap; gap: .25rem .65rem; }
+.alerts-destinations .setting-info { flex: 1 1 6rem; }
+.secret-form.alerts-form { align-items: end; justify-content: start; padding-block: .15rem .65rem; }
+.alerts-form p { flex: 0 0 100%; }
+.alerts-field { display: grid; flex: 1 1 8rem; min-width: 0; gap: .2rem; }
+.alerts-form .alerts-field input { inline-size: 100%; }
+
+.alerts-privacy { max-width: 65ch; padding-block-end: .45rem; }
+
+@media (pointer: coarse) {
+  .alerts-form .alerts-field input { min-height: 44px; font-size: 1rem; }
+}

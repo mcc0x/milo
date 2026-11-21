@@ -276,6 +276,8 @@ milo alerts off                       # ends it at once
 
 The same choices are under **Integrations → Alert forwarding** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
 
+In the browser, choose **Set up destination** (or **Change destination**) to manage a Telegram chat or Discord channel. Saving a destination and turning forwarding on are separate choices.
+
 <picture>
   <source media="(max-width: 600px)" srcset="https://github.com/mcc0x/milo/blob/main/docs/img/web-alerts-mobile.webp">
   <img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-alerts.webp" width="760" alt="The Alerts page of the browser editor: mirroring is off, alerts would go to an example Telegram channel, and the page says that only the kind of alert and the program's short name are sent">
@@ -889,7 +891,7 @@ To show a name and icon of your choosing in place of Milo's:
 
 1. Open <https://discord.com/developers/applications>, choose **New Application** and name it. The name is what Discord shows, as in “Playing Rex”. An app icon is optional. No bot is needed.
 2. Copy the **Application ID** from its General Information page. It is a number of 17 to 19 digits.
-3. Give it to Milo: `milo presence application APPLICATION_ID`, **Presence application** in Settings, or **Use my own** in the browser editor. A terminal's paste is not read in Settings, so the command is easier for a copied ID.
+3. Give it to Milo: `milo presence application APPLICATION_ID`, **Presence application** in Settings, or **Use your own Discord app** in the browser editor. A terminal's paste is not read in Settings, so the command is easier for a copied ID.
 
 `milo presence application official`, or the same control in Settings and the browser editor, goes back to Milo's. An application ID you saved with an earlier Milo is kept until you do.
 

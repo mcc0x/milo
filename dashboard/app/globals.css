@@ -218,8 +218,11 @@ h1, h2, h3, p, figure { margin: 0; }
 .pane-line { display: flex; align-items: center; justify-content: space-between; gap: .4rem; }
 .pane-line > label { display: flex; flex: 1; align-items: center; gap: .55rem; min-height: 2.4rem; cursor: pointer; font-size: .87rem; font-weight: 640; }
 .pane-glyph { order: -1; width: 2rem; height: 2rem; padding: .38rem; border-radius: .6rem; color: #275f88; background: #dfedfb; }
-.pane-line[data-pane="history"] .pane-glyph { color: #665087; background: #ece6f7; }
-.pane-line[data-pane="usage"] .pane-glyph { color: #286451; background: #def1e9; }
+.pane-glyph[data-pane="history"] { color: #665087; background: #ece6f7; }
+.pane-glyph[data-pane="usage"] { color: #286451; background: #def1e9; }
+.pane-glyph[data-pane="appearance"] { color: #576474; background: #e7ecf1; }
+.setting-subheading:has(.pane-glyph) { display: flex; align-items: center; gap: .55rem; color: var(--ink); font-size: .91rem; padding-block: .6rem .25rem; }
+.setting-subheading:has(.pane-glyph) + .group-controls > .setting { border: 0; padding-block: .3rem; }
 .pane-line > label:has(:not(:checked)[type=checkbox]) .pane-glyph { color: #667581; background: #e6ebee; }
 .pane-line input { order: 1; margin-inline: auto .2rem; width: 1rem; height: 1rem; accent-color: var(--blue); }
 .pane-line .button { min-height: 2rem; min-width: 2rem; padding: 0; border: 0; background: transparent; color: var(--blue); font-size: 1rem; }

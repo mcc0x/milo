@@ -1,10 +1,11 @@
 "use client";
 
-import { useRef, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ChoiceSetting, SettingRow, SwitchSetting } from "./controls";
 import { useSession } from "./session";
+import "./alerts.css";
 
-const destinations = { telegram: "Telegram", discord: "Discord" } as const;
+const destinations = [["telegram", "Telegram"], ["discord", "Discord"]] as const;
 const events = [
   ["blocked", "Waiting for you", "A program is blocked on a permission, a question or a sign-in."],
   ["error", "Reported an error", "A program says it failed."],
@@ -14,16 +15,14 @@ const events = [
 ] as const;
 const content = [["metadata", "Kind and program name"], ["text", "Also program text"]] as const;
 
-type Destination = keyof typeof destinations;
+type Destination = (typeof destinations)[number][0];
+type DestinationEditor = "closed" | "list" | Destination;
 type Field = "enabled" | "content" | "destination" | "test" | "forget" | Destination | `events.${(typeof events)[number][0]}`;
 
-function AlertGroup({ id, title, status, children }: { id: string; title: string; status?: string; children: ReactNode }) {
+function AlertGroup({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
-    <section className="settings-group" aria-labelledby={id}>
-      <header className="group-header group-titleline">
-        <h2 id={id}>{title}</h2>
-        {status ? <span className="setting-detail" id={`${id}-status`} role="status">{status}</span> : null}
-      </header>
+    <section className="settings-group" id={id} aria-labelledby={`${id}-title`}>
+      <h3 className="alerts-heading" id={`${id}-title`}>{title}</h3>
       <div className="group-controls">{children}</div>
     </section>
   );
@@ -38,8 +37,13 @@ function DestinationInput({ id, label, disabled, secret = false, initial }: {
   secret?: boolean;
   initial?: string;
 }) {
-  return <input type="text" id={id} className={secret ? "masked" : undefined} placeholder={label} aria-label={label}
-    autoComplete="off" autoCapitalize="off" spellCheck={false} required disabled={disabled} defaultValue={initial} />;
+  return (
+    <label className="alerts-field">
+      <span className="setting-label">{label}</span>
+      <input type="text" id={id} className={secret ? "masked" : undefined} placeholder={secret ? " " : undefined}
+        autoComplete="off" autoCapitalize="off" spellCheck={false} required disabled={disabled} defaultValue={initial} />
+    </label>
+  );
 }
 
 function valueOf(form: HTMLFormElement, id: string) {
@@ -48,22 +52,34 @@ function valueOf(form: HTMLFormElement, id: string) {
 
 export default function Alerts() {
   const { state, paused, running, closing, command, confirm } = useSession();
-  const telegram = useRef<HTMLFormElement>(null);
-  const discord = useRef<HTMLFormElement>(null);
+  const form = useRef<HTMLFormElement>(null);
+  const [editor, setEditor] = useState<DestinationEditor>("closed");
   const alerts = state.alerts;
   if (!alerts) return null;
 
   const busy = paused || running || closing;
-  const target = alerts.destination === "telegram" ? `Telegram chat ${alerts.telegram.chat}` :
-    alerts.destination === "discord" ? "the Discord channel of the saved webhook" : "";
-  const status = !alerts.enabled ? "Off" : alerts.running ? "On" : "On, but not running";
+  const { destination, enabled } = alerts;
+  const target = destination === "telegram" ? `Telegram chat ${alerts.telegram.chat}` :
+    destination === "discord" ? "Discord channel of the saved webhook" : null;
+  const status = !enabled ? "Off" : alerts.running ? "On" : "On, but not running";
+  const destinationsOpen = editor !== "closed";
+  const selectedEvents = events.filter(([kind]) => alerts.events[kind]);
+  const payload = alerts.content === "text"
+    ? "Each alert includes its kind, the program’s short name, and up to 300 characters of program text. That text can name files or quote a prompt. No session, tab or folder names are added."
+    : "Each alert includes only its kind and the program’s short name. No text from the program is sent. No session, tab, folder or file names are included.";
+  const rexNotifications = "Rex’s own notifications are unchanged.";
+  const noEvents = "No events selected. Nothing is forwarded until you select an event.";
+
+  function showEditor(next: DestinationEditor) {
+    form.current?.reset();
+    setEditor(next);
+  }
 
   function send(field: Field, value: unknown) {
     if (busy) return;
     // Clear unsent inputs when making a change, before the request can settle.
     // Secrets never enter React state, and the response never repopulates them.
-    telegram.current?.reset();
-    discord.current?.reset();
+    form.current?.reset();
     command("alerts", { field, value });
   }
 
@@ -79,85 +95,120 @@ export default function Alerts() {
     if (!busy) send("discord", valueOf(event.currentTarget, "alerts-discord-link"));
   }
 
-  const destinationRow = (name: Destination) => {
-    const selected = alerts.destination === name;
-    const saved = alerts[name].saved;
-    const label = destinations[name];
-    const detail = !saved ? `Not saved. Once saved, its secret is kept in ${alerts.place} and is never shown.` :
-      `${selected ? "Saved and selected." : "Saved."} The secret is kept in ${alerts.place} and is never shown again.`;
-    return (
-      <SettingRow label={label} detail={detail}>
-        <div className="button-row">
-          {saved && !selected ? (
-            <button type="button" className="button secondary" id={`alerts-use-${name}`} disabled={busy}
-              onClick={() => send("destination", name)}>
-              Use {label}
-            </button>
-          ) : null}
-          {saved ? (
-            <button type="button" className="button text-button" id={`alerts-forget-${name}`} disabled={busy}
-              onClick={() => confirm(`Forget ${label}?`,
-                `This removes the saved ${label} destination and its secret from ${alerts.place}. Mirroring to it ends.`,
-                "Forget", () => send("forget", name))}>
-              Forget…
-            </button>
-          ) : null}
-        </div>
-      </SettingRow>
-    );
-  };
+  function toggleForwarding() {
+    if (enabled) {
+      send("enabled", false);
+    } else if (target) {
+      const selected = selectedEvents.length ? `Events: ${selectedEvents.map(([, label]) => label).join(", ")}.` : noEvents;
+      confirm("Turn on alert forwarding?",
+        `Destination: ${target}.\n${selected}\n${payload}\n${rexNotifications}`, "Turn on", () => send("enabled", true));
+    }
+  }
 
   return (
-    <>
-      <AlertGroup id="group-alerts" title="Mirror Rex alerts" status={status}>
-        <SettingRow label="Send Rex alerts to a chat or channel you choose"
-          detail={`${alerts.enabled ? "On." : "Off until you turn it on."} Rex’s own notifications stay as they are. ` +
-            (target ? `Alerts go to ${target}.` : "Save a destination below first.")}>
-          <button type="button" className="button secondary" id="alerts-toggle"
-            disabled={busy || (!alerts.enabled && !alerts.destination)} onClick={() => {
-              if (alerts.enabled) send("enabled", false);
-              else if (alerts.destination) confirm("Mirror Rex alerts?",
-                `Alerts go to ${target}.\n${alerts.disclosure}\nRex’s own notifications are unchanged.`,
-                "Turn on", () => send("enabled", true));
-            }}>
-            {alerts.enabled ? "Turn off" : "Turn on…"}
-          </button>
-        </SettingRow>
-        <SettingRow label="What is sent" detail={alerts.disclosure + (alerts.note ? `\n${alerts.note}` : "")}
-          detailClassName="setting-detail disclosure-text" />
-        <ChoiceSetting field="alerts.content" label="Content" detail="Program text can name files or quote a prompt."
-          value={alerts.content} choices={content} disabled={busy} onChange={key => send("content", key)} />
-        <SettingRow label="Test message" detail="One message written by Milo. No Rex alert is involved.">
-          <button type="button" className="button secondary" id="alerts-test" disabled={busy || !alerts.destination}
-            onClick={() => { if (alerts.destination) send("test", null); }}>
-            Send test
-          </button>
-        </SettingRow>
+    <div className="alert-settings">
+      <AlertGroup id="group-alerts" title="Destination">
+        <div className="alerts-destination">
+          <div className="alerts-destination-line">
+            <p className="setting-label">{target ?? "No destination"}</p>
+            <span className="setting-detail alerts-status" id="group-alerts-status" role="status"
+              data-running={enabled && alerts.running}>{status}</span>
+          </div>
+          {!target ? <p className="setting-detail">Choose a Telegram chat or Discord channel. Saving won’t turn forwarding on.</p> : null}
+          {alerts.note ? <p className="setting-detail disclosure-text">{alerts.note}</p> : null}
+          <div className="button-row">
+            {(enabled || target) ? (
+              <button type="button" className={`button ${enabled ? "secondary" : "primary"}`}
+                id="alerts-toggle" disabled={busy} onClick={toggleForwarding}>
+                {enabled ? "Turn off" : "Turn on…"}
+              </button>
+            ) : null}
+            <button type="button" className={`button ${target || destinationsOpen ? "secondary" : "primary"}`}
+              id="alerts-destinations-toggle" aria-expanded={destinationsOpen} aria-controls="alerts-destinations"
+              onClick={() => showEditor(destinationsOpen ? "closed" : "list")}>
+              {destinationsOpen ? "Close destinations" : target ? "Change destination" : "Set up destination"}
+            </button>
+            {target ? (
+              <button type="button" className="button text-button" id="alerts-test" disabled={busy}
+                aria-describedby="alerts-test-detail" onClick={() => send("test", null)}>Send test</button>
+            ) : null}
+          </div>
+          {target ? (
+            <p className="setting-detail" id="alerts-test-detail">A test sends one message from Milo, not a Rex alert.</p>
+          ) : null}
+        </div>
+        <div id="alerts-destinations" className="alerts-destinations" hidden={!destinationsOpen}>
+          {destinationsOpen ? (
+            <>
+              <h4 className="setting-label">Destinations</h4>
+              <p className="setting-detail">Milo stores credentials in {alerts.place}. Once saved, they aren’t shown again.</p>
+              <div className="group-controls">
+                {destinations.map(([name, label]) => {
+                  const saved = alerts[name].saved;
+                  const selected = destination === name;
+                  const open = editor === name;
+                  const chat = saved && name === "telegram" ? `: ${alerts.telegram.chat}` : "";
+                  return (
+                    <div key={name}>
+                      <SettingRow label={label} detail={`${selected ? "Selected" : saved ? "Saved" : "Not saved"}${chat}`}>
+                        <div className="button-row">
+                          {saved && !selected ? (
+                            <button type="button" className="button secondary" id={`alerts-use-${name}`} disabled={busy}
+                              onClick={() => send("destination", name)}>Use {label}</button>
+                          ) : null}
+                          <button type="button" className="button secondary" id={`alerts-edit-${name}`}
+                            aria-expanded={open} aria-controls={`alerts-${name}-setup`}
+                            onClick={() => showEditor(open ? "list" : name)}>
+                            {open ? `Close ${label} setup` : `${saved ? "Edit" : "Add"} ${label}`}
+                          </button>
+                          {saved ? (
+                            <button type="button" className="button text-button" id={`alerts-forget-${name}`} disabled={busy}
+                              aria-label={`Forget ${label}…`} onClick={() => confirm(`Forget ${label}?`,
+                                `This removes the saved ${label} destination and its secret from ${alerts.place}. Forwarding to it ends.`,
+                                "Forget", () => send("forget", name))}>Forget…</button>
+                          ) : null}
+                        </div>
+                      </SettingRow>
+                      <div id={`alerts-${name}-setup`} hidden={!open}>
+                        {open ? (
+                          <form id={`alerts-${name}`} className="secret-form alerts-form" autoComplete="off" ref={form}
+                            onSubmit={name === "telegram" ? saveTelegram : saveDiscord}>
+                            <p className="setting-detail">{name === "telegram"
+                              ? "Enter the chat number or a public channel’s @name, and the bot token from BotFather."
+                              : "Copy the webhook link from the channel’s Integrations settings."}</p>
+                            {name === "telegram" ? (
+                              <>
+                                <DestinationInput key={alerts.telegram.chat} id="alerts-telegram-chat" label="Chat"
+                                  disabled={busy} initial={alerts.telegram.chat} />
+                                <DestinationInput id="alerts-telegram-token" label="Bot token" disabled={busy} secret />
+                              </>
+                            ) : <DestinationInput id="alerts-discord-link" label="Webhook link" disabled={busy} secret />}
+                            <button type="submit" id={`alerts-${name}-save`} className="button secondary" disabled={busy}>
+                              Save {label}
+                            </button>
+                          </form>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
+        </div>
       </AlertGroup>
-      <AlertGroup id="group-alert-kinds" title="Alerts to mirror">
+      <AlertGroup id="group-alert-content" title="What gets sent">
+        <p className="setting-detail alerts-privacy">{payload} {rexNotifications}</p>
+        <ChoiceSetting field="alerts.content" label="Content"
+          value={alerts.content} choices={content} disabled={busy} onChange={key => send("content", key)} />
+      </AlertGroup>
+      <AlertGroup id="group-alert-kinds" title="Events to forward">
+        {!selectedEvents.length ? <p className="setting-detail alerts-privacy">{noEvents}</p> : null}
         {events.map(([kind, label, detail]) => (
           <SwitchSetting key={kind} field={`alerts.events.${kind}`} label={label} detail={detail}
             checked={alerts.events[kind]} disabled={busy} onChange={checked => send(`events.${kind}`, checked)} />
         ))}
       </AlertGroup>
-      <AlertGroup id="group-alert-destinations" title="Destinations">
-        {destinationRow("telegram")}
-        <SettingRow label="Telegram bot" detail="The chat’s number or a public channel’s @name, and the bot token from BotFather.">
-          <form id="alerts-telegram" className="secret-form" autoComplete="off" ref={telegram} onSubmit={saveTelegram}>
-            <DestinationInput key={alerts.telegram.chat} id="alerts-telegram-chat" label="Chat" disabled={busy}
-              initial={alerts.telegram.chat} />
-            <DestinationInput id="alerts-telegram-token" label="Bot token" disabled={busy} secret />
-            <button type="submit" id="alerts-telegram-save" className="button secondary" disabled={busy}>Save Telegram</button>
-          </form>
-        </SettingRow>
-        {destinationRow("discord")}
-        <SettingRow label="Discord webhook" detail="The webhook link from the channel’s Integrations settings.">
-          <form id="alerts-discord" className="secret-form" autoComplete="off" ref={discord} onSubmit={saveDiscord}>
-            <DestinationInput id="alerts-discord-link" label="Webhook link" disabled={busy} secret />
-            <button type="submit" id="alerts-discord-save" className="button secondary" disabled={busy}>Save Discord</button>
-          </form>
-        </SettingRow>
-      </AlertGroup>
-    </>
+    </div>
   );
 }

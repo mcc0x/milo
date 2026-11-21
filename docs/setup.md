@@ -154,6 +154,8 @@ milo alerts off                       # ends it at once
 
 The same choices are under **Integrations → Alert forwarding** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
 
+In the browser, choose **Set up destination** (or **Change destination**) to manage a Telegram chat or Discord channel. Saving a destination and turning forwarding on are separate choices.
+
 <picture>
   <source media="(max-width: 600px)" srcset="img/web-alerts-mobile.webp">
   <img src="img/web-alerts.webp" width="760" alt="The Alerts page of the browser editor: mirroring is off, alerts would go to an example Telegram channel, and the page says that only the kind of alert and the program's short name are sent">

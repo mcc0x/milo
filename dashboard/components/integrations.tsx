@@ -15,22 +15,32 @@ const names = {
 
 type Detail = keyof typeof names;
 
+function IntegrationMark({kind}: {kind: Detail}) {
+  return <span className="integration-mark" data-kind={kind} aria-hidden="true">
+    {kind === 'automation' ? <img src="/rex.png" alt="" width="23" height="23"/> :
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        {kind === 'presence' ? <><path d="M4 4h16v12H9l-5 4z"/><path d="M8 10h2l1-2 2 4 1-2h2"/></> :
+          <><path d="M3 6h9M3 11h6m-6 5h4m4-1 9-9m-7 0h7v7"/></>}
+      </svg>}
+  </span>;
+}
+
 function RexAutomation() {
   const { state, draftValue, edit } = useSession();
   return (
     <>
-      <GroupCard group="preferences" title="Tab titles">
-        <SwitchSetting field="workflow.tab_titles" label="Title Rex tabs" detail="Unnamed tabs only: project, worktree and agent."
+      <GroupCard group="preferences" title="Naming">
+        <SwitchSetting field="workflow.tab_titles" label="Title Rex tabs" detail="Name unnamed tabs after the project, worktree, and active agent."
           checked={draftValue<boolean>('workflow.tab_titles')} disabled={!state.groups.preferences.editable}
           onChange={checked => edit('workflow.tab_titles', checked)} />
       </GroupCard>
       {state.capabilities.auto_arrange ? (
-        <GroupCard group="layout" title="New tab layout">
+        <GroupCard group="layout" title="Arrangement">
           <SwitchSetting field="layout.auto_arrange" label="Arrange new shell tabs"
-            detail="This switch is global. New command tabs and tabs with an existing layout are skipped."
+            detail="Applies globally to new shell tabs. Existing layouts and command tabs stay untouched."
             checked={draftValue<boolean>('layout.auto_arrange')} onChange={checked => edit('layout.auto_arrange', checked)} />
         </GroupCard>
-      ) : null}
+      ) : <p className="setting-note">Automatic arrangement isn’t available in this session.</p>}
     </>
   );
 }
@@ -64,16 +74,18 @@ export default function Integrations() {
     if (next === 'alerts') command('alerts', { field: 'refresh', value: null });
   }
 
-  const autoArrange = capabilities.auto_arrange
-    ? `Auto-arrange ${draftValue<boolean>('layout.auto_arrange') ? 'on' : 'off'}`
-    : 'Auto-arrange unavailable';
+  const rules = Number(draftValue<boolean>('workflow.tab_titles')) + Number(draftValue<boolean>('layout.auto_arrange'));
   const summaries = {
-    automation: `Tab titles ${draftValue<boolean>('workflow.tab_titles') ? 'on' : 'off'} · ${autoArrange}`,
-    presence: presence ? (presence.enabled ? `On · ${presence.status}` : 'Off') : unavailable,
-    alerts: alerts ? `${!alerts.enabled ? 'Off' : alerts.running ? 'On' : 'On, but not running'} · ${
-      alerts.destination ? alertDestinations[alerts.destination] : 'No destination'}` : unavailable,
+    automation: rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off',
+    presence: presence ? (presence.enabled ? 'On' : 'Off') : unavailable,
+    alerts: alerts ? (alerts.enabled ? (alerts.running ? 'On' : 'Not running') : 'Off') : unavailable,
   };
-  const immediate = detail && detail !== 'automation' && available[detail];
+  const descriptions = {
+    automation: 'Tab titles and new shell layouts',
+    presence: 'What appears on your Discord profile',
+    alerts: alerts?.destination ? `Destination: ${alertDestinations[alerts.destination]}` : 'Send Rex alerts to a chat or channel',
+  };
+  const timing = detail && available[detail] ? (detail === 'automation' ? 'Save to apply changes' : 'Applies immediately') : '';
 
   return (
     <div className="integrations">
@@ -83,9 +95,9 @@ export default function Integrations() {
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2"
             strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6"/></svg>
         </button>
-          <h2 id="integrations-title" tabIndex={-1} ref={heading}
-            aria-describedby={immediate ? 'integration-timing' : undefined}>{detail ? names[detail] : 'Integrations'}</h2>
-        {immediate ? <p className="setting-detail" id="integration-timing">Applies immediately</p> : null}
+        <h2 id="integrations-title" tabIndex={-1} ref={heading}
+          aria-describedby={timing ? 'integration-timing' : undefined}>{detail ? names[detail] : 'Integrations'}</h2>
+        {timing ? <p className="setting-detail" id="integration-timing">{timing}</p> : null}
       </header>
       {!detail ? (
         <ul className="integrations-list" role="list">
@@ -93,9 +105,15 @@ export default function Integrations() {
             <li key={key}>
               <button type="button" className="integration-row" id={`integration-${key}`} aria-label={names[key]}
                 aria-describedby={`integration-${key}-summary`} disabled={!available[key]} onClick={() => open(key)}>
+                <IntegrationMark kind={key}/>
                 <span className="setting-info">
                   <span className="setting-label">{names[key]}</span>
-                  <span className="setting-detail" id={`integration-${key}-summary`}>{summaries[key]}</span>
+                  <span className="setting-detail">{descriptions[key]}</span>
+                </span>
+                <span className="integration-state" id={`integration-${key}-summary`}
+                  data-state={!available[key] ? 'unavailable' : key === 'alerts' && alerts?.enabled && !alerts.running ? 'warning' :
+                    (key === 'automation' ? rules > 0 : key === 'presence' ? presence?.enabled : alerts?.enabled) ? 'on' : 'off'}>
+                  {summaries[key]}
                 </span>
                 {available[key] ? <span className="integration-chevron" aria-hidden="true">›</span> : null}
               </button>

@@ -1,0 +1,108 @@
+.presence-settings {
+  container-type: inline-size;
+  container-name: presence;
+  min-width: 0;
+}
+
+.presence-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4rem .8rem;
+}
+
+.presence-example {
+  flex: 1 1 12rem;
+  max-inline-size: 19rem;
+  min-width: 0;
+}
+
+.presence-example figcaption {
+  margin-block-end: .25rem;
+  color: var(--blue);
+  font-size: .77rem;
+  font-weight: 670;
+}
+
+.presence-activity {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .5rem .6rem;
+  border-radius: .55rem;
+  background: #292a32;
+  color: #f3f3f8;
+  font-size: .83rem;
+  line-height: 1.3;
+}
+
+.presence-activity p { color: #d6d6e2; }
+.presence-app-mark { flex: none; border-radius: .45rem; }
+svg.presence-app-mark { background: #3b3d4b; color: #d6d6e2; }
+
+.presence-action, .presence-application-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4rem;
+}
+
+.presence-status {
+  max-inline-size: 62ch;
+  margin-block-start: .55rem;
+  overflow-wrap: anywhere;
+}
+
+.presence-sharing, .presence-application-options {
+  border-block-start: 1px solid var(--line);
+  margin-block-start: .55rem;
+}
+
+.presence-sharing { padding-block-start: .55rem; }
+.presence-sharing .choice-strip {
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  inline-size: fit-content;
+  margin-block: .25rem;
+}
+
+.presence-application-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: .25rem .5rem;
+  padding-block-start: .1rem;
+}
+
+.presence-application-options details { min-width: 0; max-inline-size: 62ch; }
+.presence-application-options summary {
+  inline-size: fit-content;
+  min-block-size: 2.4rem;
+  padding-block: .55rem;
+  cursor: pointer;
+  color: var(--blue);
+  font-size: .83rem;
+  font-weight: 670;
+}
+
+.presence-application-options details > p { margin-block-start: 0; }
+.presence-application-options form { margin-block-start: .55rem; }
+.presence-application-input { margin-block-start: .2rem; }
+.presence-application-input input { max-inline-size: 100%; }
+.presence-application-options a { color: var(--blue); }
+
+@container presence (max-width: 18rem) {
+  .presence-sharing .choice-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    inline-size: 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  .presence-application-options summary, #presence-application { min-block-size: 2.75rem; }
+  #presence-application { font-size: 1rem; }
+}
+
+@media (forced-colors: active) {
+  .presence-activity { outline: 1px solid CanvasText; }
+}

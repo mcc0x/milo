@@ -24,7 +24,8 @@
 
 .integration-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  column-gap: .6rem;
   align-items: center;
   width: 100%;
   padding: .55rem .65rem;
@@ -47,8 +48,19 @@
 }
 
 .integration-chevron {
-  margin-inline-start: .75rem;
+  justify-self: end;
   color: var(--blue);
   font-size: 1.2rem;
   line-height: 1;
+}
+
+.integration-mark { display: grid; place-items: center; inline-size: 2.2rem; block-size: 2.2rem; border-radius: .65rem; background: #dfedfb; }
+.integration-mark[data-kind="presence"] { background: #e7e5fa; color: #504a8d; }
+.integration-mark[data-kind="alerts"] { background: #f8eadb; color: #84562d; }
+.integration-state { color: var(--muted); background: #e5ebf1; border-radius: 1rem; padding: .18rem .52rem; font-size: .72rem; font-weight: 650; }
+.integration-state[data-state="on"] { color: #245d49; background: #daeee4; }
+.integration-state[data-state="warning"] { color: #774e19; background: #fbecd3; }
+@media (max-width: 30rem) {
+  .integration-row { padding-inline: .1rem; column-gap: .35rem; }
+  .integration-state[data-state="unavailable"] { grid-column: 2/-1; justify-self: start; }
 }

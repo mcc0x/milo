@@ -2,14 +2,10 @@
 
 import { ChoiceSetting, Disclosure, GroupCard, NumberInput } from './controls';
 import { useSession } from './session';
+import PaneGlyph from './pane-glyph';
 import type { PaneRole } from './session-state';
 
 const roleNames = { outline: 'Outline', history: 'History', usage: 'Usage' };
-const panePaths = {
-  outline: 'M6 3v14a2 2 0 0 0 2 2h10M6 8h12M6 13h8',
-  history: 'M6 3v4m0 6v8m4-11h9m-9 5h6M9 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
-  usage: 'M4 18v-5m6 5V5m6 13V9m4 12H3',
-};
 
 const directions = [[-1, '↑', 'up', 'earlier'], [1, '↓', 'down', 'later']] as const;
 const sides = [['left', 'Left'], ['right', 'Right']] as const;
@@ -25,12 +21,11 @@ function PanePicker({ disabled }: { disabled: boolean }) {
         {order.map((role, index) => {
           const field = `layout.panes.${role}`;
           return (
-            <li className="pane-line" data-pane={role} key={role}>
+            <li className="pane-line" key={role}>
               <label>
                 <input id={`enable-${role}`} type="checkbox" checked={draftValue<boolean>(field)}
                   onChange={event => edit(field, event.currentTarget.checked)} />{roleNames[role]}
-                <svg className="pane-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"
-                  strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={panePaths[role]}/></svg>
+                <PaneGlyph kind={role}/>
               </label>
               <div className="button-row">
                 {directions.map(([delta, arrow, direction, description]) => (

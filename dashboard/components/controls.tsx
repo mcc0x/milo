@@ -285,7 +285,7 @@ export function GroupCard({ group, title, actions, children }: {
 
 export function SettingSection({ id, title, children }: {
   id: string;
-  title: string;
+  title: ReactNode;
   children: ReactNode;
 }) {
   return (

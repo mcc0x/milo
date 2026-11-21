@@ -289,7 +289,8 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   const question = dialog(page, 'Turn on Discord presence?');
   const names = dialog(page, 'Show these names on Discord?');
   const choice = name => card.getByRole('radio', {name, exact: true});
-  await card.getByText('Discord will show Milo\'s name and icon with the line “In a Rex session”').waitFor();
+  await card.getByText('Activity preview', {exact: true}).waitFor();
+  await card.getByText('In a Rex session', {exact: true}).waitFor();
   await card.getByText('Milo is not connected to Discord and shows nothing there.').waitFor();
   assert(await choice('Generic').isChecked(), 'no names are shown unless chosen');
 
@@ -335,9 +336,11 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
 
   // An application of your own replaces Milo's until you go back.
+  assert.equal(await card.getByRole('textbox', {name: 'Application ID'}).count(), 0);
+  await card.getByText('Use your own Discord app', {exact: true}).click();
   await button(card, 'Use my own').click();
   await page.getByRole('alert').filter({hasText: 'Enter the Application ID of your own Discord application'}).waitFor();
-  await card.getByRole('textbox', {name: 'Shown under Milo’s application', exact: true}).fill(own);
+  await card.getByRole('textbox', {name: 'Application ID', exact: true}).fill(own);
   await button(card, 'Use my own').click();
   await status(page, `Discord presence uses your application ${own}.`).waitFor();
   await until(() => last(0).client_id === own, 'the helper introduced the other application');
@@ -500,10 +503,19 @@ async function confirmFromMobileFooter(browser, url, exited) {
 async function checkAlerts(page) {
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
-  const mirror = page.getByRole('region', {name: 'Mirror Rex alerts'});
-  assert(await button(mirror, 'Turn on…').isDisabled(), 'a fresh profile cannot enable mirroring without a destination');
-  assert(await button(mirror, 'Send test').isDisabled(), 'a test cannot contact an unconfigured destination');
-  const content = mirror.getByRole('group', {name: 'Content', exact: true});
+  const destination = page.getByRole('region', {name: 'Destination', exact: true});
+  assert.equal(await button(page, 'Turn on…').count(), 0, 'cannot enable forwarding without a destination');
+  assert.equal(await button(page, 'Send test').count(), 0, 'cannot send to an unconfigured destination');
+  await button(destination, 'Set up destination').click();
+  await button(page, 'Add Discord').click();
+  const webhook = page.getByRole('textbox', {name: 'Webhook link'});
+  await webhook.fill('unsaved example');
+  await button(page, 'Close destinations').click();
+  await button(destination, 'Set up destination').click();
+  await button(page, 'Add Discord').click();
+  assert.equal(await webhook.inputValue(), '', 'closing destination setup forgets unsaved credentials');
+  await button(page, 'Close destinations').click();
+  const content = page.getByRole('group', {name: 'Content', exact: true});
   await content.getByRole('radio', {name: 'Also program text'}).click();
   await page.getByText(/up to 300 characters/i).first().waitFor();
   await page.reload();

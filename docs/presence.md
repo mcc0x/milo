@@ -52,7 +52,7 @@ To show a name and icon of your choosing in place of Milo's:
 
 1. Open <https://discord.com/developers/applications>, choose **New Application** and name it. The name is what Discord shows, as in “Playing Rex”. An app icon is optional. No bot is needed.
 2. Copy the **Application ID** from its General Information page. It is a number of 17 to 19 digits.
-3. Give it to Milo: `milo presence application APPLICATION_ID`, **Presence application** in Settings, or **Use my own** in the browser editor. A terminal's paste is not read in Settings, so the command is easier for a copied ID.
+3. Give it to Milo: `milo presence application APPLICATION_ID`, **Presence application** in Settings, or **Use your own Discord app** in the browser editor. A terminal's paste is not read in Settings, so the command is easier for a copied ID.
 
 `milo presence application official`, or the same control in Settings and the browser editor, goes back to Milo's. An application ID you saved with an earlier Milo is kept until you do.
 
