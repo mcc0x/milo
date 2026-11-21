@@ -34,8 +34,10 @@ pub(super) struct Pos {
 }
 
 /// One replacement of text, kept so that it can be taken back or made again.
+/// It is placed by bytes from the start of the text, not by line: a line that
+/// ends in a lone carriage return reads as a different line once a line feed follows it.
 struct Change {
-    at: Pos,
+    offset: usize,
     removed: String,
     inserted: String,
     /// Where the inserted text ends.
@@ -58,14 +60,6 @@ fn pieces(text: &str) -> impl Iterator<Item = (&str, Eol)> {
             Some(line) => (line, Eol::CrLf),
             None => (&text[..at], Eol::Lf),
         })
-    })
-}
-
-/// Where `text` ends when it starts at `at`.
-fn end_of(at: Pos, text: &str) -> Pos {
-    pieces(text).fold(at, |end, (line, eol)| match eol {
-        Eol::None => Pos { row: end.row, col: end.col + line.len() },
-        _ => Pos { row: end.row + 1, col: 0 },
     })
 }
 
@@ -176,10 +170,32 @@ impl Buffer {
         self.undo.push(change);
     }
 
+    /// How many bytes of the text come before a place.
+    fn offset(&self, at: Pos) -> usize {
+        self.rows[..at.row].iter().map(|row| row.text.len() + row.eol.text().len()).sum::<usize>() + at.col
+    }
+
+    /// The nearest place at or before `pos` that the text has.
+    pub(super) fn clamp(&self, pos: Pos) -> Pos {
+        let row = pos.row.min(self.rows.len() - 1);
+        let text = &self.rows[row].text;
+        let col = (0..=pos.col.min(text.len())).rev().find(|&at| text.is_char_boundary(at)).unwrap_or(0);
+        Pos { row, col }
+    }
+
+    /// Puts `text` in place of `len` bytes at `offset` and reads the lines again.
+    fn rewrite(&mut self, offset: usize, len: usize, text: &str) {
+        let mut whole = self.text();
+        whole.replace_range(offset..offset + len, text);
+        self.rows = pieces(&whole).map(|(line, eol)| Row { text: line.to_owned(), eol }).collect();
+        self.size = whole.len();
+    }
+
     /// Replaces the text between two places and returns where the new text ends.
     pub(super) fn edit(&mut self, from: Pos, to: Pos, text: &str, cursor: Pos) -> Pos {
+        let offset = self.offset(from);
         let (removed, end) = self.splice(from, to, text);
-        self.record(Change { at: from, removed, inserted: text.to_owned(), end, cursor });
+        self.record(Change { offset, removed, inserted: text.to_owned(), end, cursor });
         self.typing = false;
         end
     }
@@ -205,21 +221,21 @@ impl Buffer {
         end
     }
 
-    /// Takes back the last change. Returns where the cursor was and the first line that changed.
-    pub(super) fn undo(&mut self) -> Option<(Pos, usize)> {
+    /// Takes back the last change and returns where the cursor was before it.
+    pub(super) fn undo(&mut self) -> Option<Pos> {
         let change = self.undo.pop()?;
-        self.splice(change.at, change.end, &change.removed);
-        let back = (change.cursor, change.at.row);
+        self.rewrite(change.offset, change.inserted.len(), &change.removed);
+        let back = self.clamp(change.cursor);
         self.redo.push(change);
         self.typing = false;
         Some(back)
     }
 
-    /// Makes the last undone change again. Returns where its text ends and the first line that changed.
-    pub(super) fn redo(&mut self) -> Option<(Pos, usize)> {
+    /// Makes the last undone change again and returns where its text ends.
+    pub(super) fn redo(&mut self) -> Option<Pos> {
         let change = self.redo.pop()?;
-        self.splice(change.at, end_of(change.at, &change.removed), &change.inserted);
-        let again = (change.end, change.at.row);
+        self.rewrite(change.offset, change.removed.len(), &change.inserted);
+        let again = self.clamp(change.end);
         self.undo.push(change);
         self.typing = false;
         Some(again)
@@ -276,7 +292,7 @@ mod tests {
             assert_eq!(&buffer.text(), expected);
         }
         assert!(buffer.undo().is_none() && !buffer.dirty());
-        assert_eq!(buffer.redo(), Some((at(1, 1), 0)));
+        assert_eq!(buffer.redo(), Some(at(1, 1)));
         for expected in &texts[2..] {
             buffer.redo().unwrap();
             assert_eq!(&buffer.text(), expected);
@@ -284,7 +300,7 @@ mod tests {
         assert!(buffer.redo().is_none());
         buffer.undo();
         buffer.undo();
-        assert_eq!(buffer.undo(), Some((at(2, 0), 0)));
+        assert_eq!(buffer.undo(), Some(at(2, 0)));
     }
 
     #[test]
@@ -305,6 +321,32 @@ mod tests {
         assert_eq!((buffer.text().as_str(), end), ("ba", at(0, 1)));
         buffer.undo();
         assert_eq!(buffer.text(), "a");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_survives_changes_around_it_and_their_undoing() {
+        // Removing what follows the carriage return puts it straight before a line feed.
+        let mut buffer = Buffer::new("a\rb\nc");
+        let end = buffer.edit(at(0, 2), at(0, 3), "", at(0, 3));
+        assert_eq!(buffer.text(), "a\r\nc");
+        // The whole text is then replaced, as a formatter does, and both changes are taken back.
+        buffer.edit(at(0, 0), buffer.end(), "X\n", end);
+        let back = buffer.undo().unwrap();
+        assert_eq!(buffer.text(), "a\r\nc");
+        assert!(buffer.row(back.row).is_char_boundary(back.col) && back.col <= buffer.row(back.row).len());
+        buffer.undo();
+        assert_eq!(buffer.text(), "a\rb\nc");
+        buffer.redo();
+        buffer.redo();
+        assert_eq!(buffer.text(), "X\n");
+
+        let mut buffer = Buffer::new("a\r");
+        let end = buffer.edit(at(0, 2), at(0, 2), "\n", at(0, 2));
+        buffer.edit(at(0, 0), buffer.end(), "Y", end);
+        buffer.undo();
+        buffer.undo();
+        assert_eq!(buffer.text(), "a\r");
+        assert_eq!(buffer.clamp(at(9, 9)), at(0, 2));
     }
 
     #[test]

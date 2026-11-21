@@ -197,6 +197,14 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         if self.notice_only { None } else { self.pane.next_frame() }
     }
 
+    fn editing(&self) -> bool {
+        !self.notice_only && self.pane.editing()
+    }
+
+    fn paste(&mut self, text: Option<&str>) -> After {
+        if self.notice_only { After::Ignored } else { self.pane.paste(text) }
+    }
+
     fn key(&mut self, key: Key) -> After {
         // A one-row notice hides the pane but leaves its last hit map intact.
         if self.notice_only && matches!(key, Key::Click(..)) {

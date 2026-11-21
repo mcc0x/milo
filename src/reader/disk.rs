@@ -45,6 +45,9 @@ impl ReadOnly {
 /// The file as it was when read: what a save expects to replace.
 pub(super) struct Original {
     bytes: Vec<u8>,
+    /// The file began with a byte-order mark when it was first read. Text typed
+    /// into the draft later does not decide this.
+    marked: bool,
     /// The device and file numbers, which a file put in its place does not share.
     identity: (u64, u64),
 }
@@ -53,12 +56,12 @@ impl Original {
     /// The text to edit, without the byte-order mark a save puts back.
     pub(super) fn text(&self) -> &str {
         let text = std::str::from_utf8(&self.bytes).expect("only UTF-8 files are loaded");
-        text.strip_prefix(BOM).unwrap_or(text)
+        if self.marked { &text[BOM.len()..] } else { text }
     }
 
     /// The bytes of the file when it holds `text`.
     pub(super) fn bytes_for(&self, text: &str) -> Vec<u8> {
-        let bom = if self.bytes.starts_with(BOM.as_bytes()) { BOM } else { "" };
+        let bom = if self.marked { BOM } else { "" };
         [bom.as_bytes(), text.as_bytes()].concat()
     }
 }
@@ -125,7 +128,8 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     if !is_text(&bytes) {
         return Err(ReadOnly::NOT_TEXT);
     }
-    Ok(Original { bytes, identity })
+    let marked = bytes.starts_with(BOM.as_bytes());
+    Ok(Original { bytes, marked, identity })
 }
 
 /// Writes `text` over the file `original` was read from. With `overwrite`, a
@@ -170,7 +174,7 @@ pub(super) fn save(
             "Could not write the file. Check it before closing."
         }));
     }
-    *original = Original { bytes, identity };
+    *original = Original { bytes, marked: original.marked, identity };
     if file.sync_all().is_err() {
         return Err(SaveError::Refused("Saved, but the disk did not confirm it."));
     }

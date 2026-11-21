@@ -79,7 +79,8 @@ The reader shows the whole file with changed lines marked, and colours the langu
 | Lua | `.lua` | Long comments and long strings |
 | Shell | `.sh`, `.bash`, `.zsh` | Quoted strings |
 | SQL | `.sql` | Block comments |
-| HTML, XML, Vue, Svelte | `.html`, `.htm`, `.xhtml`, `.xml`, `.svg`, `.vue`, `.svelte` | Comments, tags, attribute values, and the JavaScript and CSS inside `script` and `style` |
+| HTML, SVG, Vue, Svelte | `.html`, `.htm`, `.xhtml`, `.svg`, `.vue`, `.svelte` | Comments, tags, attribute values, and the JavaScript and CSS inside `script` and `style` |
+| XML | `.xml` | Comments, tags, attribute values |
 | CSS, SCSS, Less | `.css`, `.scss`, `.less` | Block comments |
 | Markdown | `.md`, `.markdown`, `.mdx` | Fenced code blocks, comments |
 | JSON | `.json`, `.jsonc` | Block comments |
@@ -146,7 +147,9 @@ A save writes in place, not through a temporary file; that is what keeps the fil
 
 `Esc`, `Ctrl-Q` and `Ctrl-C` stop editing. With unsaved changes they ask `Unsaved edits: s save · d discard · Esc back` first. `q` is a letter while you edit. If the terminal has stopped taking output, `Ctrl-C` ends the reader at once, as it always has; the draft is then kept as described next.
 
-A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. A kept draft stays until you restore or delete it, whatever else you save in the meantime. One draft is kept for each file, and a later one replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
+A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. If milo has no state folder, because neither that variable nor `HOME` names one, the line says the edits were lost.
+
+The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before: saving other edits, or undoing the restore and leaving, keeps it. One draft is kept for each file, so a reader that is ended again with unsaved changes to that file replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
 
 In Rex, opening another file from Outline or History replaces the floating reader. While that reader has unsaved changes, the pane says `The open reader has unsaved edits.` and leaves it alone.
 

@@ -118,6 +118,8 @@ pub(super) struct Editor {
     mark: Option<Mark>,
     /// The user gave the draft up, so closing must not keep it.
     discarded: bool,
+    /// The draft holds text restored from a kept copy, which a save of it makes unneeded.
+    restored: bool,
 }
 
 /// The display column at which the character at `byte` starts.
@@ -222,6 +224,7 @@ impl Editor {
             formatting: None,
             mark: None,
             discarded: false,
+            restored: false,
         }
     }
 
@@ -258,11 +261,16 @@ impl Editor {
         disk::save(entry, &mut self.original, &self.buffer.text(), overwrite)
     }
 
-    /// A draft kept from an earlier reader stays until the user restores or deletes it:
-    /// saving something else is not an answer to that question.
+    /// A kept draft the user put off stays until they restore or delete it: saving
+    /// something else is not an answer to that question. One they restored is now saved.
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
         self.sync_mark();
+        if std::mem::take(&mut self.restored)
+            && let Some(draft) = self.place.draft()
+        {
+            draft.forget();
+        }
         self.say("Saved", now);
     }
 
@@ -372,7 +380,7 @@ impl Editor {
 
     fn undo(&mut self, now: Instant) -> Step {
         match self.buffer.undo() {
-            Some((cursor, row)) => self.edited(row, cursor),
+            Some(cursor) => self.edited(0, cursor),
             None => {
                 self.say("Nothing to undo", now);
                 Step::Stay
@@ -382,7 +390,7 @@ impl Editor {
 
     fn redo(&mut self, now: Instant) -> Step {
         match self.buffer.redo() {
-            Some((cursor, row)) => self.edited(row, cursor),
+            Some(cursor) => self.edited(0, cursor),
             None => {
                 self.say("Nothing to redo", now);
                 Step::Stay
@@ -434,7 +442,8 @@ impl Editor {
         };
         let kept = kept.strip_prefix('\u{feff}').unwrap_or(&kept);
         let step = self.replace(Pos::default(), self.buffer.end(), kept);
-        draft.forget();
+        // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
+        self.restored = true;
         self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
         self.say("Draft restored · ^Z undoes", now);
         step
@@ -458,7 +467,13 @@ impl Editor {
             Some(text) => {
                 let text = clean(text, self.buffer.newline());
                 self.notice = None;
-                if self.has_room(text.len(), now) { self.insert(&text) } else { Step::Stay }
+                if text.is_empty() {
+                    Step::Ignored
+                } else if self.has_room(text.len(), now) {
+                    self.insert(&text)
+                } else {
+                    Step::Stay
+                }
             }
             None => {
                 self.say("That paste was too long to take.", now);
@@ -524,7 +539,8 @@ impl Editor {
             Key::Ctrl(b'i') => self.indent.len(),
             _ => 0,
         };
-        if !self.has_room(adds, now) {
+        // A key that adds nothing must work in a file that is already as large as one can be.
+        if adds > 0 && !self.has_room(adds, now) {
             return Step::Stay;
         }
         let page = isize::try_from(self.rows.max(2) - 1).unwrap_or(isize::MAX);
@@ -737,11 +753,13 @@ impl Editor {
 impl Drop for Editor {
     fn drop(&mut self) {
         // Closed from outside with changes: the terminal went away, or the pane was ended.
-        if self.buffer.dirty()
-            && !self.discarded
-            && let Some(draft) = self.place.draft()
-        {
-            rescue::tell(draft.keep(&self.original.bytes_for(&self.buffer.text())));
+        if !self.buffer.dirty() || self.discarded {
+            return;
         }
+        let note = match self.place.draft() {
+            Some(draft) => draft.keep(&self.original.bytes_for(&self.buffer.text())),
+            None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
+        };
+        rescue::tell(note);
     }
 }

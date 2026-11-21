@@ -1225,6 +1225,10 @@ fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
     for name in ["a.txt", "b.txt", "c.txt"] {
         fs::write(root.join(name), format!("{name} text\n")).unwrap();
     }
+    // A setting milo cannot read puts a notice under the outline, which is then drawn by a
+    // pane around it. Keys and pasted text must still reach the editor through that pane.
+    fs::create_dir_all(project.0.join("config/milo")).unwrap();
+    fs::write(project.0.join("config/milo/preferences.conf"), "garbage line\n").unwrap();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
     let mut tty = Terminal::run(command.arg("outline"));
     tty.shows("c.txt");
@@ -1232,9 +1236,14 @@ fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
     tty.shows("b.txt text");
     tty.master.write_all(b"e").unwrap();
     tty.shows("^S save");
-    tty.master.write_all(b"edited \x13").unwrap();
+    tty.master.write_all(b"q? \x1b[200~edited \x1b[201~\x03").unwrap();
+    tty.shows("Unsaved edits: s save");
+    tty.shows("q? edited b.txt text");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"\x13").unwrap();
     tty.shows("Saved");
-    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "edited b.txt text\n");
+    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "q? edited b.txt text\n");
 
     // Esc stops editing, q closes the reader, and the outline still has that file selected.
     tty.master.write_all(b"\x1b").unwrap();

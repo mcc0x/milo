@@ -457,9 +457,10 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
     };
     let result = run_entered(start, open, &mut terminal);
     drop(terminal);
-    // The terminal is the shell's again, so this line stays on screen.
+    // The terminal is the shell's again, so this line stays on screen. A file's name is in it.
     if let Some(note) = crate::reader::take_rescue_note() {
-        eprintln!("milo: {note}");
+        let safe: String = note.chars().filter(|c| !c.is_control()).collect();
+        eprintln!("milo: {safe}");
     }
     result
 }

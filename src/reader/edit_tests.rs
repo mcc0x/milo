@@ -375,7 +375,8 @@ fn a_reader_closed_from_outside_keeps_its_draft_for_the_next_edit() {
     reader.key(Key::Char('r'));
     assert_eq!(draft(&reader), "unsaved one\ntwo\n");
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Draft restored · ^Z undoes");
-    assert!(!kept[0].exists());
+    // The kept copy is not given up before its text is saved.
+    assert!(kept[0].exists());
     // The restored text is one change on top of the file.
     reader.key(Key::Ctrl(b'z'));
     assert_eq!(draft(&reader), "one\ntwo\n");
@@ -819,4 +820,77 @@ fn a_kept_draft_put_off_is_still_there_after_another_save() {
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
     reader.key(Key::Char('r'));
     assert_eq!(draft(&reader), "kept one\n");
+}
+
+#[test]
+fn undoing_a_restored_draft_and_leaving_does_not_lose_it() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "one\n");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "kept ");
+    drop(reader);
+
+    let mut reader = open(&f, "notes.txt");
+    reader.key(Key::Char('e'));
+    reader.key(Key::Char('r'));
+    reader.key(Key::Ctrl(b'z'));
+    // The draft is the file again, so Esc leaves without asking; the kept text is still offered.
+    assert_eq!(reader.key(Key::Esc), After::Stay);
+    assert!(!reader.editing());
+    reader.key(Key::Char('e'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
+}
+
+#[test]
+fn a_file_as_large_as_one_can_be_is_still_left_and_trimmed() {
+    let f = Fixture::folder();
+    let limit = usize::try_from(content::LIMIT).unwrap();
+    f.write("full.txt", &"x\n".repeat(limit / 2));
+    let mut reader = editing(&f, "full.txt");
+    typed(&mut reader, "y");
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " The file would be too large to edit.");
+    assert_eq!(reader.key(Key::Right), After::Stay);
+    reader.key(Key::Backspace);
+    assert_eq!(draft(&reader).len(), limit - 1);
+    reader.key(Key::Ctrl(b'z'));
+    assert_eq!(reader.key(Key::Esc), After::Stay);
+    assert!(!reader.editing());
+}
+
+#[test]
+fn a_byte_order_mark_typed_into_a_file_without_one_is_not_doubled() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "abc\n");
+    let file = f.root.join("notes.txt");
+    let mut reader = editing(&f, "notes.txt");
+    reader.paste(Some("\u{feff}"));
+    reader.key(Key::Ctrl(b's'));
+    typed(&mut reader, "x");
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}xabc\n");
+    // A paste that holds nothing to insert is not a change.
+    assert_eq!(reader.paste(Some("\x1b\x07")), After::Ignored);
+    assert!(!reader.editor.as_ref().unwrap().dirty());
+}
+
+#[test]
+fn a_format_is_undone_in_a_file_with_a_lone_carriage_return() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("a.go", "a\rb\n");
+    let (mut reader, bin) = with_tools(&f, "a.go");
+    stand_in(&bin, "gofmt", "cat >/dev/null; echo formatted");
+    reader.key(Key::Char('e'));
+    reader.key(Key::End);
+    reader.key(Key::Backspace);
+    format(&mut reader);
+    assert_eq!(draft(&reader), "formatted\n");
+    reader.key(Key::Ctrl(b'z'));
+    drawn(&mut reader, 60, 5);
+    typed(&mut reader, "!");
+    reader.key(Key::Ctrl(b'z'));
+    reader.key(Key::Ctrl(b'z'));
+    drawn(&mut reader, 60, 5);
+    assert_eq!(draft(&reader), "a\rb\n");
 }
