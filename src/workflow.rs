@@ -360,4 +360,43 @@ mod tests {
         assert_eq!(screen.text()[0], "Content");
         assert_eq!(pane.next_frame(), Some(Duration::ZERO));
     }
+
+    #[test]
+    fn a_followed_history_shows_a_slow_commits_files_without_another_key() {
+        use crate::history::History;
+        use std::time::Instant;
+
+        let f = Fixture::new();
+        f.write("page.txt", "one\n");
+        f.commit("first");
+        let make = |repo, _: &Preferences| -> Box<dyn Pane> { Box::new(History::new(repo, true).impatient()) };
+        let repo = Repo::open(&f.root).unwrap();
+        let mut pane = Project {
+            root: repo.root.clone(),
+            git: true,
+            pane: make(repo, &Preferences::default()),
+            make,
+            source: None,
+            last_dir: None,
+            note: None,
+            notice_only: false,
+            preference_note: None,
+            focus: None,
+        };
+        let mut screen = Screen::sized(60, 8);
+        pane.draw(&mut screen);
+        pane.key(Key::Enter);
+        pane.draw(&mut screen);
+        assert!(screen.text().iter().any(|row| row.contains("Reading files")), "{:?}", screen.text());
+
+        // The loop is given only this pane's deadline and frames, never the one it wraps.
+        let until = Instant::now() + Duration::from_secs(30);
+        while !screen.text().iter().any(|row| row.contains("page.txt")) {
+            let wait = pane.next_frame().expect("a frame is due while the files are read");
+            assert!(Instant::now() < until, "{:?}", screen.text());
+            std::thread::sleep(wait);
+            pane.draw(&mut screen);
+        }
+        assert_eq!(pane.next_frame(), None);
+    }
 }

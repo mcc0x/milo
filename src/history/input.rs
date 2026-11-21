@@ -73,7 +73,7 @@ impl History {
     }
 
     /// Make room for the preview when a keyboard opens a commit at the edge.
-    fn keep_preview_in_view(&mut self) {
+    pub(super) fn keep_preview_in_view(&mut self) {
         let preview = self.open_files().map_or(0, |diff| {
             let files = diff.files.len();
             files.min(FILE_PREVIEW) + usize::from(files > FILE_PREVIEW) + usize::from(diff.unrepresented > 0)
