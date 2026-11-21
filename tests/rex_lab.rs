@@ -875,3 +875,85 @@ fn rails_follow_their_worktree_through_new_tabs_resizes_renames_and_a_restart() 
     scene.a_restored_rail_is_remembered_only_if_milo_runs_in_it(&two, &other_session, [&fresh, &barrier]);
     scene.a_restored_rail_needs_confirmation_to_rebuild(&two);
 }
+
+/// The floating reader the outline opens in Rex, edited through Rex's own keys.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn a_floating_reader_edits_a_file_and_is_not_replaced_while_it_has_unsaved_changes() {
+    let mut lab = Lab::start();
+    lab.start_app();
+    let dir = lab.root.join("edit");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "first\n").unwrap();
+    fs::write(dir.join("b.txt"), "second\n").unwrap();
+    let [session, tab] = lab.new_session("edit", "files", &dir);
+    let milo = lab.milo.to_str().unwrap().to_owned();
+    let place = ["-s", session.as_str(), "-w", tab.as_str(), "-c", dir.to_str().unwrap()];
+    let outline = ["--split=left", "--shell=none", "--label", "outline", "--", milo.as_str(), "outline"];
+    lab.rex(&[["run"].as_slice(), &place, &outline].concat());
+
+    // The reader is named after its file; what it runs is checked by what its screen shows.
+    let pane = |label: &str| {
+        let view = lab.view();
+        view.tab(&tab).panes.iter().find(|pane| pane.label == label).map(|pane| pane.block.clone())
+    };
+    let screen = |block: &str| lab.rex(&["capture", "-s", &session, "-b", block, "--trim"]);
+    let shows = |block: &str, text: &str| {
+        assert!(soon(|| screen(block).contains(text)), "expected {text:?} on:\n{}", screen(block));
+    };
+    let keys = |block: &str, keys: &[&str]| {
+        lab.rex(&[["send-key", "-s", session.as_str(), "-b", block].as_slice(), keys].concat());
+    };
+    let outline = {
+        assert!(soon(|| pane("outline").is_some()), "{:?}", lab.view());
+        pane("outline").unwrap()
+    };
+
+    // Reading is the default: the reader the outline opens offers to edit and writes nothing.
+    shows(&outline, "a.txt");
+    keys(&outline, &["enter"]);
+    assert!(soon(|| pane("a.txt").is_some()), "no floating reader in {:?}", lab.view());
+    let reader = pane("a.txt").unwrap();
+    shows(&reader, "first");
+    shows(&reader, "e edit");
+    keys(&reader, &["e"]);
+    shows(&reader, "^S save");
+    lab.rex(&["send", "-s", &session, "-b", &reader, "typed "]);
+    shows(&reader, "unsaved");
+    shows(&reader, "typed first");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "first\n");
+
+    // Opening another file would end this reader, so the outline leaves it alone.
+    keys(&outline, &["down", "enter"]);
+    shows(&outline, "The open reader has unsaved edits.");
+    assert!(pane("b.txt").is_none() && pane("a.txt").as_deref() == Some(reader.as_str()));
+
+    keys(&reader, &["ctrl+s"]);
+    shows(&reader, "Saved");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "typed first\n");
+    keys(&outline, &["enter"]);
+    assert!(soon(|| pane("b.txt").is_some() && pane("a.txt").is_none()), "{:?}", lab.view());
+
+    // A reader that Rex closes with unsaved changes keeps them outside the project.
+    let reader = pane("b.txt").unwrap();
+    shows(&reader, "second");
+    keys(&reader, &["e"]);
+    shows(&reader, "^S save");
+    lab.rex(&["send", "-s", &session, "-b", &reader, "lost? "]);
+    shows(&reader, "unsaved");
+    lab.rex(&["block", "close", "-s", &session, &reader]);
+    let drafts = lab.root.join("home/.local/state/milo/drafts");
+    let kept = || fs::read_dir(&drafts).ok()?.flatten().find_map(|entry| fs::read_to_string(entry.path()).ok());
+    assert!(soon(|| kept().as_deref() == Some("lost? second\n")), "{:?}", kept());
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "second\n");
+
+    // The outline can open it again, and the editor offers the draft back.
+    keys(&outline, &["enter"]);
+    assert!(soon(|| pane("b.txt").is_some()), "{:?}", lab.view());
+    let reader = pane("b.txt").unwrap();
+    shows(&reader, "second");
+    keys(&reader, &["e"]);
+    shows(&reader, "Kept draft found");
+    keys(&reader, &["r", "ctrl+s"]);
+    assert!(soon(|| fs::read_to_string(dir.join("b.txt")).unwrap() == "lost? second\n"));
+}
