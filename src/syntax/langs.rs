@@ -438,8 +438,9 @@ static CSS: Lang = Lang {
 static SCSS: Lang = Lang { spaced_comments: true, line_comments: &["//"], ..CSS };
 
 const MARKUP_COMMENTS: &[(&str, &str)] = &[("<!--", "-->")];
-/// HTML, XML and the single-file components built on them.
+/// HTML and the single-file components built on it, and SVG, which also holds styles and scripts.
 static MARKUP: Lang = Lang { grammar: Grammar::Markup, block_comments: MARKUP_COMMENTS, names: false, ..PLAIN };
+static XML: Lang = Lang { grammar: Grammar::Xml, ..MARKUP };
 static MARKDOWN: Lang = Lang { grammar: Grammar::Markdown, block_comments: MARKUP_COMMENTS, names: false, ..PLAIN };
 
 /// The language of a `script` element's text.
@@ -483,7 +484,8 @@ pub(super) const FILE_LANGS: &[(&[&str], &Lang)] = &[
     (&["tf", "tfvars", "hcl"], &HCL),
     (&["css"], &CSS),
     (&["scss", "less"], &SCSS),
-    (&["html", "htm", "xhtml", "xml", "svg", "vue", "svelte"], &MARKUP),
+    (&["html", "htm", "xhtml", "svg", "vue", "svelte"], &MARKUP),
+    (&["xml"], &XML),
     (&["md", "markdown", "mdx"], &MARKDOWN),
 ];
 
@@ -521,9 +523,9 @@ impl Lang {
             "make" | "gmake" => &[&MAKEFILE],
             "ruby" | "jruby" => &[&RUBY],
             "elixir" => &[&ELIXIR],
-            "scala" | "scala-cli" => &[&SCALA],
+            "scala" | "scala-cli" | "amm" => &[&SCALA],
             "dart" => &[&DART],
-            "kotlin" => &[&KOTLIN],
+            "kotlin" | "kscript" => &[&KOTLIN],
             _ => return false,
         };
         languages.iter().any(|&lang| std::ptr::eq(self, lang))
@@ -1513,12 +1515,51 @@ mod tests {
     fn long_runs_of_markdown_and_markup_openers_are_read_once() {
         // Each opener must not start a fresh search of the rest of the line.
         const N: usize = 1 << 17;
-        for lang in [&MARKDOWN, &MARKUP, &CSS] {
-            for piece in ["[", "[x](", "`a``", "<", "&", "[a][", "#abc", "<a "] {
-                let text = piece.repeat(N / piece.len());
+        let run = |piece: &str| piece.repeat(N / piece.len());
+        let mut lines: Vec<String> = ["[", "[x](", "`a``", "<", "&", "[a][", "#abc", "<a "].map(run).into();
+        // Many openers that share one closer, each followed by something that never closes.
+        lines.push(format!("{}]{}", run("["), run("[")));
+        lines.push(format!("{}][{}", run("["), run("x")));
+        lines.push(format!("{}]({}", run("["), run("x")));
+        let started = std::time::Instant::now();
+        for lang in [&MARKDOWN, &MARKUP, &XML, &CSS] {
+            for text in &lines {
                 let mut state = State::Code;
-                pieces(lang, &text, &mut state);
+                pieces(lang, text, &mut state);
             }
+        }
+        // Read once, these take milliseconds; read from every opener, minutes.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn xml_names_are_only_names_and_css_colours_keep_to_their_declaration() {
+        assert_eq!(
+            one(&XML, "<?xml version=\"1.0\"?>"),
+            [("xml", Class::Keyword), ("version", Class::Key), ("\"1.0\"", Class::Str)]
+        );
+        let mut state = State::Code;
+        pieces(&XML, "<style name=\"AppTheme\">", &mut state);
+        assert_eq!(state, State::Code);
+        assert_eq!(
+            pieces(&XML, "  <item name=\"a\">Don't @color/x</item>", &mut state),
+            [("item", Class::Keyword), ("name", Class::Key), ("\"a\"", Class::Str), ("item", Class::Keyword)]
+        );
+        assert!(std::ptr::eq(for_file("res/values/styles.xml").unwrap(), &XML));
+        assert!(std::ptr::eq(for_file("icon.svg").unwrap(), &MARKUP));
+
+        assert_eq!(one(&CSS, "  border:1px solid #ccc;"), [("1px", Class::Number), ("#ccc", Class::Number)]);
+        assert!(!one(&CSS, "a { color: red } #abc { x: y }").contains(&("#abc", Class::Number)));
+        assert!(!one(&CSS, "@media (min-width: 600px) { #add {").contains(&("#add", Class::Number)));
+    }
+
+    #[test]
+    fn markdown_looks_far_enough_ahead_to_close_inline_code_at_the_edge() {
+        assert!(MARKDOWN.lookahead() >= 256 && MARKUP.lookahead() == 32);
+        for name in ["build.sc", "x.kts"] {
+            let lang = for_file(name).unwrap();
+            let runner = if name == "build.sc" { "amm" } else { "kscript" };
+            assert!(lang.agrees_with_shebang(&format!("#!/usr/bin/env {runner}")), "{name}");
         }
     }
 

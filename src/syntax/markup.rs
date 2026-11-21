@@ -38,7 +38,14 @@ impl Raw {
     }
 }
 
-pub(super) fn walk<const DRAW: bool>(text: &str, mut i: usize, state: &mut State, emit: &mut impl FnMut(Span)) {
+/// With `embedded`, the text of a `script` or `style` element is read as code.
+pub(super) fn walk<const DRAW: bool>(
+    text: &str,
+    mut i: usize,
+    embedded: bool,
+    state: &mut State,
+    emit: &mut impl FnMut(Span),
+) {
     let b = text.as_bytes();
     while i < b.len() {
         i = match state {
@@ -57,7 +64,7 @@ pub(super) fn walk<const DRAW: bool>(text: &str, mut i: usize, state: &mut State
                 }
                 end
             }
-            State::Code => prose(b, i, state, emit),
+            State::Code => prose(b, i, embedded, state, emit),
             _ => {
                 *state = State::Code;
                 i
@@ -72,7 +79,7 @@ fn find_caseless(b: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 }
 
 /// Skips text up to the next tag, comment or entity, and colours that.
-fn prose(b: &[u8], from: usize, state: &mut State, emit: &mut impl FnMut(Span)) -> usize {
+fn prose(b: &[u8], from: usize, embedded: bool, state: &mut State, emit: &mut impl FnMut(Span)) -> usize {
     let Some(at) = b[from..].iter().position(|&c| matches!(c, b'<' | b'&')) else { return b.len() };
     let at = from + at;
     if b[at] == b'&' {
@@ -95,7 +102,7 @@ fn prose(b: &[u8], from: usize, state: &mut State, emit: &mut impl FnMut(Span)) 
     }
     let end = name + b[name..].iter().take_while(|&&c| !c.is_ascii_whitespace() && !matches!(c, b'>' | b'/')).count();
     emit((name, end, Class::Keyword));
-    let raw = if closing { None } else { Raw::named(&b[name..end]) };
+    let raw = if closing || !embedded { None } else { Raw::named(&b[name..end]) };
     *state = State::Tag { quote: None, raw };
     end
 }
@@ -112,8 +119,9 @@ fn entity(b: &[u8], at: usize, emit: &mut impl FnMut(Span)) -> usize {
     }
 }
 
+/// What cannot be part of an attribute's name, including the `?` that closes `<?xml … ?>`.
 fn attribute_end(c: u8) -> bool {
-    c.is_ascii_whitespace() || matches!(c, b'=' | b'>' | b'/' | b'"' | b'\'')
+    c.is_ascii_whitespace() || matches!(c, b'=' | b'>' | b'/' | b'"' | b'\'' | b'?')
 }
 
 /// Colours attribute names and quoted values up to the end of the tag or the line.

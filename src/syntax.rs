@@ -96,8 +96,11 @@ pub struct Lang {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Grammar {
     Code,
-    /// Tags and attributes around text that is not code, as in HTML and XML.
+    /// Tags and attributes around text that is not code, as in HTML. The
+    /// text of `script` and `style` elements is code in another language.
     Markup,
+    /// The same without those elements: in XML, `style` is a name like any other.
+    Xml,
     Markdown,
 }
 
@@ -234,7 +237,8 @@ impl Lang {
         let Some(mut i) = self.resume(b, state, emit) else { return };
         match self.grammar {
             Grammar::Code => {}
-            Grammar::Markup => return markup::walk::<DRAW>(text, i, state, emit),
+            Grammar::Markup => return markup::walk::<DRAW>(text, i, true, state, emit),
+            Grammar::Xml => return markup::walk::<DRAW>(text, i, false, state, emit),
             Grammar::Markdown => return markdown::walk(text, i, state, emit),
         }
         // Only the other grammars leave anything else open.
@@ -324,7 +328,9 @@ impl Lang {
 
     pub fn lookahead(&self) -> usize {
         // A raw string or long bracket can repeat a mark in its opener up to 255 times.
-        if matches!(self.dialect, Dialect::Rust | Dialect::Lua | Dialect::Swift) { 260 } else { 32 }
+        // In prose, inline code or a link is coloured only once its closer has been read.
+        let far = matches!(self.dialect, Dialect::Rust | Dialect::Lua | Dialect::Swift);
+        if far || self.grammar == Grammar::Markdown { 260 } else { 32 }
     }
 
     #[inline]
@@ -399,8 +405,14 @@ impl Lang {
     fn css_mark(b: &[u8], i: usize, emit: &mut impl FnMut(Span)) -> usize {
         let end = i + 1 + b[i + 1..].iter().take_while(|&&c| is_word(c) || c == b'-').count();
         let name = &b[i + 1..end];
-        // Look a short way back, so a long run of marks is not read again from each one.
-        let declared = |b: &[u8]| b.ends_with(b":") || b[b.len().saturating_sub(256)..].windows(2).any(|w| w == b": ");
+        // Look a short way back, so a long run of marks is not read again from
+        // each one, and no further than the start of this declaration.
+        let declared = |b: &[u8]| {
+            let near = &b[b.len().saturating_sub(256)..];
+            let from = near.iter().rposition(|c| matches!(c, b'{' | b'}' | b';')).map_or(0, |at| at + 1);
+            let near = &near[from..];
+            (0..near.len()).any(|at| near[at] == b':' && !near.get(at + 1).is_some_and(u8::is_ascii_alphabetic))
+        };
         if b[i] == b'@' {
             if !name.is_empty() {
                 emit((i, end, Class::Keyword));

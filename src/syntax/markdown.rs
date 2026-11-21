@@ -86,6 +86,8 @@ struct Inline {
     bracket: Option<usize>,
     no_bracket: bool,
     no_paren: bool,
+    /// No `]` closes a `[text][name]` reference from here on.
+    no_reference: bool,
 }
 
 impl Inline {
@@ -154,7 +156,11 @@ impl Inline {
                 self.no_paren = end.is_none();
                 end.map(|at| (after + at + 1, Class::Type))
             }
-            Some(b'[') => b[after..].iter().position(|&c| c == b']').map(|at| (after + at + 1, Class::Key)),
+            Some(b'[') if !self.no_reference => {
+                let end = b[after..].iter().position(|&c| c == b']');
+                self.no_reference = end.is_none();
+                end.map(|at| (after + at + 1, Class::Key))
+            }
             Some(b':') => Some((after, Class::Key)),
             _ => None,
         };
