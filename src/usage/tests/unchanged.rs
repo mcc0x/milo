@@ -3,7 +3,7 @@
 
 use std::process::{Child, Command, Stdio};
 
-use super::idle::{history, last_written, steps};
+use super::idle::{history, last_written, steps, steps_sql};
 use super::omp_limits::{report, sqlite, wait_for, window};
 use super::opencode_activity::{Database, RELEASES, busy_day};
 use super::sqlite::Poll;
@@ -174,7 +174,7 @@ impl Writer {
     }
 
     /// Runs a statement and waits until the tool has committed it.
-    fn run(&mut self, sql: &str) {
+    pub(super) fn run(&mut self, sql: &str) {
         self.saved += 1;
         let done = format!("saved-{}-{}", self.child.id(), self.saved);
         writeln!(self.child.stdin.as_mut().unwrap(), "{sql}\n.once {done}\nSELECT 1;").unwrap();
@@ -244,12 +244,12 @@ fn opencode_activity_beside_a_write_ahead_log_is_read_when_a_write_moves_its_tim
     assert_eq!(steps_today(looks.look(noon)), Some(1));
     assert!(looks.look(noon + 20).is_none());
 
-    // OpenCode keeps the database open in write-ahead mode. There the header's change
-    // counter stands still and a step can land without the files changing size, so
-    // their times are what says a write happened.
-    let tool = Writer::open(&f, &db.path);
+    // OpenCode keeps the database open in write-ahead mode and writes its steps
+    // itself. There the database's change counter stands still, and where a write
+    // leaves both files their sizes only their times say that it happened.
+    let mut tool = Writer::open(&f, &db.path);
     for (step, at) in [(1, noon + 30), (2, noon + 70)] {
-        steps(&db.path, step, 1, (noon - 50) * 1000);
+        tool.run(&steps_sql(step, 1, (noon - 50) * 1000));
         written(at);
         assert_eq!(steps_today(looks.look(at + 10)), Some(u64::from(step) + 1), "a step written at {at} was not read");
         assert!(looks.look(at + 30).is_none());

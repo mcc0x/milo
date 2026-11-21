@@ -39,28 +39,30 @@ pub(super) fn last_written(path: &Path, at: i64) {
 }
 
 pub(super) fn history(path: &Path, rows: u32, newest_ms: i64, fraction: &str) {
+    exec(path, &history_sql(rows, newest_ms, fraction));
+}
+
+fn history_sql(rows: u32, newest_ms: i64, fraction: &str) -> String {
     let reset = (NOW + DAY) * 1000;
-    exec(
-        path,
-        &format!(
-            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows})
-             INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, resets_at, window_label)
-             SELECT 'anthropic','oauth|account:bench',{newest_ms}-i*1000,'anthropic:5h',{fraction},{reset},'5 Hours' FROM n;"
-        ),
-    );
+    format!(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows}) \
+         INSERT INTO usage_history(provider, account_key, recorded_at, limit_id, used_fraction, resets_at, window_label) \
+         SELECT 'anthropic','oauth|account:bench',{newest_ms}-i*1000,'anthropic:5h',{fraction},{reset},'5 Hours' FROM n;"
+    )
 }
 
 pub(super) fn steps(path: &Path, first: u32, rows: u32, newest_ms: i64) {
-    exec(
-        path,
-        &format!(
-            r#"WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows})
-               INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data)
-               SELECT 'msg_'||({first}+i),'bench','assistant',{first}+i,{newest_ms}-i,{newest_ms}-i,
-                      '{{"cost":0.001,"tokens":{{"input":10,"output":5,"reasoning":0,"cache":{{"read":7,"write":1}}}}}}'
-               FROM n;"#
-        ),
-    );
+    exec(path, &steps_sql(first, rows, newest_ms));
+}
+
+pub(super) fn steps_sql(first: u32, rows: u32, newest_ms: i64) -> String {
+    format!(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows}) \
+         INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data) \
+         SELECT 'msg_'||({first}+i),'bench','assistant',{first}+i,{newest_ms}-i,{newest_ms}-i,\
+         '{{\"cost\":0.001,\"tokens\":{{\"input\":10,\"output\":5,\"reasoning\":0,\"cache\":{{\"read\":7,\"write\":1}}}}}}' \
+         FROM n;"
+    )
 }
 
 /// Lets every read the timer started finish, and returns how long that took.
@@ -125,10 +127,12 @@ fn measure(size: &Size, write_ahead: bool) {
     db.session("bench", "2.3.2", NOW - 3600, None);
     steps(&db.path, 0, size.steps, (NOW - 60) * 1000);
     let bytes = fs::metadata(&omp).unwrap().len() + fs::metadata(&db.path).unwrap().len();
-    let tools = write_ahead.then(|| [&omp, &db.path].map(|database| Writer::open(&f, database)));
-    if write_ahead {
-        // A database in this mode cannot be read until a write has made its log.
-        [&omp, &db.path].into_iter().for_each(|database| exec(database, "PRAGMA user_version=1;"));
+    // In write-ahead mode the tools hold their databases open and do their own
+    // writing, as OMP and OpenCode do. A database in that mode cannot be read
+    // until its tool has written and so made its log.
+    let mut tools = write_ahead.then(|| [&omp, &db.path].map(|database| Writer::open(&f, database)));
+    for tool in tools.iter_mut().flatten() {
+        tool.run("PRAGMA user_version=1;");
     }
     dated(&omp, NOW - 60);
     dated(&db.path, NOW - 60);
@@ -148,8 +152,11 @@ fn measure(size: &Size, write_ahead: bool) {
     }
 
     let written = NOW + i64::from(TICKS) * 20;
-    history(&omp, 1, written * 1000, "0.77");
-    steps(&db.path, size.steps, 1, written * 1000);
+    let rows = [history_sql(1, written * 1000, "0.77"), steps_sql(size.steps, 1, written * 1000)];
+    match &mut tools {
+        Some(tools) => tools.iter_mut().zip(&rows).for_each(|(tool, row)| tool.run(row)),
+        None => [&omp, &db.path].into_iter().zip(&rows).for_each(|(database, row)| exec(database, row)),
+    }
     dated(&omp, written);
     dated(&db.path, written);
     let fresh = (1..=TICKS).find(|after| {
