@@ -35,7 +35,7 @@ After changing `install.sh`, also run `sh tests/install.sh`; `cargo test` does n
 
 Then run the program and look at what you changed. Text checks cannot tell you whether a pane looks right.
 
-When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
+When updating the README, guides, agent skill, `llms.txt` or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt` and `site/public/llms.txt`. CI checks that the published copies match these sources.
 
 The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
 
@@ -258,11 +258,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | --- | --- |
 | `src/alerts.rs` | Keeps the alert mirroring choices and applies each change to them. |
 | `src/alerts/cli.rs` | Runs `milo alerts` and reads a secret without showing it. |
+| `src/alerts/consent.rs` | Captures what a confirmation showed without exposing the saved credentials. |
 | `src/alerts/event.rs` | Reads Rex's event stream and decides which events are alerts, once each. |
 | `src/alerts/forward.rs` | Follows Rex as the one mirroring process, with retries and rate limits. |
 | `src/alerts/message.rs` | Words an alert, strips a program's text of mentions, and says what is sent. |
+| `src/alerts/relay.rs` | Pairs a destination and forwards Telegram alerts through Milo's relay, or a loopback one in development. |
 | `src/alerts/secret.rs` | Keeps a destination's secret in the macOS Keychain or a private file. |
 | `src/alerts/send.rs` | Posts one message with curl and classifies the answer. |
+| `src/alerts/telegram.rs` | Finds the chats in a bot's recent updates, within limits, to offer as destinations. |
 | `src/alerts/tests.rs` | Checks alerts, messages, settings, secrets and the request. |
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
@@ -278,17 +281,23 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
 | `src/history/input.rs` | Handles history keys and mouse clicks. |
 | `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
+| `src/home.rs` | Runs Home, the picker `milo` opens, with settings and maintenance in the same terminal session. |
+| `src/home/mascot.rs` | Draws the mascot in coloured cells at four sizes. |
 | `src/icons.rs` | Chooses file and folder symbols and their colours. |
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
 | `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
+| `src/menubar.rs` | Installs or removes the optional macOS menu app from the archive built into a menu-enabled binary. |
+| `src/menubar.sh` | Verifies, installs, upgrades and removes that app for `menubar.rs`. It is embedded, never downloaded. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
 | `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
 | `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/outline/untracked.rs` | Fills in line counts for new files after the first frame, without following links. |
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
+| `src/preferences.rs` | Stores personal preferences outside repositories, per worktree over global defaults, and folder choices in local state. |
 | `src/presence.rs` | Keeps the one Discord presence choice, says what each choice makes public, and turns it on, off, and into a status for every settings surface. |
 | `src/presence/discord.rs` | Speaks Discord's local RPC protocol: the socket, the frames, the fixed activity and its optional second line. |
 | `src/presence/helper.rs` | Runs the single background process that shows the activity while a Rex app has a session open, and the chosen names of what is in front. |
@@ -306,10 +315,16 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
+| `src/rex_reader.lua` | Opens a floating reader in Rex and closes the one it replaces only after the new one exists. |
+| `src/rex_reader_test.lua` | Checks that script with a stand-in for Rex. |
+| `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows, and nothing from other terminals. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
-| `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
+| `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
+| `src/setup/actions_test.lua` | Checks those actions with a stand-in for Rex. |
 | `src/setup/claude.rs` | Plans changes to the Claude Code status line and tracks ownership. |
+| `src/setup/doctor.rs` | Inspects the installation without starting Rex, and repairs or removes the integration with setup's ownership checks. |
+| `src/setup/draw.rs` | Draws setup in a full tab or a narrow rail. |
 | `src/setup/files.rs` | Checks, replaces, and restores files changed by setup. |
 | `src/setup/install.rs` | Coordinates setup saves, Rex reloads, and listener changes. |
 | `src/setup/layout.rs` | Reads and writes layout choices and generates Lua files. |
@@ -317,9 +332,13 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/listener_0_1_2.lua` | Keeps the listener of releases 0.1.1 and 0.1.2 for the test that saves over it. |
 | `src/setup/listener_test.lua` | Checks the new-tab, new-session and tab-title handlers with a stand-in for Rex. |
 | `src/setup/lock.rs` | Keeps saves, listeners and presence helpers from overlapping and stops the listener or helper. |
+| `src/setup/preview.rs` | Sketches, in proportion, the layout Milo would build around a shell. |
+| `src/setup/profiles.rs` | Saves a rail's roles, side, order and proportions globally or for a worktree, never Rex block IDs, and undoes a trial. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
+| `src/setup/tests.rs` | Checks the setup screen's frames and clicks, scoped saves, trials, and installation with throwaway settings and a stand-in for Rex. |
 | `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
+| `src/setup/welcome.rs` | Guides a first run without changing settings until the user chooses Save or Skip. |
 | `src/syntax.rs` | Scans source text to find spans to colour. |
 | `src/syntax/delimiters.rs` | Handles string and comment closers that depend on their openers. |
 | `src/syntax/markdown.rs` | Colours Markdown headings, code, links, list marks and quotes. |
@@ -329,6 +348,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
+| `src/uninstall.rs` | Uninstalls the running copy of Milo once confirmed, not the first `milo` on `PATH`. |
 | `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity, and works out which tools are in use. |
 | `src/usage/accounts.rs` | Asks providers about accounts the user turned on, and keeps each figure in its own unit. |
 | `src/usage/draw.rs` | Lays out the tools that have a place, with their figures, reset times, and hints. |
@@ -336,14 +356,17 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
 | `src/usage/files.rs` | Scans session files and bounds how much a refresh reads. |
 | `src/usage/marks/Inter-OFL.txt` | Records the licence for the font used in usage figures. |
+| `src/usage/marks/LobeHub-LICENSE.txt` | Records the licence of the marks taken from LobeHub Icons. |
 | `src/usage/marks/README.md` | Records artwork sources and figure generation instructions. |
 | `src/usage/marks/claude.png` | Embeds the Claude mark shown in the pane. |
 | `src/usage/marks/claude.svg` | Stores the SVG source for the Claude mark. |
 | `src/usage/marks/codex.png` | Embeds the Codex mark shown in the pane. |
 | `src/usage/marks/codex.svg` | Wraps the original Codex bitmap in SVG. |
+| `src/usage/marks/copilot.png`, `deepseek.png`, `devin.png`, `opencode.png`, `openrouter.png` | Hold the marks the menu app shows for those tools and accounts. |
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
 | `src/usage/http.rs` | Sends one bounded GET through curl with the key on standard input. |
+| `src/usage/menu.rs` | Streams the pane's readings as one JSON snapshot per line for the menu app, using global preferences. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
 | `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
@@ -355,6 +378,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
+| `src/usage/tests/menu_stream.rs` | Checks that the stream agrees with the pane, follows global preferences, and stops when its reader is gone. |
 | `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
 | `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
 | `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
@@ -366,14 +390,21 @@ By contributing you agree that your work is released under the MIT licence that 
 | `dashboard/app/`, `dashboard/components/` | Next.js App Router entry point and React settings sections. Run `bun run build` in `dashboard/` after changing the UI, and commit its generated `dashboard/bundle/` alongside the source. Cargo embeds that bundle without installing frontend tooling. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
+| `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
+| `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
 | `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
-| `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
+| `tests/install.sh` | Checks both installers with stand-ins for Git, Cargo and curl: which source is built, the macOS and checksum checks, and removal only with a matching receipt. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
+| `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
+| `tests/menu-badge.swift` | Checks which provider and window the menu bar badge shows. |
+| `tests/menu-handoff.swift` | Checks that the menu app hands the browser its private link through an owner-only file. |
+| `tests/menubar.sh` | Verifies the built menu app's signature, runs those three checks, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |
 | `tests/presence.rs` | Runs `milo presence` and its helper against stand-ins for Discord and Rex, frame by frame. |
 | `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
 | `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
+| `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |

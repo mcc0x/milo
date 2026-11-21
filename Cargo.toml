@@ -10,10 +10,12 @@ license = "MIT"
 keywords = ["terminal", "git", "tui", "rex", "code-reader"]
 categories = ["command-line-utilities", "development-tools"]
 # Shell test drivers require files from a Git checkout, not the Cargo archive.
+# A leading slash names one path at the package root. Without it, a name such as
+# README.md also matches every copy under an installed frontend dependency.
 # A unit test reads the one file under hosted/, shared with the relay's tests.
 include = [
-    "build.rs", "dashboard/bundle/**", "src/**", "tests/**", "!tests/*.sh",
-    "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml", "hosted/milo-alert-texts.json",
+    "/build.rs", "/dashboard/bundle/**", "/src/**", "/tests/**", "!/tests/*.sh",
+    "/Cargo.lock", "/LICENSE", "/README.md", "/rustfmt.toml", "/hosted/milo-alert-texts.json",
 ]
 
 [dependencies]
