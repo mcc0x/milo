@@ -1,7 +1,7 @@
 'use client';
 
 import {createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode} from 'react';
-import {canSaveDraft, canWriteGroup, groupLabels, healthLabels, type AlertDestination, type GroupKey, type Scope, type SessionState} from './session-state';
+import {canSaveDraft, canWriteGroup, groupLabels, healthLabels, type AlertDestination, type GroupKey, type Scope, type SessionState, type TransferGroup, type TransferScope} from './session-state';
 
 export type {AlertDestination, AlertKind, AlertsState, GroupKey, GroupState, PaneRole, PresenceDetails, PresenceState, Scope, SessionState, UsageChoice} from './session-state';
 
@@ -22,6 +22,10 @@ type HostedConnectRequest =
   | {action: 'preview'; provider: AlertDestination; deviceKey: string; finishCode?: string};
 type HostedSaveRequest = {provider: AlertDestination; deviceKey: string; finishCode?: string; label: string};
 type HostedSaveResult = {status: number; cleanupConfirmed?: boolean};
+type TransferRead =
+  | {action: 'export'; groups: TransferGroup[]; scope: TransferScope}
+  | {action: 'preview'; bundle: string; here: string | null};
+type TransferWrite = {action: 'apply'; bundle: string; here: string | null; basis: string} | {action: 'undo'};
 
 type Snapshot = {
   state: SessionState | undefined;
@@ -55,6 +59,10 @@ interface SessionActions {
   findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   hostedConnect(request: HostedConnectRequest, signal: AbortSignal): Promise<{status: number; data: unknown}>;
   saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult>;
+  /** Asks for a bundle or a preview. Nothing is saved. Rejects with the editor's own words. */
+  readTransfer<T>(request: TransferRead): Promise<T>;
+  /** Applies an import or takes the last one back. Resolves to what went wrong, or to nothing. */
+  writeTransfer(request: TransferWrite): Promise<string>;
   confirm(title: string, note: string, label: string, action: () => void): void;
   discard(group: GroupKey | 'all'): void;
   notify(text: string, error?: boolean): void;
@@ -372,6 +380,39 @@ function createEditor(): Editor {
     }
   }
 
+  async function readTransfer<T>(request: TransferRead): Promise<T> {
+    try {
+      return await api<T>('/api/transfer', 'POST', request);
+    } finally {
+      publish();
+    }
+  }
+
+  async function writeTransfer(request: TransferWrite): Promise<string> {
+    if (!state || !connected || running || paused || closing || ended || queue.length) {
+      return 'The editor is busy. Wait for it to finish, then try again.';
+    }
+    running = true;
+    localError = '';
+    operationWarning = '';
+    publish();
+    try {
+      state = await api<SessionState>('/api/transfer', 'POST', {...request, version: state.version});
+      if (state.message?.error) operationWarning = state.message.text;
+      else if (state.message?.text) setToast(state.message.text, false);
+      return '';
+    } catch (error) {
+      // A refused import can follow a change made elsewhere; show what is saved now.
+      try { state = await api<SessionState>('/api/state'); } catch { /* Keep the reason below. */ }
+      return (error as Error).message;
+    } finally {
+      running = false;
+      syncNumericDrafts();
+      if (!paused) void drain();
+      publish();
+    }
+  }
+
   async function keepDraftAlive() {
     if (running || closing || ended) return;
     try {
@@ -613,7 +654,7 @@ function createEditor(): Editor {
   return {
     start, subscribe, getSnapshot: () => snapshot, getServerSnapshot: () => initialSnapshot,
     actions: {
-      draftValue, edit, command, findTelegramChats, hostedConnect, saveHostedConnection, confirm, discard, notify,
+      draftValue, edit, command, findTelegramChats, hostedConnect, saveHostedConnection, readTransfer, writeTransfer, confirm, discard, notify,
       trackNumericDraft, commitNumericDraft,
       applyNumericDraft, applyNumericDrafts, hasNumericDraft: field => numericDrafts.has(field),
       connect, dropEdit, done, requestSave, finishSave, finishConfirmation,
