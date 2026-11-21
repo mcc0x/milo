@@ -35,7 +35,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
-| `milo view FILE [--commit ID]` | Opens the read-only reader. |
+| `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
 | `milo listen [--stop]` | Starts or stops layout memory, automatic new-tab arrangement and tab titles; normally managed by setup. |
@@ -62,6 +62,13 @@ rex run -s "$session" -c "$project_dir" -- milo view "$file" --commit "$id"
 The user can press `n` or `N` to move between changed blocks and `q` or `Esc`
 to close the reader. In Rex, opening a file from the outline or history also
 opens a floating reader.
+
+The reader does not change a file unless the user edits and saves it. `e`
+starts an edit of a working text file, `Ctrl-S` saves, `Ctrl-F` formats the
+draft with a formatter already installed, and `Esc` stops, asking first if
+there are unsaved changes. Use `milo view "$file" --edit` only when the user
+asked to edit that file. Do not type into the user's editor or answer its
+questions for them; to change a file yourself, use your own tools.
 
 ## Do not
 

@@ -39,6 +39,20 @@ When updating the README, guides, agent skill or this file, run `python3 site/bu
 
 The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
 
+Describe the pull request under the headings in `.github/pull_request_template.md`: **What changed** and **Verification**. GitHub fills them in when you open a pull request in the browser. A body passed on the command line (`gh pr create --body` or `--body-file`) replaces the template, so write the same headings yourself. Add **Compatibility** when a user or packager has to act.
+
+A pull request that changes anything you can see (the website, a terminal pane, the macOS app or any other visible surface) must show real screenshots of the affected UI under **Screenshots** in its description. Show before and after when it changes an existing design, and desktop and mobile when both are affected. A change with nothing to see needs no screenshot; leave the section out.
+
+Give every screenshot alt text that says what it shows, for people who cannot see the image: `![Changes pane after the fix, with the deleted file listed once](…)`. GitHub's default, the file name, says nothing. Replace it, in `alt="…"` too when GitHub inserts an `<img>` tag.
+
+Label the pull request with the existing labels that fit, not every one that could. Usually that is one kind and one or two areas:
+
+- **Kind:** `bug`, `enhancement` or `documentation`.
+- **Area:** `ux` for what the user sees or does, `integrations` for Rex, coding agents and usage sources, `reliability` for recovery and regression checks, `performance` for speed and resource use, `accessibility` for barriers to people with disabilities.
+- **State:** `in review` once it is ready to be read.
+
+Nothing adds these for you, except that Dependabot labels its own pull requests. If GitHub does not let you set labels, say which fit and a maintainer will add them. Do not create new labels in a pull request.
+
 ## Tagging a release
 
 Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. On an arm64 macOS runner, GitHub Actions runs `sh tests/install.sh` and `cargo test --release --locked`, then drives the browser editor of a release build in Chromium with `tests/web-smoke.cjs`. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
@@ -53,9 +67,11 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
-**It stays read-only.** milo never changes a repository. Every git command it runs only reads.
+**It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
+
+**It starts no program the user did not ask for.** Opening and showing a file never run anything from the project or for it. A formatter runs only on `Ctrl-F`, is found by a fixed name in the folders of `PATH` written in full, and is given the draft on standard input. Never install, download or run a tool through a package runner.
 
 ## Style
 
@@ -149,6 +165,11 @@ is opened in its place. That holds for the tabs the test opens one at a time
 and for those it opens back to back, four with no pause between them, three
 times over.
 
+A second test there, on a server of its own, is for the floating reader. It
+opens a file from the outline, edits and saves it through keys Rex sends, sees
+the outline leave that reader alone while it has unsaved changes, then has Rex
+close the reader on an unsaved draft and gets the draft back at the next edit.
+
 ### Adding a usage source
 
 [Usage sources](docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
@@ -157,13 +178,24 @@ A tool also needs a rule for when it is found on this machine, apart from whethe
 
 ### Adding a language to the reader
 
-Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. Adding a language normally means changing only the tables:
+Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. `src/syntax/markup.rs` reads HTML and XML, and `src/syntax/markdown.rs` reads Markdown; those two are not code and have walkers of their own. Adding a language normally means changing only the tables:
 
 1. Add a `Lang` constant: its line and block comments, its quotes (list a longer opener before any opener it starts with), its keywords and constants.
 2. Map its file extensions in `FILE_LANGS`, or a file name such as `Makefile` in `NAMED_LANGS`.
 3. Add a test with a few idiomatic lines and the classes you expect.
+4. Add its row to the language table in `docs/panes.md`.
 
-The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly.
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long.
+
+### Adding a formatter
+
+`src/format.rs` has the table of formatters: `KINDS` maps file extensions to the tools tried in order, and each `Tool` is a program's name and its arguments. A formatter belongs there only if it reads the text on standard input and writes the formatted text to standard output, leaves the file alone, needs no network and exits with a failure when it cannot format. Give it the file's name with `Name`, which is passed as `./name` so that it cannot be read as an option.
+
+1. Check the command against the real program, including what it does with text it cannot parse and whether it writes a cache into the folder it runs in.
+2. Add the `Tool` and its row in `KINDS`, with the names as they read in `Not installed: …`. Keep those names within 24 characters: they are a row of the help page.
+3. Add the row to the formatter table in `docs/panes.md`.
+
+The tests use stand-ins written by `format::tests::stand_in`, so they pass on a machine with no formatter installed. `rustfmt_formats_a_rust_draft_where_it_is_installed` in `tests/pane.rs` runs the real program where there is one.
 
 ### Checking failures and speed
 
@@ -186,7 +218,9 @@ One line in the imperative that says what the commit does for someone using or r
 
 ## Reporting a bug
 
-Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. For anything that looks like a security problem (milo running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+Use the **Bug report** form on GitHub; it adds the `bug` label. Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. A screenshot or pasted output helps but is optional; remove anything private first, such as tokens, account names, paths and repository contents, and give images alt text. For anything that looks like a security problem (milo running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+
+To ask for something new, use the **Feature request** form, which adds `enhancement`. Describe the problem and the outcome you want; a design is not needed.
 
 ## Licence
 
@@ -199,6 +233,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
+| `src/format.rs` | Finds an installed formatter for a kind of file and runs it over a draft, within limits. |
 | `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
@@ -211,7 +246,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
 | `src/icons.rs` | Chooses file and folder symbols and their colours. |
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
-| `src/keys.rs` | Decodes keys, mouse events, paste markers, and terminal replies. |
+| `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
@@ -221,10 +256,16 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
 | `src/read.rs` | Reads regular files and the names that file links point to. |
-| `src/reader.rs` | Keeps reader state and handles navigation and updates. |
+| `src/reader.rs` | Keeps reader state, handles navigation and updates, and starts and ends an edit. |
+| `src/reader/buffer.rs` | Holds the lines of a draft with their endings, and its undo history. |
 | `src/reader/content.rs` | Locates files and loads text, diffs, or pictures. |
+| `src/reader/disk.rs` | Reads a file to edit and saves a draft only into the file it was read from. |
 | `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
+| `src/reader/edit.rs` | Edits a draft: cursor, keys, questions, formatting, and drawing. |
+| `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
+| `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
+| `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
@@ -242,6 +283,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
 | `src/syntax.rs` | Scans source text to find spans to colour. |
 | `src/syntax/delimiters.rs` | Handles string and comment closers that depend on their openers. |
+| `src/syntax/markdown.rs` | Colours Markdown headings, code, links, list marks and quotes. |
+| `src/syntax/markup.rs` | Colours HTML and XML tags, and the scripts and styles inside them. |
 | `src/syntax/langs.rs` | Defines language rules and maps them to file names and extensions. |
 | `src/term.rs` | Sets and restores terminal modes and waits for events. |
 | `src/titles.rs` | Names Rex tabs and sessions after a Git project and remembers the titles Milo set. |
@@ -281,11 +324,11 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
-| `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |
+| `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |
 | `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
 | `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
-| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server. |
+| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, and edits a file in its floating reader. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
 | `tests/web-smoke.cjs` | Saves layout and usage tool choices in the browser editor of a built binary in Chromium, then closes it. |

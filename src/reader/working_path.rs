@@ -143,6 +143,38 @@ impl Entry<'_> {
         !matches!(self.stat.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFLNK)
     }
 
+    pub(super) fn is_regular(&self) -> bool {
+        self.stat.st_mode & libc::S_IFMT == libc::S_IFREG
+    }
+
+    pub(super) fn is_link(&self) -> bool {
+        self.stat.st_mode & libc::S_IFMT == libc::S_IFLNK
+    }
+
+    /// Opens the file to read and write through the held directory. A link
+    /// that has taken the file's place is refused, not followed.
+    pub(super) fn open_edit(&self) -> io::Result<File> {
+        open_at(self.parent.as_ref().unwrap_or(self.root), &self.name, libc::O_RDWR)
+    }
+
+    /// Opens the file to read only, the same way.
+    pub(super) fn open_read(&self) -> io::Result<File> {
+        open_at(self.parent.as_ref().unwrap_or(self.root), &self.name, 0)
+    }
+
+    /// Whether the user may write to the file, asked without opening it: opening
+    /// a file to write and closing it looks like a write to whoever watches it.
+    pub(super) fn writable(&self) -> bool {
+        let dir = self.parent.as_ref().unwrap_or(self.root);
+        // SAFETY: The descriptor and name are live; the call only reports on the file.
+        unsafe { libc::faccessat(dir.as_raw_fd(), self.name.as_ptr(), libc::W_OK, 0) == 0 }
+    }
+
+    /// The file's length when it was looked up.
+    pub(super) fn size(&self) -> u64 {
+        u64::try_from(self.stat.st_size).unwrap_or(0)
+    }
+
     pub(super) fn read(&self, limit: u64) -> Content {
         let dir = self.parent.as_ref().unwrap_or(self.root);
         let link = || link_at(dir, &self.name).map_or_else(|e| LookupError::of(e).content(), Content::Link);

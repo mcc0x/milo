@@ -1,0 +1,23 @@
+name: Feature request
+description: Something milo could do, or do better.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: The outcome you want
+      description: What would be true when this is done. A way to build it is welcome but not needed.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or sketches
+      description: Optional. Drag images in and give each one alt text that says what it shows. Remove anything private first, such as tokens, account names, paths or repository contents.
