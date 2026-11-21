@@ -1232,12 +1232,19 @@ mod tests {
         assert_eq!(pieces(&RUBY, "def hidden", &mut state), [("def hidden", Class::Comment)]);
         assert_eq!(pieces(&RUBY, "=end", &mut state), [("=end", Class::Comment)]);
         assert_eq!(state, State::Code);
-        // Appending to a list, comparing a class and interpolating are not openers.
-        for line in ["list << item", "x <<y", "class << self", "a =begin", "\"#{count}\" + path"] {
+        // Appending to a list, shifting a number, comparing a class and interpolating are not openers.
+        let plain =
+            ["list << item", "x <<y", "MASK = (1<<BITS) - 1", "@items <<Other.new", "n<<SHIFT", "class << self"];
+        for line in plain.into_iter().chain(["a =begin", "\"#{count}\" + path"]) {
             pieces(&RUBY, line, &mut state);
             assert_eq!(state, State::Code, "{line}");
         }
         assert!(!one(&RUBY, "a =begin").iter().any(|p| p.1 == Class::Comment));
+        // Only a line that is the label and nothing else ends the text.
+        pieces(&RUBY, "note = <<~TEXT", &mut state);
+        assert_eq!(pieces(&RUBY, "  TEXT: the label", &mut state), [("  TEXT: the label", Class::Str)]);
+        pieces(&RUBY, "  TEXT", &mut state);
+        assert_eq!(state, State::Code);
         // A quote inside a pattern ends with its line.
         pieces(&RUBY, "name =~ /don't/", &mut state);
         assert_eq!(state, State::Code);
@@ -1398,6 +1405,11 @@ mod tests {
             one(&MARKUP, "<input value=plain disabled>")[1..],
             [("value", Class::Key), ("disabled", Class::Key)]
         );
+        // Code in Svelte's braces does not end the tag at its arrow.
+        assert_eq!(
+            one(&MARKUP, "<button on:click={() => { n += 1 }} class=\"btn\">")[1..],
+            [("on:click", Class::Key), ("class", Class::Key), ("\"btn\"", Class::Str)]
+        );
 
         let mut state = State::Code;
         assert_eq!(
@@ -1509,6 +1521,15 @@ mod tests {
         assert_eq!(pieces(&MARKDOWN, "# hidden", &mut state), [("# hidden", Class::Comment)]);
         assert_eq!(pieces(&MARKDOWN, "--> `shown`", &mut state), [("-->", Class::Comment), ("`shown`", Class::Str)]);
         assert_eq!(state, State::Code);
+
+        // A block in a list item opens beside its bullet or under it, and closes at the same depth.
+        for (open, body, close) in [("- ```sh", "  # make", "  ```"), ("    ```html", "    <!-- config", "    ```")] {
+            assert_eq!(pieces(&MARKDOWN, open, &mut state), [(open, Class::Keyword)]);
+            assert_eq!(pieces(&MARKDOWN, body, &mut state), [(body, Class::Str)]);
+            assert_eq!(pieces(&MARKDOWN, close, &mut state), [(close, Class::Keyword)]);
+            assert_eq!(state, State::Code);
+            assert_eq!(pieces(&MARKDOWN, "# Next", &mut state), [("# Next", Class::Keyword)]);
+        }
     }
 
     #[test]

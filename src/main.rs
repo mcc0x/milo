@@ -60,7 +60,7 @@ Usage: milo
        milo web [--port PORT] [--no-open]
        milo doctor
        milo setup --repair | --remove
-       milo view FILE [--commit ID]
+       milo view FILE [--commit ID | --edit]
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
@@ -125,7 +125,8 @@ Editing in the reader (also opened by milo view FILE --edit):
   Esc           stop editing; asks first if there are unsaved changes
   Ctrl-G        help
 
-Ctrl-C quits, or asks first while a file is being edited. Press ? for help
+Ctrl-C quits; while a file is being edited it stops editing, and asks first
+if there are unsaved edits. Press ? for help
 when the pane has room. The outline, history and reader support the mouse
 wheel, Page Up/Down and Home/End.
 

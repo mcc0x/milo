@@ -24,6 +24,8 @@ pub enum Delimiter {
     CppRaw(Rc<[u8]>),
     CsharpRaw(usize),
     Heredoc(Rc<[u8]>),
+    /// A heredoc that ends only at a line holding its label and nothing else.
+    Alone(Rc<[u8]>),
     Template(Template),
     /// A Lua long string and the number of `=` between its brackets.
     LuaString(u8),
@@ -54,9 +56,13 @@ impl Dialect {
                 (end, end.is_none().then_some(Delimiter::CsharpRaw(width)))
             }
             Self::Php if rest.starts_with(b"<<<") => (None, Some(Delimiter::Heredoc(php_label(&rest[3..])?.into()))),
-            Self::Heredoc if rest.starts_with(b"<<") && (from == 0 || b[from - 1] != b'<') => {
+            // After a value, `<<` shifts or appends.
+            Self::Heredoc
+                if rest.starts_with(b"<<")
+                    && (from == 0 || !(is_word(b[from - 1]) || matches!(b[from - 1], b'<' | b')' | b']' | b'}'))) =>
+            {
                 let (len, label) = heredoc_open(&rest[2..])?;
-                (Some(from + 2 + len), Some(Delimiter::Heredoc(label.into())))
+                (Some(from + 2 + len), Some(Delimiter::Alone(label.into())))
             }
             Self::Javascript if b[from] == b'`' => {
                 let mut template = Template::default();
@@ -105,6 +111,7 @@ impl Delimiter {
                 }
                 Some(b.len() - after.len() + usize::from(after.starts_with(b";")))
             }
+            Self::Alone(label) => (b.trim_ascii() == &**label).then_some(b.len()),
             Self::Template(template) => template.end(b, 0),
             Self::LuaString(level) | Self::LuaComment(level) => lua_end(b, 0, (*level).into()),
             Self::SwiftRaw(hashes) => swift_end(b, 0, (*hashes).into(), 3),
@@ -246,7 +253,7 @@ fn php_label(after: &[u8]) -> Option<&[u8]> {
 }
 
 /// The length and label of what follows `<<`: an optional `~` or `-`, then a
-/// label that is quoted or starts with a capital, which a shifted value seldom does.
+/// label that is quoted or all capitals, which a value added to a list seldom is.
 fn heredoc_open(after: &[u8]) -> Option<(usize, &[u8])> {
     let squiggle = usize::from(matches!(after.first(), Some(b'~' | b'-')));
     let (quote, start) = match after.get(squiggle) {
@@ -254,7 +261,8 @@ fn heredoc_open(after: &[u8]) -> Option<(usize, &[u8])> {
         _ => (None, squiggle),
     };
     let first = *after.get(start)?;
-    let named = if quote.is_some() { is_word(first) } else { first.is_ascii_uppercase() || first == b'_' };
+    let shouted = || after[start..word_end(after, start)].iter().all(|c| !c.is_ascii_lowercase());
+    let named = if quote.is_some() { is_word(first) } else { shouted() && is_word(first) };
     if !named || first.is_ascii_digit() {
         return None;
     }

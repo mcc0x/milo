@@ -537,6 +537,10 @@ impl Reader {
             Some(ReadOnly::NOT_FILE)
         } else if matches!(self.body, Body::Note(note) if note != content::EMPTY) {
             Some(ReadOnly::NOT_SHOWN)
+        } else if entry.size() > content::LIMIT {
+            Some(ReadOnly::TOO_LARGE)
+        } else if !entry.writable() {
+            Some(ReadOnly::NO_PERMISSION)
         } else {
             None
         }
@@ -568,7 +572,7 @@ impl Reader {
             let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
             match stamp.reachable() {
                 Ok(()) => editor.save_to(entry.as_ref().map_err(|error| *error), overwrite),
-                Err(_) => Err(SaveError::Refused("The path to the file changed. Not saved.")),
+                Err(_) => Err(SaveError::Refused("Not saved: the path to the file changed.")),
             }
         };
         match saved {
@@ -588,6 +592,11 @@ impl Reader {
         let Some(editor) = self.editor.take() else { return };
         let line = editor.top();
         drop(editor);
+        // A save into the same file can leave it looking, to the reader's
+        // cheap check, like the file it had already read.
+        if let Source::Working(work) = &mut self.source {
+            work.stamp = None;
+        }
         self.refresh(true);
         self.opening = false;
         self.clear_change();

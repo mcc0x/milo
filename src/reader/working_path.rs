@@ -157,6 +157,24 @@ impl Entry<'_> {
         open_at(self.parent.as_ref().unwrap_or(self.root), &self.name, libc::O_RDWR)
     }
 
+    /// Opens the file to read only, the same way.
+    pub(super) fn open_read(&self) -> io::Result<File> {
+        open_at(self.parent.as_ref().unwrap_or(self.root), &self.name, 0)
+    }
+
+    /// Whether the user may write to the file, asked without opening it: opening
+    /// a file to write and closing it looks like a write to whoever watches it.
+    pub(super) fn writable(&self) -> bool {
+        let dir = self.parent.as_ref().unwrap_or(self.root);
+        // SAFETY: The descriptor and name are live; the call only reports on the file.
+        unsafe { libc::faccessat(dir.as_raw_fd(), self.name.as_ptr(), libc::W_OK, 0) == 0 }
+    }
+
+    /// The file's length when it was looked up.
+    pub(super) fn size(&self) -> u64 {
+        u64::try_from(self.stat.st_size).unwrap_or(0)
+    }
+
     pub(super) fn read(&self, limit: u64) -> Content {
         let dir = self.parent.as_ref().unwrap_or(self.root);
         let link = || link_at(dir, &self.name).map_or_else(|e| LookupError::of(e).content(), Content::Link);

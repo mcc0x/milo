@@ -118,8 +118,8 @@ pub(super) struct Editor {
     mark: Option<Mark>,
     /// The user gave the draft up, so closing must not keep it.
     discarded: bool,
-    /// The draft holds text restored from a kept copy, which a save of it makes unneeded.
-    restored: bool,
+    /// The change that put a kept draft's text in place, if one did.
+    restored: Option<u64>,
 }
 
 /// The display column at which the character at `byte` starts.
@@ -224,7 +224,7 @@ impl Editor {
             formatting: None,
             mark: None,
             discarded: false,
-            restored: false,
+            restored: None,
         }
     }
 
@@ -261,12 +261,13 @@ impl Editor {
         disk::save(entry, &mut self.original, &self.buffer.text(), overwrite)
     }
 
-    /// A kept draft the user put off stays until they restore or delete it: saving
-    /// something else is not an answer to that question. One they restored is now saved.
+    /// A kept draft stays until the user deletes it or saves the text restored
+    /// from it. Saving something else, or the file again after undoing the
+    /// restore, is not an answer to that question.
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
         self.sync_mark();
-        if std::mem::take(&mut self.restored)
+        if self.restored.take_if(|change| self.buffer.holds(*change)).is_some()
             && let Some(draft) = self.place.draft()
         {
             draft.forget();
@@ -443,7 +444,7 @@ impl Editor {
         let kept = kept.strip_prefix('\u{feff}').unwrap_or(&kept);
         let step = self.replace(Pos::default(), self.buffer.end(), kept);
         // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
-        self.restored = true;
+        self.restored = Some(self.buffer.last_change());
         self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
         self.say("Draft restored · ^Z undoes", now);
         step
@@ -463,6 +464,7 @@ impl Editor {
         if self.prompt.is_some() {
             return Step::Ignored;
         }
+        self.format_pending();
         match text {
             Some(text) => {
                 let text = clean(text, self.buffer.newline());
@@ -492,16 +494,26 @@ impl Editor {
         Step::Stay
     }
 
-    /// Runs the formatter that the last frame announced, and puts its text in
-    /// place of the draft as one change. A failure leaves the draft as it was.
-    pub(super) fn format_if_announced(&mut self, now: Instant) {
-        let Some(Formatting { tool, program, .. }) = self.formatting.take_if(|formatting| formatting.announced) else {
-            return;
-        };
+    /// Runs the formatter that the last frame announced.
+    pub(super) fn format_if_announced(&mut self) {
+        if self.formatting.as_ref().is_some_and(|formatting| formatting.announced) {
+            self.format_pending();
+        }
+    }
+
+    /// Runs the formatter that was asked for, if one still is, and puts its
+    /// text in place of the draft as one change. A failure leaves the draft as
+    /// it was. Whatever is typed after Ctrl-F acts on the formatted text, so
+    /// this runs before the next key even when no frame has announced it.
+    fn format_pending(&mut self) {
+        let Some(Formatting { tool, program, .. }) = self.formatting.take() else { return };
         let text = self.buffer.text();
         let dir = self.place.file.parent().unwrap_or(Path::new("."));
         let draft = format::Draft { text: &text, name: self.place.name(), dir, root: &self.place.root };
-        let formatted = match format::run(tool, &program, &draft) {
+        let result = format::run(tool, &program, &draft);
+        // What is said stays its full time from when the formatter ended, however long it took.
+        let now = Instant::now();
+        let formatted = match result {
             Ok(formatted) => formatted,
             Err(failure) => return self.say(failure.sentence(tool.name), now),
         };
@@ -529,6 +541,7 @@ impl Editor {
         if matches!(key, Key::Focus(_)) {
             return Step::Ignored;
         }
+        self.format_pending();
         if let Some(prompt) = self.prompt {
             return self.answer(prompt, key, now);
         }
@@ -632,11 +645,27 @@ impl Editor {
         } else if self.cursor.row >= self.top + self.rows {
             self.top = self.cursor.row + 1 - self.rows;
         }
-        let column = column_of(self.row(), self.cursor.col);
-        if column < self.pan {
+        let text = self.buffer.row(self.cursor.row);
+        let column = column_of(text, self.cursor.col);
+        if column < self.columns {
+            // A line that fits is shown from its start, whatever a longer one needed.
+            self.pan = 0;
+        } else if column < self.pan {
             self.pan = column;
-        } else if self.columns > 0 && column >= self.pan + self.columns {
+        } else if column >= self.pan + self.columns {
             self.pan = column + 1 - self.columns;
+        }
+        // A view that starts inside a wide character would draw this line one column off its cursor.
+        let mut start = 0;
+        for c in text.chars() {
+            let end = start + shown_width(c, start);
+            if start < self.pan && self.pan < end {
+                self.pan = if column >= end { end } else { start };
+            }
+            if end >= self.pan {
+                break;
+            }
+            start = end;
         }
     }
 

@@ -456,11 +456,12 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
         }
     };
     let result = run_entered(start, open, &mut terminal);
-    drop(terminal);
-    // The terminal is the shell's again, so this line stays on screen. A file's name is in it.
+    terminal.restore();
+    // The terminal is the shell's again, so this line stays on screen. It
+    // holds a file's name, and it must not wait for a terminal that has stopped reading.
     if let Some(note) = crate::reader::take_rescue_note() {
         let safe: String = note.chars().filter(|c| !c.is_control()).collect();
-        eprintln!("milo: {safe}");
+        terminal.finish(format!("milo: {safe}\n").as_bytes());
     }
     result
 }

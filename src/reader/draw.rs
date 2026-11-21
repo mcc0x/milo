@@ -125,7 +125,7 @@ impl Reader {
         s.clear();
         if let Some(mut editor) = self.editor.take() {
             // The frame before this one said a formatter was about to run; this one shows what it did.
-            editor.format_if_announced(now);
+            editor.format_if_announced();
             self.draw_editor(s, &mut editor, now);
             self.editor = Some(editor);
             return;

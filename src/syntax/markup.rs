@@ -164,7 +164,19 @@ fn tag(
             b'=' => {
                 i += 1 + b[i + 1..].iter().take_while(|c| c.is_ascii_whitespace()).count();
                 // A value without quotes is not another attribute's name.
-                if !matches!(b.get(i), Some(b'"' | b'\'')) {
+                if b.get(i) == Some(&b'{') {
+                    // Svelte's braces hold code, where `>` does not close the tag.
+                    let mut depth = 0usize;
+                    let close = b[i..].iter().position(|&c| {
+                        depth = match c {
+                            b'{' => depth + 1,
+                            b'}' => depth - 1,
+                            _ => depth,
+                        };
+                        depth == 0
+                    });
+                    i = close.map_or(b.len(), |close| i + close + 1);
+                } else if !matches!(b.get(i), Some(b'"' | b'\'')) {
                     i += b[i..].iter().take_while(|&&c| !c.is_ascii_whitespace() && c != b'>').count();
                 }
             }

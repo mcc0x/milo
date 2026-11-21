@@ -399,7 +399,7 @@ The editor is for small changes. It has one cursor and no selection or search, a
 
 ### What can be edited
 
-A working file can be edited when it is a regular file, is reached without passing through a link, holds UTF-8 text with no NUL bytes, is no larger than 2 MiB and can be written by you. A byte-order mark is allowed. Anything else stays read-only. The last row then has no `e edit`, and `e` or help says why:
+A working file can be edited when it is a regular file, is reached without passing through a link, holds UTF-8 text with no NUL bytes, is no larger than 2 MiB and can be written by you. A byte-order mark is allowed. Anything else stays read-only. The last row then never has `e edit`, and `e` or help says why. A narrow pane can also lack room for `e edit` on a file that can be edited; `e` works all the same.
 
 | It says | Because |
 | --- | --- |
@@ -413,7 +413,7 @@ A working file can be edited when it is a regular file, is reached without passi
 | `not text` | It holds NUL bytes or is not UTF-8, which a save could not keep, or Git treats it as binary |
 | `shown as a picture` | The reader is showing it as a picture |
 | `it cannot be shown` | The reader shows a note in its place, such as `Too large to show.` |
-| `too large` | It grew past 2 MiB since the reader read it |
+| `too large` | It is larger than 2 MiB, though the reader can show its changes |
 | `no write permission` | You may read it but not write it |
 | `it cannot be read` | The file or a folder on the way could not be opened |
 
@@ -440,13 +440,13 @@ A save writes in place, not through a temporary file; that is what keeps the fil
 
 A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. If milo has no state folder, because neither that variable nor `HOME` names one, the line says the edits were lost.
 
-The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before: saving other edits, or undoing the restore and leaving, keeps it. One draft is kept for each file, so a reader that is ended again with unsaved changes to that file replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
+The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before: saving other edits, or undoing the restore and then saving or leaving, keeps it. One draft is kept for each file, so a reader that is ended again with unsaved changes to that file replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
 
 In Rex, opening another file from Outline or History replaces the floating reader. While that reader has unsaved changes, the pane says `The open reader has unsaved edits.` and leaves it alone.
 
 ## Formatting
 
-While editing, `Ctrl-F` gives the draft to a formatter and puts its answer in place of the draft as one change. The file is not touched: look the result over, press `Ctrl-Z` to take it back, or discard it with the draft. Only `Ctrl-S` writes it. If the formatter fails, the draft is left exactly as it was and the last row shows the first line of what the formatter said.
+While editing, `Ctrl-F` gives the draft to a formatter and puts its answer in place of the draft as one change. The file is not touched: look the result over, press `Ctrl-Z` to take it back, or discard it with the draft. Only `Ctrl-S` writes it. Keys pressed after `Ctrl-F` wait for the formatter and act on what it answered. If the formatter fails, the draft is left exactly as it was and the last row shows the first line of what the formatter said.
 
 Milo runs a formatter you have installed. It does not install one, download one or run one through a package runner. For each kind of file, the first of these found is used:
 
@@ -462,7 +462,7 @@ Milo runs a formatter you have installed. It does not install one, download one 
 | `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh` | clang-format | `clang-format --assume-filename=NAME` |
 | `.sh`, `.bash` | shfmt | `shfmt --filename ./NAME` |
 | `.lua` | stylua | `stylua --stdin-filepath ./NAME -` |
-| `.swift` | swift-format | `swift-format format --assume-filename ./NAME -` |
+| `.swift` | swift-format | `swift-format format --assume-filename ./NAME` |
 | `.tf`, `.tfvars` | terraform | `terraform fmt -no-color -` |
 
 `NAME` is the file's name and `EXT` its extension. For Rust, `E` is the edition in the nearest `Cargo.toml` at or above the file within the project, or 2021; the option is left out when a `rustfmt.toml` there sets an edition. Other kinds of file, including some the reader colours such as Kotlin, Ruby, Java, C#, PHP and SQL, have no formatter: `Ctrl-F` says `No formatter for this kind of file.` and the last row does not offer it.
@@ -470,10 +470,11 @@ Milo runs a formatter you have installed. It does not install one, download one 
 How a formatter is run:
 
 - **Only when you press `Ctrl-F`.** Opening, reading and editing a file never start one. Help looks for the program so that it can name it, and does not run it.
-- **By name, from where you installed it.** The program is looked for in the folders of `PATH` that are written in full. A folder written relative to where milo runs, such as `.` or `node_modules/.bin`, is skipped, so a project cannot supply the program. If none is installed, the last row says which to install, for example `Not installed: ruff or black.`
+- **By name, from where you installed it.** The program is looked for in the folders of `PATH` that are written in full. A folder written relative to where milo runs, such as `.` or `node_modules/.bin`, is skipped, so a project cannot supply the program. The formatter's own `PATH` has those folders taken out too, so a launcher that starts `node` cannot find one in the project. If none is installed, the last row says which to install, for example `Not installed: ruff or black.`
 - **On the draft, not the file.** The draft goes in on standard input and the formatted text comes back on standard output. The formatter is not asked to write anything.
 - **In the file's folder, with the file's name.** That is how a formatter finds the project's settings, such as `rustfmt.toml`, `pyproject.toml` or `.prettierrc`. Those settings belong to the project, and some formatters load code named in them: Prettier loads plugins and JavaScript settings files. Format files only in a project you trust, as you would in an editor.
-- **For at most ten seconds.** After that the formatter is stopped together with anything it started. An answer that is empty, is not UTF-8 text or is larger than 2 MiB is refused.
+- **For at most ten seconds.** After that the formatter and the programs it started are stopped. A formatter that leaves a helper running with its output still open is waited for just as long, and its answer is not used. An answer that is empty, is not UTF-8 text or is larger than 2 MiB is refused.
+- **Without downloads.** Milo installs nothing. A `rustfmt` installed by rustup is told not to fetch the toolchain a project's `rust-toolchain.toml` names: if that toolchain is missing, the last row says so.
 - **Keeping the file's line endings.** If the file uses `CRLF` and the formatter answers with `LF`, the draft gets `CRLF` back. A byte-order mark is not given to the formatter and is kept.
 
 The pane shows `Formatting with NAME…` and does not redraw until the formatter is done.
@@ -545,7 +546,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `e` | Edit the file, or say why it is read-only |
 | `q` or `Esc` | Close |
 
-The last row shows `e edit` when the file can be edited. Help lists the reason when it cannot, and the formatter that would run.
+The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
 
 ### Editing in the reader
 

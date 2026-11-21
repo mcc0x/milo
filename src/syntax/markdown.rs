@@ -9,7 +9,8 @@ use super::{Class, Span, State, find_end, is_word};
 pub(super) fn walk(text: &str, start: usize, state: &mut State, emit: &mut impl FnMut(Span)) {
     let b = text.as_bytes();
     let indent = b.iter().take_while(|&&c| c == b' ').count();
-    let fence = if indent <= 3 { fence_run(&b[indent..]) } else { None };
+    // At any depth: a code block in a list item is indented with the item.
+    let fence = fence_run(&b[indent..]);
     match state {
         State::Fence { mark, len } => {
             let closes = fence.is_some_and(|(m, n, after)| m == *mark && n >= *len && after.trim_ascii().is_empty());
@@ -26,6 +27,12 @@ pub(super) fn walk(text: &str, start: usize, state: &mut State, emit: &mut impl 
     }
     let mut from = start;
     if start == 0 {
+        // A block can open on the line of the bullet it belongs to.
+        let fence = fence.or_else(|| {
+            let item = list_mark(b, &mut |_| {});
+            let text = item + b[item..].iter().take_while(|&&c| c == b' ').count();
+            (item > 0).then(|| fence_run(&b[text..])).flatten()
+        });
         // The words after a backtick fence cannot contain a backtick; that is inline code.
         if let Some((mark, len, after)) = fence
             && (mark == b'~' || !after.contains(&b'`'))

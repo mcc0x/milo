@@ -79,8 +79,8 @@ fn is_text(bytes: &[u8]) -> bool {
 }
 
 /// Opens the file itself and checks that it is the regular file the lookup found.
-fn open(entry: &Entry<'_>) -> io::Result<(File, (u64, u64))> {
-    let file = entry.open_edit()?;
+fn open(entry: &Entry<'_>, write: bool) -> io::Result<(File, (u64, u64))> {
+    let file = if write { entry.open_edit() } else { entry.open_read() }?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -108,7 +108,8 @@ fn contents(file: &File) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-/// Reads a file to edit, or says why it stays read-only.
+/// Reads a file to edit, or says why it stays read-only. The file is not
+/// opened for writing until a save.
 pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     if entry.is_link() {
         return Err(ReadOnly::LINK);
@@ -116,7 +117,10 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     if !entry.is_regular() {
         return Err(ReadOnly::NOT_FILE);
     }
-    let (file, identity) = open(entry).map_err(|error| match error.kind() {
+    if !entry.writable() {
+        return Err(ReadOnly::NO_PERMISSION);
+    }
+    let (file, identity) = open(entry, false).map_err(|error| match error.kind() {
         io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => ReadOnly::NO_PERMISSION,
         io::ErrorKind::NotFound => ReadOnly::GONE,
         io::ErrorKind::InvalidInput => ReadOnly::NOT_FILE,
@@ -142,22 +146,22 @@ pub(super) fn save(
 ) -> Result<(), SaveError> {
     let entry = entry.map_err(|error| {
         SaveError::Refused(match error {
-            LookupError::Gone => "The file is gone, so nothing was saved.",
-            LookupError::Outside => "The path now leads outside the project. Not saved.",
-            LookupError::Unreadable => "The file cannot be reached. Not saved.",
+            LookupError::Gone => "Not saved: the file is gone.",
+            LookupError::Outside => "Not saved: the path leaves the project.",
+            LookupError::Unreadable => "Not saved: the file cannot be reached.",
         })
     })?;
     if !entry.is_regular() {
-        return Err(SaveError::Refused("This is no longer a regular file. Not saved."));
+        return Err(SaveError::Refused("Not saved: no longer a regular file."));
     }
-    let (file, identity) = open(entry).map_err(|error| {
+    let (file, identity) = open(entry, true).map_err(|error| {
         SaveError::Refused(match error.kind() {
-            io::ErrorKind::NotFound => "The file is gone, so nothing was saved.",
-            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => "No write permission. Not saved.",
-            _ => "The file cannot be opened to write. Not saved.",
+            io::ErrorKind::NotFound => "Not saved: the file is gone.",
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => "Not saved: no write permission.",
+            _ => "Not saved: the file cannot be opened.",
         })
     })?;
-    let current = contents(&file).map_err(|_| SaveError::Refused("The file cannot be read back. Not saved."))?;
+    let current = contents(&file).map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
     let unchanged = identity == original.identity && current.as_deref() == Some(original.bytes.as_slice());
     if !unchanged && !overwrite {
         return Err(SaveError::Changed);
@@ -169,14 +173,14 @@ pub(super) fn save(
         let restored =
             current.is_some_and(|old| file.write_all_at(&old, 0).and_then(|()| file.set_len(old.len() as u64)).is_ok());
         return Err(SaveError::Refused(if restored {
-            "Could not write the file. It is as it was."
+            "Not saved: writing failed. File is as it was."
         } else {
-            "Could not write the file. Check it before closing."
+            "Write failed: check the file before closing."
         }));
     }
     *original = Original { bytes, marked: original.marked, identity };
     if file.sync_all().is_err() {
-        return Err(SaveError::Refused("Saved, but the disk did not confirm it."));
+        return Err(SaveError::Refused("Not confirmed on disk: save again."));
     }
     Ok(())
 }

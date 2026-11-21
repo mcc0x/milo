@@ -62,8 +62,8 @@ const CLANG_FORMAT: Tool = Tool { name: "clang-format", args: &[Named("--assume-
 const SHFMT: Tool = Tool { name: "shfmt", args: &[Text("--filename"), Name] };
 const STYLUA: Tool = Tool { name: "stylua", args: &[Text("--stdin-filepath"), Name, Text("-")] };
 const TAPLO: Tool = Tool { name: "taplo", args: &[Text("format"), Text("--stdin-filepath"), Name, Text("-")] };
-const SWIFT_FORMAT: Tool =
-    Tool { name: "swift-format", args: &[Text("format"), Text("--assume-filename"), Name, Text("-")] };
+// With no path, swift-format reads standard input; releases before 602 refuse `-` beside a file name.
+const SWIFT_FORMAT: Tool = Tool { name: "swift-format", args: &[Text("format"), Text("--assume-filename"), Name] };
 const TERRAFORM: Tool = Tool { name: "terraform", args: &[Text("fmt"), Text("-no-color"), Text("-")] };
 
 /// The formatters for a kind of file, tried in order, and their names for a sentence.
@@ -256,12 +256,21 @@ pub fn run(tool: &Tool, program: &Path, draft: &Draft<'_>) -> Result<String, Fai
     run_within(tool, program, draft, WAIT)
 }
 
+/// The folders of `PATH` that are named in full, for the formatter's own use.
+/// It runs in the project, where a launcher's `env node` must not find `./node`.
+fn full_path(path: &OsStr) -> OsString {
+    std::env::join_paths(std::env::split_paths(path).filter(|dir| dir.is_absolute())).unwrap_or_default()
+}
+
 fn run_within(tool: &Tool, program: &Path, draft: &Draft<'_>, wait: Duration) -> Result<String, Failure> {
     let deadline = Instant::now() + wait;
     let mut child = Command::new(program)
         .args(arguments(tool, draft))
         .current_dir(draft.dir)
+        .env("PATH", full_path(&std::env::var_os("PATH").unwrap_or_default()))
         .env("NO_COLOR", "1")
+        // A project's toolchain file must not make rustup fetch a toolchain.
+        .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -398,6 +407,12 @@ pub(crate) mod tests {
         assert_eq!(format(&f, &bin, "a.py", "x\n").unwrap(), "ruff format --no-cache --stdin-filename ./a.py -\nx\n");
         // A name that looks like an option is still a file name to the formatter.
         assert!(format(&f, &bin, "--version.py", "x\n").unwrap().contains("--stdin-filename ./--version.py -"));
+    }
+
+    #[test]
+    fn a_formatter_is_not_given_folders_named_from_where_it_runs() {
+        assert_eq!(full_path(OsStr::new(".:/usr/bin::node_modules/.bin:/bin:bin")), "/usr/bin:/bin");
+        assert_eq!(full_path(OsStr::new(".")), "");
     }
 
     #[test]

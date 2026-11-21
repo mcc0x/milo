@@ -312,14 +312,14 @@ fn a_save_does_not_follow_a_link_put_in_the_way() {
     fs::remove_file(f.root.join("dir/notes.txt")).unwrap();
     symlink(outside.join("notes.txt"), f.root.join("dir/notes.txt")).unwrap();
     reader.key(Key::Ctrl(b's'));
-    assert_eq!(drawn(&mut reader, 70, 4)[3], " This is no longer a regular file. Not saved.");
+    assert_eq!(drawn(&mut reader, 70, 4)[3], " Not saved: no longer a regular file.");
     reader.key(Key::Char(' '));
 
     // Then its folder becomes a link to a folder outside the project.
     fs::remove_dir_all(f.root.join("dir")).unwrap();
     symlink(&outside, f.root.join("dir")).unwrap();
     reader.key(Key::Ctrl(b's'));
-    assert_eq!(drawn(&mut reader, 70, 4)[3], " The path to the file changed. Not saved.");
+    assert_eq!(drawn(&mut reader, 70, 4)[3], " Not saved: the path to the file changed.");
     assert_eq!(fs::read_to_string(outside.join("notes.txt")).unwrap(), "outside\n");
 
     // The draft is still there, and answering the question cannot force it through either.
@@ -339,7 +339,7 @@ fn a_file_removed_while_editing_is_not_made_again() {
     typed(&mut reader, "mine ");
     fs::remove_file(&file).unwrap();
     reader.key(Key::Ctrl(b's'));
-    assert_eq!(drawn(&mut reader, 60, 4)[3], " The file is gone, so nothing was saved.");
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " Not saved: the file is gone.");
     assert!(!file.exists());
     assert!(reader.editing() && reader.editor.as_ref().unwrap().dirty());
 }
@@ -780,24 +780,118 @@ fn formatting_keeps_the_line_endings_and_byte_order_mark_of_the_file() {
 }
 
 #[test]
-fn a_question_waits_for_its_answer_before_a_formatter_runs() {
+fn keys_typed_after_asking_for_formatting_act_on_the_formatted_text() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("a.go", "package main\n");
+    let file = f.root.join("a.go");
+    let (mut reader, bin) = with_tools(&f, "a.go");
+    stand_in(&bin, "gofmt", "tr a-z A-Z");
+    reader.key(Key::Char('e'));
+    typed(&mut reader, "x");
+
+    // Both keys arrive before a frame is drawn: what is saved is what was asked for.
+    reader.key(Key::Ctrl(b'f'));
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "XPACKAGE MAIN\n");
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Saved");
+
+    // Undo takes back the formatting, not the typing before it.
+    reader.key(Key::Home);
+    typed(&mut reader, "y");
+    reader.key(Key::Ctrl(b'f'));
+    reader.key(Key::Ctrl(b'z'));
+    assert_eq!(draft(&reader), "yXPACKAGE MAIN\n");
+
+    // The question about leaving is asked of the formatted text, and nothing runs behind it.
+    reader.key(Key::Ctrl(b'f'));
+    reader.key(Key::Esc);
+    assert_eq!(draft(&reader), "YXPACKAGE MAIN\n");
+    for _ in 0..2 {
+        assert_eq!(drawn(&mut reader, 60, 5)[4], " Unsaved edits: s save · d discard · Esc back");
+    }
+}
+
+#[test]
+fn what_a_slow_formatter_did_stays_on_screen_after_it_ends() {
     use crate::format::tests::stand_in;
 
     let f = Fixture::folder();
     f.write("a.go", "package main\n");
     let (mut reader, bin) = with_tools(&f, "a.go");
-    stand_in(&bin, "gofmt", "tr a-z A-Z");
+    stand_in(&bin, "gofmt", "sleep 1; tr a-z A-Z");
     reader.key(Key::Char('e'));
+    let asked = Instant::now();
+    let (_, done) = format(&mut reader);
+    assert_eq!(done, " Formatted with gofmt · ^Z undoes");
+    // The four seconds count from the end of the run, not from the frame that started it.
+    let left = reader.editor.as_ref().unwrap().next_frame(Instant::now()).unwrap();
+    assert!(asked.elapsed() + left > Duration::from_millis(4900), "{left:?}");
+}
+
+#[test]
+fn a_file_that_cannot_be_written_does_not_offer_editing() {
+    let f = Fixture::folder();
+    f.write("locked.txt", "one\n");
+    fs::set_permissions(f.root.join("locked.txt"), Permissions::from_mode(0o444)).unwrap();
+    let mut reader = open(&f, "locked.txt");
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " ↑↓ scroll · q close · ? help");
+    assert!(reader.help().text().contains("Read-only:\n  no write permission\n"));
+    assert_eq!(refusal(&mut reader), " Read-only: no write permission · ? help");
+}
+
+#[test]
+fn undoing_a_restored_draft_before_saving_keeps_the_draft() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "one\n");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "kept ");
+    drop(reader);
+
+    let mut reader = open(&f, "notes.txt");
+    reader.key(Key::Char('e'));
+    reader.key(Key::Char('r'));
+    reader.key(Key::Ctrl(b'z'));
     typed(&mut reader, "x");
-    reader.key(Key::Ctrl(b'f'));
+    reader.key(Key::Ctrl(b's'));
     reader.key(Key::Esc);
-    for _ in 0..3 {
-        assert_eq!(drawn(&mut reader, 60, 5)[4], " Unsaved edits: s save · d discard · Esc back");
+    assert_eq!(fs::read_to_string(f.root.join("notes.txt")).unwrap(), "xone\n");
+
+    reader.key(Key::Char('e'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
+}
+
+#[test]
+fn a_short_line_is_shown_from_its_start_after_a_long_one() {
+    let f = Fixture::folder();
+    f.write("text.txt", &format!("short\n{}\nabc\n", "word ".repeat(20)));
+    let mut reader = editing(&f, "text.txt");
+    for key in [Key::Down, Key::End, Key::Down] {
+        reader.key(key);
     }
-    assert_eq!(draft(&reader), "xpackage main\n");
-    reader.key(Key::Esc);
-    assert_eq!(drawn(&mut reader, 60, 5)[4], " Formatting with gofmt…");
-    assert_eq!(drawn(&mut reader, 60, 5)[4], " Formatted with gofmt · ^Z undoes");
+    assert_eq!(drawn(&mut reader, 30, 6)[3], " 3   abc");
+}
+
+#[test]
+fn the_cursor_stays_on_its_character_when_a_wide_line_is_panned() {
+    for width in [20, 21] {
+        let f = Fixture::folder();
+        f.write("wide.txt", &"日本語".repeat(10));
+        let mut reader = editing(&f, "wide.txt");
+        let mut screen = Screen::sized(width, 5);
+        reader.draw(&mut screen);
+        reader.key(Key::End);
+        typed(&mut reader, "Z");
+        reader.key(Key::Left);
+        let mut screen = Screen::sized(width, 5);
+        reader.draw(&mut screen);
+        let out = String::from_utf8(screen.emitted()).unwrap();
+        let reversed: Vec<_> =
+            out.split("\x1b[").filter_map(|run| run.split_once('m')).filter(|run| run.0 == "0;7").collect();
+        assert_eq!(reversed.iter().map(|run| run.1).collect::<String>(), "Z", "{width}: {out:?}");
+        assert!(screen.text()[1].ends_with("語Z"), "{width}: {:?}", screen.text());
+    }
 }
 
 #[test]

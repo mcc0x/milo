@@ -55,7 +55,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `e` | Edit the file, or say why it is read-only |
 | `q` or `Esc` | Close |
 
-The last row shows `e edit` when the file can be edited. Help lists the reason when it cannot, and the formatter that would run.
+The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
 
 ### Editing in the reader
 

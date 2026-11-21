@@ -37,6 +37,8 @@ pub(super) struct Pos {
 /// It is placed by bytes from the start of the text, not by line: a line that
 /// ends in a lone carriage return reads as a different line once a line feed follows it.
 struct Change {
+    /// A number no other change of this buffer has.
+    id: u64,
     offset: usize,
     removed: String,
     inserted: String,
@@ -76,6 +78,8 @@ pub(super) struct Buffer {
     typing: bool,
     /// The length of the whole text in bytes.
     size: usize,
+    /// How many changes have been recorded.
+    changes: u64,
 }
 
 impl Buffer {
@@ -84,7 +88,8 @@ impl Buffer {
         let crlf = rows.iter().filter(|row| row.eol == Eol::CrLf).count();
         let lf = rows.iter().filter(|row| row.eol == Eol::Lf).count();
         let newline = if crlf > lf { Eol::CrLf } else { Eol::Lf };
-        Self { rows, newline, undo: Vec::new(), redo: Vec::new(), saved: Some(0), typing: false, size: text.len() }
+        let size = text.len();
+        Self { rows, newline, undo: Vec::new(), redo: Vec::new(), saved: Some(0), typing: false, size, changes: 0 }
     }
 
     pub(super) fn len(&self) -> usize {
@@ -195,9 +200,20 @@ impl Buffer {
     pub(super) fn edit(&mut self, from: Pos, to: Pos, text: &str, cursor: Pos) -> Pos {
         let offset = self.offset(from);
         let (removed, end) = self.splice(from, to, text);
-        self.record(Change { offset, removed, inserted: text.to_owned(), end, cursor });
+        self.changes += 1;
+        self.record(Change { id: self.changes, offset, removed, inserted: text.to_owned(), end, cursor });
         self.typing = false;
         end
+    }
+
+    /// The number of the change made last.
+    pub(super) fn last_change(&self) -> u64 {
+        self.changes
+    }
+
+    /// Whether a change is part of the text now: made, and not undone.
+    pub(super) fn holds(&self, change: u64) -> bool {
+        self.undo.iter().any(|made| made.id == change)
     }
 
     /// Inserts one typed character. A run of them, up to the end of a word, is undone together.
