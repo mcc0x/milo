@@ -1296,3 +1296,67 @@ fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
     outline.master.write_all(b"\r").unwrap();
     wait_for_opens(2);
 }
+
+#[test]
+fn formatting_runs_an_installed_formatter_on_the_draft_and_saves_only_when_asked() {
+    let project = Project::new();
+    let file = project.0.join("project/a.go");
+    fs::write(&file, "package main\n").unwrap();
+    let tools = project.0.join("tools");
+    fs::create_dir(&tools).unwrap();
+    fs::write(tools.join("gofmt"), "#!/bin/sh\ntr a-z A-Z\n").unwrap();
+    fs::set_permissions(tools.join("gofmt"), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut paths = vec![tools.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+    let mut tty = Terminal::run(command.args(["view", "a.go", "--edit"]));
+    tty.shows("^F format");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("Formatted with gofmt");
+    tty.shows("PACKAGE MAIN");
+    tty.shows("unsaved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "package main\n");
+    tty.master.write_all(b"\x1a").unwrap();
+    tty.shows("package main");
+    tty.hides("unsaved");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("PACKAGE MAIN");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "PACKAGE MAIN\n");
+    // Esc and a letter sent together would read as one key, so Ctrl-Q stops editing here.
+    tty.master.write_all(b"\x11q").unwrap();
+    assert!(tty.wait_for_exit().success());
+
+    // With no formatter to be found, the pane says which to install and starts nothing.
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.env("PATH", project.0.join("empty"));
+    let mut tty = Terminal::run(command.args(["view", "a.go", "--edit"]));
+    tty.shows("^F format");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("Not installed: gofmt.");
+    tty.master.write_all(b"\x11q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "PACKAGE MAIN\n");
+}
+
+#[test]
+fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
+    if !Command::new("rustfmt").arg("--version").output().is_ok_and(|output| output.status.success()) {
+        // The formatter is optional; the stand-in above covers the pane without it.
+        return;
+    }
+    let project = Project::new();
+    let file = project.0.join("project/main.rs");
+    fs::write(&file, "fn  main( ){let x=1;}\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "main.rs", "--edit"]));
+    tty.shows("^F format");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("Formatted with rustfmt");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "fn main() {\n    let x = 1;\n}\n");
+}

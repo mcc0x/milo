@@ -29,7 +29,7 @@ use crate::syntax::{self, Lang, Span, State};
 use crate::ui::{ADD, DEL};
 use crate::watch::{Ignored, Scope};
 use disk::{ReadOnly, SaveError};
-use edit::{Editor, Safekeeping, Step};
+use edit::{Editor, Place, Step};
 pub use rescue::take_note as take_rescue_note;
 
 /// Lines of context kept above a change when jumping to it.
@@ -68,6 +68,8 @@ pub struct Reader {
     editor: Option<Box<Editor>>,
     /// Milo's state folder, where a draft is kept if the reader is closed from outside.
     state: Option<PathBuf>,
+    /// The folders searched for a formatter, as `PATH` lists them.
+    tools: Option<std::ffi::OsString>,
 }
 
 /// A short message in place of the hints, or of the details in a reader too short for hints.
@@ -242,6 +244,7 @@ impl Reader {
             read_only: None,
             editor: None,
             state: rescue::state_dir(),
+            tools: std::env::var_os("PATH"),
         }
     }
 
@@ -364,7 +367,11 @@ impl Pane for Reader {
             heading("Editing"),
         ];
         match self.read_only {
-            None => rows.extend([key("e    ", "edit this file"), note("Nothing is written"), note("until you save.")]),
+            None => {
+                let name = self.path.rsplit('/').next().unwrap_or_default();
+                rows.extend([key("e    ", "edit this file"), note("Nothing is written"), note("until you save.")]);
+                rows.extend(edit::format_help(name, self.tools.as_deref()));
+            }
             Some(ReadOnly(why)) => rows.extend([note("Read-only:"), note(why)]),
         }
         if matches!(self.source, Source::Committed { .. }) {
@@ -501,12 +508,14 @@ impl Reader {
         let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
         let entry = stamp.reachable().and(entry.map_err(ReadOnly::of))?;
         let original = disk::load(&entry)?;
-        let keep = self.state.clone().map(|state| Safekeeping {
-            state,
+        let place = Place {
             file: work.repo.root.join(&work.relative),
+            root: work.repo.root.clone(),
+            state: self.state.clone(),
             block: std::env::var("REX_BLOCK").ok().filter(|_| !cfg!(test) && rex::inside()),
-        });
-        Ok(Editor::open(original, syntax::for_file(&self.path), self.top_line(), keep))
+            tools: self.tools.clone(),
+        };
+        Ok(Editor::open(original, syntax::for_file(&self.path), self.top_line(), place))
     }
 
     /// Whether the file may be edited, as far as its place and what is shown of it can say.

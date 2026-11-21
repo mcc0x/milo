@@ -2,9 +2,11 @@
 //!
 //! The draft is plain text with a cursor. Leaving with unsaved changes asks
 //! first, and a reader closed from outside keeps its draft in the state folder.
+//! A formatter changes the draft, never the file, and undo takes it back.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::buffer::{Buffer, Pos};
@@ -14,6 +16,7 @@ use super::draw::LinePainter;
 use super::rescue::{self, Draft, Mark};
 use super::working_path::{Entry, LookupError};
 use crate::diff::{Line, LineKind, TAB};
+use crate::format::{self, Support, Tool};
 use crate::help::{self, HelpRow, Page};
 use crate::keys::Key;
 use crate::screen::{Screen, Style, YELLOW};
@@ -51,18 +54,46 @@ pub(super) enum Step {
     Close,
 }
 
-/// Where a reader's unsaved text is kept and announced.
-pub(super) struct Safekeeping {
-    pub(super) state: PathBuf,
+/// Where the file being edited is, and what else on this machine an edit of it uses.
+pub(super) struct Place {
     /// The file's full path.
     pub(super) file: PathBuf,
+    /// The project's folder.
+    pub(super) root: PathBuf,
+    /// Milo's state folder, where a draft is kept if the reader is closed from outside.
+    pub(super) state: Option<PathBuf>,
     /// The Rex block this reader runs in, if any.
     pub(super) block: Option<String>,
+    /// The folders searched for a formatter, as `PATH` lists them.
+    pub(super) tools: Option<OsString>,
+}
+
+impl Place {
+    fn draft(&self) -> Option<Draft> {
+        Some(Draft::new(self.state.clone()?, self.file.clone()))
+    }
+
+    fn name(&self) -> &str {
+        self.file.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+    }
+
+    fn support(&self) -> Support {
+        format::support(self.name(), self.tools.as_deref())
+    }
+}
+
+/// A formatter the user asked for. It starts once a frame has said so,
+/// because nothing can be drawn while it runs.
+struct Formatting {
+    tool: &'static Tool,
+    program: PathBuf,
+    announced: bool,
 }
 
 pub(super) struct Editor {
     buffer: Buffer,
     original: Original,
+    place: Place,
     cursor: Pos,
     /// The column kept while moving up and down through shorter lines.
     column: Option<usize>,
@@ -83,7 +114,7 @@ pub(super) struct Editor {
     indent: &'static str,
     prompt: Option<Prompt>,
     notice: Option<(Cow<'static, str>, Instant)>,
-    safekeeping: Option<Safekeeping>,
+    formatting: Option<Formatting>,
     mark: Option<Mark>,
     /// The user gave the draft up, so closing must not keep it.
     discarded: bool,
@@ -152,22 +183,29 @@ fn clean(text: &str, newline: &str) -> String {
     out
 }
 
+/// Rows for a help page that say whether this file can be formatted here, and with what.
+pub(super) fn format_help(name: &str, tools: Option<&std::ffi::OsStr>) -> Vec<HelpRow> {
+    use help::note;
+
+    match format::support(name, tools) {
+        Support::Ready(tool, _) => vec![vec![("  ", Style::PLAIN), ("Formatter: ", FAINT), (tool.name, Style::PLAIN)]],
+        Support::Missing(names) => vec![note("No formatter installed:"), note(names)],
+        Support::Unknown => vec![note("No formatter for this"), note("kind of file.")],
+    }
+}
+
 impl Editor {
     /// Starts editing with the cursor on `row`, counted from the top of the file.
-    pub(super) fn open(
-        original: Original,
-        lang: Option<&'static Lang>,
-        row: usize,
-        safekeeping: Option<Safekeeping>,
-    ) -> Self {
+    pub(super) fn open(original: Original, lang: Option<&'static Lang>, row: usize, place: Place) -> Self {
         let buffer = Buffer::new(original.text());
         let lang = lang.filter(|lang| lang.agrees_with_shebang(buffer.row(0)));
         let row = row.min(buffer.len() - 1);
-        let kept = safekeeping.as_ref().is_some_and(|keep| keep.draft().exists());
+        let kept = place.draft().is_some_and(|draft| draft.exists());
         Self {
             indent: indent_of(&buffer),
             buffer,
             original,
+            place,
             cursor: Pos { row, col: 0 },
             column: None,
             top: row,
@@ -181,7 +219,7 @@ impl Editor {
             spans: Vec::new(),
             prompt: kept.then_some(Prompt::Kept),
             notice: None,
-            safekeeping,
+            formatting: None,
             mark: None,
             discarded: false,
         }
@@ -202,7 +240,12 @@ impl Editor {
         self.buffer.text()
     }
 
+    /// How long the frame on screen stays right: until a message goes, or no
+    /// time at all once it has said that a formatter is about to run.
     pub(super) fn next_frame(&self, now: Instant) -> Option<Duration> {
+        if self.formatting.as_ref().is_some_and(|formatting| formatting.announced) {
+            return Some(Duration::ZERO);
+        }
         self.notice.as_ref().map(|(_, until)| until.saturating_duration_since(now))
     }
 
@@ -218,8 +261,8 @@ impl Editor {
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
         self.sync_mark();
-        if let Some(keep) = &self.safekeeping {
-            keep.draft().forget();
+        if let Some(draft) = self.place.draft() {
+            draft.forget();
         }
         self.say("Saved", now);
     }
@@ -233,7 +276,7 @@ impl Editor {
         if !self.buffer.dirty() {
             self.mark = None;
         } else if self.mark.is_none()
-            && let Some(Safekeeping { state, block: Some(block), .. }) = &self.safekeeping
+            && let Place { state: Some(state), block: Some(block), .. } = &self.place
         {
             self.mark = Mark::set(state, block);
         }
@@ -371,8 +414,8 @@ impl Editor {
                 return self.restore(now);
             }
             (Prompt::Kept, Key::Char('d' | 'D')) => {
-                if let Some(keep) = &self.safekeeping {
-                    keep.draft().forget();
+                if let Some(draft) = self.place.draft() {
+                    draft.forget();
                 }
                 Step::Stay
             }
@@ -385,7 +428,7 @@ impl Editor {
 
     /// Puts a kept draft in place of the text as one change, so that undo shows the file again.
     fn restore(&mut self, now: Instant) -> Step {
-        let Some(draft) = self.safekeeping.as_ref().map(Safekeeping::draft) else { return Step::Stay };
+        let Some(draft) = self.place.draft() else { return Step::Stay };
         let Some(kept) = draft.read() else {
             self.say("The kept draft cannot be read.", now);
             return Step::Stay;
@@ -425,6 +468,49 @@ impl Editor {
         }
     }
 
+    /// Finds the formatter for this file, or says why there is none to run.
+    fn ask_format(&mut self, now: Instant) -> Step {
+        match self.place.support() {
+            Support::Ready(tool, program) => self.formatting = Some(Formatting { tool, program, announced: false }),
+            Support::Missing(names) => self.say(format!("Not installed: {names}."), now),
+            Support::Unknown => self.say("No formatter for this kind of file.", now),
+        }
+        Step::Stay
+    }
+
+    /// Runs the formatter that the last frame announced, and puts its text in
+    /// place of the draft as one change. A failure leaves the draft as it was.
+    pub(super) fn format_if_announced(&mut self, now: Instant) {
+        let Some(Formatting { tool, program, .. }) = self.formatting.take_if(|formatting| formatting.announced) else {
+            return;
+        };
+        let text = self.buffer.text();
+        let dir = self.place.file.parent().unwrap_or(Path::new("."));
+        let draft = format::Draft { text: &text, name: self.place.name(), dir, root: &self.place.root };
+        let formatted = match format::run(tool, &program, &draft) {
+            Ok(formatted) => formatted,
+            Err(failure) => return self.say(failure.sentence(tool.name), now),
+        };
+        // A formatter that writes its own line endings does not get to change the file's.
+        let formatted = match self.buffer.newline() {
+            "\r\n" if !formatted.contains("\r\n") => formatted.replace('\n', "\r\n"),
+            _ => formatted,
+        };
+        if formatted == text {
+            self.say(format!("Already formatted ({})", tool.name), now);
+        } else if formatted.len() as u64 + 3 > LIMIT {
+            self.say("The formatted file would be too large.", now);
+        } else {
+            let Pos { row, col } = self.cursor;
+            self.replace(Pos::default(), self.buffer.end(), &formatted);
+            let row = row.min(self.buffer.len() - 1);
+            let line = self.buffer.row(row);
+            let col = (0..=col.min(line.len())).rev().find(|&at| line.is_char_boundary(at)).unwrap_or(0);
+            self.cursor = Pos { row, col };
+            self.say(format!("Formatted with {} · ^Z undoes", tool.name), now);
+        }
+    }
+
     pub(super) fn key(&mut self, key: Key, now: Instant) -> Step {
         if matches!(key, Key::Focus(_)) {
             return Step::Ignored;
@@ -444,6 +530,8 @@ impl Editor {
         }
         let page = isize::try_from(self.rows.max(2) - 1).unwrap_or(isize::MAX);
         let step = match key {
+            // A terminal can send a control character as text; it is not something to type.
+            Key::Char(c) if c.is_control() => Step::Ignored,
             Key::Char(c) => {
                 let end = self.buffer.type_char(self.cursor, c);
                 self.edited(self.cursor.row, end)
@@ -472,6 +560,7 @@ impl Editor {
             Key::Ctrl(b's') => Step::Save { close: false, overwrite: false },
             Key::Ctrl(b'z') => self.undo(now),
             Key::Ctrl(b'y') => self.redo(now),
+            Key::Ctrl(b'f') => self.ask_format(now),
             Key::Ctrl(b'g') => Step::Help,
             Key::Esc | Key::Ctrl(b'c' | b'q') => self.leave(),
             _ => Step::Ignored,
@@ -482,7 +571,7 @@ impl Editor {
     pub(super) fn help(&self) -> Page {
         use help::{heading, key, note};
 
-        let rows: Vec<HelpRow> = vec![
+        let mut rows: Vec<HelpRow> = vec![
             heading("Editing"),
             note("Changes stay a draft"),
             note("until you save them."),
@@ -490,6 +579,7 @@ impl Editor {
             heading("Keys"),
             key("^S       ", "save"),
             key("^Z ^Y    ", "undo, redo"),
+            key("^F       ", "format"),
             key("Esc      ", "stop editing"),
             key("←→↑↓     ", "move"),
             key("Home End ", "line ends"),
@@ -500,7 +590,11 @@ impl Editor {
             note("^ is the Ctrl key."),
             note("Click to place the"),
             note("cursor; paste works."),
+            HelpRow::new(),
+            heading("Formatting"),
         ];
+        rows.extend(format_help(self.place.name(), self.place.tools.as_deref()));
+        rows.extend([note("It changes the draft,"), note("not the file. ^Z undoes.")]);
         Page::new(rows)
     }
 
@@ -595,7 +689,16 @@ impl Editor {
             Some(Prompt::Unsaved) => Some(("Unsaved edits".into(), &["s save", "d discard", "Esc back"])),
             Some(Prompt::Changed { .. }) => Some(("Changed on disk".into(), &["o overwrite", "Esc back"])),
             Some(Prompt::Kept) => Some(("Kept draft found".into(), &["r restore", "d delete", "Esc later"])),
-            None => self.notice.as_ref().map(|(text, _)| (text.clone(), [].as_slice())),
+            None => {
+                let text = match &mut self.formatting {
+                    Some(formatting) => {
+                        formatting.announced = true;
+                        format!("Formatting with {}…", formatting.tool.name).into()
+                    }
+                    None => self.notice.as_ref()?.0.clone(),
+                };
+                Some((text, &[]))
+            }
         }
     }
 
@@ -603,33 +706,32 @@ impl Editor {
     pub(super) fn draw_message(&mut self, s: &mut Screen, y: usize, now: Instant) -> bool {
         let Some((label, choices)) = self.message(now) else { return false };
         let style = if self.prompt.is_some() { Style::fg(YELLOW) } else { Style::PLAIN };
-        let margin = usize::from(s.w >= 12);
-        let room = s.w - margin * 2;
-        // Keep every choice on screen before the words that explain them.
+        // Keep every choice on screen before the words that explain them, and before the margins.
+        let inset = s.w.saturating_sub(2);
         let text = if choices.is_empty() {
             label.into_owned()
         } else {
             let all = choices.join(" · ");
             [format!("{label}: {all}"), all]
                 .into_iter()
-                .find(|text| str_width(text) <= room)
+                .find(|text| str_width(text) <= inset)
                 .unwrap_or_else(|| choices.join(" "))
         };
+        let margin = usize::from(str_width(&text) <= inset);
         for x in 0..s.w {
             s.put(x, y, 1, " ", Style::PLAIN);
         }
-        s.put_fit(margin, y, room, &text, style);
+        s.put_fit(margin, y, s.w - margin * 2, &text, style);
         true
     }
 
     pub(super) fn draw_hint(&self, s: &mut Screen) {
-        help::draw_hint(s, "^S save", &["^Z undo", "Esc done"], "^G help");
-    }
-}
-
-impl Safekeeping {
-    fn draft(&self) -> Draft {
-        Draft::new(self.state.clone(), self.file.clone())
+        let middle: &[_] = if format::known(self.place.name()) {
+            &["^Z undo", "^F format", "Esc done"]
+        } else {
+            &["^Z undo", "Esc done"]
+        };
+        help::draw_hint(s, "^S save", middle, "^G help");
     }
 }
 
@@ -638,9 +740,9 @@ impl Drop for Editor {
         // Closed from outside with changes: the terminal went away, or the pane was ended.
         if self.buffer.dirty()
             && !self.discarded
-            && let Some(keep) = &self.safekeeping
+            && let Some(draft) = self.place.draft()
         {
-            rescue::tell(keep.draft().keep(&self.original.bytes_for(&self.buffer.text())));
+            rescue::tell(draft.keep(&self.original.bytes_for(&self.buffer.text())));
         }
     }
 }

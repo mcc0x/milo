@@ -363,6 +363,8 @@ fn a_reader_closed_from_outside_keeps_its_draft_for_the_next_edit() {
     assert_eq!(drawn(&mut reader, 60, 5)[1], " 1   one");
     reader.key(Key::Char('e'));
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
+    // The narrowest pane milo is laid out for still lists every key, using its margins.
+    assert_eq!(drawn(&mut reader, 28, 5)[4], "r restore d delete Esc later");
     assert_eq!(reader.key(Key::Char('x')), After::Ignored);
     reader.key(Key::Esc);
     assert_eq!(draft(&reader), "one\ntwo\n");
@@ -611,4 +613,188 @@ fn a_draft_cannot_outgrow_what_the_reader_can_show() {
     reader.key(Key::Esc);
     assert!(!reader.editing());
     assert!(drawn(&mut reader, 60, 4)[3].contains("e edit"));
+}
+
+/// A reader that finds formatters only in the fixture's own folder of stand-ins.
+fn with_tools(f: &Fixture, path: &str) -> (Reader, PathBuf) {
+    let bin = f.root.parent().unwrap().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let mut reader = open(f, path);
+    reader.tools = Some(bin.clone().into_os_string());
+    (reader, bin)
+}
+
+/// Asks for formatting and returns the hint row of the frame that announces it and of the one after it.
+fn format(reader: &mut Reader) -> (String, String) {
+    assert_eq!(reader.key(Key::Ctrl(b'f')), After::Stay);
+    let announced = drawn(reader, 60, 5)[4].clone();
+    (announced, drawn(reader, 60, 5)[4].clone())
+}
+
+#[test]
+fn formatting_changes_the_draft_and_undo_takes_it_back_before_anything_is_saved() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("src/main.rs", "fn main() {}\nlet x = 1;\n");
+    let file = f.root.join("src/main.rs");
+    let (mut reader, bin) = with_tools(&f, "src/main.rs");
+    stand_in(&bin, "rustfmt", "touch \"$0.ran\"; tr a-z A-Z");
+
+    // Nothing runs when the file is opened, shown, edited or explained.
+    drawn(&mut reader, 60, 5);
+    assert!(reader.help().text().contains("  Formatter: rustfmt\n"));
+    reader.key(Key::Char('e'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " ^S save · ^Z undo · ^F format · Esc done · ^G help");
+    assert!(
+        reader.help().text().contains("  ^F         format\n")
+            && reader.help().text().contains("  Formatter: rustfmt\n")
+    );
+    reader.help().assert_rows_fit(26);
+    reader.key(Key::Down);
+    reader.key(Key::End);
+    assert!(!bin.join("rustfmt.ran").exists());
+
+    let (announced, done) = format(&mut reader);
+    assert_eq!(announced, " Formatting with rustfmt…");
+    assert_eq!(done, " Formatted with rustfmt · ^Z undoes");
+    assert!(bin.join("rustfmt.ran").exists());
+    let rows = drawn(&mut reader, 60, 5);
+    assert!(rows[0].ends_with("  unsaved"), "{rows:?}");
+    assert_eq!(&rows[1..3], [" 1   FN MAIN() {}", " 2   LET X = 1;"]);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "fn main() {}\nlet x = 1;\n");
+    // The cursor stays on its line, at the end of it.
+    typed(&mut reader, "!");
+    assert_eq!(draft(&reader), "FN MAIN() {}\nLET X = 1;!\n");
+
+    reader.key(Key::Ctrl(b'z'));
+    reader.key(Key::Ctrl(b'z'));
+    assert_eq!(draft(&reader), "fn main() {}\nlet x = 1;\n");
+    assert!(drawn(&mut reader, 60, 5)[0].ends_with("  editing"));
+    reader.key(Key::Ctrl(b'y'));
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "FN MAIN() {}\nLET X = 1;\n");
+}
+
+#[test]
+fn formatted_text_can_be_discarded_with_the_draft() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("a.go", "package main\n");
+    let (mut reader, bin) = with_tools(&f, "a.go");
+    stand_in(&bin, "gofmt", "tr a-z A-Z");
+    reader.key(Key::Char('e'));
+    format(&mut reader);
+    assert_eq!(draft(&reader), "PACKAGE MAIN\n");
+    reader.key(Key::Esc);
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Unsaved edits: s save · d discard · Esc back");
+    reader.key(Key::Char('d'));
+    assert!(!reader.editing());
+    assert_eq!(fs::read_to_string(f.root.join("a.go")).unwrap(), "package main\n");
+    assert_eq!(drawn(&mut reader, 60, 5)[1], " 1   package main");
+}
+
+#[test]
+fn a_formatter_that_fails_leaves_the_draft_and_the_file_as_they_were() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("a.go", "package main\n");
+    let file = f.root.join("a.go");
+    let (mut reader, bin) = with_tools(&f, "a.go");
+    stand_in(&bin, "gofmt", "head -c 4; echo ' half'; echo '<standard input>:1:9: expected ;' >&2; exit 2");
+    reader.key(Key::Char('e'));
+    typed(&mut reader, "mine");
+    assert_eq!(reader.key(Key::Char('\u{85}')), After::Ignored);
+    let (_, done) = format(&mut reader);
+    assert_eq!(done, " gofmt: <standard input>:1:9: expected ;");
+    assert_eq!(draft(&reader), "minepackage main\n");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "package main\n");
+    // The draft is still the user's to undo, and nothing of the failed run is in its history.
+    reader.key(Key::Ctrl(b'z'));
+    assert_eq!(draft(&reader), "package main\n");
+    assert!(!reader.editor.as_ref().unwrap().dirty());
+
+    stand_in(&bin, "gofmt", "cat");
+    let (_, done) = format(&mut reader);
+    assert_eq!(done, " Already formatted (gofmt)");
+    assert!(!reader.editor.as_ref().unwrap().dirty());
+}
+
+#[test]
+fn a_missing_or_unknown_formatter_is_explained_and_nothing_is_started() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("a.py", "x=1\n");
+    f.write("notes.txt", "x\n");
+    // A program in the project is not a formatter, even when the pane was started there.
+    stand_in(&f.root, "ruff", "touch \"$0.ran\"; cat");
+
+    let (mut reader, _) = with_tools(&f, "a.py");
+    let help = reader.help();
+    help.assert_rows_fit(26);
+    assert!(help.text().contains("  No formatter installed:\n  ruff or black\n"), "{}", help.text());
+    reader.key(Key::Char('e'));
+    assert!(drawn(&mut reader, 60, 5)[4].contains("^F format"));
+    reader.key(Key::Ctrl(b'f'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Not installed: ruff or black.");
+    assert_eq!(draft(&reader), "x=1\n");
+    reader.help().assert_rows_fit(26);
+    assert!(reader.help().text().contains("  No formatter installed:\n  ruff or black\n"));
+    for path in [".", ""] {
+        reader.editor = None;
+        reader.tools = Some(path.into());
+        reader.key(Key::Char('e'));
+        reader.key(Key::Ctrl(b'f'));
+        assert_eq!(drawn(&mut reader, 60, 5)[4], " Not installed: ruff or black.", "{path:?}");
+    }
+    assert!(!f.root.join("ruff.ran").exists());
+
+    let (mut reader, _) = with_tools(&f, "notes.txt");
+    assert!(reader.help().text().contains("  No formatter for this\n  kind of file.\n"));
+    reader.key(Key::Char('e'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " ^S save · ^Z undo · Esc done · ^G help");
+    reader.key(Key::Ctrl(b'f'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " No formatter for this kind of file.");
+    reader.help().assert_rows_fit(26);
+}
+
+#[test]
+fn formatting_keeps_the_line_endings_and_byte_order_mark_of_the_file() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    let file = f.root.join("a.go");
+    fs::write(&file, "\u{feff}package  main\r\n\r\nvar x\r\n").unwrap();
+    let (mut reader, bin) = with_tools(&f, "a.go");
+    // The formatter is given the text without the mark, and answers with bare line feeds.
+    stand_in(&bin, "gofmt", "tr -d '\\r' | sed 's/  / /'");
+    reader.key(Key::Char('e'));
+    let (_, done) = format(&mut reader);
+    assert_eq!(done, " Formatted with gofmt · ^Z undoes");
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}package main\r\n\r\nvar x\r\n");
+}
+
+#[test]
+fn a_question_waits_for_its_answer_before_a_formatter_runs() {
+    use crate::format::tests::stand_in;
+
+    let f = Fixture::folder();
+    f.write("a.go", "package main\n");
+    let (mut reader, bin) = with_tools(&f, "a.go");
+    stand_in(&bin, "gofmt", "tr a-z A-Z");
+    reader.key(Key::Char('e'));
+    typed(&mut reader, "x");
+    reader.key(Key::Ctrl(b'f'));
+    reader.key(Key::Esc);
+    for _ in 0..3 {
+        assert_eq!(drawn(&mut reader, 60, 5)[4], " Unsaved edits: s save · d discard · Esc back");
+    }
+    assert_eq!(draft(&reader), "xpackage main\n");
+    reader.key(Key::Esc);
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Formatting with gofmt…");
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Formatted with gofmt · ^Z undoes");
 }

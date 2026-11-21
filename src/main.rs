@@ -3,6 +3,7 @@
 mod diff;
 #[cfg(test)]
 mod fixture;
+mod format;
 mod fs_ops;
 mod git;
 mod help;
@@ -120,6 +121,7 @@ Reader (also opened by milo view):
 Editing in the reader (also opened by milo view FILE --edit):
   Ctrl-S        save
   Ctrl-Z Ctrl-Y undo, redo
+  Ctrl-F        format with an installed formatter; undo takes it back
   Esc           stop editing; asks first if there are unsaved changes
   Ctrl-G        help
 

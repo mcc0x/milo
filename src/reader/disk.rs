@@ -29,7 +29,6 @@ impl ReadOnly {
     pub(super) const NOT_TEXT: Self = Self("not text");
     pub(super) const PICTURE: Self = Self("shown as a picture");
     pub(super) const NOT_SHOWN: Self = Self("it cannot be shown");
-    pub(super) const NOT_UTF8: Self = Self("not UTF-8 text");
     pub(super) const TOO_LARGE: Self = Self("too large");
     pub(super) const NO_PERMISSION: Self = Self("no write permission");
     pub(super) const UNREADABLE: Self = Self("it cannot be read");
@@ -124,7 +123,7 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     })?;
     let bytes = contents(&file).map_err(|_| ReadOnly::UNREADABLE)?.ok_or(ReadOnly::TOO_LARGE)?;
     if !is_text(&bytes) {
-        return Err(if bytes.contains(&0) { ReadOnly::NOT_TEXT } else { ReadOnly::NOT_UTF8 });
+        return Err(ReadOnly::NOT_TEXT);
     }
     Ok(Original { bytes, identity })
 }

@@ -124,6 +124,8 @@ impl Reader {
     pub(super) fn draw_file(&mut self, s: &mut Screen, now: Instant) {
         s.clear();
         if let Some(mut editor) = self.editor.take() {
+            // The frame before this one said a formatter was about to run; this one shows what it did.
+            editor.format_if_announced(now);
             self.draw_editor(s, &mut editor, now);
             self.editor = Some(editor);
             return;
