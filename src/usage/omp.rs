@@ -101,15 +101,18 @@ impl Reports {
 }
 
 /// A missing database clears the saved reports; any other failure keeps them.
+/// These are limits, so only a database without a write-ahead log is ever
+/// left unread: with one, what a reader sees can change without its files changing.
 pub(super) fn poll(path: Option<PathBuf>, wait: Duration) -> Poll<Reports> {
-    Poll::new(path, wait, |path, now, wait| {
+    let read: sqlite::Reader<Reports> = |path, now, wait| {
         if let Some(reports) = read(path, now, wait) {
             let stands_until = Some(reports.stand_until());
             return Some(Outcome { value: reports, stands_until });
         }
         let missing = std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
         missing.then(|| Outcome { value: Reports::default(), stands_until: None })
-    })
+    };
+    Poll::new(path, wait, read).never_settled_with_a_log()
 }
 
 pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Option<Reports> {

@@ -4,13 +4,16 @@
 //! The pane is given OMP's and OpenCode's databases, made up here at two
 //! sizes, and its timer is run twenty times, one read interval apart, with
 //! nothing written in between. Then each database gets a new row and the
-//! timer runs until the pane shows it.
+//! timer runs until the pane shows it. Each size is run with rollback
+//! journals and again in write-ahead mode with the tools still holding their
+//! databases open, which is how OMP and OpenCode keep theirs.
 //!
 //! ```sh
 //! cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocapture
 //! ```
 
 use super::opencode_activity::{Database, RELEASES};
+use super::unchanged::Writer;
 use super::*;
 
 const TICKS: u32 = 20;
@@ -95,43 +98,66 @@ fn idle_ticks_and_freshness() {
         return;
     }
     println!("# milo usage idle bench: {TICKS} timer ticks {TICK:?} apart with nothing written");
-    println!("size\tdatabase_bytes\tsqlite3_started\tread_ms\tticks_to_fresh");
-    for size in SIZES {
-        let f = Fixture::folder();
-        let omp = omp_limits::sqlite(&f).unwrap();
-        history(&omp, size.history, (NOW - 60) * 1000, "0.5");
-        let (_, schema, store) = RELEASES[3];
-        let db = Database::new(&f, schema, store);
-        db.session("bench", "2.3.2", NOW - 3600, None);
-        steps(&db.path, 0, size.steps, (NOW - 60) * 1000);
-        let bytes = fs::metadata(&omp).unwrap().len() + fs::metadata(&db.path).unwrap().len();
-        last_written(&omp, NOW - 60);
-        last_written(&db.path, NOW - 60);
-
-        let mut usage = unopened(&f, NOW);
-        usage.omp = omp::poll(Some(omp.clone()), TEST_WAIT);
-        usage.opencode = OpenCode::new(Some(db.path.clone()), TEST_WAIT);
-        let clock = Instant::now();
-        // The first read is the pane opening, not an idle tick.
-        tick(&mut usage, 0, clock);
-        assert_eq!(shown(&usage), (Some(50.0), Some(u64::from(size.steps))));
-        let (mut started, mut reading) = (0, Duration::ZERO);
-        for at in 1..=TICKS {
-            let (processes, took) = tick(&mut usage, at, clock);
-            started += processes;
-            reading += took;
+    println!("journal\tsize\tdatabase_bytes\tsqlite3_started\tread_ms\tticks_to_fresh");
+    for write_ahead in [false, true] {
+        for size in &SIZES {
+            measure(size, write_ahead);
         }
-
-        let written = NOW + i64::from(TICKS) * 20;
-        history(&omp, 1, written * 1000, "0.77");
-        steps(&db.path, size.steps, 1, written * 1000);
-        last_written(&omp, written);
-        last_written(&db.path, written);
-        let fresh = (1..=TICKS).find(|after| {
-            tick(&mut usage, TICKS + after, clock);
-            shown(&usage) == (Some(77.0), Some(u64::from(size.steps) + 1))
-        });
-        let fresh = fresh.map_or("never".into(), |ticks| ticks.to_string());
-        println!("{}\t{bytes}\t{started}\t{}\t{fresh}", size.name, reading.as_millis());
     }
+}
+
+/// Dates a database, and its write-ahead log if it has one, as written at `at`.
+fn dated(database: &Path, at: i64) {
+    let mut log = database.as_os_str().to_owned();
+    log.push("-wal");
+    last_written(database, at);
+    if Path::new(&log).exists() {
+        last_written(Path::new(&log), at);
+    }
+}
+
+fn measure(size: &Size, write_ahead: bool) {
+    let f = Fixture::folder();
+    let omp = omp_limits::sqlite(&f).unwrap();
+    history(&omp, size.history, (NOW - 60) * 1000, "0.5");
+    let (_, schema, store) = RELEASES[3];
+    let db = Database::new(&f, schema, store);
+    db.session("bench", "2.3.2", NOW - 3600, None);
+    steps(&db.path, 0, size.steps, (NOW - 60) * 1000);
+    let bytes = fs::metadata(&omp).unwrap().len() + fs::metadata(&db.path).unwrap().len();
+    let tools = write_ahead.then(|| [&omp, &db.path].map(|database| Writer::open(&f, database)));
+    if write_ahead {
+        // A database in this mode cannot be read until a write has made its log.
+        [&omp, &db.path].into_iter().for_each(|database| exec(database, "PRAGMA user_version=1;"));
+    }
+    dated(&omp, NOW - 60);
+    dated(&db.path, NOW - 60);
+
+    let mut usage = unopened(&f, NOW);
+    usage.omp = omp::poll(Some(omp.clone()), TEST_WAIT);
+    usage.opencode = OpenCode::new(Some(db.path.clone()), TEST_WAIT);
+    let clock = Instant::now();
+    // The first read is the pane opening, not an idle tick.
+    tick(&mut usage, 0, clock);
+    assert_eq!(shown(&usage), (Some(50.0), Some(u64::from(size.steps))));
+    let (mut started, mut reading) = (0, Duration::ZERO);
+    for at in 1..=TICKS {
+        let (processes, took) = tick(&mut usage, at, clock);
+        started += processes;
+        reading += took;
+    }
+
+    let written = NOW + i64::from(TICKS) * 20;
+    history(&omp, 1, written * 1000, "0.77");
+    steps(&db.path, size.steps, 1, written * 1000);
+    dated(&omp, written);
+    dated(&db.path, written);
+    let fresh = (1..=TICKS).find(|after| {
+        tick(&mut usage, TICKS + after, clock);
+        shown(&usage) == (Some(77.0), Some(u64::from(size.steps) + 1))
+    });
+    let fresh = fresh.map_or("never".into(), |ticks| ticks.to_string());
+    let journal = if write_ahead { "write-ahead" } else { "rollback" };
+    println!("{journal}\t{}\t{bytes}\t{started}\t{}\t{fresh}", size.name, reading.as_millis());
+    tools.into_iter().flatten().for_each(Writer::close);
 }

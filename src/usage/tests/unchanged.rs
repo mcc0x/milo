@@ -152,14 +152,14 @@ fn a_replaced_or_removed_database_is_read_and_a_failed_read_settles_nothing() {
 
 /// A tool that keeps its database open in write-ahead mode and saves a
 /// figure each time it is told to.
-struct Writer {
+pub(super) struct Writer {
     child: Child,
     folder: PathBuf,
     saved: u32,
 }
 
 impl Writer {
-    fn open(f: &Fixture, path: &Path) -> Self {
+    pub(super) fn open(f: &Fixture, path: &Path) -> Self {
         let child = Command::new(sqlite::executable())
             .args(["-batch", "-bail", "-init", "/dev/null"])
             .current_dir(&f.root)
@@ -176,7 +176,7 @@ impl Writer {
     /// Runs a statement and waits until the tool has committed it.
     fn run(&mut self, sql: &str) {
         self.saved += 1;
-        let done = format!("saved-{}", self.saved);
+        let done = format!("saved-{}-{}", self.child.id(), self.saved);
         writeln!(self.child.stdin.as_mut().unwrap(), "{sql}\n.once {done}\nSELECT 1;").unwrap();
         wait_for(|| self.folder.join(&done).exists());
     }
@@ -190,14 +190,14 @@ impl Writer {
     }
 
     /// The tool exits: SQLite moves the log into the database and removes it.
-    fn close(mut self) {
+    pub(super) fn close(mut self) {
         drop(self.child.stdin.take());
         assert!(self.child.wait().unwrap().success());
     }
 }
 
 #[test]
-fn a_write_ahead_log_that_appears_grows_or_goes_is_read() {
+fn limits_in_a_database_with_a_write_ahead_log_are_read_at_every_look() {
     let f = Fixture::folder();
     let Some((path, mut looks)) = omp_at(&f, "0.5") else { return };
     let log = f.root.join("agent.db-wal");
@@ -209,13 +209,10 @@ fn a_write_ahead_log_that_appears_grows_or_goes_is_read() {
     tool.save(NOW + 30, "0.6");
     assert!(log.exists());
     left_alone(NOW - 60);
-    assert_eq!(percent(looks.look(NOW + 40)), Some(60.0), "a log appeared beside a database dated as before");
-    assert!(looks.look(NOW + 60).is_none());
-
-    tool.save(NOW + 70, "0.7");
-    left_alone(NOW - 60);
-    assert_eq!(percent(looks.look(NOW + 80)), Some(70.0), "the log grew");
-    assert!(looks.look(NOW + 100).is_none());
+    // However long its files have been left alone, nothing here vouches for what a reader sees.
+    for now in [NOW + 40, NOW + 60, NOW + 80] {
+        assert_eq!(percent(looks.look(now)), Some(60.0), "a limit was left unread beside a write-ahead log");
+    }
 
     // Some builds of SQLite leave the log when the last tool closes; most remove it and its index.
     tool.close();
@@ -226,6 +223,38 @@ fn a_write_ahead_log_that_appears_grows_or_goes_is_read() {
     for now in [NOW + 120, NOW + 140] {
         assert!(matches!(looks.look(now), Some(None)), "a database missing its log is tried at every look");
     }
+}
+
+#[test]
+fn opencode_activity_beside_a_write_ahead_log_is_read_when_a_write_moves_its_times() {
+    if !sqlite_installed() {
+        return;
+    }
+    let f = Fixture::folder();
+    let noon = local_noon();
+    let (_, schema, store) = RELEASES[3];
+    let db = Database::new(&f, schema, store);
+    db.session("bench", "2.3.2", noon - 3600, None);
+    steps(&db.path, 0, 1, (noon - 60) * 1000);
+    let log = f.root.join("opencode.db-wal");
+    // The fixture's writes happen as the test runs; date each as the pane's clock would have seen it.
+    let written = |at: i64| [&db.path, &log].into_iter().filter(|file| file.exists()).for_each(|f| last_written(f, at));
+    written(noon - 60);
+    let mut looks = Looks::new(opencode::poll(Some(db.path.clone()), TEST_WAIT));
+    assert_eq!(steps_today(looks.look(noon)), Some(1));
+    assert!(looks.look(noon + 20).is_none());
+
+    // OpenCode keeps the database open in write-ahead mode. There the header's change
+    // counter stands still and a step can land without the files changing size, so
+    // their times are what says a write happened.
+    let tool = Writer::open(&f, &db.path);
+    for (step, at) in [(1, noon + 30), (2, noon + 70)] {
+        steps(&db.path, step, 1, (noon - 50) * 1000);
+        written(at);
+        assert_eq!(steps_today(looks.look(at + 10)), Some(u64::from(step) + 1), "a step written at {at} was not read");
+        assert!(looks.look(at + 30).is_none());
+    }
+    tool.close();
 }
 
 fn steps_today(read: Option<Option<opencode::Report>>) -> Option<u64> {

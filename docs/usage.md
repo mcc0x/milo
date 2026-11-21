@@ -71,7 +71,7 @@ The frame closes up around what is shown:
 
 | Source | What milo reads |
 | --- | --- |
-| oh-my-pi | Limits the harness saves for Codex and Claude in `~/.omp/agent/agent.db` (or `$PI_CODING_AGENT_DIR/agent.db`). Milo reads only the usage data, using `/usr/bin/sqlite3` in read-only mode. Automatic reads are at least 20 seconds apart per pane, and a database nothing has written to since the last read is read again only every five minutes. |
+| oh-my-pi | Limits the harness saves for Codex and Claude in `~/.omp/agent/agent.db` (or `$PI_CODING_AGENT_DIR/agent.db`). Milo reads only the usage data, using `/usr/bin/sqlite3` in read-only mode. Automatic reads are at least 20 seconds apart per pane. |
 | Codex | Limit reports in recent Codex session files under `~/.codex/sessions` |
 | Claude Code | Its own saved limits in `~/.claude.json`, or limits sent through the status line if you turn it on in setup. |
 | OpenCode | Today's activity, not limits, from its session database. See [OpenCode activity](#opencode-activity). |

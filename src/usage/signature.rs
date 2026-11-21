@@ -14,7 +14,9 @@ use crate::fs_ops;
 /// system's clock as the one before it leaves the times as they were.
 const QUIET: i64 = 2;
 /// A database's header holds its change counter and size; a write-ahead
-/// log's holds the salts that change each time the log starts over.
+/// log's holds the salts that change each time the log starts over. A
+/// database in write-ahead mode leaves its counter alone, and a checkpoint
+/// can leave both files their sizes, so there the times carry the weight.
 const HEAD: usize = 100;
 
 /// What a write to a file changes, without reading the file through.
@@ -88,5 +90,11 @@ impl Signature {
             .into_iter()
             .flatten()
             .all(|mark| mark.modified.0.saturating_add(QUIET) <= now)
+    }
+
+    /// Whether the database keeps a write-ahead log. A commit there shows to
+    /// readers through the log's index, which these files cannot vouch for.
+    pub(super) fn write_ahead(&self) -> bool {
+        self.log.is_some() || self.index || self.database.head[18] == 2 || self.database.head[19] == 2
     }
 }

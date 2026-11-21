@@ -52,6 +52,8 @@ pub(super) struct Poll<T> {
     last: Option<Instant>,
     job: Option<Job<(T, Option<Settled>)>>,
     settled: Option<Settled>,
+    /// Whether a read of a database with a write-ahead log may settle.
+    with_a_log: bool,
 }
 
 /// One read on its own thread. Its descriptor becomes readable when the result is ready.
@@ -92,7 +94,14 @@ impl<T: Send + 'static> Job<T> {
 
 impl<T: Send + 'static> Poll<T> {
     pub(super) fn new(path: Option<PathBuf>, wait: Duration, read: Reader<T>) -> Self {
-        Self { path, wait, read, last: None, job: None, settled: None }
+        Self { path, wait, read, last: None, job: None, settled: None, with_a_log: true }
+    }
+
+    /// For figures that must never be older than the last look: a database
+    /// with a write-ahead log is read at every one, as if nothing were known of it.
+    pub(super) fn never_settled_with_a_log(mut self) -> Self {
+        self.with_a_log = false;
+        self
     }
 
     /// Only the initial read and deliberate reloads announce themselves.
@@ -151,7 +160,7 @@ impl<T: Send + 'static> Poll<T> {
             return;
         }
         let Some(path) = self.path.clone() else { return };
-        let (read, wait) = (self.read, self.wait);
+        let (read, wait, with_a_log) = (self.read, self.wait, self.with_a_log);
         self.last = Some(clock);
         self.job = Job::start(checking, move || {
             let before = Signature::of(&path);
@@ -160,6 +169,7 @@ impl<T: Send + 'static> Poll<T> {
             let settled = outcome
                 .stands_until
                 .zip(before)
+                .filter(|(_, before)| with_a_log || !before.write_ahead())
                 .filter(|(_, before)| before.quiet(now) && Signature::of(&path).as_ref() == Some(before))
                 .map(|(until, signature)| Settled { signature, from: now, until, read: clock });
             Some((outcome.value, settled))
