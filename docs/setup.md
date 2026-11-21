@@ -152,6 +152,13 @@ milo alerts off                       # ends it at once
 
 The same choices are under **Alerts** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
 
+<picture>
+  <source media="(max-width: 600px)" srcset="img/web-alerts-mobile.webp">
+  <img src="img/web-alerts.webp" width="760" alt="The Alerts page of the browser editor: mirroring is off, alerts would go to an example Telegram channel, and the page says that only the kind of alert and the program's short name are sent">
+</picture>
+
+![The setup screen's Mirror Rex alerts panel: mirroring off, Telegram as destination, the three status alerts on, notifications and bells off, and Kind only as what is sent](img/setup-alerts.webp)
+
 **What counts as an alert.** A program that reports through Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) that it is `blocked`, failed (`error`) or finished (`done`); a program that asks for a desktop notification (OSC 9 or OSC 777); and the terminal bell. The first three are mirrored unless you choose otherwise with `milo alerts events blocked,error,done,notification,bell`. Working and idle reports, progress, exits, titles and everything else in a session are never sent, and neither is anything Milo itself shows.
 
 **What is sent.** By default only the kind of alert and the program's short name, such as `Rex: claude-code is waiting for permission`: no text from the program and no session, tab, folder or file name. `milo alerts content text` adds up to 300 characters of the line the program gave Rex, which can name files or quote a prompt. Both the name and that line come from the program, so they are sent marked as code, where neither Telegram nor Discord makes a link, a mention or formatting of them. The line is also cut to one line with every `@` broken, Discord is told to notify no user, role or `@everyone`, and link previews are turned off.
