@@ -505,6 +505,210 @@ async function confirmFromMobileFooter(browser, url, exited) {
   console.log('Mobile Done: cancel retained the draft, confirm closed the editor');
 }
 
+async function checkHostedConnections(page, destination) {
+  const editorUrl = new URL(page.url());
+  const authorization = `Bearer ${editorUrl.hash.slice(1)}`;
+  const initial = await page.request.get(new URL('/api/state', editorUrl).href, {headers: {authorization}});
+  assert(initial.ok(), 'the local editor supplied fixture state');
+  let state = await initial.json();
+  const initialVersion = state.version;
+  const providers = [
+    {name: 'Telegram', provider: 'telegram', manual: 'Use your own bot', input: 'Bot token',
+      url: `https://t.me/MiloSmokeBot?start=${'t'.repeat(43)}`, chat: '1234',
+      label: 'Telegram DM · 1234', credential: 'milorelay_smoke_fixture_not_a_credential'},
+    {name: 'Discord', provider: 'discord', manual: 'Use your own webhook', input: 'Webhook link',
+      url: `http://127.0.0.1:6120/discord/start/${'d'.repeat(43)}`, chat: '',
+      label: 'Discord channel · 5678', credential: 'https://discord.com/api/webhooks/999/smoke-fixture'},
+  ];
+  const context = page.context();
+  const launches = [];
+  const providerUrls = new Set(providers.map(({url}) => url));
+  const outsideEditor = url => url.origin !== editorUrl.origin;
+  const openProvider = async route => {
+    const url = route.request().url();
+    if (route.request().isNavigationRequest()) launches.push(url);
+    if (!providerUrls.has(url)) return route.abort();
+    await route.fulfill({contentType: 'text/html', body: '<title>Provider fixture</title><link rel="icon" href="data:,">'});
+  };
+  const hostedPath = '**/api/hosted-connect';
+  const actionPath = '**/api/action';
+  const responses = [];
+  const saved = [];
+  const scoped = [];
+  let hostedRequests = 0;
+  const hosted = async route => {
+    const request = route.request();
+    assert.equal(request.method(), 'POST');
+    assert.equal(request.headers().authorization, authorization, 'hosted setup uses the local session key');
+    hostedRequests++;
+    const next = responses.shift();
+    assert(next, 'hosted requests require a user action');
+    assert.deepEqual(request.postDataJSON(), next.request);
+    await route.fulfill(next.response);
+  };
+  const alertAction = async route => {
+    const action = route.request().postDataJSON();
+    if (action.action !== 'alerts') return route.fallback();
+    const {field, value} = action;
+    const alerts = {...state.alerts};
+    let message = null;
+    if (field === 'forwarding') {
+      const {destination, enabled} = value;
+      scoped.push({field, value});
+      assert(alerts[destination].saved, 'only a saved provider can be toggled');
+      alerts[destination] = {...alerts[destination], active: enabled};
+      alerts.running = alerts.enabled = alerts.telegram.active || alerts.discord.active;
+    } else if (field === 'test') {
+      scoped.push({field, value});
+      const provider = providers.find(({provider}) => provider === value);
+      assert(provider && alerts[value].saved, 'the test targets a saved provider');
+      message = {text: `${provider.name} accepted the test message.`, error: false};
+    } else {
+      assert(['telegram', 'discord'].includes(field), 'setup only saves the chosen provider');
+      saved.push(action);
+      alerts.destination ??= field;
+      alerts[field] = field === 'telegram' ? {saved: true, active: false, chat: value.chat} : {saved: true, active: false};
+    }
+    state = {...state, version: state.version + 1, alerts, message};
+    await route.fulfill({json: state});
+  };
+  await context.route(outsideEditor, openProvider);
+  await page.route(hostedPath, hosted);
+  await page.route(actionPath, alertAction);
+  try {
+    for (const [index, {name, provider, manual, input, url, chat, label, credential}] of providers.entries()) {
+      const wizard = dialog(page, `Destinations / ${name}`);
+      const connect = button(wizard, 'Connect with Milo');
+      const check = button(wizard, 'Check connection');
+      const approve = button(wizard, `Save ${name}`);
+      const proposal = wizard.getByRole('heading', {name: 'Proposed destination'});
+      const requestsBeforeOpen = hostedRequests;
+      await button(destination, index === 0 ? 'Set up destination' : 'Manage destinations').click();
+      await button(page, name).click();
+      assert(await connect.isVisible(), 'hosted setup is offered in both destination editors');
+      assert.equal(await wizard.getByRole('textbox').count(), 0, 'credentials are not requested up front');
+      assert.equal(hostedRequests, requestsBeforeOpen, 'opening an editor makes no hosted request');
+
+      const start = {action: 'start', provider};
+      const diagnostic = 'private service diagnostic';
+      responses.push({request: start, response: {status: 503, json: {error: diagnostic}}});
+      await connect.click();
+      await status(wizard, 'Connect with Milo is unavailable').waitFor();
+      assert.equal(await wizard.getByText(diagnostic).count(), 0, 'service diagnostics are not displayed');
+      await button(wizard, manual).click();
+      await wizard.getByRole('textbox', {name: input, exact: true}).waitFor();
+      await button(wizard, 'Connection options').click();
+
+      if (index === 0) {
+        responses.push({request: start, response: {json: {deviceKey: 'unsafe-pairing', url: 'https://t.me.example.invalid/milo'}}});
+        await connect.click();
+        await status(wizard, 'Connect with Milo is unavailable').waitFor();
+        assert.deepEqual(launches, [], 'an untrusted pairing URL is not opened');
+      }
+
+      const startPair = async deviceKey => {
+        responses.push({request: start, response: {json: {deviceKey, url}}});
+        const [popup] = await Promise.all([context.waitForEvent('page'), connect.click()]);
+        await popup.waitForURL(url);
+        assert(await popup.evaluate(() => window.opener === null), 'the provider page cannot access the local editor');
+        await popup.close();
+        await check.waitFor();
+        assert.equal(responses.length, 0, 'the start request completed without automatically claiming');
+      };
+      const claim = async (deviceKey, response) => {
+        responses.push({request: {action: 'claim', deviceKey}, response});
+        await check.click();
+      };
+      if (index === 0) {
+        const deviceKey = 'expired-fixture-pair';
+        await startPair(deviceKey);
+        await claim(deviceKey, {status: 404, json: {error: diagnostic}});
+        await status(wizard, 'This connection expired or was already used').waitFor();
+        assert.equal(await check.count() + await approve.count(), 0, 'expired pairing must start over');
+      }
+      const ready = {json: {provider, label, credential, chat}};
+      for (const attempt of ['discard', 'save']) {
+        const deviceKey = `${provider}-${attempt}-fixture-pair`;
+        await startPair(deviceKey);
+        if (attempt === 'discard') {
+          if (index === 1) {
+            await claim(deviceKey, {status: 502, json: {error: diagnostic}});
+            await status(wizard, 'Couldn’t check the connection').waitFor();
+            assert.equal(await wizard.getByText(diagnostic).count(), 0);
+          }
+          await claim(deviceKey, {status: 202, json: {pending: true}});
+          await status(wizard, 'Not connected yet').waitFor();
+          assert.equal(await approve.count(), 0, 'pending setup cannot be saved');
+        }
+        await claim(deviceKey, ready);
+        await proposal.waitFor();
+        await wizard.getByText(label, {exact: true}).waitFor();
+        await wizard.getByText('Saving does not turn forwarding on.', {exact: true}).waitFor();
+        assert.equal(saved.length, index, 'claiming a destination does not save it');
+        const markup = await wizard.innerHTML();
+        assert(!markup.includes(credential) && !markup.includes(deviceKey), 'the proposal never renders secrets');
+        if (attempt === 'discard') {
+          if (index === 0) await button(wizard, 'Cancel').click();
+          else {
+            await button(wizard, 'Back to destinations').click();
+            await button(page, name).click();
+          }
+          await connect.waitFor();
+          assert.equal(await proposal.count() + await approve.count(), 0, 'cancelling or going back discards the proposal');
+        } else {
+          await approve.click();
+          await wizard.getByText(chat ? `Saved destination · ${chat}` : 'Saved destination', {exact: true}).waitFor();
+          assert.equal(await proposal.count(), 0, 'saving clears the proposal');
+        }
+      }
+      await button(wizard, `Forget ${name}…`).click();
+      await button(dialog(page, `Forget ${name}?`), 'Keep editing').click();
+      await button(wizard, 'Back to destinations').click();
+      const manager = dialog(page, 'Destinations');
+      await manager.getByRole('switch', {name: `Forward to ${name}`, checked: false}).waitFor();
+      await button(manager, `Send test to ${name}`).waitFor();
+      await button(manager, 'Close destinations').click();
+    }
+    assert.equal(responses.length, 0);
+    assert.deepEqual(launches, [providers[0].url, ...providers.flatMap(({url}) => [url, url])],
+      'only approved launches reached the provider fixtures');
+    assert.deepEqual(saved, providers.map(({provider, credential, chat}, index) => ({
+      action: 'alerts', field: provider, version: initialVersion + index,
+      value: provider === 'telegram' ? {token: credential, chat, hosted: true} : {webhook: credential, hosted: true},
+    })), 'only explicit Save submits the provider credential to the existing setup action');
+
+    await button(destination, 'Manage destinations').click();
+    const manager = dialog(page, 'Destinations');
+    await button(manager, 'Send test to Discord').click();
+    await status(manager, 'Discord accepted the test message.').waitFor();
+    await button(manager, 'Send test to Telegram').click();
+    await status(manager, 'Telegram accepted the test message.').waitFor();
+    const confirmation = dialog(page, 'Turn on alert forwarding?');
+    for (const [name, target] of [['Telegram', 'Telegram chat 1234'], ['Discord', 'Discord channel']]) {
+      await manager.getByRole('switch', {name: `Forward to ${name}`, checked: false}).click();
+      await confirmation.getByText(`Destination: ${target}.`, {exact: false}).waitFor();
+      await button(confirmation, 'Turn on').click();
+      await manager.getByRole('switch', {name: `Forward to ${name}`, checked: true}).waitFor();
+    }
+    await manager.getByRole('switch', {name: 'Forward to Telegram', checked: true}).click();
+    await manager.getByRole('switch', {name: 'Forward to Telegram', checked: false}).waitFor();
+    assert(await manager.getByRole('switch', {name: 'Forward to Discord'}).isChecked(),
+      'turning Telegram off keeps Discord on');
+    assert.deepEqual(scoped, [
+      {field: 'test', value: 'discord'},
+      {field: 'test', value: 'telegram'},
+      {field: 'forwarding', value: {destination: 'telegram', enabled: true}},
+      {field: 'forwarding', value: {destination: 'discord', enabled: true}},
+      {field: 'forwarding', value: {destination: 'telegram', enabled: false}},
+    ]);
+    await button(manager, 'Close destinations').click();
+  } finally {
+    await context.unroute(outsideEditor, openProvider);
+    await page.unroute(hostedPath, hosted);
+    await page.unroute(actionPath, alertAction);
+  }
+}
+
 async function checkTelegramWizard(page, destination) {
   const url = new URL(page.url());
   const authorization = `Bearer ${url.hash.slice(1)}`;
@@ -542,7 +746,7 @@ async function checkTelegramWizard(page, destination) {
     if (action.action !== 'alerts' || action.field !== 'telegram') return route.fallback();
     received.push(action);
     state = {...state, version: state.version + 1, alerts: {...state.alerts,
-      destination: 'telegram', telegram: {saved: true, chat: action.value.chat}}};
+      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat}}};
     await route.fulfill({json: state});
   };
   // No discovery or Telegram save reaches Telegram, even with a packaged editor.
@@ -560,6 +764,7 @@ async function checkTelegramWizard(page, destination) {
     const open = async name => {
       await button(destination, name).click();
       await telegram.click();
+      await button(wizard, 'Use your own bot').click();
     };
     const assertReset = async () => {
       assert.equal(await token.inputValue(), '', 'starting over clears the token');
@@ -574,6 +779,7 @@ async function checkTelegramWizard(page, destination) {
     await button(wizard, 'Back to destinations').click();
     assert(await telegram.evaluate(element => element === document.activeElement), 'Back restores focus to Telegram');
     await telegram.click();
+    await button(wizard, 'Use your own bot').click();
     await assertReset();
 
     await token.fill(` ${fakeToken} `);
@@ -586,7 +792,7 @@ async function checkTelegramWizard(page, destination) {
     assert.equal(await chat.inputValue(), '', 'discovery does not select a chat for the user');
     await chat.selectOption({label: `Build room · ${chatId}`});
     await save.click();
-    await wizard.getByText(`Current destination · ${chatId}`, {exact: true}).waitFor();
+    await wizard.getByText(`Saved destination · ${chatId}`, {exact: true}).waitFor();
     await assertReset();
 
     for (const [index, text] of ['No recent chats found', 'Couldn’t find chats', 'Couldn’t find chats'].entries()) {
@@ -598,7 +804,7 @@ async function checkTelegramWizard(page, destination) {
       await manualChat.fill(index === 2 ? '@public_channel' : '-1009876543210');
       if (index === 2) {
         await save.click();
-        await wizard.getByText('Current destination · @public_channel', {exact: true}).waitFor();
+        await wizard.getByText('Saved destination · @public_channel', {exact: true}).waitFor();
         await assertReset();
       } else {
         if (index === 0) await button(wizard, 'Close destinations').click();
@@ -623,23 +829,33 @@ async function checkTelegramWizard(page, destination) {
 async function checkAlerts(page) {
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
-  const destination = page.getByRole('region', {name: 'Destination', exact: true});
-  assert.equal(await page.getByRole('switch', {name: 'Alert forwarding'}).count(), 0, 'cannot enable forwarding without a destination');
-  assert.equal(await button(page, 'Send test').count(), 0, 'cannot send to an unconfigured destination');
+  const destination = page.getByRole('region', {name: 'Destinations', exact: true});
+  await button(destination, 'Set up destination').click();
+  const manager = dialog(page, 'Destinations');
+  assert.equal(await manager.getByRole('switch').count(), 0, 'unconfigured providers cannot forward');
+  assert.equal(await manager.getByRole('button', {name: /^Send test to /}).count(), 0, 'unconfigured providers cannot send tests');
+  await button(manager, 'Close destinations').click();
+  await checkHostedConnections(page, destination);
+  await page.reload(); // Drop the hosted route fixture before checking manual setup.
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
   await checkTelegramWizard(page, destination);
   await page.reload(); // Drop the route fixture's Telegram destination before testing real settings.
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
   await button(destination, 'Set up destination').click();
   await button(page, 'Discord').click();
+  await button(page, 'Use your own webhook').click();
   const webhook = page.getByRole('textbox', {name: 'Webhook link'});
   await webhook.fill('unsaved example');
   await button(page, 'Close destinations').click();
   await button(destination, 'Set up destination').click();
   await button(page, 'Telegram').click();
+  await button(page, 'Use your own bot').click();
   assert.equal(await page.getByRole('textbox', {name: 'Bot token'}).inputValue(), '', 'closing the Discord editor leaves Telegram empty');
   await button(page, 'Back to destinations').click();
   await button(page, 'Discord').click();
+  await button(page, 'Use your own webhook').click();
   assert.equal(await webhook.inputValue(), '', 'closing destination setup forgets unsaved credentials');
   await button(page, 'Close destinations').click();
   const content = page.getByRole('group', {name: 'Content', exact: true});

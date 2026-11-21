@@ -361,7 +361,7 @@ impl Client {
                 Input::Wait => return Ok(Progress::Wait),
                 Input::Disconnected => return Ok(Progress::Done),
                 Input::Rejected(rejection) => (rejection.response(), false),
-                Input::Ready(route @ (Route::Action | Route::Close | Route::TelegramChats)) => {
+                Input::Ready(route @ (Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect)) => {
                     return Ok(Progress::Job(EditorJob { route, request: std::mem::take(input) }));
                 }
                 Input::Ready(route) => {
@@ -387,7 +387,9 @@ fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
         Route::Static(asset) => asset.response(),
         Route::State => Response::json(Arc::clone(snapshot)),
-        Route::Action | Route::Close | Route::TelegramChats => unreachable!("route runs on the editor worker"),
+        Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect => {
+            unreachable!("route runs on the editor worker")
+        }
     }
 }
 
@@ -411,6 +413,9 @@ impl EditorJob {
         }
         if self.route == Route::TelegramChats {
             return Completion { response: respond_telegram_chats(body, editor), snapshot: None, close: false };
+        }
+        if self.route == Route::HostedConnect {
+            return Completion { response: respond_hosted_connect(body), snapshot: None, close: false };
         }
         let (response, snapshot) = match editor.action(body) {
             Ok(state) => {
@@ -451,6 +456,24 @@ fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
         Err(Unavailable) => {
             Response::bad_gateway("Could not look up Telegram chats. Check the bot token or enter the chat ID manually.")
         }
+    }
+}
+
+fn respond_hosted_connect(body: &[u8]) -> Response {
+    use crate::alerts::relay::{self, ConnectError, Connected};
+
+    match relay::connect(body) {
+        Ok(Connected::Ready(reply)) => Response::json_owned(reply),
+        Ok(Connected::Pending) => Response::pairing_pending(),
+        Err(ConnectError::Invalid) => Response::bad_request("Invalid hosted connection request."),
+        Err(ConnectError::Expired) => Response::error("404 Not Found", "This connection expired or was already claimed."),
+        Err(ConnectError::Busy) => {
+            Response::error("429 Too Many Requests", "Too many connection requests. Try again shortly.")
+        }
+        Err(ConnectError::Disabled) => {
+            Response::error("503 Service Unavailable", "This provider is not enabled in Milo's connection service.")
+        }
+        Err(ConnectError::Unavailable) => Response::bad_gateway("Could not reach Milo's connection service."),
     }
 }
 

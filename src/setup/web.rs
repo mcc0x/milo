@@ -574,12 +574,13 @@ impl Action {
 /// `Telegram` and `Discord`, and is never sent back to the browser.
 enum AlertChange {
     Enabled(bool),
+    Forwarding(alerts::Destination, bool),
     Destination(alerts::Destination),
     Kind(alerts::Kind, bool),
     Content(alerts::Content),
-    Telegram { token: String, chat: String },
-    Discord(String),
-    Test,
+    Telegram { token: String, chat: String, hosted: bool },
+    Discord { webhook: String, hosted: bool },
+    Test(Option<alerts::Destination>),
     Forget(alerts::Destination),
     /// Reads again whether mirroring is running and what it last noted.
     Refresh,
@@ -590,14 +591,32 @@ impl AlertChange {
         let destination = |value: Value<'_>| alerts::Destination::parse(value.string(8)?.as_ref());
         Some(match field.string(32)?.as_ref() {
             "enabled" => Self::Enabled(value.boolean()?),
+            "forwarding" => {
+                let [target, enabled] = value.fields(["destination", "enabled"]);
+                Self::Forwarding(destination(target?)?, enabled?.boolean()?)
+            }
             "destination" => Self::Destination(destination(value)?),
             "content" => Self::Content(alerts::Content::parse(value.string(8)?.as_ref())?),
             "telegram" => {
-                let [token, chat] = value.fields(["token", "chat"]);
-                Self::Telegram { token: token?.string(128)?.into_owned(), chat: chat?.string(64)?.into_owned() }
+                let [token, chat, hosted] = value.fields(["token", "chat", "hosted"]);
+                let hosted = match hosted {
+                    Some(value) if value.boolean() == Some(true) => true,
+                    None => false,
+                    _ => return None,
+                };
+                Self::Telegram { token: token?.string(128)?.into_owned(), chat: chat?.string(64)?.into_owned(), hosted }
             }
-            "discord" => Self::Discord(value.string(256)?.into_owned()),
-            "test" if value.null() => Self::Test,
+            "discord" => match value.string(256) {
+                Some(webhook) => Self::Discord { webhook: webhook.into_owned(), hosted: false },
+                None => {
+                    let [webhook, hosted] = value.fields(["webhook", "hosted"]);
+                    if hosted?.boolean() != Some(true) {
+                        return None;
+                    }
+                    Self::Discord { webhook: webhook?.string(256)?.into_owned(), hosted: true }
+                }
+            },
+            "test" => Self::Test(if value.null() { None } else { Some(destination(value)?) }),
             "forget" => Self::Forget(destination(value)?),
             "refresh" if value.null() => Self::Refresh,
             field => Self::Kind(alerts::Kind::parse(field.strip_prefix("events.")?)?, value.boolean()?),
@@ -608,12 +627,16 @@ impl AlertChange {
         match self {
             Self::Enabled(true) => alerts.enable(),
             Self::Enabled(false) => alerts.disable(),
+            Self::Forwarding(destination, enabled) => alerts.set_forwarding(destination, enabled),
             Self::Destination(destination) => alerts.choose(destination),
             Self::Kind(kind, on) => alerts.set_kind(kind, on),
             Self::Content(content) => alerts.set_content(content),
-            Self::Telegram { token, chat } => alerts.set_telegram(token.trim(), chat.trim()),
-            Self::Discord(link) => alerts.set_discord(link.trim()),
-            Self::Test => alerts.test(),
+            Self::Telegram { token, chat, hosted: false } => alerts.set_telegram(token.trim(), chat.trim()),
+            Self::Telegram { token, chat, hosted: true } => alerts.set_hosted_telegram(token.trim(), chat.trim()),
+            Self::Discord { webhook, hosted: false } => alerts.set_discord(webhook.trim()),
+            Self::Discord { webhook, hosted: true } => alerts.set_hosted_discord(webhook.trim()),
+            Self::Test(Some(destination)) => alerts.test_destination(destination),
+            Self::Test(None) => alerts.test(),
             Self::Forget(destination) => alerts.forget(destination),
             Self::Refresh => Ok(String::new()),
         }
@@ -628,14 +651,17 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
         out,
         concat!(
             "{{\"enabled\":{},\"running\":{},\"destination\":{},",
-            "\"telegram\":{{\"saved\":{},\"chat\":{}}},\"discord\":{{\"saved\":{}}},\"events\":{{"
+            "\"telegram\":{{\"saved\":{},\"active\":{},\"chat\":{}}},",
+            "\"discord\":{{\"saved\":{},\"active\":{}}},\"events\":{{"
         ),
         settings.enabled,
         summary.running,
         Optional(settings.destination.map(|destination| Quoted(destination.name()))),
         telegram,
+        settings.active(alerts::Destination::Telegram),
         Quoted(&settings.telegram_chat),
         discord,
+        settings.active(alerts::Destination::Discord),
     )
     .expect("writing to a string");
     for (index, kind) in alerts::Kind::ALL.into_iter().enumerate() {
@@ -1368,8 +1394,15 @@ mod tests {
         {
             assert!(change(&mut editor, name, value).is_err(), "{name}");
         }
-        for (name, value) in
-            [("events.everything", "true"), ("content", "\"all\""), ("test", "true"), ("forget", "\"x\"")]
+        for (name, value) in [
+            ("events.everything", "true"),
+            ("content", "\"all\""),
+            ("test", "true"),
+            ("test", "\"other\""),
+            ("forget", "\"x\""),
+            ("forwarding", r#"{"destination":"telegram"}"#),
+            ("forwarding", r#"{"destination":"other","enabled":true}"#),
+        ]
         {
             assert_eq!(change(&mut editor, name, value).unwrap_err(), BAD_ACTION, "{name}");
         }
@@ -1380,6 +1413,7 @@ mod tests {
         let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
         assert!(field(alerts, "destination").is("telegram"));
         assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(true));
+        assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
         assert_eq!(field(alerts, "enabled").boolean(), Some(false));
         assert!(field(alerts, "disclosure").string(600).unwrap().contains("No text from the program"));
 
@@ -1388,6 +1422,7 @@ mod tests {
         let state = change(&mut editor, "enabled", "true").unwrap();
         let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
         assert_eq!(field(alerts, "enabled").boolean(), Some(true));
+        assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(true));
         assert_eq!(field(field(alerts, "events"), "bell").boolean(), Some(true));
         assert!(field(alerts, "disclosure").string(600).unwrap().contains("up to 300 characters"));
         assert!(saved(&editor).enabled && saved(&editor).content == alerts::Content::Text);
@@ -1400,6 +1435,62 @@ mod tests {
         let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
         assert!(field(alerts, "destination").null());
         assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(false));
+        assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
+    }
+
+    #[test]
+    fn saving_hosted_destinations_is_explicit_and_disarms_the_replaced_destination() {
+        const CAPABILITY: &str = concat!("milorelay_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
+        const MANUAL: &str = "123456:syntheticSYNTHETICsynthetic00";
+        const WEBHOOK: &str = "https://discord.com/api/webhooks/1234567891/synthetic_SYNTHETICsynthetic-01";
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        editor.setup.alerts = Some(Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state")));
+        editor.setup.refresh_alerts();
+        let change = |editor: &mut Editor, field: &str, value: &str| {
+            action(editor, &format!("\"action\":\"alerts\",\"field\":{field:?},\"value\":{value}"))
+        };
+        let active = |alerts| ["telegram", "discord"].map(|target| field(field(alerts, target), "active").boolean());
+        let forward = |editor: &mut Editor, destination: &str, enabled: bool| {
+            change(editor, "forwarding", &format!(r#"{{"destination":{destination:?},"enabled":{enabled}}}"#))
+                .unwrap()
+        };
+        change(&mut editor, "telegram", &format!(r#"{{"token":"{MANUAL}","chat":"-1001234567890"}}"#)).unwrap();
+        change(&mut editor, "enabled", "true").unwrap();
+        let error = change(&mut editor, "test", "\"discord\"").unwrap_err();
+        assert!(error.contains("No Discord destination is saved"), "{error}");
+        let telegram = format!(r#"{{"token":"{CAPABILITY}","chat":"42","hosted":true}}"#);
+        let discord = format!(r#"{{"webhook":"{WEBHOOK}","hosted":true}}"#);
+        let state = change(&mut editor, "discord", &discord).unwrap();
+        assert!(!state.contains(WEBHOOK));
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert!(field(alerts, "destination").is("telegram"));
+        assert_eq!(field(alerts, "enabled").boolean(), Some(true));
+        assert_eq!(active(alerts), [Some(true), Some(false)]);
+
+        let state = forward(&mut editor, "discord", true);
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert!(field(alerts, "destination").is("telegram"));
+        assert_eq!(active(alerts), [Some(true), Some(true)]);
+
+        let state = forward(&mut editor, "telegram", false);
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert_eq!(active(alerts), [Some(false), Some(true)]);
+        forward(&mut editor, "telegram", true);
+
+        let state = change(&mut editor, "telegram", &telegram).unwrap();
+        assert!(!state.contains(CAPABILITY));
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert_eq!(active(alerts), [Some(false), Some(true)]);
+        assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(true));
+
+        change(&mut editor, "destination", "\"discord\"").unwrap();
+        change(&mut editor, "enabled", "true").unwrap();
+        let state = change(&mut editor, "discord", &discord).unwrap();
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert!(field(alerts, "destination").is("discord"));
+        assert_eq!(field(alerts, "enabled").boolean(), Some(false));
+        assert_eq!(active(alerts), [Some(false), Some(false)]);
     }
 
     #[test]

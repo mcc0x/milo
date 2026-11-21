@@ -26,6 +26,7 @@ pub(super) enum Route {
     Action,
     Close,
     TelegramChats,
+    HostedConnect,
 }
 
 impl Route {
@@ -120,16 +121,21 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
         ("POST", "/api/action") => Route::Action,
         ("POST", "/api/close") => Route::Close,
         ("POST", "/api/telegram-chats") => Route::TelegramChats,
+        ("POST", "/api/hosted-connect") => Route::HostedConnect,
         ("GET", path) => Route::Static(Asset::at(path).ok_or(Rejection::NotFound)?),
         _ => return Err(Rejection::NotFound),
     };
     if route.authenticated() && !authorization.is_some_and(|header| same_secret(header, access.bearer)) {
         return Err(Rejection::Unauthorized);
     }
-    let expects_json = matches!(route, Route::Action | Route::Close | Route::TelegramChats);
+    let expects_json = matches!(route, Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect);
+    let limit = match route {
+        Route::HostedConnect => crate::alerts::relay::REQUEST_LIMIT,
+        _ => MAX_BODY,
+    };
     let body_len = match length {
         Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
-            value.parse::<usize>().ok().filter(|&len| len <= MAX_BODY).ok_or(Rejection::BodyTooLarge)?
+            value.parse::<usize>().ok().filter(|&len| len <= limit).ok_or(Rejection::BodyTooLarge)?
         }
         Some(_) => return Err(Rejection::BadRequest),
         None if expects_json => return Err(Rejection::LengthRequired),
@@ -302,6 +308,10 @@ impl Response {
         Self::new("200 OK", Some(JSON), Body::Owned(body.into_bytes()), "")
     }
 
+    pub(super) fn pairing_pending() -> Self {
+        Self::new("202 Accepted", Some(JSON), Body::Borrowed(br#"{"pending":true}"#), "")
+    }
+
     pub(super) fn no_content() -> Self {
         Self::new("204 No Content", None, Body::Borrowed(b""), "")
     }
@@ -325,7 +335,7 @@ impl Response {
         )
     }
 
-    fn error(status: &str, message: &str) -> Self {
+    pub(super) fn error(status: &str, message: &str) -> Self {
         let mut body = String::with_capacity(message.len() + 12);
         body.push_str("{\"error\":\"");
         for character in message.chars() {
@@ -430,6 +440,25 @@ mod tests {
         assert_eq!(incoming("POST", path, &format!("{bearer}{origin}")), Err(Rejection::LengthRequired));
         assert_eq!(
             incoming("POST", path, &format!("{bearer}{origin}\r\nContent-Length: 2")),
+            Err(Rejection::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn hosted_connect_is_an_exact_authenticated_same_origin_json_post_with_a_smaller_limit() {
+        let path = "/api/hosted-connect";
+        let bearer = "\r\nAuthorization: Bearer the-token";
+        let origin = "\r\nOrigin: http://127.0.0.1:4321";
+        let write = "\r\nContent-Type: application/json\r\nContent-Length: 1024";
+        let valid = format!("{bearer}{origin}{write}");
+        assert_eq!(incoming("POST", path, &valid), Ok((Route::HostedConnect, 1024)));
+        assert_eq!(incoming("GET", path, &valid), Err(Rejection::NotFound));
+        assert_eq!(incoming("POST", "/api/hosted-connect?target=other", &valid), Err(Rejection::NotFound));
+        assert_eq!(incoming("POST", path, &format!("{bearer}{write}")), Err(Rejection::Forbidden));
+        assert_eq!(incoming("POST", path, &format!("{origin}{write}")), Err(Rejection::Unauthorized));
+        assert_eq!(incoming("POST", path, &valid.replace("1024", "1025")), Err(Rejection::BodyTooLarge));
+        assert_eq!(
+            incoming("POST", path, &valid.replace("application/json", "text/plain")),
             Err(Rejection::UnsupportedMediaType)
         );
     }

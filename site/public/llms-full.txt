@@ -264,19 +264,26 @@ New setups use the full path to Milo, so Claude Code does not need `milo` on its
 
 ## Mirror Rex alerts
 
-Milo can send the alerts Rex raises to a Telegram chat or a Discord channel you choose, so that a blocked or finished agent reaches you away from the machine. It is off until you turn it on. Rex's own tab marks, sounds and notifications stay exactly as they are: Milo only listens to Rex's event stream (`rex events`) beside the Rex apps and changes no Rex setting.
+Milo can send the same Rex alert to Telegram, Discord, or both. Forwarding is off until you enable it. Rex's own tab marks, sounds and notifications stay as they are: Milo listens to `rex events` and changes no Rex setting.
 
 ```sh
 milo alerts telegram -1001234567890   # asks for the bot's token; or: milo alerts discord
 milo alerts                           # what is saved, whether it is running, what would be sent
 milo alerts test                      # one message written by Milo
 milo alerts on                        # starts, and says again what is sent
+milo alerts on discord                # enable just Discord, leaving Telegram as configured
+milo alerts on telegram               # now send to both
+milo alerts test telegram             # test only Telegram
 milo alerts off                       # ends it at once
 ```
 
 The same choices are under **Integrations → Alert forwarding** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
 
 In the browser, choose **Set up destination** (or **Manage destinations**). For Telegram, enter the bot token and look for a chat in its recent updates. If your chat isn’t listed, message the bot there and try again, or enter the chat ID or public `@channel` yourself. Bots already using a webhook need manual entry; Milo doesn’t disconnect their webhook. Looking for chats doesn’t save a destination or turn on forwarding.
+
+Each saved destination has its own forwarding switch and test button. Turn on both switches to send each alert to both places, or test either destination without enabling forwarding. Forgetting one leaves the other connected.
+
+**Connect with Milo (local preview).** Instead of entering your own secret, pair through the optional [connection service](https://github.com/mcc0x/milo/blob/main/hosted/README.md). For Telegram, confirm in a **private DM** with the official bot; the relay delivers alerts to that DM. For Discord, authorize a webhook for your channel; your device delivers alerts directly to Discord. Review the destination in Milo before saving. Pairing does not turn forwarding on. Confirmed connections survive relay restarts; unfinished pairings do not. Manual setup needs no connection service.
 
 <picture>
   <source media="(max-width: 600px)" srcset="https://github.com/mcc0x/milo/blob/main/docs/img/web-alerts-mobile.webp">

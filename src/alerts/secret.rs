@@ -1,5 +1,5 @@
-//! Keeps a destination's secret: a Telegram bot token, or the `ID/TOKEN` of a
-//! Discord webhook link. Either lets its holder post to the chat or channel.
+//! Keeps a destination's secret: a Telegram bot token or relay capability,
+//! or the `ID/TOKEN` of a Discord webhook link. Each allows posting.
 //!
 //! On macOS the secret goes in the user's Keychain, through `/usr/bin/security`.
 //! Elsewhere it goes in a file only the user can read, beside Milo's settings.

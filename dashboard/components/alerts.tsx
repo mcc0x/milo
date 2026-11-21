@@ -2,6 +2,7 @@
 
 import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { ChoiceSetting, SwitchSetting } from "./controls";
+import HostedAlertsSetup from "./hosted-alerts-setup";
 import { useSession, type TelegramChat } from "./session";
 import IntegrationSwitch from "./integration-switch";
 import "./alerts.css";
@@ -18,7 +19,7 @@ const content = [["metadata", "Kind and program name"], ["text", "Also program t
 
 type Destination = (typeof destinations)[number][0];
 type DestinationEditor = "closed" | "list" | Destination;
-type Field = "enabled" | "content" | "destination" | "test" | "forget" | Destination | `events.${(typeof events)[number][0]}`;
+type Field = "forwarding" | "content" | "test" | "forget" | Destination | `events.${(typeof events)[number][0]}`;
 
 function AlertGroup({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -169,7 +170,7 @@ function TelegramSetup({ form, busy, savedChat, save }: {
 }
 
 export default function Alerts() {
-  const { state, paused, running, closing, command, confirm } = useSession();
+  const { state, paused, running, closing, command, confirm, localError, operationWarning, toast } = useSession();
   const form = useRef<HTMLFormElement>(null);
   const manager = useRef<HTMLDialogElement>(null);
   const [editor, setEditor] = useState<DestinationEditor>("closed");
@@ -185,11 +186,13 @@ export default function Alerts() {
   if (!alerts) return null;
 
   const busy = paused || running || closing;
-  const { destination, enabled } = alerts;
-  const target = destination === "telegram" ? `Telegram chat ${alerts.telegram.chat}` :
-    destination === "discord" ? "Discord channel" : null;
-  const status = !enabled ? "Forwarding off" : alerts.running ? "Forwarding on" : "Enabled, not running";
+  const active = destinations.filter(([name]) => alerts[name].active);
+  const saved = destinations.filter(([name]) => alerts[name].saved);
+  const targetLabels = { telegram: `Telegram chat ${alerts.telegram.chat}`, discord: "Discord channel" };
+  const targets = (active.length ? active : saved).map(([name]) => targetLabels[name]);
+  const status = !active.length ? "Forwarding off" : alerts.running ? "Forwarding on" : "Enabled, not running";
   const destinationsOpen = editor !== "closed";
+  const actionError = localError || operationWarning;
   const selectedEvents = events.filter(([kind]) => alerts.events[kind]);
   const payload = alerts.content === "text"
     ? "Each alert includes its kind, the program’s short name, and up to 300 characters of program text. That text can name files or quote a prompt. No session, tab or folder names are added."
@@ -205,7 +208,7 @@ export default function Alerts() {
   function send(field: Field, value: unknown) {
     if (busy) return;
     // Clear unsent inputs when making a change, before the request can settle.
-    // Secrets never enter React state, and the response never repopulates them.
+    // The session keeps a credential out of its public queue and response.
     form.current?.reset();
     command("alerts", { field, value });
   }
@@ -215,46 +218,41 @@ export default function Alerts() {
     if (!busy) send("discord", valueOf(event.currentTarget, "alerts-discord-link"));
   }
 
-  function toggleForwarding() {
-    if (enabled) {
-      send("enabled", false);
-    } else if (target) {
+  function saveHosted(name: Destination, credential: string, chat: string) {
+    send(name, name === "telegram" ? { token: credential, chat, hosted: true } : { webhook: credential, hosted: true });
+  }
+
+  function toggleForwarding(destination: Destination) {
+    if (alerts?.[destination].active) {
+      send("forwarding", { destination, enabled: false });
+    } else if (alerts?.[destination].saved) {
       const selected = selectedEvents.length ? `Events: ${selectedEvents.map(([, label]) => label).join(", ")}.` : noEvents;
       confirm("Turn on alert forwarding?",
-        `Destination: ${target}.\n${selected}\n${payload}\n${rexNotifications}`, "Turn on", () => send("enabled", true));
+        `Destination: ${targetLabels[destination]}.\n${selected}\n${payload}\n${rexNotifications}`, "Turn on",
+        () => send("forwarding", { destination, enabled: true }));
     }
   }
 
   return (
     <div className="alert-settings">
-      <AlertGroup id="group-alerts" title="Destination">
+      <AlertGroup id="group-alerts" title="Destinations">
         <div className="alerts-destination">
           <div className="alerts-destination-copy">
-          <div className="alerts-destination-line">
-            <p className="setting-label">{target ?? "No destination"}</p>
-            <span className="setting-detail alerts-status" id="group-alerts-status" role="status"
-              data-running={enabled && alerts.running}>{status}</span>
-          </div>
-          {!target ? <p className="setting-detail">Connect a chat or channel. Forwarding stays off until you turn it on.</p> : null}
-          {alerts.note ? <p className="setting-detail disclosure-text">{alerts.note}</p> : null}
+            <div className="alerts-destination-line">
+              <p className="setting-label">{targets.length ? targets.join(" and ") : "No destination"}</p>
+              <span className="setting-detail alerts-status" id="group-alerts-status" role="status"
+                data-running={active.length > 0 && alerts.running}>{status}</span>
+            </div>
+            {!targets.length ? <p className="setting-detail">Connect a chat or channel. Forwarding stays off until you turn it on.</p> : null}
+            {alerts.note ? <p className="setting-detail disclosure-text">{alerts.note}</p> : null}
           </div>
           <div className="button-row">
-            {(enabled || target) ? (
-              <IntegrationSwitch id="alerts-toggle" label="Alert forwarding" enabled={enabled} disabled={busy} onClick={toggleForwarding}/>
-            ) : null}
-            <button type="button" className={`button ${target ? "secondary" : "primary"}`}
+            <button type="button" className={`button ${targets.length ? "secondary" : "primary"}`}
               id="alerts-destinations-toggle" aria-haspopup="dialog" aria-controls="alerts-destinations"
               onClick={() => { showEditor("list"); manager.current?.showModal(); }}>
-              {target ? "Manage destinations" : "Set up destination"}
+              {targets.length ? "Manage destinations" : "Set up destination"}
             </button>
-            {target ? (
-              <button type="button" className="button text-button" id="alerts-test" disabled={busy}
-                aria-describedby="alerts-test-detail" onClick={() => send("test", null)}>Send test</button>
-            ) : null}
           </div>
-          {target ? (
-            <p className="setting-detail" id="alerts-test-detail">A test sends one message from Milo, not a Rex alert.</p>
-          ) : null}
         </div>
         <dialog ref={manager} id="alerts-destinations" className="alerts-manager" aria-labelledby="alerts-manager-title"
           onClose={() => showEditor("closed")}>
@@ -271,6 +269,7 @@ export default function Alerts() {
             <div className="alerts-manager-body" key={editor}>
               {editor === "list" && <div className="alerts-provider-picker" role="group" aria-label="Choose a destination">
                 {destinations.map(([name, label]) => {
+                  const { active, saved } = alerts[name];
                   return (
                     <div className="alerts-provider-row" key={name}>
                     <button type="button" className="alerts-provider" id={`alerts-edit-${name}`} aria-label={label}
@@ -279,48 +278,55 @@ export default function Alerts() {
                         {name === "telegram" ? <path d="M21.5 3.7 18 20.1c-.2.9-.8 1.1-1.5.6l-5.3-3.9-2.5 2.4.4-4.8L18 6.6c.4-.4.1-.6-.4-.3L6.5 13.2 2 11.8c-1-.3-1-1 .2-1.5L20.5 3.3c.7-.3 1.2-.1 1 .4Z"/> :
                           <path fillRule="evenodd" d="M8.5 4.5c-1.6.2-3 .7-4.1 1.3C2 9.4 1.1 13.3 1.5 17c1.6 1.2 3.2 2 5.1 2.5l1.1-1.7-1.7-.9.4-.3c3.5 1.6 7.7 1.6 11.2 0l.4.3-1.7.9 1.1 1.7c1.9-.5 3.5-1.3 5.1-2.5.4-3.7-.5-7.6-2.9-11.2-1.1-.6-2.5-1.1-4.1-1.3l-.6 1.2a15 15 0 0 0-5.8 0ZM8.4 14.6a1.6 2 0 1 1 0-4 1.6 2 0 1 1 0 4Zm7.2 0a1.6 2 0 1 1 0-4 1.6 2 0 1 1 0 4Z"/>}
                       </svg>
-                      <span>{label}<small>{destination === name ? status : alerts[name].saved ? "Saved" : "Not connected"}</small></span>
-                      <span className="alerts-edit-label">{alerts[name].saved ? "Edit" : "Set up"}</span>
+                      <span>{label}<small>{active ? (alerts.running ? "Forwarding on" : "Enabled, not running") : saved ? "Forwarding off" : "Not connected"}</small></span>
+                      <span className="alerts-edit-label">{saved ? "Edit" : "Set up"}</span>
                     </button>
-                    {destination === name ? <IntegrationSwitch id={`alerts-forward-${name}`} label={`Forward to ${label}`} enabled={enabled} disabled={busy} onClick={toggleForwarding}/> :
-                      alerts[name].saved ? <button type="button" className="button secondary" disabled={busy}
-                        onClick={() => send("destination", name)}>Use {label}</button> : null}
+                    {active || saved ? (
+                      <div className="alerts-provider-controls">
+                        <IntegrationSwitch id={`alerts-forward-${name}`} label={`Forward to ${label}`} enabled={active} disabled={busy}
+                          onClick={() => toggleForwarding(name)} />
+                        {saved ? <button type="button" className="button text-button" id={`alerts-test-${name}`} disabled={busy}
+                          aria-label={`Send test to ${label}`} aria-describedby="alerts-test-detail"
+                          onClick={() => send("test", name)}>Send test</button> : null}
+                      </div>
+                    ) : null}
                     </div>
                   );
                 })}
+                {saved.length ? <p className="setting-detail" id="alerts-test-detail">A test sends one message from Milo, not a Rex alert.</p> : null}
               </div>}
               <div id="alerts-provider-setup">
                 {destinations.map(([name, label]) => editor === name && (
                   <div key={name}>
-                    {alerts[name].saved && <p className="setting-detail">{destination === name ? "Current destination" : "Saved destination"}{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p>}
-                    {name === "telegram" ? (
-                      <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={value => {
-                        manager.current?.querySelector<HTMLElement>("h2")?.focus();
-                        send("telegram", value);
-                      }} />
-                    ) : (
-                      <form id="alerts-discord" className="secret-form alerts-form" autoComplete="off" ref={form}
-                        onSubmit={saveDiscord}>
-                        <ol className="setting-detail alerts-steps" aria-label="Discord setup steps">
-                          <li>In Discord, open <strong>Edit Channel</strong> for the channel you want Milo to post in.</li>
-                          <li>Go to <strong>Integrations → Webhooks</strong>. Choose a webhook or create one.</li>
-                          <li>Select <strong>Copy Webhook URL</strong>, paste it below, then choose <strong>Save</strong>.</li>
-                        </ol>
-                        <DestinationInput id="alerts-discord-link" label="Webhook link" disabled={busy} secret>
-                          <DestinationSave name="discord" label="Discord" disabled={busy} />
-                        </DestinationInput>
-                      </form>
-                    )}
-                    {alerts[name].saved && <div className="button-row">
-                      <button type="button" className="button text-button" disabled={busy}
-                        onClick={() => confirm(`Forget ${label}?`,
-                          `This removes the saved ${label} destination and its secret from ${alerts.place}. Forwarding to it ends.`,
-                          "Forget", () => send("forget", name))}>Forget {label}…</button>
-                    </div>}
+                    {alerts[name].saved ? <p className="setting-detail alerts-saved-destination">Saved destination{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p> : null}
+                    <HostedAlertsSetup provider={name} label={label} busy={busy}
+                      replacingActive={alerts[name].active} save={(credential, chat) => saveHosted(name, credential, chat)}
+                      forget={alerts[name].saved ? () => confirm(`Forget ${label}?`,
+                        `This removes the saved ${label} destination and its secret from ${alerts.place}. Forwarding to it ends.`,
+                        "Forget", () => send("forget", name)) : undefined}>
+                      {name === "telegram" ? (
+                        <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={value => {
+                          manager.current?.querySelector<HTMLElement>("h2")?.focus();
+                          send("telegram", value);
+                        }} />
+                      ) : (
+                        <form id="alerts-discord" className="secret-form alerts-form" autoComplete="off" ref={form}
+                          onSubmit={saveDiscord}>
+                          <ol className="setting-detail alerts-steps" aria-label="Discord setup steps">
+                            <li>In Discord, open <strong>Edit Channel</strong> for the channel you want Milo to post in.</li>
+                            <li>Go to <strong>Integrations → Webhooks</strong>. Choose a webhook or create one.</li>
+                            <li>Select <strong>Copy Webhook URL</strong>, paste it below, then choose <strong>Save</strong>.</li>
+                          </ol>
+                          <DestinationInput id="alerts-discord-link" label="Webhook link" disabled={busy} secret>
+                            <DestinationSave name="discord" label="Discord" disabled={busy} />
+                          </DestinationInput>
+                        </form>
+                      )}
+                    </HostedAlertsSetup>
                   </div>
                 ))}
               </div>
-              {alerts.note && <p role="status" className="setting-detail">{alerts.note}</p>}
+              <p role="status" className="setting-detail alerts-action-note" data-error={!!actionError}>{actionError || toast?.text || alerts.note}</p>
             </div>
           ) : null}
           <footer className="setting-detail alerts-storage"><strong>Credentials:</strong> stored in {alerts.place}. Saved secrets aren’t shown again.</footer>
