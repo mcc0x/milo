@@ -446,6 +446,13 @@ fn a_reply_in_another_form_is_unknown_and_never_a_figure_of_zero() {
     let overspent = r#"{"data":{"limit":5,"limit_remaining":-0.25,"usage":5.25}}"#;
     let Status::Reading(reading, None) = look(OpenRouter, 200, "", overspent) else { panic!() };
     assert_eq!(reading.figure, dollars(Kind::LimitLeft, 0.0));
+    // An amount the provider rounded to nothing from below is nothing, not a negative figure.
+    let rounded = r#"{"data":{"limit":5,"limit_remaining":-0.0,"usage":5}}"#;
+    let Status::Reading(reading, None) = look(OpenRouter, 200, "", rounded) else { panic!() };
+    assert_eq!(reading.figure.text(), "$0.00 key limit left");
+    let owed = r#"{"is_available":false,"balance_infos":[{"currency":"CNY","total_balance":"-0.00"}]}"#;
+    let Status::Reading(reading, None) = look(DeepSeek, 200, "", owed) else { panic!() };
+    assert_eq!(reading.figure.text(), "¥0.00 balance");
     assert_eq!(
         look(OpenRouter, 200, "", r#"{"data":{"limit_remaining":"plenty","usage":1}}"#),
         failed(Failure::Unexpected)
@@ -467,6 +474,11 @@ fn a_reply_in_another_form_is_unknown_and_never_a_figure_of_zero() {
     assert_eq!(look(Copilot, 200, "", &mixed), failed(Failure::Unexpected));
     let last_month = COPILOT.replace("\"month\": 11", "\"month\": 10");
     assert_eq!(look(Copilot, 200, "", &last_month), failed(Failure::Unexpected));
+    // Quantities too large to add into a count, or a year no calendar holds, are no report.
+    let endless = COPILOT.replace("1100.5", "1e308").replace("139.5", "1e308");
+    assert_eq!(look(Copilot, 200, "", &endless), failed(Failure::Unexpected));
+    let no_such_year = COPILOT.replace("\"year\": 2026", "\"year\": 9223372036854775807");
+    assert_eq!(look(Copilot, 200, "", &no_such_year), failed(Failure::Unexpected));
     assert_eq!(look(Copilot, 404, "", r#"{"message":"Not Found"}"#), failed(Failure::Denied));
     assert_eq!(
         look(Copilot, 403, "Retry-After: 60\r\n", r#"{"message":"secondary rate limit"}"#),
@@ -474,6 +486,28 @@ fn a_reply_in_another_form_is_unknown_and_never_a_figure_of_zero() {
     );
     assert_eq!(look(Copilot, 503, "", ""), failed(Failure::Unreachable));
     assert_eq!(look(Copilot, 302, "Location: https://example.com/elsewhere\r\n", ""), failed(Failure::Unreachable));
+}
+
+#[test]
+fn a_count_is_asked_for_again_when_its_period_ends_and_not_a_whole_interval_later() {
+    let (f, provider) = (Fixture::folder(), Provider::start());
+    provider.reply("devin", 200, "", DEVIN);
+    let devin = UsageAccount::Devin;
+    let environment = [("MILO_DEVIN_API_KEY", KEY), ("MILO_DEVIN_ORG", "org-abc")];
+    let mut usage = pane(&f, sources(&f, &provider, &environment), &[(devin, Show::Auto)]);
+    let (_, end) = DEVIN_DAY;
+    // Asked two minutes before Devin's day ends, the schedule alone would wait
+    // thirteen minutes into the next day with no figure to show.
+    usage.accounts.settle(end - 2 * MINUTE, false);
+    usage.accounts.settle(end - 1, false);
+    assert_eq!(provider.asked("devin").len(), 1);
+    assert!(matches!(status(&usage, devin, end - 1), Status::Reading(reading, None) if reading.until == Some(end)));
+
+    usage.accounts.settle(end, false);
+    let asked = provider.asked("devin");
+    assert_eq!(asked.len(), 2);
+    assert!(asked[1].contains(&format!("time_after={end}&time_before={} ", end + DAY)), "{asked:?}");
+    assert!(matches!(status(&usage, devin, end), Status::Reading(reading, None) if reading.until == Some(end + DAY)));
 }
 
 #[test]
