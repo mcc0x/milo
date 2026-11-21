@@ -388,6 +388,41 @@ fn a_reader_closed_from_outside_keeps_its_draft_for_the_next_edit() {
 }
 
 #[test]
+fn deferring_or_undoing_a_kept_draft_does_not_lose_either_edit_on_external_close() {
+    for defer in [true, false] {
+        let f = Fixture::folder();
+        f.write("notes.txt", "one\n");
+        let mut reader = editing(&f, "notes.txt");
+        typed(&mut reader, "first ");
+        drop(reader);
+
+        let mut reader = editing(&f, "notes.txt");
+        if defer {
+            reader.key(Key::Esc);
+        } else {
+            reader.key(Key::Char('r'));
+            reader.key(Key::Ctrl(b'z'));
+        }
+        typed(&mut reader, "second ");
+        drop(reader);
+
+        let file = f.root.join("notes.txt");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
+        let mut reader = editing(&f, "notes.txt");
+        reader.key(Key::Char('r'));
+        assert_eq!(draft(&reader), "first one\n");
+        reader.key(Key::Ctrl(b's'));
+        reader.key(Key::Esc);
+        reader.key(Key::Char('e'));
+        reader.key(Key::Char('r'));
+        assert_eq!(draft(&reader), "second one\n");
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "second one\n");
+        assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn a_kept_draft_can_be_deleted_instead() {
     let f = Fixture::folder();
     f.write("notes.txt", "one\n");
