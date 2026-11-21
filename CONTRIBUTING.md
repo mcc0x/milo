@@ -363,6 +363,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
 | `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
+| `dashboard/app/`, `dashboard/components/` | Next.js App Router entry point and React settings sections. Run `bun run build` in `dashboard/` after changing the UI, and commit its generated `dashboard/bundle/` alongside the source. Cargo embeds that bundle without installing frontend tooling. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |

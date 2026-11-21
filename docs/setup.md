@@ -69,7 +69,7 @@ Run `milo` for Home or `milo setup` to go directly to Settings. Both share the s
 
 Milo leaves tab and session names alone unless you ask. It builds a name from folder names and the name of an agent's process. It never reads what a terminal shows, a terminal's title or a program's status text, so nothing you type to an agent ends up in a name.
 
-Turn on **Title Rex tabs** under **Workflow** to name tabs that nobody has named. A tab is titled after the Git project its shell is in: `project` in the repository's own folder and `project/worktree` in a linked worktree. While Claude Code, Codex or oh-my-pi runs in one of the tab's shells, the title ends with ` · claude`, ` · codex` or ` · omp`. A tab outside a Git project keeps the label Rex gave it. The setting is off by default. Save it globally, or for one worktree to title tabs only there or everywhere but there.
+Turn on **Title Rex tabs** under **Workflow** in terminal Settings or **Integrations → Rex automation** in the browser to name tabs that nobody has named. A tab is titled after the Git project its shell is in: `project` in the repository's own folder and `project/worktree` in a linked worktree. While Claude Code, Codex or oh-my-pi runs in one of the tab's shells, the title ends with ` · claude`, ` · codex` or ` · omp`. A tab outside a Git project keeps the label Rex gave it. The setting is off by default. Save it globally, or for one worktree to title tabs only there or everywhere but there.
 
 Milo titles a tab only while its label is Rex's own, such as `Window 89abcdef`, or the title Milo set last. Rename a tab yourself, in the app or with `rex window rename`, and Milo stops titling it. Clear the name to hand the tab back. Milo remembers the titles it set by Rex window ID in its state folder, so a name you chose is still respected after Rex or Milo's listener restarts.
 
@@ -91,9 +91,11 @@ On macOS, the optional [Milo menu app](usage.md#macos-menu-bar) also opens this 
 
 The editor listens on `127.0.0.1:6110` by default. Use `milo web --port 7000` to choose another port, or `--port 0` for an available port when running a second editor.
 
-Layout edits stay in a draft until you save. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default. Appearance and workflow use the same preference files as terminal Settings; Claude Code choices apply to the active profile. Outside Rex you can still edit and save settings.
+Use **Layout** for pane order and sizes, **Panes** for Outline, History and shared appearance, and **Usage** for tools, accounts and display. In Rex, the layout actions menu lets you copy the current tab’s layout or try the draft in that tab. Undo a trial to restore the previous layout. Save explicitly for the current worktree or as the global default; Claude Code choices apply to the active profile. Outside Rex you can still edit and save settings.
 
-After saving, the confirmation names the destination: global defaults, the current worktree, or the active Claude profile. If open panes still use the old preferences, the browser keeps **Reopen panes to apply** in the footer after the confirmation fades. Editing again clears the reminder.
+**Integrations** groups Rex automation, Discord presence and alert forwarding. Rex automation uses drafts; presence and forwarding apply immediately. **Menu Bar** manages the optional macOS app, and **Health** checks for problems.
+
+After saving, the confirmation names the destination: global defaults, the current worktree, or the active Claude profile. If open panes still use the old preferences, the browser keeps **Reopen panes to apply** in the project bar after the confirmation fades. Editing again clears the reminder.
 
 Terminal Settings and the browser editor check for intervening changes before saving preferences or removing a worktree override. If another editor saved first, reopen the settings and review the current values rather than overwriting them. In terminal Settings, save or discard layout and Claude drafts before repairing or removing integrations.
 
@@ -103,7 +105,7 @@ While the page is open, it periodically keeps the local session alive only if it
 
 **Done** closes the editor only after undoing any active layout trial. If undo fails, the editor stays open so you can retry. Stopping Milo with `Ctrl-C` or letting it time out only attempts to undo the trial. Closing the browser tab alone leaves the private link usable until Milo stops or the session is idle for 15 minutes. When the session ends, unsaved drafts are discarded; saved settings stay as they are.
 
-For UI development, run `cargo run --features web-dev -- web` from the Milo checkout and use the browser tab it opens. Edits to `src/web/app.css` apply in place; changes to `index.html`, `app.js`, or the mascot reload the page against the same in-memory settings draft. Finish any pending input first. Rust changes still require restarting the command. Normal builds serve embedded assets and do not watch the checkout.
+The dashboard ships inside `milo`: using it needs no Node runtime, account, or internet connection. For UI development, use Node 26 and Bun: `cd dashboard && bun install --frozen-lockfile && bun run dev`. Open the private URL printed in the terminal. Next.js Fast Refresh updates the interface against a real local Milo session. `MILO_BIN` selects the backend executable (default `milo` on PATH); `MILO_PROJECT` selects the project to edit; `PORT` selects the development port (default `6110`). Stop the development server with `Ctrl-C`.
 
 ## Rex actions
 
@@ -150,7 +152,9 @@ milo alerts on                        # starts, and says again what is sent
 milo alerts off                       # ends it at once
 ```
 
-The same choices are under **Alerts** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
+The same choices are under **Integrations → Alert forwarding** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
+
+In the browser, choose **Set up destination** (or **Manage destinations**). For Telegram, enter the bot token and look for a chat in its recent updates. If your chat isn’t listed, message the bot there and try again, or enter the chat ID or public `@channel` yourself. Bots already using a webhook need manual entry; Milo doesn’t disconnect their webhook. Looking for chats doesn’t save a destination or turn on forwarding.
 
 <picture>
   <source media="(max-width: 600px)" srcset="img/web-alerts-mobile.webp">

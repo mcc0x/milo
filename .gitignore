@@ -4,3 +4,8 @@
 /site/.next/
 /site/next-env.d.ts
 /site/AGENTS.md
+/dashboard/node_modules/
+/dashboard/.next/
+/dashboard/out/
+/dashboard/next-env.d.ts
+/dashboard/tsconfig.tsbuildinfo

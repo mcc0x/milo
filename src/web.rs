@@ -1,7 +1,6 @@
 //! Serves the settings editor on an ephemeral loopback address for this invocation only.
 
-#[cfg(feature = "web-dev")]
-mod dev;
+mod assets;
 mod http;
 mod launch;
 
@@ -18,39 +17,6 @@ use std::time::{Duration, Instant};
 use self::http::{Access, Input, Request, Response, Route};
 use self::launch::Launch;
 use crate::setup::web::Editor;
-
-#[cfg(not(feature = "web-dev"))]
-fn asset(name: Asset) -> Response {
-    let bytes: &[u8] = match name {
-        Asset::Index => include_bytes!("web/index.html"),
-        Asset::Script => include_bytes!("web/app.js"),
-        Asset::Style => include_bytes!("web/app.css"),
-        Asset::Mascot => include_bytes!("web/milo.webp"),
-    };
-    Response::asset(name.mime(), bytes)
-}
-
-#[cfg(feature = "web-dev")]
-use dev::asset;
-
-#[derive(Clone, Copy)]
-enum Asset {
-    Index,
-    Script,
-    Style,
-    Mascot,
-}
-
-impl Asset {
-    fn mime(self) -> &'static str {
-        match self {
-            Self::Index => "text/html; charset=utf-8",
-            Self::Script => "text/javascript; charset=utf-8",
-            Self::Style => "text/css; charset=utf-8",
-            Self::Mascot => "image/webp",
-        }
-    }
-}
 
 pub(crate) const DEFAULT_PORT: u16 = 6110;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -181,12 +147,12 @@ fn serve(
     launcher: Option<Launch>,
 ) -> io::Result<()> {
     let snapshot = Arc::new(editor.state());
-    let (send, jobs) = mpsc::sync_channel::<Mutation>(1);
+    let (send, jobs) = mpsc::sync_channel::<EditorJob>(1);
     let (replies, receive) = mpsc::sync_channel(1);
     let (ready, mut notify) = io::pipe()?;
-    let mut mutations = Mutations { send, receive, ready };
+    let mut worker = EditorWorker { send, receive, ready };
 
-    let worker = std::thread::Builder::new().spawn(move || {
+    let thread = std::thread::Builder::new().spawn(move || {
         while let Ok(job) = jobs.recv() {
             if STOP.load(Ordering::Relaxed) {
                 break;
@@ -197,24 +163,24 @@ fn serve(
             }
         }
     })?;
-    let result = serve_clients(listener, wake, access, snapshot, &mut mutations, launcher);
+    let result = serve_clients(listener, wake, access, snapshot, &mut worker, launcher);
     // Pending requests belong to the socket loop and have already been dropped.
-    // Finish only the admitted action, then let the editor undo any active trial.
-    drop(mutations.send);
-    worker.join().map_err(|_| io::Error::other("editor worker panicked"))?;
+    // Finish only the admitted job, then let the editor undo any active trial.
+    drop(worker.send);
+    thread.join().map_err(|_| io::Error::other("editor worker panicked"))?;
     result
 }
 
-struct Mutations {
-    send: SyncSender<Mutation>,
+struct EditorWorker {
+    send: SyncSender<EditorJob>,
     receive: Receiver<Completion>,
     ready: PipeReader,
 }
 
-impl Mutations {
-    fn submit(&self, job: Mutation) -> io::Result<()> {
+impl EditorWorker {
+    fn submit(&self, job: EditorJob) -> io::Result<()> {
         // The poll loop submits only when no other job is in flight.
-        self.send.try_send(job).map_err(|_| io::Error::other("editor worker could not accept an action"))
+        self.send.try_send(job).map_err(|_| io::Error::other("editor worker could not accept a job"))
     }
 
     fn complete(&mut self) -> io::Result<Completion> {
@@ -228,15 +194,15 @@ fn serve_clients(
     wake: &PipeReader,
     access: &Access<'_>,
     mut snapshot: Arc<String>,
-    mutations: &mut Mutations,
+    worker: &mut EditorWorker,
     mut launcher: Option<Launch>,
 ) -> io::Result<()> {
     let mut clients: Vec<Client> = Vec::with_capacity(MAX_CLIENTS);
     let mut fds = [libc::pollfd { fd: -1, events: libc::POLLIN, revents: 0 }; MAX_CLIENTS + 3];
     fds[1].fd = wake.as_raw_fd();
-    fds[2].fd = mutations.ready.as_raw_fd();
+    fds[2].fd = worker.ready.as_raw_fd();
     let mut active: Option<Client> = None;
-    let mut pending: Option<(Client, Mutation)> = None;
+    let mut pending: Option<(Client, EditorJob)> = None;
     let mut last_activity = Instant::now();
     let mut closing = false;
     while !STOP.load(Ordering::Relaxed) && last_activity.elapsed() < IDLE_TIMEOUT {
@@ -284,12 +250,12 @@ fn serve_clients(
             continue;
         }
         if fds[2].revents != 0 {
-            let completion = mutations.complete()?;
-            let mut client = active.take().expect("completion follows an action");
+            let completion = worker.complete()?;
+            let mut client = active.take().expect("completion follows a job");
             client.reply(completion.response);
             last_activity = Instant::now();
             if completion.close {
-                // Only flush the close response; never submit another mutation.
+                // Only flush the close response; never submit another job.
                 clients.clear();
                 clients.push(client);
                 pending = None;
@@ -303,7 +269,7 @@ fn serve_clients(
             if let Some((client, job)) = pending.take()
                 && !STOP.load(Ordering::Relaxed)
             {
-                mutations.submit(job)?;
+                worker.submit(job)?;
                 active = Some(client);
             }
         }
@@ -320,7 +286,7 @@ fn serve_clients(
                 continue;
             }
             let progress = clients[index].step(access, &snapshot);
-            if matches!(progress, Ok(Progress::Reply { authenticated: true } | Progress::Mutate(_))) {
+            if matches!(progress, Ok(Progress::Reply { authenticated: true } | Progress::Job(_))) {
                 last_activity = Instant::now();
                 if let Some(launcher) = &mut launcher {
                     launcher.connected();
@@ -328,12 +294,12 @@ fn serve_clients(
             }
             match progress {
                 Ok(Progress::Wait | Progress::Reply { .. }) => {}
-                Ok(Progress::Mutate(job)) => {
+                Ok(Progress::Job(job)) => {
                     if active.is_none() {
-                        mutations.submit(job)?;
+                        worker.submit(job)?;
                         active = Some(clients.swap_remove(index));
                     } else if pending.is_none() {
-                        // One queued mutation leaves space for independent asset and state reads.
+                        // One queued job leaves space for independent asset and state reads.
                         let mut client = clients.swap_remove(index);
                         client.deadline = Instant::now() + IO_TIMEOUT;
                         pending = Some((client, job));
@@ -372,7 +338,7 @@ enum Exchange {
 enum Progress {
     Wait,
     Reply { authenticated: bool },
-    Mutate(Mutation),
+    Job(EditorJob),
     Done,
 }
 
@@ -395,8 +361,8 @@ impl Client {
                 Input::Wait => return Ok(Progress::Wait),
                 Input::Disconnected => return Ok(Progress::Done),
                 Input::Rejected(rejection) => (rejection.response(), false),
-                Input::Ready(route @ (Route::Action | Route::Close)) => {
-                    return Ok(Progress::Mutate(Mutation { route, request: std::mem::take(input) }));
+                Input::Ready(route @ (Route::Action | Route::Close | Route::TelegramChats)) => {
+                    return Ok(Progress::Job(EditorJob { route, request: std::mem::take(input) }));
                 }
                 Input::Ready(route) => {
                     let authenticated = route.authenticated();
@@ -419,22 +385,13 @@ impl Client {
 
 fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
-        Route::Index => asset(Asset::Index),
-        Route::Script => asset(Asset::Script),
-        Route::Style => asset(Asset::Style),
-        Route::Mascot => asset(Asset::Mascot),
-        Route::Favicon => Response::asset("image/png", include_bytes!("web/favicon.png")),
-        Route::RexIcon => Response::asset("image/png", include_bytes!("web/rex.png")),
-        #[cfg(feature = "web-dev")]
-        Route::DevScript => Response::asset("text/javascript; charset=utf-8", include_bytes!("web/dev.js")),
-        #[cfg(feature = "web-dev")]
-        Route::DevVersion => dev::version(),
+        Route::Static(asset) => asset.response(),
         Route::State => Response::json(Arc::clone(snapshot)),
-        Route::Action | Route::Close => unreachable!("mutations run on the editor worker"),
+        Route::Action | Route::Close | Route::TelegramChats => unreachable!("route runs on the editor worker"),
     }
 }
 
-struct Mutation {
+struct EditorJob {
     route: Route,
     request: Request,
 }
@@ -445,12 +402,15 @@ struct Completion {
     close: bool,
 }
 
-impl Mutation {
+impl EditorJob {
     fn apply(self, editor: &mut Editor) -> Completion {
         let body = self.request.body();
         if self.route == Route::Close {
             let (response, close) = respond_close(body, editor);
             return Completion { response, snapshot: None, close };
+        }
+        if self.route == Route::TelegramChats {
+            return Completion { response: respond_telegram_chats(body, editor), snapshot: None, close: false };
         }
         let (response, snapshot) = match editor.action(body) {
             Ok(state) => {
@@ -480,6 +440,18 @@ fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
         )),
     };
     (response, false)
+}
+
+fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
+    use crate::alerts::TelegramChatsError::{InvalidToken, Unavailable};
+
+    match http::telegram_token(body).ok_or(InvalidToken).and_then(|token| editor.telegram_chats(&token)) {
+        Ok(chats) => Response::json_owned(chats),
+        Err(InvalidToken) => Response::bad_request("Enter a valid Telegram bot token from BotFather."),
+        Err(Unavailable) => {
+            Response::bad_gateway("Could not look up Telegram chats. Check the bot token or enter the chat ID manually.")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -514,7 +486,7 @@ mod tests {
         let (ready, _notify) = io::pipe().unwrap();
         let (send, jobs) = mpsc::sync_channel(1);
         let (_replies, receive) = mpsc::sync_channel(1);
-        let mut worker = Mutations { send, receive, ready };
+        let mut worker = EditorWorker { send, receive, ready };
         std::thread::scope(|scope| {
             let server = scope.spawn(|| serve_clients(listener, &wake, &access, Arc::default(), &mut worker, None));
             let _stop_on_exit = stop;

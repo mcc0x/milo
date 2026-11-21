@@ -1,0 +1,78 @@
+.alert-settings { display: grid; min-width: 0; gap: 1.05rem; }
+.alerts-heading { margin-block-end: .25rem; font-size: .9rem; font-weight: 730; }
+
+.alerts-destination { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(52%); align-items: center; gap: .45rem .85rem; }
+.alerts-destination > .button-row { justify-content: flex-end; }
+.alerts-destination > p { grid-column: 1/-1; }
+.alerts-destination-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: start;
+  flex-wrap: wrap;
+  gap: .2rem .65rem;
+}
+.alerts-destination-line > p, .alerts-destinations .setting-info { overflow-wrap: anywhere; }
+.alerts-status {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  margin: 0;
+  font-weight: 650;
+}
+.alerts-status::before {
+  content: '';
+  width: .42rem;
+  height: .42rem;
+  flex: none;
+  border-radius: 50%;
+  background: #627791;
+}
+.alerts-status[data-running='true'] { color: #236147; }
+.alerts-status[data-running='true']::before { background: #267659; }
+
+.alerts-manager { width: min(26rem, calc(100% - 2rem)); height: min(21rem, calc(100dvh - 2rem)); }
+.alerts-manager[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.alerts-manager-body { overflow-y: auto; overscroll-behavior: contain; }
+.alerts-manager-heading h2 { flex: 1; font-size: 1rem; }
+.alerts-manager-heading h2 span { color: var(--blue); }
+.alerts-manager-heading, .alerts-provider-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+.alerts-provider-picker { margin-block: .45rem; }
+.alerts-provider-row + .alerts-provider-row { border-top: 1px solid var(--line); }
+.alerts-provider { flex: 1; display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .6rem .25rem; border: none; background: transparent; text-align: start; color: var(--ink); font-weight: 650; }
+.alerts-provider svg { color: var(--blue); }
+.alerts-provider small { display: block; color: var(--muted); font-size: .72rem; font-weight: 450; }
+.alerts-edit-label { margin-inline-start: auto; font-size: .78rem; color: var(--blue); }
+.secret-form.alerts-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr)); gap: .45rem; align-items: end; padding-block: .55rem; }
+.alerts-form p { grid-column: 1/-1; }
+.alerts-steps { grid-column: 1/-1; margin: 0; padding-inline-start: 1.35rem; list-style: decimal; }
+.alerts-steps li + li { margin-block-start: .3rem; }
+.alerts-steps li::marker { color: var(--blue); font-weight: 650; }
+.alerts-entry { display: flex; align-items: center; gap: .25rem; padding: .18rem; border: 1px solid var(--line); border-radius: .75rem; background: linear-gradient(120deg,#ffffffb8,#eff6ff85); box-shadow: inset 0 1px 0 #ffffffc9; }
+.alerts-entry:has(input:focus) { border-color: var(--blue); outline: 2px solid var(--blue); outline-offset: -2px; }
+.alerts-entry input:focus-visible { outline: none; }
+.alerts-entry button:focus-visible { outline-offset: 1px; }
+.secret-form .alerts-entry input { flex: 1; min-width: 0; border: 0; background: transparent; }
+.alerts-form .alerts-save { display: inline-flex; align-items: center; gap: .25rem; border-radius: .55rem; padding-inline: .65rem; }
+.alerts-field:has(.alerts-entry) { grid-column: 1/-1; }
+.alerts-storage { text-align: center; padding-block-start: .55rem; overflow-wrap: anywhere; }
+.alerts-field { display: grid; flex: 1 1 8rem; min-width: 0; gap: .2rem; }
+.alerts-form .alerts-field input { inline-size: 100%; }
+.secret-form.alerts-telegram-form { grid-template-columns: minmax(0, 1fr); }
+.alerts-telegram-status { margin: 0; }
+.alerts-telegram-status:empty { margin-block-start: -.45rem; }
+.alerts-telegram-form select {
+  inline-size: 100%; min-width: 0; min-height: 2.25rem;
+  padding: .25rem .45rem; border: 1px solid var(--line); border-radius: .5rem;
+  font-size: .85rem; background: var(--paper);
+}
+.alerts-telegram-form .button[aria-disabled="true"] { opacity: .62; cursor: default; }
+.alerts-telegram-actions .text-button { padding-inline: .35rem; }
+.alerts-telegram-actions .alerts-save { margin-inline-start: auto; }
+
+.alerts-privacy { max-width: 65ch; padding-block-end: .45rem; }
+
+@media (pointer: coarse) {
+  .alerts-form .alerts-field input { min-height: 44px; font-size: 1rem; }
+  .alerts-telegram-form select, .alerts-telegram-form .button { min-height: 44px; }
+  .alerts-telegram-form select { font-size: 1rem; }
+}

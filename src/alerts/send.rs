@@ -50,16 +50,29 @@ impl Outcome {
 /// Posts `body` as JSON to `address` and reports the answer. While curl
 /// runs, its process ID is in `running`, for a signal handler to end it.
 pub(crate) fn post(address: &str, body: &str, running: Option<&AtomicI32>) -> Outcome {
-    let Some(answer) = run(&request(address, body), running) else { return Outcome::Failed(None) };
-    // The status follows the answer's body on a line of its own.
-    let (body, code) = answer.rsplit_once('\n').unwrap_or(("", &answer));
-    match code.trim().parse::<u16>() {
-        Ok(200..=299) => Outcome::Sent,
-        Ok(429) => Outcome::Wait(retry_after(body)),
-        Ok(code @ 400..=499) => Outcome::Refused(code),
-        Ok(code @ 500..=599) => Outcome::Failed(Some(code)),
+    let Some((body, code)) = response(address, body, ANSWER_LIMIT, running) else { return Outcome::Failed(None) };
+    match code {
+        200..=299 => Outcome::Sent,
+        429 => Outcome::Wait(retry_after(&body)),
+        400..=499 => Outcome::Refused(code),
+        500..=599 => Outcome::Failed(Some(code)),
         _ => Outcome::Failed(None),
     }
+}
+
+/// Posts a query and returns only a successful answer, bounded by `limit` bytes.
+pub(super) fn query(address: &str, body: &str, limit: u64) -> Option<String> {
+    let (body, code) = response(address, body, limit, None)?;
+    (200..=299).contains(&code).then_some(body)
+}
+
+fn response(address: &str, body: &str, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
+    let mut answer = run(&request(address, body), limit, running)?;
+    // The status follows the answer's body on a line of its own.
+    let (body, code) = answer.rsplit_once('\n')?;
+    let code = code.trim().parse().ok()?;
+    answer.truncate(body.len());
+    Some((answer, code))
 }
 
 /// curl's options, in the form of its own settings file.
@@ -90,7 +103,7 @@ fn quoted(value: &str) -> String {
     out
 }
 
-fn run(request: &str, running: Option<&AtomicI32>) -> Option<String> {
+fn run(request: &str, limit: u64, running: Option<&AtomicI32>) -> Option<String> {
     // `-q` must come first: it keeps curl from reading the user's own curlrc.
     let mut curl = Command::new(CURL)
         .args(["-q", "--config", "-"])
@@ -104,15 +117,19 @@ fn run(request: &str, running: Option<&AtomicI32>) -> Option<String> {
     }
     let written = curl.stdin.take().map(|mut input| input.write_all(request.as_bytes()));
     let mut answer = String::new();
-    let read = curl.stdout.take().map(|output| output.take(ANSWER_LIMIT).read_to_string(&mut answer));
-    // curl has closed its output, so it has ended or is about to: from here
-    // on its ID may no longer be signalled.
+    let read = curl.stdout.take().map(|output| output.take(limit + 1).read_to_string(&mut answer));
+    let over_limit = answer.len() as u64 > limit;
+    if over_limit {
+        let _ = curl.kill();
+    }
+    // The output was closed; from here the process ID may no longer be signalled.
     if let Some(running) = running {
         running.store(0, Ordering::Relaxed);
     }
     let status = curl.wait();
     // An HTTP error is still an answer; curl itself fails only when there is none.
-    (matches!(written, Some(Ok(()))) && matches!(read, Some(Ok(_))) && status.ok()?.success()).then_some(answer)
+    (!over_limit && matches!(written, Some(Ok(()))) && matches!(read, Some(Ok(_))) && status.ok()?.success())
+        .then_some(answer)
 }
 
 /// Telegram gives whole seconds in `parameters.retry_after`; Discord gives

@@ -1,0 +1,21 @@
+{
+  "name": "milo-dashboard",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "26.x" },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "next build && bun scripts/bundle.mjs"
+  },
+  "dependencies": {
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}

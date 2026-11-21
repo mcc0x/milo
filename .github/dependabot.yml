@@ -10,12 +10,12 @@ updates:
         update-types: [minor, patch]
 
   - package-ecosystem: bun
-    directory: /site
+    directories: [/site, /dashboard]
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
     groups:
-      site-minor-and-patch:
+      frontend-minor-and-patch:
         update-types: [minor, patch]
 
   - package-ecosystem: github-actions

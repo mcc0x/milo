@@ -10,10 +10,10 @@ license = "MIT"
 keywords = ["terminal", "git", "tui", "rex", "code-reader"]
 categories = ["command-line-utilities", "development-tools"]
 # Shell test drivers require files from a Git checkout, not the Cargo archive.
-include = ["src/**", "tests/**", "!tests/*.sh", "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml"]
-
-[features]
-web-dev = []
+include = [
+    "build.rs", "dashboard/bundle/**", "src/**", "tests/**", "!tests/*.sh",
+    "Cargo.lock", "LICENSE", "README.md", "rustfmt.toml",
+]
 
 [dependencies]
 libc = "0.2"

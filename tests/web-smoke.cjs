@@ -19,14 +19,11 @@ const button = (page, name) => page.getByRole('button', {name, exact: true});
 const dialog = (page, name) => page.getByRole('dialog', {name, exact: true});
 const number = (page, name) => page.getByRole('spinbutton', {name, exact: true});
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
-const reopenNote = page => page.getByRole('contentinfo').getByText('Reopen panes to apply.', {exact: true});
+const reopenNote = page => page.getByRole('region', {name: 'Project session'}).getByText('Reopen panes to apply.', {exact: true});
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
-const usageChoice = (page, tool, name) =>
-  page.getByRole('group', {name: `${tool} usage`, exact: true}).getByRole('radio', {name, exact: true});
+const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
-const accountChoice = (page, account, name) =>
-  page.getByRole('group', {name: account, exact: true}).getByRole('radio', {name, exact: true});
 
 async function withMilo(binary, cwd, env, run) {
   const server = spawn(binary, ['web', '--no-open', '--port', '0'], {
@@ -57,7 +54,7 @@ async function withMilo(binary, cwd, env, run) {
 async function openEditor(context, url) {
   const page = await context.newPage();
   await page.goto(url);
-  await page.getByRole('heading', {name: 'Panes', exact: true}).waitFor();
+  await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
   return page;
 }
 
@@ -85,22 +82,23 @@ async function saveNumbers(page, cwd) {
 }
 
 async function chooseUsageTools(page, binary, cwd, env) {
-  await section(page, 'Appearance').click();
+  await section(page, 'Usage').click();
   for (const tool of usageTools) {
-    assert(await usageChoice(page, tool, 'Auto').isChecked(), `${tool} starts on Auto`);
+    assert.equal(await usageChoice(page, tool).inputValue(), 'auto', `${tool} starts on Auto`);
   }
   // Accounts are asked about online, so each starts hidden, and trying one out saves nothing.
+  const accounts = page.locator('summary').filter({hasText: 'Provider accounts'});
+  assert.equal(await usageChoice(page, 'DeepSeek balance').count(), 0, 'optional accounts start collapsed');
+  await accounts.click();
   for (const account of usageAccounts) {
-    assert(await accountChoice(page, account, 'Hide').isChecked(), `${account} starts on Hide`);
+    assert.equal(await usageChoice(page, account).inputValue(), 'hide', `${account} starts on Hide`);
   }
-  await accountChoice(page, 'DeepSeek balance', 'Auto').click();
-  await page.getByText('Asks the provider with the key you set for Milo.').waitFor();
-  await accountChoice(page, 'DeepSeek balance', 'Hide').click();
-  await accountChoice(page, 'DeepSeek balance', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
-  await usageChoice(page, 'OpenCode', 'Hide').click();
-  await usageChoice(page, 'OpenCode', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
-  await page.getByText('Never shown, and never looked for.').waitFor();
-  await usageChoice(page, 'Claude Code', 'Always show').click();
+  await usageChoice(page, 'DeepSeek balance').selectOption('auto');
+  await accounts.getByText('1 enabled').waitFor();
+  await usageChoice(page, 'DeepSeek balance').selectOption('hide');
+  await usageChoice(page, 'OpenCode').selectOption('hide');
+  await accounts.getByText('0 enabled').waitFor();
+  await usageChoice(page, 'Claude Code').selectOption('always');
   await status(page, dirty).waitFor({state: 'attached'});
   const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
   await assert.rejects(readFile(preferences), {code: 'ENOENT'}, 'a draft writes no preferences');
@@ -115,7 +113,7 @@ async function chooseUsageTools(page, binary, cwd, env) {
   await saved.waitFor({state: 'hidden'});
   await reopenNote(page).waitFor();
   assert.equal(await readFile(preferences, 'utf8'), 'usage_claude = always\nusage_opencode = hide\n');
-  assert(await usageChoice(page, 'Codex', 'Auto').isChecked(), 'Codex was left on Auto');
+  assert.equal(await usageChoice(page, 'Codex').inputValue(), 'auto', 'Codex was left on Auto');
   // What the panes read is what the controls saved, and a hidden tool is not looked for.
   const doctor = execFileSync(binary, ['doctor'], {cwd, env, encoding: 'utf8'});
   assert.match(doctor, /^ {2}Usage tools: Claude Code always shown; OpenCode hidden; others automatic$/m);
@@ -130,7 +128,8 @@ async function chooseUsageTools(page, binary, cwd, env) {
   await width.fill(before);
   assert.equal(await reopenNote(page).count(), 0, 'undoing browser-only input does not revive the instruction');
 
-  await section(page, 'Workflow').click();
+  await section(page, 'Integrations').click();
+  await button(page, 'Rex automation').click();
   await page.getByRole('switch', {name: 'Title Rex tabs', exact: true}).check();
   await status(page, dirty).waitFor({state: 'attached'});
   await button(page, 'Save').click();
@@ -142,7 +141,7 @@ async function chooseUsageTools(page, binary, cwd, env) {
 }
 
 async function manageMenuApp(page, url, env) {
-  await section(page, 'Workflow').click();
+  await section(page, 'Panes').click();
   const menu = page.getByRole('region', {name: 'Menu bar app', exact: true});
   const readState = async () => {
     const response = await page.request.get(new URL('/api/state', url).href, {
@@ -153,7 +152,7 @@ async function manageMenuApp(page, url, env) {
   };
   const {menubar} = await readState();
   const menuTab = section(page, 'Menu Bar');
-  assert.equal(await menu.count(), 0, 'Workflow does not contain menu app settings');
+  assert.equal(await menu.count(), 0, 'menu app settings have their own section');
   assert.equal(await menuTab.isVisible(), menubar.installed !== null, 'Menu Bar navigation follows server availability');
   const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
   const previous = await readFile(preferences, 'utf8');
@@ -177,12 +176,12 @@ async function manageMenuApp(page, url, env) {
   // Hold menu app replies so the dashboard is exercised without opening apps
   // or touching the logged-in user's services, even with a packaged installer.
   await page.route('**/api/action', intercept);
-  const install = button(menu, 'Install menu app');
-  const update = button(menu, 'Open or update menu app');
-  const remove = button(menu, 'Remove menu app…');
+  const install = button(menu, 'Install');
+  const update = button(menu, 'Open Milo');
+  const remove = button(menu, 'Uninstall');
   const confirmation = dialog(page, 'Remove menu app?');
   const pin = page.getByRole('radio', {name: 'Pin project', exact: true});
-  const perform = async (activate, pending, active, next) => {
+  const perform = async (activate, pending, active, next, focus = next) => {
     let complete;
     gate = new Promise(resolve => { complete = resolve; });
     try {
@@ -196,7 +195,7 @@ async function manageMenuApp(page, url, env) {
       complete();
     }
     await next.and(page.locator(':not([aria-disabled])')).waitFor();
-    assert(await next.evaluate(el => el === document.activeElement), 'completed action restores focus');
+    assert(await focus.evaluate(el => el === document.activeElement), 'completed action retains keyboard focus');
   };
 
   try {
@@ -204,7 +203,7 @@ async function manageMenuApp(page, url, env) {
     await status(page, dirty).waitFor({state: 'attached'});
     await menuTab.click();
     assert.equal(await remove.count(), 0, 'nothing to remove before installation');
-    await perform(() => install.click(), 'Installing menu app…', install, update);
+    await perform(() => install.click(), 'Installing menu app…', install, update, remove);
     await remove.waitFor();
     await perform(() => update.click(), 'Opening or updating menu app…', update, update);
     assert.equal(await confirmation.count(), 0, 'opening the installed app does not ask for removal');
@@ -223,7 +222,7 @@ async function manageMenuApp(page, url, env) {
   } finally {
     await page.unroute('**/api/action', intercept);
   }
-  await section(page, 'Workflow').click();
+  await section(page, 'Panes').click();
   assert(await pin.isChecked(), 'menu app operations retained the draft');
   assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app operations did not save the draft');
   await button(page, 'Discard').click();
@@ -283,13 +282,15 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   const last = opcode => discord.frames.filter(([code, payload]) => code === opcode &&
     (opcode === 0 || payload.includes('"activity"'))).map(([, payload]) => JSON.parse(payload)).at(-1);
   const shown = () => last(1)?.args.activity;
-  await section(page, 'Workflow').click();
+  await section(page, 'Integrations').click();
+  await button(page, 'Discord presence').click();
   const card = page.getByRole('region', {name: 'Discord presence', exact: true});
-  const turnOn = button(card, 'Turn on…');
+  const turnOn = card.getByRole('switch', {name: 'Discord presence', checked: false});
   const question = dialog(page, 'Turn on Discord presence?');
   const names = dialog(page, 'Show these names on Discord?');
   const choice = name => card.getByRole('radio', {name, exact: true});
-  await card.getByText('Discord will show Milo\'s name and icon with the line “In a Rex session”').waitFor();
+  await card.getByText('Activity preview', {exact: true}).waitFor();
+  await card.getByText('In a Rex session', {exact: true}).waitFor();
   await card.getByText('Milo is not connected to Discord and shows nothing there.').waitFor();
   assert(await choice('Generic').isChecked(), 'no names are shown unless chosen');
 
@@ -304,7 +305,7 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   await turnOn.click();
   await button(question, 'Turn on').click();
   await status(page, 'Discord presence is on. Discord is showing “In a Rex session”.').waitFor();
-  await button(card, 'Turn off').waitFor();
+  await card.getByRole('switch', {name: 'Discord presence', checked: true}).waitFor();
   assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
   await until(() => shown(), 'the helper introduced itself and set the activity');
   assert.deepEqual(last(0), {v: 1, client_id: milo});
@@ -325,6 +326,8 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   await button(names, 'Show names').click();
   await status(page, 'Discord presence shows the name of the session in front.').waitFor();
   await choice('Session name').and(page.locator(':checked')).waitFor({state: 'attached'});
+  await button(card, 'What others can see').hover();
+  await card.getByRole('tooltip').filter({hasText: 'May add the name of the Rex session in front.'}).waitFor();
   assert.equal(await readFile(file, 'utf8'), 'presence = true\ndetails = session\n');
   await until(() => shown()?.state === 'Session: smoke session', 'the session in front is named, and its folder is not');
 
@@ -335,19 +338,24 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
 
   // An application of your own replaces Milo's until you go back.
-  await button(card, 'Use my own').click();
-  await page.getByRole('alert').filter({hasText: 'Enter the Application ID of your own Discord application'}).waitFor();
-  await card.getByRole('textbox', {name: 'Shown under Milo’s application', exact: true}).fill(own);
-  await button(card, 'Use my own').click();
+  assert.equal(await card.getByRole('textbox', {name: 'Application ID'}).count(), 0);
+  const appSettings = button(page, 'Custom App Setup');
+  await appSettings.click();
+  const app = dialog(page, 'Discord app settings');
+  await button(app, 'Use my own').click();
+  await app.getByRole('alert').filter({hasText: 'Enter an Application ID of 17 to 19 digits.'}).waitFor();
+  await app.getByRole('textbox', {name: 'Application ID', exact: true}).fill(own);
+  await button(app, 'Use my own').click();
   await status(page, `Discord presence uses your application ${own}.`).waitFor();
   await until(() => last(0).client_id === own, 'the helper introduced the other application');
   assert.equal(await readFile(file, 'utf8'), `presence = true\napplication_id = ${own}\n`);
-  await button(card, 'Use Milo’s application').click();
+  await appSettings.click();
+  await button(app, 'Use Milo’s application').click();
   await status(page, 'Discord presence uses Milo\'s application.').waitFor();
   await until(() => last(0).client_id === milo, 'the helper is back under Milo\'s application');
   assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
 
-  await button(card, 'Turn off').click();
+  await card.getByRole('switch', {name: 'Discord presence', checked: true}).click();
   await status(page, 'Discord presence is off.').waitFor();
   await turnOn.waitFor();
   await until(() => discord.connections() === 0, 'turning presence off closed the connection to Discord');
@@ -360,13 +368,13 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
 }
 
 async function usageToolsPersisted(page) {
-  await section(page, 'Appearance').click();
-  const expected = [['Codex', 'Auto'], ['Claude Code', 'Always show'], ['OpenCode', 'Hide']];
+  await section(page, 'Usage').click();
+  const expected = [['Codex', 'auto'], ['Claude Code', 'always'], ['OpenCode', 'hide']];
   for (const [tool, name] of expected) {
-    assert(await usageChoice(page, tool, name).isChecked(), `${tool} persisted as ${name}`);
+    assert.equal(await usageChoice(page, tool).inputValue(), name, `${tool} persisted as ${name}`);
   }
   await section(page, 'Layout').click();
-  await page.getByRole('heading', {name: 'Panes', exact: true}).waitFor();
+  await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
 }
 
 async function pressAfterNumberEdit(page) {
@@ -387,8 +395,8 @@ async function pressAfterNumberEdit(page) {
   console.log('Rail side: the first press after a number edit was not lost');
 
   await field.fill('');
-  await button(page, 'Appearance').click();
-  assert.equal(await page.getByRole('heading', {name: 'Panes', exact: true}).count(), 1,
+  await button(page, 'Usage').click();
+  assert.equal(await page.getByRole('heading', {name: 'Pane layout', exact: true}).count(), 1,
     'an invalid number keeps Layout open');
   assert(await field.evaluate(input => input === document.activeElement && !input.validity.valid),
     'the invalid Rail width is focused');
@@ -478,10 +486,10 @@ async function confirmFromMobileFooter(browser, url, exited) {
   const dock = await page.locator('.control-dock').boundingBox();
   assert(dock && dock.x >= 0 && dock.x + dock.width <= 260, 'navigation and draft controls fit at narrow widths');
   await page.setViewportSize(viewport);
-  const done = button(page.getByRole('contentinfo'), 'Done');
+  const done = button(page.getByRole('region', {name: 'Project session'}), 'Done');
   const box = await done.boundingBox();
   assert(box && box.x >= 0 && box.x + box.width <= viewport.width &&
-    box.y >= 0 && box.y + box.height <= viewport.height, 'mobile footer Done fits in the viewport');
+    box.y >= 0 && box.y + box.height <= viewport.height, 'mobile session Done fits in the viewport');
 
   const confirmation = dialog(page, 'Close the dashboard?');
   await done.tap();
@@ -493,8 +501,159 @@ async function confirmFromMobileFooter(browser, url, exited) {
   await button(confirmation, 'Discard and close').tap();
   await page.getByRole('heading', {name: 'Settings closed', exact: true}).waitFor();
   const result = await Promise.race([exited, delay(timeout, null, {ref: false})]);
-  assert.deepEqual(result, [0, null], 'confirming from the mobile footer stops Milo cleanly');
+  assert.deepEqual(result, [0, null], 'confirming from the session bar stops Milo cleanly');
   console.log('Mobile Done: cancel retained the draft, confirm closed the editor');
+}
+
+async function checkTelegramWizard(page, destination) {
+  const url = new URL(page.url());
+  const authorization = `Bearer ${url.hash.slice(1)}`;
+  const initial = await page.request.get(new URL('/api/state', url).href, {headers: {authorization}});
+  assert(initial.ok(), 'the real editor supplied the initial fixture state');
+  let state = await initial.json();
+  const initialVersion = state.version;
+  const fakeToken = 'smoke-test-token-not-a-credential';
+  const chatId = '-1001234567890';
+  const providerError = 'provider diagnostic must not appear in the dashboard';
+  const replies = [
+    {json: {chats: [{id: '42', title: 'Direct chat'}, {id: chatId, title: 'Build room'}]}},
+    {json: {chats: []}},
+    {status: 502, json: {error: providerError}},
+    {status: 409, json: {error: providerError}},
+  ];
+  let releaseLookup;
+  const lookupGate = new Promise(resolve => { releaseLookup = resolve; });
+  let lookups = 0;
+  const received = [];
+  const lookupPath = '**/api/telegram-chats';
+  const actionPath = '**/api/action';
+  const discover = async route => {
+    const request = route.request();
+    assert.equal(request.method(), 'POST');
+    assert(request.headers().authorization === authorization, 'chat lookup uses the editor session key');
+    assert.deepEqual(request.postDataJSON(), {token: fakeToken});
+    const reply = replies[lookups++];
+    assert(reply, 'unexpected chat lookup');
+    if (lookups === 1) await lookupGate;
+    await route.fulfill(reply);
+  };
+  const saveTelegram = async route => {
+    const action = route.request().postDataJSON();
+    if (action.action !== 'alerts' || action.field !== 'telegram') return route.fallback();
+    received.push(action);
+    state = {...state, version: state.version + 1, alerts: {...state.alerts,
+      destination: 'telegram', telegram: {saved: true, chat: action.value.chat}}};
+    await route.fulfill({json: state});
+  };
+  // No discovery or Telegram save reaches Telegram, even with a packaged editor.
+  await page.route(lookupPath, discover);
+  await page.route(actionPath, saveTelegram);
+  try {
+    const wizard = dialog(page, 'Destinations / Telegram');
+    const token = wizard.getByRole('textbox', {name: 'Bot token', exact: true});
+    const chat = wizard.getByRole('combobox', {name: 'Telegram chat', exact: true});
+    const manualChat = wizard.getByRole('textbox', {name: 'Chat ID or @channel', exact: true});
+    const find = button(wizard, 'Find chats');
+    const manual = button(wizard, 'Enter chat manually');
+    const save = button(wizard, 'Save Telegram');
+    const telegram = button(page, 'Telegram');
+    const open = async name => {
+      await button(destination, name).click();
+      await telegram.click();
+    };
+    const assertReset = async () => {
+      assert.equal(await token.inputValue(), '', 'starting over clears the token');
+      assert.equal(await chat.count() + await manualChat.count(), 0, 'starting over clears the chat step');
+    };
+
+    await open('Set up destination');
+    await manual.click();
+    assert(await manualChat.evaluate(element => element === document.activeElement), 'manual entry receives keyboard focus');
+    await token.fill(fakeToken);
+    await manualChat.fill('@not-saved');
+    await button(wizard, 'Back to destinations').click();
+    assert(await telegram.evaluate(element => element === document.activeElement), 'Back restores focus to Telegram');
+    await telegram.click();
+    await assertReset();
+
+    await token.fill(` ${fakeToken} `);
+    await find.click();
+    await status(wizard, 'Looking for recent chats').waitFor();
+    assert(await find.isDisabled(), 'lookup cannot repeat while pending');
+    assert(await manual.isEnabled(), 'manual entry remains available during lookup');
+    releaseLookup();
+    await chat.waitFor();
+    assert.equal(await chat.inputValue(), '', 'discovery does not select a chat for the user');
+    await chat.selectOption({label: `Build room · ${chatId}`});
+    await save.click();
+    await wizard.getByText(`Current destination · ${chatId}`, {exact: true}).waitFor();
+    await assertReset();
+
+    for (const [index, text] of ['No recent chats found', 'Couldn’t find chats', 'Couldn’t find chats'].entries()) {
+      await token.fill(fakeToken);
+      await find.click();
+      await status(wizard, text).waitFor();
+      assert.equal(await wizard.getByText(providerError).count(), 0, 'lookup never displays provider errors');
+      await manual.click();
+      await manualChat.fill(index === 2 ? '@public_channel' : '-1009876543210');
+      if (index === 2) {
+        await save.click();
+        await wizard.getByText('Current destination · @public_channel', {exact: true}).waitFor();
+        await assertReset();
+      } else {
+        if (index === 0) await button(wizard, 'Close destinations').click();
+        else await page.keyboard.press('Escape');
+        await wizard.waitFor({state: 'hidden'});
+        await open('Manage destinations');
+        await assertReset();
+      }
+    }
+    assert.equal(lookups, replies.length);
+    assert.deepEqual(received, [chatId, '@public_channel'].map((chat, index) => ({
+      action: 'alerts', field: 'telegram', value: {token: fakeToken, chat}, version: initialVersion + index,
+    })), 'discovered and manual chat IDs use the same Telegram save action');
+    await button(wizard, 'Close destinations').click();
+  } finally {
+    releaseLookup();
+    await page.unroute(lookupPath, discover);
+    await page.unroute(actionPath, saveTelegram);
+  }
+}
+
+async function checkAlerts(page) {
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
+  const destination = page.getByRole('region', {name: 'Destination', exact: true});
+  assert.equal(await page.getByRole('switch', {name: 'Alert forwarding'}).count(), 0, 'cannot enable forwarding without a destination');
+  assert.equal(await button(page, 'Send test').count(), 0, 'cannot send to an unconfigured destination');
+  await checkTelegramWizard(page, destination);
+  await page.reload(); // Drop the route fixture's Telegram destination before testing real settings.
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
+  await button(destination, 'Set up destination').click();
+  await button(page, 'Discord').click();
+  const webhook = page.getByRole('textbox', {name: 'Webhook link'});
+  await webhook.fill('unsaved example');
+  await button(page, 'Close destinations').click();
+  await button(destination, 'Set up destination').click();
+  await button(page, 'Telegram').click();
+  assert.equal(await page.getByRole('textbox', {name: 'Bot token'}).inputValue(), '', 'closing the Discord editor leaves Telegram empty');
+  await button(page, 'Back to destinations').click();
+  await button(page, 'Discord').click();
+  assert.equal(await webhook.inputValue(), '', 'closing destination setup forgets unsaved credentials');
+  await button(page, 'Close destinations').click();
+  const content = page.getByRole('group', {name: 'Content', exact: true});
+  await content.getByRole('radio', {name: 'Also program text'}).click();
+  await page.getByText(/up to 300 characters/i).first().waitFor();
+  await page.reload();
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
+  assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
+  await content.getByRole('radio', {name: 'Kind and program name'}).click();
+  await page.getByText(/no text from the program/i).first().waitFor();
+  await button(page, 'Back to integrations').click();
+  await button(page, 'Alert forwarding').waitFor();
+  await section(page, 'Layout').click();
 }
 
 async function main() {
@@ -530,8 +689,7 @@ async function main() {
     desktop.setDefaultTimeout(timeout);
     await withMilo(binary, cwd, env, async url => {
       const page = await openEditor(desktop, url);
-      const dev = await page.request.get(new URL('/dev/version', url).href);
-      assert.equal(dev.status(), 404, 'the smoke test must run without web-dev');
+      await checkAlerts(page);
       await page.clock.install();
       await saveNumbers(page, cwd);
       await chooseUsageTools(page, binary, cwd, env);

@@ -1,44 +1,36 @@
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{self, IoSlice, Read, Write};
 use std::sync::Arc;
+
+use super::assets::Asset;
 
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 16 * 1024;
 const READ_CHUNK: usize = 2048;
 const SECURITY_HEADERS: &str = "Cache-Control: no-store\r\n\
-    Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; \
-    connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\n\
     Referrer-Policy: no-referrer\r\n\
     X-Content-Type-Options: nosniff\r\n\
     Cross-Origin-Opener-Policy: same-origin\r\n\
     Cross-Origin-Resource-Policy: same-origin\r\n\
     Connection: close\r\n";
+const POLICY_START: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'";
+const POLICY_END: &str = "; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; \
+    base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\n";
 const JSON: &str = "application/json; charset=utf-8";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Route {
-    Index,
-    Script,
-    Style,
-    Mascot,
-    Favicon,
-    RexIcon,
-    #[cfg(feature = "web-dev")]
-    DevScript,
-    #[cfg(feature = "web-dev")]
-    DevVersion,
+    Static(Asset),
     State,
     Action,
     Close,
+    TelegramChats,
 }
 
 impl Route {
     pub(super) fn authenticated(&self) -> bool {
-        #[cfg(feature = "web-dev")]
-        if matches!(self, Self::DevVersion) {
-            return true;
-        }
-        matches!(self, Self::State | Self::Action | Self::Close)
+        !matches!(self, Self::Static(_))
     }
 }
 
@@ -124,25 +116,17 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
         return Err(Rejection::Forbidden);
     }
     let route = match (method, path) {
-        ("GET", "/") => Route::Index,
-        ("GET", "/app.js") => Route::Script,
-        ("GET", "/app.css") => Route::Style,
-        ("GET", "/milo.webp") => Route::Mascot,
-        ("GET", "/favicon.png") => Route::Favicon,
-        ("GET", "/rex.png") => Route::RexIcon,
-        #[cfg(feature = "web-dev")]
-        ("GET", "/dev.js") => Route::DevScript,
-        #[cfg(feature = "web-dev")]
-        ("GET", "/dev/version") => Route::DevVersion,
         ("GET", "/api/state") => Route::State,
         ("POST", "/api/action") => Route::Action,
         ("POST", "/api/close") => Route::Close,
+        ("POST", "/api/telegram-chats") => Route::TelegramChats,
+        ("GET", path) => Route::Static(Asset::at(path).ok_or(Rejection::NotFound)?),
         _ => return Err(Rejection::NotFound),
     };
     if route.authenticated() && !authorization.is_some_and(|header| same_secret(header, access.bearer)) {
         return Err(Rejection::Unauthorized);
     }
-    let expects_json = matches!(route, Route::Action | Route::Close);
+    let expects_json = matches!(route, Route::Action | Route::Close | Route::TelegramChats);
     let body_len = match length {
         Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
             value.parse::<usize>().ok().filter(|&len| len <= MAX_BODY).ok_or(Rejection::BodyTooLarge)?
@@ -175,6 +159,15 @@ pub(super) fn close_version(body: &[u8]) -> Option<u64> {
         return None;
     }
     version?.unsigned()
+}
+
+pub(super) fn telegram_token(body: &[u8]) -> Option<Cow<'_, str>> {
+    let mut token = None;
+    let mut valid = true;
+    crate::json::settings_object(std::str::from_utf8(body).ok()?, |member| {
+        valid &= member.key.is("token") && token.replace(member.value).is_none();
+    })?;
+    token.filter(|_| valid)?.string(128)
 }
 
 #[derive(Default)]
@@ -283,9 +276,10 @@ impl AsRef<[u8]> for Body {
 }
 
 impl Response {
-    fn new(status: &str, content_type: Option<&str>, body: Body) -> Self {
-        let mut header = String::with_capacity(SECURITY_HEADERS.len() + 128);
-        let _ = write!(header, "HTTP/1.1 {status}\r\n{SECURITY_HEADERS}");
+    fn new(status: &str, content_type: Option<&str>, body: Body, scripts: &str) -> Self {
+        let capacity = SECURITY_HEADERS.len() + POLICY_START.len() + scripts.len() + POLICY_END.len() + 128;
+        let mut header = String::with_capacity(capacity);
+        let _ = write!(header, "HTTP/1.1 {status}\r\n{SECURITY_HEADERS}{POLICY_START}{scripts}{POLICY_END}");
         if status == "401 Unauthorized" {
             header.push_str("WWW-Authenticate: Bearer\r\n");
         }
@@ -296,24 +290,20 @@ impl Response {
         Self { header, body, sent: 0 }
     }
 
-    pub(super) fn asset(content_type: &str, body: &'static [u8]) -> Self {
-        Self::new("200 OK", Some(content_type), Body::Borrowed(body))
-    }
-
-    #[cfg(feature = "web-dev")]
-    pub(super) fn local_asset(content_type: &str, body: std::io::Result<Vec<u8>>) -> Self {
-        match body {
-            Ok(bytes) => Self::new("200 OK", Some(content_type), Body::Owned(bytes)),
-            Err(_) => Self::error("503 Service Unavailable", "Cannot read editor source assets"),
-        }
+    pub(super) fn asset(content_type: &str, body: &'static [u8], scripts: &str) -> Self {
+        Self::new("200 OK", Some(content_type), Body::Borrowed(body), scripts)
     }
 
     pub(super) fn json(body: Arc<String>) -> Self {
-        Self::new("200 OK", Some(JSON), Body::Snapshot(body))
+        Self::new("200 OK", Some(JSON), Body::Snapshot(body), "")
+    }
+
+    pub(super) fn json_owned(body: String) -> Self {
+        Self::new("200 OK", Some(JSON), Body::Owned(body.into_bytes()), "")
     }
 
     pub(super) fn no_content() -> Self {
-        Self::new("204 No Content", None, Body::Borrowed(b""))
+        Self::new("204 No Content", None, Body::Borrowed(b""), "")
     }
 
     pub(super) fn bad_request(message: &str) -> Self {
@@ -322,6 +312,10 @@ impl Response {
 
     pub(super) fn conflict(message: &str) -> Self {
         Self::error("409 Conflict", message)
+    }
+
+    pub(super) fn bad_gateway(message: &str) -> Self {
+        Self::error("502 Bad Gateway", message)
     }
 
     pub(super) fn busy() -> Self {
@@ -345,7 +339,7 @@ impl Response {
             }
         }
         body.push_str("\"}");
-        Self::new(status, Some(JSON), Body::Owned(body.into_bytes()))
+        Self::new(status, Some(JSON), Body::Owned(body.into_bytes()), "")
     }
 
     // Keep the fixed assets borrowed; the first write can send headers and body together.
@@ -383,7 +377,20 @@ mod tests {
 
     #[test]
     fn exposed_routes_are_exact_and_state_requires_bearer() {
-        assert_eq!(incoming("GET", "/", ""), Ok((Route::Index, 0)));
+        for path in ["/", "/favicon.png", "/milo.webp", "/rex.png"] {
+            assert!(matches!(incoming("GET", path, ""), Ok((Route::Static(_), 0))));
+        }
+        for path in [
+            "/index.html",
+            "/index.txt",
+            "/dev/version",
+            "/app.js",
+            "/favicon.png?other",
+            "/_next/static/chunks/unknown.js",
+            "/_next/static/chunks/../index.html",
+        ] {
+            assert_eq!(incoming("GET", path, ""), Err(Rejection::NotFound), "{path}");
+        }
         assert_eq!(incoming("GET", "/api/state", ""), Err(Rejection::Unauthorized));
         assert_eq!(incoming("GET", "/api/state", "\r\nAuthorization: Bearer bad-token"), Err(Rejection::Unauthorized));
         let bearer = "\r\nAuthorization: Bearer the-token";
@@ -408,6 +415,38 @@ mod tests {
         assert_eq!(incoming("POST", "/api/close", "\r\nOrigin: http://127.0.0.1:4321"), Err(Rejection::Unauthorized));
         let headers = format!("{valid}\r\nContent-Type: application/json\r\nContent-Length: 13");
         assert_eq!(incoming("POST", "/api/close", &headers), Ok((Route::Close, 13)));
+    }
+
+    #[test]
+    fn telegram_chats_requires_an_authenticated_same_origin_json_post() {
+        let path = "/api/telegram-chats";
+        let bearer = "\r\nAuthorization: Bearer the-token";
+        let origin = "\r\nOrigin: http://127.0.0.1:4321";
+        let headers = format!("{bearer}{origin}\r\nContent-Type: application/json\r\nContent-Length: 2");
+        assert_eq!(incoming("POST", path, &headers), Ok((Route::TelegramChats, 2)));
+        assert_eq!(incoming("GET", path, bearer), Err(Rejection::NotFound));
+        assert_eq!(incoming("POST", path, bearer), Err(Rejection::Forbidden));
+        assert_eq!(incoming("POST", path, origin), Err(Rejection::Unauthorized));
+        assert_eq!(incoming("POST", path, &format!("{bearer}{origin}")), Err(Rejection::LengthRequired));
+        assert_eq!(
+            incoming("POST", path, &format!("{bearer}{origin}\r\nContent-Length: 2")),
+            Err(Rejection::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn telegram_discovery_accepts_only_a_single_bounded_token_string() {
+        assert_eq!(telegram_token(br#"{"token":"key"}"#).as_deref(), Some("key"));
+        for body in [
+            "{}",
+            r#"{"token":1}"#,
+            r#"{"token":"a","token":"b"}"#,
+            r#"{"token":"a","offset":1}"#,
+            r#"{"token":"a"}null"#,
+        ] {
+            assert_eq!(telegram_token(body.as_bytes()), None);
+        }
+        assert_eq!(telegram_token(format!(r#"{{"token":"{}"}}"#, "x".repeat(129)).as_bytes()), None);
     }
 
     #[test]
@@ -505,7 +544,7 @@ mod tests {
             }
         }
 
-        let mut response = Response::asset("text/plain", b"a fixed response body");
+        let mut response = Response::asset("text/plain", b"a fixed response body", "");
         let mut output = ShortWriter::default();
         for _ in 0..(response.header.len() + response.body.as_ref().len()).div_ceil(16) + 1 {
             if response.write_to(&mut output).unwrap() {
@@ -515,6 +554,20 @@ mod tests {
         let header_end = response.header.len();
         assert_eq!(&output.0[..header_end], response.header.as_bytes());
         assert_eq!(&output.0[header_end..], b"a fixed response body");
+    }
+
+    #[test]
+    fn only_the_document_allows_hashed_inline_scripts() {
+        let index = Asset::at("/").unwrap().response();
+        assert!(index.header.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(index.header.contains("script-src 'self' 'sha256-"));
+        assert!(!index.header.contains("unsafe-inline"));
+        assert!(!index.header.contains("unsafe-eval"));
+
+        let image = Asset::at("/favicon.png").unwrap().response();
+        assert!(image.header.contains("Content-Type: image/png\r\n"));
+        assert!(image.header.contains("script-src 'self';"));
+        assert!(!image.header.contains("sha256-"));
     }
 
     #[test]
