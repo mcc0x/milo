@@ -66,6 +66,8 @@
 .integration-state[data-state="on"] { color: #245d49; background: #daeee4; }
 .integration-state[data-state="warning"] { color: #774e19; background: #fbecd3; }
 @media (max-width: 30rem) {
+  /* A title, its timing note and an action do not fit one line of a narrow panel. */
+  .integration-heading { flex-wrap: wrap; }
   .integration-row { padding-inline: .1rem; column-gap: .35rem; }
   .integration-state[data-state="unavailable"] { grid-column: 2/-1; justify-self: start; }
 }

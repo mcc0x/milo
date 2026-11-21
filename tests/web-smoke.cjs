@@ -477,6 +477,21 @@ async function rejectStaleDone(context, current, url) {
   assert.equal(await field.inputValue(), '42', 'dropping one edit kept the independent local number');
 }
 
+// 320 CSS pixels is a 1280-pixel window at 400% zoom. A detail page there must wrap its
+// heading, not push its controls out to the side of the panel.
+async function integrationDetailsFitNarrowPanel(page) {
+  await page.setViewportSize({width: 320, height: 700});
+  await section(page, 'Integrations').click();
+  for (const name of ['Rex automation', 'Discord presence', 'Alert forwarding']) {
+    await button(page, name).click();
+    await page.getByRole('heading', {name, exact: true}).waitFor();
+    const hidden = await page.locator('#settings-panel').evaluate(panel => panel.scrollWidth - panel.clientWidth);
+    assert.equal(hidden, 0, `${name} fits a narrow panel without scrolling sideways`);
+    await button(page, 'Back to integrations').click();
+  }
+  await section(page, 'Layout').click();
+}
+
 async function confirmFromMobileFooter(browser, url, exited) {
   const viewport = {width: 390, height: 700};
   const context = await browser.newContext({viewport, isMobile: true, hasTouch: true});
@@ -485,6 +500,7 @@ async function confirmFromMobileFooter(browser, url, exited) {
   await page.setViewportSize({width: 260, height: viewport.height});
   const dock = await page.locator('.control-dock').boundingBox();
   assert(dock && dock.x >= 0 && dock.x + dock.width <= 260, 'navigation and draft controls fit at narrow widths');
+  await integrationDetailsFitNarrowPanel(page);
   await page.setViewportSize(viewport);
   const done = button(page.getByRole('region', {name: 'Project session'}), 'Done');
   const box = await done.boundingBox();
