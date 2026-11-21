@@ -20,7 +20,7 @@ const title = 'milo — The little things that make Rex feel like home';
 const description = 'A file tree, commit history, diffs, and agent usage, right where you want them. Milo remembers how you like your panes.';
 const preview = {
   url: 'https://usemilo.net/milo-preview.jpg',
-  alt: 'Milo’s blue cat mascot and wordmark above the tagline: The little things that make Rex feel like home.',
+  alt: 'Milo — Your Git workspace, inside Rex. A file tree, commit history and agent session sit above the Milo and Rex mascots.',
 };
 
 export const metadata: Metadata = {
@@ -39,7 +39,7 @@ export const metadata: Metadata = {
     url: 'https://usemilo.net/',
     title,
     description,
-    images: { ...preview, type: 'image/jpeg', width: 1200, height: 630 },
+    images: { ...preview, type: 'image/jpeg', width: 1280, height: 640 },
   },
   twitter: { card: 'summary_large_image', title, description, images: preview },
 };
