@@ -25,6 +25,10 @@ If the CLI that installed the app has changed or moved, **Browser settings…** 
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 
+Hover over the percentage to see which provider and limit it represents, how much is left, and when it resets if known. Open the menu to see that same window first. Icon-only mode keeps the usual provider order.
+
+Low-quota notifications are **off by default**. In **More options → Low-quota alerts**, choose 10%, 20%, or 30% remaining and allow notifications when macOS asks. Milo alerts only when a visible provider’s fresh reading moves from above your threshold to at or below it, at most once for that provider and reset time. Starting below the threshold is silent. Stale, elapsed, hidden, and unknown-reset readings do not trigger alerts. Choose **Off** to stop them.
+
 ![Milo’s native menu with example Codex and Claude limits and the Settings button](img/menu-bar.webp)
 
 Choose **Browser settings…** to open the [local browser editor](setup.md#browser-editor). To change a specific worktree instead, run `milo web` from that project.
@@ -102,14 +106,63 @@ Milo reads `~/.local/share/opencode/opencode.db`, or the same file under an abso
 
 The figures were checked against databases written by OpenCode 1.2.0, 1.19.6, 2.2.0 and 2.3.2. They match `opencode stats --days 0`, except that Milo does not count a forked session's copied steps again on the day OpenCode 1 is upgraded to 2. Milo shows nothing, and `milo doctor` reports OpenCode's activity as unknown, when the database has other tables, when a step from today is malformed, when one of today's sessions was created by a version other than 1.x or 2.x, or when OpenCode 1 is still writing to a database OpenCode 2 has upgraded. Title requests are not counted, nor are OpenCode 2's compaction requests, because OpenCode does not record them as steps. [Usage sources](usage-sources.md) has the evidence, the limits of this reading, and why Amp and Gemini CLI are not read.
 
+## Accounts asked online
+
+Some figures exist only on a provider's servers. Milo can ask for four of them, and asks for none until you turn that account on. Each is hidden by default: with the choice left at **Hide**, Milo does not read the key, does not contact the provider and shows nothing, whatever keys are in your environment.
+
+| Account | What the provider reports | What it is not |
+| --- | --- | --- |
+| DeepSeek | The prepaid API **balance**, in yuan or dollars, and the part of it that was granted | A limit, or what you spent |
+| OpenRouter | What is **left of the key's spending limit** in dollars, or what the key has used when it has no limit; and its spend today and this month | Your account's credit balance, which needs a management key Milo does not ask for |
+| Devin | **ACUs** your organization consumed in Devin's current billing day, which starts at 08:00 UTC | What is left of a plan. Enterprise plans only |
+| Copilot | GitHub **AI credits** your personal account consumed this calendar month | What is left of the monthly allowance, which the API does not report. Not for seats billed to an organization |
+
+These are money and counts, so they are written out in words, such as `DeepSeek · ¥110.00 balance` or `Devin · 12.5 ACUs today`. They are never drawn as a percentage or a large figure, never pick the menu bar badge and never raise a low-quota alert. An answer older than two refreshes is marked with its age; one older than a day, or from a billing day or month that has ended, is dropped.
+
+**Turn an account on** under **Appearance** in `milo web`, or in `~/.config/milo/preferences.conf` (a worktree can have its own choice, like the tools):
+
+```
+usage_deepseek = auto
+usage_openrouter = always
+usage_devin = hide
+usage_copilot = hide
+```
+
+**Auto** asks the provider and gives the account a place once it has a figure. **Always show** also keeps the place to say why there is none, such as `no key set`, `key was refused` or `rate limited`. Terminal Settings (`milo setup`) does not list accounts yet.
+
+**Give Milo a key of its own.** Milo reads only these names, from the environment of the shell that starts the pane, or from `~/.config/milo/usage-accounts.conf`:
+
+| Account | Settings | The key |
+| --- | --- | --- |
+| DeepSeek | `MILO_DEEPSEEK_API_KEY` | An API key from the DeepSeek platform |
+| OpenRouter | `MILO_OPENROUTER_API_KEY` | An ordinary API key; one with its own spending limit shows what is left of it |
+| Devin | `MILO_DEVIN_API_KEY`, `MILO_DEVIN_ORG` (`org-…`) | A service user key or personal access token with the `ViewOrgConsumption` permission |
+| Copilot | `MILO_GITHUB_TOKEN`, `MILO_GITHUB_USER` | A fine-grained personal access token with read access to the account's **Plan** |
+
+```
+# ~/.config/milo/usage-accounts.conf — chmod 600
+MILO_DEEPSEEK_API_KEY = sk-…
+```
+
+The file must be a plain file of yours that no one else can read, or Milo ignores it and says so. The environment wins over the file. The macOS menu bar app does not inherit your shell's environment, so it needs the file. Milo does not look at `DEEPSEEK_API_KEY`, `GH_TOKEN` or any key another tool keeps: a key reaches a provider only because you named it for Milo. Prefer a key made for this, with the least access the provider offers. A DeepSeek key can also spend the balance, so treat the file like the key itself.
+
+**What is sent and kept.** One `GET` over HTTPS to the provider's own host, through `/usr/bin/curl`, with the key passed on curl's standard input rather than its command line. Redirects are not followed. DeepSeek and OpenRouter are asked at most every 5 minutes, Devin and Copilot every 15. `r` asks again, but no sooner than 30 seconds after the last request and never inside a rate limit the provider announced. A refused key is not offered again for 30 minutes unless you press `r`. The figures and times of the last answer are saved under `~/.local/state/milo/accounts/` so that every pane and the menu share one request; the key is never written there.
+
+**Where it appears.** Limits keep their rows first, then OpenCode, then accounts: one row each at the foot of the pane, or the whole pane when no tool has a place. The menu lists each account with its figure in words.
+
+Using DeepSeek or OpenRouter through OpenCode shows two different things: OpenCode's estimate of what today's steps cost, and what the provider says is left. Milo shows each under its own name and does not combine them.
+
 ## What milo does not do
 
-The usage pane reads local data. It does not call the providers, run their tools, sign in, read credentials, guess limits from token counts or work out a cost from them. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
+For the tools above, the usage pane reads local data. It does not call their providers, run the tools, sign in, read their saved credentials, guess limits from token counts or work out a cost from them. Figures can be old or missing if no tool has saved a report on this machine recently. The status-line helper writes its own limit readings, not the session logs.
+
+The one exception is an [account you turn on](#accounts-asked-online). For that account alone Milo sends one request to the provider's documented endpoint, with a key you set for Milo. It never turns a balance, a spend or a count of credits into a percentage, never adds figures from different accounts together, and never uses a key another tool saved.
 
 ## If a figure is missing
 
 - A tool that is not there at all has no figure saved on this Mac, or is hidden. Run `milo doctor` to see what Milo found, or choose **Always show** for it in setup to keep its place and see what it is waiting for.
 - Make the pane taller and wider to see labels, reset times and hints. Where the terminal can show pictures, including in Rex, milo draws the logos and large figures as pictures. Otherwise it draws with text. Short panes use text either way.
-- Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. Reload does not ask a provider for a fresh reading.
+- Press `r` to check local data immediately. Milo reuses any oh-my-pi check already in progress and updates the pane when it finishes. Existing figures stay visible; `checking` means a lookup is in progress and there is no figure yet. For a tool, reload does not ask a provider for a fresh reading; for an account you turned on, it asks again at most every 30 seconds.
 - A tool that is always shown, or found while no tool has a figure, says why it has none. `no sessions found` means no Codex sessions were found; `no limits to show` means there are sessions but no usable limits, or that a saved report has no windows. `no saved limits found` means milo has no saved Claude Code reading. `no tokens recorded today` means OpenCode's database has nothing from today. A narrow pane may shorten these hints.
 - For oh-my-pi, check that `/usr/bin/sqlite3` is available and the harness has saved a report. For Claude Code, see [setup](setup.md#claude-code-limits) if neither saved source has a reading.
+- An account that is turned on but missing has no figure yet and is set to Auto. Run `milo doctor`: it names the setting each account reads, where it found the key, and what the last answer or failure was, without asking the provider again. Choose **Always show** to see the reason in the pane. On a two-row rail with two limits, raise **Usage height** to give an account a row.

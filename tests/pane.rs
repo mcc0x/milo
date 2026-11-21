@@ -183,6 +183,77 @@ impl Terminal {
         String::from_utf8_lossy(&self.bytes)
     }
 
+    /// The rows a terminal would show after everything read so far. A frame
+    /// carries only the cells that changed, so the words on a row are not
+    /// always next to each other in the output. Every cell is taken as one column wide.
+    fn screen(&self) -> Vec<String> {
+        let output = self.output();
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        let (mut x, mut y) = (0, 0);
+        let mut chars = output.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                if !c.is_control() {
+                    if rows.len() <= y {
+                        rows.resize(y + 1, Vec::new());
+                    }
+                    if rows[y].len() <= x {
+                        rows[y].resize(x + 1, ' ');
+                    }
+                    rows[y][x] = c;
+                    x += 1;
+                }
+                continue;
+            }
+            match chars.next() {
+                Some('[') => {
+                    let mut values = String::new();
+                    let last = chars.by_ref().find(|&c| {
+                        values.push(c);
+                        ('@'..='~').contains(&c)
+                    });
+                    values.pop();
+                    match last {
+                        Some('H') => {
+                            let mut at = values.split(';').map(|n| n.parse::<usize>().unwrap_or(1) - 1);
+                            (y, x) = (at.next().unwrap_or(0), at.next().unwrap_or(0));
+                        }
+                        Some('J') => rows.clear(),
+                        _ => {}
+                    }
+                }
+                // A string for the terminal itself ends at ESC \ or a bell.
+                Some(']' | '_' | 'P') => {
+                    let mut escaped = false;
+                    for c in chars.by_ref() {
+                        if c == '\x07' || escaped && c == '\\' {
+                            break;
+                        }
+                        escaped = c == '\x1b';
+                    }
+                }
+                _ => {}
+            }
+        }
+        rows.into_iter().map(|row| row.into_iter().collect()).collect()
+    }
+
+    /// Waits until some row of the screen holds `text`.
+    fn shows(&mut self, text: &str) {
+        let until = Instant::now() + TEST_WAIT;
+        while !self.screen().iter().any(|row| row.contains(text)) {
+            assert!(self.read(until), "expected {text:?} on {:#?}", self.screen());
+        }
+    }
+
+    /// Waits until no row of the screen holds `text`.
+    fn hides(&mut self, text: &str) {
+        let until = Instant::now() + TEST_WAIT;
+        while self.screen().iter().any(|row| row.contains(text)) {
+            assert!(self.read(until), "expected no {text:?} on {:#?}", self.screen());
+        }
+    }
+
     fn wait_for_exit(&mut self) -> ExitStatus {
         let until = Instant::now() + TEST_WAIT;
         loop {
@@ -676,7 +747,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
         (&["history", "--help"][..], "Usage: milo history [PATH]"),
         (&["usage", "--help"][..], "Usage: milo usage [--menu-stream]"),
         (&["setup", "--help"][..], "Usage: milo setup"),
-        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID]"),
+        (&["view", "--help"][..], "Usage: milo view FILE [--commit ID | --edit]"),
         (&["listen", "--help"][..], "Usage: milo listen [--stop]"),
         (&["claude-status", "--help"][..], "Usage: milo claude-status"),
     ] {
@@ -687,7 +758,7 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
     }
     for (args, message) in [
         (&["not-a-milo-command"][..], "milo: not-a-milo-command is not a directory; see milo --help for commands\n"),
-        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID]\n"),
+        (&["view"][..], "milo: missing file; use milo view FILE [--commit ID | --edit]\n"),
     ] {
         let output = run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
@@ -729,7 +800,17 @@ fn uninstall_keeps_the_executable_when_the_owned_claude_status_line_cannot_be_re
         command.env_remove("REX_CONFIG");
         command
     };
-    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    // A sibling test's new process can hold the copy open for writing for a moment.
+    let until = Instant::now() + TEST_WAIT;
+    let skipped = loop {
+        match command().args(["setup", "--skip-onboarding"]).status() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            status => break status.unwrap(),
+        }
+    };
+    assert!(skipped.success());
     let settings = project.0.join(".claude/settings.json");
     fs::create_dir(settings.parent().unwrap()).unwrap();
     let invalid = br#"{"statusLine":{"type":"command","command":"milo claude-status"}"#;
@@ -1060,4 +1141,376 @@ fn usage_and_doctor_read_only_the_selected_provider_directories() {
     pane.until("39%");
     pane.master.write_all(b"q").unwrap();
     assert!(pane.wait_for_exit().success());
+}
+
+#[test]
+fn the_reader_edits_a_file_and_asks_before_ctrl_c_can_lose_the_draft() {
+    let project = Project::new();
+    let file = project.0.join("project/page.txt");
+    fs::write(&file, "old\r\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "page.txt"]));
+    tty.shows("e edit");
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save · ^Z undo · Esc done · ^G help");
+
+    // Keys that close or explain a reader are text now, and a paste is text too.
+    tty.master.write_all(b"q? \x1b[200~pasted\nlines \x1b[201~").unwrap();
+    tty.shows("unsaved");
+    tty.shows("q? pasted");
+    tty.shows("lines old");
+    tty.master.write_all(b"\x03").unwrap();
+    tty.shows("Unsaved edits: s save · d discard · Esc back");
+    assert_eq!(fs::read(&file).unwrap(), b"old\r\n");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("^S save");
+
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read(&file).unwrap(), b"q? pasted\r\nlines old\r\n");
+
+    // Saved, so leaving does not ask, and the reader is a reader again.
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert!(!project.0.join("state/milo/drafts").exists());
+}
+
+#[test]
+fn a_reader_ended_from_outside_keeps_its_unsaved_edits_and_offers_them_again() {
+    let project = Project::new();
+    let file = project.0.join("project/page.txt");
+    fs::write(&file, "old\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "page.txt", "--edit"]));
+    tty.shows("^S save");
+    tty.master.write_all(b"draft ").unwrap();
+    tty.shows("unsaved");
+    let pid = i32::try_from(tty.child.id()).unwrap();
+    // SAFETY: This is our own, still-owned child, not a process group.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    tty.wait_for_exit();
+    assert!(tty.restored());
+    // The line about the draft comes after the terminal is handed back.
+    tty.until("\x1b[?1049l");
+    tty.until("were kept");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "old\n");
+    let drafts: Vec<_> =
+        fs::read_dir(project.0.join("state/milo/drafts")).unwrap().map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(fs::read_to_string(&drafts[0]).unwrap(), "draft old\n");
+
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "page.txt", "--edit"]));
+    tty.shows("Kept draft found: r restore · d delete · Esc later");
+    tty.master.write_all(b"r").unwrap();
+    tty.shows("Draft restored");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "draft old\n");
+    assert!(!drafts[0].exists());
+}
+
+#[test]
+fn view_edit_opens_a_read_only_file_for_reading_and_says_why() {
+    let project = Project::new();
+    fs::write(project.0.join("project/data.bin"), b"a\0b").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.args(["view", "data.bin", "--edit"]));
+    tty.shows("Read-only: not text");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+
+    let both = project.command(env!("CARGO_BIN_EXE_milo")).args(["view", "x", "--edit", "--commit"]).output().unwrap();
+    assert!(!both.status.success());
+    assert!(String::from_utf8_lossy(&both.stderr).contains("[--commit ID | --edit]"));
+}
+
+#[test]
+fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(root.join(name), format!("{name} text\n")).unwrap();
+    }
+    // A setting milo cannot read puts a notice under the outline, which is then drawn by a
+    // pane around it. Keys and pasted text must still reach the editor through that pane.
+    fs::create_dir_all(project.0.join("config/milo")).unwrap();
+    fs::write(project.0.join("config/milo/preferences.conf"), "garbage line\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    let mut tty = Terminal::run(command.arg("outline"));
+    tty.shows("c.txt");
+    tty.master.write_all(b"j\r").unwrap();
+    tty.shows("b.txt text");
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"q? \x1b[200~edited \x1b[201~\x03").unwrap();
+    tty.shows("Unsaved edits: s save");
+    tty.shows("q? edited b.txt text");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "q? edited b.txt text\n");
+
+    // Esc stops editing, q closes the reader, and the outline still has that file selected.
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("c.txt");
+    tty.hides("edited b.txt text");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("edited b.txt text");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
+fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "data\n").unwrap();
+    let block = "block:11111111-1111-1111-1111-111111111111";
+    let rex = project.0.join("rex");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\ncat >/dev/null\necho open >> \"$HOME/opens\"\necho {block}\n"
+    );
+    fs::write(&rex, script).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+    // A sibling test's new process can hold the script open for writing for a moment.
+    let until = Instant::now() + TEST_WAIT;
+    while let Err(error) = project.command(&rex).arg("ready").status() {
+        assert!(
+            error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < until,
+            "cannot run stand-in rex: {error}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let mut paths = vec![project.0.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let in_rex = |args: &[&str], block: &str| {
+        let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+        command
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("REX_SESSION", "test")
+            .env("REX_BLOCK", block)
+            .args(args);
+        command
+    };
+    let wait_for_opens = |count: usize| {
+        let until = Instant::now() + TEST_WAIT;
+        while fs::read_to_string(project.0.join("opens")).map_or(0, |log| log.lines().count()) != count {
+            assert!(Instant::now() < until, "expected {count} requests to open a reader");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    // The outline opens the file in a floating reader, which Rex runs in the block it names.
+    let mut outline = Terminal::run(&mut in_rex(&["outline"], "block:22222222-2222-2222-2222-222222222222"));
+    outline.shows("page.txt");
+    outline.master.write_all(b"\r").unwrap();
+    wait_for_opens(1);
+    let mut reader = Terminal::run(&mut in_rex(&["view", "page.txt", "--edit"], block));
+    reader.shows("^S save");
+    reader.master.write_all(b"x").unwrap();
+    reader.shows("unsaved");
+
+    outline.master.write_all(b"\r").unwrap();
+    outline.shows("The open reader has unsaved edits.");
+    wait_for_opens(1);
+
+    // Once the edit is taken back, the reader can be replaced again.
+    reader.master.write_all(b"\x1a").unwrap();
+    reader.hides("unsaved");
+    outline.master.write_all(b"\r").unwrap();
+    wait_for_opens(2);
+}
+
+#[test]
+fn formatting_runs_an_installed_formatter_on_the_draft_and_saves_only_when_asked() {
+    let project = Project::new();
+    let file = project.0.join("project/a.go");
+    fs::write(&file, "package main\n").unwrap();
+    // A program that already exists stands in for the formatter: `rev` turns each line
+    // around, and a link to it is not a file some other test's new process could hold open.
+    let rev = ["/usr/bin/rev", "/bin/rev"].into_iter().find(|rev| Path::new(rev).is_file()).expect("no rev");
+    let tools = project.0.join("tools");
+    fs::create_dir(&tools).unwrap();
+    std::os::unix::fs::symlink(rev, tools.join("gofmt")).unwrap();
+    let mut paths = vec![tools.clone()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+    let mut tty = Terminal::run(command.args(["view", "a.go", "--edit"]));
+    tty.shows("^F format");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("Formatted with gofmt");
+    tty.shows("niam egakcap");
+    tty.shows("unsaved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "package main\n");
+    tty.master.write_all(b"\x1a").unwrap();
+    tty.shows("package main");
+    tty.hides("unsaved");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("niam egakcap");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "niam egakcap\n");
+    // Esc and a letter sent together would read as one key, so Ctrl-Q stops editing here.
+    tty.master.write_all(b"\x11q").unwrap();
+    assert!(tty.wait_for_exit().success());
+
+    // With no formatter to be found, the pane says which to install and starts nothing.
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.env("PATH", project.0.join("empty"));
+    let mut tty = Terminal::run(command.args(["view", "a.go", "--edit"]));
+    tty.shows("^F format");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("Not installed: gofmt.");
+    tty.master.write_all(b"\x11q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "niam egakcap\n");
+}
+
+#[test]
+fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
+    let project = Project::new();
+    // The project's stand-in home has no Rust toolchains, so say where the real ones are.
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let toolchains = |command: &mut Command| {
+        for (name, folder) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
+            command.env(name, std::env::var_os(name).map_or_else(|| home.join(folder), PathBuf::from));
+        }
+    };
+    let mut rustfmt = project.command("rustfmt");
+    toolchains(&mut rustfmt);
+    if !rustfmt.arg("--version").output().is_ok_and(|output| output.status.success()) {
+        // The formatter is optional; the stand-in above covers the pane without it.
+        return;
+    }
+    let file = project.0.join("project/main.rs");
+    fs::write(&file, "fn  main( ){let x=1;}\n").unwrap();
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    toolchains(&mut command);
+    let mut tty = Terminal::run(command.args(["view", "main.rs", "--edit"]));
+    tty.shows("^F format");
+    tty.master.write_all(b"\x06").unwrap();
+    tty.shows("Formatted with rustfmt");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "fn main() {\n    let x = 1;\n}\n");
+}
+
+/// The installed binary has no way to send a key anywhere but its provider:
+/// the loopback stand-in that unit tests use is not compiled into it, and the
+/// variable that once selected it does nothing. Saved answers stand in for
+/// the providers here, so this test sends no request at all.
+#[test]
+fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_its_key() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::Stdio;
+
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let binary = fs::read(milo).unwrap();
+    let holds = |text: &str| binary.windows(text.len()).any(|window| window == text.as_bytes());
+    assert!(holds("MILO_DEEPSEEK_API_KEY") && holds("proto = \"=https\""));
+    assert!(!holds("MILO_TEST_USAGE_PORT"), "the binary must not know a transport override");
+    assert!(!holds("proto = \"=http\""), "the binary must not be able to ask over plain HTTP");
+
+    // A receiver that would see any request the old override could have redirected.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = std::sync::Arc::new(AtomicU32::new(0));
+    let counted = received.clone();
+    std::thread::spawn(move || {
+        for _ in listener.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let project = Project::new();
+    let command = || {
+        let mut command = project.command(milo);
+        command
+            .env_remove("REX_CONFIG")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("OPENCODE_DB")
+            .env_remove("CODEX_HOME")
+            .env("XDG_DATA_HOME", project.0.join("data"))
+            .env("MILO_TEST_USAGE_PORT", port.to_string())
+            // Should a request be made after all, curl's proxy sends it to the counter, not to a provider.
+            .env("HTTPS_PROXY", format!("http://127.0.0.1:{port}"))
+            .env("https_proxy", format!("http://127.0.0.1:{port}"))
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env("MILO_OPENROUTER_API_KEY", "sk-or-not-a-real-key");
+        command
+    };
+    let config = project.0.join("config/milo");
+    fs::create_dir_all(&config).unwrap();
+    let keys = config.join("usage-accounts.conf");
+    fs::write(&keys, "MILO_DEEPSEEK_API_KEY = sk-not-a-real-key\n").unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+
+    // Keys alone turn nothing on: the pane and doctor say nothing of the accounts.
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
+    // The pane moves the cursor across spaces, so only single words arrive whole.
+    pane.until("show");
+    pane.master.write_all(b"rq").unwrap();
+    assert!(pane.wait_for_exit().success());
+    let report = command().arg("doctor").output().unwrap();
+    assert!(!String::from_utf8_lossy(&report.stdout).contains("DeepSeek"));
+    assert!(!project.0.join("state/milo/accounts").exists());
+
+    // Answers saved moments ago, as another pane would have left them: none is due a request.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let later = now + 3600;
+    let saved = project.0.join("state/milo/accounts");
+    fs::create_dir_all(&saved).unwrap();
+    let reading = format!(
+        r#"{{"observed":{now},"figure":{{"kind":"balance","unit":"cny","value":110}},"details":[{{"kind":"granted","unit":"cny","value":10}}],"depleted":false}}"#
+    );
+    fs::write(saved.join("deepseek.json"), format!(r#"{{"version":1,"asked":{now},"next":{later},"reading":{reading}}}"#))
+        .unwrap();
+    fs::write(
+        saved.join("openrouter.json"),
+        format!(r#"{{"version":1,"asked":{now},"next":{later},"failure":"limited"}}"#),
+    )
+    .unwrap();
+    fs::write(config.join("preferences.conf"), "usage_deepseek = auto\nusage_openrouter = always\n").unwrap();
+
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
+    pane.until("granted");
+    pane.until("limited");
+    assert!(!pane.output().contains('%'), "{}", pane.output());
+    pane.master.write_all(b"q").unwrap();
+    assert!(pane.wait_for_exit().success());
+
+    let report = command().arg("doctor").output().unwrap();
+    let report = String::from_utf8(report.stdout).unwrap();
+    assert!(report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"), "{report}");
+    assert!(report.contains("DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from "), "{report}");
+    assert!(report.contains("  last answer: ¥110.00 balance, "), "{report}");
+    assert!(report.contains("  last attempt: the provider rate limited the request"), "{report}");
+    assert!(!report.contains("not-a-real-key"), "{report}");
+
+    let mut stream = command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut lines = BufReader::new(stream.stdout.take().unwrap()).lines();
+    let line = lines.find(|line| line.as_ref().is_ok_and(|line| line.contains("deepseek"))).unwrap().unwrap();
+    assert!(
+        line.contains(r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#),
+        "{line}"
+    );
+    assert!(line.contains(r#"{"id":"openrouter","name":"OpenRouter","windows":[],"detail":"Rate limited"}"#), "{line}");
+    drop(stream.stdin.take());
+    assert!(stream.wait().unwrap().success());
+
+    // Nothing was sent to the loopback receiver, with or without accounts turned on.
+    assert_eq!(received.load(Ordering::SeqCst), 0);
+    for name in ["deepseek.json", "openrouter.json"] {
+        assert!(!fs::read_to_string(saved.join(name)).unwrap().contains("not-a-real-key"));
+    }
 }

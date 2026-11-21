@@ -1,8 +1,8 @@
 # milo
 
-> milo provides small terminal panes for a live file tree, Git history, usage, and a read-only file reader. The panes work on their own or alongside your shell in Rex.
+> milo provides small terminal panes for a live file tree, Git history, usage, and a file reader that can edit a working text file when asked. The panes work on their own or alongside your shell in Rex.
 
-milo does not write to the project it displays. The v0.1.4 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+milo writes to the project it displays only when you save a file you edited in its reader. The v0.1.4 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
 ## Using milo
 
@@ -15,7 +15,7 @@ milo does not write to the project it displays. The v0.1.4 prebuilt release is f
 - [Keys and marks](docs/keys.md): Keyboard shortcuts and what the panes show.
 - [Usage limits](docs/usage.md): Where the figures come from and what they mean.
 - [Discord presence](docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the application ID you supply, `milo presence`, and its limits.
-- [Using the panes](docs/panes.md): Pane sizes, history and the file reader.
+- [Using the panes](docs/panes.md): Pane sizes, history, the file reader and its languages, editing a file, and the formatters milo can run.
 
 ## Developing milo
 

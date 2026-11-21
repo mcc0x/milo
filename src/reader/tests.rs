@@ -18,7 +18,8 @@ fn reader_hints_say_close_and_keep_help_last() {
     let f = Fixture::folder();
     f.write("page.txt", "a file\n");
     let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
-    assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · q close · ? help");
+    assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · e edit · q close · ? help");
+    assert_eq!(drawn(&mut reader, 28, 5)[4], " e edit · q close · ? help");
     assert_eq!(drawn(&mut reader, 20, 5)[4], " q close · ? help");
 }
 
@@ -28,7 +29,7 @@ fn an_empty_file_uses_the_body_row_not_the_hint_row() {
     f.write("empty.txt", "");
     let mut reader = Reader::open(&f.root.join("empty.txt")).unwrap();
     let rows = drawn(&mut reader, 40, 3);
-    assert_eq!(&rows[1..], ["  Empty.", " q close · ? help"]);
+    assert_eq!(&rows[1..], ["  Empty.", " e edit · q close · ? help"]);
 }
 
 #[test]
@@ -1163,6 +1164,48 @@ fn lua_swift_sql_dockerfiles_and_makefiles_are_coloured_in_working_and_committed
     let id = CommitId::parse(&commits[0].hash).unwrap();
     for (path, before, keyword) in files {
         check(&mut Reader::at_commit(&f.root.join(path), id).unwrap(), path, before, keyword);
+    }
+}
+
+#[test]
+fn markdown_markup_stylesheets_and_more_code_are_coloured_in_working_and_committed_reads() {
+    let f = Fixture::new();
+    let files = [
+        ("README.md", "# Notes\n\nDon't skip `code` in step 1.\n", "# Notes"),
+        ("site/index.html", "<main class=\"a\">\n  <p>Don't stop at 1</p>\n</main>\n", "main"),
+        ("theme.css", "@media print {\n  a { z-index: 1; }\n}\n", "@media"),
+        ("app.rb", "def run\n  puts 1\nend\n", "def"),
+        ("Main.kt", "fun main() {\n  println(1)\n}\n", "fun"),
+        ("main.tf", "variable \"n\" {\n  default = 1\n}\n", "variable"),
+    ];
+    for (path, before, _) in files {
+        f.write(path, before);
+    }
+    f.commit("before");
+    for (path, before, _) in files {
+        f.write(path, &before.replace('1', "2"));
+    }
+    let check = |reader: &mut Reader, path: &str, keyword: &str| {
+        let mut screen = Screen::sized(60, 10);
+        reader.draw(&mut screen);
+        let out = String::from_utf8(screen.emitted()).unwrap();
+        let runs = runs(&out);
+        assert!(runs.contains(&("0;35", keyword)), "{path}: {out:?}");
+        // The diff still marks only the changed number, on the removed and the added line.
+        let emphasised: Vec<_> = runs.iter().filter(|run| reversed(run.0)).map(|run| run.1).collect();
+        assert_eq!(emphasised, ["1", "2"], "{path}: {out:?}");
+    };
+    for (path, _, keyword) in files {
+        check(&mut Reader::open(&f.root.join(path)).unwrap(), path, keyword);
+    }
+
+    f.commit("after");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    for (path, _, keyword) in files {
+        check(&mut Reader::at_commit(&f.root.join(path), id).unwrap(), path, keyword);
     }
 }
 

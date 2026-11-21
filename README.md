@@ -80,7 +80,9 @@ Optionally show **In a Rex session** on your Discord profile while a Rex app has
   <img src="docs/img/reader.png" width="675" alt="A TypeScript file with coloured code and green and red lines showing edits">
 </p>
 
-Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks.
+Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks. The reader colours [about thirty languages](docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
+
+Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
 
 ## Commands
 
@@ -90,7 +92,7 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | `milo outline [PATH]` | File tree |
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |
-| `milo view FILE [--commit ID]` | File reader |
+| `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |

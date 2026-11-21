@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use super::disk::ReadOnly;
 use super::working_path::{Entry, LookupError, Root, Stamp};
 use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
@@ -12,9 +13,10 @@ use crate::picture::{self, Picture};
 use crate::read::Content;
 use crate::syntax;
 
-/// How many bytes to read when there is no diff text to show.
-const LIMIT: u64 = 2 << 20;
+/// How many bytes to read when there is no diff text to show, and the most that can be edited.
+pub(super) const LIMIT: u64 = 2 << 20;
 pub(super) const NOT_TEXT: &str = "This file is not text.";
+pub(super) const EMPTY: &str = "Empty.";
 const NOT_FILE: &str = "Not a file, so there is nothing to show.";
 
 struct Location {
@@ -64,7 +66,7 @@ pub(super) struct WorkingStamp {
 }
 
 impl WorkingStamp {
-    fn at<'a>(repo: &Repo, root: &'a Root, relative: &Path) -> (Result<Entry<'a>, LookupError>, Self) {
+    pub(super) fn at<'a>(repo: &Repo, root: &'a Root, relative: &Path) -> (Result<Entry<'a>, LookupError>, Self) {
         let at_path = root.at_path(&repo.root);
         let mut links = 0;
         let entry = at_path.and_then(|_| root.entry(&repo.root, relative, &mut links));
@@ -81,6 +83,18 @@ impl WorkingStamp {
         let entry_stamp = entry.as_ref().map(Entry::stamp).map_err(|e| *e);
         let stamp = Self { entry: entry_stamp, compare, at_root_path, linked_ancestor };
         (entry, stamp)
+    }
+
+    /// Whether the file was reached where the project still is, through no link.
+    /// Only such a file is edited: a save must land in the file that was read.
+    pub(super) fn reachable(&self) -> Result<(), ReadOnly> {
+        if !self.at_root_path {
+            Err(ReadOnly::MOVED)
+        } else if self.linked_ancestor {
+            Err(ReadOnly::LINKED)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -206,11 +220,17 @@ impl Reader {
         let (icons, note) = Self::appearance_for(repo);
         let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time }, icons, note);
         reader.body = Body::from_lines(committed_lines(repo, path, hash, file), syntax::for_file(path));
+        reader.read_only = reader.edit_refusal();
         reader
     }
 
     /// Rebuilds the working file when it or Git has changed, keeping the last good result if git fails.
     pub(super) fn refresh(&mut self, force: bool) {
+        self.refresh_body(force);
+        self.read_only = self.edit_refusal();
+    }
+
+    fn refresh_body(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
         let WorkingFile { repo, root, relative, attributes, stamp: last, .. } = work.as_mut();
         let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
@@ -343,7 +363,7 @@ fn text(bytes: &[u8]) -> Option<&str> {
 /// Turns a stored file into text, or says why it cannot be shown.
 fn byte_lines(bytes: &[u8], kind: LineKind) -> Result<Vec<Line>, &'static str> {
     if bytes.is_empty() {
-        return Err("Empty.");
+        return Err(EMPTY);
     }
     let text = text(bytes).ok_or(NOT_TEXT)?;
     Ok((1..).zip(text.lines()).map(|(no, line)| Line::new(kind, no, line)).collect())
@@ -383,7 +403,7 @@ fn committed_lines(repo: &Repo, path: &str, hash: &str, file: Option<&PendingFil
             return Ok(patch.lines);
         }
         if file.kind == Kind::Deleted {
-            return Err("Empty.");
+            return Err(EMPTY);
         }
     }
     let raw = repo.blob_at(hash, path).map_err(|err| match err {

@@ -1,6 +1,6 @@
 # Keys and marks
 
-Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses.
+Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses. While you are [editing a file](#editing-in-the-reader), the keys you type are text: help is `Ctrl-G`, and `Ctrl-C` asks before it gives up unsaved changes.
 
 ## Moving around
 
@@ -52,7 +52,41 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
 | `n` / `N` | Next or previous block of added or removed lines |
+| `e` | Edit the file, or say why it is read-only |
 | `q` or `Esc` | Close |
+
+The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
+
+### Editing in the reader
+
+Press `e` in the reader, or start with `milo view FILE --edit`. The heading says `editing`, then `unsaved` once the draft differs from the file. Nothing is written until you save. See [editing files](panes.md#editing-files) for what can be edited and how a save is kept safe.
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-S` | Save the draft to the file |
+| `Ctrl-Z` / `Ctrl-Y` | Undo or redo. A run of typing is undone a word at a time |
+| `Ctrl-F` | Format the draft with an [installed formatter](panes.md#formatting). `Ctrl-Z` takes it back |
+| `Esc`, `Ctrl-Q` or `Ctrl-C` | Stop editing. With unsaved changes, asks: `s` save, `d` discard, `Esc` back |
+| Arrows | Move the cursor. Up and Down keep their column through shorter lines |
+| Home / End or `Ctrl-A` / `Ctrl-E` | Start or end of the line |
+| Page Up / Page Down | Move a page |
+| `Enter` | New line, indented like the one above |
+| `Tab` | Indent by a tab or by the file's own number of spaces |
+| Backspace or `Ctrl-H` | Delete the character before the cursor |
+| Delete or `Ctrl-D` | Delete the character under the cursor |
+| `Ctrl-G` | Help |
+| Click | Put the cursor there |
+| Mouse wheel | Scroll without moving the cursor |
+
+Pasted text is inserted as one change, with the file's line endings and without control characters. A paste larger than 1 MiB is refused. Every other key types itself, including `?` and `q`.
+
+Questions take the place of the last row and wait for one of the keys they list. Any other key is ignored. When the pane is two rows tall they take the heading's row instead. A narrow pane drops the words before the keys first: at 28 columns every key is still listed.
+
+| Question | Keys |
+| --- | --- |
+| `Unsaved edits` | `s` save and stop editing, `d` discard the draft, `Esc` go back to it |
+| `Changed on disk` | `o` write your draft over the file as it is now, `Esc` go back without writing |
+| `Kept draft found` | `r` put the kept draft in place of the text, `d` delete it, `Esc` decide later |
 
 ### Usage and setup
 

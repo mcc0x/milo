@@ -157,6 +157,16 @@ impl Session {
         self.keys.drain(..)
     }
 
+    /// Whether pasted text is kept for the pane or skipped.
+    pub fn keep_pastes(&mut self, keep: bool) {
+        self.input.keep_pastes(keep);
+    }
+
+    /// The text behind the oldest `Key::Paste` received, unless it was too long to keep.
+    pub fn pasted(&mut self) -> Option<String> {
+        self.input.pasted()
+    }
+
     pub fn stopping(&self) -> bool {
         self.cancelled_input || TERMINATED.load(Ordering::Relaxed)
     }

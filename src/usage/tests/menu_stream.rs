@@ -1,7 +1,7 @@
 use std::io::{BufRead as _, BufReader};
 use std::thread;
 
-use super::super::menu::{global_tools, snapshots};
+use super::super::menu::{global_choices, snapshots};
 use super::*;
 
 fn snapshot(usage: &mut Usage) -> String {
@@ -174,7 +174,7 @@ fn menu_stream_global_preferences_change_without_reopening_an_unaffected_reader(
     assert_eq!(global, config.join("preferences.conf"));
     fs::create_dir_all(local.parent().unwrap()).unwrap();
     fs::write(local, "usage_codex = hide\n").unwrap();
-    let initial = global_tools(Some(&config)).unwrap();
+    let (initial, _) = global_choices(Some(&config)).unwrap();
     let mut usage = automatic(&f, NOW).showing(initial);
     usage.refresh(NOW, clock, false);
     let line = snapshot(&mut usage);
@@ -183,9 +183,9 @@ fn menu_stream_global_preferences_change_without_reopening_an_unaffected_reader(
     assert!(field(providers(&line).nth(1).unwrap(), "detail").is("No database found"));
 
     f.write("config/preferences.conf", "usage_opencode = invalid\n");
-    assert!(global_tools(Some(&config)).is_none());
+    assert!(global_choices(Some(&config)).is_none());
     f.write("config/preferences.conf", "usage_codex = always\nusage_opencode = auto\n");
-    usage.apply_menu_tools(None, global_tools(Some(&config)).unwrap());
+    usage.apply_menu_tools(None, global_choices(Some(&config)).unwrap().0);
     let newest = codex(NOW, 64, NOW + HOUR, "null");
     let path = f.root.join(CODEX);
     OpenOptions::new().append(true).open(&path).unwrap().write_all(newest.as_bytes()).unwrap();
@@ -199,7 +199,7 @@ fn menu_stream_global_preferences_change_without_reopening_an_unaffected_reader(
     assert_eq!(usage.bytes_read, 0);
 
     f.write("config/preferences.conf", "usage_codex = hide\n");
-    usage.apply_menu_tools(None, global_tools(Some(&config)).unwrap());
+    usage.apply_menu_tools(None, global_choices(Some(&config)).unwrap().0);
     assert!(usage.codex_dir.is_none() && usage.codex.files.entries.is_empty());
     assert_eq!(providers(&snapshot(&mut usage)).count(), 0);
 }

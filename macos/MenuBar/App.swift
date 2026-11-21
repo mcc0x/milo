@@ -105,10 +105,13 @@ private final class Model: ObservableObject {
     @Published var mode = UserDefaults.standard.string(forKey: "badgeMode") ?? "auto" {
         didSet { UserDefaults.standard.set(mode, forKey: "badgeMode"); changed?() }
     }
+    @Published private(set) var badge: BadgeReading?
+    private(set) var badgeUpdatedAt = Date.now
     var changed: (() -> Void)?
     private var child: Process?
     private var input: FileHandle?
     private let reader = DispatchQueue(label: "net.usemilo.usage.frames", qos: .utility)
+    let alerts = UsageAlerts()
 
     private var settings: Process?
     private var settingsURL: URL?
@@ -228,6 +231,7 @@ private final class Model: ObservableObject {
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.child === process else { return }
                             self.snapshot = frame; self.failure = nil; self.changed?()
+                            self.alerts.observe(frame)
                         }
                     }
                     guard pending.count <= 65536 else { throw FeedError.invalid }
@@ -242,11 +246,17 @@ private final class Model: ObservableObject {
 
     private enum FeedError: Error { case invalid }
     private func failed(_ message: String) { snapshot = nil; failure = message; changed?() }
+    func updateBadge(at now: Date) {
+        badgeUpdatedAt = now
+        let reading = badgeReading(snapshot, mode: mode, now: now)
+        if badge != reading { badge = reading }
+    }
     func refresh() {
         guard let input else { start(); return }
         do { try input.write(contentsOf: Data([10])) } catch { stop(); start() }
     }
     func stop() {
+        alerts.clearBaseline()
         try? input?.close(); input = nil
         if let process = child, process.isRunning { process.terminate() }
         child = nil
@@ -273,8 +283,10 @@ private final class Model: ObservableObject {
 
 private struct Content: View {
     @ObservedObject var model: Model
+    @ObservedObject var alerts: UsageAlerts
     var body: some View {
-        UsagePanel(snapshot: model.snapshot, error: model.failure, badgeMode: $model.mode,
+        UsagePanel(snapshot: model.snapshot, error: model.failure, badge: model.badge, now: model.badgeUpdatedAt, badgeMode: $model.mode,
+                   alertThreshold: Binding(get: { alerts.threshold }, set: { alerts.select($0) }), alertIssue: alerts.issue,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
                    loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
     }
@@ -287,6 +299,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var status: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        model.alerts.start()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.autosaveName = "Milo Usage"
         if let button = status.button {
@@ -296,7 +309,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         }
         popover.behavior = .transient
-        let host = NSHostingController(rootView: Content(model: model)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
+        let host = NSHostingController(rootView: Content(model: model, alerts: model.alerts)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
         model.changed = { [weak self] in self?.updateBadge() }
         updateBadge(); model.start()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
@@ -306,21 +319,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func woke() {
         // A badge that was fresh before sleep must be rechecked before showing it again.
         model.snapshot = nil
+        model.alerts.clearBaseline()
         updateBadge()
         model.refresh()
     }
     private func updateBadge() {
         guard let button = status?.button else { return }
-        let reading = badgeReading(model.snapshot, mode: model.mode)
-        let label = reading.map { "\($0.provider.name), \($0.window.label): \($0.window.remaining)% left" } ?? "Milo"
-        button.title = reading.map { " \($0.window.remaining)%" } ?? ""
-        status.length = reading == nil ? NSStatusItem.variableLength : 67
-        button.toolTip = label; button.setAccessibilityLabel(label)
+        // The reader emits even unchanged frames, at most 30 seconds apart when settled.
+        // Use those ticks for the countdown and share the chosen window with the popover.
+        let now = Date.now
+        model.updateBadge(at: now)
+        let label = model.badge?.label(at: now) ?? "Milo"
+        let title = model.badge.map { " \($0.window.remaining)%" } ?? ""
+        if button.title != title {
+            button.title = title
+            status.length = model.badge == nil ? NSStatusItem.variableLength : 67
+        }
+        if button.toolTip != label {
+            button.toolTip = label; button.setAccessibilityLabel(label)
+        }
     }
     @objc private func toggle() { if popover.isShown { popover.performClose(nil) } else { show() } }
     private func show() {
         guard let button = status?.button else { return }
         model.refreshLoginStatus()
+        model.alerts.refreshPermission()
         updateBadge(); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }

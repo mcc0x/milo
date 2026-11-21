@@ -768,6 +768,14 @@ const usageDetails = {
   always: 'Shown even when nothing is known about it.',
   hide: 'Never shown, and never looked for.',
 };
+// Accounts are asked about over the network, so each starts hidden.
+const usageAccounts = [['deepseek', 'DeepSeek balance'], ['openrouter', 'OpenRouter spend'],
+  ['devin', 'Devin ACUs'], ['copilot', 'Copilot AI credits']];
+const accountDetails = {
+  auto: 'Asks the provider with the key you set for Milo. Shown once it answers. Not a limit.',
+  always: 'Asks the provider, and says why when there is no figure. Not a limit.',
+  hide: 'Never shown, and the provider is never contacted.',
+};
 
 function appearanceView() {
   const disabled = !state.groups.preferences.editable;
@@ -782,6 +790,8 @@ function appearanceView() {
       {disabled, choices: [['false', 'Auto compact'], ['true', 'Large figures']]}),
     ...usageTools.map(([key, name]) => setting(`appearance.usage_${key}`, `${name} usage`,
       usageDetails[draftValue(`appearance.usage_${key}`)], 'select', {disabled, choices: usageChoices})),
+    ...usageAccounts.map(([key, name]) => setting(`appearance.usage_${key}`, name,
+      accountDetails[draftValue(`appearance.usage_${key}`)], 'select', {disabled, choices: usageChoices})),
   ])];
 }
 
