@@ -335,7 +335,7 @@ fn an_alert_is_sent_once_however_often_rex_repeats_it_or_milo_is_started() {
     home.status("a", "done", "", "SYNTHETIC done");
     assert!(home.received(2));
     settle();
-    assert_eq!(home.destination.texts(), ["Rex: `synthetic` is waiting for permission", "Rex: `synthetic` finished"]);
+    assert_eq!(home.destination.texts(), ["`synthetic` **is waiting for permission**", "`synthetic` **finished**"]);
     let request = &home.destination.requests()[0];
     assert_eq!(request.path, "/api/v10/webhooks/1234567890/SYNTHETIC_synthetic-SYNTHETIC0");
     assert!(request.body.contains("\"allowed_mentions\":{\"parse\":[]}"), "{}", request.body);
@@ -396,8 +396,8 @@ fn a_destination_that_limits_the_rate_or_fails_is_asked_again_and_the_alert_arri
     assert!(home.received(4));
     settle();
     let texts = home.destination.texts();
-    assert_eq!(texts[..3], ["Rex: `synthetic` is waiting for permission"; 3]);
-    assert_eq!(texts[3..], ["Rex: `synthetic` reported an error"]);
+    assert_eq!(texts[..3], ["`synthetic` **is waiting for permission**"; 3]);
+    assert_eq!(texts[3..], ["`synthetic` **reported an error**"]);
     assert!(home.run(&["alerts"]).contains("The last alert was delivered."));
 }
 
@@ -448,7 +448,7 @@ fn one_message_a_destination_turns_down_does_not_silence_the_next() {
     assert!(soon(|| home.run(&["alerts"]).contains("The last alert was not delivered: Discord refused the request")));
     home.status("b", "done", "", "SYNTHETIC done");
     assert!(home.received(2));
-    assert_eq!(home.destination.texts()[1], "Rex: `synthetic` finished\n(1 earlier alert was not sent.)");
+    assert_eq!(home.destination.texts()[1], "`synthetic` **finished**\n(1 earlier alert was not sent.)");
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn a_program_s_text_is_sent_only_when_chosen_and_can_mention_nobody() {
     settle();
     let texts = home.destination.texts();
     let sent = texts.last().unwrap();
-    assert_eq!(sent, "Rex: a program sent a notification\n`SYNTHETIC title: hello @\u{200b}here <@\u{200b}123>`");
+    assert_eq!(sent, "a program **sent a notification**\n`SYNTHETIC title: hello @\u{200b}here <@\u{200b}123>`");
     // "done" was not among the chosen kinds.
     assert!(!texts.iter().any(|text| text.contains("finished")), "{texts:?}");
 }

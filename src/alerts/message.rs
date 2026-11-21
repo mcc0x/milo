@@ -16,20 +16,44 @@ pub(crate) const TEST: &str =
 /// How much of a program's own text is sent, in characters.
 const TEXT_LIMIT: usize = 300;
 const MILO_BLUE: u32 = 0x4582f9;
+const MILO_ICON: &str = "https://usemilo.net/apple-touch-icon.png";
+
+/// UTC send time for Discord's localized embed footer, fixed across delivery retries.
+fn discord_timestamp() -> String {
+    let now = libc::time_t::try_from(crate::when::now()).unwrap_or(0);
+    let mut utc = std::mem::MaybeUninit::uninit();
+    // SAFETY: both pointers are valid for this call; success initializes the entire tm.
+    let utc = unsafe {
+        if libc::gmtime_r(&now, utc.as_mut_ptr()).is_null() {
+            return String::new();
+        }
+        utc.assume_init()
+    };
+    format!(
+        ",\"timestamp\":\"{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z\"",
+        utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec
+    )
+}
 
 /// The message for one alert, in the destination's own mark-up. `unsent`
 /// counts alerts dropped since the last one sent.
 pub(crate) fn text(alert: &Alert, content: Content, unsent: u32, destination: Destination) -> String {
-    let app = alert.app.as_deref().map_or_else(|| "a program".to_owned(), |app| literal(app, destination));
-    let mut message = match (alert.kind, alert.waiting) {
-        (Kind::Blocked, Some(Waiting::Permission)) => format!("Rex: {app} is waiting for permission"),
-        (Kind::Blocked, Some(Waiting::Question)) => format!("Rex: {app} is waiting for an answer"),
-        (Kind::Blocked, Some(Waiting::Auth)) => format!("Rex: {app} is waiting for you to sign in"),
-        (Kind::Blocked, None) => format!("Rex: {app} is waiting for you"),
-        (Kind::Error, _) => format!("Rex: {app} reported an error"),
-        (Kind::Done, _) => format!("Rex: {app} finished"),
-        (Kind::Notification, _) => "Rex: a program sent a notification".into(),
-        (Kind::Bell, _) => "Rex: a terminal rang its bell".into(),
+    let (subject, action) = match (alert.kind, alert.waiting) {
+        (Kind::Blocked, Some(Waiting::Permission)) => (alert.app.as_deref(), "is waiting for permission"),
+        (Kind::Blocked, Some(Waiting::Question)) => (alert.app.as_deref(), "is waiting for an answer"),
+        (Kind::Blocked, Some(Waiting::Auth)) => (alert.app.as_deref(), "is waiting for you to sign in"),
+        (Kind::Blocked, None) => (alert.app.as_deref(), "is waiting for you"),
+        (Kind::Error, _) => (alert.app.as_deref(), "reported an error"),
+        (Kind::Done, _) => (alert.app.as_deref(), "finished"),
+        (Kind::Notification, _) => (None, "sent a notification"),
+        (Kind::Bell, _) => (None, "rang its bell"),
+    };
+    let fallback = if alert.kind == Kind::Bell { "a terminal" } else { "a program" };
+    let subject = subject.map(|name| literal(name, destination));
+    let subject = subject.as_deref().unwrap_or(fallback);
+    let mut message = match destination {
+        Destination::Telegram => format!("Rex: {subject} {action}"),
+        Destination::Discord => format!("{subject} **{action}**"),
     };
     if content == Content::Text {
         let said = plain(&alert.text);
@@ -111,9 +135,11 @@ pub(crate) fn body(destination: Destination, chat: &str, text: &str, kind: Optio
                 Some(Kind::Bell) => ("Terminal bell", MILO_BLUE),
                 None => ("Connection test", MILO_BLUE),
             };
+            // Discord puts the icon to the left of the author line, not the title.
+            let description = if kind.is_none() { "**Connected.** Milo can send Rex alerts to this channel." } else { text };
             format!(
-                "{{\"embeds\":[{{\"author\":{{\"name\":\"Milo\"}},\"title\":\"{title}\",\"color\":{color},\"description\":{}}}],\"allowed_mentions\":{{\"parse\":[]}}}}",
-                json(text)
+                "{{\"embeds\":[{{\"author\":{{\"name\":\"milo - {title}\",\"icon_url\":\"{MILO_ICON}\"}},\"color\":{color},\"description\":{}{}}}],\"allowed_mentions\":{{\"parse\":[]}}}}",
+                json(description), discord_timestamp()
             )
         }
     }

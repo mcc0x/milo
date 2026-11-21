@@ -146,10 +146,10 @@ fn nothing_a_program_wrote_is_sent_unless_text_was_chosen() {
     );
     assert_eq!(
         message::text(&secret, Content::Text, 2, Destination::Discord),
-        "Rex: `claude-code` is waiting for permission\n`Delete /Users/me/private.txt?`\n(2 earlier alerts were not sent.)"
+        "`claude-code` **is waiting for permission**\n`Delete /Users/me/private.txt?`\n(2 earlier alerts were not sent.)"
     );
     let unnamed = Alert { kind: Kind::Done, waiting: None, app: None, text: "x".into() };
-    assert_eq!(message::text(&unnamed, Content::Metadata, 0, Destination::Discord), "Rex: a program finished");
+    assert_eq!(message::text(&unnamed, Content::Metadata, 0, Destination::Discord), "a program **finished**");
     let bell = message::text(&alert(Kind::Bell, ""), Content::Text, 0, Destination::Telegram);
     assert_eq!(bell, "Rex: a terminal rang its bell");
 }
@@ -169,7 +169,7 @@ fn a_program_s_name_and_text_cannot_become_a_link_or_mark_up() {
     );
     assert_eq!(
         message::text(&lure, Content::Metadata, 0, Destination::Discord),
-        "Rex: `login.example.com` is waiting for you to sign in"
+        "`login.example.com` **is waiting for you to sign in**"
     );
     let text = "</code><a href=\"https://example.com\">x</a> & `[label](https://example.com)` ||s||";
     let telegram = message::text(&alert(Kind::Error, text), Content::Text, 0, Destination::Telegram);
@@ -203,9 +203,9 @@ fn program_text_is_one_short_line_that_mentions_nobody() {
     assert_eq!(line.lines().count(), 2, "{line:?}");
     assert!(!line.chars().any(|c| c == '\u{1b}' || c == '\u{202e}'));
     // A break a program put in itself cannot make a mention whole again.
-    assert_eq!(said("@\u{200b}here"), "Rex: `claude-code` reported an error\n`@\u{200b} here`");
+    assert_eq!(said("@\u{200b}here"), "`claude-code` **reported an error**\n`@\u{200b} here`");
     // Neither can it pad a line with blanks that are not spaces until it looks like two.
-    assert_eq!(said("a\u{3164}\u{2800}\u{e0020}\u{61c}b"), "Rex: `claude-code` reported an error\n`a b`");
+    assert_eq!(said("a\u{3164}\u{2800}\u{e0020}\u{61c}b"), "`claude-code` **reported an error**\n`a b`");
     let long = said(&"é".repeat(1000));
     assert_eq!(long.lines().nth(1).unwrap().chars().count(), 303);
     assert!(long.ends_with("…`"));
@@ -221,8 +221,12 @@ fn each_destination_is_told_how_to_read_the_text_and_to_notify_nobody_by_name() 
     let text = "Rex: \"quoted\" \\ back\nline";
     let discord = message::body(Destination::Discord, "", text, Some(Kind::Blocked));
     let mut embeds = field(&discord, "embeds").elements().unwrap();
-    let [title, description, color] = embeds.next().unwrap().fields(["title", "description", "color"]);
-    assert!(title.unwrap().is("Needs attention"));
+    let [author, description, color, timestamp] = embeds.next().unwrap().fields(["author", "description", "color", "timestamp"]);
+    let [name, icon] = author.unwrap().fields(["name", "icon_url"]);
+    assert!(name.unwrap().is("milo - Needs attention"));
+    assert!(icon.unwrap().is("https://usemilo.net/apple-touch-icon.png"));
+    let stamp = timestamp.unwrap().string(20).unwrap();
+    assert!(stamp.len() == 20 && stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T');
     assert_eq!(description.unwrap().string(100).unwrap(), text);
     assert_eq!(color.unwrap().unsigned(), Some(0xe5a53b));
     assert!(embeds.next().is_none());
@@ -324,7 +328,7 @@ fn only_a_stand_in_on_this_machine_can_replace_a_destination() {
 
 #[test]
 fn the_request_speaks_only_https_and_keeps_its_body_whole() {
-    let body = message::body(Destination::Discord, "", "say \"hi\" \\ @\u{200b}here", None);
+    let body = message::body(Destination::Discord, "", "say \"hi\" \\ @\u{200b}here", Some(Kind::Error));
     let request = send::request("https://discord.com/api/webhooks/1/abc", &body);
     assert!(request.contains("proto = \"=https\"\n") && request.contains("max-redirs = 0\n"), "{request}");
     assert!(request.starts_with("url = \"https://discord.com/api/webhooks/1/abc\"\n"));
