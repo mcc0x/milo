@@ -3,7 +3,6 @@
 
 .alerts-destination { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(52%); align-items: center; gap: .45rem .85rem; }
 .alerts-destination > .button-row { justify-content: flex-end; }
-.alerts-destination > p { grid-column: 1/-1; }
 .alerts-destination-line {
   display: flex;
   align-items: baseline;
@@ -11,7 +10,7 @@
   flex-wrap: wrap;
   gap: .2rem .65rem;
 }
-.alerts-destination-line > p, .alerts-destinations .setting-info { overflow-wrap: anywhere; }
+.alerts-destination-line > p, .alerts-saved-destination { overflow-wrap: anywhere; }
 .alerts-status {
   display: inline-flex;
   align-items: center;
@@ -30,7 +29,7 @@
 .alerts-status[data-running='true'] { color: #236147; }
 .alerts-status[data-running='true']::before { background: #267659; }
 
-.alerts-manager { width: min(26rem, calc(100% - 2rem)); height: min(21rem, calc(100dvh - 2rem)); }
+.alerts-manager { width: min(27rem, calc(100% - 2rem)); height: min(23rem, calc(100dvh - 2rem)); }
 .alerts-manager[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .alerts-manager-body { overflow-y: auto; overscroll-behavior: contain; }
 .alerts-manager-heading h2 { flex: 1; font-size: 1rem; }
@@ -40,9 +39,32 @@
 .alerts-provider-row + .alerts-provider-row { border-top: 1px solid var(--line); }
 .alerts-provider { flex: 1; display: flex; align-items: center; gap: .65rem; min-width: 0; padding: .6rem .25rem; border: none; background: transparent; text-align: start; color: var(--ink); font-weight: 650; }
 .alerts-provider svg { color: var(--blue); }
+.alerts-provider:hover:not(:disabled) { background: var(--tint); border-radius: .5rem; }
 .alerts-provider small { display: block; color: var(--muted); font-size: .72rem; font-weight: 450; }
 .alerts-edit-label { margin-inline-start: auto; font-size: .78rem; color: var(--blue); }
+.alerts-provider-controls { display: flex; gap: .25rem; align-items: center; }
+.alerts-provider-controls .button { white-space: nowrap; }
+.alerts-provider-picker > p { margin-block-start: .65rem; }
+.alerts-setup { display: grid; justify-items: start; gap: .45rem; padding-block: .55rem; }
+.alerts-connect-options { display: grid; width: 100%; gap: .45rem; }
+.alerts-connect-primary {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .65rem .9rem;
+  padding: .8rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--tint);
+}
+.alerts-connect-primary > p { flex: 1 1 9rem; margin: 0; }
+.alerts-connect, .alerts-forget { display: inline-flex; align-items: center; gap: .35rem; }
+.alerts-manual { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: start; }
+.alerts-manual > span { font-size: 1.1rem; line-height: 1; }
+.alerts-destination-removal { padding-block-start: .45rem; border-block-start: 1px solid var(--line); }
+.alerts-forget { color: #8b303b; }
+.alerts-forget:hover:not(:disabled) { background: #fff1f3; }
+.alerts-action-note[data-error="true"] { color: #8b303b; }
+.alerts-action-note:empty { margin: 0; }
+.alerts-hosted-proposal { min-width: 0; padding-inline-start: .65rem; border-inline-start: 2px solid var(--blue); overflow-wrap: anywhere; }
+.alerts-setup-note:empty { position: absolute; margin: 0; }
+.alerts-setup .button[aria-disabled="true"] { opacity: .62; cursor: default; }
 .secret-form.alerts-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr)); gap: .45rem; align-items: end; padding-block: .55rem; }
+.alerts-setup .alerts-form { inline-size: 100%; padding-block: 0; }
 .alerts-form p { grid-column: 1/-1; }
 .alerts-steps { grid-column: 1/-1; margin: 0; padding-inline-start: 1.35rem; list-style: decimal; }
 .alerts-steps li + li { margin-block-start: .3rem; }
@@ -65,14 +87,19 @@
   padding: .25rem .45rem; border: 1px solid var(--line); border-radius: .5rem;
   font-size: .85rem; background: var(--paper);
 }
-.alerts-telegram-form .button[aria-disabled="true"] { opacity: .62; cursor: default; }
 .alerts-telegram-actions .text-button { padding-inline: .35rem; }
 .alerts-telegram-actions .alerts-save { margin-inline-start: auto; }
 
 .alerts-privacy { max-width: 65ch; padding-block-end: .45rem; }
 
+@media (max-width: 24rem) {
+  .alerts-provider-row { flex-wrap: wrap; gap: 0 .45rem; }
+  .alerts-provider-row:has(.alerts-provider-controls) .alerts-provider { flex-basis: 100%; }
+  .alerts-provider-controls { margin-inline-start: auto; }
+}
+
 @media (pointer: coarse) {
   .alerts-form .alerts-field input { min-height: 44px; font-size: 1rem; }
-  .alerts-telegram-form select, .alerts-telegram-form .button { min-height: 44px; }
+  .alerts-telegram-form select, .alerts-setup .button { min-height: 44px; }
   .alerts-telegram-form select { font-size: 1rem; }
 }

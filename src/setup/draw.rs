@@ -392,10 +392,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::MirrorAlerts) => {
                 match self.alert_summary.as_ref().map(|summary| summary.settings.content) {
                     Some(alerts::Content::Text) => {
-                        "Each chosen alert is sent to the destination: its kind, the program's short name, and up to 300 characters of the text the program gave Rex, which can name files or quote a prompt. Rex's own notifications are unchanged."
+                        "Each enabled destination receives the alert kind, the program's short name, and up to 300 characters the program gave Rex, which can name files or quote a prompt. Rex's own notifications are unchanged."
                     }
                     _ => {
-                        "Each chosen alert is sent to the destination as its kind and the program's short name, such as “Rex: claude-code is waiting for permission”. Nothing the program wrote is sent. Rex's own notifications are unchanged."
+                        "Each enabled destination receives the alert kind and the program's short name, such as “Rex: claude-code is waiting for permission”. Nothing the program wrote is sent. Rex's own notifications are unchanged."
                     }
                 }
             }
@@ -799,13 +799,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Alerts => Cell::action(
                 "Mirror Rex alerts…",
                 "Rex alerts",
-                "Send chosen Rex alerts to a Telegram chat or Discord channel. Off until you turn it on.",
+                "Send chosen Rex alerts to Telegram, Discord, or both. Off until you turn it on.",
             ),
             Row::AlertsOn => Cell::toggle(
                 "Mirror Rex alerts",
                 "Mirror",
                 self.alert_summary.as_ref().is_some_and(|summary| summary.settings.enabled),
-                "Send the chosen alerts to the destination. Rex's own notifications stay as they are.",
+                "Send the chosen alerts to enabled destinations. Rex's own notifications stay as they are.",
             ),
             Row::AlertsDestination => Cell::choice(
                 "Destination",
@@ -814,7 +814,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Some(destination) => destination.title(),
                     None => "None saved",
                 },
-                "Switch between saved destinations. Save one with milo alerts telegram CHAT or milo alerts discord, or in milo web. Secrets are not typed here.",
+                "Choose a saved destination for tests. To enable Telegram and Discord independently, open Alert forwarding in milo web.",
             ),
             Row::AlertKind(kind) => {
                 let (label, short, detail) = match kind {

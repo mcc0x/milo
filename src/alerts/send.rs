@@ -1,8 +1,8 @@
 //! Posts one message with `/usr/bin/curl`, the only program Milo sends with.
 //!
-//! The address holds the destination's secret, so the request is given to
-//! curl on its standard input, never on its command line. curl may only
-//! speak HTTPS, follows no redirect, and reads no settings file of the user's.
+//! Each request holds a secret, so it is given to curl on standard input,
+//! never on its command line. curl follows no redirect and reads no user
+//! settings file; only the loopback relay and test stand-ins use plain HTTP.
 
 use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
@@ -32,11 +32,12 @@ pub(crate) enum Outcome {
 
 impl Outcome {
     /// Why a message was not delivered, for the user.
-    pub(crate) fn reason(&self, destination: Destination) -> String {
+    pub(super) fn reason(&self, destination: Destination, hosted_telegram: bool) -> String {
         let name = destination.title();
         match self {
             Self::Sent => "it was delivered".into(),
             Self::Wait(wait) => format!("{name} is limiting the rate; it asks to wait {} seconds", wait.as_secs()),
+            Self::Refused(401) if hosted_telegram => "Telegram pairing expired or was revoked; reconnect with Milo".into(),
             Self::Refused(code @ (401 | 403 | 404)) => {
                 format!("{name} refused the saved secret or destination (HTTP {code}); save it again")
             }
@@ -47,10 +48,10 @@ impl Outcome {
     }
 }
 
-/// Posts `body` as JSON to `address` and reports the answer. While curl
-/// runs, its process ID is in `running`, for a signal handler to end it.
-pub(crate) fn post(address: &str, body: &str, running: Option<&AtomicI32>) -> Outcome {
-    let Some((body, code)) = response(address, body, ANSWER_LIMIT, running) else { return Outcome::Failed(None) };
+/// Sends a prepared request and reports the answer. While curl runs, its
+/// process ID is in `running`, for a signal handler to end it.
+pub(super) fn post(request: &str, running: Option<&AtomicI32>) -> Outcome {
+    let Some((body, code)) = response(request, ANSWER_LIMIT, running) else { return Outcome::Failed(None) };
     match code {
         200..=299 => Outcome::Sent,
         429 => Outcome::Wait(retry_after(&body)),
@@ -62,12 +63,12 @@ pub(crate) fn post(address: &str, body: &str, running: Option<&AtomicI32>) -> Ou
 
 /// Posts a query and returns only a successful answer, bounded by `limit` bytes.
 pub(super) fn query(address: &str, body: &str, limit: u64) -> Option<String> {
-    let (body, code) = response(address, body, limit, None)?;
+    let (body, code) = response(&request(address, body), limit, None)?;
     (200..=299).contains(&code).then_some(body)
 }
 
-fn response(address: &str, body: &str, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
-    let mut answer = run(&request(address, body), limit, running)?;
+pub(super) fn response(request: &str, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
+    let mut answer = run(request, limit, running)?;
     // The status follows the answer's body on a line of its own.
     let (body, code) = answer.rsplit_once('\n')?;
     let code = code.trim().parse().ok()?;
@@ -77,20 +78,45 @@ fn response(address: &str, body: &str, limit: u64, running: Option<&AtomicI32>) 
 
 /// curl's options, in the form of its own settings file.
 pub(super) fn request(address: &str, body: &str) -> String {
-    // Only a test's stand-in on this machine is spoken to without TLS.
+    config(address, "POST", Some(body), None, 8, 15)
+}
+
+pub(super) fn relay_request(address: &str, method: &str, body: Option<&str>, capability: Option<&str>) -> String {
+    config(address, method, body, capability, 2, if capability.is_some() && body.is_some() { 15 } else { 4 })
+}
+
+fn config(
+    address: &str,
+    method: &str,
+    body: Option<&str>,
+    capability: Option<&str>,
+    connect_timeout: u8,
+    timeout: u8,
+) -> String {
+    use std::fmt::Write as _;
     let protocol = if address.starts_with("http://127.0.0.1:") { "http" } else { "https" };
-    format!(
-        "url = {}\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\ndata-raw = {}\n\
-         proto = \"={protocol}\"\nmax-redirs = 0\nnoproxy = \"127.0.0.1\"\nconnect-timeout = 8\nmax-time = 15\n\
-         silent\nwrite-out = \"\\n%{{http_code}}\"\n",
-        quoted(address),
-        quoted(body)
-    )
+    let mut request = String::with_capacity(256 + address.len() + body.map_or(0, str::len));
+    request.push_str("url = ");
+    push_quoted(&mut request, address);
+    let _ = write!(request, "\nrequest = \"{method}\"\n");
+    if let Some(body) = body {
+        request.push_str("header = \"Content-Type: application/json\"\ndata-raw = ");
+        push_quoted(&mut request, body);
+        request.push('\n');
+    }
+    if let Some(capability) = capability {
+        let _ = writeln!(request, "header = \"Authorization: Bearer {capability}\"");
+    }
+    let _ = write!(
+        request,
+        "proto = \"={protocol}\"\nmax-redirs = 0\nnoproxy = \"127.0.0.1\"\nconnect-timeout = {connect_timeout}\n\
+         max-time = {timeout}\nsilent\nwrite-out = \"\\n%{{http_code}}\"\n",
+    );
+    request
 }
 
 /// A value between double quotes, as curl's settings files read one.
-fn quoted(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
+fn push_quoted(out: &mut String, value: &str) {
     out.push('"');
     for c in value.chars() {
         match c {
@@ -100,7 +126,6 @@ fn quoted(value: &str) -> String {
         }
     }
     out.push('"');
-    out
 }
 
 fn run(request: &str, limit: u64, running: Option<&AtomicI32>) -> Option<String> {

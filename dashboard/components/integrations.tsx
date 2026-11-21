@@ -47,7 +47,7 @@ function RexAutomation() {
 }
 
 const unavailable = 'Not available in this session';
-const alertDestinations = { telegram: 'Telegram', discord: 'Discord' } as const;
+const alertDestinations = [['telegram', 'Telegram'], ['discord', 'Discord']] as const;
 
 export default function Integrations() {
   const { state, draftValue, command } = useSession();
@@ -76,15 +76,18 @@ export default function Integrations() {
   }
 
   const rules = Number(draftValue<boolean>('workflow.tab_titles')) + Number(draftValue<boolean>('layout.auto_arrange'));
+  const activeAlerts = alertDestinations.filter(([key]) => alerts?.[key].active);
+  const forwarding = activeAlerts.length > 0;
+  const listedAlerts = forwarding ? activeAlerts : alertDestinations.filter(([key]) => alerts?.[key].saved);
   const summaries = {
     automation: rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off',
     presence: presence ? (presence.enabled ? 'On' : 'Off') : unavailable,
-    alerts: alerts ? (alerts.enabled ? (alerts.running ? 'On' : 'Not running') : 'Off') : unavailable,
+    alerts: alerts ? (forwarding ? (alerts.running ? 'On' : 'Not running') : 'Off') : unavailable,
   };
   const descriptions = {
     automation: 'Tab titles and new shell layouts',
     presence: 'What appears on your Discord profile',
-    alerts: alerts?.destination ? `Destination: ${alertDestinations[alerts.destination]}` : 'Send Rex alerts to a chat or channel',
+    alerts: listedAlerts.length ? listedAlerts.map(([, label]) => label).join(' and ') : 'Send Rex alerts to a chat or channel',
   };
   const timing = detail && available[detail] ? (detail === 'automation' ? 'Save to apply changes' : 'Applies immediately') : '';
 
@@ -119,8 +122,8 @@ export default function Integrations() {
                   <span className="setting-detail">{descriptions[key]}</span>
                 </span>
                 <span className="integration-state" id={`integration-${key}-summary`}
-                  data-state={!available[key] ? 'unavailable' : key === 'alerts' && alerts?.enabled && !alerts.running ? 'warning' :
-                    (key === 'automation' ? rules > 0 : key === 'presence' ? presence?.enabled : alerts?.enabled) ? 'on' : 'off'}>
+                  data-state={!available[key] ? 'unavailable' : key === 'alerts' && forwarding && !alerts?.running ? 'warning' :
+                    (key === 'automation' ? rules > 0 : key === 'presence' ? presence?.enabled : forwarding) ? 'on' : 'off'}>
                   {summaries[key]}
                 </span>
                 {available[key] ? <span className="integration-chevron" aria-hidden="true">›</span> : null}

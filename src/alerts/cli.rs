@@ -13,12 +13,12 @@ Usage: milo alerts
        milo alerts use telegram | discord
        milo alerts events KIND[,KIND...]
        milo alerts content metadata | text
-       milo alerts test
-       milo alerts on | off
+       milo alerts test [telegram | discord]
+       milo alerts on|off [telegram | discord]
        milo alerts forget telegram | discord
 
-Mirror Rex alerts to a Telegram chat or a Discord channel you choose. It is off
-until you run milo alerts on, and Rex's own notifications stay as they are.
+Mirror Rex alerts to a Telegram chat, a Discord channel, or both. Forwarding
+is opt-in, and Rex's own notifications stay as they are.
 
 milo alerts shows what is saved, whether mirroring is running, and exactly
 what would be sent.
@@ -26,14 +26,16 @@ telegram CHAT saves a bot and the chat it posts to. CHAT is the chat's number
 or a public channel's @name. The bot's token is asked for, or read from
 standard input; never give it as an argument.
 discord saves a channel's webhook link, asked for in the same way.
-use selects one of the saved destinations.
+use selects a saved destination for commands without a provider. It also
+switches mirroring if you have not set independent forwarding choices.
 events chooses the kinds mirrored: blocked, error, done, notification, bell.
 The first three are chosen to begin with.
 content chooses what is sent. metadata, the default, is the kind of alert and
 the program's short name. text adds the line the program gave Rex.
-test sends one message, written by Milo, to the selected destination.
-on starts mirroring and off ends it at once. forget also removes a saved
-destination and its secret.";
+test sends one message written by Milo to the named or selected destination.
+on and off with a provider affect only that provider. Without a provider, off
+pauses all forwarding and on resumes it (or starts with the selected destination
+if none are chosen). forget removes a saved destination and its secret.";
 
 const USAGE: &str = "unexpected arguments; see milo alerts --help";
 
@@ -59,8 +61,11 @@ pub(crate) fn command(action: Option<&OsStr>, rest: &[OsString]) -> Result<(), S
             alerts.set_content(Content::parse(name).ok_or("Content is metadata or text.")?)?
         }
         [Some("test")] => alerts.test()?,
+        [Some("test"), Some(name)] => alerts.test_destination(destination(name)?)?,
         [Some("on")] => alerts.enable()?,
+        [Some("on"), Some(name)] => alerts.set_forwarding(destination(name)?, true)?,
         [Some("off")] => alerts.disable()?,
+        [Some("off"), Some(name)] => alerts.set_forwarding(destination(name)?, false)?,
         [Some("forget"), Some(name)] => alerts.forget(destination(name)?)?,
         [Some("run")] => {
             return forward::run(&alerts).map_err(|error| format!("could not mirror Rex alerts: {error}"));
@@ -77,7 +82,7 @@ fn destination(name: &str) -> Result<Destination, String> {
 
 fn status(summary: &Summary, place: &str) -> String {
     let settings = &summary.settings;
-    let state = match (settings.enabled, summary.running) {
+    let state = match (settings.has_active(), summary.running) {
         (true, true) => "on",
         (true, false) => "on, but not running; run milo alerts on to start it",
         (false, _) => "off",
@@ -85,7 +90,8 @@ fn status(summary: &Summary, place: &str) -> String {
     let mut report = format!("Rex alert mirroring: {state}\nDestination: {}\n", describe(settings));
     for destination in Destination::ALL {
         let saved = if summary.saved(destination) { "saved" } else { "not saved" };
-        report.push_str(&format!("  {}: {saved}\n", destination.title()));
+        let forwarding = if settings.active(destination) { "on" } else { "off" };
+        report.push_str(&format!("  {}: {saved}; forwarding {forwarding}\n", destination.title()));
     }
     report.push_str(&format!("Secrets are kept in {place}.\n{}", message::disclosure(settings)));
     let unchosen: Vec<_> = Kind::ALL.into_iter().filter(|&kind| !settings.mirrors(kind)).map(Kind::name).collect();

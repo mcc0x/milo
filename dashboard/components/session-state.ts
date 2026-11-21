@@ -30,8 +30,8 @@ export interface AlertsState {
   enabled: boolean;
   running: boolean;
   destination: AlertDestination | null;
-  telegram: {saved: boolean; chat: string};
-  discord: {saved: boolean};
+  telegram: {saved: boolean; active: boolean; chat: string};
+  discord: {saved: boolean; active: boolean};
   events: Record<AlertKind, boolean>;
   content: 'metadata' | 'text';
   place: string;

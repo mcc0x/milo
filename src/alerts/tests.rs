@@ -4,8 +4,6 @@
 //! programs a test started in a session of its own; only the IDs are shortened.
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::sync::atomic::AtomicU32;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::event::{self, Alert, Seen, Waiting};
@@ -249,6 +247,7 @@ fn each_destination_is_told_how_to_read_the_text_and_to_notify_nobody_by_name() 
 fn mirroring_is_off_and_sends_no_text_until_chosen() {
     let settings = Settings::default();
     assert!(!settings.enabled && settings.destination.is_none() && settings.content == Content::Metadata);
+    assert_eq!(Destination::ALL.map(|destination| settings.active(destination)), [false; 2]);
     assert_eq!(Kind::ALL.map(|kind| settings.mirrors(kind)), [true, true, true, false, false]);
     assert_eq!(Settings::parse("").unwrap(), settings);
 }
@@ -258,17 +257,21 @@ fn saved_settings_read_back_and_a_broken_file_mirrors_nothing() {
     let chosen = Settings {
         enabled: true,
         destination: Some(Destination::Telegram),
+        targets: None,
         kinds: [true, false, false, true, true],
         content: Content::Text,
         telegram_chat: "@synthetic_channel".into(),
     };
     assert_eq!(Settings::parse(&chosen.render()).unwrap(), chosen);
+    assert_eq!(Destination::ALL.map(|destination| chosen.active(destination)), [true, false]);
+    assert!(!chosen.render().contains("targets"));
     assert_eq!(Settings::parse("events = \n").unwrap().kinds, [false; 5]);
     // A later version's setting is left alone.
     assert_eq!(Settings::parse("quiet_hours = 22-7\n").unwrap(), Settings::default());
     for broken in [
         "enabled = yes",
         "destination = email",
+        "targets = telegram,email",
         "events = blocked,everything",
         "content = all",
         "telegram_chat = a b",
@@ -276,6 +279,18 @@ fn saved_settings_read_back_and_a_broken_file_mirrors_nothing() {
     ] {
         assert!(Settings::parse(broken).is_err(), "{broken}");
     }
+}
+
+#[test]
+fn an_explicit_target_list_overrides_the_legacy_selection() {
+    let prefix = "enabled = true\ndestination = discord\n";
+    let legacy = Settings::parse(prefix).unwrap();
+    assert_eq!(Destination::ALL.map(|destination| legacy.active(destination)), [false, true]);
+    let explicit = Settings::parse(&format!("{prefix}targets = telegram, discord\n")).unwrap();
+    assert_eq!(Destination::ALL.map(|destination| explicit.active(destination)), [true, true]);
+    assert_eq!(Settings::parse(&explicit.render()).unwrap(), explicit);
+    let empty = Settings::parse(&format!("{prefix}targets =\n")).unwrap();
+    assert_eq!(Destination::ALL.map(|destination| empty.active(destination)), [false; 2]);
 }
 
 #[test]
@@ -350,15 +365,22 @@ fn both_destinations_ways_of_saying_how_long_to_wait_are_understood() {
 }
 
 #[test]
+fn a_rejected_hosted_telegram_pairing_prompts_reconnection_not_a_new_token() {
+    let refused = send::Outcome::Refused(401);
+    assert_eq!(
+        refused.reason(Destination::Telegram, true),
+        "Telegram pairing expired or was revoked; reconnect with Milo"
+    );
+    assert!(refused.reason(Destination::Telegram, false).contains("refused the saved secret"));
+}
+
+#[test]
 fn a_line_too_long_to_be_an_alert_is_skipped_without_losing_the_next() {
     let huge = line("a", "clipboard_written", &format!("{{\"text\":\"{}\"}}", "x".repeat(200_000)));
     let stream = format!("{huge}\n{}\n{}", line("a", "bell", "{}"), line("b", "bell", "{}"));
-    let (alerts, waiting) = mpsc::sync_channel(1);
-    let dropped = AtomicU32::new(0);
-    forward::read(stream.as_bytes(), [true; 5], &alerts, &dropped);
-    assert_eq!(waiting.try_recv().map(|alert| alert.kind), Ok(Kind::Bell));
-    // The second had nowhere to wait, and is counted rather than held back.
-    assert_eq!(dropped.into_inner(), 1);
+    let mut kinds = Vec::new();
+    forward::read(stream.as_bytes(), [true; 5], |alert| kinds.push(alert.kind));
+    assert_eq!(kinds, [Kind::Bell, Kind::Bell]);
 }
 
 #[test]
@@ -367,12 +389,9 @@ fn what_is_an_alert_is_decided_as_each_event_arrives_and_only_chosen_kinds_wait(
     // the second block would look like a repeat of the first.
     let lines =
         [blocked("a", "permission", "x"), working("a"), line("a", "bell", "{}"), blocked("a", "permission", "x")];
-    let (alerts, waiting) = mpsc::sync_channel(8);
-    let dropped = AtomicU32::new(0);
-    forward::read(lines.join("\n").as_bytes(), [true, true, true, false, false], &alerts, &dropped);
-    drop(alerts);
-    assert_eq!(waiting.iter().map(|alert| alert.kind).collect::<Vec<_>>(), [Kind::Blocked, Kind::Blocked]);
-    assert_eq!(dropped.into_inner(), 0);
+    let mut kinds = Vec::new();
+    forward::read(lines.join("\n").as_bytes(), [true, true, true, false, false], |alert| kinds.push(alert.kind));
+    assert_eq!(kinds, [Kind::Blocked, Kind::Blocked]);
 }
 
 #[test]
@@ -468,6 +487,74 @@ fn saving_another_destination_while_mirroring_does_not_move_the_alerts() {
     assert_eq!(alerts.settings().unwrap().telegram_chat, "@synthetic_channel");
     assert!(alerts.choose(Destination::Discord).unwrap().contains("the Discord channel"));
     assert_eq!(alerts.settings().unwrap().destination, Some(Destination::Discord));
+}
+
+#[test]
+fn scoped_forwarding_and_legacy_selection_do_not_change_each_other() {
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    let active = || {
+        let settings = alerts.settings().unwrap();
+        Destination::ALL.map(|destination| settings.active(destination))
+    };
+    assert!(alerts.set_forwarding(discord, true).is_err());
+    assert!(alerts.test_destination(discord).unwrap_err().contains("No Discord destination is saved"));
+    assert_eq!(active(), [false; 2]);
+
+    alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
+    alerts.enable().unwrap();
+    alerts.set_discord(LINK).unwrap();
+    assert_eq!(active(), [true, false]);
+    alerts.set_forwarding(discord, true).unwrap();
+    assert_eq!(alerts.settings().unwrap().destination, Some(telegram));
+    assert_eq!(active(), [true, true]);
+
+    alerts.disable().unwrap();
+    assert_eq!(active(), [false; 2]);
+    alerts.enable().unwrap();
+    assert_eq!(active(), [true, true]);
+    alerts.set_forwarding(discord, false).unwrap();
+    alerts.choose(discord).unwrap();
+    assert_eq!(alerts.settings().unwrap().destination, Some(discord));
+    assert_eq!(active(), [true, false]);
+    assert_eq!(alerts.summary().unwrap().saved, [true, true]);
+
+    alerts.set_forwarding(discord, true).unwrap();
+    alerts.disable().unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    assert_eq!(active(), [true, false]);
+}
+
+#[test]
+fn hosted_replacement_and_forget_leave_the_other_provider_active() {
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    let active = || {
+        let settings = alerts.settings().unwrap();
+        Destination::ALL.map(|destination| settings.active(destination))
+    };
+    alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
+    alerts.set_hosted_discord(LINK).unwrap();
+    assert_eq!(active(), [false; 2]);
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+    assert_eq!(active(), [true, true]);
+
+    const NEW_LINK: &str = "https://discord.com/api/webhooks/1234567891/SYNTHETIC_synthetic-SYNTHETIC1";
+    alerts.set_hosted_discord(NEW_LINK).unwrap();
+    assert_eq!(active(), [true, false]);
+    assert_eq!(alerts.summary().unwrap().saved, [true, true]);
+
+    alerts.set_forwarding(discord, true).unwrap();
+    alerts.choose(telegram).unwrap();
+    alerts.forget(telegram).unwrap();
+    let settings = alerts.settings().unwrap();
+    assert_eq!(settings.destination, None);
+    assert!(settings.telegram_chat.is_empty());
+    assert_eq!(active(), [false, true]);
+    assert_eq!(alerts.summary().unwrap().saved, [false, true]);
 }
 
 #[test]

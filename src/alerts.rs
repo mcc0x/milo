@@ -1,4 +1,4 @@
-//! Mirrors Rex alerts to a Telegram chat or a Discord channel the user chose.
+//! Mirrors Rex alerts to the Telegram and Discord destinations the user chose.
 //!
 //! An *alert* is something Rex itself draws attention to: a program that says
 //! through its terminal that it is blocked, failed or finished, one that asks
@@ -11,6 +11,7 @@ mod cli;
 mod event;
 mod forward;
 mod message;
+pub(crate) mod relay;
 mod secret;
 mod send;
 mod telegram;
@@ -101,6 +102,8 @@ impl Content {
 pub(crate) struct Settings {
     pub(crate) enabled: bool,
     pub(crate) destination: Option<Destination>,
+    /// Explicit forwarding choices; a legacy file follows `destination` instead.
+    targets: Option<[bool; 2]>,
     /// One choice for each kind, in `Kind::ALL` order.
     pub(crate) kinds: [bool; 5],
     pub(crate) content: Content,
@@ -113,6 +116,7 @@ impl Default for Settings {
         Self {
             enabled: false,
             destination: None,
+            targets: None,
             kinds: [true, true, true, false, false],
             content: Content::Metadata,
             telegram_chat: String::new(),
@@ -132,6 +136,16 @@ impl Settings {
             match key {
                 "enabled" => settings.enabled = value.parse().map_err(|_| invalid(key))?,
                 "destination" => settings.destination = Some(Destination::parse(value).ok_or_else(|| invalid(key))?),
+                "targets" => {
+                    let mut targets = [false; 2];
+                    if !value.is_empty() {
+                        for name in value.split(',') {
+                            let destination = Destination::parse(name.trim()).ok_or_else(|| invalid(key))?;
+                            targets[destination as usize] = true;
+                        }
+                    }
+                    settings.targets = Some(targets);
+                }
                 "events" => settings.kinds = parse_kinds(value).ok_or_else(|| invalid(key))?,
                 "content" => settings.content = Content::parse(value).ok_or_else(|| invalid(key))?,
                 "telegram_chat" if valid_chat(value) => value.clone_into(&mut settings.telegram_chat),
@@ -147,12 +161,45 @@ impl Settings {
         if let Some(destination) = self.destination {
             let _ = writeln!(text, "destination = {}", destination.name());
         }
+        if let Some(targets) = self.targets {
+            text.push_str("targets = ");
+            let mut names = Destination::ALL.into_iter().filter(|&destination| targets[destination as usize]);
+            if let Some(destination) = names.next() {
+                text.push_str(destination.name());
+            }
+            for destination in names {
+                text.push(',');
+                text.push_str(destination.name());
+            }
+            text.push('\n');
+        }
         let _ = writeln!(text, "events = {}", self.kind_names().join(","));
         let _ = writeln!(text, "content = {}", self.content.name());
         if !self.telegram_chat.is_empty() {
             let _ = writeln!(text, "telegram_chat = {}", self.telegram_chat);
         }
         text
+    }
+
+    fn targets(&self) -> [bool; 2] {
+        self.targets.unwrap_or_else(|| Destination::ALL.map(|destination| self.destination == Some(destination)))
+    }
+
+    pub(crate) fn active(&self, destination: Destination) -> bool {
+        self.enabled && self.targets()[destination as usize]
+    }
+
+    fn has_active(&self) -> bool {
+        self.enabled && self.targets().contains(&true)
+    }
+
+    fn remove_target(&mut self, destination: Destination) {
+        if let Some(targets) = &mut self.targets {
+            targets[destination as usize] = false;
+            self.enabled &= targets.contains(&true);
+        } else if self.destination == Some(destination) {
+            self.enabled = false;
+        }
     }
 
     pub(crate) fn mirrors(&self, kind: Kind) -> bool {
@@ -202,12 +249,15 @@ fn webhook(link: &str) -> Option<&str> {
     let path = ["https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/"]
         .into_iter()
         .find_map(|host| link.strip_prefix(host))?;
-    let (id, token) = path.split_once('/')?;
-    let valid = (5..=25).contains(&id.len())
+    valid_webhook_path(path).then_some(path)
+}
+
+fn valid_webhook_path(path: &str) -> bool {
+    let Some((id, token)) = path.split_once('/') else { return false };
+    (5..=25).contains(&id.len())
         && id.bytes().all(|c| c.is_ascii_digit())
         && (20..=100).contains(&token.len())
-        && token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-');
-    valid.then_some(path)
+        && token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
 /// The address of a stand-in, if `named` is one on this machine's loopback
@@ -237,7 +287,7 @@ impl Summary {
 /// makes this the way mirroring returns after Rex or the machine restarts.
 pub(crate) fn resume() {
     if let Some(alerts) = Alerts::real()
-        && alerts.settings().is_ok_and(|settings| settings.enabled)
+        && alerts.settings().is_ok_and(|settings| settings.has_active())
         && !lock::alerts_running(&alerts.state).unwrap_or(true)
     {
         let _ = alerts.start();
@@ -255,6 +305,7 @@ pub(crate) fn remove() -> Result<(), String> {
     }
     alerts.stop()?;
     for destination in Destination::ALL {
+        alerts.revoke_saved(destination, None)?;
         alerts.discard(destination)?;
     }
     std::fs::remove_file(alerts.file()).map_err(|_| "Could not remove Milo's alert settings (alerts.conf).".to_owned())
@@ -285,13 +336,30 @@ impl Alerts {
         Self { config: config.to_owned(), state: state.to_owned(), secrets, stand_in: None }
     }
 
-    /// Where a message is posted. The address holds the secret.
-    fn address(&self, destination: Destination, secret: &str) -> String {
+    /// Build the whole request once, including the destination's wire format,
+    /// after checking which service is allowed to receive the saved secret.
+    fn message_request(
+        &self,
+        destination: Destination,
+        secret: &str,
+        chat: &str,
+        text: &str,
+        kind: Option<Kind>,
+    ) -> Option<String> {
         let base = self.stand_in.as_deref();
-        match destination {
-            Destination::Telegram => format!("{}/bot{secret}/sendMessage", base.unwrap_or(telegram::API)),
-            Destination::Discord => format!("{}/api/v10/webhooks/{secret}", base.unwrap_or("https://discord.com")),
-        }
+        let address = match destination {
+            Destination::Telegram if relay::valid_capability(secret) => {
+                return Some(relay::send_request(base, secret, text));
+            }
+            Destination::Telegram if valid_token(secret) => {
+                format!("{}/bot{secret}/sendMessage", base.unwrap_or(telegram::API))
+            }
+            Destination::Discord if valid_webhook_path(secret) => {
+                format!("{}/api/v10/webhooks/{secret}", base.unwrap_or("https://discord.com"))
+            }
+            _ => return None,
+        };
+        Some(send::request(&address, &message::body(destination, chat, text, kind)))
     }
 
     fn file(&self) -> PathBuf {
@@ -324,20 +392,20 @@ impl Alerts {
         Ok(())
     }
 
-    /// Ends the mirroring process, saves the settings, changes a secret with
-    /// `secret`, and only then starts mirroring again if the settings ask for
-    /// it. So the process never runs with a secret the settings do not match.
-    fn apply(&self, settings: &Settings, secret: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
-        self.stop()?;
+    fn start_if_active(&self, settings: &Settings) -> Result<(), String> {
+        if settings.has_active() { self.start() } else { Ok(()) }
+    }
+
+    fn write_settings(&self, settings: &Settings) -> Result<(), String> {
         let file = self.file();
         preferences::locked(&file, |dir| preferences::replace(dir, &file, &settings.render()))
-            .map_err(|_| UNSAVED.to_owned())?;
-        secret()?;
-        if settings.enabled { self.start() } else { Ok(()) }
+            .map_err(|_| UNSAVED.to_owned())
     }
 
     fn save(&self, settings: &Settings) -> Result<(), String> {
-        self.apply(settings, || Ok(()))
+        self.stop()?;
+        self.write_settings(settings)?;
+        self.start_if_active(settings)
     }
 
     /// Starts the mirroring process in the background, apart from this
@@ -377,17 +445,35 @@ impl Alerts {
         Ok(Summary { settings, saved, running, note })
     }
 
-    /// Saves a Telegram bot's token and the chat it posts to.
+    /// Saves a manual bot token or the capability for a verified Telegram DM.
     pub(crate) fn set_telegram(&self, token: &str, chat: &str) -> Result<String, String> {
-        if !valid_chat(chat) {
-            return Err("CHAT must be a chat's number, such as -1001234567890, or a public channel's @name.".into());
-        }
-        if !valid_token(token) {
-            return Err("That is not a bot token. BotFather gives one that looks like 123456:ABC-DEF…".into());
+        self.save_telegram(token, chat, false)
+    }
+
+    pub(crate) fn set_hosted_telegram(&self, token: &str, chat: &str) -> Result<String, String> {
+        self.save_telegram(token, chat, true)
+    }
+
+    fn save_telegram(&self, token: &str, chat: &str, require_hosted: bool) -> Result<String, String> {
+        let hosted = relay::valid_capability(token);
+        if hosted {
+            if !relay::valid_chat(chat) {
+                return Err("The connected Telegram destination must be a private chat with Milo's bot.".into());
+            }
+        } else {
+            if require_hosted {
+                return Err("Invalid hosted Telegram connection. Connect Telegram again.".into());
+            }
+            if !valid_chat(chat) {
+                return Err("CHAT must be a chat's number, such as -1001234567890, or a public channel's @name.".into());
+            }
+            if !valid_token(token) {
+                return Err("That is not a bot token. BotFather gives one that looks like 123456:ABC-DEF…".into());
+            }
         }
         let mut settings = self.editable()?;
         chat.clone_into(&mut settings.telegram_chat);
-        self.keep(settings, Destination::Telegram, token)
+        self.keep(settings, Destination::Telegram, token, hosted)
     }
 
     /// Finds recent Telegram chats without saving a token or changing subscriptions.
@@ -400,36 +486,61 @@ impl Alerts {
 
     /// Saves a Discord webhook link.
     pub(crate) fn set_discord(&self, link: &str) -> Result<String, String> {
+        self.save_discord(link, false)
+    }
+
+    pub(crate) fn set_hosted_discord(&self, link: &str) -> Result<String, String> {
+        self.save_discord(link, true)
+    }
+
+    fn save_discord(&self, link: &str, hosted: bool) -> Result<String, String> {
         let Some(secret) = webhook(link) else {
             return Err("That is not a Discord webhook link. Copy it from the channel's Integrations settings: \
                         https://discord.com/api/webhooks/…"
                 .into());
         };
-        self.keep(self.editable()?, Destination::Discord, secret)
+        self.keep(self.editable()?, Destination::Discord, secret, hosted)
     }
 
-    /// Keeps a destination's secret and selects the destination. While
-    /// alerts are being mirrored somewhere else they stay there: where they
-    /// go only changes when the user says so, with `choose`.
-    fn keep(&self, mut settings: Settings, destination: Destination, secret: &str) -> Result<String, String> {
-        let elsewhere = settings.enabled && settings.destination.is_some_and(|current| current != destination);
-        if !elsewhere {
+    /// Keeps a credential without opting in. A hosted connection must be
+    /// turned on explicitly, even when it replaces an active credential.
+    fn keep(&self, mut settings: Settings, destination: Destination, secret: &str, hosted: bool) -> Result<String, String> {
+        let was_active = settings.active(destination);
+        if !settings.has_active() || settings.destination.is_none() {
             settings.destination = Some(destination);
         }
-        self.apply(&settings, || {
-            let kept = self.secrets.set(destination, secret);
-            kept.map_err(|_| format!("Could not save the secret in {}.", self.secrets.place()))
-        })?;
+        if hosted {
+            settings.remove_target(destination);
+        }
+        self.revoke_saved(destination, Some(secret))?;
+        if was_active {
+            self.stop()?;
+        }
+        self.write_settings(&settings)?;
+        let kept = self
+            .secrets
+            .set(destination, secret)
+            .map_err(|_| format!("Could not save the secret in {}.", self.secrets.place()));
+        if was_active && (kept.is_ok() || !settings.active(destination)) {
+            let restarted = self.start_if_active(&settings);
+            kept.and(restarted)?;
+        } else {
+            kept?;
+        }
         let saved =
             format!("Saved the {} destination; its secret is in {}.", destination.title(), self.secrets.place());
-        Ok(if elsewhere {
+        let name = destination.name();
+        Ok(if settings.active(destination) {
+            format!("{saved} Alerts go to {}.", describe_active(&settings))
+        } else if settings.has_active() {
             format!(
-                "{saved} Alerts still go to {}. Switch with milo alerts use {}.",
-                describe(&settings),
-                destination.name()
+                "{saved} Alerts still go to {}. Turn this destination on with milo alerts on {name}.",
+                describe_active(&settings)
             )
         } else {
-            format!("{saved} {}", next_step(&settings))
+            format!(
+                "{saved} Mirroring is still off. Check it with milo alerts test {name}, then run milo alerts on {name}."
+            )
         })
     }
 
@@ -439,6 +550,35 @@ impl Alerts {
             Ok(None) => Err(format!("No {} destination is saved. {NO_DESTINATION}", destination.title())),
             Err(_) => Err(format!("Could not read the saved secret from {}.", self.secrets.place())),
         }
+    }
+
+    fn target_secret(&self, settings: &Settings, destination: Destination) -> Result<String, String> {
+        let secret = self.secret(destination)?;
+        if destination == Destination::Telegram && settings.telegram_chat.is_empty() {
+            return Err("No Telegram chat is saved. Save it again with milo alerts telegram CHAT.".into());
+        }
+        Ok(secret)
+    }
+
+    fn revoke_saved(&self, destination: Destination, replacement: Option<&str>) -> Result<(), String> {
+        if destination != Destination::Telegram {
+            return Ok(());
+        }
+        let secret = self
+            .secrets
+            .get(destination)
+            .map_err(|_| format!("Could not read the saved secret from {}.", self.secrets.place()))?;
+        if let Some(secret) = secret.as_deref()
+            && Some(secret) != replacement
+            && relay::valid_capability(secret)
+            && !relay::revoke(self.stand_in.as_deref(), secret)
+        {
+            return Err(
+                "Could not disconnect the saved Telegram connection. Start Milo's connection service and try again."
+                    .into(),
+            );
+        }
+        Ok(())
     }
 
     fn discard(&self, destination: Destination) -> Result<(), String> {
@@ -458,16 +598,24 @@ impl Alerts {
         self.secrets.place()
     }
 
-    /// Selects a destination that was saved earlier.
+    /// Selects a saved destination for legacy commands. When no independent
+    /// choices were made, this also changes where active mirroring goes.
     pub(crate) fn choose(&self, destination: Destination) -> Result<String, String> {
         let mut settings = self.editable()?;
-        self.secret(destination)?;
-        if destination == Destination::Telegram && settings.telegram_chat.is_empty() {
-            return Err("No Telegram chat is saved. Save it again with milo alerts telegram CHAT.".into());
-        }
+        self.target_secret(&settings, destination)?;
         settings.destination = Some(destination);
-        self.save(&settings)?;
-        Ok(format!("Alerts go to {}. {}", describe(&settings), next_step(&settings)))
+        if settings.targets.is_some() {
+            self.write_settings(&settings)?;
+        } else {
+            self.save(&settings)?;
+        }
+        let mut report = format!("Selected {}.", describe(&settings));
+        if settings.has_active() {
+            let _ = write!(report, " Alerts go to {}.", describe_active(&settings));
+        } else {
+            report.push_str(" Mirroring is still off. Check the destination with milo alerts test.");
+        }
+        Ok(report)
     }
 
     pub(crate) fn set_kinds(&self, kinds: [bool; 5]) -> Result<String, String> {
@@ -485,20 +633,50 @@ impl Alerts {
         Ok(message::sends(content).to_owned())
     }
 
-    /// Turns mirroring on. It needs a saved destination, so that nothing is
-    /// ever sent to a place the user did not name.
+    /// Resumes the chosen targets, or starts with the legacy selection.
     pub(crate) fn enable(&self) -> Result<String, String> {
         let mut settings = self.editable()?;
-        let destination = settings.destination.ok_or(NO_DESTINATION)?;
-        self.secret(destination)?;
+        let mut targets = settings.targets();
+        if !targets.contains(&true) {
+            let destination = settings.destination.ok_or(NO_DESTINATION)?;
+            targets[destination as usize] = true;
+            settings.targets = Some(targets);
+        }
+        for destination in Destination::ALL.into_iter().filter(|&destination| targets[destination as usize]) {
+            self.target_secret(&settings, destination)?;
+        }
         settings.enabled = true;
         self.save(&settings)?;
         Ok(format!(
             "Rex alert mirroring is on. Alerts go to {}.\n{}\nRex's own notifications are unchanged. Turn this off \
              with milo alerts off.",
-            describe(&settings),
+            describe_active(&settings),
             message::disclosure(&settings)
         ))
+    }
+
+    /// Turns one provider on or off without changing the legacy selection.
+    pub(crate) fn set_forwarding(&self, destination: Destination, enabled: bool) -> Result<String, String> {
+        let mut settings = self.editable()?;
+        let index = destination as usize;
+        if enabled {
+            self.target_secret(&settings, destination)?;
+            let mut targets = if settings.enabled { settings.targets() } else { [false; 2] };
+            targets[index] = true;
+            settings.targets = Some(targets);
+            settings.enabled = true;
+            self.save(&settings)?;
+        } else if settings.active(destination) || settings.targets.is_some_and(|targets| targets[index]) {
+            settings.targets = Some(settings.targets());
+            settings.remove_target(destination);
+            self.save(&settings)?;
+        }
+        let state = if enabled { "on" } else { "off" };
+        let mut report = format!("{} alert mirroring is {state}.", destination.title());
+        if enabled {
+            let _ = write!(report, "\n{}", message::disclosure(&settings));
+        }
+        Ok(report)
     }
 
     /// Turns mirroring off and ends the mirroring process before returning.
@@ -515,15 +693,28 @@ impl Alerts {
     /// Removes a saved destination and its secret. Mirroring to it ends
     /// first, and settings that cannot be read do not stand in the way.
     pub(crate) fn forget(&self, destination: Destination) -> Result<String, String> {
-        let mut settings = self.settings().unwrap_or_default();
-        if settings.destination == Some(destination) {
+        let read = self.settings();
+        let unreadable = read.is_err();
+        let mut settings = read.unwrap_or_default();
+        let was_active = settings.active(destination);
+        let selected = settings.destination == Some(destination);
+        settings.remove_target(destination);
+        if selected {
             settings.destination = None;
-            settings.enabled = false;
         }
         if destination == Destination::Telegram {
             settings.telegram_chat.clear();
         }
-        self.apply(&settings, || self.discard(destination))?;
+        let restart = was_active || unreadable;
+        if restart {
+            self.stop()?;
+        }
+        if restart || selected || destination == Destination::Telegram || settings.targets.is_some() {
+            self.write_settings(&settings)?;
+        }
+        // Restart unrelated targets even when the relay cannot revoke this one.
+        let restarted = if restart { self.start_if_active(&settings) } else { Ok(()) };
+        self.revoke_saved(destination, None).and_then(|()| self.discard(destination)).and(restarted)?;
         Ok(format!("Removed the saved {} destination and its secret.", destination.title()))
     }
 
@@ -531,11 +722,27 @@ impl Alerts {
     pub(crate) fn test(&self) -> Result<String, String> {
         let settings = self.editable()?;
         let destination = settings.destination.ok_or(NO_DESTINATION)?;
-        let secret = self.secret(destination)?;
-        let body = message::body(destination, &settings.telegram_chat, message::TEST, None);
-        match send::post(&self.address(destination, &secret), &body, None) {
-            send::Outcome::Sent => Ok(format!("{} accepted the test message.", describe(&settings))),
-            outcome => Err(format!("The test message was not delivered: {}.", outcome.reason(destination))),
+        self.send_test(&settings, destination)
+    }
+
+    /// Tests a saved provider whether or not it is selected or active.
+    pub(crate) fn test_destination(&self, destination: Destination) -> Result<String, String> {
+        self.send_test(&self.editable()?, destination)
+    }
+
+    fn send_test(&self, settings: &Settings, destination: Destination) -> Result<String, String> {
+        let secret = self.target_secret(settings, destination)?;
+        let request = self
+            .message_request(destination, &secret, &settings.telegram_chat, message::TEST, None)
+            .ok_or_else(|| format!("The saved {} secret is invalid. Save it again.", destination.title()))?;
+        match send::post(&request, None) {
+            send::Outcome::Sent => {
+                Ok(format!("{} accepted the test message.", describe_destination(settings, destination)))
+            }
+            outcome => {
+                let hosted = destination == Destination::Telegram && relay::valid_capability(&secret);
+                Err(format!("The test message was not delivered: {}.", outcome.reason(destination, hosted)))
+            }
         }
     }
 
@@ -546,17 +753,25 @@ impl Alerts {
 
 /// The selected destination in words, without its secret.
 pub(crate) fn describe(settings: &Settings) -> String {
-    match settings.destination {
-        Some(Destination::Telegram) => format!("Telegram chat {}", settings.telegram_chat),
-        Some(Destination::Discord) => "the Discord channel of the saved webhook".into(),
-        None => "no destination".into(),
+    settings.destination.map_or_else(|| "no destination".into(), |destination| {
+        describe_destination(settings, destination).into_owned()
+    })
+}
+
+fn describe_destination(settings: &Settings, destination: Destination) -> std::borrow::Cow<'static, str> {
+    match destination {
+        Destination::Telegram => format!("Telegram chat {}", settings.telegram_chat).into(),
+        Destination::Discord => "the Discord channel of the saved webhook".into(),
     }
 }
 
-fn next_step(settings: &Settings) -> &'static str {
-    if settings.enabled {
-        "Mirroring is on and uses it."
-    } else {
-        "Mirroring is still off. Check the destination with milo alerts test, then turn it on with milo alerts on."
+fn describe_active(settings: &Settings) -> String {
+    let mut destinations = Destination::ALL.into_iter().filter(|&destination| settings.active(destination));
+    let Some(first) = destinations.next() else { return "no destination".into() };
+    let mut description = describe_destination(settings, first).into_owned();
+    for destination in destinations {
+        description.push_str(" and ");
+        description.push_str(&describe_destination(settings, destination));
     }
+    description
 }

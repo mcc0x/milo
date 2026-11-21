@@ -39,26 +39,38 @@ struct Request {
     body: String,
 }
 
-/// Stands in for Telegram and Discord. It answers with `answers` in turn,
-/// then with success.
+struct Reply {
+    path_prefix: &'static str,
+    status: u16,
+    body: &'static str,
+}
+
+/// Stands in for Telegram and Discord. It answers with the first queued
+/// reply matching the request's path, or with success when none matches.
 struct Destination {
     port: u16,
     requests: Arc<Mutex<Vec<Request>>>,
-    answers: Arc<Mutex<VecDeque<(u16, &'static str)>>>,
+    answers: Arc<Mutex<VecDeque<Reply>>>,
 }
 
 impl Destination {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (requests, answers) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(VecDeque::new())));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let answers = Arc::new(Mutex::new(VecDeque::<Reply>::new()));
         let (seen, queued) = (Arc::clone(&requests), Arc::clone(&answers));
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let Some(request) = read_request(&mut stream) else { continue };
+                let reply = {
+                    let mut queued = queued.lock().unwrap();
+                    let index = queued.iter().position(|reply| request.path.starts_with(reply.path_prefix));
+                    index.and_then(|index| queued.remove(index))
+                };
                 seen.lock().unwrap().push(request);
-                let (code, body): (u16, &str) = queued.lock().unwrap().pop_front().unwrap_or((200, "{\"ok\":true}"));
+                let (code, body) = reply.map_or((200, "{\"ok\":true}"), |reply| (reply.status, reply.body));
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {code} Answer\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
@@ -71,11 +83,19 @@ impl Destination {
     }
 
     fn answer(&self, answers: &[(u16, &'static str)]) {
-        self.answers.lock().unwrap().extend(answers.iter().copied());
+        self.answer_at("", answers);
+    }
+
+    fn answer_at(&self, path_prefix: &'static str, answers: &[(u16, &'static str)]) {
+        self.answers.lock().unwrap().extend(answers.iter().map(|&(status, body)| Reply { path_prefix, status, body }));
     }
 
     fn requests(&self) -> Vec<Request> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn requests_at(&self, path_prefix: &str) -> Vec<Request> {
+        self.requests.lock().unwrap().iter().filter(|request| request.path.starts_with(path_prefix)).cloned().collect()
     }
 
     /// The text of every message received, whichever destination it was for.
@@ -402,6 +422,40 @@ fn a_destination_that_limits_the_rate_or_fails_is_asked_again_and_the_alert_arri
 }
 
 #[test]
+fn an_alert_goes_to_both_destinations_and_one_retry_does_not_delay_the_other() {
+    let Some(home) = Home::new() else { return };
+    home.save_telegram();
+    home.save_discord();
+    home.run(&["alerts", "on", "telegram"]);
+    home.run(&["alerts", "on", "discord"]);
+    home.blocked("a", "SYNTHETIC approve?");
+    assert!(home.received(2));
+    let telegram = home.destination.requests_at("/bot");
+    let discord = home.destination.requests_at("/api/v10/webhooks/");
+    assert_eq!(telegram.len(), 1);
+    assert_eq!(discord.len(), 1);
+    assert_eq!(text_of(&telegram[0].body), "Rex: <code>synthetic</code> is waiting for permission");
+    assert_eq!(text_of(&discord[0].body), "`synthetic` **is waiting for permission**");
+
+    // Discord must get both new alerts while the Telegram worker is still
+    // waiting to retry the first one, without counting it as a Discord drop.
+    home.destination.answer_at("/bot", &[(429, "{\"parameters\":{\"retry_after\":60}}")]);
+    home.status("b", "error", "", "SYNTHETIC failed");
+    assert!(soon(|| home.destination.requests_at("/bot").len() == 2));
+    home.status("c", "done", "", "SYNTHETIC done");
+    assert!(soon(|| home.destination.requests_at("/api/v10/webhooks/").len() == 3));
+    let discord = home.destination.requests_at("/api/v10/webhooks/");
+    assert_eq!(text_of(&discord[1].body), "`synthetic` **reported an error**");
+    assert_eq!(text_of(&discord[2].body), "`synthetic` **finished**");
+    assert_eq!(home.destination.requests_at("/bot").len(), 2);
+    assert!(soon(|| {
+        let status = home.run(&["alerts"]);
+        status.contains("Telegram: Trying again: Telegram is limiting the rate")
+            && status.contains("Discord: The last alert was delivered.")
+    }));
+}
+
+#[test]
 fn an_alert_a_failing_destination_never_takes_is_dropped_and_the_next_says_so() {
     let Some(home) = Home::new() else { return };
     home.save_telegram();
@@ -455,19 +509,22 @@ fn one_message_a_destination_turns_down_does_not_silence_the_next() {
 fn a_destination_that_refuses_the_secret_is_not_asked_again() {
     let Some(home) = Home::new() else { return };
     home.save_telegram();
-    home.destination.answer(&[(401, "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}")]);
-    home.run(&["alerts", "on"]);
+    home.save_discord();
+    home.destination.answer_at("/bot", &[(401, "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}")]);
+    home.run(&["alerts", "on", "telegram"]);
+    home.run(&["alerts", "on", "discord"]);
     home.blocked("a", "SYNTHETIC approve?");
-    assert!(home.received(1));
+    assert!(soon(|| home.destination.requests_at("/bot").len() == 1));
     assert!(soon(|| home.run(&["alerts"]).contains("Paused: Telegram refused the saved secret")));
     home.blocked("b", "SYNTHETIC approve?");
     home.status("c", "error", "", "SYNTHETIC failed");
+    assert!(soon(|| home.destination.requests_at("/api/v10/webhooks/").len() == 3));
     settle();
-    assert_eq!(home.destination.requests().len(), 1);
+    assert_eq!(home.destination.requests_at("/bot").len(), 1);
     // Saving the destination again starts afresh.
     home.save_telegram();
     home.blocked("d", "SYNTHETIC approve?");
-    assert!(soon(|| home.destination.requests().len() > 1));
+    assert!(soon(|| home.destination.requests_at("/bot").len() > 1));
 }
 
 #[test]

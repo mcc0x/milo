@@ -1,4 +1,4 @@
-//! The mirroring process: follows Rex's event stream and sends each alert once.
+//! Follows Rex's event stream and sends alerts to each enabled destination.
 //!
 //! One process mirrors at a time, whatever number of tabs, panes and Rex
 //! apps are open, because it holds a lock for as long as it lives. It only
@@ -7,21 +7,22 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, BufReader, Read as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::event::{self, Alert, Seen};
 use super::send::{self, Outcome};
-use super::{Alerts, Settings, message};
+use super::{Alerts, Destination, Settings, message, relay};
 use crate::setup::lock;
 use crate::{preferences, rex};
 
 /// The longest line of the stream that is read. Rex's largest alert is far smaller.
 const LINE_LIMIT: u64 = 1 << 16;
-/// Alerts waiting while a message is being sent. More than this are dropped.
+/// Alerts waiting for each destination. More than this are dropped for it alone.
 const WAITING: usize = 64;
 /// How often the settings are read again while nothing happens.
 const TICK: Duration = Duration::from_secs(2);
@@ -42,9 +43,9 @@ const GIVE_UP: Duration = Duration::from_secs(600);
 const SLOWEST_RETRY: Duration = Duration::from_secs(30);
 const STATUS_LIMIT: u64 = 1 << 10;
 
-/// The programs to end with this process: `rex events`, then `curl`. Each
-/// slot is cleared before its program is waited for.
-pub(super) static CHILDREN: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+/// The programs to end with this process: `rex events`, then each sender's
+/// `curl`. Each slot is cleared before its program is waited for.
+static CHILDREN: [AtomicI32; 3] = [const { AtomicI32::new(0) }; 3];
 
 /// Ends the stream and any request in flight, then this process, at once.
 extern "C" fn stop(_: libc::c_int) {
@@ -116,26 +117,190 @@ pub(crate) fn run(alerts: &Alerts) -> io::Result<()> {
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         stop_on(signal);
     }
-    let mut forwarder = Forwarder::new(alerts);
+    let status = Status { file: alerts.state_dir().join("alerts.status"), notes: Mutex::default() };
+    let mut deliveries = Destination::ALL.map(|_| Delivery::default());
+    loop {
+        let Some(settings) = wanted(alerts) else { return Ok(()) };
+        if mirror(alerts, &status, &settings, &mut deliveries) != Ended::Changed {
+            return Ok(());
+        }
+    }
+}
+
+fn wanted(alerts: &Alerts) -> Option<Settings> {
+    alerts
+        .settings()
+        .ok()
+        .filter(|settings| settings.enabled && Destination::ALL.into_iter().any(|destination| settings.active(destination)))
+}
+
+fn changed(alerts: &Alerts, settings: &Settings) -> Option<Ended> {
+    let Some(now) = wanted(alerts) else { return Some(Ended::Off) };
+    let same = Destination::ALL.into_iter().all(|destination| now.active(destination) == settings.active(destination))
+        && now.kinds == settings.kinds
+        && now.content == settings.content
+        && (!now.active(Destination::Telegram) || now.telegram_chat == settings.telegram_chat);
+    (!same).then_some(Ended::Changed)
+}
+
+/// Each worker has a queue that survives Rex reconnects. A destination's
+/// retries or rate limits cannot delay the reader or the other destination.
+fn mirror(alerts: &Alerts, status: &Status, settings: &Settings, deliveries: &mut [Delivery; 2]) -> Ended {
+    let secrets = Destination::ALL.map(|destination| {
+        if !settings.active(destination) {
+            return None;
+        }
+        let secret = alerts.secrets.get(destination).ok().flatten();
+        if secret.is_none() {
+            deliveries[destination as usize].report(
+                status,
+                destination,
+                "Stopped: the destination's secret is no longer saved.",
+            );
+        }
+        secret
+    });
+    if secrets.iter().all(Option::is_none) {
+        return Ended::Off;
+    }
+    let dropped = Destination::ALL.map(|_| AtomicU32::new(0));
+    let cancelled = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let mut senders = [None, None];
+        let mut workers = [None, None];
+        for ((destination, delivery), secret) in Destination::ALL.into_iter().zip(deliveries).zip(secrets) {
+            let Some(secret) = secret else { continue };
+            let index = destination as usize;
+            let (sender, waiting) = mpsc::sync_channel(WAITING);
+            senders[index] = Some(sender);
+            let hosted_telegram = destination == Destination::Telegram && relay::valid_capability(&secret);
+            let target = Target { alerts, settings, status, destination, secret, hosted_telegram, cancelled: &cancelled };
+            let dropped = &dropped[index];
+            workers[index] = Some(scope.spawn(move || delivery.pump(&waiting, dropped, &target)));
+        }
+        let ended = follow(alerts, status, settings, &senders, &dropped);
+        cancelled.store(true, Ordering::Relaxed);
+        drop(senders);
+        for worker in workers.iter().flatten() {
+            worker.thread().unpark();
+        }
+        ended
+    })
+}
+
+fn follow(
+    alerts: &Alerts,
+    status: &Status,
+    settings: &Settings,
+    senders: &[Option<mpsc::SyncSender<Queued>>; 2],
+    dropped: &[AtomicU32; 2],
+) -> Ended {
     let mut away = Away::new();
     loop {
+        if let Some(ended) = changed(alerts, settings) {
+            return ended;
+        }
         let began = Instant::now();
-        match forwarder.follow() {
-            Ended::Off => return Ok(()),
-            Ended::Changed => continue,
-            Ended::Stream => {}
+        if let Ok(mut stream) = rex::events() {
+            CHILDREN[0].store(stream.id().try_into().unwrap_or(0), Ordering::Relaxed);
+            status.stream("Listening for Rex alerts.");
+            let ended = read_stream(&mut stream, alerts, settings, senders, dropped);
+            CHILDREN[0].store(0, Ordering::Relaxed);
+            let _ = stream.wait();
+            if ended != Ended::Stream {
+                return ended;
+            }
         }
         let Some(wait) = away.wait(began.elapsed(), Instant::now()) else {
-            forwarder.report("Rex could not be reached, so mirroring stopped. It starts again with Rex.");
-            return Ok(());
+            status.stream("Rex could not be reached, so mirroring stopped. It starts again with Rex.");
+            return Ended::Off;
         };
-        forwarder.report("Waiting for Rex. Alerts raised meanwhile are not mirrored.");
+        status.stream("Waiting for Rex. Alerts raised meanwhile are not mirrored.");
         std::thread::sleep(wait);
     }
 }
 
-struct Forwarder<'a> {
+fn read_stream(
+    stream: &mut Child,
+    alerts: &Alerts,
+    settings: &Settings,
+    senders: &[Option<mpsc::SyncSender<Queued>>; 2],
+    dropped: &[AtomicU32; 2],
+) -> Ended {
+    let Some(output) = stream.stdout.take() else { return Ended::Stream };
+    let (reading, ended) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            read(output, settings.kinds, |alert| fan_out(alert, senders, dropped));
+            drop(reading);
+        });
+        let ended = loop {
+            match ended.recv_timeout(TICK) {
+                Err(RecvTimeoutError::Disconnected) => break Ended::Stream,
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(ended) = changed(alerts, settings) {
+                        break ended;
+                    }
+                }
+                Ok(()) => unreachable!(),
+            }
+        };
+        // The reader ends with the stream, so end the stream before joining it.
+        let _ = stream.kill();
+        ended
+    })
+}
+
+enum Queued {
+    Only(Alert),
+    Shared(Arc<Alert>),
+}
+
+fn fan_out(alert: Alert, senders: &[Option<mpsc::SyncSender<Queued>>; 2], dropped: &[AtomicU32; 2]) {
+    let queue = |index: usize, sender: &mpsc::SyncSender<Queued>, alert| {
+        if sender.try_send(alert).is_err() {
+            dropped[index].fetch_add(1, Ordering::Relaxed);
+        }
+    };
+    match senders {
+        [Some(first), Some(second)] => {
+            let alert = Arc::new(alert);
+            queue(0, first, Queued::Shared(Arc::clone(&alert)));
+            queue(1, second, Queued::Shared(alert));
+        }
+        [Some(first), None] => queue(0, first, Queued::Only(alert)),
+        [None, Some(second)] => queue(1, second, Queued::Only(alert)),
+        [None, None] => {}
+    }
+}
+
+/// The shared configuration for one destination's worker.
+struct Target<'a> {
     alerts: &'a Alerts,
+    settings: &'a Settings,
+    status: &'a Status,
+    destination: Destination,
+    secret: String,
+    hosted_telegram: bool,
+    cancelled: &'a AtomicBool,
+}
+
+impl Target<'_> {
+    fn stopped(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    fn pause(&self, wait: Duration) {
+        let until = Instant::now() + wait;
+        while !self.stopped() {
+            let Some(remaining) = until.checked_duration_since(Instant::now()) else { break };
+            std::thread::park_timeout(remaining);
+        }
+    }
+}
+
+#[derive(Default)]
+struct Delivery {
     /// When each of the last minute's messages was sent.
     sent_at: VecDeque<Instant>,
     sent: u32,
@@ -151,117 +316,68 @@ struct Forwarder<'a> {
     refused: bool,
 }
 
-impl<'a> Forwarder<'a> {
-    fn new(alerts: &'a Alerts) -> Self {
-        Self { alerts, sent_at: VecDeque::new(), sent: 0, unsent: 0, not_before: None, refusals: 0, refused: false }
-    }
-
-    /// The settings, while they still ask for mirroring.
-    fn wanted(&self) -> Option<Settings> {
-        self.alerts.settings().ok().filter(|settings| settings.enabled && settings.destination.is_some())
-    }
-
-    /// How following must end if the settings are no longer `settings`.
-    fn changed(&self, settings: &Settings) -> Option<Ended> {
-        match self.wanted() {
-            Some(now) if now == *settings => None,
-            Some(_) => Some(Ended::Changed),
-            None => Some(Ended::Off),
-        }
-    }
-
-    fn follow(&mut self) -> Ended {
-        let Some(settings) = self.wanted() else { return Ended::Off };
-        let Some(secret) = settings.destination.and_then(|destination| self.alerts.secrets.get(destination).ok()?)
-        else {
-            self.report("Stopped: the destination's secret is no longer saved.");
-            return Ended::Off;
-        };
-        let Ok(mut stream) = rex::events() else { return Ended::Stream };
-        CHILDREN[0].store(stream.id().try_into().unwrap_or(0), Ordering::Relaxed);
-        if !self.refused {
-            self.report("Listening for Rex alerts.");
-        }
-        let ended = self.mirror(&mut stream, &settings, &secret);
-        CHILDREN[0].store(0, Ordering::Relaxed);
-        let _ = stream.wait();
-        ended
-    }
-
-    /// Reads the stream on a thread of its own, so that a slow destination
-    /// never keeps Rex waiting to write. That thread also decides what is an
-    /// alert, as each event arrives, so that a wait here cannot lose the
-    /// reports in between that tell a new alert from a repeated one.
-    fn mirror(&mut self, stream: &mut Child, settings: &Settings, secret: &str) -> Ended {
-        let Some(output) = stream.stdout.take() else { return Ended::Stream };
-        let (alerts, waiting) = mpsc::sync_channel(WAITING);
-        let dropped = &AtomicU32::new(0);
-        std::thread::scope(|scope| {
-            // The reader owns the sending end, so that the end of the stream is seen here.
-            scope.spawn(move || read(output, settings.kinds, &alerts, dropped));
-            let ended = self.pump(&waiting, dropped, settings, secret);
-            // The reader ends with the stream, so end the stream first.
-            let _ = stream.kill();
-            ended
-        })
-    }
-
-    fn pump(&mut self, waiting: &Receiver<Alert>, dropped: &AtomicU32, settings: &Settings, secret: &str) -> Ended {
-        loop {
-            let alert = match waiting.recv_timeout(TICK) {
-                Ok(alert) => alert,
-                Err(RecvTimeoutError::Disconnected) => return Ended::Stream,
-                Err(RecvTimeoutError::Timeout) => match self.changed(settings) {
-                    Some(ended) => return ended,
-                    None => continue,
-                },
-            };
-            self.unsent += dropped.swap(0, Ordering::Relaxed);
-            if let Some(ended) = self.deliver(&alert, settings, secret) {
-                return ended;
+impl Delivery {
+    fn pump(&mut self, waiting: &Receiver<Queued>, dropped: &AtomicU32, target: &Target<'_>) {
+        while let Ok(queued) = waiting.recv() {
+            if target.stopped() {
+                break;
             }
+            self.unsent += dropped.swap(0, Ordering::Relaxed);
+            let alert = match &queued {
+                Queued::Only(alert) => alert,
+                Queued::Shared(alert) => alert.as_ref(),
+            };
+            self.deliver(alert, target);
         }
     }
 
-    /// Sends one alert. Says how following must end if, meanwhile, mirroring
-    /// was turned off or its settings changed.
-    fn deliver(&mut self, alert: &Alert, settings: &Settings, secret: &str) -> Option<Ended> {
-        let destination = settings.destination?;
-        if self.refused || !self.within_rate() {
+    fn note(&self, target: &Target<'_>, note: &str) {
+        self.report(target.status, target.destination, note);
+    }
+
+    fn deliver(&mut self, alert: &Alert, target: &Target<'_>) {
+        let Target { alerts, settings, destination, secret, .. } = target;
+        let destination = *destination;
+        if self.refused || !self.within_rate(target) {
             self.unsent += 1;
-            return None;
+            return;
         }
         let text = message::text(alert, settings.content, self.unsent, destination);
-        let body = message::body(destination, &settings.telegram_chat, &text, Some(alert.kind));
-        let address = self.alerts.address(destination, secret);
+        let Some(request) = alerts.message_request(destination, secret, &settings.telegram_chat, &text, Some(alert.kind)) else {
+            self.refused = true;
+            self.note(target, "Stopped: the saved destination secret is invalid. Save it again.");
+            return;
+        };
         for attempt in 0..ATTEMPTS {
             // Checked before every request, so that turning mirroring off
             // holds even if this process was not told to stop.
-            if let Some(ended) = self.changed(settings) {
-                return Some(ended);
+            if target.stopped() || changed(alerts, settings).is_some() {
+                return;
             }
-            let outcome = send::post(&address, &body, Some(&CHILDREN[1]));
+            let outcome = send::post(&request, Some(&CHILDREN[1 + destination as usize]));
             let wait = match outcome {
                 Outcome::Sent => {
                     self.sent_at.push_back(Instant::now());
                     (self.sent, self.unsent, self.refusals) = (self.sent + 1, 0, 0);
-                    self.report("The last alert was delivered.");
-                    return None;
+                    self.note(target, "The last alert was delivered.");
+                    return;
                 }
                 Outcome::Refused(code) => {
                     self.unsent += 1;
                     self.refusals += 1;
-                    let reason = outcome.reason(destination);
+                    let reason = outcome.reason(destination, target.hosted_telegram);
                     if matches!(code, 401 | 403 | 404) || self.refusals >= REFUSALS {
                         self.refused = true;
-                        self.report(&format!(
-                            "Paused: {reason}. Mirroring resumes when the destination is saved again or milo alerts \
-                             on is run."
-                        ));
+                        let resume = if code == 401 && target.hosted_telegram {
+                            ""
+                        } else {
+                            " Mirroring resumes when the destination is saved again or milo alerts on is run."
+                        };
+                        self.note(target, &format!("Paused: {reason}.{resume}"));
                     } else {
-                        self.report(&format!("The last alert was not delivered: {reason}."));
+                        self.note(target, &format!("The last alert was not delivered: {reason}."));
                     }
-                    return None;
+                    return;
                 }
                 Outcome::Wait(wait) => {
                     self.not_before = Some(Instant::now() + wait);
@@ -272,20 +388,19 @@ impl<'a> Forwarder<'a> {
                 }
                 Outcome::Failed(_) => Duration::from_secs(1) * 3_u32.pow(attempt),
             };
-            self.report(&format!("Trying again: {}.", outcome.reason(destination)));
+            self.note(target, &format!("Trying again: {}.", outcome.reason(destination, target.hosted_telegram)));
             if attempt + 1 < ATTEMPTS {
-                std::thread::sleep(wait);
+                target.pause(wait);
             }
         }
         self.unsent += 1;
-        self.report("The last alert could not be delivered and was dropped.");
-        None
+        self.note(target, "The last alert could not be delivered and was dropped.");
     }
 
     /// Whether another message may be sent now. Waits out the gap between
     /// two messages. An alert that comes while the destination asked for
     /// quiet, or past the minute's allowance, is not sent at all.
-    fn within_rate(&mut self) -> bool {
+    fn within_rate(&mut self, target: &Target<'_>) -> bool {
         let now = Instant::now();
         if self.not_before.is_some_and(|until| now < until) {
             return false;
@@ -297,20 +412,54 @@ impl<'a> Forwarder<'a> {
             return false;
         }
         if let Some(gap) = self.sent_at.back().and_then(|&at| SPACING.checked_sub(now.duration_since(at))) {
-            std::thread::sleep(gap);
+            target.pause(gap);
         }
         true
     }
 
-    /// Notes for `milo alerts` what the process last did. Never an alert's text.
-    fn report(&self, note: &str) {
-        let mut text = format!("{note}\n");
-        if self.sent > 0 || self.unsent > 0 {
-            let _ =
-                writeln!(text, "Delivered since it started: {}. Not sent since the last: {}.", self.sent, self.unsent);
+    fn report(&self, status: &Status, destination: Destination, note: &str) {
+        status.delivery(destination, note, self.sent, self.unsent);
+    }
+}
+
+/// Keep one worker's note from hiding another's, using the same status file.
+struct Status {
+    file: PathBuf,
+    notes: Mutex<Notes>,
+}
+
+#[derive(Default)]
+struct Notes {
+    stream: &'static str,
+    providers: [String; 2],
+}
+
+impl Status {
+    fn stream(&self, note: &'static str) {
+        let mut notes = self.notes.lock().unwrap();
+        notes.stream = note;
+        self.write(&notes);
+    }
+
+    fn delivery(&self, destination: Destination, note: &str, sent: u32, unsent: u32) {
+        let mut notes = self.notes.lock().unwrap();
+        let note_text = &mut notes.providers[destination as usize];
+        note_text.clear();
+        let _ = writeln!(note_text, "{}: {note}", destination.title());
+        if sent > 0 || unsent > 0 {
+            let _ = writeln!(note_text, "Delivered since it started: {sent}. Not sent since the last: {unsent}.");
         }
-        let file = self.alerts.state_dir().join("alerts.status");
-        let _ = preferences::locked(&file, |dir| preferences::replace(dir, &file, &text));
+        self.write(&notes);
+    }
+
+    fn write(&self, notes: &Notes) {
+        let [telegram, discord] = &notes.providers;
+        let text = if notes.stream.is_empty() {
+            format!("{telegram}{discord}")
+        } else {
+            format!("{}\n{telegram}{discord}", notes.stream)
+        };
+        let _ = preferences::locked(&self.file, |dir| preferences::replace(dir, &self.file, &text));
     }
 }
 
@@ -327,7 +476,7 @@ pub(crate) fn forget_note(state: &Path) {
 /// too long to be an alert is skipped whole. What each terminal last said is
 /// kept only for this stream: Rex repeats nothing to a listener that joins
 /// late, so after the stream is opened again nothing remembered can be trusted.
-pub(super) fn read(stream: impl io::Read, mirrors: [bool; 5], alerts: &mpsc::SyncSender<Alert>, dropped: &AtomicU32) {
+pub(super) fn read(stream: impl io::Read, mirrors: [bool; 5], mut queue: impl FnMut(Alert)) {
     let mut stream = BufReader::new(stream);
     let mut seen = Seen::default();
     let mut line = Vec::new();
@@ -342,12 +491,33 @@ pub(super) fn read(stream: impl io::Read, mirrors: [bool; 5], alerts: &mpsc::Syn
             }
             Ok(_) => {
                 let alert = event::parse(line.trim_ascii_end()).and_then(|event| seen.alert(event, Instant::now()));
-                if let Some(alert) = alert.filter(|alert| mirrors[alert.kind as usize])
-                    && alerts.try_send(alert).is_err()
-                {
-                    dropped.fetch_add(1, Ordering::Relaxed);
+                if let Some(alert) = alert.filter(|alert| mirrors[alert.kind as usize]) {
+                    queue(alert);
                 }
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_full_queue_drops_only_that_destinations_copy() {
+    use super::event::Kind;
+
+    let (telegram, _telegram_waiting) = mpsc::sync_channel(1);
+    let (discord, discord_waiting) = mpsc::sync_channel(2);
+    let senders = [Some(telegram), Some(discord)];
+    let dropped = Destination::ALL.map(|_| AtomicU32::new(0));
+    for kind in [Kind::Bell, Kind::Blocked] {
+        fan_out(Alert { kind, waiting: None, app: None, text: String::new() }, &senders, &dropped);
+    }
+    let kinds: Vec<_> = discord_waiting
+        .try_iter()
+        .map(|queued| match queued {
+            Queued::Shared(alert) => alert.kind,
+            Queued::Only(alert) => alert.kind,
+        })
+        .collect();
+    assert_eq!(kinds, [Kind::Bell, Kind::Blocked]);
+    assert_eq!(dropped.map(AtomicU32::into_inner), [1, 0]);
 }

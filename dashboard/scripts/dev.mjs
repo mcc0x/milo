@@ -23,7 +23,8 @@ const server = createServer(async (req, res) => {
   if (!upstream) { res.writeHead(503).end(); return; }
   if (!req.url?.startsWith('/api/')) { await handle(req, res); return; }
   const read = req.url === '/api/state' && req.method === 'GET';
-  const write = ['/api/action', '/api/close', '/api/telegram-chats'].includes(req.url) && req.method === 'POST';
+  const hosted = req.url === '/api/hosted-connect';
+  const write = (hosted || ['/api/action', '/api/close', '/api/telegram-chats'].includes(req.url)) && req.method === 'POST';
   if (!read && !write) { res.writeHead(404).end(); return; }
   if (write && req.headers.origin !== origin) { res.writeHead(403).end(); return; }
   const headers = { authorization: req.headers.authorization ?? '', origin: upstream.origin };
@@ -33,16 +34,26 @@ const server = createServer(async (req, res) => {
       if (req.headers['content-type'] !== 'application/json') { res.writeHead(415).end(); return; }
       headers['content-type'] = 'application/json';
       const parts = []; let bytes = 0;
+      const limit = hosted ? 1024 : 16384;
       for await (const chunk of req) {
         bytes += chunk.length;
-        if (bytes > 16384) { res.writeHead(413).end(); return; }
+        if (bytes > limit) { res.writeHead(413).end(); return; }
         parts.push(chunk);
       }
       body = Buffer.concat(parts, bytes);
     }
-    const result = await fetch(new URL(req.url, upstream.origin), { method: req.method, headers, body, redirect: 'error' });
+    const result = await fetch(new URL(req.url, upstream.origin), {
+      method: req.method, headers, body, redirect: 'error',
+      signal: hosted ? AbortSignal.timeout(10000) : undefined,
+    });
+    const length = result.headers.get('content-length');
+    if (hosted && (!length || !/^\d{1,4}$/.test(length) || Number(length) > 4096)) {
+      await result.body?.cancel();
+      res.writeHead(502).end(); return;
+    }
+    const answer = Buffer.from(await result.arrayBuffer());
     res.writeHead(result.status, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' });
-    res.end(Buffer.from(await result.arrayBuffer()));
+    res.end(answer);
   } catch { if (!res.headersSent) res.writeHead(502); res.end(); }
 });
 // Bind before generating a session key: never point the user at a port another process owns.
