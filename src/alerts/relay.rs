@@ -406,12 +406,14 @@ mod tests {
                             name.eq_ignore_ascii_case("Content-Length").then(|| value.trim().parse::<u64>().unwrap())
                         });
                         (&mut reader).take(len.unwrap_or(0)).read_to_string(&mut wire).unwrap();
-                        write!(
-                            socket,
-                            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len(),
-                        )
-                        .unwrap();
+                        if *status != 0 {
+                            write!(
+                                socket,
+                                "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len(),
+                            )
+                            .unwrap();
+                        }
                         wire
                     })
                     .collect()
@@ -633,6 +635,24 @@ mod tests {
             send::post(&request, None)
         });
         assert_eq!(outcome, send::Outcome::Wait(Duration::from_secs(35)));
+    }
+
+    #[test]
+    fn a_rejected_relay_message_and_one_with_unknown_delivery_are_distinct() {
+        let replies = [(422, "{}"), (502, "{}"), (200, "<html>OK</html>"), (0, "")];
+        let (outcomes, _) = with_replies(&replies, |origin| {
+            let request = Origin::Test(origin.to_owned()).send_request(CAPABILITY, "text").unwrap();
+            replies.map(|_| send::post(&request, None))
+        });
+        assert_eq!(
+            outcomes,
+            [
+                send::Outcome::Refused(422),
+                send::Outcome::Uncertain(Some(502)),
+                send::Outcome::Uncertain(Some(200)),
+                send::Outcome::Uncertain(None),
+            ],
+        );
     }
 
     #[test]

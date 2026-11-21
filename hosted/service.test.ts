@@ -646,6 +646,34 @@ test("a throttled send says how long to wait in the body Milo's sender reads", a
   expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(1);
 });
 
+test("only definitive Telegram errors are reported as rejected, and ambiguous sends are never replayed", async () => {
+  let now = 0;
+  const fixture = telegramFixture({ alert: async ({ text }) => {
+    switch (text) {
+      case "invalid message": return Response.json({ ok: false, error_code: 400 }, { status: 400 });
+      case "bot credentials": return Response.json({ ok: false, error_code: 401 }, { status: 401 });
+      case "timeout after send": throw new DOMException("Fixture deadline", "TimeoutError");
+      case "server error": return Response.json({ ok: false, error_code: 500 }, { status: 500 });
+      case "unconfirmed throttling": return new Response(null, { status: 429, headers: { "Retry-After": "1" } });
+      default: return new Response("<html>OK</html>");
+    }
+  } });
+  const service = await createService({ telegram, fetch: fixture.fetch, now: () => now });
+  const auth = await claimTelegram(service, fixture);
+  for (const [text, status] of [
+    ["invalid message", 422], ["bot credentials", 422], ["timeout after send", 502],
+    ["server error", 502], ["unconfirmed throttling", 502], ["unreadable success", 502],
+  ] as const) {
+    const response = await api(service, "send", { text }, auth);
+    expect(response.status).toBe(status);
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(await response.json()).not.toHaveProperty("retry_after");
+    expect(fixture.calls.filter(({ body }) => body.parse_mode && body.text === text)).toHaveLength(1);
+    now += 1000;
+  }
+  expect((await removeBinding(service, auth)).status).toBe(204);
+});
+
 test("Discord bounds concurrent exchanges and drains expired webhook cleanup in batches", async () => {
   let now = 0;
   let exchanges = 0;

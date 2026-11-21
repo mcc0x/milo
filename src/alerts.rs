@@ -612,6 +612,7 @@ impl Alerts {
             send::Outcome::Sent => {
                 Ok(format!("{} accepted the test message.", describe_destination(settings, destination)))
             }
+            outcome @ send::Outcome::Uncertain(_) => Err(format!("{}.", outcome.reason(destination, hosted))),
             outcome => {
                 Err(format!("The test message was not delivered: {}.", outcome.reason(destination, hosted)))
             }

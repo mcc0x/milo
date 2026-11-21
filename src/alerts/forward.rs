@@ -299,7 +299,7 @@ impl Target<'_> {
 
 #[derive(Default)]
 struct Delivery {
-    /// When each of the last minute's messages was sent.
+    /// When each of the last minute's messages was sent or may have been sent.
     sent_at: VecDeque<Instant>,
     sent: u32,
     /// Alerts dropped since the last message that was sent.
@@ -375,6 +375,14 @@ impl Delivery {
                     } else {
                         self.note(target, &format!("The last alert was not delivered: {reason}."));
                     }
+                    return;
+                }
+                Outcome::Uncertain(_) => {
+                    // The message might count toward Telegram's rate limit.
+                    self.sent_at.push_back(Instant::now());
+                    self.refusals = 0;
+                    let reason = outcome.reason(destination, target.hosted_telegram);
+                    self.note(target, &format!("The last alert was not retried: {reason}."));
                     return;
                 }
                 Outcome::Wait(wait) => {

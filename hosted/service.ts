@@ -513,7 +513,7 @@ export async function createService({
         chat_id: binding.chat, text, parse_mode: "HTML", link_preview_options: { is_disabled: true },
       }, undefined, signal);
       if (response.status === 200) return plain(null, 204);
-      if (response.status === 429) {
+      if (response.status === 429 && response.confirmedError) {
         const retry = response.retryAfter ?? 1;
         binding.nextSend = Math.max(binding.nextSend, now() + retry * 1000);
         return rateLimited(retry);
@@ -522,7 +522,9 @@ export async function createService({
         if (chats.get(binding.chat) === binding) revokeChat(binding.chat);
         return error(401, "Telegram binding is missing or revoked.");
       }
-      return error(502, "Telegram could not deliver this message.");
+      if (response.confirmedError && response.status < 500) return error(422, "Telegram rejected this message.");
+      // A timeout, unreadable answer or upstream server error may follow a successful send.
+      return error(502, "Telegram delivery could not be confirmed.");
     } finally {
       sendActive--;
       binding.sending = false;
