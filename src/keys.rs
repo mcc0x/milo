@@ -163,6 +163,19 @@ impl Input {
         self.paste.done.pop_front().flatten()
     }
 
+    /// Reads and drops input until the terminal's last answer or `until`. An
+    /// answer left unread would be the shell's to read once the keyboard is its again.
+    pub fn drain_answers(&mut self, keyboard: &mut File, until: Instant) {
+        let mut keys = Vec::new();
+        while !self.answered && wait_for_sequence(keyboard, until) {
+            self.receive(keyboard, &mut keys);
+            if keys.contains(&Key::Eof) {
+                return;
+            }
+            keys.clear();
+        }
+    }
+
     pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
         let mut buf = [0u8; READ_SIZE];
         let mut read_input = false;
