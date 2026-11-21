@@ -25,7 +25,7 @@ export default defineRailway((ctx) => {
     healthcheckTimeout: 90,
     deploy: { sleepApplication: false, overlapSeconds: 0, drainingSeconds: 15 },
     replicas: { "us-west2": 1 },
-    // Register connect.usemilo.net after provisioning; Railway cannot create a custom domain from IaC.
+    domains: [{ domain: "connect.usemilo.net", port: 8080 }],
     volumeMounts: { "/data": volume("telegram-bindings", { sizeMB: 512, region: "us-west2" }) },
   });
 
