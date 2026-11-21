@@ -4,16 +4,21 @@ import { createContext, use, useEffect, useRef, useState, type ReactNode } from 
 
 // Both Copy buttons report through the page's one status line.
 const Announce = createContext<(message: string) => void>(() => {});
-const Announcement = createContext('');
+const Announcement = createContext({ message: '', count: 0 });
 
 export function CopyAnnouncer({ children }: { children: ReactNode }) {
-  const [message, setMessage] = useState('');
-  return <Announce value={setMessage}><Announcement value={message}>{children}</Announcement></Announce>;
+  const [announcement, setAnnouncement] = useState({ message: '', count: 0 });
+  const [announce] = useState(() => (message: string) => setAnnouncement(({ count }) => ({ message, count: count + 1 })));
+  return <Announce value={announce}><Announcement value={announcement}>{children}</Announcement></Announce>;
 }
 
 /** Tells a screen reader what the last Copy button did. */
 export function CopyStatus() {
-  return <p id="copy-feedback" className="visually-hidden" role="status">{use(Announcement)}</p>;
+  const { message, count } = use(Announcement);
+  // A new key writes the text again, so copying twice is announced twice. The
+  // text has an element of its own because page translation rewrites bare
+  // text nodes, and React cannot replace one it no longer finds.
+  return <p id="copy-feedback" className="visually-hidden" role="status"><span key={count}>{message}</span></p>;
 }
 
 /** Copies the text of the element it names, or selects it when the clipboard is unavailable. */

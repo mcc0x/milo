@@ -32,7 +32,7 @@ export default function NotFound() {
       <main>
         <img src="/apple-touch-icon.png" width="180" height="180" alt="" fetchPriority="low" />
         <h1>Nothing here.</h1>
-        <p>That page does not exist. <Link href="/">Go to milo</Link>.</p>
+        <p>That page does not exist. <Link href="/" prefetch={false}>Go to milo</Link>.</p>
       </main>
     </div>
   );

@@ -79,6 +79,8 @@ function useMediaQuery(query: string) {
   );
 }
 
+const subscribeToNothing = () => () => {};
+
 function useDocumentHidden() {
   return useSyncExternalStore(
     notify => {
@@ -93,7 +95,8 @@ function useDocumentHidden() {
 /** A caption with its one emphasized phrase, written between asterisks. */
 function Words({ line }: { line: string }) {
   const [before, emphasis, after] = line.split('**');
-  return <>{before}<strong>{emphasis}</strong>{after}</>;
+  // Each part has its own element: page translation rewrites bare text nodes, and React cannot update what it no longer finds.
+  return <><span>{before}</span><strong>{emphasis}</strong><span>{after}</span></>;
 }
 
 /** The Rex window that plays the scene, with its pane picker, caption and playback control. */
@@ -104,6 +107,8 @@ export function Demo() {
   const reduced = useMediaQuery('(prefers-reduced-motion: reduce)');
   const phone = useMediaQuery('(max-width: 45rem)');
   const hidden = useDocumentHidden();
+  // Until the script runs, the window is described as it reads without one.
+  const hydrated = useSyncExternalStore(subscribeToNothing, () => true, () => false);
   const playing = !(userPaused || hidden || !onScreen || reduced);
   const picker = reduced && phone;
 
@@ -112,6 +117,7 @@ export function Demo() {
   const session = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!('IntersectionObserver' in window)) return;
     const observer = new IntersectionObserver(([entry]) => setOnScreen(entry.isIntersecting));
     observer.observe(demo.current!);
     return () => observer.disconnect();
@@ -232,7 +238,7 @@ export function Demo() {
         data-resized={stage >= stageOf('resize') ? '' : undefined}
         data-shell={newTab ? '' : undefined}
         aria-label={picker ? `A Rex window showing the ${state.snapshot.focus} pane` : demoLabel}
-        aria-describedby={reduced ? 'demo-still-caption' : 'caption'}>
+        aria-describedby={!hydrated ? 'demo-fallback demo-still-caption' : reduced ? 'demo-still-caption' : 'caption'}>
         <div className="rex-titlebar">
           <span className="window-lights"><i></i><i></i><i></i></span>
           <span className="rex-tab">tidebook</span><span className="rex-tab rex-tab-new" hidden={!newTab}>zsh</span><span>Rex</span>
@@ -273,7 +279,7 @@ export function Demo() {
           <span className="caption" id="caption" ref={caption} aria-hidden="true" data-tone={tone}><Words line={line} /></span>
         </button>
         {/* Without scripting the stylesheet shows this caption in place of the button, so it rests on the still's line. */}
-        <p className="caption" id="demo-still-caption" role="status" data-tone={reduced ? tone : 'whole'} hidden={!reduced}><Words line={reduced ? line : still.say} /></p>
+        <p className="caption" id="demo-still-caption" role="status" data-tone={state.still ? tone : 'whole'} hidden={!reduced}><Words line={state.still ? line : still.say} /></p>
       </div>
     </>
   );

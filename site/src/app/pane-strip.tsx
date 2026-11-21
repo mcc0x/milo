@@ -7,6 +7,7 @@ export function PaneStrip({ children }: { children: ReactNode }) {
   const strip = useRef<HTMLElement>(null);
   const [beat, setBeat] = useState(false);
   useEffect(() => {
+    if (!('IntersectionObserver' in window)) return;
     const observer = new IntersectionObserver(([entry]) => {
       if (!entry.isIntersecting) return;
       if (!matchMedia('(prefers-reduced-motion: reduce)').matches) setBeat(true);
