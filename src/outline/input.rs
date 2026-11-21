@@ -35,6 +35,9 @@ impl Outline {
         if let Key::Focus(here) = key {
             if !here {
                 self.clicked = None;
+                if let Some(search) = &mut self.search {
+                    search.clear_click();
+                }
             }
             self.attention.focus(here, now);
             return After::Stay;
@@ -48,6 +51,26 @@ impl Outline {
                 }
                 after => after,
             };
+        }
+        if let Some(search) = &mut self.search {
+            use super::search::Action;
+
+            match search.key(key, now) {
+                Action::Ignored => return After::Ignored,
+                Action::Redraw => {}
+                Action::Close => self.search = None,
+                Action::Open => {
+                    if let Some(path) = search.selected_path().map(Rc::from) {
+                        self.search = None;
+                        self.open_file(ClickTarget::Tree(path));
+                    }
+                }
+            }
+            return After::Stay;
+        }
+        if key == Key::Char('/') || matches!(key, Key::Click(x, y) if self.painted.find_at(x, y)) {
+            self.start_search();
+            return After::Stay;
         }
         if key == Key::Char('q') || self.peek && key == Key::Esc {
             return After::Leave;
@@ -267,7 +290,7 @@ impl Outline {
             Ok(reader) => {
                 self.reading = reader;
                 if self.reading.is_some() {
-                    self.painted.tree_rows = 0..0;
+                    self.painted.clear_tree_targets();
                     self.painted.clear_strip_targets();
                 }
             }

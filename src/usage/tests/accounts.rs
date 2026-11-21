@@ -58,6 +58,10 @@ impl Provider {
                 let answers = answers.lock().unwrap();
                 let canned = answers.iter().find(|(id, _)| path.starts_with(&format!("/{id}/"))).map(|(_, c)| c);
                 let (status, header, body) = canned.map_or((404, "", ""), |c| (c.status, c.header, c.body.as_str()));
+                if status == 0 {
+                    // Simulate a connection that drops before any HTTP reply.
+                    continue;
+                }
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status} Canned\r\nContent-Type: application/json\r\n{header}Content-Length: {}\r\n\
@@ -185,14 +189,14 @@ fn each_provider_is_asked_its_documented_question_and_its_answer_keeps_its_own_u
     assert_eq!(copilot.until, Some(1_796_083_200));
 
     // What is saved for other panes holds figures and times, and no credential.
-    for account in UsageAccount::ALL {
-        let saved = fs::read_to_string(f.root.join(format!("state/accounts/{}.json", account.id()))).unwrap();
+    let entries: Vec<_> = fs::read_dir(f.root.join("state/accounts")).unwrap().map(|entry| entry.unwrap()).collect();
+    assert_eq!(entries.len(), UsageAccount::ALL.len());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_str().unwrap();
+        let saved = fs::read_to_string(entry.path()).unwrap();
         assert!(Value::parse(saved.as_bytes()).is_some(), "{saved}");
-        assert!(
-            environment
-                .iter()
-                .all(|(name, value)| name.ends_with("ORG") || name.ends_with("USER") || !saved.contains(value))
-        );
+        assert!(environment.iter().all(|(_, value)| !saved.contains(value) && !name.contains(value)));
     }
 }
 
@@ -393,6 +397,101 @@ fn panes_share_one_saved_answer_instead_of_each_asking_the_provider() {
 }
 
 #[test]
+fn panes_and_doctor_keep_separate_readings_and_cooldowns_for_each_key() {
+    let (f, provider) = (Fixture::folder(), Provider::start());
+    let router = UsageAccount::OpenRouter;
+    let accounts = [(router, Show::Always)];
+    let choices = chosen(&accounts);
+    let key = |token| sources(&f, &provider, &[("MILO_OPENROUTER_API_KEY", token)]);
+    let second = "sk-test-another-key";
+    let refused = "sk-test-refused-key";
+    let look = |token, now| {
+        let mut usage = pane(&f, key(token), &accounts);
+        usage.accounts.settle(now, false);
+        status(&usage, router, now)
+    };
+    // This old format cannot tell which key was asked.
+    f.write(
+        "state/accounts/openrouter.json",
+        &format!(r#"{{"version":1,"asked":{NOW},"next":{},"failure":"refused"}}"#, NOW + HOUR),
+    );
+    assert_eq!(key(KEY).doctor(choices, NOW)[1], "  no answer saved yet");
+    provider.reply("openrouter", 200, "", OPENROUTER);
+    let first = look(KEY, NOW);
+    assert!(matches!(first, Status::Reading(reading, None) if reading.figure == dollars(Kind::LimitLeft, 74.5)));
+    assert_eq!(key(second).doctor(choices, NOW)[1], "  no answer saved yet");
+
+    provider.reply("openrouter", 401, "", "");
+    assert_eq!(look(refused, NOW + 1), Status::Failed(Failure::Refused));
+    assert_eq!(key(refused).doctor(choices, NOW + 1)[1], "  last attempt: the provider refused the key");
+
+    provider.reply("openrouter", 200, "", &OPENROUTER.replace("74.5", "12.5"));
+    let different = look(second, NOW + 2);
+    assert!(matches!(different, Status::Reading(reading, None) if reading.figure == dollars(Kind::LimitLeft, 12.5)));
+    assert_eq!(look(KEY, NOW + 3), first);
+    assert_eq!(look(second, NOW + 3), different);
+    assert_eq!(look(refused, NOW + 3), Status::Failed(Failure::Refused));
+    assert!(key(KEY).doctor(choices, NOW + 3)[1].contains("$74.50"));
+    assert!(key(second).doctor(choices, NOW + 3)[1].contains("$12.50"));
+    assert_eq!(provider.requests(), 3);
+}
+
+#[test]
+fn a_named_account_does_not_reuse_the_answer_for_another_scope_of_the_same_key() {
+    let (f, provider) = (Fixture::folder(), Provider::start());
+    provider.reply("devin", 200, "", DEVIN);
+    let look = |org, now| {
+        let environment = [("MILO_DEVIN_API_KEY", KEY), ("MILO_DEVIN_ORG", org)];
+        let mut usage = pane(&f, sources(&f, &provider, &environment), &[(UsageAccount::Devin, Show::Always)]);
+        usage.accounts.settle(now, false);
+        status(&usage, UsageAccount::Devin, now)
+    };
+    let first = look("org-abc", NOW);
+    let second = look("org-def", NOW + 1);
+    assert_ne!(first, second);
+    assert_eq!(look("org-abc", NOW + 2), first);
+    assert_eq!(look("org-def", NOW + 2), second);
+    let requests = provider.asked("devin");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains("/org-abc/") && requests[1].contains("/org-def/"));
+}
+
+#[test]
+fn an_open_pane_drops_old_readings_and_in_flight_results_when_the_settings_key_changes() {
+    let (f, provider) = (Fixture::folder(), Provider::start());
+    let router = UsageAccount::OpenRouter;
+    let use_key = |key| {
+        f.write("config/usage-accounts.conf", &format!("MILO_OPENROUTER_API_KEY={key}\n"));
+        fs::set_permissions(f.root.join("config/usage-accounts.conf"), fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    use_key(KEY);
+    provider.reply("openrouter", 200, "", OPENROUTER);
+    let mut usage = pane(&f, sources(&f, &provider, &[]), &[(router, Show::Always)]);
+    usage.accounts.settle(NOW, false);
+    assert!(text(&mut usage, 60, 1).contains("$74.50"));
+
+    // Let an old-key reload finish without allowing the pane to collect it yet.
+    usage.accounts.start(NOW + MINUTE, true);
+    let mut fd = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: `fd` is writable and the pane keeps its job descriptor open.
+    assert_eq!(unsafe { libc::poll(&raw mut fd, 1, 5000) }, 1);
+    use_key("sk-test-replacement-key");
+    assert!(matches!(usage.check_external(), External::Redraw));
+    assert_eq!(status(&usage, router, NOW + MINUTE), Status::Checking);
+    assert!(!text(&mut usage, 60, 1).contains("$74.50"));
+
+    provider.reply("openrouter", 200, "", &OPENROUTER.replace("74.5", "12.5"));
+    usage.accounts.settle(NOW + MINUTE + 1, false);
+    assert!(text(&mut usage, 60, 1).contains("$12.50"));
+    use_key(KEY);
+    usage.accounts.start(NOW + MINUTE + 2, false);
+    assert!(!text(&mut usage, 60, 1).contains("$12.50"));
+    usage.accounts.settle(NOW + MINUTE + 2, false);
+    assert!(text(&mut usage, 60, 1).contains("$74.50"));
+    assert_eq!(provider.requests(), 3);
+}
+
+#[test]
 fn a_reply_in_another_form_is_unknown_and_never_a_figure_of_zero() {
     let (f, provider) = (Fixture::folder(), Provider::start());
     let environment = [
@@ -508,6 +607,41 @@ fn a_count_is_asked_for_again_when_its_period_ends_and_not_a_whole_interval_late
     assert_eq!(asked.len(), 2);
     assert!(asked[1].contains(&format!("time_after={end}&time_before={} ", end + DAY)), "{asked:?}");
     assert!(matches!(status(&usage, devin, end), Status::Reading(reading, None) if reading.until == Some(end + DAY)));
+}
+
+#[test]
+fn unreachable_attempts_retry_after_one_minute_and_keep_the_last_reading() {
+    for failure in [0, 503] {
+        let (f, provider) = (Fixture::folder(), Provider::start());
+        let devin = UsageAccount::Devin;
+        let environment = [("MILO_DEVIN_API_KEY", KEY), ("MILO_DEVIN_ORG", "org-abc")];
+        let sources = sources(&f, &provider, &environment);
+        let choices = [(devin, Show::Always)];
+        let mut usage = pane(&f, sources.clone(), &choices);
+        provider.reply("devin", 200, "", DEVIN);
+        usage.accounts.settle(NOW, false);
+
+        let wake = NOW + 20 * MINUTE;
+        provider.reply("devin", failure, "", "");
+        usage.accounts.settle(wake, false);
+        let reading = status(&usage, devin, wake);
+        assert!(matches!(reading, Status::Reading(reading, None) if reading.observed == NOW));
+        assert_eq!(provider.requests(), 2);
+
+        provider.reply("devin", 200, "", DEVIN);
+        usage.accounts.settle(wake + MINUTE - 1, false);
+        let mut reopened = pane(&f, sources, &choices);
+        reopened.accounts.settle(wake + MINUTE - 1, false);
+        assert_eq!(status(&reopened, devin, wake + MINUTE - 1), reading);
+        assert_eq!(provider.requests(), 2);
+
+        reopened.accounts.settle(wake + MINUTE, false);
+        assert!(matches!(status(&reopened, devin, wake + MINUTE), Status::Reading(reading, None)
+            if reading.observed == wake + MINUTE));
+        usage.accounts.settle(wake + MINUTE, false);
+        assert_eq!(status(&usage, devin, wake + MINUTE), status(&reopened, devin, wake + MINUTE));
+        assert_eq!(provider.requests(), 3);
+    }
 }
 
 #[test]
@@ -660,7 +794,7 @@ fn doctor_describes_an_account_from_its_settings_and_saved_answer_without_asking
     assert_eq!(
         sources.doctor(on, NOW),
         [
-            "DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from the environment, at most every 5 minutes"
+            "DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from the environment, usually every 5 minutes"
                 .to_owned(),
             "  no answer saved yet".to_owned(),
             format!("Devin ACUs: not asked; set MILO_DEVIN_ORG in the environment or in {}", file.display()),

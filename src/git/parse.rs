@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use super::{Commit, CommitId, CommitVersion, DiffFiles, Ends, Kind, PendingFile};
 use crate::when;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Status {
     pub(super) branch: String,
     pub(super) ends: Ends,

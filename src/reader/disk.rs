@@ -1,9 +1,9 @@
 //! Reads a working file for editing and writes it back only where it was read from.
 //!
 //! A save goes through the open file, so its permissions, owner, links and
-//! attributes stay as they were. Before writing, the file is read again: if
-//! it no longer holds what the edit started from, nothing is written unless
-//! the user says to overwrite it.
+//! attributes stay as they were. Before writing, Milo reads the file again.
+//! An overwrite confirms one particular version, not anything a different
+//! program may have written since the question appeared.
 
 use std::fs::File;
 use std::io;
@@ -42,27 +42,39 @@ impl ReadOnly {
     }
 }
 
+/// The identity and exact bytes seen during a read, including any byte-order mark.
+#[derive(PartialEq, Eq)]
+pub(super) struct Snapshot {
+    identity: (u64, u64),
+    text: String,
+}
+
+impl Snapshot {
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 /// The file as it was when read: what a save expects to replace.
 pub(super) struct Original {
-    bytes: Vec<u8>,
-    /// The file began with a byte-order mark when it was first read. Text typed
-    /// into the draft later does not decide this.
+    snapshot: Snapshot,
+    /// A mark typed into the draft does not decide whether to restore the original one.
     marked: bool,
-    /// The device and file numbers, which a file put in its place does not share.
-    identity: (u64, u64),
 }
 
 impl Original {
     /// The text to edit, without the byte-order mark a save puts back.
     pub(super) fn text(&self) -> &str {
-        let text = std::str::from_utf8(&self.bytes).expect("only UTF-8 files are loaded");
+        let text = self.snapshot.text();
         if self.marked { &text[BOM.len()..] } else { text }
     }
 
-    /// The bytes of the file when it holds `text`.
-    pub(super) fn bytes_for(&self, text: &str) -> Vec<u8> {
-        let bom = if self.marked { BOM } else { "" };
-        [bom.as_bytes(), text.as_bytes()].concat()
+    /// The text of the file when it holds the draft.
+    pub(super) fn with_mark(&self, mut text: String) -> String {
+        if self.marked {
+            text.insert_str(0, BOM);
+        }
+        text
     }
 }
 
@@ -73,24 +85,22 @@ pub(super) enum SaveError {
     Refused(&'static str),
 }
 
-/// Text that milo shows and can write back unchanged: UTF-8 with no NUL bytes.
-fn is_text(bytes: &[u8]) -> bool {
-    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
-}
-
-/// Opens the file itself and checks that it is the regular file the lookup found.
-fn open(entry: &Entry<'_>, write: bool) -> io::Result<(File, (u64, u64))> {
+/// Opens the file itself and checks that it is a regular file.
+fn open(entry: &Entry<'_>, write: bool) -> io::Result<(File, std::fs::Metadata)> {
     let file = if write { entry.open_edit() } else { entry.open_read() }?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    Ok((file, (metadata.dev(), metadata.ino())))
+    Ok((file, metadata))
 }
 
 /// Reads all of a file that is within the limit.
-fn contents(file: &File) -> io::Result<Option<Vec<u8>>> {
-    let mut bytes = Vec::new();
+fn contents(file: &File, size: u64) -> io::Result<Option<Vec<u8>>> {
+    if size > LIMIT {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
     let mut offset = 0;
     let mut chunk = [0; 1 << 16];
     loop {
@@ -100,11 +110,12 @@ fn contents(file: &File) -> io::Result<Option<Vec<u8>>> {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
-        bytes.extend_from_slice(&chunk[..read]);
+        // Check the incoming part too: the file could have grown after opening.
         offset += read as u64;
         if offset > LIMIT {
             return Ok(None);
         }
+        bytes.extend_from_slice(&chunk[..read]);
     }
 }
 
@@ -120,7 +131,7 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     if !entry.writable() {
         return Err(ReadOnly::NO_PERMISSION);
     }
-    let (file, identity) = open(entry, false).map_err(|error| match error.kind() {
+    let (file, meta) = open(entry, false).map_err(|error| match error.kind() {
         io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => ReadOnly::NO_PERMISSION,
         io::ErrorKind::NotFound => ReadOnly::GONE,
         io::ErrorKind::InvalidInput => ReadOnly::NOT_FILE,
@@ -128,22 +139,23 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
         _ if error.raw_os_error() == Some(libc::ELOOP) => ReadOnly::LINK,
         _ => ReadOnly::UNREADABLE,
     })?;
-    let bytes = contents(&file).map_err(|_| ReadOnly::UNREADABLE)?.ok_or(ReadOnly::TOO_LARGE)?;
-    if !is_text(&bytes) {
+    let bytes = contents(&file, meta.len()).map_err(|_| ReadOnly::UNREADABLE)?.ok_or(ReadOnly::TOO_LARGE)?;
+    if bytes.contains(&0) {
         return Err(ReadOnly::NOT_TEXT);
     }
     let marked = bytes.starts_with(BOM.as_bytes());
-    Ok(Original { bytes, marked, identity })
+    let text = String::from_utf8(bytes).map_err(|_| ReadOnly::NOT_TEXT)?;
+    Ok(Original { snapshot: Snapshot { text, identity: (meta.dev(), meta.ino()) }, marked })
 }
 
-/// Writes `text` over the file `original` was read from. With `overwrite`, a
-/// regular file that has changed, or has been put in its place, is written too.
+/// Writes the draft, or returns the current snapshot if it does not match the
+/// original or the exact replacement the user confirmed.
 pub(super) fn save(
     entry: Result<&Entry<'_>, LookupError>,
     original: &mut Original,
-    text: &str,
-    overwrite: bool,
-) -> Result<(), SaveError> {
+    draft: impl FnOnce() -> String,
+    confirmed: Option<&Snapshot>,
+) -> Result<Option<Snapshot>, SaveError> {
     let entry = entry.map_err(|error| {
         SaveError::Refused(match error {
             LookupError::Gone => "Not saved: the file is gone.",
@@ -154,33 +166,45 @@ pub(super) fn save(
     if !entry.is_regular() {
         return Err(SaveError::Refused("Not saved: no longer a regular file."));
     }
-    let (file, identity) = open(entry, true).map_err(|error| {
+    let (file, meta) = open(entry, true).map_err(|error| {
         SaveError::Refused(match error.kind() {
             io::ErrorKind::NotFound => "Not saved: the file is gone.",
             io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => "Not saved: no write permission.",
             _ => "Not saved: the file cannot be opened.",
         })
     })?;
-    let current = contents(&file).map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
-    let unchanged = identity == original.identity && current.as_deref() == Some(original.bytes.as_slice());
-    if !unchanged && !overwrite {
-        return Err(SaveError::Changed);
+    let bytes = contents(&file, meta.len())
+        .map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?
+        .ok_or(SaveError::Refused("Not saved: the file is now too large."))?;
+    if bytes.contains(&0) {
+        return Err(SaveError::Refused("Not saved: the file is no longer text."));
     }
-    let bytes = original.bytes_for(text);
-    let written = file.write_all_at(&bytes, 0).and_then(|()| file.set_len(bytes.len() as u64));
+    let text = String::from_utf8(bytes).map_err(|_| SaveError::Refused("Not saved: the file is no longer text."))?;
+    let identity = (meta.dev(), meta.ino());
+    let current = Snapshot { identity, text };
+    let replacement = (&current == confirmed.unwrap_or(&original.snapshot)).then(|| original.with_mark(draft()));
+    // Only present snapshots from stable reads, and do not write over an edit that happened during one.
+    let after = file.metadata().map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
+    let stamp = |m: &std::fs::Metadata| (m.len(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec());
+    if stamp(&after) != stamp(&meta) {
+        return Err(SaveError::Refused("Not saved: the file changed while reading. Save again."));
+    }
+    let Some(text) = replacement else { return Ok(Some(current)) };
+    let bytes = text.as_bytes();
+    let written = file.write_all_at(bytes, 0).and_then(|()| file.set_len(bytes.len() as u64));
     if written.is_err() {
         // Leave what was there rather than part of each.
-        let restored =
-            current.is_some_and(|old| file.write_all_at(&old, 0).and_then(|()| file.set_len(old.len() as u64)).is_ok());
+        let old = current.text.as_bytes();
+        let restored = file.write_all_at(old, 0).and_then(|()| file.set_len(old.len() as u64)).is_ok();
         return Err(SaveError::Refused(if restored {
             "Not saved: writing failed. File is as it was."
         } else {
             "Write failed: check the file before closing."
         }));
     }
-    *original = Original { bytes, marked: original.marked, identity };
+    original.snapshot = Snapshot { text, identity };
     if file.sync_all().is_err() {
         return Err(SaveError::Refused("Not confirmed on disk: save again."));
     }
-    Ok(())
+    Ok(None)
 }

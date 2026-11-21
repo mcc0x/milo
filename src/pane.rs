@@ -83,6 +83,18 @@ pub trait Pane {
         self.check()
     }
 
+    /// Readable once a check that `check` left running away from the loop has
+    /// its answer. The loop takes no other look until then.
+    fn unfinished_check(&self) -> Option<RawFd> {
+        None
+    }
+
+    /// Takes in what that check found, or returns `None` while there is nothing
+    /// to take in. False asks the loop to check again soon.
+    fn finish_check(&mut self) -> Option<bool> {
+        None
+    }
+
     fn external_fd(&self) -> Option<RawFd> {
         None
     }
@@ -153,11 +165,23 @@ pub(super) struct Pace {
     took: Duration,
     next: NextLook,
     git_locked_since: Option<Instant>,
+    /// When a check that is still running away from the loop started.
+    away: Option<Instant>,
+    /// The watcher reported a change while that check was away.
+    moved_while_away: bool,
 }
 
 impl Pace {
     fn new(idle: Duration, now: Instant) -> Self {
-        Self { idle, ended: now, took: Duration::ZERO, next: NextLook::Idle, git_locked_since: None }
+        Self {
+            idle,
+            ended: now,
+            took: Duration::ZERO,
+            next: NextLook::Idle,
+            git_locked_since: None,
+            away: None,
+            moved_while_away: false,
+        }
     }
 
     #[cfg(test)]
@@ -172,6 +196,7 @@ impl Pace {
             self.took = Duration::ZERO;
         }
         self.next = NextLook::Prompt;
+        self.moved_while_away |= self.away.is_some();
     }
 
     fn waiting_for_git(&self) -> bool {
@@ -197,11 +222,20 @@ impl Pace {
         rest.saturating_sub(now.saturating_duration_since(self.ended))
     }
 
+    /// The check carries on away from the loop, which takes no look until it is finished.
+    fn leave_running(&mut self, started: Instant) {
+        self.away = Some(started);
+        self.git_locked_since = None;
+    }
+
     /// An unsettled look, say during a checkout, is retried as if a change was reported.
     fn finish_look(&mut self, started: Instant, ended: Instant, settled: bool) {
         (self.ended, self.took) = (ended, ended - started);
+        // A change reported while a check was away can be newer than what it read.
+        let settled = settled && !std::mem::take(&mut self.moved_while_away);
         self.next = if settled { NextLook::Idle } else { NextLook::Prompt };
         self.git_locked_since = None;
+        self.away = None;
     }
 }
 
@@ -360,15 +394,56 @@ pub(super) fn check_watched_pane_at(
         return timing.block_on_git(started);
     }
     let settled = pane.check_with_watcher(watcher.fd().is_some(), started);
+    if pane.unfinished_check().is_some() {
+        timing.leave_running(started);
+    } else {
+        finish_watched_look(pane, watcher, pace, keep_polling, (started, clock()), settled);
+    }
+    true
+}
+
+/// Ends a look that `started` and `ended` at `span`, whether it ran in the loop or away from it.
+fn finish_watched_look(
+    pane: &dyn Pane,
+    watcher: &mut Watcher,
+    pace: &mut Option<Pace>,
+    keep_polling: bool,
+    span: (Instant, Instant),
+    settled: bool,
+) {
+    let Some(timing) = pace else { return };
     // A snapshot cannot see edits made just after it. If coverage changed,
     // check again under the new scope rather than relying on the old event queue.
     let handoff = watcher.refresh(pane.watch_scope());
     if let Some(idle) = watch_idle(watcher, keep_polling) {
         timing.idle = idle;
-        timing.finish_look(started, clock(), settled && !handoff);
+        timing.finish_look(span.0, span.1, settled && !handoff);
     } else {
         *pace = None;
     }
+}
+
+/// Takes in a check that was left running, once it has an answer or the pane has dropped it.
+fn finish_away_check(
+    pane: &mut dyn Pane,
+    watcher: &mut Watcher,
+    pace: &mut Option<Pace>,
+    keep_polling: bool,
+    clock: impl Fn() -> Instant,
+) -> bool {
+    let started = pace.as_ref().and_then(|pace| pace.away);
+    // A pace made anew, as for another scope, does not know of a check its pane still has away.
+    if started.is_none() && pane.unfinished_check().is_none() {
+        return false;
+    }
+    let settled = match pane.finish_check() {
+        Some(settled) => settled,
+        // The pane loaded by itself meanwhile, and nothing says that was the latest.
+        None if pane.unfinished_check().is_none() => false,
+        None => return false,
+    };
+    let ended = clock();
+    finish_watched_look(pane, watcher, pace, keep_polling, (started.unwrap_or(ended), ended), settled);
     true
 }
 
@@ -406,7 +481,7 @@ fn with_loading<T>(
             'loading: while !terminal.stopping() {
                 let timeout = if painted { -1 } else { milliseconds(delay.saturating_duration_since(Instant::now())) };
                 let check_size = match terminal.wait_for_open(timeout, ready.as_raw_fd()) {
-                    Wait::Woken | Wait::External => return,
+                    Wait::Woken | Wait::External | Wait::Checked => return,
                     Wait::Closed => break,
                     Wait::Timeout | Wait::Interrupted => true,
                     Wait::Input => {
@@ -480,7 +555,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         Exit::OpenWeb => {
             terminal.restore();
             // Home has no port selector; a second worktree needs its own session.
-            crate::web::run(true, 0)
+            crate::web::run(crate::web::Start::Local { open_browser: true, port: 0 })
         }
     }
 }
@@ -564,6 +639,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
         let now = Instant::now();
         let wait = pace
             .as_ref()
+            .filter(|pace| pace.away.is_none())
             .map(|pace| pace.until_look(now))
             .into_iter()
             .chain(frame_due.map(|due: Instant| due.saturating_duration_since(now)))
@@ -571,7 +647,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
             .min();
         let timeout_ms = wait.map_or(-1, milliseconds);
         terminal.keep_pastes(help.is_none() && pane.editing());
-        match terminal.wait(timeout_ms, watcher.fd(), pane.external_fd()) {
+        match terminal.wait(timeout_ms, [watcher.fd(), pane.external_fd(), pane.unfinished_check()]) {
             Wait::Input => {
                 let mut overlay_changed = false;
                 keys.extend(terminal.receive());
@@ -660,15 +736,16 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                 }
             }
             Wait::Interrupted if term::RESIZED.load(Ordering::Relaxed) => continue,
-            Wait::Timeout | Wait::Interrupted => {}
+            Wait::Timeout | Wait::Interrupted | Wait::Checked => {}
             Wait::Closed => break,
         }
         if term::TERMINATED.load(Ordering::Relaxed) {
             break;
         }
+        redraw |= finish_away_check(pane.as_mut(), &mut watcher, &mut pace, check_on_open, Instant::now);
         let now = Instant::now();
         redraw |= frame_due.is_some_and(|due| due <= now);
-        if pace.as_ref().is_some_and(|pace| pace.until_look(now).is_zero()) {
+        if pace.as_ref().is_some_and(|pace| pace.away.is_none() && pace.until_look(now).is_zero()) {
             redraw |= check_watched_pane(pane.as_mut(), &mut watcher, &mut pace, check_on_open);
         }
     }
@@ -898,6 +975,93 @@ mod tests {
         assert_eq!(pace.until_look(retry), Duration::ZERO);
         pace.finish_look(retry, retry + Duration::from_millis(10), true);
         assert_eq!(pace.until_look(retry + Duration::from_millis(10)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_change_reported_while_a_check_is_away_brings_another_look_soon() {
+        let start = Instant::now();
+        let ended = start + Duration::from_millis(10);
+        let mut pace = Pace::new(WATCHED, start);
+        pace.leave_running(start);
+        pace.finish_look(start, ended, true);
+        assert_eq!(pace.until_look(ended), WATCHED);
+
+        pace.leave_running(ended);
+        pace.report_change();
+        let later = ended + Duration::from_millis(10);
+        pace.finish_look(ended, later, true);
+        assert_eq!(pace.until_look(later), MIN_LOOK_INTERVAL);
+    }
+
+    /// A pane whose check stays away until the test says what it found.
+    struct Away {
+        ready: Option<io::PipeReader>,
+        found: Option<bool>,
+    }
+
+    impl Away {
+        fn watched(start: Instant) -> (Self, Watcher, Option<Pace>) {
+            let pane = Self { ready: Some(io::pipe().unwrap().0), found: None };
+            let watcher = Watcher::new(pane.watch_scope());
+            (pane, watcher, Some(Pace::new(UNWATCHED, start)))
+        }
+    }
+
+    impl Pane for Away {
+        fn draw(&mut self, _: &mut Screen) {}
+        fn help(&self) -> Page {
+            Page::new(vec![])
+        }
+        fn unfinished_check(&self) -> Option<RawFd> {
+            self.ready.as_ref().map(AsRawFd::as_raw_fd)
+        }
+        fn finish_check(&mut self) -> Option<bool> {
+            let found = self.found.take()?;
+            self.ready = None;
+            Some(found)
+        }
+        fn key(&mut self, _: Key) -> After {
+            After::Ignored
+        }
+    }
+
+    #[test]
+    fn a_check_left_running_is_not_repeated_and_rests_for_its_whole_length_afterwards() {
+        let start = Instant::now();
+        let (mut pane, mut watcher, mut pace) = Away::watched(start);
+        assert!(check_watched_pane_at(&mut pane, &mut watcher, &mut pace, true, || start));
+
+        let later = start + Duration::from_secs(1);
+        assert!(!finish_away_check(&mut pane, &mut watcher, &mut pace, true, || later));
+        assert!(pace.as_ref().unwrap().away.is_some());
+
+        pane.found = Some(true);
+        assert!(finish_away_check(&mut pane, &mut watcher, &mut pace, true, || later));
+        let pace = pace.unwrap();
+        assert!(pace.away.is_none());
+        assert_eq!(pace.until_look(later), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_pane_that_drops_its_running_check_is_looked_at_again_soon() {
+        let start = Instant::now();
+        let (mut pane, mut watcher, mut pace) = Away::watched(start);
+        check_watched_pane_at(&mut pane, &mut watcher, &mut pace, true, || start);
+        pane.ready = None;
+        assert!(finish_away_check(&mut pane, &mut watcher, &mut pace, true, || start));
+        let pace = pace.unwrap();
+        assert!(pace.away.is_none());
+        assert_eq!(pace.until_look(start), MIN_LOOK_INTERVAL);
+    }
+
+    #[test]
+    fn an_answer_is_taken_in_even_by_a_pace_that_never_saw_its_check_start() {
+        let start = Instant::now();
+        let (mut pane, mut watcher, mut pace) = Away::watched(start);
+        assert!(!finish_away_check(&mut pane, &mut watcher, &mut pace, true, || start));
+        pane.found = Some(true);
+        assert!(finish_away_check(&mut pane, &mut watcher, &mut pace, true, || start));
+        assert!(pane.unfinished_check().is_none());
     }
 
     #[test]

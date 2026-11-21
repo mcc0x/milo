@@ -2,13 +2,14 @@
 //! panes see that a floating reader holds some.
 //!
 //! Both live in milo's state folder, never in the project. A kept draft is
-//! named after the file's path and offered the next time that file is edited.
+//! named after the file's path and offered one at a time when that file is edited.
 
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::content::LIMIT;
 use crate::fs_ops::{self, Temp};
@@ -52,35 +53,73 @@ fn hashed(text: &[u8]) -> String {
 }
 
 /// Where an interrupted edit of one file is kept.
-pub(super) struct Draft {
+pub(super) struct Drafts {
     state: PathBuf,
     /// The file's full path, which names the draft and is shown to the user.
     file: PathBuf,
 }
 
-impl Draft {
+impl Drafts {
     pub(super) fn new(state: PathBuf, file: PathBuf) -> Self {
         Self { state, file }
     }
 
-    fn path(&self) -> PathBuf {
-        let name = hashed(self.file.as_os_str().as_encoded_bytes());
-        self.state.join("drafts").join(format!("{name}.draft"))
+    fn dir(&self) -> PathBuf {
+        self.state.join("drafts")
     }
 
-    /// Writes the unsaved text beside any other drafts, replacing an older one
-    /// for this file. Returns what to tell the user about it.
-    pub(super) fn keep(&self, bytes: &[u8]) -> String {
+    fn name(&self) -> String {
+        hashed(self.file.as_os_str().as_encoded_bytes())
+    }
+
+    pub(super) fn first(&self) -> Option<Draft> {
+        let dir = self.dir();
+        let name = self.name();
+        let first = dir.join(format!("{name}.draft"));
+        if fs::symlink_metadata(&first).is_ok_and(|metadata| metadata.is_file()) {
+            return Some(Draft(first));
+        }
+        fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let filename = entry.file_name();
+                let tail = filename.to_str()?.strip_prefix(&name)?.strip_prefix('-')?.strip_suffix(".draft")?;
+                let slot = tail.parse::<u128>().ok()?;
+                entry.file_type().ok()?.is_file().then(|| (slot, Draft(entry.path())))
+            })
+            .min_by_key(|(slot, _)| *slot)
+            .map(|(_, draft)| draft)
+    }
+
+    /// Updates the restored copy, or adds an independent draft without replacing other copies.
+    /// Returns what to tell the user about it.
+    pub(super) fn keep(&self, bytes: &[u8], restored: Option<&Draft>) -> String {
         let write = || {
             let dir = private_dir(&self.state, "drafts")?;
-            let path = self.path();
+            let name = self.name();
             let staged = dir.join(format!(".draft-{}", std::process::id()));
             // A process of the same number may have died while writing one.
             let _ = fs::remove_file(&staged);
             let (temp, mut file) = Temp::create(staged)?;
             file.write_all(bytes)?;
             file.sync_all()?;
-            temp.replace(&path)
+            // Publish under a new name before giving up the restored copy. Other readers can
+            // have restored it too, and their independently kept copies must not overwrite ours.
+            let mut slot = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+            loop {
+                let filename = format!("{name}-{slot:039}.draft");
+                match fs::hard_link(temp.path(), dir.join(filename)) {
+                    Ok(()) => {
+                        if let Some(restored) = restored {
+                            restored.forget();
+                        }
+                        return Ok(());
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => slot += 1,
+                    Err(error) => return Err(error),
+                }
+            }
         };
         match write() {
             Ok(()) => format!(
@@ -90,14 +129,14 @@ impl Draft {
             Err(error) => format!("unsaved edits to {} could not be kept: {error}", self.file.display()),
         }
     }
+}
 
-    pub(super) fn exists(&self) -> bool {
-        fs::symlink_metadata(self.path()).is_ok_and(|metadata| metadata.is_file())
-    }
+pub(super) struct Draft(PathBuf);
 
+impl Draft {
     /// The kept text, if it is still text milo can edit.
     pub(super) fn read(&self) -> Option<String> {
-        let file = fs_ops::open_read(&self.path()).ok()?;
+        let file = fs_ops::open_read(&self.0).ok()?;
         if !file.metadata().ok()?.is_file() {
             return None;
         }
@@ -108,7 +147,7 @@ impl Draft {
     }
 
     pub(super) fn forget(&self) {
-        let _ = fs::remove_file(self.path());
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -164,19 +203,30 @@ mod tests {
 
         let f = Fixture::folder();
         let state = f.root.join("state");
-        let draft = Draft::new(state.clone(), f.root.join("a.txt"));
-        assert!(!draft.exists() && draft.read().is_none());
-        let note = draft.keep(b"kept \xc3\xa9\r\n");
+        let drafts = Drafts::new(state.clone(), f.root.join("a.txt"));
+        assert!(drafts.first().is_none());
+        // Recognize the original single-draft file name as well.
+        private_dir(&state, "drafts").unwrap();
+        let (temp, mut file) = Temp::create(drafts.dir().join(".legacy")).unwrap();
+        file.write_all(b"kept \xc3\xa9\r\n").unwrap();
+        temp.replace(&drafts.dir().join(format!("{}.draft", drafts.name()))).unwrap();
+        let note = drafts.keep(b"another copy", None);
         assert!(note.contains("a.txt") && note.contains("were kept"), "{note}");
+        let draft = drafts.first().unwrap();
         assert_eq!(draft.read().as_deref(), Some("kept é\r\n"));
-        assert_eq!(fs::metadata(draft.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&draft.0).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::metadata(state.join("drafts")).unwrap().permissions().mode() & 0o777, 0o700);
-        assert!(!Draft::new(state.clone(), f.root.join("b.txt")).exists());
-        // A later draft of the same file takes the older one's place.
-        assert!(draft.keep(b"newer").contains("were kept"));
-        assert_eq!(draft.read().as_deref(), Some("newer"));
-        draft.forget();
-        assert!(!draft.exists());
+        assert!(Drafts::new(state, f.root.join("b.txt")).first().is_none());
+        // Saving a successor to the restored copy removes only its predecessor.
+        assert!(drafts.keep(b"newer", Some(&draft)).contains("were kept"));
+        assert!(draft.read().is_none());
+        let other = drafts.first().unwrap();
+        assert_eq!(other.read().as_deref(), Some("another copy"));
+        other.forget();
+        let newer = drafts.first().unwrap();
+        assert_eq!(newer.read().as_deref(), Some("newer"));
+        newer.forget();
+        assert!(drafts.first().is_none());
     }
 
     #[test]

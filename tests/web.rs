@@ -40,11 +40,12 @@ struct Editor {
     root: PathBuf,
     child: Child,
     link: String,
+    address: String,
 }
 
 impl Editor {
     /// Returns once the link is printed, which must not wait for Rex.
-    fn start() -> Self {
+    fn start(forwarded: bool) -> Self {
         let name = format!("milo-web-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let root = std::env::temp_dir().join(name);
         fs::create_dir_all(root.join("bin")).unwrap();
@@ -53,7 +54,8 @@ impl Editor {
         let mut path = root.join("bin").into_os_string();
         path.push(":/usr/bin:/bin");
         let mut child = Command::new(env!("CARGO_BIN_EXE_milo"))
-            .args(["web", "--no-open", "--port", "0"])
+            .args(["web", "--port", "0"])
+            .args(if forwarded { &["--forwarded-port", "80"][..] } else { &["--no-open"][..] })
             .env_clear()
             .current_dir(&root)
             .env("PATH", path)
@@ -71,13 +73,23 @@ impl Editor {
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = output.read_line(&mut line);
-            let _ = send.send(line);
+            let mut link = String::new();
+            let mut target = String::new();
+            let _ = output.read_line(&mut link);
+            if forwarded {
+                let _ = output.read_line(&mut target);
+            }
+            let _ = send.send((link, target));
         });
-        let link = receive.recv_timeout(WAIT).unwrap_or_default();
-        let editor = Self { root, child, link: link.trim_end().to_owned() };
-        assert!(editor.link.starts_with("http://127.0.0.1:"), "no link while Rex was still asked: {link:?}");
+        let (link, target) = receive.recv_timeout(WAIT).unwrap_or_default();
+        let address = if forwarded {
+            target.trim_end().strip_prefix("milo web: serving a forward on ").unwrap_or_default()
+        } else {
+            link.strip_prefix("http://").and_then(|url| url.split_once("/#")).map_or("", |(host, _)| host)
+        };
+        let editor = Self { root, child, link: link.trim_end().to_owned(), address: address.to_owned() };
+        assert!(editor.link.starts_with("http://127.0.0.1"), "no link while Rex was still asked");
+        assert!(editor.address.starts_with("127.0.0.1:"), "no serving port while Rex was still asked");
         editor
     }
 
@@ -97,7 +109,7 @@ impl Editor {
     fn ask_for_state(&self) -> TcpStream {
         let (origin, token) = self.link.split_once("/#").unwrap();
         let host = origin.strip_prefix("http://").unwrap();
-        let mut socket = TcpStream::connect(host).unwrap();
+        let mut socket = TcpStream::connect(&self.address).unwrap();
         write!(socket, "GET /api/state HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\r\n").unwrap();
         socket
     }
@@ -133,7 +145,7 @@ fn silent(socket: &mut TcpStream) -> bool {
 
 #[test]
 fn the_link_comes_before_rex_answers_and_the_state_only_after() {
-    let mut editor = Editor::start();
+    let mut editor = Editor::start(false);
     editor.wait_until_rex_is_asked();
     let mut early = editor.ask_for_state();
     assert!(silent(&mut early), "a state was served before the editor knew its tab");
@@ -150,7 +162,7 @@ fn the_link_comes_before_rex_answers_and_the_state_only_after() {
 
 #[test]
 fn stopping_while_rex_is_asked_ends_at_once_without_serving_a_state() {
-    let mut editor = Editor::start();
+    let mut editor = Editor::start(false);
     editor.wait_until_rex_is_asked();
     let mut early = editor.ask_for_state();
     assert!(silent(&mut early));
@@ -161,4 +173,21 @@ fn stopping_while_rex_is_asked_ends_at_once_without_serving_a_state() {
     // A connection the server never took is reset or closed, with nothing in it.
     let _ = early.read_to_end(&mut reply);
     assert!(reply.is_empty(), "{}", String::from_utf8_lossy(&reply));
+}
+
+#[test]
+fn a_forwarded_editor_announces_both_ends_before_its_state_is_ready() {
+    let mut editor = Editor::start(true);
+    assert!(editor.link.starts_with("http://127.0.0.1/#"), "the link should name the browser's end of the forward");
+    editor.wait_until_rex_is_asked();
+    let mut early = editor.ask_for_state();
+    assert!(silent(&mut early), "a state was served before the forwarded editor knew its tab");
+
+    editor.release_rex();
+    early.set_read_timeout(Some(WAIT)).unwrap();
+    let mut reply = String::new();
+    early.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 200 OK\r\n"), "{reply}");
+    assert!(reply.contains(r#""forwarded":true"#), "{reply}");
+    assert!(editor.stop().success());
 }

@@ -23,6 +23,7 @@ const HINT_ROWS: usize = 12;
 /// From this outline width each file also says what happened to it.
 const WIDE_COLS: usize = 52;
 const GIT_ERROR: &str = "git did not answer";
+const FIND: &str = "/ find";
 
 #[derive(Default)]
 pub(super) struct Layout {
@@ -37,6 +38,7 @@ pub(super) struct Layout {
     heading: bool,
     hint: bool,
     wide: bool,
+    find_y: Option<usize>,
     partial: bool,
 }
 
@@ -67,6 +69,15 @@ impl Layout {
 
     pub(super) fn clear_strip_targets(&mut self) {
         self.strip_hits.clear();
+    }
+
+    pub(super) fn find_at(&self, x: usize, y: usize) -> bool {
+        self.find_y == Some(y) && (1..1 + FIND.len()).contains(&x)
+    }
+
+    pub(super) fn clear_tree_targets(&mut self) {
+        self.tree_rows = 0..0;
+        self.find_y = None;
     }
 }
 
@@ -136,8 +147,8 @@ impl Outline {
                 s.put_fit(1, s.h - 1, s.w - 2, note, Style::fg(screen::YELLOW));
             } else if git_unavailable {
                 s.put_fit(1, s.h - 1, s.w - 2, GIT_UNAVAILABLE, ui::DEL);
-            } else if layout.hint && self.attention.show_controls() {
-                self.draw_hint(s);
+            } else if layout.hint && self.attention.show_controls() && self.draw_hint(s) {
+                layout.find_y = Some(s.h - 1);
             }
         }
         self.record_layout(layout);
@@ -225,14 +236,14 @@ impl Outline {
 
     /// Words the keys for what they would do, with shorter hints in narrow
     /// panes. On screen a pending file is simply one that changed.
-    fn draw_hint(&self, s: &mut Screen) {
+    fn draw_hint(&self, s: &mut Screen) -> bool {
         let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
         if self.repo.git {
             let filter = if self.pending_only { "c all files" } else { "c changed only" };
             let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
-            help::draw_hint(s, first, &[folders, filter, "q quit"], "? help");
+            help::draw_hint(s, FIND, &[first, folders, filter, "q quit"], "? help").index_at(1, s.h - 1) == Some(0)
         } else {
-            help::draw_hint(s, "Enter open", &[folders, "q quit"], "? help");
+            help::draw_hint(s, FIND, &["Enter open", folders, "q quit"], "? help").index_at(1, s.h - 1) == Some(0)
         }
     }
 

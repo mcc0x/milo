@@ -23,9 +23,13 @@ pub(crate) enum Outcome {
     Sent,
     /// The destination limits the rate and says when to try again.
     Wait(Duration),
+    /// The relay is temporarily unavailable and has not forwarded the message.
+    Unavailable(Duration),
     /// The destination will not take this request, now or later: a wrong or
     /// revoked secret, an unknown chat, or a bot that may not post there.
     Refused(u16),
+    /// The relay may have forwarded the message, but delivery was not confirmed.
+    Uncertain(Option<u16>),
     /// The destination could not be reached, or failed. Trying again may work.
     Failed(Option<u16>),
 }
@@ -37,11 +41,17 @@ impl Outcome {
         match self {
             Self::Sent => "it was delivered".into(),
             Self::Wait(wait) => format!("{name} is limiting the rate; it asks to wait {} seconds", wait.as_secs()),
+            Self::Unavailable(wait) => {
+                format!("the Telegram relay is not ready; it asks to wait {} seconds", wait.as_secs())
+            }
             Self::Refused(401) if hosted_telegram => "Telegram pairing expired or was revoked; reconnect with Milo".into(),
+            Self::Refused(422) if hosted_telegram => "Telegram rejected this message".into(),
             Self::Refused(code @ (401 | 403 | 404)) => {
                 format!("{name} refused the saved secret or destination (HTTP {code}); save it again")
             }
             Self::Refused(code) => format!("{name} refused the request (HTTP {code}); check the chat or channel"),
+            Self::Uncertain(Some(code)) => format!("{name} delivery could not be confirmed (HTTP {code})"),
+            Self::Uncertain(None) => format!("{name} delivery could not be confirmed"),
             Self::Failed(Some(code)) => format!("{name} answered with a server error (HTTP {code})"),
             Self::Failed(None) => format!("{name} could not be reached"),
         }
@@ -51,12 +61,16 @@ impl Outcome {
 /// Sends a prepared request and reports the answer. While curl runs, its
 /// process ID is in `running`, for a signal handler to end it.
 pub(super) fn post(request: &Request, running: Option<&AtomicI32>) -> Outcome {
-    let Some((body, code)) = response(request, ANSWER_LIMIT, running) else { return Outcome::Failed(None) };
+    let Some((body, code)) = response(request, ANSWER_LIMIT, running) else {
+        return if request.relay { Outcome::Uncertain(None) } else { Outcome::Failed(None) };
+    };
     match code {
         204 if request.relay && body.is_empty() => Outcome::Sent,
         200..=299 if !request.relay => Outcome::Sent,
         429 => Outcome::Wait(retry_after(&body)),
+        503 if request.relay => relay_retry_after(&body).map_or(Outcome::Uncertain(Some(code)), Outcome::Unavailable),
         400..=499 => Outcome::Refused(code),
+        _ if request.relay => Outcome::Uncertain(Some(code)),
         500..=599 => Outcome::Failed(Some(code)),
         _ => Outcome::Failed(None),
     }
@@ -183,4 +197,10 @@ pub(super) fn retry_after(body: &str) -> Duration {
         Some(seconds) if (0.0..=86_400.0).contains(&seconds) => Duration::from_secs_f64(seconds),
         _ => DEFAULT_WAIT,
     }
+}
+
+/// A 503 without a valid hint could come from a gateway after the send.
+fn relay_retry_after(body: &str) -> Option<Duration> {
+    let seconds = Value::parse(body.trim().as_bytes())?.fields(["retry_after"])[0]?.unsigned()?;
+    (1..=86_400).contains(&seconds).then(|| Duration::from_secs(seconds))
 }

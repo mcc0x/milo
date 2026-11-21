@@ -3,6 +3,7 @@
 use std::ops::Range;
 use std::time::Instant;
 
+use super::changes::{Fold, Row};
 use super::edit::Editor;
 use super::{Body, JumpNotice, Reader, Source};
 use crate::diff::{Line, LineKind};
@@ -137,6 +138,7 @@ impl Reader {
         self.rows = s.h.saturating_sub(1 + usize::from(hint));
         self.columns = 0;
         self.pan_limit = 0;
+        self.review.click_width = 0;
         if s.w == 0 || s.h == 0 {
             return;
         }
@@ -178,7 +180,8 @@ impl Reader {
         if std::mem::take(&mut self.opening) {
             self.reveal_first_change();
         }
-        self.top = self.top.min(self.last_top());
+        self.clamp_top();
+        let focused = self.focused_fold();
         let note = match &self.body {
             Body::Note(note) => Some(*note),
             Body::Picture(picture) => match s.pictures() {
@@ -192,25 +195,48 @@ impl Reader {
                 _ => None,
             },
             Body::Text(text) => {
-                let lines = &text.lines[self.top..];
-                let shown = &lines[..lines.len().min(self.rows)];
+                let folds = self.review.folds();
+                let total = folds.row_count(text.lines.len());
+                let shown = folds.rows(self.top..(self.top + self.rows).min(total));
                 let gutter = text.digits + 4;
                 let x = if s.w >= gutter + 3 { gutter } else { 0 };
                 let width = s.w - 1 - x;
                 self.columns = width;
-                self.pan_limit = shown.iter().map(Line::display_width).max().unwrap_or(0).saturating_sub(width);
+                self.pan_limit = shown
+                    .clone()
+                    .filter_map(|row| match row {
+                        Row::Line(line) => Some(text.lines[line].display_width()),
+                        Row::Fold(_) => None,
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_sub(width);
                 self.pan = self.pan.min(self.pan_limit);
                 let mut painter = LinePainter { x, width, pan: self.pan, lang: text.lang, spans: &mut self.spans };
-                let first = text.starts.partition_point(|(at, _)| *at <= self.top).saturating_sub(1);
-                let mut starts = text.starts[first..].iter().peekable();
+                let mut starts = text.starts.as_slice();
                 let mut state = &State::Code;
-                for (i, line) in shown.iter().enumerate() {
-                    if starts.peek().is_some_and(|(at, _)| *at <= self.top + i) {
-                        state = &starts.next().unwrap().1;
+                let mut skipped = true;
+                for (i, row) in shown.enumerate() {
+                    match row {
+                        Row::Line(line) => {
+                            if starts.first().is_some_and(|(at, _)| *at <= line) {
+                                let used = if skipped { starts.partition_point(|(at, _)| *at <= line) } else { 1 };
+                                state = &starts[used - 1].1;
+                                starts = &starts[used..];
+                            }
+                            painter.draw_line(s, i + 1, &text.lines[line], state);
+                            skipped = false;
+                        }
+                        Row::Fold(fold) => {
+                            draw_fold(s, i + 1, x, fold, focused == Some(self.top + i));
+                            skipped = true;
+                        }
                     }
-                    painter.draw_line(s, i + 1, line, state);
                 }
-                ui::thumb(s, s.w - 1, 1, self.rows, text.lines.len(), self.top);
+                if !folds.is_empty() {
+                    self.review.click_width = s.w - 1;
+                }
+                ui::thumb(s, s.w - 1, 1, self.rows, total, self.top);
                 return;
             }
         };
@@ -221,6 +247,12 @@ impl Reader {
     }
 
     fn draw_hint(&self, s: &mut Screen) {
+        if self.can_fold() {
+            let action = if self.review.is_compact() { "c full file" } else { "c changes only" };
+            let middle = &["e edit", "↑↓ scroll", "q close", "n N changes"][usize::from(self.read_only.is_some())..];
+            crate::help::draw_hint(s, action, middle, "? help");
+            return;
+        }
         let changes = matches!(&self.body, Body::Text(text)
             if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize);
         let committed = matches!(self.source, Source::Committed { .. });
@@ -291,6 +323,31 @@ impl Reader {
             }
         }
         right
+    }
+}
+
+fn draw_fold(s: &mut Screen, y: usize, gutter: usize, fold: Fold, selected: bool) {
+    let number = fold.len();
+    let digits = number.ilog10() as usize + 1;
+    let end = s.w - 1;
+    let label = " unchanged lines";
+    let full = 2 + digits + label.len();
+    let x = if gutter != 0 && end.saturating_sub(gutter) >= full { gutter } else { usize::from(end > 1) };
+    let room = end - x;
+    let style = if selected { Style::PLAIN.reverse() } else { FAINT };
+    if room < 2 + digits {
+        s.put(x, y, room, "…", style);
+        return;
+    }
+    let mut at = x + s.put(x, y, room, "… ", style) + digits;
+    s.put_number(at, y, number as u64, style);
+    let suffix = if room >= full { label } else { " hidden" };
+    if suffix.len() <= end - at {
+        at += s.put(at, y, suffix.len(), suffix, style);
+    }
+    const ENTER: &str = " · Enter";
+    if selected && str_width(ENTER) <= end - at {
+        s.put(at, y, end - at, ENTER, FAINT);
     }
 }
 

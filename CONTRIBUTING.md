@@ -95,6 +95,8 @@ The [source map](#source-map) lists the files under `src/` and `tests/`.
 
 Put the pane in a module under `src/` and implement `pane::Pane`: `draw` fills a `Screen`, `help` returns its own `Page::new` guide, and `key` handles pane-specific input. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to keep the frame. For outside changes, add `watch_scope` and `check`; for timed redraws, add `next_frame`. A pane with no watch or timer sleeps until input, resize or a signal.
 
+A `check` runs in the pane loop, and no key is read until it returns. Where it can take long, as Git can in a large project, start the work on a thread and return: `unfinished_check` gives the loop a descriptor that becomes readable when the answer is ready, and `finish_check` takes the answer in. Show nothing of an answer until all of it can be shown, drop one that an earlier load has overtaken, and return false from `finish_check` when another look is needed. The loop takes no other look while one is away, rests after it for four times as long as it took, and looks again soon if a change was reported meanwhile. `src/outline/refresh.rs` is the example.
+
 Declare the module in `src/main.rs`. Add the command to `Command`, the argument parser, `dispatch` and `--help`. Use the shared loop; choose whether the pane starts loaded, does a first check or shows `Reading…` on a slow open.
 
 ### Changing the Rex layout
@@ -184,6 +186,18 @@ A secret goes from standard input or the browser editor to `secret.rs` and from 
 
 To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
 
+### Changing support for several Rex hosts
+
+[Several Rex hosts](docs/setup.md#several-rex-hosts) says what a person sees. Three parts stay separate.
+
+`src/host.rs` reports the computer and its Rex. `CHECKED_API` is the control API revision Milo's Lua files and calls were checked against: raise it only after running the Lua fixtures and both Rex labs against that Rex. A newer server is a note, never a warning. The computer's name is shown on that computer and in pages its editor serves, and goes nowhere else.
+
+`src/web/remote.rs` opens another host's editor here. The host's `milo web --forwarded-port N` accepts exactly one authority on the computer carrying the forward, `127.0.0.1:N` (or `127.0.0.1` for HTTP port 80), in place of its own and never beside it. Do not add a second accepted name, a wildcard, or a bind address other than loopback at either end. Keep the session key out of arguments: it reaches this computer only by reading the terminal the host's editor printed it in. Wait for Rex's forward process to confirm the expected listener before exposing that link; another local process listening there is not confirmation. Every Rex call for it is in `src/rex/server.rs`, never starts a server, and keeps only whole IDs, numbers and plain version words from what a server answers. Whichever way `remote::run` leaves, dropping `Carried` ends the forward and the host's session.
+
+`src/setup/transfer.rs` writes and reads bundles. A key travels only if a `Group` lists it. Never list an account, a token, a destination, an integration switch or anything from the state folder, and keep the test that seeds those and searches the bundle for them. An import changes files only through `files::install`, so that it is all or nothing and stops when a file is not what the preview read; its undo record may name only files below the settings folder. A project is matched by `git::root_commit` or by the person, never by a name or a path.
+
+Use `cargo test --bin milo FILTER` with `host::`, `rex::server`, `transfer::`, or `web::remote` to run the corresponding unit tests. With Rex installed, `cargo test --test rex_hosts -- --ignored` starts two disposable Rex servers with a home, settings and socket each, and follows Doctor, the forward and its cleanup, and a bundle from one to the other. `rex server stop` and `rex hosts` do not follow `REX_SERVER`, so that test names each socket with `-S` and never runs `rex hosts`. A development build takes the computer's name from `MILO_TEST_HOST_NAME`, for a test or a screenshot; a release build does not read it.
+
 ### Changing Discord presence
 
 [Discord presence](docs/presence.md) publishes an activity to Discord. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
@@ -229,7 +243,7 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 
 `src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
-`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame that shows the file and the frame after each key, through a real terminal:
+`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft:
 
 ```sh
 cargo test --release --locked --test reader_bench -- --ignored --nocapture
@@ -306,6 +320,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
 | `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
 | `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/outline/refresh.rs` | Refreshes the outline's Git state away from the pane loop and takes the answer in whole. |
 | `src/outline/untracked.rs` | Fills in line counts for new files after the first frame, without following links. |
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
@@ -326,7 +341,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
+| `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
+| `src/rex/server.rs` | Asks a Rex server for its version, host ID and connected apps, and starts, forwards and ends another host's settings editor. |
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
 | `src/rex_reader.lua` | Opens a floating reader in Rex and closes the one it replaces only after the new one exists. |
 | `src/rex_reader_test.lua` | Checks that script with a stand-in for Rex. |
@@ -349,6 +366,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/setup/profiles.rs` | Saves a rail's roles, side, order and proportions globally or for a worktree, never Rex block IDs, and undoes a trial. |
 | `src/setup/rex_files.rs` | Plans edits to Rex settings and checks the generated layouts. |
 | `src/setup/settings.rs` | Reads and edits the top-level Claude Code status-line setting. |
+| `src/setup/transfer.rs` | Exports chosen preferences and layouts as a bundle, plans and applies an import, matches a project by its repository, and takes the last import back. |
+| `src/setup/transfer/tests.rs` | Checks what a bundle holds and refuses, project matching, a host changed after a preview, and undo. |
 | `src/setup/tests.rs` | Checks the setup screen's frames and clicks, scoped saves, trials, and installation with throwaway settings and a stand-in for Rex. |
 | `src/setup/web.rs` | Exposes drafts, scoped saves, and Rex trials to the browser editor. |
 | `src/setup/welcome.rs` | Guides a first run without changing settings until the user chooses Save or Skip. |
@@ -402,7 +421,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
-| `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
+| `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. `remote.rs` opens another host's editor here through a Rex forward and ends both. |
 | `dashboard/app/`, `dashboard/components/` | Next.js App Router entry point and React settings sections. Run `bun run build` in `dashboard/` after changing the UI, and commit its generated `dashboard/bundle/` alongside the source. Cargo embeds that bundle without installing frontend tooling. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
@@ -425,6 +444,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
+| `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
@@ -432,4 +452,4 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
 | `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
 | `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
-| `tests/web-smoke.cjs` | Saves layout and usage tool choices and turns Discord presence, its names and its application on and off in the browser editor of a built binary in Chromium, then closes it. |
+| `tests/web-smoke.cjs` | Saves layout and usage tool choices, turns Discord presence, its names and its application on and off, and exports, previews, imports and undoes a settings bundle under Hosts in the browser editor of a built binary in Chromium, then closes it. |

@@ -19,7 +19,7 @@ const content = [["metadata", "Kind and program name"], ["text", "Also program t
 
 type Destination = (typeof destinations)[number][0];
 type DestinationEditor = "closed" | "list" | Destination;
-type Field = "forwarding" | "content" | "test" | "forget" | Destination | `events.${(typeof events)[number][0]}`;
+type Field = "forwarding" | "content" | "test" | "forget" | "forget_local" | Destination | `events.${(typeof events)[number][0]}`;
 
 function AlertGroup({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -213,6 +213,26 @@ export default function Alerts() {
     command("alerts", { field, value });
   }
 
+  function forgetTelegramLocally() {
+    confirm("Forget Telegram on this Mac?",
+      "This removes the saved Telegram connection and stops its forwarding on this Mac. Discord is not changed. " +
+      "It does not revoke the connection on the relay. If the original relay is still available, send /stop to Milo’s bot " +
+      "in the original chat to revoke all Milo connections to that chat.",
+      "Forget on this Mac", () => {
+        manager.current?.querySelector<HTMLElement>("h2")?.focus();
+        send("forget_local", "telegram");
+      });
+  }
+
+  function saveTelegram(value: { token: string; chat: string }) {
+    const submitted = form.current;
+    command("alerts", { field: "telegram", value }, () => {
+      if (!submitted || form.current !== submitted) return;
+      manager.current?.querySelector<HTMLElement>("h2")?.focus();
+      submitted.reset();
+    });
+  }
+
   function saveDiscord(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!busy) send("discord", valueOf(event.currentTarget, "alerts-discord-link"));
@@ -296,16 +316,19 @@ export default function Alerts() {
                 {destinations.map(([name, label]) => editor === name && (
                   <div key={name}>
                     {alerts[name].saved ? <p className="setting-detail alerts-saved-destination">Saved destination{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p> : null}
-                    <HostedAlertsSetup provider={name} label={label} busy={busy}
+                    {name === "telegram" && alerts.telegram.needs_local_forget ? (
+                      <div className="alerts-setup">
+                        <p className="setting-detail">Milo can’t disconnect this Telegram connection using the current relay. Return to the original relay if possible, or forget the connection on this Mac before connecting again.</p>
+                        <button type="button" className="button alerts-forget" id="alerts-forget-telegram-local"
+                          disabled={busy} onClick={forgetTelegramLocally}>Forget on this Mac</button>
+                      </div>
+                    ) : <HostedAlertsSetup provider={name} label={label} busy={busy}
                       replacingActive={alerts[name].active}
                       forget={alerts[name].saved ? () => confirm(`Forget ${label}?`,
                         `This removes the saved ${label} destination and its secret from ${alerts.place}. Forwarding to it ends.`,
                         "Forget", () => send("forget", name)) : undefined}>
                       {name === "telegram" ? (
-                        <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={value => {
-                          manager.current?.querySelector<HTMLElement>("h2")?.focus();
-                          send("telegram", value);
-                        }} />
+                        <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={saveTelegram} />
                       ) : (
                         <form id="alerts-discord" className="secret-form alerts-form" autoComplete="off" ref={form}
                           onSubmit={saveDiscord}>
@@ -319,7 +342,7 @@ export default function Alerts() {
                           </DestinationInput>
                         </form>
                       )}
-                    </HostedAlertsSetup>
+                    </HostedAlertsSetup>}
                   </div>
                 ))}
               </div>

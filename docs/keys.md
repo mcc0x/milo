@@ -28,6 +28,7 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | `e` | Open every folder; press again to restore your choices |
 | `n` / `N` | Jump to the next or previous changed file, including inside closed folders. If there’s nowhere to jump, the tree says why. |
 | `c` | Switch between the whole tree and changed files only |
+| `/` | Find files by name or path; arrows choose a result, `Enter` reads it and `Esc` returns to the tree |
 | `r` | Reload |
 | `q` | Quit |
 
@@ -52,6 +53,8 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
 | `n` / `N` | Next or previous block of added or removed lines |
+| `c` | Switch between the full diff and changes with nearby context |
+| `Tab`, then `Enter` | Select and expand a folded stretch of unchanged lines; clicking the fold expands it too |
 | `e` | Edit the file, or say why it is read-only |
 | `q` or `Esc` | Close |
 
@@ -85,7 +88,7 @@ Questions take the place of the last row and wait for one of the keys they list.
 | Question | Keys |
 | --- | --- |
 | `Unsaved edits` | `s` save and stop editing, `d` discard the draft, `Esc` go back to it |
-| `Changed on disk` | `o` write your draft over the file as it is now, `Esc` go back without writing |
+| `Changed on disk` | `c` compare disk and draft, `o` overwrite the confirmed version, `Esc` back without writing |
 | `Kept draft found` | `r` put the kept draft in place of the text, `d` delete it, `Esc` decide later |
 
 ### Usage and setup

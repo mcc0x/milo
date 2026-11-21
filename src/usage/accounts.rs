@@ -4,11 +4,14 @@
 //! credits each keep their own unit, and none of them is turned into a
 //! percentage or compared with another.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{Read as _, Write as _};
 use std::os::fd::RawFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use crate::json::Value;
@@ -24,6 +27,8 @@ const MANUAL_REST: i64 = 30;
 const REFUSED_REST: i64 = 30 * MINUTE;
 /// How long to stay away after a rate limit that named no wait of its own.
 const LIMITED_REST: i64 = 5 * MINUTE;
+/// Retry soon after a transport or server failure, including when waking offline.
+const UNREACHABLE_REST: i64 = MINUTE;
 /// A reading older than this no longer says anything about the account.
 const KEPT: i64 = DAY;
 const HTTP_WAIT: Duration = Duration::from_secs(8);
@@ -223,12 +228,6 @@ impl Failure {
 
     fn words(self) -> &'static str {
         Self::NAMES.iter().find(|(failure, ..)| *failure == self).map_or("", |(_, _, words)| words)
-    }
-
-    /// A failure of what is set up here says nothing about the account, so
-    /// an earlier reading is not shown beside it.
-    fn local(self) -> bool {
-        matches!(self, Self::NoKey | Self::NoScope | Self::OpenFile | Self::BadSetting)
     }
 }
 
@@ -469,16 +468,39 @@ enum Origin {
 }
 
 /// A key, and the organization or user to ask about when the key does not say.
-struct Credentials {
-    key: String,
-    scope: Option<String>,
+struct Credentials<'a> {
+    key: Cow<'a, str>,
+    scope: Option<Cow<'a, str>>,
     /// Where the key was found, for doctor.
     from_environment: bool,
 }
 
-/// Everything a look needs besides the clock. It is copied into the worker,
-/// so the environment is read once, when the pane opens.
-#[derive(Clone)]
+/// A cache discriminator, not an authenticator. Using a different hash in a
+/// later Rust release can only cause a miss, never reuse an untagged answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CredentialId([u64; 2]);
+
+impl Credentials<'_> {
+    fn id(&self, account: UsageAccount) -> CredentialId {
+        CredentialId([0, 1].map(|domain: u8| {
+            let mut hash = DefaultHasher::new();
+            (domain, account.id(), self.key.as_ref(), self.scope.as_deref()).hash(&mut hash);
+            hash.finish()
+        }))
+    }
+
+    fn into_owned(self) -> Credentials<'static> {
+        Credentials {
+            key: Cow::Owned(self.key.into_owned()),
+            scope: self.scope.map(|scope| Cow::Owned(scope.into_owned())),
+            from_environment: self.from_environment,
+        }
+    }
+}
+
+/// The shell environment is captured once, but private settings can change
+/// while a pane or the menu is open.
+#[cfg_attr(test, derive(Clone))]
 pub(super) struct Sources {
     environment: Vec<(&'static str, String)>,
     settings: Option<PathBuf>,
@@ -515,7 +537,7 @@ impl Sources {
     /// The settings file's lines, if it is the user's own private file.
     fn settings(&self) -> Result<Option<String>, Failure> {
         let Some(path) = &self.settings else { return Ok(None) };
-        let mut file = match fs_ops::open_read(path) {
+        let file = match fs_ops::open_read(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(Failure::OpenFile),
@@ -527,18 +549,21 @@ impl Sources {
             return Err(Failure::OpenFile);
         }
         let mut text = String::new();
-        file.read_to_string(&mut text).map_err(|_| Failure::OpenFile)?;
+        file.take(SETTINGS_LIMIT + 1).read_to_string(&mut text).map_err(|_| Failure::OpenFile)?;
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > SETTINGS_LIMIT {
+            return Err(Failure::OpenFile);
+        }
         Ok(Some(text))
     }
 
     /// The environment comes first, so one shell can use another key without editing the file.
-    fn credentials(&self, account: UsageAccount) -> Result<Credentials, Failure> {
+    fn credentials(&self, account: UsageAccount) -> Result<Credentials<'_>, Failure> {
         let environment = |name: &str| {
             let named = self.environment.iter().find(|(known, _)| *known == name);
-            named.map(|(_, value)| value.clone()).filter(|value| !value.is_empty())
+            named.map(|(_, value)| Cow::Borrowed(value.as_str())).filter(|value| !value.is_empty())
         };
         let mut file = None;
-        let mut saved = |name: &str| -> Result<Option<String>, Failure> {
+        let mut saved = |name: &str| -> Result<Option<Cow<'_, str>>, Failure> {
             if file.is_none() {
                 file = Some(self.settings()?.unwrap_or_default());
             }
@@ -547,8 +572,9 @@ impl Sources {
                 .filter(|line| !line.starts_with('#'))
                 .filter_map(|line| line.split_once('='))
                 .find(|(key, _)| key.trim() == name)
-                .map(|(_, value)| value.trim().to_owned())
-                .filter(|value| !value.is_empty()))
+                .map(|(_, value)| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| Cow::Owned(value.to_owned())))
         };
         let (key, from_environment) = match environment(account.key_name()) {
             Some(key) => (key, true),
@@ -573,29 +599,27 @@ impl Sources {
         Ok(Credentials { key, scope, from_environment })
     }
 
-    fn cache_file(&self, account: UsageAccount) -> Option<PathBuf> {
-        Some(self.cache.as_ref()?.join(format!("{}.json", account.id())))
+    fn cache_file(&self, account: UsageAccount, CredentialId([first, second]): CredentialId) -> Option<PathBuf> {
+        Some(self.cache.as_ref()?.join(format!("{}-{first:016x}{second:016x}.json", account.id())))
     }
 
-    /// The last look any Milo process saved for this account and scope.
-    fn remembered(&self, account: UsageAccount, scope: Option<&str>, now: i64) -> Option<Fetched> {
-        let mut file = fs_ops::open_read(&self.cache_file(account)?).ok()?;
+    /// The last look any Milo process saved for this provider, key and scope.
+    fn remembered(path: &Path, now: i64) -> Option<Fetched> {
+        let file = fs_ops::open_read(path).ok()?;
         let metadata = file.metadata().ok()?;
         if !metadata.is_file() || metadata.len() > CACHE_LIMIT {
             return None;
         }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).ok()?;
-        let [version, saved_scope, asked, next, failure, reading] =
-            Value::parse(&bytes)?.fields(["version", "scope", "asked", "next", "failure", "reading"]);
-        let same_scope = match (scope, saved_scope) {
-            (Some(scope), Some(saved)) => saved.is(scope),
-            (None, None) => true,
-            _ => false,
-        };
+        file.take(CACHE_LIMIT + 1).read_to_end(&mut bytes).ok()?;
+        if u64::try_from(bytes.len()).ok()? > CACHE_LIMIT {
+            return None;
+        }
+        let [version, asked, next, failure, reading] =
+            Value::parse(&bytes)?.fields(["version", "asked", "next", "failure", "reading"]);
         let asked = asked?.integer()?;
         // A look saved while the clock was ahead would put off every later one.
-        if version?.unsigned() != Some(1) || !same_scope || asked > now + CLOCK_SKEW {
+        if version?.unsigned() != Some(2) || asked > now + CLOCK_SKEW {
             return None;
         }
         Some(Fetched {
@@ -608,15 +632,10 @@ impl Sources {
 
     /// Saves the figures and times of a look for other panes and the menu.
     /// The key is never written, and a failed save only costs a request.
-    fn remember(&self, account: UsageAccount, scope: Option<&str>, fetched: &Fetched) {
-        let Some(path) = self.cache_file(account) else { return };
+    fn remember(path: &Path, fetched: &Fetched) {
         let Some(dir) = path.parent() else { return };
         let mut text = String::with_capacity(256);
-        text.push_str(r#"{"version":1"#);
-        if let Some(scope) = scope {
-            // A scope is letters, digits, hyphens and underscores, checked before any request.
-            write!(text, r#","scope":"{scope}""#).expect("writing to a string");
-        }
+        text.push_str(r#"{"version":2"#);
         write!(text, r#","asked":{},"next":{}"#, fetched.asked, fetched.next).expect("writing to a string");
         if let Some(failure) = fetched.failure {
             write!(text, r#","failure":"{}""#, failure.name()).expect("writing to a string");
@@ -629,26 +648,27 @@ impl Sources {
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
-        let temp = dir.join(format!(".{}.{}.tmp", account.id(), std::process::id()));
-        let _ = std::fs::remove_file(&temp);
+        static SERIAL: AtomicU32 = AtomicU32::new(0);
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let temp = dir.join(format!(".{}.{}.tmp", std::process::id(), serial));
         let Ok((temp, mut file)) = fs_ops::Temp::create(temp) else { return };
         if file.write_all(text.as_bytes()).is_ok() {
-            let _ = temp.replace(&path);
+            let _ = temp.replace(path);
         }
     }
 
     /// One look. The saved answer is used while it is recent enough; otherwise
     /// the provider is asked once and the answer saved.
-    fn fetch(&self, account: UsageAccount, now: i64, manual: bool) -> Fetched {
-        let credentials = match self.credentials(account) {
-            Ok(credentials) => credentials,
-            // Nothing was sent. Look at the settings again soon, in case they change.
-            Err(failure) => {
-                return Fetched { reading: None, failure: Some(failure), asked: 0, next: now + MANUAL_REST };
-            }
-        };
+    fn fetch(
+        account: UsageAccount,
+        credentials: &Credentials<'_>,
+        cache: Option<&Path>,
+        origin: Origin,
+        now: i64,
+        manual: bool,
+    ) -> Fetched {
         let scope = credentials.scope.as_deref();
-        let before = self.remembered(account, scope, now);
+        let before = cache.and_then(|path| Self::remembered(path, now));
         if let Some(saved) = before {
             // A reload may ask sooner than the schedule, but never inside a rate limit.
             let limited = if saved.failure == Some(Failure::Limited) { saved.next } else { 0 };
@@ -658,7 +678,7 @@ impl Sources {
             }
         }
         let (path, until) = account.question(scope, now);
-        let url = match self.origin {
+        let url = match origin {
             Origin::Providers => format!("https://{}{path}", account.host()),
             #[cfg(test)]
             Origin::Loopback(port) => format!("http://127.0.0.1:{port}/{}{path}", account.id()),
@@ -666,7 +686,7 @@ impl Sources {
         let request = http::Request { url: &url, bearer: &credentials.key, headers: account.headers() };
         let interval = account.interval();
         let (answer, rest) = match http::get(&request, HTTP_WAIT) {
-            None => (Err(Failure::Unreachable), interval),
+            None => (Err(Failure::Unreachable), UNREACHABLE_REST),
             Some(reply) => match reply.status {
                 200 => (account.parse(&reply.body, now, until).unwrap_or(Err(Failure::Unexpected)), interval),
                 401 => (Err(Failure::Refused), REFUSED_REST),
@@ -676,7 +696,7 @@ impl Sources {
                     (Err(Failure::Limited), wait.clamp(MINUTE, HOUR))
                 }
                 403 | 404 => (Err(Failure::Denied), REFUSED_REST),
-                _ => (Err(Failure::Unreachable), interval),
+                _ => (Err(Failure::Unreachable), UNREACHABLE_REST),
             },
         };
         let fetched = match answer {
@@ -691,7 +711,9 @@ impl Sources {
                 Fetched { reading: earlier, failure: Some(failure), asked: now, next: now + rest }
             }
         };
-        self.remember(account, scope, &fetched);
+        if let Some(cache) = cache {
+            Self::remember(cache, &fetched);
+        }
         fetched
     }
 }
@@ -711,6 +733,7 @@ pub(super) enum Status {
 pub(super) struct Account {
     pub(super) which: UsageAccount,
     pub(super) show: Show,
+    credentials: Option<Result<CredentialId, Failure>>,
     fetched: Option<Fetched>,
     /// When this process should look again.
     next: i64,
@@ -719,13 +742,28 @@ pub(super) struct Account {
 
 impl Account {
     fn new(which: UsageAccount, show: Show) -> Self {
-        Self { which, show, fetched: None, next: 0, job: None }
+        Self { which, show, credentials: None, fetched: None, next: 0, job: None }
+    }
+
+    /// Nothing observed under the previous key can be shown or delay this key.
+    fn bind(&mut self, credentials: Result<CredentialId, Failure>) -> bool {
+        if self.credentials == Some(credentials) {
+            return false;
+        }
+        self.credentials = Some(credentials);
+        self.fetched = None;
+        self.next = 0;
+        self.job = None;
+        true
     }
 
     pub(super) fn status(&self, now: i64) -> Status {
+        if let Some(Err(failure)) = self.credentials {
+            return Status::Failed(failure);
+        }
         let Some(fetched) = &self.fetched else { return Status::Checking };
         let failure = fetched.failure;
-        match fetched.reading.filter(|reading| reading.usable(now) && !failure.is_some_and(Failure::local)) {
+        match fetched.reading.filter(|reading| reading.usable(now)) {
             Some(reading) => {
                 let age = now.saturating_sub(reading.observed);
                 Status::Reading(reading, (age > self.which.fresh_for()).then_some(age))
@@ -794,6 +832,11 @@ impl Accounts {
     pub(super) fn start(&mut self, now: i64, manual: bool) {
         let Some(sources) = &self.sources else { return };
         for account in &mut self.accounts {
+            let which = account.which;
+            let credentials = sources.credentials(which);
+            let id = credentials.as_ref().map(|credentials| credentials.id(which)).map_err(|&failure| failure);
+            account.bind(id);
+            let (Ok(credentials), Ok(id)) = (credentials, id) else { continue };
             if let Some(job) = &mut account.job {
                 job.checking |= manual;
                 continue;
@@ -801,21 +844,31 @@ impl Accounts {
             if !manual && now < account.next {
                 continue;
             }
-            let (sources, which, first) = (sources.clone(), account.which, account.fetched.is_none());
+            let (cache, origin, first) = (sources.cache_file(which, id), sources.origin, account.fetched.is_none());
+            let credentials = credentials.into_owned();
             // If no thread can be started, the next check tries again.
-            account.job = sqlite::Job::start(first || manual, move || Some(sources.fetch(which, now, manual))).ok();
+            account.job = sqlite::Job::start(first || manual, move || {
+                Some(Sources::fetch(which, &credentials, cache.as_deref(), origin, now, manual))
+            })
+            .ok();
         }
     }
 
     /// Takes in finished looks. True when one changed what the pane shows or
     /// ended a look it was announcing.
     pub(super) fn collect(&mut self, now: i64) -> bool {
+        let Some(sources) = &self.sources else { return false };
         let mut changed = false;
         for account in &mut self.accounts {
             let Some(result) = account.job.as_ref().and_then(sqlite::Job::finished) else { continue };
+            let id = sources.credentials(account.which).map(|credentials| credentials.id(account.which));
+            if account.bind(id) {
+                changed = true;
+                continue;
+            }
             let announced = account.job.take().is_some_and(|job| job.checking);
             // A worker that died leaves what is known, and the look is tried again later.
-            account.next = result.map_or(now + MANUAL_REST, |fetched| fetched.next.max(now + MANUAL_REST));
+            account.next = result.map_or(now + MANUAL_REST, |fetched| fetched.next.max(fetched.asked + MANUAL_REST));
             if let Some(fetched) = result {
                 changed |= account.fetched != Some(fetched);
                 account.fetched = Some(fetched);
@@ -883,11 +936,12 @@ impl Sources {
             let place = if credentials.from_environment { "the environment" } else { file.as_str() };
             let every = account.interval() / MINUTE;
             lines.push(format!(
-                "{title}: asks {} with {} from {place}, at most every {every} minutes",
+                "{title}: asks {} with {} from {place}, usually every {every} minutes",
                 account.host(),
                 account.key_name()
             ));
-            let Some(saved) = self.remembered(account, credentials.scope.as_deref(), now) else {
+            let saved = self.cache_file(account, credentials.id(account)).and_then(|path| Self::remembered(&path, now));
+            let Some(saved) = saved else {
                 lines.push("  no answer saved yet".into());
                 continue;
             };

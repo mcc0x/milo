@@ -4,6 +4,7 @@ use std::fmt::{self, Display, Write as _};
 
 use super::claude::ClaudeSnapshot;
 use super::*;
+use crate::host::Host;
 use crate::json::{self, Value};
 use crate::menubar;
 use crate::preferences::{Show, UsageAccount};
@@ -31,6 +32,8 @@ pub(crate) struct Editor {
     // A local-only browser edit can dismiss this save without hiding a later reminder.
     reopen_panes: Option<u64>,
     directory: Option<String>,
+    /// The computer and Rex this editor runs on, asked when it opened and again by a health check.
+    host: Option<Host>,
 }
 
 pub(crate) enum HostedSaveError {
@@ -46,8 +49,20 @@ pub(crate) enum CloseError {
     Trial(&'static str),
 }
 
+/// What the editor answers to a request to move settings between hosts.
+pub(crate) enum TransferReply {
+    /// A bundle or a preview. The editor is as it was.
+    Data(String),
+    /// Saved settings changed; this is the editor's new state.
+    Changed(String),
+    /// The draft or the saved files are not what the request was made against.
+    Stale(String),
+    Refused(String),
+}
+
 impl Editor {
-    pub(crate) fn open() -> Self {
+    /// `forwarded` says the page is opened from another computer, through a Rex forward.
+    pub(crate) fn open(forwarded: bool, viewers: impl FnOnce() -> Option<rex::Viewers>) -> Self {
         let inside = rex::inside();
         let store = Store::real();
         let target = inside.then(rex::Target::current).flatten();
@@ -61,6 +76,7 @@ impl Editor {
         editor.setup.alerts = Alerts::real();
         editor.setup.refresh_alerts();
         editor.setup.presence = editor.setup.presence.take().map(presence::Control::starting_helper);
+        editor.host = Host::probe(forwarded, viewers);
         editor
     }
 
@@ -78,6 +94,15 @@ impl Editor {
         Ok(out)
     }
 
+    pub(crate) fn check_telegram_reconnect(&mut self) -> Result<(), String> {
+        let alerts = self.setup.alerts.as_ref().ok_or(UNAVAILABLE)?;
+        let result = alerts.check_telegram_reconnect();
+        if result.is_err() {
+            self.setup.refresh_alerts();
+        }
+        result
+    }
+
     pub(crate) fn save_hosted_connection(
         &mut self,
         version: u64,
@@ -91,6 +116,11 @@ impl Editor {
         }
         let alerts = self.setup.alerts.as_ref().ok_or_else(|| Local(UNAVAILABLE.into()))?;
         let saved = alerts.locked(|edit| {
+            if request.provider() == alerts::Destination::Telegram
+                && let Err(error) = edit.check_telegram_reconnect()
+            {
+                return Ok(Err(Local(error)));
+            }
             let claim = match request.run() {
                 Ok(Connected::Claimed(claim)) => claim,
                 Ok(Connected::Pending) => return Ok(Err(Pending)),
@@ -140,7 +170,7 @@ impl Editor {
         if let Err(why) = setup.reload_prefs() {
             setup.report(Err(why));
         }
-        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory }
+        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory, host: None }
     }
 
     fn load_account(&mut self) {
@@ -292,6 +322,11 @@ impl Editor {
         } else {
             out.push_str("null");
         }
+        out.push_str(",\"host\":");
+        match &self.host {
+            Some(host) => host.json(&mut out),
+            None => out.push_str("null"),
+        }
         out.push_str(",\"alerts\":");
         match (&setup.alerts, &setup.alert_summary) {
             (Some(alerts), Some(summary)) => alerts_state(&mut out, alerts, summary),
@@ -328,7 +363,9 @@ impl Editor {
             }
             None => out.push_str("null"),
         }
-        out.push('}');
+        // Whether an import is kept that the page can offer to take back.
+        let undo = setup.store.as_ref().is_some_and(|store| transfer::undo_available(&store.state));
+        write!(out, ",\"transfer\":{{\"undo\":{undo}}}}}").expect("writing to a string");
         out
     }
 
@@ -405,9 +442,14 @@ impl Editor {
             }
             Action::Doctor => {
                 self.doctor = None;
+                if let Some(host) = &self.host {
+                    self.host = Host::probe(host.forwarded, rex::viewers);
+                }
                 let setup = &self.setup;
                 let target = if setup.inside { self.require_tab().map(|()| setup.target.as_ref()) } else { Ok(None) };
-                self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
+                let health =
+                    doctor::health_anchored(setup.store()?, setup.root.as_deref(), target, self.host.as_ref())?;
+                self.doctor = Some(health);
                 None
             }
             Action::Presence(edit) if self.setup.presence.is_some() => {
@@ -509,6 +551,105 @@ impl Editor {
         self.doctor = None;
         self.load_account();
         Ok(self.setup.claude_save_feedback().map(Cow::Borrowed))
+    }
+
+    /// Exports chosen settings, previews an import, applies it, or takes the last one back.
+    pub(crate) fn transfer(&mut self, body: &[u8]) -> TransferReply {
+        use TransferReply::{Changed, Data, Refused, Stale};
+        const DRAFT_OPEN: &str = "Save or discard your unsaved changes first, so an import does not replace them.";
+        const STALE_DRAFT: &str = "The editor changed in another request. Reload it and try again.";
+
+        let Some(request) = Value::parse(body) else { return Refused(BAD_ACTION.into()) };
+        let [action, groups, scope, bundle, here, basis, version] =
+            request.fields(["action", "groups", "scope", "bundle", "here", "basis", "version"]);
+        let Some(action) = action.and_then(|action| action.string(8)) else { return Refused(BAD_ACTION.into()) };
+        let Some(store) = self.setup.store.clone() else { return Refused(UNAVAILABLE.into()) };
+        let home = paths::home();
+        let root = self.setup.root.clone();
+        let place = transfer::Place {
+            config: &store.config,
+            state: &store.state,
+            home: home.as_deref(),
+            worktree: root.as_deref(),
+        };
+        // A project of the bundle goes to this editor's worktree only when the page says which.
+        let maps = || -> Result<Vec<(String, PathBuf)>, String> {
+            let Some(name) = here.filter(|here| !here.null()) else { return Ok(Vec::new()) };
+            let name = name.string(128).ok_or(BAD_ACTION)?.into_owned();
+            let root = root.clone().ok_or("Open Settings from a Git worktree to apply a project's settings to it.")?;
+            Ok(vec![(name, root)])
+        };
+        let plan = || -> Result<transfer::Plan, String> {
+            let bundle = bundle.and_then(|bundle| bundle.string(transfer::BUNDLE_LIMIT)).ok_or(BAD_ACTION)?;
+            transfer::plan(&place, &bundle, &maps()?)
+        };
+        let current = |editor: &Self| version.and_then(Value::unsigned) == Some(editor.version);
+        let result = match action.as_ref() {
+            "export" => {
+                let chosen: Option<Vec<transfer::Group>> = groups
+                    .and_then(Value::elements)
+                    .and_then(|names| names.map(|name| transfer::Group::parse(&name.string(16)?)).collect());
+                let scopes = scope.and_then(|scope| transfer::Scopes::parse(&scope.string(8)?));
+                let (Some(chosen), Some(scopes)) = (chosen, scopes) else { return Refused(BAD_ACTION.into()) };
+                return match transfer::export(&place, &chosen, scopes) {
+                    Ok(bundle) => Data(format!("{{\"bundle\":{}}}", Quoted(&bundle))),
+                    Err(why) => Refused(why),
+                };
+            }
+            "preview" => {
+                return match plan() {
+                    Ok(plan) => Data(plan.json()),
+                    Err(why) => Refused(why),
+                };
+            }
+            "apply" => {
+                if !current(self) {
+                    return Stale(STALE_DRAFT.into());
+                }
+                if self.setup.dirty() || self.setup.trial.is_some() {
+                    return Refused(DRAFT_OPEN.into());
+                }
+                let plan = match plan() {
+                    Ok(plan) => plan,
+                    Err(why) => return Refused(why),
+                };
+                let reviewed = basis.and_then(|basis| basis.string(16));
+                if reviewed.as_deref() != Some(plan.basis().as_str()) {
+                    return Stale(transfer::STALE.into());
+                }
+                transfer::apply(&place, plan).map(|count| {
+                    let settings = if count == 1 { "1 setting".to_owned() } else { format!("{count} settings") };
+                    format!("Imported {settings}. Undo is in Hosts if you change your mind.")
+                })
+            }
+            "undo" => {
+                if !current(self) {
+                    return Stale(STALE_DRAFT.into());
+                }
+                if self.setup.dirty() || self.setup.trial.is_some() {
+                    return Refused(DRAFT_OPEN.into());
+                }
+                transfer::undo(&place).map(|_| "The last import was taken back.".to_owned())
+            }
+            _ => return Refused(BAD_ACTION.into()),
+        };
+        match result {
+            Ok(text) => {
+                // The saved files changed underneath the draft, which was clean.
+                let reloaded = self.setup.reload_prefs().and(self.setup.reload_layout());
+                self.doctor = None;
+                self.reopen_panes = Some(self.version + 1);
+                self.setup.message = None;
+                match reloaded {
+                    Ok(()) => self.setup.report_text(Ok(text.into())),
+                    Err(why) => self.setup.report(Err(why)),
+                }
+                self.version += 1;
+                Changed(self.state())
+            }
+            Err(why) if why == transfer::STALE => Stale(why),
+            Err(why) => Refused(why),
+        }
     }
 }
 
@@ -629,6 +770,7 @@ enum AlertChange {
     Discord(String),
     Test(Option<alerts::Destination>),
     Forget(alerts::Destination),
+    ForgetTelegramLocally,
     /// Reads again whether mirroring is running and what it last noted.
     Refresh,
 }
@@ -666,6 +808,7 @@ impl AlertChange {
             "discord" => Self::Discord(value.string(256)?.into_owned()),
             "test" => Self::Test(if value.null() { None } else { Some(destination(value)?) }),
             "forget" => Self::Forget(destination(value)?),
+            "forget_local" if destination(value)? == alerts::Destination::Telegram => Self::ForgetTelegramLocally,
             "refresh" if value.null() => Self::Refresh,
             field => Self::Kind(alerts::Kind::parse(field.strip_prefix("events.")?)?, value.boolean()?),
         })
@@ -683,6 +826,7 @@ impl AlertChange {
             Self::Test(Some(destination)) => alerts.test_destination(destination),
             Self::Test(None) => alerts.test(),
             Self::Forget(destination) => alerts.forget(destination),
+            Self::ForgetTelegramLocally => alerts.forget_incompatible_telegram(),
             Self::Refresh => Ok(String::new()),
         }
     }
@@ -705,7 +849,7 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
         out,
         concat!(
             "{{\"enabled\":{},\"running\":{},\"destination\":{},\"consent\":{},",
-            "\"telegram\":{{\"saved\":{},\"active\":{},\"chat\":{},\"consent\":{}}},",
+            "\"telegram\":{{\"saved\":{},\"active\":{},\"chat\":{},\"consent\":{},\"needs_local_forget\":{}}},",
             "\"discord\":{{\"saved\":{},\"active\":{},\"consent\":{}}},\"events\":{{"
         ),
         settings.enabled,
@@ -716,6 +860,7 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
         settings.active(alerts::Destination::Telegram),
         Quoted(&settings.telegram_chat),
         consent(alerts::ConsentFor::Destination(alerts::Destination::Telegram)),
+        summary.telegram_needs_local_forget,
         discord,
         settings.active(alerts::Destination::Discord),
         consent(alerts::ConsentFor::Destination(alerts::Destination::Discord)),
@@ -1480,6 +1625,7 @@ mod tests {
             ("test", "true"),
             ("test", "\"other\""),
             ("forget", "\"x\""),
+            ("forget_local", "\"discord\""),
             ("enabled", "true"),
             ("destination", "\"telegram\""),
             ("forwarding", r#"{"destination":"telegram","enabled":true}"#),
@@ -1521,6 +1667,31 @@ mod tests {
         assert!(field(alerts, "destination").null());
         assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(false));
         assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
+    }
+
+    #[test]
+    fn browser_telegram_reconnect_reports_an_incompatible_binding_and_accepts_local_forget() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const CAPABILITY: &str = concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        let config = f.root.join("alerts");
+        let state_dir = f.root.join("alert-state");
+        let alerts = Alerts::at(&config, &state_dir);
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(config.join("alerts.conf"), "enabled = false\ndestination = telegram\ntelegram_chat = 42\n").unwrap();
+        let secrets = state_dir.join("alerts-secrets");
+        fs::write(&secrets, format!("telegram = {CAPABILITY}:42\n")).unwrap();
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600)).unwrap();
+        editor.setup.alerts = Some(alerts);
+        assert!(editor.check_telegram_reconnect().unwrap_err().contains("Forget on this Mac"));
+        let state = editor.state();
+        assert!(state.contains(r#""needs_local_forget":true"#) && !state.contains(CAPABILITY));
+        let state = change_alert(&mut editor, "forget_local", "\"telegram\"").unwrap();
+        assert!(state.contains(r#""needs_local_forget":false"#) && state.contains("this machine only"));
+        editor.check_telegram_reconnect().unwrap();
     }
 
     #[test]

@@ -138,12 +138,15 @@ fn a_tighter_old_window_cannot_displace_a_current_one_in_the_two_row_pane() {
     let f = Fixture::folder();
     let mut usage = automatic(&f, NOW);
     let reset = NOW + HOUR;
-    usage.claude.native = Some(Reading {
-        at: Timestamp::seconds(NOW),
-        windows: Limits::new([
-            Some(Window { minutes: 300, percent: 99.9, resets: Some(reset), observed: NOW }),
-            Some(Window { minutes: 10_080, percent: 100.0, resets: Some(reset), observed: NOW - 5 * MINUTE }),
-        ]),
+    usage.claude.native = Some(status::Native {
+        account: None,
+        reading: Some(Reading {
+            at: Timestamp::seconds(NOW),
+            windows: Limits::new([
+                Some(Window { minutes: 300, percent: 99.9, resets: Some(reset), observed: NOW }),
+                Some(Window { minutes: 10_080, percent: 100.0, resets: Some(reset), observed: NOW - 5 * MINUTE }),
+            ]),
+        }),
     });
     let rail = frame(&mut usage, 22, 2);
     assert_eq!(rail, ["Claude 5h · <1% left", "Resets in 1h"]);

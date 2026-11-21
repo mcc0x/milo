@@ -10,6 +10,7 @@ mod git;
 mod help;
 mod history;
 mod home;
+mod host;
 mod icons;
 mod json;
 mod keys;
@@ -60,6 +61,8 @@ Usage: milo
        milo menubar install | uninstall
        milo setup
        milo web [--port PORT] [--no-open]
+       milo web --host HOST [--project DIR] [--port PORT] [--no-open]
+       milo settings export GROUPS | import FILE [--apply] | undo
        milo doctor
        milo setup --repair | --remove
        milo presence [status] | enable | details DETAILS | application ID | disable
@@ -76,9 +79,11 @@ On first launch, milo and milo setup share a short welcome guide.
 --skip-onboarding marks the guide skipped and exits without opening a terminal or changing settings.
 milo setup saves a Rex layout and can enable Claude Code usage limits.
 milo web opens local Settings in your browser. Use --no-open to print the link without opening it.
+milo web --host HOST opens the Settings of another Rex host here, through a Rex forward that ends with it.
 milo doctor explains local preferences, integration health and usage sources.
 milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose. It is off until you turn it on.
 milo presence shows or changes the optional Discord Rich Presence, which is off until you turn it on.
+milo settings copies chosen pane settings to another host as a file, shows what an import would change, and undoes it.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -171,12 +176,13 @@ fn command_help(name: &str) -> Option<&'static str> {
             "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
         }
         "web" => {
-            "Usage: milo web [--port PORT] [--no-open]\n\nEdit local settings in your browser. The default port is 6110; use --port 0 for a free port. --no-open prints the private link without launching a browser."
+            "Usage: milo web [--port PORT] [--no-open]\n       milo web --host HOST [--project DIR] [--port PORT] [--no-open]\n\nEdit local settings in your browser. The default port is 6110; use --port 0 for a free port. --no-open prints the private link without launching a browser.\n\n--host opens the settings of another Rex host on this computer. HOST is a label from `rex hosts` or a server address, as for `rex -S`. Milo starts its editor on that host, carries it here with `rex forward` on 127.0.0.1 only, and closes both when you choose Done or press Ctrl-C. --project names a folder on the host, to edit that worktree's settings. The host needs this version of milo on the search path of its login shell."
         }
         "doctor" => {
             "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
         }
         "presence" => presence::HELP,
+        "settings" => setup::transfer::HELP,
         "listen" => {
             "Usage: milo listen [--stop]\n\nStart or stop the Rex listener that remembers sidebar sizes, arranges new tabs and titles tabs."
         }
@@ -228,7 +234,7 @@ enum Command<'a> {
     MenuBar(menubar::Action),
     Home,
     Setup,
-    Web { open_browser: bool, port: u16 },
+    Web(web::Start<'a>),
     SkipOnboarding,
     Doctor,
     Repair,
@@ -236,6 +242,7 @@ enum Command<'a> {
     Listen(bool),
     Alerts(Option<&'a OsStr>, &'a [OsString]),
     Presence(presence::Request),
+    Settings(setup::transfer::Request<'a>),
     ClaudeStatus,
     Help(&'static str),
     Version,
@@ -269,7 +276,7 @@ fn command<'a>(
             Command::ShellOutline(block)
         });
     }
-    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "alerts" | "presence")) {
+    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "alerts" | "presence" | "settings")) {
         return Err("too many arguments; see milo --help".to_string());
     }
     if rest.is_empty()
@@ -300,25 +307,54 @@ fn command<'a>(
         (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID | --edit]".to_string()),
         (Some("setup"), None) => Command::Setup,
         (Some("web"), first_flag) => {
+            const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";
             let mut open_browser = true;
-            let mut port = None;
+            let (mut port, mut forwarded_port, mut host, mut project) = (None, None, None, None);
             let mut flags = first_flag.into_iter().chain(rest.iter().map(OsString::as_os_str));
             while let Some(flag) = flags.next() {
+                let mut number = |least: u16, why: &'static str| {
+                    flags
+                        .next()
+                        .and_then(OsStr::to_str)
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .filter(|n| *n >= least)
+                        .ok_or(why)
+                };
                 match flag.to_str() {
                     Some("--no-open") if open_browser => open_browser = false,
                     Some("--port") if port.is_none() => {
-                        port = Some(
+                        port = Some(number(0, "--port requires a number from 0 to 65535")?)
+                    }
+                    Some("--forwarded-port") if forwarded_port.is_none() => {
+                        forwarded_port = Some(number(1, "--forwarded-port requires a number from 1 to 65535")?);
+                    }
+                    Some("--host") if host.is_none() => {
+                        // A label or an address, never something Rex would read as an option.
+                        let named =
+                            flags.next().filter(|name| !name.is_empty() && !name.as_encoded_bytes().starts_with(b"-"));
+                        host = Some(named.ok_or("--host requires a host label from rex hosts, or a server address")?);
+                    }
+                    Some("--project") if project.is_none() => {
+                        project = Some(
                             flags
                                 .next()
-                                .and_then(OsStr::to_str)
-                                .and_then(|s| s.parse::<u16>().ok())
-                                .ok_or("--port requires a number from 0 to 65535")?,
+                                .filter(|dir| !dir.is_empty())
+                                .ok_or("--project requires a folder on the host")?,
                         );
                     }
-                    _ => return Err("expected milo web [--port PORT] [--no-open]".into()),
+                    _ => return Err(EXPECTED.into()),
                 }
             }
-            Command::Web { open_browser, port: port.unwrap_or(web::DEFAULT_PORT) }
+            Command::Web(match (host, forwarded_port) {
+                (Some(host), None) => web::Start::Host { host, project, open_browser, port: port.unwrap_or(0) },
+                (None, Some(forwarded_port)) if project.is_none() && open_browser => {
+                    web::Start::Forwarded { port: port.unwrap_or(0), forwarded_port }
+                }
+                (None, None) if project.is_none() => {
+                    web::Start::Local { open_browser, port: port.unwrap_or(web::DEFAULT_PORT) }
+                }
+                _ => return Err(EXPECTED.into()),
+            })
         }
         (Some("--skip-onboarding"), None) => Command::SkipOnboarding,
         (Some("setup"), Some(flag)) if flag == "--skip-onboarding" => Command::SkipOnboarding,
@@ -328,6 +364,7 @@ fn command<'a>(
         (Some("usage"), None) => Command::Usage,
         (Some("usage"), Some(flag)) if flag == "--menu-stream" => Command::UsageMenuStream,
         (Some("presence"), action) => Command::Presence(presence::Request::parse(action, rest)?),
+        (Some("settings"), action) => Command::Settings(setup::transfer::Request::parse(action, rest)?),
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
@@ -367,7 +404,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::PeekOutline(origin) => {
             let result = run(Start::Reading(Path::new(".")), &|| {
                 Ok(workflow::project(open_repo(None)?, None, |repo, prefs| {
-                    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek())
+                    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek().refreshing_away())
                 }))
             });
             setup::return_from_peek(origin);
@@ -391,7 +428,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         }),
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
         Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),
-        Command::Web { open_browser, port } => web::run(open_browser, port),
+        Command::Web(start) => web::run(start),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),
@@ -410,6 +447,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         }
         Command::Alerts(action, rest) => alerts::command(action, rest),
         Command::Presence(request) => print_report(presence::command(request)),
+        Command::Settings(request) => print_report(setup::transfer::command(request)),
         Command::Listen(stop) => {
             if !stop {
                 // Rex runs this as it starts, which is when presence should come up too.
@@ -440,7 +478,7 @@ fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
 }
 
 fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
-    Box::new(Outline::with_preferences(repo, rex::inside(), prefs))
+    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).refreshing_away())
 }
 
 fn history(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
@@ -582,8 +620,12 @@ mod tests {
     fn setup_usage_and_helper_commands_reach_separate_destinations() {
         for (name, arg, expected) in [
             ("setup", None, Command::Setup),
-            ("web", None, Command::Web { open_browser: true, port: web::DEFAULT_PORT }),
-            ("web", Some("--no-open"), Command::Web { open_browser: false, port: web::DEFAULT_PORT }),
+            ("web", None, Command::Web(web::Start::Local { open_browser: true, port: web::DEFAULT_PORT })),
+            (
+                "web",
+                Some("--no-open"),
+                Command::Web(web::Start::Local { open_browser: false, port: web::DEFAULT_PORT }),
+            ),
             ("--skip-onboarding", None, Command::SkipOnboarding),
             ("setup", Some("--skip-onboarding"), Command::SkipOnboarding),
             ("usage", None, Command::Usage),
@@ -593,6 +635,38 @@ mod tests {
             ("listen", Some("--stop"), Command::Listen(true)),
         ] {
             assert_eq!(command(Some(OsStr::new(name)), arg.map(OsStr::new), &[]), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn web_names_another_host_or_serves_a_forward_but_never_both() {
+        let parse = |flags: &[&str]| {
+            let flags: Vec<OsString> = flags.iter().map(OsString::from).collect();
+            command(Some(OsStr::new("web")), flags.first().map(OsString::as_os_str), flags.get(1..).unwrap_or(&[]))
+                .map(|command| format!("{command:?}"))
+        };
+        let host = web::Start::Host {
+            host: OsStr::new("studio"),
+            project: Some(OsStr::new("/srv/app")),
+            open_browser: false,
+            port: 0,
+        };
+        assert_eq!(
+            parse(&["--host", "studio", "--project", "/srv/app", "--no-open"]),
+            Ok(format!("{:?}", Command::Web(host)))
+        );
+        let forwarded = web::Start::Forwarded { port: 0, forwarded_port: 7001 };
+        assert_eq!(parse(&["--forwarded-port", "7001"]), Ok(format!("{:?}", Command::Web(forwarded))));
+        for refused in [
+            &["--host", "-S"][..],
+            &["--host", ""],
+            &["--host"],
+            &["--host", "studio", "--forwarded-port", "7001"],
+            &["--forwarded-port", "0"],
+            &["--forwarded-port", "7001", "--no-open"],
+            &["--project", "/srv/app"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
         }
     }
 

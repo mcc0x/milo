@@ -602,6 +602,42 @@ fn legacy_unbound_telegram_capability_requires_repair() {
 }
 
 #[test]
+fn old_production_telegram_is_blocked_before_repair_and_only_forgotten_locally() {
+    let f = Fixture::folder();
+    let mut alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+    let webhook = alerts.secret(discord).unwrap();
+    assert!(alerts.check_telegram_reconnect().is_ok(), "the same prefix is valid for loopback");
+
+    alerts.relay = Some(super::relay::Origin::Production);
+    for credential in [CAPABILITY.to_owned(), format!("{CAPABILITY}:42")] {
+        alerts.secrets.set(telegram, &credential).unwrap();
+        assert!(alerts.summary().unwrap().telegram_needs_local_forget);
+        assert!(alerts.check_telegram_reconnect().unwrap_err().contains("Forget on this Mac"));
+        assert!(alerts.set_telegram(TOKEN, "43").unwrap_err().contains("Forget on this Mac"));
+        let settings = alerts.settings().unwrap();
+        assert!(settings.active(telegram) && settings.active(discord));
+        assert_eq!(alerts.secret(telegram).unwrap(), credential);
+    }
+
+    let report = alerts.forget_incompatible_telegram().unwrap();
+    assert!(report.contains("nothing proves that it is revoked") && report.contains("send /stop"));
+    let settings = alerts.settings().unwrap();
+    assert!(!settings.active(telegram) && settings.active(discord));
+    assert!(settings.telegram_chat.is_empty());
+    assert_eq!(alerts.secret(discord).unwrap(), webhook);
+    assert!(!alerts.summary().unwrap().telegram_needs_local_forget);
+    alerts.check_telegram_reconnect().unwrap();
+    alerts.set_telegram(TOKEN, "43").unwrap();
+    assert!(alerts.forget_incompatible_telegram().is_err(), "a stale confirmation cannot discard the new bot");
+    assert_eq!(alerts.secret(telegram).unwrap(), TOKEN);
+}
+
+#[test]
 fn the_alert_transaction_holds_the_config_lock_through_a_credential_write() {
     let f = Fixture::folder();
     let alerts = Alerts::at(&f.root, &f.root);

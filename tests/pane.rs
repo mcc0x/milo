@@ -409,6 +409,91 @@ fn a_git_that_cannot_give_whole_paths_still_names_a_project_by_its_folder() {
 }
 
 #[test]
+fn outline_search_distinguishes_closed_paths_and_escape_restores_the_tree() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    fs::create_dir_all(root.join("docs/chapter")).unwrap();
+    fs::create_dir_all(root.join("src/reference")).unwrap();
+    fs::write(root.join("docs/chapter/guide.md"), "first guide\n").unwrap();
+    fs::write(root.join("src/reference/guide.md"), "second guide\n").unwrap();
+    for i in 0..20 {
+        fs::write(root.join(format!("note-{i:02}.txt")), "").unwrap();
+    }
+    fs::write(root.join("zz-target.txt"), "previous selection\n").unwrap();
+    fs::write(root.join("zzz-after.txt"), "").unwrap();
+    project.git(&["init", "-q", "--template="]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "fixture"]);
+
+    let mut tty = Terminal::sized(project.command(env!("CARGO_BIN_EXE_milo")).arg("outline"), 80, 12);
+    tty.shows("all committed");
+    let visible = |tty: &Terminal| tty.screen()[1..11].iter().map(|s| s.trim_end().to_owned()).collect::<Vec<_>>();
+    tty.master.write_all(b"\rGk").unwrap();
+    tty.shows("zzz-after.txt");
+    let before = visible(&tty);
+    assert!(before.iter().any(|s| s.contains("zz-target.txt")));
+    tty.master.write_all(b"/absent\r").unwrap();
+    tty.shows("No matches");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("zzz-after.txt");
+    assert_eq!(visible(&tty), before);
+
+    tty.master.write_all(b"/Guide.md").unwrap();
+    tty.shows("docs/chapter/guide.md");
+    tty.shows("src/reference/guide.md");
+    tty.master.write_all(b"\x1b[B\r").unwrap();
+    tty.shows("second guide");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("zzz-after.txt");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("previous selection");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
+fn outline_search_pastes_utf8_in_a_plain_folder_and_takes_touch_controls() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    fs::create_dir(root.join("buried")).unwrap();
+    fs::write(root.join("buried/ω.txt"), "found it\n").unwrap();
+    fs::write(root.join("buried/.DS_Store"), "").unwrap();
+    let mut tty = Terminal::sized(project.command(env!("CARGO_BIN_EXE_milo")).arg("outline"), 22, 12);
+    tty.shows("/ find");
+    tty.click(2, 12, "");
+    tty.shows("Find files");
+    tty.shows("buried/ω.txt");
+    assert!(!tty.screen().iter().any(|row| row.contains(".DS_Store")));
+    tty.master.write_all("ω界".as_bytes()).unwrap();
+    tty.shows("No matches");
+    tty.master.write_all(b"\x7f").unwrap();
+    tty.shows("buried/ω.txt");
+    tty.master.write_all("\x15\x1b[200~BURIED/Ω.TXT\nq\x1b[201~".as_bytes()).unwrap();
+    tty.shows("BURIED/Ω.TXT");
+    tty.shows("buried/ω.txt");
+
+    let size = libc::winsize { ws_row: 5, ws_col: 34, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: The slave is open; ioctl reads from the live size record.
+    assert_eq!(unsafe { libc::ioctl(tty.slave.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) }, 0);
+    let pid = i32::try_from(tty.child.id()).unwrap();
+    // SAFETY: The PTY is not the child's controlling terminal; signal only this child.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGWINCH) }, 0);
+    tty.shows("Esc back");
+    tty.shows("Enter open");
+    tty.click(26, 1, "");
+    tty.hides("Esc back");
+    tty.master.write_all(b"/").unwrap();
+    tty.shows("buried/ω.txt");
+    tty.shows("Enter open");
+    tty.click(2, 5, "");
+    tty.shows("found it");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
 fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
     let project = Project::new();
     let root = project.0.join("project");
@@ -440,6 +525,126 @@ fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
         terminal.master.write_all(b"q").unwrap();
         assert!(terminal.wait_for_exit().success());
     }
+}
+
+/// An outline on two changed files and one clean one, whose Git stops at
+/// `status` for as long as the file `hold` is in the project's home.
+fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
+    let root = project.0.join("project");
+    project.git(&["init"]);
+    for name in ["clean.txt", "first.txt", "second.txt"] {
+        fs::write(root.join(name), "before\n").unwrap();
+    }
+    project.git(&["add", "."]);
+    project.git(&["commit", "-m", "Baseline"]);
+    for name in ["first.txt", "second.txt"] {
+        fs::write(root.join(name), "after\n").unwrap();
+    }
+    let real = Path::new(project.git(&["--exec-path"]).trim()).join("git");
+    let script = format!(
+        "case \" $* \" in *\" status \"*)\n  if [ -e \"$HOME/hold\" ]; then\n    : > \"$HOME/held\"\n    \
+         while [ -e \"$HOME/hold\" ]; do sleep 0.02; done\n  fi;;\nesac\nexec '{}' \"$@\"\n",
+        real.display()
+    );
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    project.stand_in_git(&mut command, &script);
+    let mut terminal = Terminal::sized(command.arg("outline"), 80, 12);
+    terminal.shows("clean.txt");
+    terminal
+}
+
+/// Changes the project and waits until the outline's Git is stopped reading it.
+fn hold_git_at_a_change(project: &Project) {
+    fs::write(project.0.join("hold"), "").unwrap();
+    fs::write(project.0.join("project/later.txt"), "new file\n").unwrap();
+    let until = Instant::now() + TEST_WAIT;
+    while !project.0.join("held").exists() {
+        assert!(Instant::now() < until, "the outline did not ask Git about the change");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_outline_answers_keys_while_git_is_still_reading_the_project() {
+    let project = Project::new();
+    let mut terminal = outline_with_a_git_that_can_be_held(&project);
+    hold_git_at_a_change(&project);
+
+    terminal.master.write_all(b"c").unwrap();
+    terminal.hides("clean.txt");
+    // The key was answered from what Git last said: not after Git was given up on,
+    // and not from half of its next answer.
+    assert!(project.0.join("hold").exists());
+    let screen = terminal.screen();
+    assert!(!screen.iter().any(|row| row.contains("later.txt") || row.contains("git did not answer")), "{screen:#?}");
+
+    fs::remove_file(project.0.join("hold")).unwrap();
+    terminal.shows("later.txt");
+    terminal.master.write_all(b"q").unwrap();
+    assert!(terminal.wait_for_exit().success());
+}
+
+#[test]
+fn search_stays_responsive_during_refresh_and_opens_the_updated_file_for_editing() {
+    let project = Project::new();
+    let mut terminal = outline_with_a_git_that_can_be_held(&project);
+    hold_git_at_a_change(&project);
+
+    let asked = Instant::now();
+    terminal.master.write_all(b"/later").unwrap();
+    terminal.shows("No matches");
+    terminal.master.write_all(b"\x15FIRST").unwrap();
+    terminal.shows("FIRST");
+    terminal.shows("first.txt");
+    assert!(asked.elapsed() < Duration::from_secs(10), "waited {:?} for Git", asked.elapsed());
+    assert!(!terminal.screen().iter().any(|row| row.contains("second.txt")));
+
+    fs::remove_file(project.0.join("hold")).unwrap();
+    terminal.master.write_all(b"\x1b").unwrap();
+    terminal.shows("later.txt");
+    terminal.master.write_all(b"/later\r").unwrap();
+    terminal.shows("new file");
+    terminal.master.write_all(b"e").unwrap();
+    terminal.shows("^S save");
+    terminal.master.write_all(b"draft ").unwrap();
+    terminal.shows("draft new file");
+
+    let file = project.0.join("project/later.txt");
+    fs::write(&file, "disk version\n").unwrap();
+    terminal.master.write_all(b"\x13").unwrap();
+    terminal.shows("c compare");
+    terminal.master.write_all(b"c").unwrap();
+    terminal.shows("- Disk  + Draft");
+    terminal.shows("disk version");
+    terminal.shows("draft new file");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "disk version\n");
+    terminal.master.write_all(b"\x1b").unwrap();
+    terminal.shows("o overwrite");
+    terminal.master.write_all(b"o").unwrap();
+    terminal.shows("Saved");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "draft new file\n");
+
+    terminal.master.write_all(b"\x1b").unwrap();
+    terminal.shows("e edit");
+    terminal.master.write_all(b"qq").unwrap();
+    assert!(terminal.wait_for_exit().success());
+    assert!(terminal.restored());
+}
+
+#[test]
+fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
+    let project = Project::new();
+    let mut terminal = outline_with_a_git_that_can_be_held(&project);
+    hold_git_at_a_change(&project);
+
+    let asked = Instant::now();
+    terminal.master.write_all(b"q").unwrap();
+    assert!(terminal.wait_for_exit().success());
+    // A pane that waits gives Git fifteen seconds before it reads the key.
+    assert!(asked.elapsed() < Duration::from_secs(10), "waited {:?} for Git", asked.elapsed());
+    assert!(terminal.restored());
+    assert!(project.0.join("hold").exists());
+    assert!(!project.0.join("project/.git/index.lock").exists());
 }
 
 #[test]
@@ -1143,7 +1348,9 @@ fn usage_and_doctor_read_only_the_selected_provider_directories() {
     fs::write(
         claude.join(".claude.json"),
         format!(
-            r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{now},"utilization":{{"seven_day":{{"utilization":35}}}}}}}}"#
+            r#"{{"oauthAccount":{{"accountUuid":"00000000-0000-4000-8000-000000000001"}},
+            "cachedUsageUtilization":{{"accountUuid":"00000000-0000-4000-8000-000000000001","fetchedAtMs":{now},
+            "utilization":{{"seven_day":{{"utilization":35}}}}}}}}"#
         ),
     )
     .unwrap();
@@ -1161,6 +1368,69 @@ fn usage_and_doctor_read_only_the_selected_provider_directories() {
     let mut pane = Terminal::sized(command().arg("usage"), 80, 2);
     pane.until("75%");
     pane.until("39%");
+    pane.master.write_all(b"q").unwrap();
+    assert!(pane.wait_for_exit().success());
+}
+
+#[test]
+fn claude_status_starts_fresh_when_the_account_changes_in_the_same_profile() {
+    let project = Project::new();
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let command = || {
+        let mut command = project.command(milo);
+        command.env_remove("CODEX_HOME").env_remove("PI_CODING_AGENT_DIR").env_remove("OPENCODE_DB");
+        command.env("XDG_DATA_HOME", project.0.join("data"));
+        command
+    };
+    let profile = |id| {
+        fs::write(project.0.join(".claude.json"), format!(r#"{{"oauthAccount":{{"accountUuid":"{id}"}}}}"#)).unwrap();
+    };
+    let save = |limits: &str, expected: &str| {
+        use std::process::Stdio;
+        let mut child = command().arg("claude-status").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        write!(child.stdin.take().unwrap(), r#"{{"session_id":"same-session","rate_limits":{limits}}}"#).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    };
+    let doctor = || {
+        let output = command().arg("doctor").output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let week = now + 172_800;
+    let old_week = week + 86_400;
+    profile("00000000-0000-4000-8000-000000000001");
+    save(
+        &format!(
+            r#"{{"five_hour":{{"used_percentage":77,"resets_at":{}}},"seven_day":{{"used_percentage":85,"resets_at":{old_week}}}}}"#,
+            now + 3600
+        ),
+        "5h 23% · week 15% left\n",
+    );
+    assert!(doctor().contains("Claude Code limits: Milo Claude status line"));
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 2);
+    pane.shows("15%");
+
+    profile("00000000-0000-4000-8000-000000000002");
+    assert!(!doctor().contains("Claude Code limits: Milo Claude status line"));
+    pane.master.write_all(b"r").unwrap();
+    pane.hides("15%");
+    pane.hides("23%");
+    save(&format!(r#"{{"seven_day":{{"used_percentage":30,"resets_at":{week}}}}}"#), "week 70% left\n");
+
+    let path = project.0.join("state/milo/claude-limits.json");
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(r#""five_hour":null"#) && saved.contains(r#""used_percentage":30"#), "{saved}");
+    assert!(doctor().contains("Claude Code limits: Milo Claude status line"));
+    pane.master.write_all(b"r").unwrap();
+    pane.shows("70%");
+    assert!(pane.screen().iter().all(|row| !row.contains("23%")));
+
+    save(&format!(r#"{{"seven_day":{{"used_percentage":29,"resets_at":{week}}}}}"#), "week 71% left\n");
+    assert_eq!(fs::read_to_string(path).unwrap(), saved);
     pane.master.write_all(b"q").unwrap();
     assert!(pane.wait_for_exit().success());
 }
@@ -1432,8 +1702,12 @@ fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
 /// the providers here, so this test sends no request at all.
 #[test]
 fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_its_key() {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
     use std::io::{BufRead as _, BufReader};
     use std::process::Stdio;
+
+    const DEEPSEEK_KEY: &str = "sk-not-a-real-key";
+    const OPENROUTER_KEY: &str = "sk-or-not-a-real-key";
 
     let milo = env!("CARGO_BIN_EXE_milo");
     let binary = fs::read(milo).unwrap();
@@ -1467,13 +1741,14 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
             .env("https_proxy", format!("http://127.0.0.1:{port}"))
             .env_remove("NO_PROXY")
             .env_remove("no_proxy")
-            .env("MILO_OPENROUTER_API_KEY", "sk-or-not-a-real-key");
+            .env_remove("MILO_DEEPSEEK_API_KEY")
+            .env("MILO_OPENROUTER_API_KEY", OPENROUTER_KEY);
         command
     };
     let config = project.0.join("config/milo");
     fs::create_dir_all(&config).unwrap();
     let keys = config.join("usage-accounts.conf");
-    fs::write(&keys, "MILO_DEEPSEEK_API_KEY = sk-not-a-real-key\n").unwrap();
+    fs::write(&keys, format!("MILO_DEEPSEEK_API_KEY = {DEEPSEEK_KEY}\n")).unwrap();
     fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
 
@@ -1492,16 +1767,22 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
     let later = now + 3600;
     let saved = project.0.join("state/milo/accounts");
     fs::create_dir_all(&saved).unwrap();
+    // The v2 cache uses the provider, key and optional scope in its file name.
+    let cache = |provider: &str, key: &str| {
+        let [first, second] = [0, 1].map(|domain: u8| {
+            let mut hash = DefaultHasher::new();
+            (domain, provider, key, None::<&str>).hash(&mut hash);
+            hash.finish()
+        });
+        saved.join(format!("{provider}-{first:016x}{second:016x}.json"))
+    };
+    let deepseek = cache("deepseek", DEEPSEEK_KEY);
+    let openrouter = cache("openrouter", OPENROUTER_KEY);
     let reading = format!(
         r#"{{"observed":{now},"figure":{{"kind":"balance","unit":"cny","value":110}},"details":[{{"kind":"granted","unit":"cny","value":10}}],"depleted":false}}"#
     );
-    fs::write(saved.join("deepseek.json"), format!(r#"{{"version":1,"asked":{now},"next":{later},"reading":{reading}}}"#))
-        .unwrap();
-    fs::write(
-        saved.join("openrouter.json"),
-        format!(r#"{{"version":1,"asked":{now},"next":{later},"failure":"limited"}}"#),
-    )
-    .unwrap();
+    fs::write(&deepseek, format!(r#"{{"version":2,"asked":{now},"next":{later},"reading":{reading}}}"#)).unwrap();
+    fs::write(&openrouter, format!(r#"{{"version":2,"asked":{now},"next":{later},"failure":"limited"}}"#)).unwrap();
     fs::write(config.join("preferences.conf"), "usage_deepseek = auto\nusage_openrouter = always\n").unwrap();
 
     let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
@@ -1513,13 +1794,17 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
 
     let report = command().arg("doctor").output().unwrap();
     let report = String::from_utf8(report.stdout).unwrap();
-    assert!(report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"), "{report}");
+    assert!(
+        report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"),
+        "{report}"
+    );
     assert!(report.contains("DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from "), "{report}");
     assert!(report.contains("  last answer: ¥110.00 balance, "), "{report}");
     assert!(report.contains("  last attempt: the provider rate limited the request"), "{report}");
     assert!(!report.contains("not-a-real-key"), "{report}");
 
-    let mut stream = command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut stream =
+        command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut lines = BufReader::new(stream.stdout.take().unwrap()).lines();
     // Each account is looked at on a thread of its own, even when a saved
     // answer spares the request, and the stream does not hold a line back for
@@ -1531,11 +1816,12 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
         .by_ref()
         .take(10)
         .map(Result::unwrap)
-        .inspect(|line| eprintln!("menu stream: {line}"))
         .find(settled)
         .expect("a line with both accounts' saved answers");
     assert!(
-        line.contains(r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#),
+        line.contains(
+            r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#
+        ),
         "{line}"
     );
     assert!(line.contains(r#"{"id":"openrouter","name":"OpenRouter","windows":[],"detail":"Rate limited"}"#), "{line}");
@@ -1544,7 +1830,8 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
 
     // Nothing was sent to the loopback receiver, with or without accounts turned on.
     assert_eq!(received.load(Ordering::SeqCst), 0);
-    for name in ["deepseek.json", "openrouter.json"] {
-        assert!(!fs::read_to_string(saved.join(name)).unwrap().contains("not-a-real-key"));
+    for path in [deepseek, openrouter] {
+        assert!(!path.file_name().unwrap().to_str().unwrap().contains("not-a-real-key"));
+        assert!(!fs::read_to_string(path).unwrap().contains("not-a-real-key"));
     }
 }

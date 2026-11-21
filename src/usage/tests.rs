@@ -34,6 +34,8 @@ const OTHER_CODEX: &str = "codex/2026/11/18/rollout-z.jsonl";
 const CLAUDE: &str = "claude/project/session.jsonl";
 const AGENT: &str = "claude/project/session/subagents/agent-good.jsonl";
 const STATE: &str = "state";
+const CLAUDE_ACCOUNT: &str = "00000000-0000-4000-8000-000000000001";
+const OTHER_CLAUDE_ACCOUNT: &str = "00000000-0000-4000-8000-000000000002";
 const STATUS: &[u8] = br#"{
     "rate_limits": {
         "five_hour": {"used_percentage":23,"resets_at":1795110000},
@@ -759,31 +761,32 @@ mod omp_limits {
         let stamp = iso(reset + HOUR);
         let content = |account: &str| {
             format!(
-                r#"{{"oauthAccount":{{"accountUuid":"fixture-current"}},
+                r#"{{"oauthAccount":{{"accountUuid":"{CLAUDE_ACCOUNT}"}},
                      "cachedUsageUtilization":{{"fetchedAtMs":{},"accountUuid":"{account}",
                       "utilization":{{"five_hour":null,"seven_day":{{"utilization":18,"resets_at":"{stamp}.987+01:00"}}}}}}}}"#,
                 NOW * 1000 + 250
             )
         };
         let state = f.root.join(STATE).join(SAVED_LIMITS);
-        status::run(STATUS, Vec::new(), Some(&state), NOW);
         let mut usage = unopened(&f, NOW);
         usage.claude_config = Some(config.clone());
-        write(&f, ".claude.json", &content("fixture-current"), NOW);
+        write(&f, ".claude.json", &content(CLAUDE_ACCOUNT), NOW);
+        let target = status::SaveTo { path: &state, config: Some(&config) };
+        status::render(STATUS, Vec::new(), Some(target), NOW);
         assert!(usage.check());
         let (reading, source) = usage.claude.reported(usage.now()).unwrap();
         assert_eq!(source.label(), "Claude Code usage cache");
         let windows = reading.windows.base;
         assert!(windows[0].is_none() && windows[1].unwrap().percent == 18.0);
         assert_eq!(windows[1].unwrap().resets, Some(reset));
-        write(&f, ".claude.json", &content("fixture-other"), NOW + 1);
+        write(&f, ".claude.json", &content(OTHER_CLAUDE_ACCOUNT), NOW + 1);
         assert!(usage.check());
         assert_eq!(usage.claude.reported(usage.now()).unwrap().0.windows.base[1].unwrap().percent, 61.0);
-        write(&f, ".claude.json", &content("fixture-current"), NOW + 2);
+        write(&f, ".claude.json", &content(CLAUDE_ACCOUNT), NOW + 2);
         OpenOptions::new().write(true).open(config).unwrap().set_len(6 * 1024 * 1024).unwrap();
         assert!(usage.check());
         assert_eq!(usage.bytes_read, 0);
-        assert_eq!(usage.claude.reported(usage.now()).unwrap().0.windows.base[1].unwrap().percent, 61.0);
+        assert!(usage.claude.reported(usage.now()).is_none());
     }
 
     #[test]

@@ -4,7 +4,7 @@ export type ProviderFetch = (url: string, init: RequestInit) => Promise<Response
 
 export type DiscordConfig = { clientId: string; clientSecret: string; redirectUri: string };
 
-type TelegramReply = { status: number; result?: unknown; retryAfter?: number };
+type TelegramReply = { status: number; result?: unknown; retryAfter?: number; confirmedError?: true };
 type TelegramApi = (
   method: string, payload?: Record<string, unknown>, timeout?: number, signal?: AbortSignal,
 ) => Promise<TelegramReply>;
@@ -37,6 +37,7 @@ export function telegramApi(fetch: ProviderFetch, token: string): TelegramApi {
       const retryAfter = object(data?.parameters)?.retry_after;
       return {
         status: status >= 400 ? status : 502,
+        confirmedError: !response.ok && data?.ok === false && data.error_code === response.status ? true : undefined,
         retryAfter: typeof retryAfter === "number" && Number.isSafeInteger(retryAfter) && retryAfter > 0
           ? Math.min(retryAfter, 86_400)
           : undefined,

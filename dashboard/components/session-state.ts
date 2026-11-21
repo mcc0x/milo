@@ -31,13 +31,49 @@ export interface AlertsState {
   running: boolean;
   destination: AlertDestination | null;
   consent: string | null;
-  telegram: {saved: boolean; active: boolean; chat: string; consent: string | null};
+  telegram: {saved: boolean; active: boolean; chat: string; consent: string | null; needs_local_forget: boolean};
   discord: {saved: boolean; active: boolean; consent: string | null};
   events: Record<AlertKind, boolean>;
   content: 'metadata' | 'text';
   place: string;
   disclosure: string;
   note: string;
+}
+
+/** The computer this editor runs on and the Rex that serves it. */
+export interface HostState {
+  name: string;
+  /** The page is open on another computer, through a Rex forward. */
+  forwarded: boolean;
+  rex: {
+    host_id: string;
+    version: string;
+    api: number;
+    checked_api: number;
+    command: {version: string; api: number} | null;
+    compatibility: 'checked' | 'newer' | 'older' | 'command_differs';
+    warning: boolean;
+    note: string;
+    viewers: 'here' | 'elsewhere' | 'nobody' | null;
+  } | null;
+}
+
+export type TransferGroup = 'appearance' | 'workflow' | 'usage' | 'layout';
+export type TransferScope = 'global' | 'worktree' | 'all';
+
+/** What an import would change here, worked out by the editor before anything is written. */
+export interface TransferPreview {
+  basis: string;
+  changes: number;
+  sections: {
+    kind: 'global' | 'worktree' | 'unmapped';
+    project: string | null;
+    path: string | null;
+    why: string | null;
+    unchanged: number;
+    rows: {label: string; from: string; to: string}[];
+    skipped: string[];
+  }[];
 }
 
 export const healthLabels = {good: 'All good', warning: 'Warning', issue: 'Issue found'};
@@ -84,6 +120,8 @@ export interface SessionState {
   doctor: {level: keyof typeof healthLabels; note: string} | null;
   message: {text: string; error: boolean} | null;
   reopen_panes: {version: number; text: string} | null;
+  transfer: {undo: boolean};
+  host: HostState | null;
   alerts: AlertsState | null;
   presence: PresenceState | null;
 }

@@ -138,7 +138,7 @@ pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Opti
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Config {
     pub(super) guard: Vec<String>,
     pub(super) has_remote: bool,

@@ -748,9 +748,9 @@ struct Claude {
     identified: Vec<Sample>,
     partial: bool,
     saved_version: Option<SnapshotVersion>,
-    status: Option<Reading>,
+    status: Option<status::Saved>,
     native_version: Option<SnapshotVersion>,
-    native: Option<Reading>,
+    native: Option<status::Native>,
     omp: Option<Reading>,
     unreadable_limits: bool,
 }
@@ -763,18 +763,27 @@ struct Activity {
 }
 
 impl Claude {
+    fn readings(&self) -> [(Option<&Reading>, Source); 3] {
+        let account = self.native.as_ref().and_then(|native| native.account);
+        [
+            (self.status.as_ref().and_then(|saved| saved.for_account(account)), Source::ClaudeStatus),
+            (self.native.as_ref().and_then(|native| native.reading.as_ref()), Source::ClaudeCache),
+            (self.omp.as_ref(), Source::Omp),
+        ]
+    }
+
     fn reported(&self, now: i64) -> Option<(&Reading, Source)> {
-        [(&self.status, Source::ClaudeStatus), (&self.native, Source::ClaudeCache), (&self.omp, Source::Omp)]
+        self.readings()
             .into_iter()
-            .filter_map(|(reading, source)| Some((reading.as_ref()?, source)))
+            .filter_map(|(reading, source)| Some((reading?, source)))
             .filter(|(reading, _)| reading.visible_at() <= now)
             .max_by_key(|(reading, _)| reading.at)
     }
 
     fn next_reading(&self, now: i64) -> Option<i64> {
-        [self.status.as_ref(), self.native.as_ref(), self.omp.as_ref()]
+        self.readings()
             .into_iter()
-            .flatten()
+            .filter_map(|(reading, _)| reading)
             .map(Reading::visible_at)
             .filter(|&change| change > now)
             .min()
@@ -1348,8 +1357,11 @@ fn help_rows(claude: bool, opencode: bool, accounts: bool) -> Vec<help::HelpRow>
 
 /// Claude Code must get a line and a successful exit even if it sent bad data.
 pub fn claude_status() -> i32 {
-    let path = claude_state(paths::claude().as_ref()).map(|dir| dir.join(SAVED_LIMITS));
-    status::run_fd(io::stdin(), io::stdout().lock(), path.as_deref(), when::now(), status::INPUT_WAIT)
+    let claude = paths::claude();
+    let config = claude.as_ref().map(paths::ClaudePaths::config);
+    let path = claude_state(claude.as_ref()).map(|dir| dir.join(SAVED_LIMITS));
+    let target = path.as_deref().map(|path| status::SaveTo { path, config: config.as_deref() });
+    status::run_fd(io::stdin(), io::stdout().lock(), target, when::now(), status::INPUT_WAIT)
 }
 
 #[cfg(test)]
