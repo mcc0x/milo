@@ -109,9 +109,11 @@
   .hero .intro { width: 100%; }
   .bubbles { position: absolute; inset: 0; display: block; pointer-events: none; }
   .bubbles li { position: absolute; }
-  .bubbles li:nth-child(1) { left: 3%; top: 8%; }
+  /* A short window puts the headline on the masthead's row. The outer bubbles sit
+     below the lockup and the links; the inner ones stay clear of the headline. */
+  .bubbles li:nth-child(1) { left: 3%; bottom: 4%; }
   .bubbles li:nth-child(2) { left: 15%; bottom: 21%; }
-  .bubbles li:nth-child(3) { right: 15%; top: -9%; }
+  .bubbles li:nth-child(3) { right: 11%; top: -4%; }
   .bubbles li:nth-child(4) { right: 3%; bottom: 24%; }
   .bubbles span { width: 4rem; }
 }

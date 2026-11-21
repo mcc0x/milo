@@ -1,10 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
-export const metadata: Metadata = {
-  title: 'Page not found — milo',
-  icons: { icon: { url: '/favicon.png', type: 'image/png', sizes: '48x48' } },
-};
+export const metadata: Metadata = { title: 'Page not found — milo' };
 
 // Every route carries this page in case it is needed. Its styles are inline
 // so that no other page fetches them.

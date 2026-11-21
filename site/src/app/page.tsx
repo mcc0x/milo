@@ -30,10 +30,6 @@ export const metadata: Metadata = {
     canonical: 'https://usemilo.net/',
     types: { 'text/plain': [{ url: '/llms.txt', title: 'Milo documentation index' }] },
   },
-  icons: {
-    icon: { url: '/favicon.png', type: 'image/png', sizes: '48x48' },
-    apple: '/apple-touch-icon.png',
-  },
   openGraph: {
     type: 'website',
     url: 'https://usemilo.net/',
