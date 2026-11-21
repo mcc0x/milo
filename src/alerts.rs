@@ -285,6 +285,7 @@ pub(crate) struct Summary {
     pub(crate) settings: Settings,
     /// Whether a secret is saved for each destination, in `Destination::ALL` order.
     pub(crate) saved: [bool; 2],
+    pub(crate) telegram_needs_local_forget: bool,
     pub(crate) running: bool,
     pub(crate) note: String,
     pub(crate) consent: Consent,
@@ -330,6 +331,11 @@ pub(crate) struct Alerts {
     stand_in: Option<String>,
     relay: Option<relay::Origin>,
 }
+
+const TELEGRAM_LOCAL_FORGET: &str =
+    "The saved Telegram connection belongs to a different relay environment and cannot be disconnected here. If the \
+     original relay is gone, use Forget on this Mac in Settings or milo alerts forget telegram --local-only before \
+     reconnecting.";
 
 /// A settings and credential transaction. All edits, including a reviewed
 /// change's comparison and commit, use the same configuration directory lock.
@@ -428,9 +434,7 @@ impl Alerts {
             return if valid_token(secret) { Ok(None) } else { Err(REPAIR_TELEGRAM) };
         };
         if !self.relay.as_ref().is_some_and(|relay| relay.accepts(capability)) {
-            return Err(
-                "The saved Telegram connection belongs to a different relay environment. Connect Telegram again in Milo.",
-            );
+            return Err(TELEGRAM_LOCAL_FORGET);
         }
         if verified_chat != Some(chat) || !relay::valid_chat(chat) {
             return Err(REPAIR_TELEGRAM);
@@ -578,6 +582,22 @@ impl Alerts {
         self.locked(|edit| edit.forget_telegram_locally())
     }
 
+    /// A browser confirmation for an incompatible binding must not discard a newer, compatible one.
+    pub(crate) fn forget_incompatible_telegram(&self) -> Result<String, String> {
+        self.locked(|edit| {
+            if !edit.telegram_needs_local_forget()? {
+                return Err(
+                    "There is no incompatible Telegram connection to forget. Review the saved destination again.".into()
+                );
+            }
+            edit.forget_telegram_locally()
+        })
+    }
+
+    pub(crate) fn check_telegram_reconnect(&self) -> Result<(), String> {
+        if self.set_up() { self.locked(|edit| edit.check_telegram_reconnect()) } else { Ok(()) }
+    }
+
     pub(crate) fn disable(&self) -> Result<String, String> {
         self.locked(|edit| edit.disable())
     }
@@ -612,6 +632,7 @@ impl Alerts {
             send::Outcome::Sent => {
                 Ok(format!("{} accepted the test message.", describe_destination(settings, destination)))
             }
+            outcome @ send::Outcome::Uncertain(_) => Err(format!("{}.", outcome.reason(destination, hosted))),
             outcome => {
                 Err(format!("The test message was not delivered: {}.", outcome.reason(destination, hosted)))
             }
@@ -652,6 +673,8 @@ impl AlertsEdit<'_> {
         let credentials =
             Destination::ALL.map(|destination| if set_up { self.saved_secret(destination).ok().flatten() } else { None });
         let saved = credentials.each_ref().map(Option::is_some);
+        let telegram_needs_local_forget =
+            self.incompatible_telegram_binding(credentials[Destination::Telegram as usize].as_deref());
         let consent = Consent::at(&settings, credentials.each_ref().map(|secret| secret.as_deref()));
         let running = lock::alerts_running(&self.alerts.state).unwrap_or(false);
         let mut note = forward::note(&self.alerts.state);
@@ -667,7 +690,25 @@ impl AlertsEdit<'_> {
         if self.alerts.stand_in.is_some() {
             note.insert_str(0, "Messages go to a test stand-in on this machine, not to Telegram or Discord.\n");
         }
-        Ok(Summary { settings, saved, running, note, consent })
+        Ok(Summary { settings, saved, telegram_needs_local_forget, running, note, consent })
+    }
+
+    fn incompatible_telegram_binding(&self, saved: Option<&str>) -> bool {
+        // Older production connections used the same prefix as loopback. They must never
+        // be sent to another relay (or passed off as revoked).
+        saved.and_then(secret::telegram_binding).is_some_and(|(capability, _)| {
+            !self.alerts.relay.as_ref().is_some_and(|relay| relay.accepts(capability))
+        })
+    }
+
+    fn telegram_needs_local_forget(&self) -> Result<bool, String> {
+        self.saved_secret(Destination::Telegram)
+            .map(|saved| self.incompatible_telegram_binding(saved.as_deref()))
+            .map_err(|_| self.alerts.secret_read_error())
+    }
+
+    pub(crate) fn check_telegram_reconnect(&self) -> Result<(), String> {
+        if self.telegram_needs_local_forget()? { Err(TELEGRAM_LOCAL_FORGET.into()) } else { Ok(()) }
     }
 
     /// Only called with a trusted relay result, never with a browser-supplied chat.
@@ -721,6 +762,9 @@ impl AlertsEdit<'_> {
     fn keep(&self, destination: Destination, secret: &str, chat: Option<&str>, hosted: bool) -> Result<String, String> {
         let mut settings = self.editable()?;
         let previous = self.saved_secret(destination).map_err(|_| self.alerts.secret_read_error())?;
+        if destination == Destination::Telegram && self.incompatible_telegram_binding(previous.as_deref()) {
+            return Err(TELEGRAM_LOCAL_FORGET.into());
+        }
         let was_active = settings.active(destination);
         let changed = previous.as_deref() != Some(secret);
         let new_chat = chat.is_some_and(|chat| settings.telegram_chat != chat);

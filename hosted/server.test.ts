@@ -189,6 +189,27 @@ function telegramTransport(
   };
 }
 
+test("startup hints a retry for pre-send Telegram requests only", async () => {
+  const directory = relayTemp();
+  const bootstrap = Promise.withResolvers<Response>();
+  const config = { ...parseRelayConfig({ ...telegram, MILO_TELEGRAM_LONG_POLL: "1" }), port: 0, dataDirectory: directory };
+  const runtime = startRelay(config, { fetch: () => bootstrap.promise, report: () => {} });
+  try {
+    const send = await fetch(new URL("/v1/send", runtime.server.url), { method: "POST" });
+    expect(send.status).toBe(503);
+    expect(send.headers.get("retry-after")).toBe("5");
+    expect(await send.json()).toHaveProperty("retry_after", 5);
+    const binding = await fetch(new URL("/v1/binding", runtime.server.url), { method: "DELETE" });
+    expect(binding.status).toBe(503);
+    expect(binding.headers.get("retry-after")).toBeNull();
+    expect(await binding.json()).not.toHaveProperty("retry_after");
+  } finally {
+    bootstrap.resolve(Response.json({ ok: true, result: { url: "https://fixture.invalid" } }));
+    await runtime.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("readiness waits for catch-up, expires, recovers and polling aborts on shutdown", async () => {
   const directory = relayTemp();
   let time = 1000;

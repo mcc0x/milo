@@ -1,5 +1,6 @@
 //! Times the reader of a release build on generated files: long lines, syntax
-//! that spans lines, and diffs just under the size Milo will load.
+//! that spans lines, diffs just under the size Milo will load, and edits near
+//! the end of a large draft.
 //!
 //! Each run starts `milo view` in a real terminal, answers its questions as a
 //! terminal would, and times what a person waits for: the first frame that
@@ -52,18 +53,22 @@ const KEY_NOISE: Duration = Duration::from_micros(20);
 /// A key pressed `times` times and timed under `measure`. After each press
 /// `back` is pressed, untimed, to return to where the key acts again.
 struct Keys {
-    measure: &'static str,
+    measure: Option<&'static str>,
     key: u8,
     back: Option<u8>,
     times: usize,
 }
 
 const fn keys(measure: &'static str, key: u8, times: usize) -> Keys {
-    Keys { measure, key, back: None, times }
+    Keys { measure: Some(measure), key, back: None, times }
 }
 
 const fn there_and_back(measure: &'static str, key: u8, back: u8, times: usize) -> Keys {
-    Keys { measure, key, back: Some(back), times }
+    Keys { measure: Some(measure), key, back: Some(back), times }
+}
+
+const fn setup(key: u8) -> Keys {
+    Keys { measure: None, key, back: None, times: 1 }
 }
 
 struct Scenario {
@@ -119,6 +124,22 @@ const SCENARIOS: &[Scenario] = &[
         file: "pairs.rs",
         at_commit: false,
         keys: &[keys("change", b'n', 20), keys("pan", b'l', 40), keys("line", b'k', 40)],
+    },
+    Scenario {
+        name: "edit-near-bottom",
+        file: "blocks.rs",
+        at_commit: false,
+        keys: &[
+            setup(b'G'),
+            setup(b'e'),
+            there_and_back("type", b'x', b'\x1a', 24),
+            there_and_back("split-line", b'\r', b'\x1a', 24),
+            setup(b'x'),
+            there_and_back("undo", b'\x1a', b'\x19', 24),
+            setup(b'\x1a'),
+            there_and_back("redo", b'\x19', b'\x1a', 24),
+            setup(b'\x1b'),
+        ],
     },
 ];
 
@@ -443,7 +464,7 @@ struct Measure {
 
 impl Measure {
     fn name(self) -> &'static str {
-        self.step.checked_sub(1).map_or("first-paint", |key| SCENARIOS[self.scenario].keys[key].measure)
+        self.step.checked_sub(1).map_or("first-paint", |key| SCENARIOS[self.scenario].keys[key].measure.unwrap())
     }
 
     fn noise(self) -> Duration {
@@ -485,6 +506,10 @@ impl Times {
         *self.coloured.entry(index).or_insert(true) &= coloured;
         reader.settle();
         for (step, keys) in scenario.keys.iter().enumerate() {
+            if keys.measure.is_none() {
+                reader.press(keys.key);
+                continue;
+            }
             let samples = self.samples.entry(Measure { scenario: index, step: step + 1 }).or_default();
             for _ in 0..keys.times {
                 samples.push(reader.press(keys.key));

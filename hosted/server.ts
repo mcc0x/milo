@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { HOST, PORT, MAX_BODY, PRODUCTION_ORIGIN, createService, type Service } from "./service";
+import { HOST, PORT, MAX_BODY, PRODUCTION_ORIGIN, TELEGRAM_RETRY_AFTER, createService, type Service } from "./service";
 import { openBindings, verifyDataMount, type BindingStore } from "./bindings";
 import type { DiscordConfig, ProviderFetch } from "./providers";
 
@@ -94,10 +94,10 @@ export function parseRelayConfig(env: Record<string, string | undefined>): Relay
   return { origin, hostname: origin ? "0.0.0.0" : HOST, port, dataDirectory, telegram, discord };
 }
 
-function json(body: object, status = 200) {
+function json(body: object, status = 200, extra?: Record<string, string>) {
   return Response.json(body, {
     status,
-    headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" },
+    headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", ...extra },
   });
 }
 
@@ -151,6 +151,10 @@ export function startRelay(config: RelayConfig, {
         const health = healthResponse(request, !!config.origin, isReady(), server.port ?? PORT);
         if (health) return health;
         if (!service || signal.aborted) {
+          if (config.telegram && request.method === "POST" && new URL(request.url).pathname === "/v1/send") {
+            return json({ error: "Relay is not ready.", retry_after: TELEGRAM_RETRY_AFTER },
+              503, { "Retry-After": String(TELEGRAM_RETRY_AFTER) });
+          }
           return json({ error: "Relay is not ready." }, 503);
         }
         // The production listener is reached through Railway's HTTPS ingress,

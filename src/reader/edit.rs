@@ -13,7 +13,7 @@ use super::buffer::{Buffer, Pos};
 use super::content::LIMIT;
 use super::disk::{self, Original, SaveError};
 use super::draw::LinePainter;
-use super::rescue::{self, Draft, Mark};
+use super::rescue::{self, Draft, Drafts, Mark};
 use super::working_path::{Entry, LookupError};
 use crate::diff::{Line, LineKind, TAB};
 use crate::format::{self, Support, Tool};
@@ -69,8 +69,8 @@ pub(super) struct Place {
 }
 
 impl Place {
-    fn draft(&self) -> Option<Draft> {
-        Some(Draft::new(self.state.clone()?, self.file.clone()))
+    fn drafts(&self) -> Option<Drafts> {
+        Some(Drafts::new(self.state.clone()?, self.file.clone()))
     }
 
     fn name(&self) -> &str {
@@ -118,8 +118,10 @@ pub(super) struct Editor {
     mark: Option<Mark>,
     /// The user gave the draft up, so closing must not keep it.
     discarded: bool,
-    /// The change that put a kept draft's text in place, if one did.
-    restored: Option<u64>,
+    /// The kept copy offered by the prompt.
+    kept: Option<Draft>,
+    /// The kept copy and change that put its text in place, if one did.
+    restored: Option<(u64, Draft)>,
 }
 
 /// The display column at which the character at `byte` starts.
@@ -202,7 +204,7 @@ impl Editor {
         let buffer = Buffer::new(original.text());
         let lang = lang.filter(|lang| lang.agrees_with_shebang(buffer.row(0)));
         let row = row.min(buffer.len() - 1);
-        let kept = place.draft().is_some_and(|draft| draft.exists());
+        let kept = place.drafts().and_then(|drafts| drafts.first());
         Self {
             indent: indent_of(&buffer),
             buffer,
@@ -219,11 +221,12 @@ impl Editor {
             lang,
             states: vec![State::Code],
             spans: Vec::new(),
-            prompt: kept.then_some(Prompt::Kept),
+            prompt: kept.is_some().then_some(Prompt::Kept),
             notice: None,
             formatting: None,
             mark: None,
             discarded: false,
+            kept,
             restored: None,
         }
     }
@@ -267,9 +270,7 @@ impl Editor {
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
         self.sync_mark();
-        if self.restored.take_if(|change| self.buffer.holds(*change)).is_some()
-            && let Some(draft) = self.place.draft()
-        {
+        if let Some((_, draft)) = self.restored.take_if(|(change, _)| self.buffer.holds(*change)) {
             draft.forget();
         }
         self.say("Saved", now);
@@ -385,7 +386,7 @@ impl Editor {
 
     fn undo(&mut self, now: Instant) -> Step {
         match self.buffer.undo() {
-            Some(cursor) => self.edited(0, cursor),
+            Some(replay) => self.edited(replay.first_row, replay.cursor),
             None => {
                 self.say("Nothing to undo", now);
                 Step::Stay
@@ -395,7 +396,7 @@ impl Editor {
 
     fn redo(&mut self, now: Instant) -> Step {
         match self.buffer.redo() {
-            Some(cursor) => self.edited(0, cursor),
+            Some(replay) => self.edited(replay.first_row, replay.cursor),
             None => {
                 self.say("Nothing to redo", now);
                 Step::Stay
@@ -426,7 +427,7 @@ impl Editor {
                 return self.restore(now);
             }
             (Prompt::Kept, Key::Char('d' | 'D')) => {
-                if let Some(draft) = self.place.draft() {
+                if let Some(draft) = self.kept.take() {
                     draft.forget();
                 }
                 Step::Stay
@@ -440,7 +441,7 @@ impl Editor {
 
     /// Puts a kept draft in place of the text as one change, so that undo shows the file again.
     fn restore(&mut self, now: Instant) -> Step {
-        let Some(draft) = self.place.draft() else { return Step::Stay };
+        let Some(draft) = self.kept.take() else { return Step::Stay };
         let Some(kept) = draft.read() else {
             self.say("The kept draft cannot be read.", now);
             return Step::Stay;
@@ -448,7 +449,7 @@ impl Editor {
         let kept = kept.strip_prefix('\u{feff}').unwrap_or(&kept);
         let step = self.replace(Pos::default(), self.buffer.end(), kept);
         // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
-        self.restored = Some(self.buffer.last_change());
+        self.restored = Some((self.buffer.last_change(), draft));
         self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
         self.say("Draft restored · ^Z undoes", now);
         step
@@ -789,10 +790,43 @@ impl Drop for Editor {
         if !self.buffer.dirty() || self.discarded {
             return;
         }
-        let note = match self.place.draft() {
-            Some(draft) => draft.keep(&self.original.bytes_for(&self.buffer.text())),
+        let restored = self.restored.as_ref().filter(|(change, _)| self.buffer.holds(*change)).map(|(_, draft)| draft);
+        let note = match self.place.drafts() {
+            Some(drafts) => drafts.keep(&self.original.bytes_for(&self.buffer.text()), restored),
             None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
         };
         rescue::tell(note);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use crate::reader::Reader;
+
+    #[test]
+    fn history_keeps_the_syntax_prefix_and_rescans_a_changed_line_ending() {
+        let f = Fixture::folder();
+        let row = 100;
+        let file = f.root.join("edit.rs");
+        f.write("edit.rs", &("// prefix\n".repeat(row) + "/\n*\rX\nlet answer = 42;\n*/\n"));
+        let mut editor = Reader::open(&file).unwrap().open_editor().unwrap();
+        let now = Instant::now();
+        assert_eq!(editor.state_at(row + 2), State::Code);
+        let from = Pos { row, col: 1 };
+        editor.cursor = Pos { row: row + 1, col: 3 };
+        editor.replace(from, editor.cursor, "*\r");
+        assert_eq!(editor.buffer.row(row), "/*");
+        assert!(matches!(editor.state_at(row + 1), State::Comment(..)));
+
+        editor.undo(now);
+        assert_eq!(editor.states.len(), row + 1);
+        assert_eq!(editor.buffer.row(row + 1), "*\rX");
+        assert_eq!(editor.state_at(row + 2), State::Code);
+        editor.redo(now);
+        assert_eq!(editor.states.len(), row + 1);
+        assert_eq!(editor.cursor, Pos { row, col: 2 });
+        assert!(matches!(editor.state_at(row + 1), State::Comment(..)));
     }
 }
