@@ -662,6 +662,90 @@ fn failed_uninstall_revoke_leaves_mirroring_durably_disabled() {
 }
 
 #[test]
+fn a_connection_no_relay_can_revoke_is_removed_only_by_the_local_forget_and_discord_is_left_alone() {
+    let f = Fixture::folder();
+    let mut alerts = store(&f);
+    let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_discord(LINK).unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.set_forwarding(discord, true).unwrap();
+    let webhook = alerts.secret(discord).unwrap();
+
+    // The relay that issued the connection is gone: nothing can be asked of it.
+    alerts.relay = None;
+    assert!(alerts.forget(telegram).unwrap_err().contains("milo alerts forget telegram --local-only"));
+    assert_eq!(alerts.secret(telegram).unwrap(), format!("{CAPABILITY}:42"));
+
+    let report = alerts.forget_telegram_locally().unwrap();
+    assert!(report.contains("this machine only") && report.contains("nothing proves that it is revoked"), "{report}");
+    assert!(report.contains("send /stop"), "{report}");
+    let settings = alerts.settings().unwrap();
+    assert_eq!(Destination::ALL.map(|destination| settings.active(destination)), [false, true]);
+    assert!(settings.telegram_chat.is_empty());
+    assert_eq!(alerts.summary().unwrap().saved, [false, true]);
+    assert_eq!(alerts.secret(discord).unwrap(), webhook);
+
+    // A bot token of the user's own was never a relay's to revoke, so there is nothing to warn of.
+    alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
+    assert!(!alerts.forget_telegram_locally().unwrap().contains("/stop"));
+    // What kept Milo's integrations from being removed is gone.
+    alerts.locked(|edit| edit.remove()).unwrap();
+    assert!(!f.root.join("config/alerts.conf").exists() && !f.root.join("state/alerts-secrets").exists());
+}
+
+#[test]
+fn a_local_forget_that_cannot_remove_the_secret_has_already_turned_telegram_off() {
+    let f = Fixture::folder();
+    let mut alerts = store(&f);
+    let telegram = Destination::Telegram;
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_forwarding(telegram, true).unwrap();
+    alerts.relay = None;
+    let secrets = f.root.join("state/alerts-secrets");
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(alerts.forget_telegram_locally().unwrap_err().contains("Could not read the saved secret"));
+    let settings = alerts.settings().unwrap();
+    assert!(!settings.has_active() && settings.telegram_chat.is_empty());
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(store(&f).enable().is_err());
+    assert_eq!(alerts.secret(telegram).unwrap(), format!("{CAPABILITY}:42"));
+}
+
+/// Milo's relay sends a production message on only when it reads as one of
+/// Milo's own. `hosted/milo-alert-texts.json` lists what Milo sends, and the
+/// relay's tests put each entry to its grammar: a wording changed here must
+/// be changed there, where the relay then says whether it still takes it.
+#[test]
+fn the_messages_the_relay_is_tested_with_are_the_ones_milo_words() {
+    let hostile = "<b>@everyone</b> & \"quoted\" \\ \u{202e}reversed\n/start https://t.me/x";
+    let states = [
+        (Kind::Blocked, Some(Waiting::Permission)),
+        (Kind::Blocked, Some(Waiting::Question)),
+        (Kind::Blocked, Some(Waiting::Auth)),
+        (Kind::Blocked, None),
+        (Kind::Error, None),
+        (Kind::Done, None),
+        (Kind::Notification, None),
+        (Kind::Bell, None),
+    ];
+    let mut sent = vec![message::TEST.to_owned()];
+    for (index, (kind, waiting)) in states.into_iter().enumerate() {
+        let named = Alert { kind, waiting, app: Some("a.b+c_d-e".into()), text: hostile.into() };
+        sent.push(message::text(&named, Content::Metadata, 0, Destination::Telegram));
+        let unnamed = Alert { app: None, ..named };
+        sent.push(message::text(&unnamed, Content::Text, [1, 2, u32::MAX][index % 3], Destination::Telegram));
+    }
+    let longest = Alert { kind: Kind::Error, waiting: None, app: None, text: "&".repeat(400) };
+    sent.push(message::text(&longest, Content::Text, 0, Destination::Telegram));
+
+    let listed = Value::parse(include_str!("../../hosted/milo-alert-texts.json").trim().as_bytes()).unwrap();
+    let listed: Vec<_> = listed.elements().unwrap().map(|text| text.string(4096).unwrap().into_owned()).collect();
+    assert_eq!(sent, listed);
+}
+
+#[test]
 fn hosted_replacement_and_forget_leave_the_other_provider_active() {
     let f = Fixture::folder();
     let alerts = store(&f);

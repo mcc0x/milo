@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openBindings } from "./bindings";
+import { validTelegramText } from "./edge";
 
 const origin = "http://127.0.0.1:6120";
 const discord = { clientId: "100100100100100100", clientSecret: "fixture-secret", redirectUri: `${origin}/discord/callback` };
@@ -674,6 +675,13 @@ test("production revocation must reach the exact issuing ledger even if Telegram
   expect((await removeBinding(active, auth, PRODUCTION_ORIGIN)).status).toBe(204);
   expect(ledger.store.load(10)).toEqual([]);
   expect((await removeBinding(active, auth, PRODUCTION_ORIGIN)).status).toBe(204);
+});
+
+test("production takes every Telegram message Milo words", async () => {
+  // `cargo test alerts` checks that this list is what Milo sends.
+  const texts: string[] = await Bun.file(new URL("./milo-alert-texts.json", import.meta.url)).json();
+  expect(texts.length).toBeGreaterThan(0);
+  expect(texts.filter((text) => !validTelegramText(text, true))).toEqual([]);
 });
 
 test("production Telegram pauses sends until its poll catches up and applies verified stops", async () => {

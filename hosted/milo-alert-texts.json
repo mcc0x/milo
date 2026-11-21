@@ -1,0 +1,20 @@
+[
+  "Milo test: Rex alert mirroring can reach this destination. This is not a Rex alert, and nothing else was sent.",
+  "Rex: <code>a.b+c_d-e</code> is waiting for permission",
+  "Rex: a program is waiting for permission\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(1 earlier alert was not sent.)",
+  "Rex: <code>a.b+c_d-e</code> is waiting for an answer",
+  "Rex: a program is waiting for an answer\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(2 earlier alerts were not sent.)",
+  "Rex: <code>a.b+c_d-e</code> is waiting for you to sign in",
+  "Rex: a program is waiting for you to sign in\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(4294967295 earlier alerts were not sent.)",
+  "Rex: <code>a.b+c_d-e</code> is waiting for you",
+  "Rex: a program is waiting for you\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(1 earlier alert was not sent.)",
+  "Rex: <code>a.b+c_d-e</code> reported an error",
+  "Rex: a program reported an error\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(2 earlier alerts were not sent.)",
+  "Rex: <code>a.b+c_d-e</code> finished",
+  "Rex: a program finished\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(4294967295 earlier alerts were not sent.)",
+  "Rex: a program sent a notification",
+  "Rex: a program sent a notification\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(1 earlier alert was not sent.)",
+  "Rex: a terminal rang its bell",
+  "Rex: a terminal rang its bell\n<code>&lt;b&gt;@\u200beveryone&lt;/b&gt; &amp; \"quoted\" \\ reversed /start https://t.me/x</code>\n(2 earlier alerts were not sent.)",
+  "Rex: a program reported an error\n<code>&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;&amp;…</code>"
+]

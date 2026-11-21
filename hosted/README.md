@@ -9,6 +9,7 @@ Only **Connect with Milo** needs the relay. The settings dashboard remains local
 - The production image sets `MILO_RELAY_ORIGIN=https://connect.usemilo.net` and `MILO_RELAY_DATA_DIR=/data`. Set `RAILWAY_RUN_UID=0` for the volume bootstrap; it must drop privileges before the HTTP service starts. Railway supplies `PORT`. Set at least one provider: `MILO_TELEGRAM_BOT_TOKEN` enables production polling; `MILO_DISCORD_CLIENT_ID` **and** `MILO_DISCORD_CLIENT_SECRET` enable Discord with its canonical callback. Keep these variables on `connect`, not `site`. Do not copy `.env`, databases, or credentials into images or commit them to IaC.
 - Before making the feature available, verify certificate issuance, authorized Discord channel selection, Telegram confirmation and delivery, individual revocation, a restart with the volume retained, and healthy delivery by the other provider. Use private test destinations with non-sensitive content. Never paste pairing links, callback URLs, request bodies, cookies or bearer headers into logs, issues or screenshots.
 - Restoring an old database can restore revoked bindings. If the current volume is lost or compromised, start with an **empty** volume and have Telegram users pair again; rotate compromised provider secrets separately. Rolling the server binary back does not revoke credentials. Stop the relay rather than falling back to a version that does not enforce the same pairing and revocation rules.
+- After such a loss, each Milo installation still holds a Telegram connection that the new volume never issued. The relay answers its sends and its revocation with `503`, and Milo never drops a connection it could not revoke: it will not replace or forget that one, nor remove its own integrations. Tell those users to run `milo alerts forget telegram --local-only` and then connect again. The command exists only on the command line. It asks no relay, turns Telegram forwarding off before it removes the connection from that machine, and leaves Discord as it is. It revokes nothing and says so; where the old ledger may still exist, the user sends `/stop` to the bot, which revokes every connection to that DM.
 
 ## Run locally
 
@@ -28,6 +29,8 @@ Set `MILO_TELEGRAM_LONG_POLL=1` and `MILO_TELEGRAM_BOT_TOKEN` to the token of a 
 In Milo, start Telegram pairing, open the official `t.me` link, press **Start** in the private chat, and then press **Confirm pairing** on the bot’s message. The sender and chat must match on both steps. Only that DM can receive relayed messages; groups, channels, and client-supplied destinations are not supported. Return to Milo and save the proposed destination. Turning forwarding on remains a separate action.
 
 Send `/stop` or `/delete` to the bot from that DM to revoke all its relay capabilities and remove associated pending confirmations. Removing the binding from a Milo installation revokes only that installation’s capability. A new claim does not invalidate an existing binding. Revocation does not delete messages already delivered to Telegram or cancel a send already in flight.
+
+`milo alerts forget telegram`, replacing the connection and removing Milo's integrations all stop, with the connection kept, when the relay cannot confirm its revocation. `milo alerts forget telegram --local-only` is the way out when the relay that issued it is gone for good; see the operator checklist for what it does and does not do.
 
 Register your own accessible privacy policy link in [@BotFather](https://t.me/BotFather) before operating a bot for anyone else. Review the [Telegram Bot Developer Terms](https://telegram.org/tos/bot-developers#4-privacy), the [standard bot privacy policy](https://telegram.org/privacy-tpa), and the [Bot API](https://core.telegram.org/bots/api). Do not rely on the standard policy unless it actually describes your deployment. BotFather’s group privacy setting is not a privacy policy link.
 
@@ -60,3 +63,5 @@ bun test
 ```
 
 The tests use local fetch stand-ins only; no credentials, accounts, or provider messages are needed.
+
+`milo-alert-texts.json` lists the Telegram messages Milo words. These tests put each one to the production grammar, and `cargo test alerts` in the repository root checks that the list is what Milo sends. Change a wording in Milo, the list and, if it must, the grammar together.
