@@ -568,6 +568,7 @@ async function checkHostedConnections(page, destination) {
     const body = request.postDataJSON();
     assert.deepEqual(body, next.request);
     if (!next.save) return route.fulfill(await next.response);
+    if (next.waitForSave) await next.waitForSave;
     const {provider, chat} = next.save;
     saved.push(body);
     const alerts = {...state.alerts};
@@ -760,8 +761,24 @@ async function checkHostedConnections(page, destination) {
           await status(wizard, 'Your proposed destination hasn’t changed').waitFor();
           await proposal.waitFor();
           assert.equal(saved.length, index, 'a transient Save failure retains the reviewed destination');
-          responses.push({request, save: {provider, chat}});
-          await approve.click();
+          if (index === 0) {
+            let releaseSave;
+            const waitForSave = new Promise(resolve => { releaseSave = resolve; });
+            responses.push({request, save: {provider, chat}, waitForSave});
+            try {
+              await approve.click();
+              await status(wizard, 'Saving the destination').waitFor();
+              await button(wizard, 'Close destinations').click();
+              await page.locator('#alerts-provider-setup').waitFor({state: 'detached'});
+            } finally {
+              releaseSave();
+            }
+            await button(destination, 'Manage destinations').click();
+            await button(page, name).click();
+          } else {
+            responses.push({request, save: {provider, chat}});
+            await approve.click();
+          }
           await wizard.getByText(chat ? `Saved destination · ${chat}` : 'Saved destination', {exact: true}).waitFor();
           assert.equal(await proposal.count(), 0, 'saving clears the proposal');
         }

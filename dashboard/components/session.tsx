@@ -54,7 +54,7 @@ interface SessionActions {
   command(action: string, payload?: Payload): void;
   findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   hostedConnect(request: HostedConnectRequest, signal: AbortSignal): Promise<{status: number; data: unknown}>;
-  saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult>;
+  saveHostedConnection(request: HostedSaveRequest): Promise<HostedSaveResult>;
   confirm(title: string, note: string, label: string, action: () => void): void;
   discard(group: GroupKey | 'all'): void;
   notify(text: string, error?: boolean): void;
@@ -344,14 +344,14 @@ function createEditor(): Editor {
     return {status: response.status, data: response.ok ? await response.json() as unknown : null};
   }
 
-  async function saveHostedConnection(request: HostedSaveRequest, signal: AbortSignal): Promise<HostedSaveResult> {
+  async function saveHostedConnection(request: HostedSaveRequest): Promise<HostedSaveResult> {
     if (!state || !connected || running || paused || closing || ended || queue.length) return {status: 409};
     running = true;
     localError = '';
     operationWarning = '';
     publish();
     try {
-      const response = await sessionFetch('/api/hosted-connect', 'POST', {...request, action: 'save', version: state.version}, signal);
+      const response = await sessionFetch('/api/hosted-connect', 'POST', {...request, action: 'save', version: state.version});
       const {status} = response;
       if (status === 200) {
         state = await response.json() as SessionState;
@@ -366,8 +366,8 @@ function createEditor(): Editor {
         await response.body?.cancel();
       }
       // Stale or failed writes may leave the editor's publicly visible state changed.
-      if ((status === 409 || status === 410 || status === 500) && !signal.aborted) {
-        try { state = await api<SessionState>('/api/state', 'GET', undefined, signal); } catch { /* Keep the save status. */ }
+      if (status === 409 || status === 410 || status === 500) {
+        try { state = await api<SessionState>('/api/state'); } catch { /* Keep the save status. */ }
       }
       return {status, cleanupConfirmed};
     } catch {
