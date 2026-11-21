@@ -3,6 +3,7 @@
 use std::ffi::OsStr;
 use std::ops::Range;
 
+use crate::alerts;
 use crate::git::Kind;
 use crate::help;
 use crate::icons;
@@ -295,6 +296,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Panel::Confirm(Confirm::Repair) => "Repair?",
                     Panel::Confirm(Confirm::Remove) => "Remove?",
                     Panel::Confirm(Confirm::RemoveMenuBar) => "Remove app?",
+                    Panel::Confirm(Confirm::MirrorAlerts) => "Mirror?",
                     _ => self.panel.title(),
                 }
             } else {
@@ -318,6 +320,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Source::Default => "Built-in defaults",
                 Source::Global => "Global preferences",
                 Source::Worktree => "Worktree preferences",
+            },
+            Panel::Alerts => match &self.alert_summary {
+                None => "Alert settings unreadable",
+                Some(summary) if !summary.settings.enabled => "Off",
+                Some(summary) if summary.running => "On",
+                Some(_) => "On, but not running",
             },
             Panel::Health if !self.inside => "Outside Rex",
             Panel::Health if self.saved.is_none() => "Rex settings unreadable",
@@ -349,6 +357,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Tune => return None,
             Panel::Appearance => return None,
             Panel::Workflow => return None,
+            Panel::Alerts => "Rex's own notifications stay as they are. Each choice here is saved as you make it.",
             Panel::Health => "Inspect settings without changing them. Repair or remove only Milo's integration.",
             Panel::Diagnostics => return None,
             Panel::Exit => "Save before leaving?",
@@ -369,16 +378,26 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 "Repair Milo's saved Rex integration without changing the layout choices. Rex may reload."
             }
             Panel::Confirm(Confirm::Remove) => {
-                "Remove integration Milo owns from Rex and Claude Code. Open panes and personal preferences are left alone."
+                "Remove integration Milo owns from Rex and Claude Code, and end alert mirroring with its saved destinations. Open panes and personal preferences are left alone."
             }
             Panel::Confirm(Confirm::RemoveMenuBar) => {
                 "Remove only the menu bar app. The Milo CLI and pane settings stay as they are."
+            }
+            Panel::Confirm(Confirm::MirrorAlerts) => {
+                match self.alert_summary.as_ref().map(|summary| summary.settings.content) {
+                    Some(alerts::Content::Text) => {
+                        "Each chosen alert is sent to the destination: its kind, the program's short name, and up to 300 characters of the text the program gave Rex, which can name files or quote a prompt. Rex's own notifications are unchanged."
+                    }
+                    _ => {
+                        "Each chosen alert is sent to the destination as its kind and the program's short name, such as “Rex: claude-code is waiting for permission”. Nothing the program wrote is sent. Rex's own notifications are unchanged."
+                    }
+                }
             }
         })
     }
 
     fn footer(&self, s: &mut Screen) -> help::HintHits<'static> {
-        let back = self.panel.modal() || matches!(self.panel, Panel::Tune | Panel::Diagnostics);
+        let back = self.panel.modal() || matches!(self.panel, Panel::Tune | Panel::Diagnostics | Panel::Alerts);
         let exit = match (back, s.w) {
             (true, 26..) => "Esc back",
             (true, 18..=23) => "back",
@@ -567,6 +586,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Claude::Invalid => "Could not read Claude Code settings. Milo will leave them alone.",
                 Claude::On | Claude::Off => cell.detail,
             },
+            Row::AlertsOn => self
+                .alert_summary
+                .as_ref()
+                .map(|summary| summary.note.as_str())
+                .filter(|note| !note.is_empty())
+                .unwrap_or(cell.detail),
             Row::Icons if self.icon_override.is_some() => "MILO_ICONS overrides this saved icon choice.",
             Row::SaveGlobal if self.panel == Panel::Save(SaveKind::Layout) && self.scope == Scope::Worktree => {
                 "Updates the global default without changing this worktree's override."
@@ -753,6 +778,65 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 "Use global",
                 "Remove this worktree's pane preferences override.",
             ),
+            Row::Alerts => Cell::action(
+                "Mirror Rex alerts…",
+                "Rex alerts",
+                "Send chosen Rex alerts to a Telegram chat or Discord channel. Off until you turn it on.",
+            ),
+            Row::AlertsOn => Cell::toggle(
+                "Mirror Rex alerts",
+                "Mirror",
+                self.alert_summary.as_ref().is_some_and(|summary| summary.settings.enabled),
+                "Send the chosen alerts to the destination. Rex's own notifications stay as they are.",
+            ),
+            Row::AlertsDestination => Cell::choice(
+                "Destination",
+                "To",
+                match self.alert_summary.as_ref().and_then(|summary| summary.settings.destination) {
+                    Some(destination) => destination.title(),
+                    None => "None saved",
+                },
+                "Switch between saved destinations. Save one with milo alerts telegram CHAT or milo alerts discord, or in milo web. Secrets are not typed here.",
+            ),
+            Row::AlertKind(kind) => {
+                let (label, short, detail) = match kind {
+                    alerts::Kind::Blocked => (
+                        "Waiting for you",
+                        "Blocked",
+                        "A program says it is blocked on a permission, a question or a sign-in.",
+                    ),
+                    alerts::Kind::Error => ("Reported an error", "Error", "A program says it failed."),
+                    alerts::Kind::Done => ("Finished", "Done", "A program says it finished."),
+                    alerts::Kind::Notification => (
+                        "Desktop notification",
+                        "Notify",
+                        "A program asks for a desktop notification. A repeat within 30 seconds is not sent.",
+                    ),
+                    alerts::Kind::Bell => {
+                        ("Terminal bell", "Bell", "A program rings the bell. At most one per terminal in 30 seconds.")
+                    }
+                };
+                let on = self.alert_summary.as_ref().is_some_and(|summary| summary.settings.mirrors(kind));
+                Cell::toggle(label, short, on, detail)
+            }
+            Row::AlertsContent => {
+                let text = self
+                    .alert_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.settings.content == alerts::Content::Text);
+                Cell::choice(
+                    "What is sent",
+                    "Sends",
+                    if text { "Kind and text" } else { "Kind only" },
+                    "Kind only sends the kind of alert and the program's short name, and nothing the program wrote. Kind and text adds up to 300 characters the program gave Rex, which can name files or quote a prompt.",
+                )
+                .with_short_value(if text { "Text" } else { "Kind" })
+            }
+            Row::AlertsTest => Cell::action(
+                "Send a test message",
+                "Send test",
+                "Send one message written by Milo to the destination. No Rex alert is involved.",
+            ),
             Row::MenuBar => match self.menu_installed {
                 Some(false) => Cell::action(
                     "Install Milo menu bar app",
@@ -812,6 +896,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Panel::Confirm(Confirm::RemoveMenuBar) => {
                     Cell::action("Remove app now", "Remove app now", "Remove Milo from the menu bar.")
                 }
+                Panel::Confirm(Confirm::MirrorAlerts) => {
+                    Cell::action("Turn mirroring on", "Turn on", "Start sending the chosen alerts now.")
+                }
                 _ => unreachable!("only confirmation pages have a continue row"),
             },
         }
@@ -823,7 +910,7 @@ impl Panel {
         match self {
             Self::Layout | Self::Tune => Some(0),
             Self::Appearance => Some(1),
-            Self::Workflow => Some(2),
+            Self::Workflow | Self::Alerts => Some(2),
             Self::Health | Self::Diagnostics => Some(3),
             Self::Save(_) | Self::Confirm(_) | Self::Exit => None,
         }
@@ -835,6 +922,7 @@ impl Panel {
             Self::Tune => "Customize panes",
             Self::Appearance => "Appearance",
             Self::Workflow => "Workflow",
+            Self::Alerts => "Mirror Rex alerts",
             Self::Health => "Health",
             Self::Diagnostics => "Diagnostics",
             Self::Save(SaveKind::Layout) => "Save layout for…",
@@ -843,6 +931,7 @@ impl Panel {
             Self::Confirm(Confirm::Repair) => "Repair integration?",
             Self::Confirm(Confirm::Remove) => "Remove integration?",
             Self::Confirm(Confirm::RemoveMenuBar) => "Remove menu app?",
+            Self::Confirm(Confirm::MirrorAlerts) => "Mirror Rex alerts?",
             Self::Exit => "Unsaved changes",
         }
     }

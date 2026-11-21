@@ -683,6 +683,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Tune,
         Panel::Appearance,
         Panel::Workflow,
+        Panel::Alerts,
         Panel::Health,
         Panel::Save(SaveKind::Layout),
         Panel::Save(SaveKind::Workflow),
@@ -690,6 +691,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Confirm(Confirm::Repair),
         Panel::Confirm(Confirm::Remove),
         Panel::Confirm(Confirm::RemoveMenuBar),
+        Panel::Confirm(Confirm::MirrorAlerts),
         Panel::Exit,
     ];
     for panel in panels {
@@ -1320,4 +1322,59 @@ fn narrow_rails_keep_tabs_scrolled_rows_and_footer_actions_mouse_accessible() {
     let rows = frame(&mut pane, 10, 5);
     assert_eq!(pane.key(click_at(&rows, 4, "q")), After::Leave);
     assert!(!f.root.join("init.lua").exists());
+}
+
+#[test]
+fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
+    const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("alerts do not call Rex"));
+    pane.alerts = Some(Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state")));
+    let saved = |pane: &Setup<_>| pane.alerts.as_ref().unwrap().settings().unwrap();
+
+    assert_eq!(choose(&mut pane, Row::Alerts), After::Stay);
+    assert_eq!(pane.panel, Panel::Alerts);
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Mirror Rex alerts  Off") && rows.contains("None saved"), "{rows}");
+
+    // Turning on is asked about first, and without a destination does nothing.
+    choose(&mut pane, Row::AlertsOn);
+    assert_eq!(pane.panel, Panel::Confirm(Confirm::MirrorAlerts));
+    assert!(!saved(&pane).enabled);
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Nothing the") && rows.contains("Turn mirroring on"), "{rows}");
+    choose(&mut pane, Row::Continue);
+    assert_eq!(pane.panel, Panel::Alerts);
+    assert!(!saved(&pane).enabled);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("Nothing was turned on"));
+    choose(&mut pane, Row::AlertsDestination);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("No other destination is saved"));
+
+    // A destination is saved elsewhere; the pane never takes a secret.
+    pane.alerts.as_ref().unwrap().set_telegram(TOKEN, "-1001234567890").unwrap();
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert!(pane.panel == Panel::Workflow && pane.selected_row() == Some(Row::Alerts));
+    choose(&mut pane, Row::Alerts);
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Telegram") && !rows.contains("SYNTHETIC"), "{rows}");
+
+    choose(&mut pane, Row::AlertKind(alerts::Kind::Bell));
+    choose(&mut pane, Row::AlertKind(alerts::Kind::Done));
+    assert_eq!(saved(&pane).kinds, [true, true, false, false, true]);
+    choose(&mut pane, Row::AlertsContent);
+    assert_eq!(saved(&pane).content, alerts::Content::Text);
+    choose(&mut pane, Row::AlertsOn);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("300 characters"));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
+    choose(&mut pane, Row::AlertsOn);
+    choose(&mut pane, Row::Continue);
+    assert!(saved(&pane).enabled);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("Rex alert mirroring is on."));
+
+    // Turning off needs no second step.
+    choose(&mut pane, Row::AlertsOn);
+    assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
+    // None of this is a draft to save or discard on the way out.
+    assert!(!pane.dirty());
 }

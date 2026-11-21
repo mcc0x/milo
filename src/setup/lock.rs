@@ -1,5 +1,6 @@
 //! Process-owned file locks are not inherited by children. The setup lock
-//! lasts through a save; the listener lock stays open when milo becomes Rex.
+//! lasts through a save; the listener lock stays open when milo becomes Rex;
+//! the alerts lock lasts as long as the process that mirrors Rex alerts.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -11,8 +12,12 @@ use std::time::{Duration, Instant};
 use crate::fs_ops;
 
 const LISTENER_LOCK: &CStr = c"listener.lock";
+const ALERTS_LOCK: &CStr = c"alerts.lock";
 /// How long a listener asked to stop is given to wind down.
 const WIND_DOWN: Duration = Duration::from_secs(1);
+/// How long a process started in the background is given to take its lock.
+/// It must first be loaded and find its settings, on a machine that may be busy.
+const START: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 
 /// Never resolve a link while opening a lock that may name a process.
@@ -82,30 +87,60 @@ fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
     Ok((lock.l_type != libc::F_UNLCK as _ && lock.l_pid > 1).then_some(lock.l_pid))
 }
 
-fn existing(dir: &Path) -> io::Result<Option<File>> {
-    match fs_ops::open_dir(dir).and_then(|directory| open(&directory, LISTENER_LOCK, libc::O_RDONLY)) {
+fn existing(dir: &Path, name: &CStr) -> io::Result<Option<File>> {
+    match fs_ops::open_dir(dir).and_then(|directory| open(&directory, name, libc::O_RDONLY)) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-/// The marker can outlive its listener; only a kernel lock proves it is running.
-pub(super) fn running(dir: &Path) -> io::Result<bool> {
-    match existing(dir)? {
+/// The marker can outlive its process; only a kernel lock proves it is running.
+fn held(dir: &Path, name: &CStr) -> io::Result<bool> {
+    match existing(dir, name)? {
         Some(lock) => holder(&lock).map(|pid| pid.is_some()),
         None => Ok(false),
     }
 }
 
+pub(super) fn running(dir: &Path) -> io::Result<bool> {
+    held(dir, LISTENER_LOCK)
+}
+
+/// Whether a process is mirroring Rex alerts.
+pub(crate) fn alerts_running(dir: &Path) -> io::Result<bool> {
+    held(dir, ALERTS_LOCK)
+}
+
+/// Makes this process the one that mirrors Rex alerts. None if another
+/// already is. Dropping the file, or opening the lock again, gives it up.
+pub(crate) fn hold_alerts(dir: &Path) -> io::Result<Option<File>> {
+    let lock = create(dir, ALERTS_LOCK)?;
+    Ok(take(&lock)?.then_some(lock))
+}
+
+/// Ends the process mirroring Rex alerts, if one is running.
+pub(crate) fn stop_alerts(dir: &Path) -> io::Result<()> {
+    stop_when(dir, ALERTS_LOCK, |asked| asked.elapsed() >= WIND_DOWN)
+}
+
+/// A process started in the background needs a moment to take its lock.
+pub(crate) fn wait_alerts_running(dir: &Path) -> io::Result<bool> {
+    wait_held(dir, ALERTS_LOCK, START)
+}
+
 /// Rex starts the listener in the background; give it time to take the lock.
 pub(super) fn wait_running(dir: &Path) -> io::Result<bool> {
+    wait_held(dir, LISTENER_LOCK, WIND_DOWN)
+}
+
+fn wait_held(dir: &Path, name: &CStr, limit: Duration) -> io::Result<bool> {
     let started = Instant::now();
     loop {
-        if running(dir)? {
+        if held(dir, name)? {
             return Ok(true);
         }
-        if started.elapsed() >= WIND_DOWN {
+        if started.elapsed() >= limit {
             return Ok(false);
         }
         std::thread::sleep(POLL);
@@ -138,15 +173,15 @@ fn keep_across_exec(lock: &File) -> io::Result<()> {
 /// Ends the listener if one is running, and returns once another could
 /// start in its place.
 pub(super) fn stop(dir: &Path) -> io::Result<()> {
-    stop_when(dir, |asked| asked.elapsed() >= WIND_DOWN)
+    stop_when(dir, LISTENER_LOCK, |asked| asked.elapsed() >= WIND_DOWN)
 }
 
-fn stop_when(dir: &Path, mut expired: impl FnMut(Instant) -> bool) -> io::Result<()> {
-    let Some(lock) = existing(dir)? else { return Ok(()) };
+fn stop_when(dir: &Path, name: &CStr, mut expired: impl FnMut(Instant) -> bool) -> io::Result<()> {
+    let Some(lock) = existing(dir, name)? else { return Ok(()) };
     for _ in 0..2 {
         let Some(listener) = holder(&lock)? else { return Ok(()) };
-        // SAFETY: The system has just identified the holder of the listener
-        // lock. The only race is PID reuse before the signal arrives.
+        // SAFETY: The system has just identified the holder of the lock.
+        // The only race is PID reuse before the signal arrives.
         if unsafe { libc::kill(listener, libc::SIGTERM) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
@@ -187,7 +222,7 @@ mod tests {
     fn a_lock_nobody_holds_names_no_process() {
         let f = Fixture::folder();
         create(&f.root, LISTENER_LOCK).unwrap();
-        let lock = existing(&f.root).unwrap().unwrap();
+        let lock = existing(&f.root, LISTENER_LOCK).unwrap().unwrap();
         // SAFETY: Asking for file status flags does not access user memory.
         let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0);
@@ -227,7 +262,7 @@ mod tests {
         }
         let mut retried = false;
         let stopped = started.exists()
-            && stop_when(&f.root, |asked| {
+            && stop_when(&f.root, LISTENER_LOCK, |asked| {
                 // Expire the first grace period only once the child has handled the signal.
                 if !retried && first_signal.exists() {
                     retried = true;

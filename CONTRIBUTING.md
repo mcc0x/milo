@@ -51,7 +51,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It stays read-only.** milo never changes a repository. Every git command it runs only reads.
 
@@ -147,6 +147,18 @@ is opened in its place. That holds for the tabs the test opens one at a time
 and for those it opens back to back, four with no pause between them, three
 times over.
 
+### Changing alert mirroring
+
+`src/alerts.rs` and the files under `src/alerts/` mirror Rex alerts to Telegram or Discord. An *alert* is an event Rex itself draws attention to; `event.rs` lists them and is the only place that decides. Hear Rex only through `rex events`, as `src/rex.rs` starts it: never read a terminal's screen, a system notification or Rex's socket for an alert.
+
+Mirroring stays off until the user turns it on. The setup screen and the browser editor say what will be sent and ask first; `milo alerts` says it before and `milo alerts on` as it starts. A new field leaves the machine only behind a choice that is off by default, and `message.rs` says so in `sends`. Whatever a program supplied, its short name included, is untrusted: send it through `literal`, and its text through `plain` first.
+
+A secret goes from standard input or the browser editor to `secret.rs` and from there to curl's standard input. Never put one in an argument, a settings file, a status note, a log, or anything sent back to a settings page. Destinations are fixed hosts; do not add one the user can type.
+
+`cargo test alerts` runs the unit tests and `cargo test --test alerts` runs the real `milo alerts` against stand-ins: a `rex` that prints the events a test writes, and a server on the loopback address for both destinations. `MILO_ALERTS_TEST_ENDPOINT` names that server, and is refused unless it is `http://127.0.0.1:PORT`. On macOS `MILO_ALERTS_KEYCHAIN` names a keychain file of the test's own, so that tests never touch yours. Only a development build reads either variable: a release build has no setting that changes where a secret is kept or sent, so with `--release` these tests do nothing. No test may use a real token, webhook or chat, or post to Telegram or Discord.
+
+To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
+
 ### Adding a usage source
 
 [Usage sources](docs/usage-sources.md) has the rules a source must meet and the evidence for each harness looked at so far. Before writing a reader, check the tool's format against a pinned release: in its source, and in a file that release wrote under a throwaway home. Keep tokens, cost and limits as separate values, and leave unknown whatever the tool does not save. Copy the structure of test fixtures from the release, and record the release and its checksum beside them. Read databases through `src/usage/sqlite.rs` and session files through `src/usage/files.rs` so every read stays bounded.
@@ -194,6 +206,14 @@ By contributing you agree that your work is released under the MIT licence that 
 
 | File | Purpose |
 | --- | --- |
+| `src/alerts.rs` | Keeps the alert mirroring choices and applies each change to them. |
+| `src/alerts/cli.rs` | Runs `milo alerts` and reads a secret without showing it. |
+| `src/alerts/event.rs` | Reads Rex's event stream and decides which events are alerts, once each. |
+| `src/alerts/forward.rs` | Follows Rex as the one mirroring process, with retries and rate limits. |
+| `src/alerts/message.rs` | Words an alert, strips a program's text of mentions, and says what is sent. |
+| `src/alerts/secret.rs` | Keeps a destination's secret in the macOS Keychain or a private file. |
+| `src/alerts/send.rs` | Posts one message with curl and classifies the answer. |
+| `src/alerts/tests.rs` | Checks alerts, messages, settings, secrets and the request. |
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
@@ -277,6 +297,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
+| `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |

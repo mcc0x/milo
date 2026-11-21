@@ -49,7 +49,10 @@ impl Editor {
         } else {
             (crate::preferences::worktree(Path::new(".")), None)
         };
-        Self::new(store, inside, target, root, window, rex::run)
+        let mut editor = Self::new(store, inside, target, root, window, rex::run);
+        editor.setup.alerts = Alerts::real();
+        editor.setup.refresh_alerts();
+        editor
     }
 
     fn new(
@@ -221,6 +224,11 @@ impl Editor {
         } else {
             out.push_str("null");
         }
+        out.push_str(",\"alerts\":");
+        match (&setup.alerts, &setup.alert_summary) {
+            (Some(alerts), Some(summary)) => alerts_state(&mut out, alerts, summary),
+            _ => out.push_str("null"),
+        }
         out.push('}');
         out
     }
@@ -306,6 +314,13 @@ impl Editor {
             Action::Menubar(action) if menubar::installed().is_some() => {
                 // Install also opens an existing app, replacing it only when the bundled copy differs.
                 return menubar::run(action).map(|text| Some(Ok(text.into())));
+            }
+            Action::Alerts(change) => {
+                // Like the menu app, alert choices are saved at once and are no part of the draft.
+                let result = change.apply(self.setup.alerts.as_ref().ok_or(UNAVAILABLE)?);
+                self.setup.refresh_alerts();
+                // The page shows what is sent beside the controls; the notice says what happened.
+                return result.map(|text| text.lines().next().map(|line| Ok(line.to_owned().into())));
             }
             _ => return Err(UNAVAILABLE.into()),
         };
@@ -420,6 +435,7 @@ enum Action {
     Undo,
     Doctor,
     Menubar(menubar::Action),
+    Alerts(AlertChange),
 }
 
 impl Action {
@@ -462,6 +478,9 @@ impl Action {
                     _ => return None,
                 })
             }
+            [Some(field), Some(value), None, None] if action.is("alerts") => {
+                Self::Alerts(AlertChange::parse(field, value)?)
+            }
             [None, None, None, None] => match action.string(7)?.as_ref() {
                 "capture" => Self::Capture,
                 "try" => Self::Try,
@@ -473,6 +492,89 @@ impl Action {
         };
         Some((version.unsigned()?, command))
     }
+}
+
+/// One change to the mirroring of Rex alerts. A secret arrives only in
+/// `Telegram` and `Discord`, and is never sent back to the browser.
+enum AlertChange {
+    Enabled(bool),
+    Destination(alerts::Destination),
+    Kind(alerts::Kind, bool),
+    Content(alerts::Content),
+    Telegram { token: String, chat: String },
+    Discord(String),
+    Test,
+    Forget(alerts::Destination),
+    /// Reads again whether mirroring is running and what it last noted.
+    Refresh,
+}
+
+impl AlertChange {
+    fn parse(field: Value<'_>, value: Value<'_>) -> Option<Self> {
+        let destination = |value: Value<'_>| alerts::Destination::parse(value.string(8)?.as_ref());
+        Some(match field.string(32)?.as_ref() {
+            "enabled" => Self::Enabled(value.boolean()?),
+            "destination" => Self::Destination(destination(value)?),
+            "content" => Self::Content(alerts::Content::parse(value.string(8)?.as_ref())?),
+            "telegram" => {
+                let [token, chat] = value.fields(["token", "chat"]);
+                Self::Telegram { token: token?.string(128)?.into_owned(), chat: chat?.string(64)?.into_owned() }
+            }
+            "discord" => Self::Discord(value.string(256)?.into_owned()),
+            "test" if value.null() => Self::Test,
+            "forget" => Self::Forget(destination(value)?),
+            "refresh" if value.null() => Self::Refresh,
+            field => Self::Kind(alerts::Kind::parse(field.strip_prefix("events.")?)?, value.boolean()?),
+        })
+    }
+
+    fn apply(self, alerts: &Alerts) -> Result<String, String> {
+        match self {
+            Self::Enabled(true) => alerts.enable(),
+            Self::Enabled(false) => alerts.disable(),
+            Self::Destination(destination) => alerts.choose(destination),
+            Self::Kind(kind, on) => alerts.set_kind(kind, on),
+            Self::Content(content) => alerts.set_content(content),
+            Self::Telegram { token, chat } => alerts.set_telegram(token.trim(), chat.trim()),
+            Self::Discord(link) => alerts.set_discord(link.trim()),
+            Self::Test => alerts.test(),
+            Self::Forget(destination) => alerts.forget(destination),
+            Self::Refresh => Ok(String::new()),
+        }
+    }
+}
+
+/// What the browser shows about mirroring. Whether a secret is saved, never the secret.
+fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
+    let settings = &summary.settings;
+    let [telegram, discord] = alerts::Destination::ALL.map(|destination| summary.saved(destination));
+    write!(
+        out,
+        concat!(
+            "{{\"enabled\":{},\"running\":{},\"destination\":{},",
+            "\"telegram\":{{\"saved\":{},\"chat\":{}}},\"discord\":{{\"saved\":{}}},\"events\":{{"
+        ),
+        settings.enabled,
+        summary.running,
+        Optional(settings.destination.map(|destination| Quoted(destination.name()))),
+        telegram,
+        Quoted(&settings.telegram_chat),
+        discord,
+    )
+    .expect("writing to a string");
+    for (index, kind) in alerts::Kind::ALL.into_iter().enumerate() {
+        let comma = if index == 0 { "" } else { "," };
+        write!(out, "{comma}\"{}\":{}", kind.name(), settings.mirrors(kind)).expect("writing to a string");
+    }
+    write!(
+        out,
+        "}},\"content\":\"{}\",\"place\":{},\"disclosure\":{},\"note\":{}}}",
+        settings.content.name(),
+        Quoted(alerts.place()),
+        Quoted(&alerts::disclosure(settings)),
+        Quoted(&summary.note),
+    )
+    .expect("writing to a string");
 }
 
 impl Group {
@@ -1131,5 +1233,59 @@ mod tests {
         assert!(action(&mut editor, r#""action":"doctor""#).is_err());
         let state = editor.state();
         assert!(field(Value::parse(state.as_bytes()).unwrap(), "doctor").null());
+    }
+
+    #[test]
+    fn browser_alert_choices_are_saved_at_once_and_a_secret_never_comes_back() {
+        const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        assert!(field(Value::parse(editor.state().as_bytes()).unwrap(), "alerts").null());
+        let change = |editor: &mut Editor, field: &str, value: &str| {
+            action(editor, &format!("\"action\":\"alerts\",\"field\":{field:?},\"value\":{value}"))
+        };
+        assert!(change(&mut editor, "enabled", "true").is_err());
+
+        editor.setup.alerts = Some(Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state")));
+        editor.setup.refresh_alerts();
+        let saved = |editor: &Editor| editor.setup.alerts.as_ref().unwrap().settings().unwrap();
+        assert!(change(&mut editor, "enabled", "true").unwrap_err().contains("Nothing was turned on"));
+        for (name, value) in
+            [("telegram", "{\"token\":\"x\",\"chat\":\"1\"}"), ("discord", "\"https://example.org/x\"")]
+        {
+            assert!(change(&mut editor, name, value).is_err(), "{name}");
+        }
+        for (name, value) in
+            [("events.everything", "true"), ("content", "\"all\""), ("test", "true"), ("forget", "\"x\"")]
+        {
+            assert_eq!(change(&mut editor, name, value).unwrap_err(), BAD_ACTION, "{name}");
+        }
+
+        let telegram = format!("{{\"token\":\"{TOKEN}\",\"chat\":\"-1001234567890\"}}");
+        let state = change(&mut editor, "telegram", &telegram).unwrap();
+        assert!(!state.contains("SYNTHETIC"), "{state}");
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert!(field(alerts, "destination").is("telegram"));
+        assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(true));
+        assert_eq!(field(alerts, "enabled").boolean(), Some(false));
+        assert!(field(alerts, "disclosure").string(600).unwrap().contains("No text from the program"));
+
+        change(&mut editor, "events.bell", "true").unwrap();
+        change(&mut editor, "content", "\"text\"").unwrap();
+        let state = change(&mut editor, "enabled", "true").unwrap();
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert_eq!(field(alerts, "enabled").boolean(), Some(true));
+        assert_eq!(field(field(alerts, "events"), "bell").boolean(), Some(true));
+        assert!(field(alerts, "disclosure").string(600).unwrap().contains("up to 300 characters"));
+        assert!(saved(&editor).enabled && saved(&editor).content == alerts::Content::Text);
+        // Alert choices are no draft: there is nothing to save or discard.
+        assert_eq!(field(Value::parse(state.as_bytes()).unwrap(), "dirty").boolean(), Some(false));
+
+        change(&mut editor, "enabled", "false").unwrap();
+        assert!(!saved(&editor).enabled);
+        let state = change(&mut editor, "forget", "\"telegram\"").unwrap();
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert!(field(alerts, "destination").null());
+        assert_eq!(field(field(alerts, "telegram"), "saved").boolean(), Some(false));
     }
 }

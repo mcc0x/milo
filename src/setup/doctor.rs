@@ -641,6 +641,7 @@ pub(crate) fn repair() -> Result<String, String> {
 }
 
 pub(crate) fn remove() -> Result<String, String> {
+    crate::alerts::remove()?;
     remove_from(&store()?, &rex::run)
 }
 
