@@ -22,7 +22,9 @@ const CLAUDE_CONFIG: &str = ".claude.json";
 fn healthy() -> Fixture {
     let f = Fixture::folder();
     write(&f, CODEX, &codex(NOW - MINUTE, 40, NOW + DAY, "null"), NOW - MINUTE);
-    assert_eq!(status::run(STATUS, Vec::new(), Some(&save(&f)), NOW - MINUTE), 0);
+    f.write(CLAUDE_CONFIG, &format!(r#"{{"oauthAccount":{{"accountUuid":"{CLAUDE_ACCOUNT}"}}}}"#));
+    let target = status::SaveTo { path: &save(&f), config: Some(&f.root.join(CLAUDE_CONFIG)) };
+    assert_eq!(status::render(STATUS, Vec::new(), Some(target), NOW - MINUTE), 0);
     f
 }
 
@@ -33,7 +35,7 @@ fn save(f: &Fixture) -> PathBuf {
 /// Claude Code's own cache of one weekly window, for the signed-in account.
 fn claude_cache(at: i64, account: &str, week: &str) -> String {
     format!(
-        r#"{{"oauthAccount":{{"accountUuid":"fixture-current"}},"cachedUsageUtilization":{{"fetchedAtMs":{},
+        r#"{{"oauthAccount":{{"accountUuid":"{CLAUDE_ACCOUNT}"}},"cachedUsageUtilization":{{"fetchedAtMs":{},
             "accountUuid":"{account}","utilization":{{"five_hour":null,"seven_day":{week}}}}}}}"#,
         at * 1000
     )
@@ -135,7 +137,7 @@ impl Drop for Writer {
 #[test]
 fn a_missing_source_is_unknown_and_takes_its_figure_with_it() {
     let f = healthy();
-    write(&f, CLAUDE_CONFIG, &claude_cache(NOW - 2 * MINUTE, "fixture-current", r#"{"utilization":18}"#), NOW);
+    write(&f, CLAUDE_CONFIG, &claude_cache(NOW - 2 * MINUTE, CLAUDE_ACCOUNT, r#"{"utilization":18}"#), NOW);
     let mut usage = pane(&f);
     assert_eq!(look(&mut usage), HEALTHY);
 
@@ -190,17 +192,18 @@ fn a_rotated_source_is_read_afresh_from_the_file_now_at_its_path() {
     // Putting back an older save shows that save, at its own age.
     let then = NOW - 2 * DAY;
     let older = format!(
-        "{{\"saved_at\":{then},\"rate_limits\":{{\"five_hour\":null,\
-         \"seven_day\":{{\"used_percentage\":20,\"observed_at\":{then}}}}}}}\n"
+        "{{\"saved_at\":{then},\"account\":\"{}\",\"rate_limits\":{{\"five_hour\":null,\
+         \"seven_day\":{{\"used_percentage\":20,\"observed_at\":{then}}}}}}}\n",
+        CLAUDE_ACCOUNT.replace('-', "")
     );
     replace(&f, &format!("{STATE}/{SAVED_LIMITS}"), &older, then);
     assert_eq!(look(&mut usage)[1], "Claude week · 80% last");
 
     // Claude Code replaces its settings file as it saves. A cache left there
     // for another account is not this account's reading.
-    replace(&f, CLAUDE_CONFIG, &claude_cache(NOW, "fixture-current", r#"{"utilization":18}"#), NOW);
+    replace(&f, CLAUDE_CONFIG, &claude_cache(NOW, CLAUDE_ACCOUNT, r#"{"utilization":18}"#), NOW);
     assert_eq!(look(&mut usage)[1], "Claude week · 82% left");
-    replace(&f, CLAUDE_CONFIG, &claude_cache(NOW, "fixture-other", r#"{"utilization":5}"#), NOW);
+    replace(&f, CLAUDE_CONFIG, &claude_cache(NOW, OTHER_CLAUDE_ACCOUNT, r#"{"utilization":5}"#), NOW);
     assert_eq!(look(&mut usage)[1], "Claude week · 80% last");
 
     let f = Fixture::folder();
@@ -219,7 +222,7 @@ fn a_locked_source_is_unknown_until_it_can_be_read_again() {
         return;
     }
     let f = healthy();
-    write(&f, CLAUDE_CONFIG, &claude_cache(NOW - 2 * MINUTE, "fixture-current", r#"{"utilization":18}"#), NOW);
+    write(&f, CLAUDE_CONFIG, &claude_cache(NOW - 2 * MINUTE, CLAUDE_ACCOUNT, r#"{"utilization":18}"#), NOW);
     let mut usage = pane(&f);
 
     // Sessions that exist but cannot be opened are not "no sessions".
@@ -281,7 +284,7 @@ fn a_stale_source_keeps_its_figure_and_says_it_is_old() {
 
     // A newer reading from another source replaces an old one whole.
     let now = NOW + 4 * MINUTE;
-    write(&f, CLAUDE_CONFIG, &claude_cache(now, "fixture-current", r#"{"utilization":18}"#), now);
+    write(&f, CLAUDE_CONFIG, &claude_cache(now, CLAUDE_ACCOUNT, r#"{"utilization":18}"#), now);
     assert_eq!(look(&mut usage), [old[0], "Claude week · 82% left"]);
     usage.fixed_now = Some(now + 5 * MINUTE);
     assert_eq!(look(&mut usage), [old[0], "Claude week · 82% last"]);
@@ -333,9 +336,9 @@ fn a_source_in_an_unknown_shape_is_never_misread() {
 
     // A cache with figures in another form is newer and has nothing usable.
     // One under another name is not a source at all.
-    write(&f, CLAUDE_CONFIG, &claude_cache(NOW, "fixture-current", r#"{"utilization":"18%"}"#), NOW);
+    write(&f, CLAUDE_CONFIG, &claude_cache(NOW, CLAUDE_ACCOUNT, r#"{"utilization":"18%"}"#), NOW);
     assert_eq!(look(&mut usage)[1], "Claude · no limits");
-    let moved = claude_cache(NOW, "fixture-current", r#"{"utilization":18}"#).replace("cachedUsage", "usage");
+    let moved = claude_cache(NOW, CLAUDE_ACCOUNT, r#"{"utilization":18}"#).replace("cachedUsage", "usage");
     write(&f, CLAUDE_CONFIG, &moved, NOW + 1);
     assert_eq!(look(&mut usage)[1], HEALTHY[1]);
     // A save without the fields Milo wrote is not a reading.

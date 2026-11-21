@@ -1143,7 +1143,9 @@ fn usage_and_doctor_read_only_the_selected_provider_directories() {
     fs::write(
         claude.join(".claude.json"),
         format!(
-            r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{now},"utilization":{{"seven_day":{{"utilization":35}}}}}}}}"#
+            r#"{{"oauthAccount":{{"accountUuid":"00000000-0000-4000-8000-000000000001"}},
+            "cachedUsageUtilization":{{"accountUuid":"00000000-0000-4000-8000-000000000001","fetchedAtMs":{now},
+            "utilization":{{"seven_day":{{"utilization":35}}}}}}}}"#
         ),
     )
     .unwrap();
@@ -1161,6 +1163,69 @@ fn usage_and_doctor_read_only_the_selected_provider_directories() {
     let mut pane = Terminal::sized(command().arg("usage"), 80, 2);
     pane.until("75%");
     pane.until("39%");
+    pane.master.write_all(b"q").unwrap();
+    assert!(pane.wait_for_exit().success());
+}
+
+#[test]
+fn claude_status_starts_fresh_when_the_account_changes_in_the_same_profile() {
+    let project = Project::new();
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let command = || {
+        let mut command = project.command(milo);
+        command.env_remove("CODEX_HOME").env_remove("PI_CODING_AGENT_DIR").env_remove("OPENCODE_DB");
+        command.env("XDG_DATA_HOME", project.0.join("data"));
+        command
+    };
+    let profile = |id| {
+        fs::write(project.0.join(".claude.json"), format!(r#"{{"oauthAccount":{{"accountUuid":"{id}"}}}}"#)).unwrap();
+    };
+    let save = |limits: &str, expected: &str| {
+        use std::process::Stdio;
+        let mut child = command().arg("claude-status").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        write!(child.stdin.take().unwrap(), r#"{{"session_id":"same-session","rate_limits":{limits}}}"#).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    };
+    let doctor = || {
+        let output = command().arg("doctor").output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let week = now + 172_800;
+    let old_week = week + 86_400;
+    profile("00000000-0000-4000-8000-000000000001");
+    save(
+        &format!(
+            r#"{{"five_hour":{{"used_percentage":77,"resets_at":{}}},"seven_day":{{"used_percentage":85,"resets_at":{old_week}}}}}"#,
+            now + 3600
+        ),
+        "5h 23% · week 15% left\n",
+    );
+    assert!(doctor().contains("Claude Code limits: Milo Claude status line"));
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 2);
+    pane.shows("15%");
+
+    profile("00000000-0000-4000-8000-000000000002");
+    assert!(!doctor().contains("Claude Code limits: Milo Claude status line"));
+    pane.master.write_all(b"r").unwrap();
+    pane.hides("15%");
+    pane.hides("23%");
+    save(&format!(r#"{{"seven_day":{{"used_percentage":30,"resets_at":{week}}}}}"#), "week 70% left\n");
+
+    let path = project.0.join("state/milo/claude-limits.json");
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(r#""five_hour":null"#) && saved.contains(r#""used_percentage":30"#), "{saved}");
+    assert!(doctor().contains("Claude Code limits: Milo Claude status line"));
+    pane.master.write_all(b"r").unwrap();
+    pane.shows("70%");
+    assert!(pane.screen().iter().all(|row| !row.contains("23%")));
+
+    save(&format!(r#"{{"seven_day":{{"used_percentage":29,"resets_at":{week}}}}}"#), "week 71% left\n");
+    assert_eq!(fs::read_to_string(path).unwrap(), saved);
     pane.master.write_all(b"q").unwrap();
     assert!(pane.wait_for_exit().success());
 }
@@ -1432,8 +1497,12 @@ fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
 /// the providers here, so this test sends no request at all.
 #[test]
 fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_its_key() {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
     use std::io::{BufRead as _, BufReader};
     use std::process::Stdio;
+
+    const DEEPSEEK_KEY: &str = "sk-not-a-real-key";
+    const OPENROUTER_KEY: &str = "sk-or-not-a-real-key";
 
     let milo = env!("CARGO_BIN_EXE_milo");
     let binary = fs::read(milo).unwrap();
@@ -1467,13 +1536,14 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
             .env("https_proxy", format!("http://127.0.0.1:{port}"))
             .env_remove("NO_PROXY")
             .env_remove("no_proxy")
-            .env("MILO_OPENROUTER_API_KEY", "sk-or-not-a-real-key");
+            .env_remove("MILO_DEEPSEEK_API_KEY")
+            .env("MILO_OPENROUTER_API_KEY", OPENROUTER_KEY);
         command
     };
     let config = project.0.join("config/milo");
     fs::create_dir_all(&config).unwrap();
     let keys = config.join("usage-accounts.conf");
-    fs::write(&keys, "MILO_DEEPSEEK_API_KEY = sk-not-a-real-key\n").unwrap();
+    fs::write(&keys, format!("MILO_DEEPSEEK_API_KEY = {DEEPSEEK_KEY}\n")).unwrap();
     fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
 
@@ -1492,16 +1562,22 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
     let later = now + 3600;
     let saved = project.0.join("state/milo/accounts");
     fs::create_dir_all(&saved).unwrap();
+    // The v2 cache uses the provider, key and optional scope in its file name.
+    let cache = |provider: &str, key: &str| {
+        let [first, second] = [0, 1].map(|domain: u8| {
+            let mut hash = DefaultHasher::new();
+            (domain, provider, key, None::<&str>).hash(&mut hash);
+            hash.finish()
+        });
+        saved.join(format!("{provider}-{first:016x}{second:016x}.json"))
+    };
+    let deepseek = cache("deepseek", DEEPSEEK_KEY);
+    let openrouter = cache("openrouter", OPENROUTER_KEY);
     let reading = format!(
         r#"{{"observed":{now},"figure":{{"kind":"balance","unit":"cny","value":110}},"details":[{{"kind":"granted","unit":"cny","value":10}}],"depleted":false}}"#
     );
-    fs::write(saved.join("deepseek.json"), format!(r#"{{"version":1,"asked":{now},"next":{later},"reading":{reading}}}"#))
-        .unwrap();
-    fs::write(
-        saved.join("openrouter.json"),
-        format!(r#"{{"version":1,"asked":{now},"next":{later},"failure":"limited"}}"#),
-    )
-    .unwrap();
+    fs::write(&deepseek, format!(r#"{{"version":2,"asked":{now},"next":{later},"reading":{reading}}}"#)).unwrap();
+    fs::write(&openrouter, format!(r#"{{"version":2,"asked":{now},"next":{later},"failure":"limited"}}"#)).unwrap();
     fs::write(config.join("preferences.conf"), "usage_deepseek = auto\nusage_openrouter = always\n").unwrap();
 
     let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
@@ -1513,13 +1589,17 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
 
     let report = command().arg("doctor").output().unwrap();
     let report = String::from_utf8(report.stdout).unwrap();
-    assert!(report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"), "{report}");
+    assert!(
+        report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"),
+        "{report}"
+    );
     assert!(report.contains("DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from "), "{report}");
     assert!(report.contains("  last answer: ¥110.00 balance, "), "{report}");
     assert!(report.contains("  last attempt: the provider rate limited the request"), "{report}");
     assert!(!report.contains("not-a-real-key"), "{report}");
 
-    let mut stream = command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut stream =
+        command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut lines = BufReader::new(stream.stdout.take().unwrap()).lines();
     // Each account is looked at on a thread of its own, even when a saved
     // answer spares the request, and the stream does not hold a line back for
@@ -1531,11 +1611,12 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
         .by_ref()
         .take(10)
         .map(Result::unwrap)
-        .inspect(|line| eprintln!("menu stream: {line}"))
         .find(settled)
         .expect("a line with both accounts' saved answers");
     assert!(
-        line.contains(r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#),
+        line.contains(
+            r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#
+        ),
         "{line}"
     );
     assert!(line.contains(r#"{"id":"openrouter","name":"OpenRouter","windows":[],"detail":"Rate limited"}"#), "{line}");
@@ -1544,7 +1625,8 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
 
     // Nothing was sent to the loopback receiver, with or without accounts turned on.
     assert_eq!(received.load(Ordering::SeqCst), 0);
-    for name in ["deepseek.json", "openrouter.json"] {
-        assert!(!fs::read_to_string(saved.join(name)).unwrap().contains("not-a-real-key"));
+    for path in [deepseek, openrouter] {
+        assert!(!path.file_name().unwrap().to_str().unwrap().contains("not-a-real-key"));
+        assert!(!fs::read_to_string(path).unwrap().contains("not-a-real-key"));
     }
 }

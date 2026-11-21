@@ -124,12 +124,15 @@ fn wide_claude_panes_show_a_model_week_without_displacing_account_limits() {
     let f = Fixture::folder();
     let mut usage = open(&f, NOW);
     let window = |minutes, percent| Window { minutes, percent, resets: Some(NOW + HOUR), observed: NOW };
-    usage.claude.native = Some(Reading {
-        at: Timestamp::seconds(NOW),
-        windows: Limits {
-            base: [Some(window(300, 12.0)), Some(window(10_080, 34.0))],
-            model_week: ModelWeek::new("opus", window(10_080, 56.0)),
-        },
+    usage.claude.native = Some(status::Native {
+        account: None,
+        reading: Some(Reading {
+            at: Timestamp::seconds(NOW),
+            windows: Limits {
+                base: [Some(window(300, 12.0)), Some(window(10_080, 34.0))],
+                model_week: ModelWeek::new("opus", window(10_080, 56.0)),
+            },
+        }),
     });
     for (width, model) in [(80, false), (140, true)] {
         let rows = frame(&mut usage, width, 3);
@@ -182,9 +185,12 @@ fn a_narrow_column_has_one_large_figure_and_a_row_of_words_for_each_window() {
     let f = Fixture::folder();
     let mut usage = open(&f, NOW).with_large_figures(true);
     let window = |percent| Window { minutes: 10_080, percent, resets: Some(NOW + DAY), observed: NOW };
-    usage.claude.native = Some(Reading {
-        at: Timestamp::seconds(NOW),
-        windows: Limits { base: [None, Some(window(31.0))], model_week: ModelWeek::new("fable", window(58.0)) },
+    usage.claude.native = Some(status::Native {
+        account: None,
+        reading: Some(Reading {
+            at: Timestamp::seconds(NOW),
+            windows: Limits { base: [None, Some(window(31.0))], model_week: ModelWeek::new("fable", window(58.0)) },
+        }),
     });
     // Claude has the six rows below the rule, and needs five of them.
     let rows = frame(&mut usage, 24, 13);
