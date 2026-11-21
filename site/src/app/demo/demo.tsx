@@ -3,15 +3,12 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import claude from '../../images/claude.png';
 import codex from '../../images/codex.png';
-import { demoLabel, frameAt, harnesses, loopLength, request, scene, still, typing, type Pane } from '../../scene';
+import { demoLabel, frameAt, harnesses, loopLength, request, scene, still, typing } from '../../scene';
 import { AgentBanner, AgentChrome, AgentTranscript, History, Outline, Reader, stageOf, UsageFigure } from './panes';
 
 type Step = typeof scene[number];
 
-// A phone with reduced motion shows one representative scene per pane, not
-// every beat of the animated timeline.
-const paneSnapshots = ['test', 'edit', 'read', 'commit', 'usage'].map(phase => scene.find(step => step.phase === phase)!);
-const paneNames: Record<Pane, string> = { agent: 'Agent', outline: 'Outline', reader: 'Reader', history: 'History', usage: 'Usage' };
+const phoneStill = scene.find(step => step.phase === 'test')!;
 // How long the shell fades before the scene starts again; matches the CSS transition.
 const fade = 320;
 
@@ -24,8 +21,6 @@ type State = {
   /** A still picture of the demo: nothing in it moves. */
   still: boolean;
   fading: boolean;
-  /** The pane a phone with reduced motion has chosen. */
-  snapshot: Step;
 };
 
 type Action =
@@ -33,12 +28,11 @@ type Action =
   | { type: 'type'; typed: string }
   | { type: 'fade' }
   | { type: 'begin'; nextHarness: boolean }
-  | { type: 'still'; picker: boolean }
-  | { type: 'pick'; snapshot: Step };
+  | { type: 'still'; step: Step };
 
 // The server and the first client render draw the opening of the scene, so
 // the page arrives with the demo in place and the loop picks up from there.
-const opening: State = { harness: 0, step: scene[0], typed: '', still: false, fading: false, snapshot: paneSnapshots[0] };
+const opening: State = { harness: 0, step: scene[0], typed: '', still: false, fading: false };
 
 function reduce(state: State, action: Action): State {
   switch (action.type) {
@@ -50,8 +44,7 @@ function reduce(state: State, action: Action): State {
       harness: action.nextHarness ? (state.harness + 1) % harnesses.length : state.harness,
       step: scene[0], typed: '', still: false, fading: false,
     };
-    case 'still': return { ...state, step: action.picker ? state.snapshot : still, typed: '', still: true, fading: false };
-    case 'pick': return { ...state, snapshot: action.snapshot, step: action.snapshot, typed: '' };
+    case 'still': return { ...state, step: action.step, typed: '', still: true, fading: false };
   }
 }
 
@@ -99,7 +92,6 @@ function Words({ line }: { line: string }) {
   return <><span>{before}</span><strong>{emphasis}</strong><span>{after}</span></>;
 }
 
-/** The Rex window that plays the scene, with its pane picker, caption and playback control. */
 export function Demo() {
   const [state, dispatch] = useReducer(reduce, opening);
   const [userPaused, setUserPaused] = useState(false);
@@ -110,7 +102,6 @@ export function Demo() {
   // Until the script runs, the window is described as it reads without one.
   const hydrated = useSyncExternalStore(subscribeToNothing, () => true, () => false);
   const playing = !(userPaused || hidden || !onScreen || reduced);
-  const picker = reduced && phone;
 
   const demo = useRef<HTMLDivElement>(null);
   const caption = useRef<HTMLSpanElement>(null);
@@ -128,10 +119,10 @@ export function Demo() {
   // scene to hold. `wasReduced` starts true to cover that first appearance.
   const wasReduced = useRef(true);
   useEffect(() => {
-    if (reduced || (wasReduced.current && !playing)) dispatch({ type: 'still', picker });
+    if (reduced || (wasReduced.current && !playing)) dispatch({ type: 'still', step: phone ? phoneStill : still });
     wasReduced.current = reduced;
     // Playback changing on its own holds the scene where it is; see the clock below.
-  }, [reduced, picker]);
+  }, [reduced, phone]);
 
   // Where the scene's clock stands while it is stopped.
   const clock = useRef({ elapsed: 0, nextCue: 0 });
@@ -224,12 +215,6 @@ export function Demo() {
   const playbackLabel = userPaused ? 'Resume demo' : 'Pause demo';
   return (
     <>
-      <div className="demo-panes" id="demo-panes" role="group" aria-label="Demo panes" hidden={!picker}>
-        {paneSnapshots.map(snapshot => (
-          <button key={snapshot.focus} type="button" value={snapshot.focus!} aria-controls="demo" aria-pressed={snapshot === state.snapshot}
-            onClick={() => dispatch({ type: 'pick', snapshot })}>{paneNames[snapshot.focus!]}</button>
-        ))}
-      </div>
       <div className={`terminal${state.fading ? ' scene-out' : ''}`} id="demo" ref={demo} translate="no" role="img"
         data-view={focus ?? 'whole'}
         data-still={state.still ? '' : undefined}
@@ -237,7 +222,7 @@ export function Demo() {
         data-expanded={phase === 'usage' ? '' : undefined}
         data-resized={stage >= stageOf('resize') ? '' : undefined}
         data-shell={newTab ? '' : undefined}
-        aria-label={picker ? `A Rex window showing the ${state.snapshot.focus} pane` : demoLabel}
+        aria-label={reduced && phone ? 'A Rex window showing the agent pane' : demoLabel}
         aria-describedby={!hydrated ? 'demo-fallback demo-still-caption' : reduced ? 'demo-still-caption' : 'caption'}>
         <div className="rex-titlebar">
           <span className="window-lights"><i></i><i></i><i></i></span>
