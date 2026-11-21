@@ -10,6 +10,7 @@ pub(crate) mod run;
 use std::cell::{Cell, OnceCell};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -283,9 +284,11 @@ pub fn checkout(dir: &Path) -> Result<Option<Checkout>, &'static str> {
     let Some(folder) = dirs.root.file_name().map(|name| name.to_string_lossy().into_owned()) else {
         return Ok(None);
     };
-    // A linked worktree keeps its index apart from the repository's branches.
+    // A linked worktree keeps its index apart from the repository's branches, in a
+    // folder of its own among the repository's `worktrees`. A checkout's files can
+    // point at any repository, so only that folder says whose worktree this is.
     let repository = match (&dirs.git, &dirs.common) {
-        (Some(git), Some(common)) if git != common => repository_name(common),
+        (Some(git), Some(common)) if linked(git, common) => repository_name(common, &dirs.root),
         _ => None,
     };
     Ok(Some(match repository {
@@ -294,13 +297,31 @@ pub fn checkout(dir: &Path) -> Result<Option<Checkout>, &'static str> {
     }))
 }
 
+/// Whether `git` is where the repository at `common` keeps a linked worktree.
+fn linked(git: &Path, common: &Path) -> bool {
+    let worktrees = git.parent();
+    worktrees.is_some_and(|dir| dir.file_name() == Some(OsStr::new("worktrees")) && dir.parent() == Some(common))
+}
+
 /// The folder holding `.git`, or a bare repository's own folder without its `.git` ending.
-fn repository_name(common: &Path) -> Option<String> {
+/// A hidden repository is named for the folder around it only from a worktree beside it:
+/// one that holds its own worktree is its own folder, and what is around it is where it is kept.
+fn repository_name(common: &Path, root: &Path) -> Option<String> {
     let own = common.file_name()?.to_string_lossy();
     if own.starts_with('.') {
+        if root.ancestors().any(|folder| same_folder(folder, common)) {
+            return None;
+        }
         return Some(common.parent()?.file_name()?.to_string_lossy().into_owned());
     }
     Some(own.strip_suffix(".git").filter(|name| !name.is_empty()).unwrap_or(&own).to_owned())
+}
+
+/// Whether two paths lead to one folder. A folder can be spelled in more than
+/// one way, in another case for instance, so the spellings are not compared.
+pub(crate) fn same_folder(one: &Path, other: &Path) -> bool {
+    let folder = |path: &Path| path.metadata().ok().map(|found| (found.dev(), found.ino()));
+    folder(one).is_some_and(|found| folder(other) == Some(found))
 }
 
 fn discovery_output(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, &'static str> {
@@ -944,8 +965,58 @@ mod tests {
         let hotfix = f.root.with_file_name("hotfix");
         assert_eq!(named(&hotfix), Some(("tool".into(), Some("hotfix".into()), hotfix.clone())));
 
+        // So is one that keeps its worktrees inside itself. One kept out of sight
+        // beside its worktrees is named for the folder that holds them all.
+        f.git(&["--git-dir", "../tool.git", "worktree", "add", "-q", "../tool.git/inside"]);
+        let inside = f.root.with_file_name("tool.git").join("inside");
+        assert_eq!(named(&inside), Some(("tool".into(), Some("inside".into()), inside.clone())));
+        f.git(&["clone", "-q", "--bare", ".", "../site/.bare"]);
+        f.git(&["--git-dir", "../site/.bare", "worktree", "add", "-q", "../site/main"]);
+        let main = f.root.with_file_name("site").join("main");
+        assert_eq!(named(&main), Some(("site".into(), Some("main".into()), main.clone())));
+
         let plain = Fixture::folder();
         assert!(checkout(&plain.root).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_checkout_is_not_named_for_a_folder_its_own_files_point_to() {
+        let named = |dir: &Path| checkout(dir).unwrap().map(|found| (found.project, found.worktree));
+        let write = |path: PathBuf, text: &str| std::fs::write(path, text).unwrap();
+
+        // Git follows a checkout's `commondir` to any repository, here a bare one two
+        // folders up. Only a folder among that repository's `worktrees` says whose it is.
+        let f = Fixture::new();
+        f.write("page.txt", "a file\n");
+        f.commit("first");
+        f.git(&["init", "-q", "--bare", "--template=", "../.kept"]);
+        write(f.root.join(".git/commondir"), "../../.kept\n");
+        assert_eq!(named(&f.root), Some(("project".into(), None)));
+
+        // A hidden folder that is its own repository is not named for the folder
+        // around it either, from its top or from a worktree inside it.
+        let hidden = f.root.with_file_name(".hidden");
+        f.git(&["init", "-q", "--template=", "-b", "main", "../.hidden"]);
+        for part in ["objects", "refs", "config"] {
+            std::fs::rename(hidden.join(".git").join(part), hidden.join(part)).unwrap();
+        }
+        write(hidden.join(".git/commondir"), "..\n");
+        assert_eq!(named(&hidden), Some((".hidden".into(), None)));
+        std::fs::create_dir_all(hidden.join("worktrees/w")).unwrap();
+        std::fs::create_dir(hidden.join("sub")).unwrap();
+        write(hidden.join("worktrees/w/HEAD"), "ref: refs/heads/w\n");
+        write(hidden.join("worktrees/w/commondir"), "../..\n");
+        write(hidden.join("sub/.git"), "gitdir: ../worktrees/w\n");
+        assert_eq!(named(&hidden.join("sub")), Some(("sub".into(), None)));
+
+        // Where one folder answers to two spellings, a worktree cannot hide that it is inside.
+        std::fs::create_dir_all(hidden.join("worktrees/v")).unwrap();
+        std::fs::create_dir(hidden.join("spelled")).unwrap();
+        write(hidden.join("worktrees/v/HEAD"), "ref: refs/heads/v\n");
+        write(hidden.join("worktrees/v/commondir"), "../..\n");
+        write(hidden.join("spelled/.git"), "gitdir: ../../.HIDDEN/worktrees/v\n");
+        // Where they are two folders, there is no such repository.
+        assert!(named(&hidden.join("spelled")).is_none_or(|found| found == ("spelled".into(), None)));
     }
 
     #[test]
