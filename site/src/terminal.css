@@ -81,39 +81,6 @@
 .caption[data-tone='omp'] strong, .caption[data-tone='history'] strong { color: #594276; }
 .caption[data-tone='usage'] strong, .caption[data-tone='reader'] strong { color: #20584e; }
 
-.demo-panes {
-  flex-wrap: wrap;
-  gap: .25rem;
-  margin-block-end: .45rem;
-}
-.demo-panes:not([hidden]) { display: flex; }
-/* The picker's place is kept while the script that shows it loads. Browsers
-   that cannot say whether scripting is on are treated as having it. */
-@media (prefers-reduced-motion: reduce) and (max-width: 45rem) {
-  .demo-panes[hidden] { display: flex; visibility: hidden; }
-}
-@media (scripting: none) {
-  .demo-panes[hidden] { display: none; }
-}
-.demo-panes button {
-  flex: 1 0 auto;
-  min-block-size: 44px;
-  padding-inline: .35rem;
-  border: 1px solid #ffffffa8;
-  border-radius: .45rem;
-  background: #ffffff63;
-  color: var(--ink);
-  font: 650 .8125rem/1.2 Bricolage, system-ui, sans-serif;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-.demo-panes button:hover { background: #ffffffa8; }
-.demo-panes button[aria-pressed='true'] {
-  border-color: var(--blue);
-  background: var(--blue);
-  color: white;
-}
-
 /* Geometry and chrome follow the tidebook window in docs/img/tab.png. */
 .terminal {
   pointer-events: none;
