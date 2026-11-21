@@ -719,8 +719,9 @@ if ... == "listener" then
           selected = nil
           return false
         end
-        local current, owner_changed = still_current(owner)
-        if owner_changed then return false end
+        -- The tab waits when its measuring client changed or its shell moved.
+        local current, wait = still_current(owner)
+        if wait then return false end
         if current then make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows) end
         return true
       end

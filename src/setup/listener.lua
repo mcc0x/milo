@@ -290,7 +290,9 @@ local function arrange(tab)
       -- Rex runs handlers one at a time, but the tab can change while a
       -- profile or size is being read. Revalidate just before the split.
       local current = shell(tab)
-      if not current or current.cwd ~= cwd then return false end
+      if not current then return false end
+      -- A shell that moved meanwhile is arranged for where it went, once an event says so.
+      if current.cwd ~= cwd then return false, true end
       local view = rex.session.view{ session_id = ctx.session_id }
       local window = find_window(view, tab.window_id)
       local block = window and single_pane(window)
