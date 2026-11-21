@@ -2,6 +2,8 @@
 
 Milo is a local-first companion to Rex. Start with the [contributor guide](CONTRIBUTING.md) for the source map, commands and release checks. Use the [Milo skill](skills/milo/SKILL.md) to **operate** Milo for a user; use the [UI review skill](skills/milo-ui-review/SKILL.md) to **change** a visible surface.
 
+For the hosted website and production infrastructure, use the [Milo Railway skill](skills/milo-railway/SKILL.md) alongside Railway’s official `use-railway` skill.
+
 ## Architecture decisions to preserve
 
 - Keep Git reads in `src/git/` and Rex calls in `src/rex.rs`. Treat the checkout, its Git settings and terminal text as untrusted. Reader edits are an explicit user save through `src/reader/disk.rs`, not a general permission to write into the project.
