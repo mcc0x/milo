@@ -1098,6 +1098,8 @@ Nothing adds these for you, except that Dependabot labels its own pull requests.
 
 Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. On an arm64 macOS runner, GitHub Actions runs `sh tests/install.sh` and `cargo test --release --locked`, then drives the browser editor of a release build in Chromium with `tests/web-smoke.cjs`. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
 
+On pushes and pull requests, website-, docs-, relay- and Railway-only changes skip the macOS runner. Shared inputs such as the menu icon, lockup, release installer and relay text fixture still trigger it. Unknown paths and incomplete diffs default to a full run. If the commit you want to tag skipped macOS, dispatch **Release tests** on its branch and verify the run SHA before tagging. A skipped job does not use the tag ruleset’s required check name.
+
 ## What a good change looks like
 
 **It solves one thing.** A bug fix does not also rename a module. A refactoring does not also change behaviour.
