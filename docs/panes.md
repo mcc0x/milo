@@ -39,7 +39,7 @@ History counts commits to push against the branch's tracked remote branch. `no b
 
 Expand a commit to see its seven-character ID beside the file count. Narrow panes keep that space for the subject instead.
 
-History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room.
+History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room. A subject longer than 4,096 bytes is cut there and ends with `…`.
 
 Expanding a commit that touched thousands of files shows `Reading files…` under it while Git lists and counts them. The pane keeps taking keys meanwhile, and the files appear under their commit when they are ready, wherever the cursor has gone.
 

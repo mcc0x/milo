@@ -213,6 +213,25 @@ pub(super) fn commit_version(raw: &[u8], id: CommitId<'_>) -> Option<CommitVersi
     Some(CommitVersion { hash: hash.to_string(), time: commit_time(time.as_bytes())? })
 }
 
+/// How much of a commit's subject is kept. Git joins a whole first paragraph
+/// into the subject, and the panes measure every subject they draw.
+const SUBJECT_LIMIT: usize = 4096;
+
+/// The subject as text, cut after a whole character and marked when it was longer.
+fn subject(raw: &[u8]) -> String {
+    if raw.len() <= SUBJECT_LIMIT {
+        return String::from_utf8_lossy(raw).into_owned();
+    }
+    let mut end = SUBJECT_LIMIT;
+    // A character's later bytes all start with the bits 10.
+    while end > SUBJECT_LIMIT - 3 && raw[end] & 0xc0 == 0x80 {
+        end -= 1;
+    }
+    let mut kept = String::from_utf8_lossy(&raw[..end]).into_owned();
+    kept.push('…');
+    kept
+}
+
 /// Parses history and marks the commits in the unpushed list.
 pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Option<Vec<Commit>> {
     let unpushed: HashSet<&[u8]> = unpushed.split(|&b| b == b'\n').filter(|oid| !oid.is_empty()).collect();
@@ -223,11 +242,11 @@ pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Option<Vec<Commit>> 
             let name = std::str::from_utf8(hash).ok()?;
             let time = commit_time(fields.next()?)?;
             let parents = fields.next()?;
-            let subject = fields.next()?;
+            let title = fields.next()?;
             commits.push(Commit {
                 unpushed: unpushed.contains(hash),
                 hash: name.to_owned(),
-                subject: String::from_utf8_lossy(subject).into_owned(),
+                subject: subject(title),
                 time,
                 day: when::local_day(time),
                 merge: parents.contains(&b' '),
@@ -381,5 +400,16 @@ mod tests {
         assert_eq!(times, [("newer".to_owned(), 17), ("undated".to_owned(), 0), ("huge".to_owned(), 0)]);
         assert_eq!(commit_version(b"bbbb\0\n", CommitId::parse("bbbb").unwrap()).map(|c| c.time), Some(0));
         assert!(commit_version(b"bbbb\0soon\n", CommitId::parse("bbbb").unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_subject_longer_than_the_panes_measure_is_cut_at_a_character_and_says_so() {
+        let log = |subject: &str| format!("aaaa\x0017\0\0{subject}\0").into_bytes();
+        let kept = |subject: &str| parse_history(&log(subject), b"").unwrap().remove(0).subject;
+        let whole = "a".repeat(SUBJECT_LIMIT);
+        assert_eq!(kept(&whole), whole);
+        // The limit falls inside the two bytes of `é`.
+        let long = format!("{}é{}", "a".repeat(SUBJECT_LIMIT - 1), "tail ".repeat(1 << 16));
+        assert_eq!(kept(&long), format!("{}…", "a".repeat(SUBJECT_LIMIT - 1)));
     }
 }

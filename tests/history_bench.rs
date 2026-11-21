@@ -1,12 +1,14 @@
 //! Times opening a commit in History of a release build, in a generated
 //! repository: a commit that touches five files, and one that reformats and
-//! moves thousands.
+//! moves thousands. A second repository has commits with subjects of two
+//! megabytes each.
 //!
 //! Each run starts `milo history` in a real terminal and times what a person
 //! waits for after Enter on a commit: the frame that lists its files, and the
 //! frame after Down when it is pressed straight after Enter. It also times
-//! Down on the opened list. Only the command line and the terminal are used,
-//! so any build can be timed.
+//! Down on the opened list, and the first frame and Down among the long
+//! subjects. Only the command line and the terminal are used, so any build
+//! can be timed.
 //!
 //! ```sh
 //! cargo test --release --locked --test history_bench -- --ignored --nocapture
@@ -26,7 +28,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use report::{Bench, Samples};
 use terminal::Terminal;
@@ -41,6 +43,9 @@ const FUNCTIONS: usize = 60;
 const MOVED_EVERY: usize = 40;
 /// How often Down is timed on an opened commit.
 const DOWNS: usize = 20;
+/// The commits with long subjects, and the words in each subject.
+const LONG_SUBJECTS: usize = 40;
+const SUBJECT_WORDS: usize = 400_000;
 
 /// A commit to open, and how many rows below the newest it is.
 struct Scenario {
@@ -63,12 +68,9 @@ impl Project {
     /// Three commits, newest first: five files edited, every source file
     /// reformatted or moved, and the files as they began.
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("milo-history-bench-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let project = Self { root };
+        let project = Self::empty("files");
         let source = project.folder().join("src");
         fs::create_dir_all(&source).unwrap();
-        project.git(&["init", "-q", "--template=", "-b", "main"]);
         for file in 0..SWEEP_FILES {
             fs::write(source.join(format!("m{file:04}.rs")), module(file, "    ")).unwrap();
         }
@@ -89,6 +91,29 @@ impl Project {
             fs::write(project.folder().join(format!("five{file}.rs")), "pub fn five() {}\npub fn six() {}\n").unwrap();
         }
         project.commit("benchfive add a function to five files");
+        project
+    }
+
+    /// Commits whose first paragraph, which Git gives as the subject, is megabytes long.
+    fn long_subjects() -> Self {
+        let project = Self::empty("subjects");
+        let message = project.root.join("message");
+        for commit in 0..LONG_SUBJECTS {
+            fs::write(&message, format!("benchsubject{commit:02} {}\n", "word ".repeat(SUBJECT_WORDS))).unwrap();
+            let identity = ["-c", "user.name=Milo Test", "-c", "user.email=test@example.com"];
+            let commit = ["commit", "-q", "--allow-empty", "-F", message.to_str().unwrap()];
+            project.git(&[&identity[..], &commit[..]].concat());
+        }
+        project
+    }
+
+    /// A new repository in a home of its own.
+    fn empty(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("milo-history-bench-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let project = Self { root };
+        fs::create_dir_all(project.folder()).unwrap();
+        project.git(&["init", "-q", "--template=", "-b", "main"]);
         project
     }
 
@@ -167,6 +192,19 @@ fn run(samples: &mut Samples, binary: &Path, project: &Project, scenario: &Scena
     samples.push(scenario.name, "down-while-opening", pane.press(b"\rj"));
 }
 
+/// Opens History on the long subjects and moves among them.
+fn run_subjects(samples: &mut Samples, binary: &Path, project: &Project) {
+    let began = Instant::now();
+    let mut pane = Terminal::start(project.command(binary).arg("history"), COLUMNS, ROWS);
+    pane.frame_showing(0, "benchsubject00");
+    samples.push("long-subjects", "first-paint", began.elapsed());
+    pane.settle();
+    for _ in 0..DOWNS {
+        samples.push("long-subjects", "down", pane.press(b"j"));
+        pane.press(b"k");
+    }
+}
+
 fn noise(measure: &str) -> Duration {
     Duration::from_micros(if measure == "down" { 20 } else { 500 })
 }
@@ -186,6 +224,14 @@ fn history_commit_files() {
             for (binary, build) in bench.builds(turn) {
                 run(&mut samples[build], binary, &project, scenario);
             }
+        }
+    }
+    writeln!(heading, "# long-subjects: {LONG_SUBJECTS} commits whose subjects are {SUBJECT_WORDS} words each")
+        .unwrap();
+    let subjects = Project::long_subjects();
+    for turn in 0..bench.runs {
+        for (binary, build) in bench.builds(turn) {
+            run_subjects(&mut samples[build], binary, &subjects);
         }
     }
     bench.report(heading, &samples, noise);

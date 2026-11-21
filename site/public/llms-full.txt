@@ -388,7 +388,7 @@ History counts commits to push against the branch's tracked remote branch. `no b
 
 Expand a commit to see its seven-character ID beside the file count. Narrow panes keep that space for the subject instead.
 
-History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room.
+History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room. A subject longer than 4,096 bytes is cut there and ends with `…`.
 
 Expanding a commit that touched thousands of files shows `Reading files…` under it while Git lists and counts them. The pane keeps taking keys meanwhile, and the files appear under their commit when they are ready, wherever the cursor has gone.
 
@@ -1291,7 +1291,7 @@ cargo test --release --locked --test history_bench -- --ignored --nocapture
 cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocapture
 ```
 
-`tests/web_bench.rs` starts `milo web --no-open` in a throwaway home, outside Rex and beside a stand-in for Rex that answers at once or after a pause. It times the link, the first authenticated state, and that state when a stand-in for a browser asks 100 milliseconds after the link. `tests/history_bench.rs` opens a five-file commit and a six-thousand-file one in a generated repository, and times the frame that lists the files, the frame after Down sent with Enter, and Down alone. Both take `MILO_BENCH_BASE`. `src/usage/tests/idle.rs` is inside the crate, because only there can it run the pane's timer twenty times without waiting twenty intervals: it counts the `sqlite3` processes an idle pane starts for a small and a large pair of generated databases, and the looks until a new row shows. Compare its figures between two checkouts.
+`tests/web_bench.rs` starts `milo web --no-open` in a throwaway home, outside Rex and beside a stand-in for Rex that answers at once or after a pause. It times the link, the first authenticated state, and that state when a stand-in for a browser asks 100 milliseconds after the link. `tests/history_bench.rs` opens a five-file commit and a six-thousand-file one in a generated repository, and times the frame that lists the files, the frame after Down sent with Enter, and Down alone; in a second repository of commits with two-megabyte subjects it times the first frame and Down. Both take `MILO_BENCH_BASE`. `src/usage/tests/idle.rs` is inside the crate, because only there can it run the pane's timer twenty times without waiting twenty intervals: it counts the `sqlite3` processes an idle pane starts for a small and a large pair of generated databases, and the looks until a new row shows. Compare its figures between two checkouts.
 
 ## Commit messages
 
