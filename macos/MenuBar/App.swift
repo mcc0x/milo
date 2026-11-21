@@ -6,6 +6,10 @@ import SwiftUI
 
 private struct MenuProfile: Codable {
     private static let pathKeys = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "OPENCODE_DB", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"]
+    // Milo resolves these against its working directory, so a relative one is captured in full.
+    // It ignores a relative XDG directory, and an OpenCode database name (or :memory:) is
+    // relative to OpenCode's data folder: those stay as set, to mean here what they meant there.
+    private static let workingDirectoryKeys: Set = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR"]
 
     struct Installer: Codable {
         let path: String
@@ -47,8 +51,7 @@ private struct MenuProfile: Codable {
         var paths: [String: String] = [:]
         for key in pathKeys {
             guard let value = source[key], validPath(value) else { continue }
-            // Relative OpenCode database names (and :memory:) are not cwd-relative.
-            paths[key] = key == "OPENCODE_DB" || value.hasPrefix("/") ? value : cwd + "/" + value
+            paths[key] = value.hasPrefix("/") || !workingDirectoryKeys.contains(key) ? value : cwd + "/" + value
         }
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
@@ -72,7 +75,7 @@ private struct MenuProfile: Codable {
 
     func applyPaths(to environment: inout [String: String]) {
         for key in Self.pathKeys {
-            if let path = paths[key], Self.validPath(path, absolute: key != "OPENCODE_DB") {
+            if let path = paths[key], Self.validPath(path, absolute: Self.workingDirectoryKeys.contains(key)) {
                 environment[key] = path
             }
         }

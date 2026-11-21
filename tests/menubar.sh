@@ -90,7 +90,7 @@ export CODEX_HOME='alternate & Codex'
 export CLAUDE_CONFIG_DIR="$root/Claude profile"
 export PI_CODING_AGENT_DIR=''
 export OPENCODE_DB='alternate.db'
-export XDG_CONFIG_HOME=config XDG_STATE_HOME=state XDG_DATA_HOME=data
+export XDG_CONFIG_HOME=config XDG_STATE_HOME="$root/state" XDG_DATA_HOME=data
 export OPENAI_API_KEY='not-a-real-openai-token' ANTHROPIC_API_KEY='not-a-real-anthropic-token'
 
 operation() (
@@ -130,9 +130,11 @@ test "$(stat -f %Lp "$profile")" = 600
 test "$(read_profile paths.CODEX_HOME)" = "$cwd/$CODEX_HOME"
 test "$(read_profile paths.CLAUDE_CONFIG_DIR)" = "$CLAUDE_CONFIG_DIR"
 test "$(read_profile paths.OPENCODE_DB)" = "$OPENCODE_DB"
-test "$(read_profile paths.XDG_CONFIG_HOME)" = "$cwd/config"
-test "$(read_profile paths.XDG_STATE_HOME)" = "$cwd/state"
-test "$(read_profile paths.XDG_DATA_HOME)" = "$cwd/data"
+# The CLI ignores a relative XDG directory, so the menu's reader must be handed
+# it as set: anchoring it here would point the menu at settings the CLI never reads.
+test "$(read_profile paths.XDG_CONFIG_HOME)" = config
+test "$(read_profile paths.XDG_STATE_HOME)" = "$root/state"
+test "$(read_profile paths.XDG_DATA_HOME)" = data
 test "$(read_profile installer.path)" = "$fixture_cli"
 test "$(read_profile installer.digest)" = "$(openssl dgst -sha256 -binary "$fixture_cli" | base64)"
 if read_profile paths.PI_CODING_AGENT_DIR >/dev/null 2>&1; then exit 1; fi
