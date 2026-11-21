@@ -683,6 +683,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Tune,
         Panel::Appearance,
         Panel::Workflow,
+        Panel::Alerts,
         Panel::Health,
         Panel::Save(SaveKind::Layout),
         Panel::Save(SaveKind::Workflow),
@@ -690,6 +691,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Confirm(Confirm::Repair),
         Panel::Confirm(Confirm::Remove),
         Panel::Confirm(Confirm::RemoveMenuBar),
+        Panel::Confirm(Confirm::MirrorAlerts),
         Panel::Presence,
         Panel::Confirm(Confirm::Presence),
         Panel::Confirm(Confirm::PresenceDetails(presence::Details::Both)),
@@ -865,7 +867,7 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("outside Rex"));
     assert_eq!(pane.panel, Panel::Workflow);
-    let rows = frame(&mut pane, 75, 22);
+    let rows = frame(&mut pane, 75, 23);
     assert!(rows.iter().any(|row| row.contains("Show Claude Code limits")));
     assert!(rows.iter().any(|row| row.contains("Keep the starting project open")));
     assert!(!rows.iter().any(|row| row.contains("Arrange new shell tabs")));
@@ -887,6 +889,7 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
 fn workflow_shows_install_or_separate_open_and_remove_actions() {
     let mut pane = Setup::new(None, false, None, None, |_| panic!("drawing does not call Rex"));
     let rows = frame(&mut pane, 80, 20);
+    assert_eq!(pane.visible.len, 11);
     assert!(!rows.iter().any(|row| row.contains("menu bar app")));
     for (installed, action, label, short) in [
         (false, Row::MenuBar, "Install Milo menu bar app", "Install app"),
@@ -896,6 +899,7 @@ fn workflow_shows_install_or_separate_open_and_remove_actions() {
         pane.menu_installed = Some(installed);
         pane.select_panel(Panel::Workflow, Some(action));
         let rows = frame(&mut pane, 80, 20);
+        assert_eq!(pane.visible.len, if installed { 13 } else { 12 });
         assert_eq!(rows.iter().any(|row| row.contains("Install Milo menu bar app")), !installed);
         assert_eq!(rows.iter().any(|row| row.contains("Open or update Milo menu bar app")), installed);
         assert_eq!(rows.iter().any(|row| row.contains("Remove Milo menu bar app…")), installed);
@@ -903,6 +907,29 @@ fn workflow_shows_install_or_separate_open_and_remove_actions() {
         let rows = frame(&mut pane, 18, 1);
         let row = rows.iter().find(|row| row.starts_with('›')).unwrap();
         assert_eq!(row.trim_start_matches('›').trim_end_matches('▐').trim(), short);
+    }
+}
+
+#[test]
+fn workflow_opens_alerts_and_presence_independently() {
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("drawing does not call Rex"));
+    pane.menu_installed = Some(true);
+    for (label, panel, row) in [
+        ("Mirror Rex alerts…", Panel::Alerts, Row::Alerts),
+        ("Discord presence…", Panel::Presence, Row::PresenceOpen),
+    ] {
+        let rows = frame(&mut pane, 80, 20);
+        assert_eq!(pane.key(click_label(&rows, label)), After::Stay);
+        assert_eq!(pane.panel, panel);
+        let rows = frame(&mut pane, 80, 20);
+        assert_eq!(pane.key(click_at(&rows, 19, "Esc back")), After::Stay);
+        assert_eq!(pane.panel, Panel::Workflow);
+        assert!(pane.selected_row() == Some(row));
+        assert_eq!(pane.key(Key::Enter), After::Stay);
+        assert_eq!(pane.key(Key::Ctrl(b'i')), After::Stay);
+        assert_eq!(pane.panel, Panel::Health);
+        assert_eq!(pane.key(Key::Char('3')), After::Stay);
     }
 }
 
@@ -1324,6 +1351,62 @@ fn narrow_rails_keep_tabs_scrolled_rows_and_footer_actions_mouse_accessible() {
     let rows = frame(&mut pane, 10, 5);
     assert_eq!(pane.key(click_at(&rows, 4, "q")), After::Leave);
     assert!(!f.root.join("init.lua").exists());
+}
+
+#[test]
+fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
+    const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
+    let f = Fixture::folder();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("alerts do not call Rex"));
+    pane.alerts = Some(Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state")));
+    let saved = |pane: &Setup<_>| pane.alerts.as_ref().unwrap().settings().unwrap();
+
+    assert_eq!(choose(&mut pane, Row::Alerts), After::Stay);
+    assert_eq!(pane.panel, Panel::Alerts);
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Mirror Rex alerts  Off") && rows.contains("None saved"), "{rows}");
+
+    // Turning on is asked about first, and without a destination does nothing.
+    choose(&mut pane, Row::AlertsOn);
+    assert_eq!(pane.panel, Panel::Confirm(Confirm::MirrorAlerts));
+    assert!(pane.selected_row() == Some(Row::Cancel));
+    assert!(!saved(&pane).enabled);
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Nothing the") && rows.contains("Turn mirroring on"), "{rows}");
+    choose(&mut pane, Row::Continue);
+    assert_eq!(pane.panel, Panel::Alerts);
+    assert!(!saved(&pane).enabled);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("Nothing was turned on"));
+    choose(&mut pane, Row::AlertsDestination);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("No other destination is saved"));
+
+    // A destination is saved elsewhere; the pane never takes a secret.
+    pane.alerts.as_ref().unwrap().set_telegram(TOKEN, "-1001234567890").unwrap();
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert!(pane.panel == Panel::Workflow && pane.selected_row() == Some(Row::Alerts));
+    choose(&mut pane, Row::Alerts);
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Telegram") && !rows.contains("SYNTHETIC"), "{rows}");
+
+    choose(&mut pane, Row::AlertKind(alerts::Kind::Bell));
+    choose(&mut pane, Row::AlertKind(alerts::Kind::Done));
+    assert_eq!(saved(&pane).kinds, [true, true, false, false, true]);
+    choose(&mut pane, Row::AlertsContent);
+    assert_eq!(saved(&pane).content, alerts::Content::Text);
+    choose(&mut pane, Row::AlertsOn);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("300 characters"));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
+    choose(&mut pane, Row::AlertsOn);
+    choose(&mut pane, Row::Continue);
+    assert!(saved(&pane).enabled);
+    assert!(frame(&mut pane, 80, 24).join("\n").contains("Rex alert mirroring is on."));
+
+    // Turning off needs no second step.
+    choose(&mut pane, Row::AlertsOn);
+    assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
+    // None of this is a draft to save or discard on the way out.
+    assert!(!pane.dirty());
 }
 
 #[test]

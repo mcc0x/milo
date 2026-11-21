@@ -178,6 +178,29 @@ pub fn exec_listener(script: &Path) -> io::Error {
     }
 }
 
+/// Starts `rex events`, which prints every event of every session of the
+/// server as a line of JSON until it is ended. It never starts a server.
+pub(crate) fn events() -> io::Result<Child> {
+    Command::new("rex")
+        .args(["--autostart=false", "events", "--all", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+/// A search path on which a program started from here finds `rex`, when
+/// this one's does not. The Rex server starts programs with a short system
+/// path that leaves `rex` out; its own program's folder is added to it.
+pub(crate) fn path_with_rex() -> Option<OsString> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&path).any(|dir| dir.join("rex").is_file()) {
+        return None;
+    }
+    let parent = parent_program().filter(|parent| parent.file_name() == Some(OsStr::new("rex")))?;
+    std::env::join_paths(std::env::split_paths(&path).chain([parent.parent()?.to_owned()])).ok()
+}
+
 /// The program that started milo, if the system will say.
 #[cfg(target_os = "macos")]
 fn parent_program() -> Option<std::path::PathBuf> {
@@ -202,7 +225,7 @@ fn parent_program() -> Option<std::path::PathBuf> {
 }
 
 /// A string as a JSON literal.
-fn json(s: &str) -> String {
+pub(crate) fn json(s: &str) -> String {
     json_chars(s.chars(), s.len())
 }
 

@@ -105,6 +105,7 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
+| `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
 | `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
 
 `milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
@@ -259,6 +260,41 @@ If you set `CLAUDE_CONFIG_DIR`, Milo uses that profile's `settings.json` instead
 
 New setups use the full path to Milo, so Claude Code does not need `milo` on its `PATH`. If Doctor reports an old launcher, turn limits off, save, then turn them back on and save.
 
+## Mirror Rex alerts
+
+Milo can send the alerts Rex raises to a Telegram chat or a Discord channel you choose, so that a blocked or finished agent reaches you away from the machine. It is off until you turn it on. Rex's own tab marks, sounds and notifications stay exactly as they are: Milo only listens to Rex's event stream (`rex events`) beside the Rex apps and changes no Rex setting.
+
+```sh
+milo alerts telegram -1001234567890   # asks for the bot's token; or: milo alerts discord
+milo alerts                           # what is saved, whether it is running, what would be sent
+milo alerts test                      # one message written by Milo
+milo alerts on                        # starts, and says again what is sent
+milo alerts off                       # ends it at once
+```
+
+The same choices are under **Alerts** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
+
+<picture>
+  <source media="(max-width: 600px)" srcset="https://github.com/mcc0x/milo/blob/main/docs/img/web-alerts-mobile.webp">
+  <img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-alerts.webp" width="760" alt="The Alerts page of the browser editor: mirroring is off, alerts would go to an example Telegram channel, and the page says that only the kind of alert and the program's short name are sent">
+</picture>
+
+![The setup screen's Mirror Rex alerts panel: mirroring off, Telegram as destination, the three status alerts on, notifications and bells off, and Kind only as what is sent](https://github.com/mcc0x/milo/blob/main/docs/img/setup-alerts.webp)
+
+**What counts as an alert.** A program that reports through Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) that it is `blocked`, failed (`error`) or finished (`done`); a program that asks for a desktop notification (OSC 9 or OSC 777); and the terminal bell. The first three are mirrored unless you choose otherwise with `milo alerts events blocked,error,done,notification,bell`. Working and idle reports, progress, exits, titles and everything else in a session are never sent, and neither is anything Milo itself shows.
+
+**What is sent.** By default only the kind of alert and the program's short name, such as `Rex: claude-code is waiting for permission`: no text from the program and no session, tab, folder or file name. `milo alerts content text` adds up to 300 characters of the line the program gave Rex, which can name files or quote a prompt. Both the name and that line come from the program, so they are sent marked as code, where neither Telegram nor Discord makes a link, a mention or formatting of them. The line is also cut to one line with every `@` broken, Discord is told to notify no user, role or `@everyone`, and link previews are turned off.
+
+Discord sends one Milo card per alert, with the Milo icon beside the status, inline code for program names and optional text, a localized send time, and a colored edge: amber for attention, red for errors, green for completion, and Milo blue for notifications, bells and connection tests. Telegram keeps its compact text format.
+
+**Destinations and secrets.** For Telegram, create a bot with BotFather, add it to the chat or channel, and give Milo the chat's number or a public channel's `@name`. For Discord, create a webhook in the channel's **Integrations** settings and give Milo its link; only `discord.com` webhook links are accepted. The bot token or webhook link is asked for without being shown, or read from standard input, never taken as an argument. On macOS it is kept in your Keychain; elsewhere in `alerts-secrets` in Milo's state folder, readable only by you. Settings pages show whether a secret is saved, never the secret. Saving a second destination while alerts are being mirrored does not move them: switch with `milo alerts use`. `milo alerts forget telegram` or `forget discord` removes one, and `milo setup --remove` removes both and ends mirroring.
+
+**Once, not twice.** One background process mirrors, whatever number of tabs, panes and Rex apps are open. Rex repeats a status each time a program reports it; Milo sends it when a terminal enters a state or changes what it is waiting for. A terminal's bell is sent at most once in 30 seconds, and so is a notification that repeats that terminal's last one.
+
+**When things go wrong.** Messages are spaced about a second apart and limited to 20 a minute; a burst beyond that is not sent, and the next message says how many were left out. If the destination asks Milo to slow down, Milo sends nothing until the time it gives has passed, and tries the waiting alert again if that is within a minute. An unreachable or failing destination is tried three times before the alert is dropped. If the destination refuses the secret, or turns down five messages in a row, Milo stops asking until you save the destination again, change a choice or run `milo alerts on`. `milo alerts` shows the last outcome.
+
+**Limits.** Mirroring needs `/usr/bin/curl`, and follows the Rex server on this machine only. It starts with `milo alerts on`, and again whenever Rex starts Milo's listener, which Rex does each time its server loads a [saved layout](https://github.com/mcc0x/milo/blob/main/docs/setup.md#in-rex); without a saved layout, run `milo alerts on` after restarting the machine. Alerts raised while Rex or the mirroring process is not running are not sent later, because Rex does not replay events. Rex decides in each app whether to show its own notification (for example only in the background, or not for a muted tab) and does not report that decision, so Milo mirrors what programs reported, not what Rex showed. A terminal's notifications through OSC 99 do not appear in Rex's event stream and are not mirrored.
+
 ## Remove milo
 
 The menu app and CLI uninstall separately. If you want both gone, run `milo menubar uninstall` **before** removing the CLI. This stops the app and unregisters launch at login. Skip this step if you want to keep using the menu bar.
@@ -268,7 +304,7 @@ If [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) 
 From Home, choose **Uninstall Milo** to review and confirm removal of the CLI and its managed integrations. **Health → Remove integration** and `milo setup --remove` only disconnect the managed integrations; they do not remove the executable. For manual removal:
 
 1. To diagnose a setup before changing it, run `milo doctor`. To fix the managed integration after an upgrade or executable move, run `milo setup --repair` with the binary you intend to keep.
-2. Before deleting the binary, run `milo setup --remove` to disconnect the managed Rex and Claude Code integrations. Saved preferences and user-edited files are not an uninstall target. Close any live Milo panes separately.
+2. Before deleting the binary, run `milo setup --remove` to disconnect the managed Rex and Claude Code integrations. It also ends [alert mirroring](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) and removes its saved destinations and secrets. Saved preferences and user-edited files are not an uninstall target. Close any live Milo panes separately.
 3. Remove the binary with `brew uninstall milo` if you installed with Homebrew. If you used the release installer, run `sh milo-install.sh --uninstall` with your downloaded copy. If you built from source, run `sh install.sh --uninstall` from the checkout. For either script, use the same `MILO_BIN_DIR` you installed to if you set one. Removing the binary does not change Rex or Claude Code settings or remove milo's saved state.
 
 If Rex cannot reload during removal, Milo still removes the managed files and tells you to restart Rex. If Milo cannot safely remove its Claude Code status line, correct the reported settings problem and retry before deleting the executable.
@@ -1057,7 +1093,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -1160,9 +1196,21 @@ opens a file from the outline, edits and saves it through keys Rex sends, sees
 the outline leave that reader alone while it has unsaved changes, then has Rex
 close the reader on an unsaved draft and gets the draft back at the next edit.
 
+### Changing alert mirroring
+
+`src/alerts.rs` and the files under `src/alerts/` mirror Rex alerts to Telegram or Discord. An *alert* is an event Rex itself draws attention to; `event.rs` lists them and is the only place that decides. Hear Rex only through `rex events`, as `src/rex.rs` starts it: never read a terminal's screen, a system notification or Rex's socket for an alert.
+
+Mirroring stays off until the user turns it on. The setup screen and the browser editor say what will be sent and ask first; `milo alerts` says it before and `milo alerts on` as it starts. A new field leaves the machine only behind a choice that is off by default, and `message.rs` says so in `sends`. Whatever a program supplied, its short name included, is untrusted: send it through `literal`, and its text through `plain` first.
+
+A secret goes from standard input or the browser editor to `secret.rs` and from there to curl's standard input. Never put one in an argument, a settings file, a status note, a log, or anything sent back to a settings page. Destinations are fixed hosts; do not add one the user can type.
+
+`cargo test alerts` runs the unit tests and `cargo test --test alerts` runs the real `milo alerts` against stand-ins: a `rex` that prints the events a test writes, and a server on the loopback address for both destinations. `MILO_ALERTS_TEST_ENDPOINT` names that server, and is refused unless it is `http://127.0.0.1:PORT`. On macOS `MILO_ALERTS_KEYCHAIN` names a keychain file of the test's own, so that tests never touch yours. Only a development build reads either variable: a release build has no setting that changes where a secret is kept or sent, so with `--release` these tests do nothing. No test may use a real token, webhook or chat, or post to Telegram or Discord.
+
+To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
+
 ### Changing Discord presence
 
-[Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) is the one thing Milo publishes, so its rules are strict. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
+[Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) publishes an activity to Discord. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
 
 A second line is shown only for the *details* a person chose: the name of the session in front, the folder name of the Git project in its focused pane, or both. The default shows neither, and a choice saved by an earlier release must go on showing only what it showed. `src/rex_presence.lua` may look at sessions only for a name that was chosen, and never reads a tab's or terminal's title, a screen, a command line or a status text. Every name goes through `src/presence/label.rs`, which keeps one short line of plain text and drops whole anything that could be a path or an address. Never show a path, a remote address, a branch, a file name or a command, by default or behind a setting. When the script cannot tell which one session is in front, it reports none, and no name is shown. `presence::public` says what each choice shows, and every surface shows that text before turning presence on or adding a name.
 
@@ -1234,6 +1282,14 @@ By contributing you agree that your work is released under the MIT licence that 
 
 | File | Purpose |
 | --- | --- |
+| `src/alerts.rs` | Keeps the alert mirroring choices and applies each change to them. |
+| `src/alerts/cli.rs` | Runs `milo alerts` and reads a secret without showing it. |
+| `src/alerts/event.rs` | Reads Rex's event stream and decides which events are alerts, once each. |
+| `src/alerts/forward.rs` | Follows Rex as the one mirroring process, with retries and rate limits. |
+| `src/alerts/message.rs` | Words an alert, strips a program's text of mentions, and says what is sent. |
+| `src/alerts/secret.rs` | Keeps a destination's secret in the macOS Keychain or a private file. |
+| `src/alerts/send.rs` | Posts one message with curl and classifies the answer. |
+| `src/alerts/tests.rs` | Checks alerts, messages, settings, secrets and the request. |
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
@@ -1335,6 +1391,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
+| `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |

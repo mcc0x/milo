@@ -181,6 +181,10 @@ async function drain() {
         if (queue[i].action !== 'set') queue.splice(i, 1);
       }
       paused = queue.length > 0;
+      // A change can fail after part of it took effect, such as mirroring saved as on but not started.
+      if (!paused && action.action === 'alerts' && action.field !== 'refresh') {
+        queue.push({action: 'alerts', field: 'refresh', value: null});
+      }
       break;
     }
   }
@@ -324,7 +328,7 @@ function renderConnection() {
 }
 
 function affectsDraft({action}) {
-  return action !== 'doctor' && action !== 'menubar' && action !== 'presence';
+  return action !== 'doctor' && action !== 'menubar' && action !== 'alerts' && action !== 'presence';
 }
 
 function hasUnsavedChanges() {
@@ -427,10 +431,11 @@ function render() {
     context.append(node('span', 'sr-only', `${state.context.worktree ? 'Git worktree' : 'Directory'}: ${path}`));
   }
   const hasMenuBar = state.menubar.installed !== null;
-  if (page === 'menubar' && !hasMenuBar) page = 'layout';
+  if ((page === 'menubar' && !hasMenuBar) || (page === 'alerts' && !state.alerts)) page = 'layout';
   for (const tab of navButtons) {
     const name = tab.dataset.page;
     if (name === 'menubar') tab.hidden = !hasMenuBar;
+    if (name === 'alerts') tab.hidden = !state.alerts;
     if (name === page) tab.setAttribute('aria-current', 'page');
     else tab.removeAttribute('aria-current');
     const dirty = name === 'layout' ? state.groups.layout.dirty :
@@ -440,7 +445,8 @@ function render() {
     dot.replaceChildren(node('span', 'sr-only', ' (unsaved changes)'));
     dot.hidden = !dirty;
   }
-  const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, menubar: menuBarView, health: healthView};
+  const views = {layout: layoutView, appearance: appearanceView, workflow: workflowView, alerts: alertsView,
+    menubar: menuBarView, health: healthView};
   const panel = byId('settings-panel');
   const openMenu = panel.querySelector('.action-menu[open] > summary')?.id;
   panel.replaceChildren(...views[page]());
@@ -477,7 +483,8 @@ function setting(field, title, detail, type, options = {}) {
       radio.name = field;
       radio.id = `field-${field}-${key}`;
       radio.checked = key === String(value);
-      radio.addEventListener('change', () => edit(field, typeof value === 'boolean' ? key === 'true' : key));
+      radio.addEventListener('change', () =>
+        (options.change || edit)(field, typeof value === 'boolean' ? key === 'true' : key));
       const caption = node('span', '', text);
       if (options.examples) {
         const sample = node('code', 'git-example', options.examples[key]);
@@ -510,7 +517,7 @@ function setting(field, title, detail, type, options = {}) {
     control.className = 'switch';
     control.setAttribute('role', 'switch');
     control.checked = draftValue(field);
-    control.addEventListener('change', () => edit(field, control.checked));
+    control.addEventListener('change', () => (options.change || edit)(field, control.checked));
   } else {
     const error = draft?.error || node('span');
     info.append(error);
@@ -828,7 +835,7 @@ const showsMore = (next, saved) =>
 function presenceView() {
   const presence = state.presence;
   if (!presence) return [];
-  const waiting = paused || queue.some(item => item.action === 'presence');
+  const waiting = paused || queue.some(item => item.action !== 'set');
   const card = node('section', 'settings-group');
   const header = node('header', 'group-header');
   const titleline = node('div', 'group-titleline');
@@ -928,6 +935,125 @@ function presenceView() {
   controls.append(details, application, now);
   card.append(header, controls);
   return [card];
+}
+
+// Alert choices are saved as they are made, like the menu app, and are no part of the draft.
+// Drawing again at once disables the controls until the change has been made.
+function changeAlerts(field, value) {
+  command('alerts', {field: field.replace(/^alerts\./, ''), value});
+  render();
+}
+
+// A secret is typed into a masked text field, not a password field, which a
+// browser would offer to remember.
+function secretForm(id, fields, label, disabled, submit) {
+  const form = node('form', 'secret-form');
+  form.id = id;
+  const inputs = fields.map(([name, placeholder, secret, value]) => {
+    const input = node('input', secret ? 'masked' : '');
+    input.id = `${id}-${name}`;
+    input.type = 'text';
+    input.placeholder = placeholder;
+    input.setAttribute('aria-label', placeholder);
+    input.autocomplete = 'off';
+    input.autocapitalize = 'off';
+    input.spellcheck = false;
+    input.required = true;
+    input.disabled = disabled;
+    if (value) input.value = value;
+    return input;
+  });
+  const save = node('button', 'button secondary', label);
+  save.id = `${id}-save`;
+  save.disabled = disabled;
+  form.append(...inputs, save);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    submit(...inputs.map(input => input.value.trim()));
+  });
+  return form;
+}
+
+function alertsView() {
+  const alerts = state.alerts;
+  const busy = paused || running;
+  const row = (title, detail, control, detailClass = '') => {
+    const line = node('div', 'setting');
+    const info = node('div', 'setting-info');
+    info.append(node('span', 'setting-label', title));
+    if (detail) info.append(node('span', `setting-detail ${detailClass}`, detail));
+    line.append(info);
+    if (control) line.append(control);
+    return line;
+  };
+  const card = (id, title, status, rows) => {
+    const section = node('section', 'settings-group');
+    const header = node('header', 'group-header group-titleline');
+    const heading = node('h2', '', title);
+    heading.id = id;
+    section.setAttribute('aria-labelledby', id);
+    header.append(heading);
+    if (status) {
+      const live = node('span', 'setting-detail', status);
+      live.id = `${id}-status`;
+      live.setAttribute('role', 'status');
+      header.append(live);
+    }
+    const controls = node('div', 'group-controls');
+    controls.append(...rows);
+    section.append(header, controls);
+    return section;
+  };
+  const names = {telegram: 'Telegram', discord: 'Discord'};
+  const target = alerts.destination === 'telegram' ? `Telegram chat ${alerts.telegram.chat}` :
+    alerts.destination === 'discord' ? 'the Discord channel of the saved webhook' : '';
+  const toggle = alerts.enabled ?
+    button('Turn off', 'secondary', 'alerts-toggle', () => changeAlerts('enabled', false), busy) :
+    button('Turn on…', 'secondary', 'alerts-toggle', () => confirm('Mirror Rex alerts?',
+      `Alerts go to ${target}.\n${alerts.disclosure}\nRex’s own notifications are unchanged.`,
+      'Turn on', () => changeAlerts('enabled', true)), busy || !alerts.destination);
+  const status = !alerts.enabled ? 'Off' : alerts.running ? 'On' : 'On, but not running';
+  const main = card('group-alerts', 'Mirror Rex alerts', status, [
+    row('Send Rex alerts to a chat or channel you choose',
+      `${alerts.enabled ? 'On.' : 'Off until you turn it on.'} Rex’s own notifications stay as they are. ` +
+        (alerts.destination ? `Alerts go to ${target}.` : 'Save a destination below first.'), toggle),
+    row('What is sent', alerts.disclosure + (alerts.note ? `\n${alerts.note}` : ''), null, 'disclosure-text'),
+    setting('alerts.content', 'Content', 'Program text can name files or quote a prompt.', 'select',
+      {disabled: busy, change: changeAlerts, choices: [['metadata', 'Kind and program name'], ['text', 'Also program text']]}),
+    row('Test message', 'One message written by Milo. No Rex alert is involved.',
+      button('Send test', 'secondary', 'alerts-test', () => changeAlerts('test', null), busy || !alerts.destination)),
+  ]);
+  const kinds = [['blocked', 'Waiting for you', 'A program is blocked on a permission, a question or a sign-in.'],
+    ['error', 'Reported an error', 'A program says it failed.'], ['done', 'Finished', 'A program says it finished.'],
+    ['notification', 'Desktop notification', 'A program asks for one. A repeat within 30 seconds is not sent.'],
+    ['bell', 'Terminal bell', 'At most one per terminal in 30 seconds.']];
+  const events = card('group-alert-kinds', 'Alerts to mirror', '', kinds.map(([kind, title, detail]) =>
+    setting(`alerts.events.${kind}`, title, detail, 'switch', {disabled: busy, change: changeAlerts})));
+  const saved = name => {
+    const actions = node('div', 'button-row');
+    if (alerts[name].saved && alerts.destination !== name) {
+      actions.append(button(`Use ${names[name]}`, 'secondary', `alerts-use-${name}`, () => changeAlerts('destination', name), busy));
+    }
+    if (alerts[name].saved) {
+      actions.append(button('Forget…', 'text-button', `alerts-forget-${name}`, () => confirm(`Forget ${names[name]}?`,
+        `This removes the saved ${names[name]} destination and its secret from ${alerts.place}. Mirroring to it ends.`,
+        'Forget', () => changeAlerts('forget', name)), busy));
+    }
+    const label = !alerts[name].saved ? `Not saved. Once saved, its secret is kept in ${alerts.place} and is never shown.` :
+      `${alerts.destination === name ? 'Saved and selected.' : 'Saved.'} The secret is kept in ${alerts.place} and is never shown again.`;
+    return row(names[name], label, actions);
+  };
+  const destinations = card('group-alert-destinations', 'Destinations', '', [
+    saved('telegram'),
+    row('Telegram bot', 'The chat’s number or a public channel’s @name, and the bot token from BotFather.',
+      secretForm('alerts-telegram', [['chat', 'Chat', false, alerts.telegram.chat], ['token', 'Bot token', true]],
+        'Save Telegram', busy, (chat, token) => changeAlerts('telegram', {token, chat}))),
+    saved('discord'),
+    row('Discord webhook', 'The webhook link from the channel’s Integrations settings.',
+      secretForm('alerts-discord', [['link', 'Webhook link', true]], 'Save Discord', busy,
+        link => changeAlerts('discord', link))),
+  ]);
+  return [main, events, destinations];
 }
 
 function menuBarView() {
@@ -1040,6 +1166,8 @@ for (const tab of navButtons) {
     if (menu) menu.open = false;
     page = tab.dataset.page;
     render();
+    // Whether mirroring is running, and what it last noted, may have changed since the page was loaded.
+    if (page === 'alerts' && state.alerts) changeAlerts('refresh', null);
     byId('settings-panel').scrollTop = 0;
     byId('settings-panel').focus({preventScroll: true});
   });

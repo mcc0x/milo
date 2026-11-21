@@ -1,6 +1,6 @@
 //! Process-owned file locks are not inherited by children. The setup lock
 //! lasts through a save; the listener lock stays open when milo becomes Rex;
-//! the presence lock lasts as long as the one helper that talks to Discord.
+//! the alerts and presence locks last for the lifetimes of their independent helpers.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -12,10 +12,14 @@ use std::time::{Duration, Instant};
 use crate::fs_ops;
 
 const LISTENER_LOCK: &CStr = c"listener.lock";
+const ALERTS_LOCK: &CStr = c"alerts.lock";
 /// Held by the one process that may set the user's Discord activity.
 pub(crate) const PRESENCE_LOCK: &CStr = c"presence.lock";
 /// How long a listener asked to stop is given to wind down.
 const WIND_DOWN: Duration = Duration::from_secs(1);
+/// How long a process started in the background is given to take its lock.
+/// It must first be loaded and find its settings, on a machine that may be busy.
+const START: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 
 /// Never resolve a link while opening a lock that may name a process.
@@ -106,6 +110,28 @@ pub(crate) fn held(dir: &Path, name: &CStr) -> io::Result<bool> {
     }
 }
 
+/// Whether a process is mirroring Rex alerts.
+pub(crate) fn alerts_running(dir: &Path) -> io::Result<bool> {
+    held(dir, ALERTS_LOCK)
+}
+
+/// Makes this process the one that mirrors Rex alerts. None if another
+/// already is. Dropping the file, or opening the lock again, gives it up.
+pub(crate) fn hold_alerts(dir: &Path) -> io::Result<Option<File>> {
+    let lock = create(dir, ALERTS_LOCK)?;
+    Ok(take(&lock)?.then_some(lock))
+}
+
+/// Ends the process mirroring Rex alerts, if one is running.
+pub(crate) fn stop_alerts(dir: &Path) -> io::Result<()> {
+    stop_when(dir, ALERTS_LOCK, |asked| asked.elapsed() >= WIND_DOWN)
+}
+
+/// A process started in the background needs a moment to take its lock.
+pub(crate) fn wait_alerts_running(dir: &Path) -> io::Result<bool> {
+    wait_held(dir, ALERTS_LOCK, START)
+}
+
 /// Takes the lock called `name` for as long as the returned file stays open.
 /// A holder that is winding down is waited for, up to `patience`.
 pub(crate) fn hold(dir: &Path, name: &CStr, patience: Duration) -> io::Result<Option<File>> {
@@ -124,12 +150,16 @@ pub(crate) fn hold(dir: &Path, name: &CStr, patience: Duration) -> io::Result<Op
 
 /// Rex starts the listener in the background; give it time to take the lock.
 pub(super) fn wait_running(dir: &Path) -> io::Result<bool> {
+    wait_held(dir, LISTENER_LOCK, WIND_DOWN)
+}
+
+fn wait_held(dir: &Path, name: &CStr, limit: Duration) -> io::Result<bool> {
     let started = Instant::now();
     loop {
-        if running(dir)? {
+        if held(dir, name)? {
             return Ok(true);
         }
-        if started.elapsed() >= WIND_DOWN {
+        if started.elapsed() >= limit {
             return Ok(false);
         }
         std::thread::sleep(POLL);
@@ -175,8 +205,8 @@ fn stop_when(dir: &Path, name: &CStr, mut expired: impl FnMut(Instant) -> bool) 
     let Some(lock) = existing(dir, name)? else { return Ok(()) };
     for _ in 0..2 {
         let Some(listener) = holder(&lock)? else { return Ok(()) };
-        // SAFETY: The system has just identified the holder of the listener
-        // lock. The only race is PID reuse before the signal arrives.
+        // SAFETY: The system has just identified the holder of the lock.
+        // The only race is PID reuse before the signal arrives.
         if unsafe { libc::kill(listener, libc::SIGTERM) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {

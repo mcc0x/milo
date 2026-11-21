@@ -25,6 +25,7 @@ use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
+use crate::alerts::{self, Alerts};
 use crate::help::{self, Page};
 use crate::keys::{ConfirmClick, Key};
 use crate::menubar::{self, Action as MenuAction};
@@ -68,6 +69,7 @@ enum Panel {
     Tune,
     Appearance,
     Workflow,
+    Alerts,
     Health,
     Diagnostics,
     /// The choices for Discord presence, opened from Workflow.
@@ -109,6 +111,7 @@ enum Confirm {
     Repair,
     Remove,
     RemoveMenuBar,
+    MirrorAlerts,
     /// Turning Discord presence on.
     Presence,
     /// Showing a name on Discord that is not shown yet.
@@ -145,6 +148,12 @@ enum Row {
     HistoryFollow,
     TabTitles,
     ClaudeLimits,
+    Alerts,
+    AlertsOn,
+    AlertsDestination,
+    AlertKind(alerts::Kind),
+    AlertsContent,
+    AlertsTest,
     MenuBar,
     RemoveMenuBar,
     /// Opens the Discord presence choices.
@@ -193,10 +202,26 @@ const WORKFLOW: &[Row] = &[
     Row::UseGlobalPrefs,
     Row::ClaudeLimits,
     Row::SaveClaude,
+    Row::Alerts,
     Row::PresenceOpen,
     Row::MenuBar,
     Row::RemoveMenuBar,
 ];
+const ALERTS: &[Row] = &[
+    Row::AlertsOn,
+    Row::AlertsDestination,
+    Row::AlertKind(alerts::Kind::Blocked),
+    Row::AlertKind(alerts::Kind::Error),
+    Row::AlertKind(alerts::Kind::Done),
+    Row::AlertKind(alerts::Kind::Notification),
+    Row::AlertKind(alerts::Kind::Bell),
+    Row::AlertsContent,
+    Row::AlertsTest,
+    Row::Back,
+];
+const ALERTS_UNAVAILABLE: &str = "Milo could not read its alert settings. Run milo alerts to see why.";
+const NO_OTHER_DESTINATION: &str =
+    "No other destination is saved. Save one with milo alerts telegram CHAT or milo alerts discord, or in milo web.";
 
 /// The draft is never written when navigating, capturing or trying a layout.
 pub struct Setup<R = fn(&[&OsStr]) -> bool> {
@@ -238,6 +263,9 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     message: Option<(Cow<'static, str>, Style)>,
     real: bool,
     status_failed: bool,
+    alerts: Option<Alerts>,
+    /// The alert choices as last read. They are saved as they are made.
+    alert_summary: Option<alerts::Summary>,
 }
 
 impl Setup {
@@ -254,6 +282,7 @@ impl Setup {
         let mut setup = Self::new(store, inside, target, root, rex::run);
         setup.tab_size = tab_size;
         setup.menu_installed = menubar::installed();
+        setup.alerts = Alerts::real();
         setup.presence = setup.presence.take().map(presence::Control::starting_helper);
         setup.icon_override = IconMode::environment();
         setup.real = true;
@@ -323,6 +352,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             message: None,
             real: false,
             status_failed: false,
+            alerts: None,
+            alert_summary: None,
         };
         setup.reload_presence();
         if inside {
@@ -390,6 +421,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Some(false) => &WORKFLOW[..WORKFLOW.len() - 1],
                 None => &WORKFLOW[..WORKFLOW.len() - 2],
             },
+            Panel::Alerts => ALERTS,
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
             Panel::Diagnostics => &[],
             Panel::Save(kind)
@@ -421,6 +453,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if panel == Panel::Diagnostics && panel != previous {
             self.refresh_health();
         }
+        if panel == Panel::Alerts && previous != panel {
+            self.refresh_alerts();
+        }
     }
 
     fn selected_row(&self) -> Option<Row> {
@@ -447,6 +482,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::Repair) => (Panel::Health, Some(Row::Repair)),
             Panel::Confirm(Confirm::Remove) => (Panel::Health, Some(Row::Remove)),
             Panel::Confirm(Confirm::RemoveMenuBar) => (Panel::Workflow, Some(Row::RemoveMenuBar)),
+            Panel::Alerts => (Panel::Workflow, Some(Row::Alerts)),
+            Panel::Confirm(Confirm::MirrorAlerts) => (Panel::Alerts, Some(Row::AlertsOn)),
             Panel::Confirm(Confirm::Presence) => (Panel::Presence, Some(Row::Presence)),
             Panel::Confirm(Confirm::PresenceDetails(_)) => (Panel::Presence, Some(Row::PresenceDetails)),
             Panel::Confirm(Confirm::PresenceApp) => (Panel::Presence, Some(Row::PresenceApp)),
@@ -460,7 +497,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let next = match self.panel {
             Panel::Layout | Panel::Tune => Panel::Appearance,
             Panel::Appearance => Panel::Workflow,
-            Panel::Workflow | Panel::Presence => Panel::Health,
+            Panel::Workflow | Panel::Alerts | Panel::Presence => Panel::Health,
             Panel::Health | Panel::Diagnostics => Panel::Layout,
             Panel::Save(_) | Panel::Confirm(_) | Panel::Exit => return,
         };
@@ -860,6 +897,53 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.report_text(result.map(Cow::Owned).map_err(|why| Cow::Owned(format!("Milo: {why}"))));
     }
 
+    /// Reads the alert choices again, which asks where secrets are kept what is saved.
+    fn refresh_alerts(&mut self) {
+        self.alert_summary = self.alerts.as_ref().and_then(|alerts| alerts.summary().ok());
+    }
+
+    /// Alert choices are saved as they are made, like the menu bar app, and
+    /// are no part of the draft.
+    fn change_alerts(&mut self, change: impl FnOnce(&Alerts) -> Result<String, String>) {
+        let result = self.alerts.as_ref().ok_or_else(|| ALERTS_UNAVAILABLE.to_owned()).and_then(change);
+        self.refresh_alerts();
+        // There is room for a line or two; the first line says what happened.
+        let first = |text: String| Cow::Owned(text.lines().next().unwrap_or_default().to_owned());
+        self.report_text(result.map(first).map_err(Cow::Owned));
+    }
+
+    fn activate_alert(&mut self, row: Row) {
+        let Some(summary) = &self.alert_summary else {
+            self.report(Err(ALERTS_UNAVAILABLE));
+            return;
+        };
+        let settings = summary.settings.clone();
+        let saved = summary.saved;
+        match row {
+            Row::AlertsOn if settings.enabled => self.change_alerts(Alerts::disable),
+            Row::AlertsOn => self.select_panel(Panel::Confirm(Confirm::MirrorAlerts), None),
+            Row::AlertsDestination => {
+                let other = alerts::Destination::ALL
+                    .into_iter()
+                    .find(|&destination| Some(destination) != settings.destination && saved[destination as usize]);
+                match other {
+                    Some(destination) => self.change_alerts(|alerts| alerts.choose(destination)),
+                    None => self.report(Err(NO_OTHER_DESTINATION)),
+                }
+            }
+            Row::AlertKind(kind) => self.change_alerts(|alerts| alerts.set_kind(kind, !settings.mirrors(kind))),
+            Row::AlertsContent => {
+                let next = match settings.content {
+                    alerts::Content::Metadata => alerts::Content::Text,
+                    alerts::Content::Text => alerts::Content::Metadata,
+                };
+                self.change_alerts(|alerts| alerts.set_content(next));
+            }
+            Row::AlertsTest => self.change_alerts(Alerts::test),
+            _ => {}
+        }
+    }
+
     fn reload_presence(&mut self) {
         self.presence_view = self.presence.as_ref().and_then(|control| control.status().ok());
         self.presence_note =
@@ -1088,6 +1172,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 return After::Stay;
             }
             Row::MenuBar | Row::RemoveMenuBar => return After::Ignored,
+            Row::Alerts => {
+                self.select_panel(Panel::Alerts, None);
+                return After::Stay;
+            }
+            Row::AlertsOn | Row::AlertsDestination | Row::AlertKind(_) | Row::AlertsContent | Row::AlertsTest => {
+                self.activate_alert(row);
+                return After::Stay;
+            }
             Row::PresenceOpen => {
                 self.select_panel(Panel::Presence, None);
                 return After::Stay;
@@ -1125,6 +1217,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 }
                 Panel::Confirm(Confirm::RemoveMenuBar) => {
                     self.change_menu_app(MenuAction::Uninstall);
+                    return After::Stay;
+                }
+                Panel::Confirm(Confirm::MirrorAlerts) => {
+                    self.select_panel(Panel::Alerts, Some(Row::AlertsOn));
+                    self.change_alerts(Alerts::enable);
                     return After::Stay;
                 }
                 Panel::Confirm(confirm @ (Confirm::Presence | Confirm::PresenceDetails(_) | Confirm::PresenceApp)) => {
@@ -1386,7 +1483,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 self.back();
                 return After::Stay;
             }
-            Key::Esc if matches!(self.panel, Panel::Tune | Panel::Presence | Panel::Diagnostics) => {
+            Key::Esc if matches!(self.panel, Panel::Tune | Panel::Alerts | Panel::Presence | Panel::Diagnostics) => {
                 self.back();
                 return After::Stay;
             }
@@ -1442,6 +1539,7 @@ pub fn listen(stop: bool) -> i32 {
         } else {
             let config = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
             rex_files::check_config_dir(&config).map_err(io::Error::other)?;
+            crate::alerts::resume();
             lock::listen(&state, &config.join("listener.lua"))
         }
     }

@@ -1,5 +1,6 @@
 //! Parses the command line and dispatches commands.
 
+mod alerts;
 mod diff;
 #[cfg(test)]
 mod fixture;
@@ -66,6 +67,7 @@ Usage: milo
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
+       milo alerts [--help]
        milo claude-status
        milo --help | --version
 
@@ -75,6 +77,7 @@ On first launch, milo and milo setup share a short welcome guide.
 milo setup saves a Rex layout and can enable Claude Code usage limits.
 milo web opens local Settings in your browser. Use --no-open to print the link without opening it.
 milo doctor explains local preferences, integration health and usage sources.
+milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose. It is off until you turn it on.
 milo presence shows or changes the optional Discord Rich Presence, which is off until you turn it on.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
@@ -177,6 +180,7 @@ fn command_help(name: &str) -> Option<&'static str> {
         "listen" => {
             "Usage: milo listen [--stop]\n\nStart or stop the Rex listener that remembers sidebar sizes, arranges new tabs and titles tabs."
         }
+        "alerts" => alerts::HELP,
         "claude-status" => "Usage: milo claude-status\n\nRead usage from Claude Code's status line input.",
         _ => return None,
     })
@@ -230,6 +234,7 @@ enum Command<'a> {
     Repair,
     Remove,
     Listen(bool),
+    Alerts(Option<&'a OsStr>, &'a [OsString]),
     Presence(presence::Request),
     ClaudeStatus,
     Help(&'static str),
@@ -264,7 +269,7 @@ fn command<'a>(
             Command::ShellOutline(block)
         });
     }
-    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "presence")) {
+    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "alerts" | "presence")) {
         return Err("too many arguments; see milo --help".to_string());
     }
     if rest.is_empty()
@@ -326,6 +331,7 @@ fn command<'a>(
         (Some("listen"), None) => Command::Listen(false),
         (Some("listen"), Some(flag)) if flag == "--stop" => Command::Listen(true),
         (Some("listen"), _) => return Err("expected milo listen [--stop]".to_string()),
+        (Some("alerts"), action) => Command::Alerts(action, rest),
         (Some("claude-status"), None) => Command::ClaudeStatus,
         (Some("setup" | "usage" | "claude-status" | "doctor"), Some(_)) => {
             return Err("unexpected argument; see milo --help".to_string());
@@ -402,6 +408,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
                 run(Start::Loaded, &destination)
             }
         }
+        Command::Alerts(action, rest) => alerts::command(action, rest),
         Command::Presence(request) => print_report(presence::command(request)),
         Command::Listen(stop) => {
             if !stop {

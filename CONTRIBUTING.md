@@ -67,7 +67,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -170,9 +170,21 @@ opens a file from the outline, edits and saves it through keys Rex sends, sees
 the outline leave that reader alone while it has unsaved changes, then has Rex
 close the reader on an unsaved draft and gets the draft back at the next edit.
 
+### Changing alert mirroring
+
+`src/alerts.rs` and the files under `src/alerts/` mirror Rex alerts to Telegram or Discord. An *alert* is an event Rex itself draws attention to; `event.rs` lists them and is the only place that decides. Hear Rex only through `rex events`, as `src/rex.rs` starts it: never read a terminal's screen, a system notification or Rex's socket for an alert.
+
+Mirroring stays off until the user turns it on. The setup screen and the browser editor say what will be sent and ask first; `milo alerts` says it before and `milo alerts on` as it starts. A new field leaves the machine only behind a choice that is off by default, and `message.rs` says so in `sends`. Whatever a program supplied, its short name included, is untrusted: send it through `literal`, and its text through `plain` first.
+
+A secret goes from standard input or the browser editor to `secret.rs` and from there to curl's standard input. Never put one in an argument, a settings file, a status note, a log, or anything sent back to a settings page. Destinations are fixed hosts; do not add one the user can type.
+
+`cargo test alerts` runs the unit tests and `cargo test --test alerts` runs the real `milo alerts` against stand-ins: a `rex` that prints the events a test writes, and a server on the loopback address for both destinations. `MILO_ALERTS_TEST_ENDPOINT` names that server, and is refused unless it is `http://127.0.0.1:PORT`. On macOS `MILO_ALERTS_KEYCHAIN` names a keychain file of the test's own, so that tests never touch yours. Only a development build reads either variable: a release build has no setting that changes where a secret is kept or sent, so with `--release` these tests do nothing. No test may use a real token, webhook or chat, or post to Telegram or Discord.
+
+To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
+
 ### Changing Discord presence
 
-[Discord presence](docs/presence.md) is the one thing Milo publishes, so its rules are strict. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
+[Discord presence](docs/presence.md) publishes an activity to Discord. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
 
 A second line is shown only for the *details* a person chose: the name of the session in front, the folder name of the Git project in its focused pane, or both. The default shows neither, and a choice saved by an earlier release must go on showing only what it showed. `src/rex_presence.lua` may look at sessions only for a name that was chosen, and never reads a tab's or terminal's title, a screen, a command line or a status text. Every name goes through `src/presence/label.rs`, which keeps one short line of plain text and drops whole anything that could be a path or an address. Never show a path, a remote address, a branch, a file name or a command, by default or behind a setting. When the script cannot tell which one session is in front, it reports none, and no name is shown. `presence::public` says what each choice shows, and every surface shows that text before turning presence on or adding a name.
 
@@ -244,6 +256,14 @@ By contributing you agree that your work is released under the MIT licence that 
 
 | File | Purpose |
 | --- | --- |
+| `src/alerts.rs` | Keeps the alert mirroring choices and applies each change to them. |
+| `src/alerts/cli.rs` | Runs `milo alerts` and reads a secret without showing it. |
+| `src/alerts/event.rs` | Reads Rex's event stream and decides which events are alerts, once each. |
+| `src/alerts/forward.rs` | Follows Rex as the one mirroring process, with retries and rate limits. |
+| `src/alerts/message.rs` | Words an alert, strips a program's text of mentions, and says what is sent. |
+| `src/alerts/secret.rs` | Keeps a destination's secret in the macOS Keychain or a private file. |
+| `src/alerts/send.rs` | Posts one message with curl and classifies the answer. |
+| `src/alerts/tests.rs` | Checks alerts, messages, settings, secrets and the request. |
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
@@ -345,6 +365,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/web.rs`, `src/web/` | Serves the embedded settings editor on loopback and authenticates its requests. |
 | `src/when.rs` | Works out local dates and wording for ages and durations. |
 | `src/width.rs` | Measures and shortens text in terminal columns. |
+| `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |

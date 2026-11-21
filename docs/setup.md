@@ -138,6 +138,41 @@ If you set `CLAUDE_CONFIG_DIR`, Milo uses that profile's `settings.json` instead
 
 New setups use the full path to Milo, so Claude Code does not need `milo` on its `PATH`. If Doctor reports an old launcher, turn limits off, save, then turn them back on and save.
 
+## Mirror Rex alerts
+
+Milo can send the alerts Rex raises to a Telegram chat or a Discord channel you choose, so that a blocked or finished agent reaches you away from the machine. It is off until you turn it on. Rex's own tab marks, sounds and notifications stay exactly as they are: Milo only listens to Rex's event stream (`rex events`) beside the Rex apps and changes no Rex setting.
+
+```sh
+milo alerts telegram -1001234567890   # asks for the bot's token; or: milo alerts discord
+milo alerts                           # what is saved, whether it is running, what would be sent
+milo alerts test                      # one message written by Milo
+milo alerts on                        # starts, and says again what is sent
+milo alerts off                       # ends it at once
+```
+
+The same choices are under **Alerts** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
+
+<picture>
+  <source media="(max-width: 600px)" srcset="img/web-alerts-mobile.webp">
+  <img src="img/web-alerts.webp" width="760" alt="The Alerts page of the browser editor: mirroring is off, alerts would go to an example Telegram channel, and the page says that only the kind of alert and the program's short name are sent">
+</picture>
+
+![The setup screen's Mirror Rex alerts panel: mirroring off, Telegram as destination, the three status alerts on, notifications and bells off, and Kind only as what is sent](img/setup-alerts.webp)
+
+**What counts as an alert.** A program that reports through Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) that it is `blocked`, failed (`error`) or finished (`done`); a program that asks for a desktop notification (OSC 9 or OSC 777); and the terminal bell. The first three are mirrored unless you choose otherwise with `milo alerts events blocked,error,done,notification,bell`. Working and idle reports, progress, exits, titles and everything else in a session are never sent, and neither is anything Milo itself shows.
+
+**What is sent.** By default only the kind of alert and the program's short name, such as `Rex: claude-code is waiting for permission`: no text from the program and no session, tab, folder or file name. `milo alerts content text` adds up to 300 characters of the line the program gave Rex, which can name files or quote a prompt. Both the name and that line come from the program, so they are sent marked as code, where neither Telegram nor Discord makes a link, a mention or formatting of them. The line is also cut to one line with every `@` broken, Discord is told to notify no user, role or `@everyone`, and link previews are turned off.
+
+Discord sends one Milo card per alert, with the Milo icon beside the status, inline code for program names and optional text, a localized send time, and a colored edge: amber for attention, red for errors, green for completion, and Milo blue for notifications, bells and connection tests. Telegram keeps its compact text format.
+
+**Destinations and secrets.** For Telegram, create a bot with BotFather, add it to the chat or channel, and give Milo the chat's number or a public channel's `@name`. For Discord, create a webhook in the channel's **Integrations** settings and give Milo its link; only `discord.com` webhook links are accepted. The bot token or webhook link is asked for without being shown, or read from standard input, never taken as an argument. On macOS it is kept in your Keychain; elsewhere in `alerts-secrets` in Milo's state folder, readable only by you. Settings pages show whether a secret is saved, never the secret. Saving a second destination while alerts are being mirrored does not move them: switch with `milo alerts use`. `milo alerts forget telegram` or `forget discord` removes one, and `milo setup --remove` removes both and ends mirroring.
+
+**Once, not twice.** One background process mirrors, whatever number of tabs, panes and Rex apps are open. Rex repeats a status each time a program reports it; Milo sends it when a terminal enters a state or changes what it is waiting for. A terminal's bell is sent at most once in 30 seconds, and so is a notification that repeats that terminal's last one.
+
+**When things go wrong.** Messages are spaced about a second apart and limited to 20 a minute; a burst beyond that is not sent, and the next message says how many were left out. If the destination asks Milo to slow down, Milo sends nothing until the time it gives has passed, and tries the waiting alert again if that is within a minute. An unreachable or failing destination is tried three times before the alert is dropped. If the destination refuses the secret, or turns down five messages in a row, Milo stops asking until you save the destination again, change a choice or run `milo alerts on`. `milo alerts` shows the last outcome.
+
+**Limits.** Mirroring needs `/usr/bin/curl`, and follows the Rex server on this machine only. It starts with `milo alerts on`, and again whenever Rex starts Milo's listener, which Rex does each time its server loads a [saved layout](#in-rex); without a saved layout, run `milo alerts on` after restarting the machine. Alerts raised while Rex or the mirroring process is not running are not sent later, because Rex does not replay events. Rex decides in each app whether to show its own notification (for example only in the background, or not for a muted tab) and does not report that decision, so Milo mirrors what programs reported, not what Rex showed. A terminal's notifications through OSC 99 do not appear in Rex's event stream and are not mirrored.
+
 ## Remove milo
 
 The menu app and CLI uninstall separately. If you want both gone, run `milo menubar uninstall` **before** removing the CLI. This stops the app and unregisters launch at login. Skip this step if you want to keep using the menu bar.
@@ -147,7 +182,7 @@ If [Discord presence](presence.md) is on, **Uninstall Milo** in Home turns it of
 From Home, choose **Uninstall Milo** to review and confirm removal of the CLI and its managed integrations. **Health → Remove integration** and `milo setup --remove` only disconnect the managed integrations; they do not remove the executable. For manual removal:
 
 1. To diagnose a setup before changing it, run `milo doctor`. To fix the managed integration after an upgrade or executable move, run `milo setup --repair` with the binary you intend to keep.
-2. Before deleting the binary, run `milo setup --remove` to disconnect the managed Rex and Claude Code integrations. Saved preferences and user-edited files are not an uninstall target. Close any live Milo panes separately.
+2. Before deleting the binary, run `milo setup --remove` to disconnect the managed Rex and Claude Code integrations. It also ends [alert mirroring](#mirror-rex-alerts) and removes its saved destinations and secrets. Saved preferences and user-edited files are not an uninstall target. Close any live Milo panes separately.
 3. Remove the binary with `brew uninstall milo` if you installed with Homebrew. If you used the release installer, run `sh milo-install.sh --uninstall` with your downloaded copy. If you built from source, run `sh install.sh --uninstall` from the checkout. For either script, use the same `MILO_BIN_DIR` you installed to if you set one. Removing the binary does not change Rex or Claude Code settings or remove milo's saved state.
 
 If Rex cannot reload during removal, Milo still removes the managed files and tells you to restart Rex. If Milo cannot safely remove its Claude Code status line, correct the reported settings problem and retry before deleting the executable.
