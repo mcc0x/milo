@@ -1010,6 +1010,7 @@ fn reading(history: &History) -> Option<i32> {
 fn arrive(history: &History) {
     let mut ready = [libc::pollfd { fd: reading(history).expect("a read"), events: libc::POLLIN, revents: 0 }];
     assert_eq!(crate::term::wait_ready(&mut ready, 30_000), 1, "Git did not list the commit's files");
+    history.listing_releases.as_ref().unwrap().fetch_add(1, Ordering::Relaxed);
 }
 
 /// Two commits, newest first: one that added `newer.txt`, one that added `older.txt`.
@@ -1018,7 +1019,7 @@ fn impatient(f: &Fixture) -> History {
     f.commit("older");
     f.write("newer.txt", "one\ntwo\n");
     f.commit("newer");
-    open(f).impatient()
+    open(f).impatient(Arc::new(AtomicUsize::new(0)))
 }
 
 #[test]

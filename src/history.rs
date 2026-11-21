@@ -8,6 +8,11 @@ mod tests;
 
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use self::listing::Listing;
@@ -96,6 +101,8 @@ pub struct History {
     /// The one read of a commit's files that is still running.
     listing: Option<Listing>,
     patience: Duration,
+    #[cfg(test)]
+    listing_releases: Option<Arc<AtomicUsize>>,
     rows: Vec<TimelineRow>,
     cursor: usize,
     top: usize,
@@ -127,6 +134,8 @@ impl History {
             listing: None,
             // Tests see a commit's files in the frame after the key, unless they ask otherwise.
             patience: if cfg!(test) { Duration::from_secs(60) } else { PATIENCE },
+            #[cfg(test)]
+            listing_releases: None,
             rows: Vec::new(),
             cursor: 0,
             top: 0,
@@ -148,10 +157,11 @@ impl History {
         history
     }
 
-    /// A pane that never waits for Git on a key, as on a commit too large to list at once.
+    /// Never waits for Git on a key, and takes each result only when the test releases it.
     #[cfg(test)]
-    pub(crate) fn impatient(mut self) -> Self {
+    pub(crate) fn impatient(mut self, releases: Arc<AtomicUsize>) -> Self {
         self.patience = Duration::ZERO;
+        self.listing_releases = Some(releases);
         self
     }
 
@@ -194,7 +204,7 @@ impl History {
         if !self.version.as_ref().is_some_and(|version| version.matches(&self.repo)) {
             let Some(commits) = self.repo.history(LIMIT + 1) else { return };
             self.replace_commits(commits, selected, uncommitted);
-        } else if self.load_files() || self.uncommitted != uncommitted {
+        } else if self.load_files(self.patience) || self.uncommitted != uncommitted {
             self.uncommitted = uncommitted;
             self.rebuild_in_place(selected);
         }
@@ -233,7 +243,7 @@ impl History {
         self.version = Some(self.repo.history_version());
         self.clicked = None;
         self.open = open;
-        self.load_files();
+        self.load_files(self.patience);
         self.uncommitted = uncommitted;
         if follow {
             self.top = 0;
@@ -310,14 +320,14 @@ impl History {
         } else {
             Some(OpenCommit { index: i, all_files: false, error: None })
         };
-        self.load_files();
+        self.load_files(self.patience);
         self.build_rows(Some(TimelineRow::Commit(i)));
     }
 
     /// Starts reading the open commit's files unless they are kept or a read
     /// is running, and takes a result that arrives within the pane's patience.
     /// Returns whether the open commit's rows changed.
-    fn load_files(&mut self) -> bool {
+    fn load_files(&mut self, patience: Duration) -> bool {
         let Some(open) = &mut self.open else { return false };
         let entry = &self.entries[open.index];
         if entry.files.is_some() {
@@ -329,14 +339,22 @@ impl History {
                 Err(_) => return open.error.replace(CommitFilesError::Git) != Some(CommitFilesError::Git),
             }
         }
-        self.collect_files(self.patience)
+        self.collect_files(patience)
     }
 
     /// Keeps a finished read with its commit, wherever that is in the timeline
     /// now, and then reads the open commit if it was not the one read. A commit
     /// opened in between waits for the one read to end: no second read runs.
     fn collect_files(&mut self, patience: Duration) -> bool {
+        #[cfg(test)]
+        if self.listing_releases.as_ref().is_some_and(|releases| releases.load(Ordering::Relaxed) == 0) {
+            return false;
+        }
         let Some(listed) = self.listing.as_ref().and_then(|listing| listing.finished(patience)) else { return false };
+        #[cfg(test)]
+        if let Some(releases) = &self.listing_releases {
+            releases.fetch_sub(1, Ordering::Relaxed);
+        }
         let hash = self.listing.take().map(|mut listing| std::mem::take(&mut listing.hash)).unwrap_or_default();
         // A commit that left the timeline while it was read has nowhere to keep its files.
         let index = self.entries.iter().position(|entry| entry.commit.hash == hash);
@@ -344,7 +362,7 @@ impl History {
             if let (Ok(files), Some(index)) = (listed, index) {
                 self.entries[index].files = Some(files);
             }
-            return self.load_files();
+            return self.load_files(Duration::ZERO);
         };
         match listed {
             Ok(files) => {

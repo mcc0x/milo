@@ -364,12 +364,19 @@ mod tests {
     #[test]
     fn a_followed_history_shows_a_slow_commits_files_without_another_key() {
         use crate::history::History;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         use std::time::Instant;
 
         let f = Fixture::new();
         f.write("page.txt", "one\n");
         f.commit("first");
-        let make = |repo, _: &Preferences| -> Box<dyn Pane> { Box::new(History::new(repo, true).impatient()) };
+        let releases = Arc::new(AtomicUsize::new(0));
+        let make = |repo, _: &Preferences| -> Box<dyn Pane> {
+            Box::new(History::new(repo, true).impatient(Arc::clone(&releases)))
+        };
         let repo = Repo::open(&f.root).unwrap();
         let mut pane = Project {
             root: repo.root.clone(),
@@ -388,6 +395,7 @@ mod tests {
         pane.key(Key::Enter);
         pane.draw(&mut screen);
         assert!(screen.text().iter().any(|row| row.contains("Reading files")), "{:?}", screen.text());
+        releases.store(1, Ordering::Relaxed);
 
         // The loop is given only this pane's deadline and frames, never the one it wraps.
         let until = Instant::now() + Duration::from_secs(30);
