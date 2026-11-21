@@ -52,6 +52,7 @@ end
 -- Milo set last, so a name anyone else chose is never replaced. Records are
 -- kept by window and block ID, never by a label or a position.
 local titles, titled, pane_tab, claims = memory.titles, {}, {}, nil
+local title_retry_seconds = 5
 
 -- The directory and agent a tab is titled for. Only the shells of a tab that
 -- is Milo's to title are ever asked about their processes.
@@ -91,15 +92,23 @@ local function retitle(window_id)
   if not cwd then return end
   local key = cwd .. "\n" .. (agent or "")
   local changed = key ~= record.key
+  if changed then
+    record.key, record.title, record.refused, record.retry_at = key, nil, nil, nil
+  end
+  local retry = record.retry_at
+  if retry and os.time() < retry then return end
   -- Recheck file-backed answers on events even when this shell has not
-  -- moved, and ask again for one that is no longer kept. Answers without
-  -- grounds still wait for a new cwd or agent.
-  if changed or record.cached then
+  -- moved. A failed lookup leaves the label alone and can try again on a
+  -- later event, without starting Milo for every event during a failure.
+  if changed or retry or record.cached then
     local title, cached = titles.ask(cwd, agent)
     record.cached = cached
-    if changed or (title ~= nil and title ~= record.title) then
-      record.key, record.title, record.refused = key, title, nil
+    if title == nil then
+      record.retry_at = os.time() + title_retry_seconds
+      return
     end
+    record.retry_at = nil
+    if title ~= record.title then record.title, record.refused = title, nil end
   end
   local title = record.title
   if not title or record.refused then return end

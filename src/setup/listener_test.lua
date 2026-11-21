@@ -479,15 +479,32 @@ one.label = "Window 00000001"
 changed()
 assert(one.label == "other/feature")
 
--- If Milo cannot answer, the title it set earlier stays.
-titling.broken = true
+-- Failed lookups leave Milo's label alone and retry on later events at the
+-- same cwd, but a burst of events during a failure starts nothing.
+local real_time, now = os.time, 100
+os.time = function() return now end
+titling.broken, asks = true, titling.asks
 moved("one", "/tmp")
-assert(one.label == "other/feature")
+changed()
+front("one", shell_in("/tmp"))
+assert(one.label == "other/feature" and titling.asks == asks + 1)
+now = 105
+changed()
+assert(one.label == "other/feature" and titling.asks == asks + 2)
 titling.broken = nil
+now = 110
+front("one", shell_in("/tmp"))
+assert(one.label == "Window 00000001" and titling.asks == asks + 3 and not titling.claims[one.window_id])
+moved("one", "/other")
 
--- A rename that lands while Milo is answering is kept.
-titling.during = function() titling.during, one.label = nil, "mine" end
+-- A rename that lands while Milo is retrying is kept.
+titling.broken = true
 moved("one", "/my project")
+titling.broken = nil
+now = 115
+titling.during = function() titling.during, one.label = nil, "mine" end
+changed()
+os.time = real_time
 assert(one.label == "mine" and not titling.claims[one.window_id])
 one.label = "Window 00000001"
 changed()
