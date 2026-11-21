@@ -519,6 +519,14 @@ fn an_application_of_your_own_is_kept_until_you_go_back_to_milos() {
     );
     client.cleared(helper, 2);
     let mut official = discord.welcome(Duration::from_secs(30));
-    official.activity(1);
-    assert_eq!(fs::read_to_string(home.root.join(".config/milo/discord.conf")).unwrap(), "presence = true\n");
+    let helper = official.activity(1);
+    let saved = || fs::read_to_string(home.root.join(".config/milo/discord.conf")).unwrap();
+    assert_eq!(saved(), "presence = true\n");
+
+    // Milo's own ID is Milo's application however it is given, when turning presence on too.
+    assert!(home.say(&["presence", "enable", APPLICATION, "--yes"]).starts_with("Discord presence is on."));
+    official.cleared(helper, 2);
+    discord.welcome(Duration::from_secs(30)).activity(1);
+    assert_eq!(saved(), "presence = true\n");
+    assert!(home.say(&["presence"]).contains("\nApplication: Milo's, "));
 }
