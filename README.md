@@ -1,14 +1,14 @@
 <p align="center">
   <a href="https://usemilo.net">
     <img src="docs/img/milo-readme-banner.webp" width="960" alt="Milo — Your Git workspace, inside Rex. Browse files, commits and diffs, edit code, track agent usage, save pane layouts, and get alerts in Discord or Telegram.">
-  </a><br>
-  <a href="https://usemilo.net">
-    <picture>
-      <source media="(max-width: 600px)" srcset="docs/img/web-demo-mobile.webp">
-      <img src="docs/img/web-demo.webp" width="960" alt="Milo’s web demo: a file tree and commit history beside a Claude Code transcript, with Codex and Claude usage percentages above it">
-    </picture>
   </a>
-  <br><sub><a href="https://usemilo.net">Watch the demo</a> cycle through Claude Code, Codex and omp in <a href="https://www.superlogical.com/rex">Rex</a>. The project and usage figures are examples.</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/mcc0x/milo/releases/latest"><img alt="Latest Milo release" src="https://img.shields.io/github/v/release/mcc0x/milo?label=version&amp;color=4178a6"></a>
+  <a href="https://github.com/mcc0x/milo/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mcc0x/milo?style=flat&amp;label=stars&amp;color=4178a6"></a>
+  <a href="Cargo.toml"><img alt="Core CLI: 1 direct dependency" src="https://img.shields.io/badge/core%20CLI-1%20dependency-4178a6"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4178a6"></a>
 </p>
 
 ## Install
