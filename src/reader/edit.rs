@@ -386,7 +386,7 @@ impl Editor {
 
     fn undo(&mut self, now: Instant) -> Step {
         match self.buffer.undo() {
-            Some(cursor) => self.edited(0, cursor),
+            Some(replay) => self.edited(replay.first_row, replay.cursor),
             None => {
                 self.say("Nothing to undo", now);
                 Step::Stay
@@ -396,7 +396,7 @@ impl Editor {
 
     fn redo(&mut self, now: Instant) -> Step {
         match self.buffer.redo() {
-            Some(cursor) => self.edited(0, cursor),
+            Some(replay) => self.edited(replay.first_row, replay.cursor),
             None => {
                 self.say("Nothing to redo", now);
                 Step::Stay
@@ -796,5 +796,37 @@ impl Drop for Editor {
             None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
         };
         rescue::tell(note);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use crate::reader::Reader;
+
+    #[test]
+    fn history_keeps_the_syntax_prefix_and_rescans_a_changed_line_ending() {
+        let f = Fixture::folder();
+        let row = 100;
+        let file = f.root.join("edit.rs");
+        f.write("edit.rs", &("// prefix\n".repeat(row) + "/\n*\rX\nlet answer = 42;\n*/\n"));
+        let mut editor = Reader::open(&file).unwrap().open_editor().unwrap();
+        let now = Instant::now();
+        assert_eq!(editor.state_at(row + 2), State::Code);
+        let from = Pos { row, col: 1 };
+        editor.cursor = Pos { row: row + 1, col: 3 };
+        editor.replace(from, editor.cursor, "*\r");
+        assert_eq!(editor.buffer.row(row), "/*");
+        assert!(matches!(editor.state_at(row + 1), State::Comment(..)));
+
+        editor.undo(now);
+        assert_eq!(editor.states.len(), row + 1);
+        assert_eq!(editor.buffer.row(row + 1), "*\rX");
+        assert_eq!(editor.state_at(row + 2), State::Code);
+        editor.redo(now);
+        assert_eq!(editor.states.len(), row + 1);
+        assert_eq!(editor.cursor, Pos { row, col: 2 });
+        assert!(matches!(editor.state_at(row + 1), State::Comment(..)));
     }
 }
