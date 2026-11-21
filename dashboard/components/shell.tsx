@@ -37,7 +37,7 @@ function isDirty(page: Page, groups: SessionState['groups'] | undefined) {
 }
 
 function Navigation({page, navigate}: {page: Page; navigate: (page: Page) => void}) {
-  const {state, discard, requestSave, canDiscard, canSave} = useEditor();
+  const {state, discard, requestSave, canDiscard, canSave, hasUnsavedChanges} = useEditor();
   return (
     <div className="control-dock">
       <nav className="navigation" aria-label="Settings sections">
@@ -50,10 +50,11 @@ function Navigation({page, navigate}: {page: Page; navigate: (page: Page) => voi
         ))}
       </nav>
       <div className="dock-actions" aria-label="Draft actions" role="group">
-        <button id="discard-all" className="button text-button draft-action" type="button" aria-label="Discard" title="Discard" disabled={!canDiscard} onClick={() => discard('all')}>
+        {!hasUnsavedChanges && <span className="draft-clean">No Changes</span>}
+        <button hidden={!hasUnsavedChanges} id="discard-all" className="draft-action" type="button" aria-label="Discard" title="Discard" disabled={!canDiscard} onClick={() => discard('all')}>
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
         </button>
-        <button id="save-draft" className={`button ${canSave ? 'primary' : 'secondary'} draft-action`} type="button" aria-label="Save" title="Save" disabled={!canSave} onClick={requestSave}>
+        <button hidden={!hasUnsavedChanges} id="save-draft" className="draft-action" type="button" aria-label="Save" title="Save" disabled={!canSave} onClick={requestSave}>
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3.5 10 4.2 4.2L16.5 5.5"/></svg>
         </button>
       </div>
