@@ -39,26 +39,31 @@ pub(super) fn quotable(text: &str) -> bool {
 }
 
 /// Whether `url` is plain HTTP to a numbered port of this machine, which is
-/// how tests stand in for a provider.
-fn loopback(url: &str) -> bool {
+/// how tests stand in for a provider. An installed build has no such address.
+#[cfg(test)]
+fn plain(url: &str) -> Option<&'static str> {
     url.strip_prefix("http://127.0.0.1:")
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(port, _)| port.parse::<u16>().is_ok())
+        .then_some("proto = \"=http\"\nnoproxy = \"127.0.0.1\"\n")
+}
+
+#[cfg(not(test))]
+fn plain(_: &str) -> Option<&'static str> {
+    None
 }
 
 /// None when curl could not be run, the provider did not answer within
 /// `wait`, or the answer was not a bounded HTTP reply. Redirects are not
 /// followed, so the credential goes only to the host Milo named.
 pub(super) fn get(request: &Request<'_>, wait: Duration) -> Option<Reply> {
-    let secure = request.url.starts_with("https://");
-    if !secure && !loopback(request.url) {
-        return None;
-    }
+    // Only HTTPS carries a key. The plain exception does not exist outside tests.
+    let protocol = if request.url.starts_with("https://") { "proto = \"=https\"\n" } else { plain(request.url)? };
     if !quotable(request.url) || !quotable(request.bearer) {
         return None;
     }
     let mut config = String::with_capacity(512 + request.url.len() + request.bearer.len());
-    config.push_str(if secure { "proto = \"=https\"\n" } else { "proto = \"=http\"\nnoproxy = \"127.0.0.1\"\n" });
+    config.push_str(protocol);
     config.push_str("silent\ninclude\nmax-redirs = 0\nmax-filesize = 262144\nconnect-timeout = 5\n");
     config.push_str(&format!("max-time = {}\n", wait.as_secs().max(1)));
     config.push_str(concat!("user-agent = \"milo/", env!("CARGO_PKG_VERSION"), "\"\n"));

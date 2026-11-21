@@ -30,8 +30,6 @@ const HTTP_WAIT: Duration = Duration::from_secs(8);
 const SETTINGS_LIMIT: u64 = 8 * 1024;
 const CACHE_LIMIT: u64 = 4 * 1024;
 const SETTINGS_FILE: &str = "usage-accounts.conf";
-/// Names a loopback port that stands in for every provider. Tests set it.
-const TEST_PORT: &str = "MILO_TEST_USAGE_PORT";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Currency {
@@ -453,11 +451,13 @@ fn month_start(year: i64, month: i64) -> i64 {
     (era * 146_097 + day_of_era - 719_468) * DAY
 }
 
-/// Where requests go.
+/// Where requests go. An installed build has one answer: the providers.
+/// Nothing in the environment or the settings can name another receiver for a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
     Providers,
     /// One loopback port serving every provider under its id.
+    #[cfg(test)]
     Loopback(u16),
 }
 
@@ -487,15 +487,11 @@ impl Sources {
             .flatten()
             .filter_map(|name| Some((name, std::env::var(name).ok().filter(|value| !value.is_empty())?)))
             .collect();
-        let origin = std::env::var(TEST_PORT)
-            .ok()
-            .and_then(|port| port.parse().ok())
-            .map_or(Origin::Providers, Origin::Loopback);
         Self {
             environment,
             settings: paths::config_dir().map(|dir| dir.join(SETTINGS_FILE)),
             cache: paths::state_dir().map(|dir| dir.join("accounts")),
-            origin,
+            origin: Origin::Providers,
         }
     }
 
@@ -657,6 +653,7 @@ impl Sources {
         let (path, until) = account.question(scope, now);
         let url = match self.origin {
             Origin::Providers => format!("https://{}{path}", account.host()),
+            #[cfg(test)]
             Origin::Loopback(port) => format!("http://127.0.0.1:{port}/{}{path}", account.id()),
         };
         let request = http::Request { url: &url, bearer: &credentials.key, headers: account.headers() };
