@@ -338,7 +338,6 @@ fn discovery_output(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, &'stat
 fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
     let ask = |args: &[&str]| discovery_output(dir, args);
     let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
-    let one = |args: &[&str]| ask(args).map(|raw| raw.as_deref().map(path));
     let raw =
         ask(&["rev-parse", "--show-toplevel", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"])?;
     let Some(raw) = raw else {
@@ -350,6 +349,9 @@ fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
         return Ok(Some(GitDirs { root: path(root), git: Some(path(git)), common: Some(path(common)) }));
     }
     // A newline can be part of a path. Separate answers have no ambiguous delimiters.
+    // Git before 2.31 prints `--path-format` back instead of following it, so only a
+    // whole path is an answer. That Git does not say where its records are.
+    let one = |args: &[&str]| ask(args).map(|raw| raw.as_deref().map(path).filter(|folder| folder.is_absolute()));
     let Some(root) = discover_worktree(dir)? else { return Ok(None) };
     Ok(Some(GitDirs {
         root,
