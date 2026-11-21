@@ -58,6 +58,10 @@ impl Provider {
                 let answers = answers.lock().unwrap();
                 let canned = answers.iter().find(|(id, _)| path.starts_with(&format!("/{id}/"))).map(|(_, c)| c);
                 let (status, header, body) = canned.map_or((404, "", ""), |c| (c.status, c.header, c.body.as_str()));
+                if status == 0 {
+                    // Simulate a connection that drops before any HTTP reply.
+                    continue;
+                }
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status} Canned\r\nContent-Type: application/json\r\n{header}Content-Length: {}\r\n\
@@ -606,6 +610,41 @@ fn a_count_is_asked_for_again_when_its_period_ends_and_not_a_whole_interval_late
 }
 
 #[test]
+fn unreachable_attempts_retry_after_one_minute_and_keep_the_last_reading() {
+    for failure in [0, 503] {
+        let (f, provider) = (Fixture::folder(), Provider::start());
+        let devin = UsageAccount::Devin;
+        let environment = [("MILO_DEVIN_API_KEY", KEY), ("MILO_DEVIN_ORG", "org-abc")];
+        let sources = sources(&f, &provider, &environment);
+        let choices = [(devin, Show::Always)];
+        let mut usage = pane(&f, sources.clone(), &choices);
+        provider.reply("devin", 200, "", DEVIN);
+        usage.accounts.settle(NOW, false);
+
+        let wake = NOW + 20 * MINUTE;
+        provider.reply("devin", failure, "", "");
+        usage.accounts.settle(wake, false);
+        let reading = status(&usage, devin, wake);
+        assert!(matches!(reading, Status::Reading(reading, None) if reading.observed == NOW));
+        assert_eq!(provider.requests(), 2);
+
+        provider.reply("devin", 200, "", DEVIN);
+        usage.accounts.settle(wake + MINUTE - 1, false);
+        let mut reopened = pane(&f, sources, &choices);
+        reopened.accounts.settle(wake + MINUTE - 1, false);
+        assert_eq!(status(&reopened, devin, wake + MINUTE - 1), reading);
+        assert_eq!(provider.requests(), 2);
+
+        reopened.accounts.settle(wake + MINUTE, false);
+        assert!(matches!(status(&reopened, devin, wake + MINUTE), Status::Reading(reading, None)
+            if reading.observed == wake + MINUTE));
+        usage.accounts.settle(wake + MINUTE, false);
+        assert_eq!(status(&usage, devin, wake + MINUTE), status(&reopened, devin, wake + MINUTE));
+        assert_eq!(provider.requests(), 3);
+    }
+}
+
+#[test]
 fn an_unreachable_provider_keeps_the_last_answer_until_it_is_a_day_old_or_its_period_ends() {
     let f = Fixture::folder();
     // A port nothing listens on: the listener is closed before any look.
@@ -755,7 +794,7 @@ fn doctor_describes_an_account_from_its_settings_and_saved_answer_without_asking
     assert_eq!(
         sources.doctor(on, NOW),
         [
-            "DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from the environment, at most every 5 minutes"
+            "DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from the environment, usually every 5 minutes"
                 .to_owned(),
             "  no answer saved yet".to_owned(),
             format!("Devin ACUs: not asked; set MILO_DEVIN_ORG in the environment or in {}", file.display()),

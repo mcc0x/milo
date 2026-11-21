@@ -27,6 +27,8 @@ const MANUAL_REST: i64 = 30;
 const REFUSED_REST: i64 = 30 * MINUTE;
 /// How long to stay away after a rate limit that named no wait of its own.
 const LIMITED_REST: i64 = 5 * MINUTE;
+/// Retry soon after a transport or server failure, including when waking offline.
+const UNREACHABLE_REST: i64 = MINUTE;
 /// A reading older than this no longer says anything about the account.
 const KEPT: i64 = DAY;
 const HTTP_WAIT: Duration = Duration::from_secs(8);
@@ -684,7 +686,7 @@ impl Sources {
         let request = http::Request { url: &url, bearer: &credentials.key, headers: account.headers() };
         let interval = account.interval();
         let (answer, rest) = match http::get(&request, HTTP_WAIT) {
-            None => (Err(Failure::Unreachable), interval),
+            None => (Err(Failure::Unreachable), UNREACHABLE_REST),
             Some(reply) => match reply.status {
                 200 => (account.parse(&reply.body, now, until).unwrap_or(Err(Failure::Unexpected)), interval),
                 401 => (Err(Failure::Refused), REFUSED_REST),
@@ -694,7 +696,7 @@ impl Sources {
                     (Err(Failure::Limited), wait.clamp(MINUTE, HOUR))
                 }
                 403 | 404 => (Err(Failure::Denied), REFUSED_REST),
-                _ => (Err(Failure::Unreachable), interval),
+                _ => (Err(Failure::Unreachable), UNREACHABLE_REST),
             },
         };
         let fetched = match answer {
@@ -866,7 +868,7 @@ impl Accounts {
             }
             let announced = account.job.take().is_some_and(|job| job.checking);
             // A worker that died leaves what is known, and the look is tried again later.
-            account.next = result.map_or(now + MANUAL_REST, |fetched| fetched.next.max(now + MANUAL_REST));
+            account.next = result.map_or(now + MANUAL_REST, |fetched| fetched.next.max(fetched.asked + MANUAL_REST));
             if let Some(fetched) = result {
                 changed |= account.fetched != Some(fetched);
                 account.fetched = Some(fetched);
@@ -934,7 +936,7 @@ impl Sources {
             let place = if credentials.from_environment { "the environment" } else { file.as_str() };
             let every = account.interval() / MINUTE;
             lines.push(format!(
-                "{title}: asks {} with {} from {place}, at most every {every} minutes",
+                "{title}: asks {} with {} from {place}, usually every {every} minutes",
                 account.host(),
                 account.key_name()
             ));
