@@ -50,10 +50,11 @@ impl Outcome {
 
 /// Sends a prepared request and reports the answer. While curl runs, its
 /// process ID is in `running`, for a signal handler to end it.
-pub(super) fn post(request: &str, running: Option<&AtomicI32>) -> Outcome {
+pub(super) fn post(request: &Request, running: Option<&AtomicI32>) -> Outcome {
     let Some((body, code)) = response(request, ANSWER_LIMIT, running) else { return Outcome::Failed(None) };
     match code {
-        200..=299 => Outcome::Sent,
+        204 if request.relay && body.is_empty() => Outcome::Sent,
+        200..=299 if !request.relay => Outcome::Sent,
         429 => Outcome::Wait(retry_after(&body)),
         400..=499 => Outcome::Refused(code),
         500..=599 => Outcome::Failed(Some(code)),
@@ -67,7 +68,7 @@ pub(super) fn query(address: &str, body: &str, limit: u64) -> Option<String> {
     (200..=299).contains(&code).then_some(body)
 }
 
-pub(super) fn response(request: &str, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
+pub(super) fn response(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
     let mut answer = run(request, limit, running)?;
     // The status follows the answer's body on a line of its own.
     let (body, code) = answer.rsplit_once('\n')?;
@@ -77,12 +78,17 @@ pub(super) fn response(request: &str, limit: u64, running: Option<&AtomicI32>) -
 }
 
 /// curl's options, in the form of its own settings file.
-pub(super) fn request(address: &str, body: &str) -> String {
-    config(address, "POST", Some(body), None, 8, 15)
+pub(super) struct Request {
+    pub(super) options: String,
+    relay: bool,
 }
 
-pub(super) fn relay_request(address: &str, method: &str, body: Option<&str>, capability: Option<&str>) -> String {
-    config(address, method, body, capability, 2, if capability.is_some() && body.is_some() { 15 } else { 4 })
+pub(super) fn request(address: &str, body: &str) -> Request {
+    config(address, "POST", Some(body), None, false, 8, 15)
+}
+
+pub(super) fn relay_request(address: &str, method: &str, body: Option<&str>, capability: Option<&str>) -> Request {
+    config(address, method, body, capability, true, 2, if capability.is_some() && body.is_some() { 15 } else { 4 })
 }
 
 fn config(
@@ -90,9 +96,10 @@ fn config(
     method: &str,
     body: Option<&str>,
     capability: Option<&str>,
+    relay: bool,
     connect_timeout: u8,
     timeout: u8,
-) -> String {
+) -> Request {
     use std::fmt::Write as _;
     let protocol = if address.starts_with("http://127.0.0.1:") { "http" } else { "https" };
     let mut request = String::with_capacity(256 + address.len() + body.map_or(0, str::len));
@@ -107,12 +114,16 @@ fn config(
     if let Some(capability) = capability {
         let _ = writeln!(request, "header = \"Authorization: Bearer {capability}\"");
     }
+    let noproxy = if relay { "*" } else { "127.0.0.1" };
+    if relay && protocol == "https" {
+        request.push_str("tlsv1.2\n");
+    }
     let _ = write!(
         request,
-        "proto = \"={protocol}\"\nmax-redirs = 0\nnoproxy = \"127.0.0.1\"\nconnect-timeout = {connect_timeout}\n\
+        "globoff\nproto = \"={protocol}\"\nmax-redirs = 0\nnoproxy = \"{noproxy}\"\nconnect-timeout = {connect_timeout}\n\
          max-time = {timeout}\nsilent\nwrite-out = \"\\n%{{http_code}}\"\n",
     );
-    request
+    Request { options: request, relay }
 }
 
 /// A value between double quotes, as curl's settings files read one.
@@ -128,9 +139,14 @@ fn push_quoted(out: &mut String, value: &str) {
     out.push('"');
 }
 
-fn run(request: &str, limit: u64, running: Option<&AtomicI32>) -> Option<String> {
+fn run(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<String> {
+    let mut command = Command::new(CURL);
+    if request.relay {
+        // Don't inherit proxy, custom CA, or debug/traffic-logging settings.
+        command.env_clear();
+    }
     // `-q` must come first: it keeps curl from reading the user's own curlrc.
-    let mut curl = Command::new(CURL)
+    let mut curl = command
         .args(["-q", "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -140,7 +156,7 @@ fn run(request: &str, limit: u64, running: Option<&AtomicI32>) -> Option<String>
     if let Some(running) = running {
         running.store(curl.id().try_into().unwrap_or(0), Ordering::Relaxed);
     }
-    let written = curl.stdin.take().map(|mut input| input.write_all(request.as_bytes()));
+    let written = curl.stdin.take().map(|mut input| input.write_all(request.options.as_bytes()));
     let mut answer = String::new();
     let read = curl.stdout.take().map(|output| output.take(limit + 1).read_to_string(&mut answer));
     let over_limit = answer.len() as u64 > limit;

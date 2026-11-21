@@ -183,7 +183,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let summary_rows = if summary_rows < space { summary_rows } else { 0 };
         if let Some(text) = self.intro() {
             let spare = end.saturating_sub(y + rows.len().min(3) + summary_rows);
-            for line in wrap(text, width).take(spare) {
+            let review = if self.panel == Panel::Confirm(Confirm::MirrorAlerts) {
+                self.alert_summary.as_ref().and_then(|summary| summary.settings.forwarding_review())
+            } else {
+                None
+            };
+            let review = review.iter().flat_map(|text| wrap(text, width));
+            for line in wrap(text, width).chain(review).take(spare) {
                 s.put(1, y, width, line, FAINT);
                 y += 1;
             }

@@ -153,11 +153,12 @@ fn serve(
     let mut worker = EditorWorker { send, receive, ready };
 
     let thread = std::thread::Builder::new().spawn(move || {
+        let mut hosted = Vec::new();
         while let Ok(job) = jobs.recv() {
             if STOP.load(Ordering::Relaxed) {
                 break;
             }
-            let reply = job.apply(&mut editor);
+            let reply = job.apply(&mut editor, &mut hosted);
             if replies.send(reply).is_err() || notify.write_all(&[0]).is_err() {
                 break;
             }
@@ -405,7 +406,7 @@ struct Completion {
 }
 
 impl EditorJob {
-    fn apply(self, editor: &mut Editor) -> Completion {
+    fn apply(self, editor: &mut Editor, hosted: &mut Vec<HostedReceipt>) -> Completion {
         let body = self.request.body();
         if self.route == Route::Close {
             let (response, close) = respond_close(body, editor);
@@ -415,7 +416,7 @@ impl EditorJob {
             return Completion { response: respond_telegram_chats(body, editor), snapshot: None, close: false };
         }
         if self.route == Route::HostedConnect {
-            return Completion { response: respond_hosted_connect(body), snapshot: None, close: false };
+            return respond_hosted_connect(body, editor, hosted);
         }
         let (response, snapshot) = match editor.action(body) {
             Ok(state) => {
@@ -459,21 +460,98 @@ fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
     }
 }
 
-fn respond_hosted_connect(body: &[u8]) -> Response {
-    use crate::alerts::relay::{self, ConnectError, Connected};
+struct HostedReceipt {
+    key: String,
+    end: Instant,
+    outcome: HostedOutcome,
+}
 
-    match relay::connect(body) {
-        Ok(Connected::Ready(reply)) => Response::json_owned(reply),
-        Ok(Connected::Pending) => Response::pairing_pending(),
-        Err(ConnectError::Invalid) => Response::bad_request("Invalid hosted connection request."),
-        Err(ConnectError::Expired) => Response::error("404 Not Found", "This connection expired or was already claimed."),
-        Err(ConnectError::Busy) => {
-            Response::error("429 Too Many Requests", "Too many connection requests. Try again shortly.")
+#[derive(Clone, Copy)]
+enum HostedOutcome {
+    Saved,
+    Discarded { cleanup_confirmed: bool },
+}
+
+fn respond_hosted_connect(body: &[u8], editor: &mut Editor, receipts: &mut Vec<HostedReceipt>) -> Completion {
+    use crate::alerts::relay::{ConnectError, Connected, ConnectionRequest};
+    use crate::setup::web::HostedSaveError;
+
+    let plain = |response| Completion { response, snapshot: None, close: false };
+    let request = match ConnectionRequest::parse(body) {
+        Ok(request) => request,
+        Err(error) => return plain(hosted_error(error)),
+    };
+    let Some((version, key)) = request.save() else {
+        return plain(match request.run() {
+            Ok(Connected::Ready(reply)) => Response::json_owned(reply),
+            Ok(Connected::Pending) => Response::pairing_pending(),
+            Ok(Connected::Claimed(_)) => hosted_error(ConnectError::Invalid),
+            Err(error) => hosted_error(error),
+        });
+    };
+    // A retry after a lost local response must not apply the same change twice,
+    // or re-save a Discord webhook deleted after a failed local write.
+    let now = Instant::now();
+    if let Some(reply) = hosted_replay(receipts, key, now, editor) {
+        return reply;
+    }
+    let outcome = match editor.save_hosted_connection(version, &request) {
+        Ok(state) => (HostedOutcome::Saved, hosted_saved(state)),
+        Err(HostedSaveError::Pending) => return plain(Response::pairing_pending()),
+        Err(HostedSaveError::Stale) => {
+            return plain(Response::conflict("Settings changed. Review the destination and try Save again."));
         }
-        Err(ConnectError::Disabled) => {
+        Err(HostedSaveError::Relay(error)) => return plain(hosted_error(error)),
+        Err(HostedSaveError::Local(error)) => {
+            return Completion {
+                response: Response::error("500 Internal Server Error", &error),
+                snapshot: Some(Arc::new(editor.state())),
+                close: false,
+            };
+        }
+        Err(HostedSaveError::Discarded { cleanup_confirmed }) => (
+            HostedOutcome::Discarded { cleanup_confirmed },
+            Completion {
+                response: Response::pairing_discarded(cleanup_confirmed),
+                snapshot: Some(Arc::new(editor.state())),
+                close: false,
+            },
+        ),
+    };
+    // This covers the entire relay receipt lifetime, which began before Save.
+    let (outcome, reply) = outcome;
+    receipts.push(HostedReceipt { key: key.into(), end: now + Duration::from_secs(600), outcome });
+    reply
+}
+
+fn hosted_replay(receipts: &mut Vec<HostedReceipt>, key: &str, now: Instant, editor: &Editor) -> Option<Completion> {
+    receipts.retain(|receipt| receipt.end > now);
+    let receipt = receipts.iter().find(|receipt| receipt.key == key)?;
+    Some(match receipt.outcome {
+        HostedOutcome::Saved => hosted_saved(editor.state()),
+        HostedOutcome::Discarded { cleanup_confirmed } => {
+            Completion { response: Response::pairing_discarded(cleanup_confirmed), snapshot: None, close: false }
+        }
+    })
+}
+
+fn hosted_saved(state: String) -> Completion {
+    let snapshot = Arc::new(state);
+    Completion { response: Response::json(Arc::clone(&snapshot)), snapshot: Some(snapshot), close: false }
+}
+
+fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
+    use crate::alerts::relay::ConnectError;
+
+    match error {
+        ConnectError::Invalid => Response::bad_request("Invalid hosted connection request."),
+        ConnectError::Proof => Response::bad_request("The finish code did not match. Check the code and try again."),
+        ConnectError::Expired => Response::error("404 Not Found", "This connection expired or was already claimed."),
+        ConnectError::Busy => Response::error("429 Too Many Requests", "Too many connection requests. Try again shortly."),
+        ConnectError::Disabled => {
             Response::error("503 Service Unavailable", "This provider is not enabled in Milo's connection service.")
         }
-        Err(ConnectError::Unavailable) => Response::bad_gateway("Could not reach Milo's connection service."),
+        ConnectError::Unavailable => Response::bad_gateway("Could not reach Milo's connection service."),
     }
 }
 
@@ -489,6 +567,33 @@ mod tests {
         assert!(wire.starts_with(status), "{}", String::from_utf8_lossy(&wire));
         assert_eq!(close, should_close);
         wire
+    }
+
+    #[test]
+    fn hosted_save_replays_are_terminal_and_expire() {
+        let fixture = Fixture::folder();
+        let editor = Editor::test_outside(&fixture);
+        let now = Instant::now();
+        let end = now + Duration::from_secs(600);
+        let mut receipts = vec![
+            HostedReceipt { key: "saved".into(), end, outcome: HostedOutcome::Saved },
+            HostedReceipt {
+                key: "discarded".into(),
+                end,
+                outcome: HostedOutcome::Discarded { cleanup_confirmed: true },
+            },
+        ];
+        let saved = hosted_replay(&mut receipts, "saved", now, &editor).unwrap();
+        assert!(saved.snapshot.is_some());
+        let discarded = hosted_replay(&mut receipts, "discarded", now, &editor).unwrap();
+        assert!(discarded.snapshot.is_none());
+        let mut response = discarded.response;
+        let mut wire = Vec::new();
+        while !response.write_to(&mut wire).unwrap() {}
+        assert!(wire.starts_with(b"HTTP/1.1 410 Gone\r\n"));
+        assert!(wire.ends_with(br#"{"cleanupConfirmed":true}"#));
+        assert!(hosted_replay(&mut receipts, "discarded", end, &editor).is_none());
+        assert!(receipts.is_empty());
     }
 
     #[test]

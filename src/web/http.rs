@@ -312,6 +312,12 @@ impl Response {
         Self::new("202 Accepted", Some(JSON), Body::Borrowed(br#"{"pending":true}"#), "")
     }
 
+    pub(super) fn pairing_discarded(cleanup_confirmed: bool) -> Self {
+        let body: &[u8] =
+            if cleanup_confirmed { br#"{"cleanupConfirmed":true}"# } else { br#"{"cleanupConfirmed":false}"# };
+        Self::new("410 Gone", Some(JSON), Body::Borrowed(body), "")
+    }
+
     pub(super) fn no_content() -> Self {
         Self::new("204 No Content", None, Body::Borrowed(b""), "")
     }

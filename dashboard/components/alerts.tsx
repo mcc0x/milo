@@ -218,18 +218,15 @@ export default function Alerts() {
     if (!busy) send("discord", valueOf(event.currentTarget, "alerts-discord-link"));
   }
 
-  function saveHosted(name: Destination, credential: string, chat: string) {
-    send(name, name === "telegram" ? { token: credential, chat, hosted: true } : { webhook: credential, hosted: true });
-  }
-
   function toggleForwarding(destination: Destination) {
+    const consent = alerts?.[destination].consent;
     if (alerts?.[destination].active) {
       send("forwarding", { destination, enabled: false });
-    } else if (alerts?.[destination].saved) {
+    } else if (consent) {
       const selected = selectedEvents.length ? `Events: ${selectedEvents.map(([, label]) => label).join(", ")}.` : noEvents;
       confirm("Turn on alert forwarding?",
         `Destination: ${targetLabels[destination]}.\n${selected}\n${payload}\n${rexNotifications}`, "Turn on",
-        () => send("forwarding", { destination, enabled: true }));
+        () => send("forwarding", { destination, enabled: true, consent }));
     }
   }
 
@@ -269,7 +266,7 @@ export default function Alerts() {
             <div className="alerts-manager-body" key={editor}>
               {editor === "list" && <div className="alerts-provider-picker" role="group" aria-label="Choose a destination">
                 {destinations.map(([name, label]) => {
-                  const { active, saved } = alerts[name];
+                  const { active, saved, consent } = alerts[name];
                   return (
                     <div className="alerts-provider-row" key={name}>
                     <button type="button" className="alerts-provider" id={`alerts-edit-${name}`} aria-label={label}
@@ -283,7 +280,7 @@ export default function Alerts() {
                     </button>
                     {active || saved ? (
                       <div className="alerts-provider-controls">
-                        <IntegrationSwitch id={`alerts-forward-${name}`} label={`Forward to ${label}`} enabled={active} disabled={busy}
+                        <IntegrationSwitch id={`alerts-forward-${name}`} label={`Forward to ${label}`} enabled={active} disabled={busy || (!active && !consent)}
                           onClick={() => toggleForwarding(name)} />
                         {saved ? <button type="button" className="button text-button" id={`alerts-test-${name}`} disabled={busy}
                           aria-label={`Send test to ${label}`} aria-describedby="alerts-test-detail"
@@ -300,7 +297,7 @@ export default function Alerts() {
                   <div key={name}>
                     {alerts[name].saved ? <p className="setting-detail alerts-saved-destination">Saved destination{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p> : null}
                     <HostedAlertsSetup provider={name} label={label} busy={busy}
-                      replacingActive={alerts[name].active} save={(credential, chat) => saveHosted(name, credential, chat)}
+                      replacingActive={alerts[name].active}
                       forget={alerts[name].saved ? () => confirm(`Forget ${label}?`,
                         `This removes the saved ${label} destination and its secret from ${alerts.place}. Forwarding to it ends.`,
                         "Forget", () => send("forget", name)) : undefined}>

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::event::{self, Alert, Seen};
 use super::send::{self, Outcome};
-use super::{Alerts, Destination, Settings, message, relay};
+use super::{Alerts, Destination, Settings, message, secret};
 use crate::setup::lock;
 use crate::{preferences, rex};
 
@@ -150,15 +150,13 @@ fn mirror(alerts: &Alerts, status: &Status, settings: &Settings, deliveries: &mu
         if !settings.active(destination) {
             return None;
         }
-        let secret = alerts.secrets.get(destination).ok().flatten();
-        if secret.is_none() {
-            deliveries[destination as usize].report(
-                status,
-                destination,
-                "Stopped: the destination's secret is no longer saved.",
-            );
+        match alerts.target_secret(settings, destination) {
+            Ok(secret) => Some(secret),
+            Err(error) => {
+                deliveries[destination as usize].report(status, destination, &format!("Stopped: {error}"));
+                None
+            }
         }
-        secret
     });
     if secrets.iter().all(Option::is_none) {
         return Ended::Off;
@@ -173,7 +171,7 @@ fn mirror(alerts: &Alerts, status: &Status, settings: &Settings, deliveries: &mu
             let index = destination as usize;
             let (sender, waiting) = mpsc::sync_channel(WAITING);
             senders[index] = Some(sender);
-            let hosted_telegram = destination == Destination::Telegram && relay::valid_capability(&secret);
+            let hosted_telegram = destination == Destination::Telegram && secret::telegram_binding(&secret).is_some();
             let target = Target { alerts, settings, status, destination, secret, hosted_telegram, cancelled: &cancelled };
             let dropped = &dropped[index];
             workers[index] = Some(scope.spawn(move || delivery.pump(&waiting, dropped, &target)));
@@ -349,8 +347,8 @@ impl Delivery {
             return;
         };
         for attempt in 0..ATTEMPTS {
-            // Checked before every request, so that turning mirroring off
-            // holds even if this process was not told to stop.
+            // Recheck the settings before each attempt: the request's verified
+            // Telegram chat must still match the current forwarding settings.
             if target.stopped() || changed(alerts, settings).is_some() {
                 return;
             }

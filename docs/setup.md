@@ -161,7 +161,11 @@ In the browser, choose **Set up destination** (or **Manage destinations**). For 
 
 Each saved destination has its own forwarding switch and test button. Turn on both switches to send each alert to both places, or test either destination without enabling forwarding. Forgetting one leaves the other connected.
 
-**Connect with Milo (local preview).** Instead of entering your own secret, pair through the optional [connection service](../hosted/README.md). For Telegram, confirm in a **private DM** with the official bot; the relay delivers alerts to that DM. For Discord, authorize a webhook for your channel; your device delivers alerts directly to Discord. Review the destination in Milo before saving. Pairing does not turn forwarding on. Confirmed connections survive relay restarts; unfinished pairings do not. Manual setup needs no connection service.
+Changing the recipient or replacing its credential turns off forwarding to that provider until you approve it again. Re-saving identical manual credentials leaves forwarding unchanged. If another editor changes what will be sent while confirmation is open, review the updated details. An old preview Telegram credential without a verifiable chat identity must be paired again; Milo will not guess which DM it belongs to.
+
+**Connect with Milo (requires the hosted service).** The official endpoint is `https://connect.usemilo.net`; the settings dashboard still runs on your device. If the service is not available, use manual setup. For Telegram, confirm in a private DM with Milo’s bot. For Discord, authorize a webhook for your channel. Enter the finish code from the bot or authorization page **only in the Milo dashboard where you started pairing**. Never send that code to someone who shared a pairing link. Review and save the destination before enabling forwarding.
+
+Telegram alerts use the relay; Discord alerts go directly from your device to your channel. Manual setup works without the hosted service. For local development or deployment requirements, see the [relay guide](../hosted/README.md).
 
 <picture>
   <source media="(max-width: 600px)" srcset="img/web-alerts-mobile.webp">

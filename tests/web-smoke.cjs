@@ -512,17 +512,20 @@ async function checkHostedConnections(page, destination) {
   assert(initial.ok(), 'the local editor supplied fixture state');
   let state = await initial.json();
   const initialVersion = state.version;
+  const telegramUrl = `https://t.me/MiloSmokeBot?start=${'t'.repeat(43)}`;
+  const discordPath = `/discord/start/${'d'.repeat(43)}`;
+  const finishCode = 'ABCD1234';
   const providers = [
     {name: 'Telegram', provider: 'telegram', manual: 'Use your own bot', input: 'Bot token',
-      url: `https://t.me/MiloSmokeBot?start=${'t'.repeat(43)}`, chat: '1234',
-      label: 'Telegram DM · 1234', credential: 'milorelay_smoke_fixture_not_a_credential'},
+      url: telegramUrl, localUrl: telegramUrl, chat: '1234',
+      label: 'Telegram DM · 1234', credential: `milorelay_prod_${'p'.repeat(43)}`},
     {name: 'Discord', provider: 'discord', manual: 'Use your own webhook', input: 'Webhook link',
-      url: `http://127.0.0.1:6120/discord/start/${'d'.repeat(43)}`, chat: '',
-      label: 'Discord channel · 5678', credential: 'https://discord.com/api/webhooks/999/smoke-fixture'},
+      url: `https://connect.usemilo.net${discordPath}`, localUrl: `http://127.0.0.1:6120${discordPath}`, chat: '',
+      label: 'Discord channel · 5678', credential: 'https://discord.com/api/webhooks/99999/synthetic_SMOKE_fixture-00'},
   ];
   const context = page.context();
   const launches = [];
-  const providerUrls = new Set(providers.map(({url}) => url));
+  const providerUrls = new Set(providers.flatMap(({url, localUrl}) => [url, localUrl]));
   const outsideEditor = url => url.origin !== editorUrl.origin;
   const openProvider = async route => {
     const url = route.request().url();
@@ -535,6 +538,7 @@ async function checkHostedConnections(page, destination) {
   const responses = [];
   const saved = [];
   const scoped = [];
+  const alertConsents = {telegram: 'a'.repeat(32), discord: 'b'.repeat(32)};
   let hostedRequests = 0;
   const hosted = async route => {
     const request = route.request();
@@ -543,8 +547,16 @@ async function checkHostedConnections(page, destination) {
     hostedRequests++;
     const next = responses.shift();
     assert(next, 'hosted requests require a user action');
-    assert.deepEqual(request.postDataJSON(), next.request);
-    await route.fulfill(next.response);
+    const body = request.postDataJSON();
+    assert.deepEqual(body, next.request);
+    if (!next.save) return route.fulfill(next.response);
+    const {provider, chat} = next.save;
+    saved.push(body);
+    const alerts = {...state.alerts};
+    alerts.destination ??= provider;
+    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider], ...(chat ? {chat} : {})};
+    state = {...state, version: state.version + 1, alerts, message: null};
+    await route.fulfill({json: state});
   };
   const alertAction = async route => {
     const action = route.request().postDataJSON();
@@ -553,7 +565,8 @@ async function checkHostedConnections(page, destination) {
     const alerts = {...state.alerts};
     let message = null;
     if (field === 'forwarding') {
-      const {destination, enabled} = value;
+      const {destination, enabled, consent} = value;
+      assert.equal(consent, enabled ? alertConsents[destination] : undefined);
       scoped.push({field, value});
       assert(alerts[destination].saved, 'only a saved provider can be toggled');
       alerts[destination] = {...alerts[destination], active: enabled};
@@ -564,10 +577,7 @@ async function checkHostedConnections(page, destination) {
       assert(provider && alerts[value].saved, 'the test targets a saved provider');
       message = {text: `${provider.name} accepted the test message.`, error: false};
     } else {
-      assert(['telegram', 'discord'].includes(field), 'setup only saves the chosen provider');
-      saved.push(action);
-      alerts.destination ??= field;
-      alerts[field] = field === 'telegram' ? {saved: true, active: false, chat: value.chat} : {saved: true, active: false};
+      assert.fail(`unexpected alert action during hosted setup: ${field}`);
     }
     state = {...state, version: state.version + 1, alerts, message};
     await route.fulfill({json: state});
@@ -576,10 +586,11 @@ async function checkHostedConnections(page, destination) {
   await page.route(hostedPath, hosted);
   await page.route(actionPath, alertAction);
   try {
-    for (const [index, {name, provider, manual, input, url, chat, label, credential}] of providers.entries()) {
+    for (const [index, {name, provider, manual, input, url, localUrl, chat, label, credential}] of providers.entries()) {
       const wizard = dialog(page, `Destinations / ${name}`);
       const connect = button(wizard, 'Connect with Milo');
       const check = button(wizard, 'Check connection');
+      const finish = wizard.getByLabel('Finish code');
       const approve = button(wizard, `Save ${name}`);
       const proposal = wizard.getByRole('heading', {name: 'Proposed destination'});
       const requestsBeforeOpen = hostedRequests;
@@ -599,55 +610,78 @@ async function checkHostedConnections(page, destination) {
       await wizard.getByRole('textbox', {name: input, exact: true}).waitFor();
       await button(wizard, 'Connection options').click();
 
-      if (index === 0) {
-        responses.push({request: start, response: {json: {deviceKey: 'unsafe-pairing', url: 'https://t.me.example.invalid/milo'}}});
-        await connect.click();
-        await status(wizard, 'Connect with Milo is unavailable').waitFor();
-        assert.deepEqual(launches, [], 'an untrusted pairing URL is not opened');
-      }
+      const unsafeUrl = index === 0 ? `https://t.me.example.invalid/MiloSmokeBot?start=${'t'.repeat(43)}` : localUrl;
+      const launchCount = launches.length;
+      responses.push({request: start, response: {json: {deviceKey: 'u'.repeat(43), url: unsafeUrl, mode: 'production'}}});
+      await connect.click();
+      await status(wizard, 'Connect with Milo is unavailable').waitFor();
+      assert.equal(launches.length, launchCount, 'an untrusted or downgraded pairing URL is not opened');
 
-      const startPair = async deviceKey => {
-        responses.push({request: start, response: {json: {deviceKey, url}}});
+      const startPair = async (deviceKey, mode) => {
+        const pairingUrl = mode === 'production' ? url : localUrl;
+        responses.push({request: start, response: {json: {deviceKey, url: pairingUrl, mode}}});
         const [popup] = await Promise.all([context.waitForEvent('page'), connect.click()]);
-        await popup.waitForURL(url);
+        await popup.waitForURL(pairingUrl);
         assert(await popup.evaluate(() => window.opener === null), 'the provider page cannot access the local editor');
         await popup.close();
         await check.waitFor();
-        assert.equal(responses.length, 0, 'the start request completed without automatically claiming');
+        assert.equal(await finish.count(), mode === 'production' ? 1 : 0, 'only production requires a finish code');
+        assert.equal(responses.length, 0, 'the start request completed without automatically checking or saving');
       };
-      const claim = async (deviceKey, response) => {
-        responses.push({request: {action: 'claim', deviceKey}, response});
+      const preview = async (deviceKey, response, code) => {
+        responses.push({request: {action: 'preview', provider, deviceKey, ...(code ? {finishCode: code} : {})}, response});
         await check.click();
       };
       if (index === 0) {
-        const deviceKey = 'expired-fixture-pair';
-        await startPair(deviceKey);
-        await claim(deviceKey, {status: 404, json: {error: diagnostic}});
+        const deviceKey = 'e'.repeat(43);
+        await startPair(deviceKey, 'production');
+        await finish.fill(finishCode);
+        await preview(deviceKey, {status: 404, json: {error: diagnostic}}, finishCode);
         await status(wizard, 'This connection expired or was already used').waitFor();
         assert.equal(await check.count() + await approve.count(), 0, 'expired pairing must start over');
       }
-      const ready = {json: {provider, label, credential, chat}};
-      for (const attempt of ['discard', 'save']) {
-        const deviceKey = `${provider}-${attempt}-fixture-pair`;
-        await startPair(deviceKey);
-        if (attempt === 'discard') {
+      for (const attempt of ['local', 'cancel', 'save']) {
+        const production = attempt !== 'local';
+        const deviceKey = attempt[0].repeat(43);
+        await startPair(deviceKey, production ? 'production' : 'local');
+        if (!production) {
           if (index === 1) {
-            await claim(deviceKey, {status: 502, json: {error: diagnostic}});
+            await preview(deviceKey, {status: 502, json: {error: diagnostic}});
             await status(wizard, 'Couldn’t check the connection').waitFor();
             assert.equal(await wizard.getByText(diagnostic).count(), 0);
           }
-          await claim(deviceKey, {status: 202, json: {pending: true}});
+          await preview(deviceKey, {status: 202, json: {pending: true}});
           await status(wizard, 'Not connected yet').waitFor();
           assert.equal(await approve.count(), 0, 'pending setup cannot be saved');
+        } else if (attempt === 'save') {
+          const requestsBeforeCode = hostedRequests;
+          await check.click();
+          await status(wizard, 'Enter the eight-character finish code').waitFor();
+          assert.equal(hostedRequests, requestsBeforeCode, 'production sends no preview without an entered code');
+          await finish.fill('deadbeef');
+          await preview(deviceKey, {status: 400, json: {error: diagnostic}}, 'DEADBEEF');
+          await status(wizard, 'The finish code did not match').waitFor();
+          assert.equal(await wizard.getByText(diagnostic).count(), 0);
+          await finish.fill(finishCode);
+          if (index === 0) {
+            await preview(deviceKey, {json: {provider, label, credential, chat}}, finishCode);
+            await status(wizard, 'Couldn’t check the connection').waitFor();
+            assert.equal(await approve.count(), 0, 'review must never accept a credential');
+          }
+        } else {
+          await finish.fill(finishCode);
         }
-        await claim(deviceKey, ready);
+        await preview(deviceKey, {json: {provider, label, chat}}, production ? finishCode : undefined);
         await proposal.waitFor();
         await wizard.getByText(label, {exact: true}).waitFor();
         await wizard.getByText('Saving does not turn forwarding on.', {exact: true}).waitFor();
-        assert.equal(saved.length, index, 'claiming a destination does not save it');
+        assert.equal(saved.length, index, 'previewing a destination does not save it');
         const markup = await wizard.innerHTML();
-        assert(!markup.includes(credential) && !markup.includes(deviceKey), 'the proposal never renders secrets');
-        if (attempt === 'discard') {
+        assert(!markup.includes(credential) && !markup.includes(deviceKey) && !markup.includes(finishCode),
+          'the proposal never renders secrets');
+        assert.equal(await finish.count(), 0, 'review unmounts the finish code input');
+        if (attempt !== 'save') {
+          const requestsBeforeCancel = hostedRequests;
           if (index === 0) await button(wizard, 'Cancel').click();
           else {
             await button(wizard, 'Back to destinations').click();
@@ -655,7 +689,15 @@ async function checkHostedConnections(page, destination) {
           }
           await connect.waitFor();
           assert.equal(await proposal.count() + await approve.count(), 0, 'cancelling or going back discards the proposal');
+          assert.equal(hostedRequests, requestsBeforeCancel, 'cancel leaves a reviewed pairing unclaimed');
         } else {
+          const request = {action: 'save', provider, deviceKey, finishCode, label, version: state.version};
+          responses.push({request, response: {status: 502, json: {error: diagnostic}}});
+          await approve.click();
+          await status(wizard, 'Your proposed destination hasn’t changed').waitFor();
+          await proposal.waitFor();
+          assert.equal(saved.length, index, 'a transient Save failure retains the reviewed destination');
+          responses.push({request, save: {provider, chat}});
           await approve.click();
           await wizard.getByText(chat ? `Saved destination · ${chat}` : 'Saved destination', {exact: true}).waitFor();
           assert.equal(await proposal.count(), 0, 'saving clears the proposal');
@@ -670,12 +712,11 @@ async function checkHostedConnections(page, destination) {
       await button(manager, 'Close destinations').click();
     }
     assert.equal(responses.length, 0);
-    assert.deepEqual(launches, [providers[0].url, ...providers.flatMap(({url}) => [url, url])],
+    assert.deepEqual(launches, [providers[0].url, ...providers.flatMap(({url, localUrl}) => [localUrl, url, url])],
       'only approved launches reached the provider fixtures');
-    assert.deepEqual(saved, providers.map(({provider, credential, chat}, index) => ({
-      action: 'alerts', field: provider, version: initialVersion + index,
-      value: provider === 'telegram' ? {token: credential, chat, hosted: true} : {webhook: credential, hosted: true},
-    })), 'only explicit Save submits the provider credential to the existing setup action');
+    assert.deepEqual(saved, providers.map(({provider, label}, index) => ({
+      action: 'save', provider, deviceKey: 's'.repeat(43), finishCode, label, version: initialVersion + index,
+    })), 'only explicit Save finalizes; the browser never submits provider credentials');
 
     await button(destination, 'Manage destinations').click();
     const manager = dialog(page, 'Destinations');
@@ -697,8 +738,8 @@ async function checkHostedConnections(page, destination) {
     assert.deepEqual(scoped, [
       {field: 'test', value: 'discord'},
       {field: 'test', value: 'telegram'},
-      {field: 'forwarding', value: {destination: 'telegram', enabled: true}},
-      {field: 'forwarding', value: {destination: 'discord', enabled: true}},
+      {field: 'forwarding', value: {destination: 'telegram', enabled: true, consent: alertConsents.telegram}},
+      {field: 'forwarding', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: false}},
     ]);
     await button(manager, 'Close destinations').click();
