@@ -32,7 +32,8 @@ const NOTE: Duration = Duration::from_secs(4);
 pub struct Outline {
     repo: Repo,
     /// Pending files, with all uncommitted entries before the unpushed entries.
-    /// A path can occur once in each group.
+    /// A path can occur once in each group, and once more among the
+    /// uncommitted when Git lists it as both tracked and untracked.
     pending: Vec<PendingFile>,
     untracked: untracked::Untracked,
     /// Without git, the listing the tree was built from, to notice changes.
@@ -237,11 +238,15 @@ impl Outline {
 
     /// Marks files that changed, and finds the path written most recently.
     fn mark_files(&mut self, old: &[PendingFile], now: Instant) -> Option<&str> {
-        let before: HashMap<(&str, bool), &PendingFile> =
-            old.iter().map(|f| ((f.path.as_str(), f.unpushed), f)).collect();
+        /// A file removed from the index but kept on disk is listed as deleted
+        /// and as untracked. Each is compared with its own earlier entry.
+        fn entry(f: &PendingFile) -> (&str, bool, bool) {
+            (f.path.as_str(), f.unpushed, f.kind == Kind::Untracked)
+        }
+        let before: HashMap<_, &PendingFile> = old.iter().map(|f| (entry(f), f)).collect();
         let mut newest: Option<&PendingFile> = None;
         for f in &self.pending {
-            if before.get(&(f.path.as_str(), f.unpushed)).is_some_and(|old| *old == f) {
+            if before.get(&entry(f)).is_some_and(|old| *old == f) {
                 continue;
             }
             self.attention.mark(&f.path, now);
@@ -884,6 +889,23 @@ mod tests {
         assert_eq!(o.selected_path().as_deref(), Some("src/deep/util.rs"));
         let at = o.note.as_ref().unwrap().1;
         assert_eq!(draw_at(&mut o, 65, 12, at).text()[11].trim_start(), "following util.rs");
+    }
+
+    #[test]
+    fn a_file_listed_as_removed_and_as_untracked_is_not_marked_when_another_file_changes() {
+        let f = Fixture::new();
+        f.write("kept.txt", "still on disk\n");
+        f.commit("first");
+        f.git(&["rm", "-q", "--cached", "kept.txt"]);
+        let mut o = open(&f);
+        o.key(Key::Focus(false));
+        assert_eq!(o.pending.iter().filter(|file| file.path == "kept.txt").count(), 2);
+
+        f.write("other.txt", "unrelated\n");
+        assert!(o.check());
+        assert!(o.attention.marked_at("other.txt", false).is_some());
+        assert!(o.attention.marked_at("kept.txt", false).is_none());
+        assert_eq!(o.selected_path().as_deref(), Some("other.txt"));
     }
 
     #[test]

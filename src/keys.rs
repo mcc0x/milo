@@ -106,6 +106,9 @@ pub struct Input {
     pending: Vec<u8>,
     /// An overlong sequence is ignored through its terminator, not decoded as keys.
     discard: Option<Sequence>,
+    /// The terminal has sent the last answer it was asked for. Until then an
+    /// unfinished control string may be one of its answers, still arriving.
+    answered: bool,
     paste: Paste,
 }
 
@@ -160,6 +163,19 @@ impl Input {
         self.paste.done.pop_front().flatten()
     }
 
+    /// Reads and drops input until the terminal's last answer or `until`. An
+    /// answer left unread would be the shell's to read once the keyboard is its again.
+    pub fn drain_answers(&mut self, keyboard: &mut File, until: Instant) {
+        let mut keys = Vec::new();
+        while !self.answered && wait_for_sequence(keyboard, until) {
+            self.receive(keyboard, &mut keys);
+            if keys.contains(&Key::Eof) {
+                return;
+            }
+            keys.clear();
+        }
+    }
+
     pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
         let mut buf = [0u8; READ_SIZE];
         let mut read_input = false;
@@ -210,6 +226,7 @@ impl Input {
                 return;
             }
         }
+        let decoded = keys.len();
         if self.pending.is_empty() {
             self.pending.extend_from_slice(decode(bytes, &mut self.paste, keys));
         } else {
@@ -218,6 +235,7 @@ impl Input {
             let used = self.pending.len() - left;
             self.pending.drain(..used);
         }
+        self.answered |= keys[decoded..].contains(&Key::Answered);
         if self.pending.len() >= READ_SIZE
             && let Some(sequence) = Sequence::of(&self.pending[1..])
         {
@@ -228,11 +246,21 @@ impl Input {
     }
 
     fn finish(&mut self, keys: &mut Vec<Key>) {
-        if self.discard.is_none() && Sequence::of(self.pending.get(1..).unwrap_or_default()).is_none() {
-            if self.pending == [0x1b] {
-                keys.push(Key::Esc);
+        if self.discard.is_some() {
+            return;
+        }
+        match Sequence::of(self.pending.get(1..).unwrap_or_default()) {
+            None => {
+                if self.pending == [0x1b] {
+                    keys.push(Key::Esc);
+                }
+                self.pending.clear();
             }
-            self.pending.clear();
+            // After its last answer the terminal sends no control string, so one
+            // that the wait did not finish is an Alt-modified key such as Alt-].
+            // Nothing would end it, and it would take every later key with it.
+            Some(sequence) if self.answered && sequence != Sequence::Csi => self.pending.clear(),
+            Some(_) => {}
         }
     }
 }
@@ -633,6 +661,27 @@ mod tests {
         input.finish(&mut keys);
         input.feed(b"\\k", &mut keys);
         assert_eq!(keys, [Key::Char('k')]);
+    }
+
+    #[test]
+    fn an_alt_key_that_opens_a_control_string_does_not_take_the_keys_after_it() {
+        for opener in *b"]P_^X" {
+            let mut input = Input::default();
+            let mut keys = Vec::new();
+            input.feed(b"\x1b[?62;22c", &mut keys);
+            input.feed(&[0x1b, opener], &mut keys);
+            input.finish(&mut keys);
+            input.feed(b"q\x03", &mut keys);
+            assert_eq!(keys, [Key::Answered, Key::Char('q'), Key::Ctrl(b'c')], "Alt-{}", char::from(opener));
+        }
+
+        // Before the last answer, a pause inside an answer still does not type its text.
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.feed(b"\x1b]", &mut keys);
+        input.finish(&mut keys);
+        input.feed(b"11;rgb:0/0/f\x1b\\\x1b[?62;22ck", &mut keys);
+        assert_eq!(keys, [Key::Background([0, 0, 255]), Key::Answered, Key::Char('k')]);
     }
 
     #[test]

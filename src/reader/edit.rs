@@ -313,10 +313,14 @@ impl Editor {
         self.replace(self.cursor, self.cursor, text)
     }
 
-    fn newline(&mut self) -> Step {
+    /// The spaces and tabs before the cursor that start its line: what a new line begins with.
+    fn indent_before_cursor(&self) -> &str {
         let before = &self.row()[..self.cursor.col];
-        let indent = &before[..before.len() - before.trim_start_matches([' ', '\t']).len()];
-        let text = format!("{}{indent}", self.buffer.newline());
+        &before[..before.len() - before.trim_start_matches([' ', '\t']).len()]
+    }
+
+    fn newline(&mut self) -> Step {
+        let text = format!("{}{}", self.buffer.newline(), self.indent_before_cursor());
         self.insert(&text)
     }
 
@@ -548,7 +552,7 @@ impl Editor {
         let had_notice = self.notice.take().is_some();
         let adds = match key {
             Key::Char(c) => c.len_utf8(),
-            Key::Enter => self.buffer.newline().len() + self.cursor.col,
+            Key::Enter => self.buffer.newline().len() + self.indent_before_cursor().len(),
             Key::Ctrl(b'i') => self.indent.len(),
             _ => 0,
         };

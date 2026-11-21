@@ -198,11 +198,19 @@ pub(super) fn parse_files(raw: &[u8]) -> DiffFiles {
     diff
 }
 
+/// A commit's time as `%ct` prints it: the digits the commit recorded. Git
+/// prints none for a commit without a date, and shows the start of 1970 for
+/// that and for a date too large to hold.
+fn commit_time(digits: &[u8]) -> Option<i64> {
+    let digits = std::str::from_utf8(digits).ok().filter(|text| text.bytes().all(|b| b.is_ascii_digit()))?;
+    Some(digits.parse().unwrap_or(0))
+}
+
 pub(super) fn commit_version(raw: &[u8], id: CommitId<'_>) -> Option<CommitVersion> {
     let (hash, time) = std::str::from_utf8(raw).ok()?.trim_end().split_once('\0')?;
     // Git also accepts refs made of hex digits. Match the object name, not the ref name.
     hash.get(..id.0.len())?.eq_ignore_ascii_case(id.0).then_some(())?;
-    Some(CommitVersion { hash: hash.to_string(), time: time.parse().ok()? })
+    Some(CommitVersion { hash: hash.to_string(), time: commit_time(time.as_bytes())? })
 }
 
 /// Parses history and marks the commits in the unpushed list.
@@ -213,7 +221,7 @@ pub(super) fn parse_history(log: &[u8], unpushed: &[u8]) -> Option<Vec<Commit>> 
         let mut fields = log.strip_suffix(b"\0")?.split(|&b| b == 0);
         while let Some(hash) = fields.next() {
             let name = std::str::from_utf8(hash).ok()?;
-            let time = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+            let time = commit_time(fields.next()?)?;
             let parents = fields.next()?;
             let subject = fields.next()?;
             commits.push(Commit {
@@ -362,5 +370,16 @@ mod tests {
         assert_eq!((commits[0].subject.as_str(), commits[0].time), ("first\nline", 17));
         assert!(commits[1].subject.is_empty() && commits[1].unpushed && commits[1].merge);
         assert!(parse_history(b"aaaa\0invalid\0\0subject\0", b"").is_none());
+    }
+
+    #[test]
+    fn a_commit_without_a_usable_date_keeps_its_place_in_history() {
+        // Git prints no digits for a commit that records no date, and all of them for one out of range.
+        let commits =
+            parse_history(b"aaaa\x0017\0\0newer\0bbbb\0\0aaaa\0undated\0cccc\x0099999999999999999999\0\0huge\0", b"");
+        let times: Vec<_> = commits.unwrap().iter().map(|c| (c.subject.clone(), c.time)).collect();
+        assert_eq!(times, [("newer".to_owned(), 17), ("undated".to_owned(), 0), ("huge".to_owned(), 0)]);
+        assert_eq!(commit_version(b"bbbb\0\n", CommitId::parse("bbbb").unwrap()).map(|c| c.time), Some(0));
+        assert!(commit_version(b"bbbb\0soon\n", CommitId::parse("bbbb").unwrap()).is_none());
     }
 }

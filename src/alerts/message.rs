@@ -22,13 +22,12 @@ const MILO_ICON: &str = "https://usemilo.net/apple-touch-icon.png";
 fn discord_timestamp() -> String {
     let now = libc::time_t::try_from(crate::when::now()).unwrap_or(0);
     let mut utc = std::mem::MaybeUninit::uninit();
-    // SAFETY: both pointers are valid for this call; success initializes the entire tm.
-    let utc = unsafe {
-        if libc::gmtime_r(&now, utc.as_mut_ptr()).is_null() {
-            return String::new();
-        }
-        utc.assume_init()
-    };
+    // SAFETY: both pointers are valid for this call, which writes nothing outside the tm.
+    if unsafe { libc::gmtime_r(&now, utc.as_mut_ptr()) }.is_null() {
+        return String::new();
+    }
+    // SAFETY: gmtime_r succeeded, which initializes the entire tm.
+    let utc = unsafe { utc.assume_init() };
     format!(
         ",\"timestamp\":\"{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z\"",
         utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec

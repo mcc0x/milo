@@ -1,21 +1,21 @@
 # milo
 
-> milo provides small terminal panes for a live file tree, Git history, usage, and a read-only file reader. The panes work on their own or alongside your shell in Rex.
+> milo provides small terminal panes for a live file tree, Git history, usage, and a file reader that can edit a working text file when asked. The panes work on their own or alongside your shell in Rex.
 
-milo does not write to the project it displays. The v0.1.4 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
+milo writes to the project it displays only when you save a file you edited in its reader. The v0.1.4 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use `brew install mcc0x/milo/milo` or the release installer below. Building from source requires Rust 1.91 or later and Git. The Rust crate depends only on `libc`.
 
 ## Using milo
 
 - [Full documentation](https://usemilo.net/llms-full.txt): The main-branch guides and agent instructions in one text file.
-- [README](https://github.com/mcc0x/milo#readme): Installation, a picture of each pane and the main commands.
+- [README](https://github.com/mcc0x/milo/blob/main/README.md): Installation, a picture of each pane and the main commands.
 - [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.4/install.sh): Downloads the v0.1.4 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
 - [Source installer](https://github.com/mcc0x/milo/blob/main/install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
 - [Agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md): How to check milo and open a reader in the user's terminal, including at a Git commit.
-- [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Rex actions, new shell tabs and the Claude Code status line.
+- [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
 - [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md): Keyboard shortcuts and what the panes show.
 - [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md): Where the figures come from and what they mean.
-- [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the opt-in session and project names, Milo's Discord application or your own, and its limits.
-- [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md): Pane sizes, history and the file reader.
+- [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the opt-in session and project names, Milo's Discord application or your own, `milo presence`, and its limits.
+- [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md): Pane sizes, history, the file reader and its languages, editing a file, and the formatters milo can run.
 
 ## Developing milo
 

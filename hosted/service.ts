@@ -117,8 +117,9 @@ export async function createService({
   const json = (body: object, status = 200, extra?: Record<string, string>) =>
     Response.json(body, { status, headers: { ...headers, ...extra } });
   const error = (status: number, message: string) => json({ error: message }, status);
+  // Milo's sender reads the wait from the body, as it does for Telegram and Discord.
   const rateLimited = (seconds: number) =>
-    json({ error: "Too many requests; try again later." }, 429, { "Retry-After": String(seconds) });
+    json({ error: "Too many requests; try again later.", retry_after: seconds }, 429, { "Retry-After": String(seconds) });
   const plain = (body: string | null, status: number, extra?: Record<string, string>) =>
     new Response(body, { status, headers: { ...headers, "Content-Type": "text/plain; charset=utf-8", ...extra } });
   const absolute = (path: string) => production ? `${PRODUCTION_ORIGIN}${path}` : path;
@@ -658,7 +659,11 @@ export async function createService({
     if (polling) return 1000;
     polling = true;
     try {
-      const result = await tg("getUpdates", { offset, timeout: 25, limit: 20, allowed_updates: ["message", "callback_query"] }, 32_000, pollSignal);
+      // Telegram answers an idle long poll only when its timeout ends. Until the queue is known to be
+      // empty, ask without waiting, so that a start or a failed poll does not hold sends back that long.
+      const result = await tg("getUpdates", {
+        offset, timeout: telegramCaughtUp ? 25 : 0, limit: 20, allowed_updates: ["message", "callback_query"],
+      }, 32_000, pollSignal);
       if (pollSignal?.aborted) return null;
       if (!Array.isArray(result.result) || result.result.length) telegramCaughtUp = false;
       if (result.status === 409 || result.status === 401 || result.status === 404) {
