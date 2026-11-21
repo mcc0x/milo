@@ -64,12 +64,14 @@ impl Project {
     }
 
     fn slow_git(&self, command: &mut Command) {
+        self.stand_in_git(command, "while [ -d \"$HOME\" ] && [ ! -e \"$HOME/go\" ]; do sleep 0.02; done\nexit 1\n");
+    }
+
+    /// Puts a `git` that runs `script` first on the command's path.
+    fn stand_in_git(&self, command: &mut Command, script: &str) {
         let git = self.0.join("git");
-        fs::write(
-            &git,
-            "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\n[ \"$1\" = --exec-path ] && exit 1\nwhile [ -d \"$HOME\" ] && [ ! -e \"$HOME/go\" ]; do sleep 0.02; done\nexit 1\n",
-        )
-        .unwrap();
+        let start = "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\n[ \"$1\" = --exec-path ] && exit 1\n";
+        fs::write(&git, format!("{start}{script}")).unwrap();
         fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
         // A sibling's fork can inherit the writer until it execs. Probe the script
         // itself before starting a pane that assumes it can execute immediately.
@@ -384,6 +386,26 @@ fn unavailable_git_is_distinguished_from_a_plain_folder() {
     let mut reader = Terminal::run(&mut milo(&["view", "page.txt"]));
     reader.until(note);
     reader.until("local-file-contents");
+}
+
+#[test]
+fn a_git_that_cannot_give_whole_paths_still_names_a_project_by_its_folder() {
+    let project = Project::new();
+    project.git(&["init", "-q", "--template="]);
+    fs::create_dir(project.0.join("project/deep")).unwrap();
+    let real = PathBuf::from(project.git(&["--exec-path"]).trim_end()).join("git");
+    // Git before 2.31 does not know `--path-format`. Like any option `rev-parse` does not know, it is
+    // printed back as it was given, and the shared folder is then named from where Git was asked.
+    let older = "for word do\n  shift\n  [ \"$word\" = --path-format=absolute ] && word=--unknown-to-this-git\n  \
+                 set -- \"$@\" \"$word\"\ndone\nexec \"$REAL_GIT\" \"$@\"\n";
+    for folder in ["project", "project/deep"] {
+        let mut milo = project.command(env!("CARGO_BIN_EXE_milo"));
+        project.stand_in_git(&mut milo, older);
+        milo.env("REAL_GIT", &real).args(["tab-title", "name"]).arg(project.0.join(folder));
+        let named = milo.output().unwrap();
+        assert!(named.status.success(), "{}", String::from_utf8_lossy(&named.stderr));
+        assert_eq!(String::from_utf8(named.stdout).unwrap(), "project\n", "asked in {folder}");
+    }
 }
 
 #[test]

@@ -397,7 +397,13 @@ local function fill_rail(ctx, selected, live, cwd, shell, rows)
         if positions[existing] < positions[role] then predecessor = existing end
       end
       local neighbour = successor or predecessor
-      local before = successor ~= nil
+      -- A pane that was closed left its room to one of its neighbours. Take
+      -- the room back from the one that holds more than its own share.
+      if successor and predecessor then
+        local function spare(other) return live.shares[other] - (desired[other] or live.shares[other]) end
+        if spare(predecessor) > spare(successor) then neighbour = predecessor end
+      end
+      local before = neighbour == successor
       local share = desired[role] / (desired[role] + (desired[neighbour] or live.shares[neighbour]))
       local height = live.shares[neighbour]
       if role == "usage" and not (selected.shares and selected.shares.usage > 0) then
@@ -634,9 +640,8 @@ if ... == "listener" then
     return true
   end
 
-  local function ask(cwd, agent, cached_only)
+  local function ask(cwd, agent)
     local answer = answers[cwd]
-    if cached_only and not answer then return end
     if answer and not stands(answer) then answers[cwd], kept, answer = nil, kept - 1, nil end
     local who = agent or ""
     local known = answer and (answer.untitled and "" or answer.titles[who])
@@ -650,8 +655,10 @@ if ... == "listener" then
     -- For the same files, keep the earlier readings: they were taken before Milo read them.
     if not (answer and same_files(answer.grounds, grounds)) then
       if answer then kept = kept - 1 end
-      -- A listener can outlive many folders. Start again rather than grow without end.
-      if kept >= 256 then answers, kept = {}, 0 end
+      -- A listener can outlive many folders. Start again rather than grow without end,
+      -- but only once it holds as many folders as Rex's default limits allow tabs:
+      -- starting again makes every open tab ask once more.
+      if kept >= 4096 then answers, kept = {}, 0 end
       answer = { grounds = grounds, titles = {} }
       answers[cwd], kept = answer, kept + 1
     end
@@ -712,8 +719,9 @@ if ... == "listener" then
           selected = nil
           return false
         end
-        local current, owner_changed = still_current(owner)
-        if owner_changed then return false end
+        -- The tab waits when its measuring client changed or its shell moved.
+        local current, wait = still_current(owner)
+        if wait then return false end
         if current then make_rail(ctx, selected, cwd, ctx.block_id, ctx.block_id, rows) end
         return true
       end

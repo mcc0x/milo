@@ -92,9 +92,10 @@ local function retitle(window_id)
   local key = cwd .. "\n" .. (agent or "")
   local changed = key ~= record.key
   -- Recheck file-backed answers on events even when this shell has not
-  -- moved. Answers without grounds still wait for a new cwd or agent.
+  -- moved, and ask again for one that is no longer kept. Answers without
+  -- grounds still wait for a new cwd or agent.
   if changed or record.cached then
-    local title, cached = titles.ask(cwd, agent, not changed)
+    local title, cached = titles.ask(cwd, agent)
     record.cached = cached
     if changed or (title ~= nil and title ~= record.title) then
       record.key, record.title, record.refused = key, title, nil
@@ -289,7 +290,9 @@ local function arrange(tab)
       -- Rex runs handlers one at a time, but the tab can change while a
       -- profile or size is being read. Revalidate just before the split.
       local current = shell(tab)
-      if not current or current.cwd ~= cwd then return false end
+      if not current then return false end
+      -- A shell that moved meanwhile is arranged for where it went, once an event says so.
+      if current.cwd ~= cwd then return false, true end
       local view = rex.session.view{ session_id = ctx.session_id }
       local window = find_window(view, tab.window_id)
       local block = window and single_pane(window)
