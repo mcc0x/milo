@@ -868,7 +868,7 @@ impl Drop for Editor {
         }
         let restored = self.restored.as_ref().filter(|(change, _)| self.buffer.holds(*change)).map(|(_, draft)| draft);
         let note = match self.place.drafts() {
-            Some(drafts) => drafts.keep(&self.original.bytes_for(&self.buffer.text()), restored),
+            Some(drafts) => drafts.keep(self.original.with_mark(self.buffer.text()).as_bytes(), restored),
             None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
         };
         rescue::tell(note);
