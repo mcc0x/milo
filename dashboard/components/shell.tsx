@@ -1,6 +1,7 @@
 'use client';
 
 import {useEffect, useLayoutEffect, useRef, useState} from 'react';
+import Hosts, {HostSummary} from './hosts';
 import Integrations from './integrations';
 import Panes from './panes';
 import {SaveChoices} from './controls';
@@ -16,11 +17,12 @@ const tabs = [
   {id: 'usage', label: 'Usage', icon: <path d="M4 4v15h16M8 15v-4m5 4V6m5 9V9"/>},
   {id: 'integrations', label: 'Integrations', icon: <path d="m8 12 4 4m-6 2 4-4m3-8 2-2m2 6 2-2M8 10l6 6 4-4-6-6z"/>},
   {id: 'menubar', label: 'Menu Bar', icon: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 10h18m-5-3h2"/></>},
+  {id: 'hosts', label: 'Hosts', icon: <><rect x="3" y="4" width="8" height="6" rx="1.5"/><rect x="13" y="14" width="8" height="6" rx="1.5"/><path d="M7 10v4a3 3 0 0 0 3 3h3m4-3v-4a3 3 0 0 0-3-3h-3"/></>},
   {id: 'health', label: 'Health', icon: <path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM6 12h3l2-4 3 8 2-4h2"/>},
 ] as const;
 
 type Page = (typeof tabs)[number]['id'];
-const views = {layout: Layout, panes: Panes, usage: Usage, integrations: Integrations, menubar: MenuBar, health: Health};
+const views = {layout: Layout, panes: Panes, usage: Usage, integrations: Integrations, menubar: MenuBar, hosts: Hosts, health: Health};
 const connectionLabels = {closed: 'Closed', ready: 'Local session', offline: 'Not connected', opening: 'Connecting'};
 
 function isAvailable(page: Page, state: SessionState | undefined) {
@@ -71,7 +73,8 @@ function SessionBar() {
             {path ? <span className="sr-only">{context.worktree ? 'Git worktree' : 'Directory'}: {path}</span> : null}
           </> : null}
         </div>
-        <span id="connection" className="connection" data-state={status}>{connectionLabels[status]}</span>
+        <span id="connection" className="connection" data-state={status}>
+          {status === 'ready' && state?.host?.forwarded ? `${state.host.name} · forwarded` : connectionLabels[status]}</span>
         <p id="reopen-panes" className="reopen-panes" hidden={!reopenNote}>{reopenNote}</p>
       </div>
       <button id="done" className="button secondary" type="button" disabled={running || closing} onClick={done}>Done</button>
@@ -187,6 +190,8 @@ function Health() {
       </button>
       </div>
       {result?.note && <p className="setting-detail health-note">{result.note}</p>}
+      {state.host ? <div className="health-host"><span className="sr-only" id="health-host-title">This host</span>
+        <HostSummary host={state.host} headingId="health-host-title"/></div> : null}
       </div>
     </section>
   );

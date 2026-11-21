@@ -377,6 +377,54 @@ async function usageToolsPersisted(page) {
   await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
 }
 
+// One host stands for both ends: what it exports is edited by hand and imported again.
+async function copySettingsThroughHosts(page, env) {
+  const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
+  const before = await readFile(preferences, 'utf8');
+  await section(page, 'Hosts').click();
+  await page.getByRole('heading', {name: 'This host', exact: true}).waitFor();
+  await page.getByText('milo web --host LABEL', {exact: true}).waitFor();
+  const create = button(page, 'Create bundle');
+  assert(await create.isDisabled(), 'nothing is exported until a group is chosen');
+  await page.getByRole('checkbox', {name: /^Usage display/}).check();
+  await create.click();
+  const exported = page.getByRole('textbox', {name: 'Exported settings bundle', exact: true});
+  await exported.waitFor();
+  const bundle = await exported.inputValue();
+  assert.match(bundle, /^milo-settings 1\n/);
+  assert.match(bundle, /^usage_claude = always$/m);
+  assert.doesNotMatch(bundle, /tab_titles|deepseek|icons/, 'only the chosen group, and no integration or account');
+
+  const incoming = `${bundle.replace('usage_claude = always', 'usage_claude = hide')}tab_titles = false\nusage_deepseek = always\n`;
+  await page.getByRole('textbox', {name: /^Paste a bundle/}).fill(incoming);
+  const importButton = button(page, 'Import 1 setting');
+  assert.equal(await importButton.count(), 0, 'nothing can be imported before a preview');
+  await button(page, 'Preview').click();
+  const preview = page.getByRole('group', {name: 'What this import changes', exact: true});
+  const row = preview.getByRole('row', {name: /^Claude Code in Usage/});
+  await row.waitFor();
+  assert.deepEqual(await row.getByRole('cell').allTextContents(), ['always', 'hide']);
+  await preview.getByText('Left out: tab_titles (set on each host, never imported)').waitFor();
+  await preview.getByText('Left out: usage_deepseek (set on each host, never imported)').waitFor();
+  assert.equal(await readFile(preferences, 'utf8'), before, 'a preview saves nothing');
+
+  await importButton.click();
+  await status(page, 'Imported 1 setting. Undo is in Hosts if you change your mind.').waitFor();
+  const imported = await readFile(preferences, 'utf8');
+  assert.match(imported, /^usage_claude = hide$/m);
+  assert.match(imported, /^tab_titles = true$/m, 'the integration switch stayed as this host had it');
+  assert.doesNotMatch(imported, /deepseek/);
+
+  await button(page, 'Undo import').click();
+  await button(dialog(page, 'Take back the last import?'), 'Undo import').click();
+  await status(page, 'The last import was taken back.').waitFor();
+  assert.equal(await readFile(preferences, 'utf8'), before, 'undo restored the file byte for byte');
+  assert.equal(await button(page, 'Undo import').count(), 0);
+  await section(page, 'Layout').click();
+  await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();
+  console.log('Hosts: a chosen group exported, previewed, imported without its integration lines, and undone');
+}
+
 async function pressAfterNumberEdit(page) {
   const field = number(page, 'Rail width');
   const right = page.getByRole('radio', {name: 'Right', exact: true});
@@ -1091,6 +1139,7 @@ async function main() {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }
       await usageToolsPersisted(page);
+      await copySettingsThroughHosts(page, env);
       await rejectStaleDone(desktop, page, url);
       await confirmFromMobileFooter(browser, url, exited);
     });

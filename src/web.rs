@@ -3,7 +3,9 @@
 mod assets;
 mod http;
 mod launch;
+mod remote;
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, PipeReader, Read, Write};
 use std::mem::MaybeUninit;
@@ -30,33 +32,75 @@ fn http_authority(address: std::net::SocketAddr) -> String {
     if address.port() == 80 { address.ip().to_string() } else { address.to_string() }
 }
 
-pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
+/// How `milo web` was asked to run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Start<'a> {
+    /// Serve the editor and open it on this computer.
+    Local { open_browser: bool, port: u16 },
+    /// Serve the editor for a page that another computer opens at its own
+    /// `127.0.0.1:forwarded_port`, through a Rex forward to this one.
+    Forwarded { port: u16, forwarded_port: u16 },
+    /// Open the editor of another Rex host on this computer.
+    Host { host: &'a OsStr, project: Option<&'a OsStr>, open_browser: bool, port: u16 },
+}
+
+/// What `milo web --forwarded-port` prints after its link, so that the
+/// computer carrying the forward knows which port to carry it to.
+pub(crate) const FORWARD_TARGET: &str = "milo web: serving a forward on 127.0.0.1:";
+
+pub(crate) fn run(start: Start<'_>) -> Result<(), String> {
     STOP.store(false, Ordering::Relaxed);
     let wake = WakePipe::open().map_err(|error| format!("could not create a termination pipe: {error}"))?;
     let install =
         |signal| Signal::install(signal).map_err(|error| format!("could not handle termination signals: {error}"));
     let _signals = (install(libc::SIGINT)?, install(libc::SIGTERM)?, install(libc::SIGHUP)?, install(libc::SIGQUIT)?);
+    let (open_browser, port, forwarded_port) = match start {
+        Start::Local { open_browser, port } => (open_browser, port, None),
+        Start::Forwarded { port, forwarded_port } => (false, port, Some(forwarded_port)),
+        Start::Host { host, project, open_browser, port } => {
+            return remote::run(&remote::Request { host, project, open_browser, port }, &wake.0);
+        }
+    };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|error| format!("could not listen on 127.0.0.1:{port}: {error}; use --port 0 for a free port"))?;
     listener.set_nonblocking(true).map_err(|error| format!("could not configure the listener: {error}"))?;
     let address = listener.local_addr().map_err(|error| format!("could not read the loopback address: {error}"))?;
-    let host = http_authority(address);
+    // A forwarded page is addressed to the other computer's end of the forward.
+    // That one authority is accepted in place of this listener's own, never beside it.
+    let host = http_authority(match forwarded_port {
+        Some(port) => (Ipv4Addr::LOCALHOST, port).into(),
+        None => address,
+    });
     let origin = format!("http://{host}");
     let token = random_token().map_err(|error| format!("could not generate a session token: {error}"))?;
     let bearer = format!("Bearer {token}");
     let url = format!("{origin}/#{token}");
     let access = Access { host: &host, origin: &origin, bearer: &bearer };
-    let editor = Editor::open();
+    let editor = Editor::open(forwarded_port.is_some());
     if STOP.load(Ordering::Relaxed) {
         return Ok(());
     }
     {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "{url}")
+            .and_then(|()| match forwarded_port {
+                Some(_) => writeln!(stdout, "{FORWARD_TARGET}{}", address.port()),
+                None => Ok(()),
+            })
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("could not print the editor URL: {error}"))?;
     }
-    let launcher = if open_browser && !STOP.load(Ordering::Relaxed) {
+    let launcher = if !open_browser || STOP.load(Ordering::Relaxed) {
+        None
+    } else if editor.seen_from_elsewhere() {
+        // A browser opened here would be on a screen nobody is looking at.
+        eprintln!(
+            "milo web: no Rex app is open on this computer, so no browser was opened here.\n\
+             On the computer you are using, run: milo web --host LABEL\n\
+             LABEL is this host's name in `rex hosts`. That opens these settings there through a Rex forward."
+        );
+        None
+    } else {
         match Launch::start(&url) {
             Ok(launcher) => Some(launcher),
             Err(error) => {
@@ -64,8 +108,6 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
                 None
             }
         }
-    } else {
-        None
     };
     serve(listener, &wake.0, &access, editor, launcher).map_err(|error| format!("settings server: {error}"))
 }
@@ -362,7 +404,13 @@ impl Client {
                 Input::Wait => return Ok(Progress::Wait),
                 Input::Disconnected => return Ok(Progress::Done),
                 Input::Rejected(rejection) => (rejection.response(), false),
-                Input::Ready(route @ (Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect)) => {
+                Input::Ready(
+                    route @ (Route::Action
+                    | Route::Close
+                    | Route::TelegramChats
+                    | Route::HostedConnect
+                    | Route::Transfer),
+                ) => {
                     return Ok(Progress::Job(EditorJob { route, request: std::mem::take(input) }));
                 }
                 Input::Ready(route) => {
@@ -388,7 +436,7 @@ fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
         Route::Static(asset) => asset.response(),
         Route::State => Response::json(Arc::clone(snapshot)),
-        Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect => {
+        Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect | Route::Transfer => {
             unreachable!("route runs on the editor worker")
         }
     }
@@ -418,6 +466,9 @@ impl EditorJob {
         if self.route == Route::HostedConnect {
             return respond_hosted_connect(body, editor, hosted);
         }
+        if self.route == Route::Transfer {
+            return respond_transfer(body, editor);
+        }
         let (response, snapshot) = match editor.action(body) {
             Ok(state) => {
                 let snapshot = Arc::new(state);
@@ -446,6 +497,23 @@ fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
         )),
     };
     (response, false)
+}
+
+/// A preview or an export answers with its own data and leaves the editor
+/// as it was. An import or its undo answers with the editor's new state.
+fn respond_transfer(body: &[u8], editor: &mut Editor) -> Completion {
+    use crate::setup::web::TransferReply::{Changed, Data, Refused, Stale};
+
+    let unchanged = |response| Completion { response, snapshot: None, close: false };
+    match editor.transfer(body) {
+        Data(data) => unchanged(Response::json_owned(data)),
+        Changed(state) => {
+            let snapshot = Arc::new(state);
+            Completion { response: Response::json(Arc::clone(&snapshot)), snapshot: Some(snapshot), close: false }
+        }
+        Stale(why) => unchanged(Response::conflict(&why)),
+        Refused(why) => unchanged(Response::bad_request(&why)),
+    }
 }
 
 fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {
@@ -730,7 +798,7 @@ mod tests {
             return;
         }
 
-        let mut editor = Editor::open();
+        let mut editor = Editor::open(false);
         let seen = editor.version();
         let request = format!(r#"{{"version":{seen},"action":"try"}}"#);
         let active = editor.action(request.as_bytes()).unwrap();
@@ -831,7 +899,7 @@ mod tests {
             wire.split_once("\r\n\r\n").unwrap().1.to_owned()
         }
 
-        let editor = Editor::open();
+        let editor = Editor::open(false);
         let version = editor.version();
         let original = editor.state();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

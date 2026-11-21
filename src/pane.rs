@@ -555,7 +555,7 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
         Exit::OpenWeb => {
             terminal.restore();
             // Home has no port selector; a second worktree needs its own session.
-            crate::web::run(true, 0)
+            crate::web::run(crate::web::Start::Local { open_browser: true, port: 0 })
         }
     }
 }

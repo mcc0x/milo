@@ -1,0 +1,35 @@
+.hosts { display: grid; min-width: 0; gap: .9rem; }
+.host-section { display: grid; min-width: 0; gap: .45rem; }
+.host-section > .setting-subheading { padding-block: 0; }
+.host-section > .setting-detail { max-width: 68ch; margin: 0; }
+.host-section code, .host-section kbd { font: .92em var(--mono); }
+.host-summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .3rem .7rem; }
+.host-summary .setting-label { font-family: var(--mono); overflow-wrap: anywhere; }
+.host-mark { display: grid; place-items: center; inline-size: 2.2rem; block-size: 2.2rem; border-radius: .65rem; background: #dfedfb; color: var(--blue); }
+.host-command { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.host-command code { padding: .45rem .65rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--paper); font-size: .85rem; overflow-wrap: anywhere; }
+.host-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .1rem .9rem; margin: 0; padding: 0; border: 0; min-width: 0; }
+.host-choice { display: flex; align-items: center; gap: .6rem; min-height: 44px; padding-block: .2rem; cursor: pointer; }
+.host-choice input { flex: none; inline-size: 1.1rem; block-size: 1.1rem; accent-color: var(--blue); }
+.host-bundle { inline-size: 100%; min-block-size: 6rem; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--paper); font: .78rem/1.45 var(--mono); resize: vertical; }
+.host-error { margin: 0; color: #79291f; font-size: .82rem; overflow-wrap: anywhere; }
+.host-error:empty { display: none; }
+.host-preview { display: grid; gap: .6rem; padding: .65rem .75rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--paper); }
+.host-preview-section { display: grid; gap: .25rem; min-width: 0; }
+.host-preview-section + .host-preview-section { padding-block-start: .6rem; border-block-start: 1px solid var(--line); }
+.host-preview h4 { display: flex; flex-wrap: wrap; align-items: baseline; gap: .1rem .5rem; font-size: .86rem; font-weight: 700; }
+.host-preview h4 .setting-detail { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+.host-preview table { inline-size: 100%; border-collapse: collapse; font-size: .82rem; }
+.host-preview :is(th, td) { padding: .28rem .5rem .28rem 0; text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.host-preview thead th { color: var(--muted); font-size: .72rem; font-weight: 650; }
+.host-preview tbody th { font-weight: 620; }
+.host-preview tbody tr { border-block-start: 1px solid var(--line); }
+.host-preview td:last-child { font-weight: 650; }
+.host-preview .button.text-button { min-height: 2rem; padding-block: .15rem; }
+.host-preview-section[data-kind="unmapped"] h4 { color: #774e19; }
+.health-host { inline-size: min(100%, 30rem); padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--paper); text-align: start; }
+@media (pointer: coarse) { .host-preview .button.text-button { min-height: 44px; } }
+@media (max-width: 30rem) {
+  .host-summary { grid-template-columns: auto minmax(0, 1fr); }
+  .host-summary .integration-state { grid-column: 2; justify-self: start; }
+}

@@ -444,6 +444,32 @@ impl Preferences {
         )
     }
 
+    /// The choice for `key` as a preferences file writes it, or `None` for a key no file holds.
+    pub(crate) fn value_of(&self, key: &str) -> Option<&'static str> {
+        Some(match key {
+            "icons" => self.icons.value(),
+            "static_marks" => bool_value(self.static_marks),
+            "text_git_marks" => bool_value(self.text_git_marks),
+            "follow_activity" => bool_value(self.follow_activity),
+            "changes_only" => bool_value(self.changes_only),
+            "project_mode" => match self.project_mode {
+                ProjectMode::Follow => "follow",
+                ProjectMode::Pin => "pin",
+            },
+            "history_follow_new" => bool_value(self.history_follow_new),
+            "usage_large_figures" => bool_value(self.usage_large_figures),
+            "tab_titles" => bool_value(self.tab_titles),
+            _ => {
+                if let Some(tool) = UsageTool::ALL.into_iter().find(|tool| tool.key() == key) {
+                    self.usage_tools[tool].value()
+                } else {
+                    let account = UsageAccount::ALL.into_iter().find(|account| account.key() == key)?;
+                    self.usage_accounts[account].value()
+                }
+            }
+        })
+    }
+
     pub fn set_icons(icons: IconMode) -> io::Result<()> {
         let dir = paths::config_dir().ok_or(io::ErrorKind::NotFound)?;
         update(&config_file(&dir, None), &[("icons", Some(icons.value()))])
@@ -481,31 +507,53 @@ fn update_guarded(
     locked(path, |dir| {
         check()?;
         let old = read(path, PREFERENCES_LIMIT)?.unwrap_or_default();
-        // Validate the destination without filling in its missing (inherited) settings.
-        Preferences::default().apply(&old)?;
-        let mut text = String::with_capacity(old.len() + extra + 1);
-        for line in old.split_inclusive('\n') {
-            let edited = line.split_once('=').is_some_and(|(key, _)| {
-                let key = key.trim();
-                edits.iter().any(|&(changed, value)| value.is_some() && key == changed)
-            });
-            if !edited {
-                text.push_str(line);
-            }
-        }
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        for (key, value) in edits {
-            if let Some(value) = value {
-                let _ = writeln!(text, "{key} = {value}");
-            }
-        }
-        if text.len() as u64 > PREFERENCES_LIMIT {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "preferences file would exceed its size limit"));
-        }
-        replace(dir, path, &text)
+        replace(dir, path, &edited(&old, edits)?)
     })
+}
+
+/// A layer's text with each edited key's lines replaced by one new line.
+/// Every other line, comment and unknown key stays as it was.
+pub(crate) fn edited(old: &str, edits: &[(&str, Option<&str>)]) -> io::Result<String> {
+    // Validate the destination without filling in its missing (inherited) settings.
+    Preferences::default().apply(old)?;
+    let mut text = String::with_capacity(old.len() + 64);
+    for line in old.split_inclusive('\n') {
+        let edited = line.split_once('=').is_some_and(|(key, _)| {
+            let key = key.trim();
+            edits.iter().any(|&(changed, value)| value.is_some() && key == changed)
+        });
+        if !edited {
+            text.push_str(line);
+        }
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for (key, value) in edits {
+        if let Some(value) = value {
+            let _ = writeln!(text, "{key} = {value}");
+        }
+    }
+    if text.len() as u64 > PREFERENCES_LIMIT {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "preferences file would exceed its size limit"));
+    }
+    Ok(text)
+}
+
+/// What a layer's own text says for `key`, if it sets it. The last line wins, as it does when read.
+pub(crate) fn layer_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines()
+        .rev()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .find(|(name, _)| name.trim() == key)
+        .map(|(_, value)| value.trim())
+}
+
+/// Whether a preferences file could hold `key = value`. An unknown key is never valid here.
+pub(crate) fn valid_choice(key: &str, value: &str) -> bool {
+    let mut prefs = Preferences::default();
+    prefs.value_of(key).is_some() && !value.contains(['\n', '\r']) && prefs.apply(&format!("{key} = {value}")).is_ok()
 }
 
 fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
@@ -544,6 +592,11 @@ fn config_file(dir: &Path, worktree: Option<&Path>) -> PathBuf {
         Some(root) => dir.join("worktrees").join(format!("{:016x}.conf", worktree_key(root))),
         None => dir.join("preferences.conf"),
     }
+}
+
+/// The file one layer of preferences is kept in: the global defaults, or a worktree's own.
+pub(crate) fn layer_file(dir: &Path, worktree: Option<&Path>) -> PathBuf {
+    config_file(dir, worktree)
 }
 
 /// The files a pane's preferences are read from: the global defaults, then the worktree's own.

@@ -1,5 +1,9 @@
 //! Calls Rex for floating readers, setup, and the new-tab listener.
 
+mod server;
+
+pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
+
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{AsRawFd, RawFd};

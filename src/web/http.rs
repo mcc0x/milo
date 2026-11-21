@@ -27,6 +27,7 @@ pub(super) enum Route {
     Close,
     TelegramChats,
     HostedConnect,
+    Transfer,
 }
 
 impl Route {
@@ -122,15 +123,19 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
         ("POST", "/api/close") => Route::Close,
         ("POST", "/api/telegram-chats") => Route::TelegramChats,
         ("POST", "/api/hosted-connect") => Route::HostedConnect,
+        ("POST", "/api/transfer") => Route::Transfer,
         ("GET", path) => Route::Static(Asset::at(path).ok_or(Rejection::NotFound)?),
         _ => return Err(Rejection::NotFound),
     };
     if route.authenticated() && !authorization.is_some_and(|header| same_secret(header, access.bearer)) {
         return Err(Rejection::Unauthorized);
     }
-    let expects_json = matches!(route, Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect);
+    let expects_json =
+        matches!(route, Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect | Route::Transfer);
     let limit = match route {
         Route::HostedConnect => crate::alerts::relay::REQUEST_LIMIT,
+        // A bundle is text in a JSON string, where a line end takes two bytes.
+        Route::Transfer => 2 * crate::setup::transfer::BUNDLE_LIMIT + 1024,
         _ => MAX_BODY,
     };
     let body_len = match length {

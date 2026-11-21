@@ -11,6 +11,7 @@ mod preview;
 mod profiles;
 mod rex_files;
 mod settings;
+pub(crate) mod transfer;
 pub(crate) mod web;
 mod welcome;
 
