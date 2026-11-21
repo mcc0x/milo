@@ -8,6 +8,7 @@
 
 use std::ffi::OsStr;
 use std::os::fd::AsRawFd as _;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::discord::{self, Connection, Ended, Failure};
@@ -221,10 +222,23 @@ fn names(details: Details, front: &Front) -> Option<String> {
         .directory
         .as_deref()
         .filter(|_| details.project())
-        // The project is the folder name of the Git repository, never where it is or where it came from.
-        .and_then(|dir| git::checkout(dir).ok().flatten())
-        .and_then(|checkout| label::display_name(&checkout.project));
+        .and_then(project_name)
+        .and_then(|project| label::display_name(&project));
     label::line(session.as_deref(), project.as_deref())
+}
+
+/// The folder name of the Git repository `dir` is in, never where it is or
+/// where it came from. A repository's own settings can name any folder as
+/// its work tree, and a checkout that was unpacked or copied here has
+/// settings someone else wrote. So a project is named only when Git's work
+/// tree is the nearest folder that holds a `.git`, as a repository's, a
+/// linked worktree's and a submodule's is. Any other would be named for a
+/// folder above the checkout: part of where it is kept.
+fn project_name(dir: &Path) -> Option<String> {
+    let checkout = git::checkout(dir).ok().flatten()?;
+    let dir = dir.canonicalize().ok()?;
+    let holder = dir.ancestors().find(|folder| folder.join(".git").symlink_metadata().is_ok())?;
+    git::same_folder(holder, &checkout.root).then_some(checkout.project)
 }
 
 #[cfg(test)]
@@ -251,5 +265,20 @@ mod tests {
         let outside = Front { session: Some("/Users/someone/client".into()), directory: Some(plain.root.clone()) };
         assert_eq!(names(Details::Both, &outside), None);
         assert_eq!(names(Details::Both, &Front::default()), None);
+    }
+
+    #[test]
+    fn a_work_tree_chosen_by_a_checkouts_own_settings_is_not_named() {
+        let f = Fixture::new();
+        f.write("file.txt", "text\n");
+        f.commit("first");
+        f.git(&["worktree", "add", "-q", "../feature"]);
+        let project = |dir: std::path::PathBuf| names(Details::Project, &Front { session: None, directory: Some(dir) });
+        assert_eq!(project(f.root.with_file_name("feature")).as_deref(), Some("Project: project"));
+
+        // As in a folder unpacked from an archive, whose `.git/config` someone else wrote:
+        // Git then takes the folder above the checkout for the project.
+        f.git(&["config", "core.worktree", "../.."]);
+        assert_eq!(project(f.root.clone()), None);
     }
 }

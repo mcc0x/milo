@@ -229,6 +229,12 @@ pub(crate) fn application_id(text: &str) -> Option<u64> {
     plain.then(|| text.parse().ok())?
 }
 
+/// The application a person gave as their own. Milo's own ID is still
+/// Milo's application, however it was given.
+fn own_application(id: Option<u64>) -> Option<u64> {
+    id.filter(|id| *id != OFFICIAL_APPLICATION)
+}
+
 /// What the helper last did, kept in a file for `status` to read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -382,8 +388,7 @@ impl Control {
         let setting = match change {
             Change::Enable => Setting { enabled: true, ..saved },
             Change::Details(details) => Setting { details, ..saved },
-            // Milo's own ID given as a person's own is still Milo's application.
-            Change::Application(own) => Setting { application: own.filter(|id| *id != OFFICIAL_APPLICATION), ..saved },
+            Change::Application(own) => Setting { application: own_application(own), ..saved },
         };
         self.save(setting).map_err(|_| UNSAVED)?;
         let now: Cow<'static, str> = if !setting.enabled {
@@ -580,6 +585,7 @@ pub fn command(request: Request) -> Result<String, String> {
         }
         Request::Enable { application, details, confirmed } => {
             let saved = saved()?;
+            let application = application.map(own_application);
             let wanted = Setting {
                 enabled: true,
                 application: application.unwrap_or(saved.application),

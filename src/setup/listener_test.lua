@@ -89,7 +89,7 @@ rex = {
       saves[#saves + 1], remembered = argv, argv[5]
       return { ok = true }
     end
-    assert(argv[2] == "layout-profile" and argv[3] == "read" and argv[4] == "/my project")
+    assert(argv[2] == "layout-profile" and argv[3] == "read" and (argv[4] == "/my project" or argv[4] == "/home"))
     if on_profile then on_profile() end
     return { ok = true, stdout = remembered or "" }
   end,
@@ -229,6 +229,15 @@ on_profile = function()
   emit("terminal.size_changed", "quick")
 end
 created("quick")
+assert(#splits == 1 and splits[1].anchor_id == "quick")
+
+-- A shell that moves while its profile is read is not arranged for the folder
+-- it left. The tab waits for the event that says where the shell went.
+splits, processes.quick = {}, { foreground = { argv0 = "-zsh", cwd = "/home" } }
+on_profile = function() on_profile, processes.quick = nil, project end
+created("quick")
+assert(#splits == 0)
+emit("terminal.pwd_changed", "quick")
 assert(#splits == 1 and splits[1].anchor_id == "quick")
 
 -- A shell split by the user while waiting stays cancelled even after an undo.
@@ -622,6 +631,19 @@ choose("")
 titling.on = false
 changed()
 assert(here.label == "Window 00000009" and there.label == "Window 0000000a" and titling.asks == asks + 5)
+
+-- A listener keeps answers for a limited number of folders and then starts
+-- again. A tab that stayed where it was is asked about afresh, so it still
+-- follows the choice.
+titling.on = true
+choose("tab_titles = true\n")
+changed()
+assert(here.label == "project")
+for n = 1, 4097 do moved("there", "/elsewhere/" .. n) end
+titling.on = false
+choose("")
+changed()
+assert(here.label == "Window 00000009", "an answer that is no longer kept must be asked for again")
 titling.on = true
 assert(os.remove(choice))
 

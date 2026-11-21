@@ -233,6 +233,17 @@ made = splits[#splits]
 assert(made.direction == "vertical" and made.anchor_id == history.block_id and made.layout.label == usage.label)
 near((1 - made.ratio) * 0.2, 2 / 80)
 
+-- A pane that comes back takes its room from the neighbour that was left
+-- with it, not from a Usage strip that is only as tall as it should be.
+tiled.layout = tree("horizontal", 0.8, leaf(shell), tree("vertical", 0.96, leaf(outline), leaf(usage)))
+tiled.blocks = { shell, outline, usage }
+sizes[shell.block_id] = { owner = "client:one", columns = 100, rows = 50 }
+actions.milo_history(ctx)
+made = splits[#splits]
+assert(made.direction == "vertical" and made.anchor_id == outline.block_id and made.side == "after")
+assert(made.layout.label == history.label)
+near(made.ratio, 0.7)
+
 -- A headless tab can still have an explicit terminal size without a client owner.
 tiled.layout, tiled.blocks = leaf(shell), { shell }
 sizes[shell.block_id] = { columns = 80, rows = 12 }
@@ -331,7 +342,7 @@ assert(ask("/off") == "" and ask("/off") == "" and ask("/off", "claude") == "" a
 -- titles on, the answer differs by agent, and each is asked for once.
 write(override, "tab_titles = true\n")
 title_reply.stdout = "=milo" .. grounds
-assert(ask("/off", nil, true) == "milo" and started(1))
+assert(ask("/off") == "milo" and started(1))
 title_reply.stdout = "=milo · omp" .. grounds
 assert(ask("/off", "omp") == "milo · omp" and started(1))
 assert(ask("/off") == "milo" and ask("/off", "omp") == "milo · omp" and started(0))
@@ -357,7 +368,6 @@ title_reply.stdout = "=milo · omp" .. grounds
 assert(ask("/kept", "omp") == "milo · omp" and started(1))
 title_reply.stdout = "=\n"
 assert(ask("/uncached") == "" and started(1))
-assert(ask("/uncached", nil, true) == nil and started(0))
 assert(ask("/kept") == "" and started(1))
 assert(ask("/kept", "omp") == "milo · omp" and started(0))
 title_reply.stdout = "=milo" .. grounds
