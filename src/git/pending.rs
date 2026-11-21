@@ -41,7 +41,7 @@ impl DiffStamp {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct TrackedDiff {
     /// In status path order, including both ends of a rename.
     stamps: Vec<DiffStamp>,

@@ -3,10 +3,12 @@
 mod attention;
 mod draw;
 mod input;
+mod refresh;
 mod search;
 mod untracked;
 
 use std::collections::{HashMap, HashSet};
+use std::os::fd::RawFd;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -73,6 +75,9 @@ pub struct Outline {
     note: Option<(String, Instant)>,
     /// A file being read here, in place of the outline, outside Rex.
     reading: Option<Reader>,
+    /// Checks refresh away from the pane loop, which then takes them in when they finish.
+    refresh_away: bool,
+    refresh: Option<refresh::Running>,
 }
 
 impl Outline {
@@ -89,6 +94,12 @@ impl Outline {
 
     pub fn into_peek(mut self) -> Self {
         self.peek = true;
+        self
+    }
+
+    /// For an outline run by the pane loop: a check no longer holds up its keys.
+    pub fn refreshing_away(mut self) -> Self {
+        self.refresh_away = true;
         self
     }
 
@@ -129,6 +140,8 @@ impl Outline {
             search_walk: None,
             note: None,
             reading: None,
+            refresh_away: false,
+            refresh: None,
         };
         if outline.repo.git {
             outline.load();
@@ -200,17 +213,24 @@ impl Outline {
 
     /// Rebuilds what the outline shows, returning the old files so new work can be marked.
     fn load(&mut self) -> Option<Vec<PendingFile>> {
-        let selected = self.selected_path();
+        // What a refresh started before this read finds is no longer news.
+        self.refresh = None;
         self.repo.read();
-        let mut files = self.repo.pending()?;
-        let tracked = self.repo.tracked()?;
+        let files = self.repo.pending()?;
+        self.repo.tracked().map(drop)?;
+        Some(self.take_in(files))
+    }
+
+    /// Shows the pending files and tracked paths just read, returning the old files.
+    fn take_in(&mut self, mut files: Vec<PendingFile>) -> Vec<PendingFile> {
+        let selected = self.selected_path();
         self.untracked.retain_details(&self.pending, &mut files);
         let files = std::mem::replace(&mut self.pending, files);
-        self.tree.rebuild(tracked, &self.pending);
+        self.tree.rebuild(self.repo.listed(), &self.pending);
         self.folds.prune(|path| self.tree.has_folder(path));
         self.update_recent();
         self.relayout(selected);
-        Some(files)
+        files
     }
 
     fn update_recent(&mut self) {
@@ -232,10 +252,16 @@ impl Outline {
 
     /// Rebuilds the outline and marks changed pending files.
     fn reload(&mut self) {
-        let Some(old) = self.load() else { return };
+        if let Some(old) = self.load() {
+            self.mark_changes(&old);
+        }
+    }
+
+    /// Marks what differs from the `old` files, and follows the newest when asked to.
+    fn mark_changes(&mut self, old: &[PendingFile]) {
         let now = Instant::now();
         let following = self.follows_activity(now);
-        let newest = self.mark_files(&old, now).filter(|_| following).map(str::to_owned);
+        let newest = self.mark_files(old, now).filter(|_| following).map(str::to_owned);
         if let Some(newest) = newest {
             self.follow(&newest);
         }
@@ -404,13 +430,22 @@ impl Pane for Outline {
         let reader_settled = self.reading.as_mut().is_none_or(Pane::check);
         if self.repo.git {
             self.check_untracked(Instant::now());
-            if self.repo.poll(&self.pending) {
+            let away = self.refresh.is_some() || self.refresh_away && self.start_refresh(reader_settled);
+            if !away && self.repo.poll(&self.pending) {
                 self.reload();
             }
         } else {
             self.check_folder();
         }
         reader_settled
+    }
+
+    fn unfinished_check(&self) -> Option<RawFd> {
+        self.refresh.as_ref().map(refresh::Running::fd)
+    }
+
+    fn finish_check(&mut self) -> Option<bool> {
+        self.finish_refresh()
     }
 
     fn filesystem_changed(&mut self) {

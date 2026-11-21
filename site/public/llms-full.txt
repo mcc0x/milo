@@ -1152,6 +1152,8 @@ The [source map](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md#source-
 
 Put the pane in a module under `src/` and implement `pane::Pane`: `draw` fills a `Screen`, `help` returns its own `Page::new` guide, and `key` handles pane-specific input. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to keep the frame. For outside changes, add `watch_scope` and `check`; for timed redraws, add `next_frame`. A pane with no watch or timer sleeps until input, resize or a signal.
 
+A `check` runs in the pane loop, and no key is read until it returns. Where it can take long, as Git can in a large project, start the work on a thread and return: `unfinished_check` gives the loop a descriptor that becomes readable when the answer is ready, and `finish_check` takes the answer in. Show nothing of an answer until all of it can be shown, drop one that an earlier load has overtaken, and return false from `finish_check` when another look is needed. The loop takes no other look while one is away, rests after it for four times as long as it took, and looks again soon if a change was reported meanwhile. `src/outline/refresh.rs` is the example.
+
 Declare the module in `src/main.rs`. Add the command to `Command`, the argument parser, `dispatch` and `--help`. Use the shared loop; choose whether the pane starts loaded, does a first check or shows `Reading…` on a slow open.
 
 ### Changing the Rex layout
@@ -1352,6 +1354,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
 | `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
 | `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/outline/refresh.rs` | Refreshes the outline's Git state away from the pane loop and takes the answer in whole. |
 | `src/outline/untracked.rs` | Fills in line counts for new files after the first frame, without following links. |
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
@@ -1493,6 +1496,7 @@ Outside the project, milo keeps two things in its state folder for the editor: t
 - On macOS, file-system notifications wake the Git panes. Outline and History filter writes to files and directories Git has reported as ignored. FSEvents excludes up to eight directories directly; Milo filters the remaining paths before waking a pane. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. While the editor is open, the reader pauses Git refreshes until it returns to the diff; saving still opens and checks the file. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
 - A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
+- The outline asks Git on a separate thread, so its keys are answered while Git reads a large project. It goes on showing what Git last said and takes the new answer in whole, never part of it. A change reported while Git was being asked brings another check, a reload with `r` replaces an answer still on its way, and an answer that arrives while Git holds the index is dropped and asked for again. History and the reader still ask in the loop.
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened. Adding an unrelated untracked file does not require recounting edits in tracked files. With the same tracked status and comparison base, an ordinary save recounts only the edited files; changes that could affect rename detection or other files use the full comparison. A working reader reuses the Git status from its current refresh.
 - In the editor, undo and redo replace only the rows spanned by the recorded byte range. Syntax state above that range stays cached; a changed row can still change how later rows are coloured.
 - Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.

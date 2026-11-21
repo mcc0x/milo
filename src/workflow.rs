@@ -183,6 +183,14 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         settled
     }
 
+    fn unfinished_check(&self) -> Option<RawFd> {
+        self.pane.unfinished_check()
+    }
+
+    fn finish_check(&mut self) -> Option<bool> {
+        self.pane.finish_check()
+    }
+
     fn filesystem_changed(&mut self) {
         self.pane.filesystem_changed();
     }
