@@ -616,6 +616,17 @@ fn a_draft_cannot_outgrow_what_the_reader_can_show() {
     assert!(drawn(&mut reader, 60, 4)[3].contains("e edit"));
 }
 
+#[test]
+fn enter_breaks_a_long_line_while_the_file_has_room_for_it() {
+    let f = Fixture::folder();
+    let half = usize::try_from(content::LIMIT).unwrap() / 2;
+    f.write("long.txt", &"x".repeat(half + 16));
+    let mut reader = editing(&f, "long.txt");
+    reader.key(Key::End);
+    reader.key(Key::Enter);
+    assert_eq!(draft(&reader).len(), half + 17, "{:?}", drawn(&mut reader, 60, 4)[3]);
+}
+
 /// A reader that finds formatters only in the fixture's own folder of stand-ins.
 fn with_tools(f: &Fixture, path: &str) -> (Reader, PathBuf) {
     let bin = f.root.parent().unwrap().join("bin");

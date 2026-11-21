@@ -7,7 +7,7 @@ use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::keys::{Input, Key};
 
@@ -34,6 +34,8 @@ const CANCEL_FRAME: &[u8] = b"\x18\x1b[?2026l";
 // End a partial control string or synchronized update before changing modes.
 const LEAVE: &[u8] =
     b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+/// How long after asking a terminal may take to answer and still be waited for on the way out.
+const ANSWER_WAIT: Duration = Duration::from_millis(250);
 
 /// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
 pub fn wake(fd: RawFd) {
@@ -90,6 +92,8 @@ pub struct Session {
     pending_interrupt: bool,
     cancelled_output: bool,
     saved: Option<libc::termios>,
+    /// When to stop waiting, on the way out, for answers to what `ENTER` asked.
+    answers_due: Option<Instant>,
 }
 
 impl Session {
@@ -132,10 +136,12 @@ impl Session {
             pending_interrupt: false,
             cancelled_output: false,
             saved: Some(saved),
+            answers_due: None,
         };
         // There is no reliable distinction between a pasted control byte and a
         // key until the terminal receives the bracketed-paste mode request.
         session.write_until(ENTER, None, false)?;
+        session.answers_due = Some(Instant::now() + ANSWER_WAIT);
         Ok(session)
     }
 
@@ -267,6 +273,12 @@ impl Session {
 
     pub fn restore(&mut self) {
         let Some(saved) = self.saved.take() else { return };
+        // A pane that closes at once, as when it cannot open, can leave before
+        // the terminal has answered. Answers that arrive once the shell has the
+        // keyboard back are shown at its prompt and read as typing.
+        if let Some(due) = self.answers_due.take() {
+            self.input.drain_answers(&mut self.keyboard, due);
+        }
         let fd = self.keyboard.as_raw_fd();
         loop {
             // SAFETY: `saved` holds the keyboard's original modes and lives through the call.
@@ -521,6 +533,7 @@ mod tests {
             pending_interrupt: false,
             cancelled_output: false,
             saved: None,
+            answers_due: None,
         };
         wake(wakeup.as_raw_fd());
         std::thread::scope(|scope| {
@@ -567,6 +580,7 @@ mod tests {
             pending_interrupt: false,
             cancelled_output: false,
             saved: None,
+            answers_due: None,
         };
         let frame = vec![b'x'; 1 << 20];
         drop(completion);
@@ -623,5 +637,33 @@ mod tests {
         let failed = Session::enter(keyboard.try_clone().unwrap(), read_only, io::pipe().unwrap().0);
         assert!(failed.is_err());
         assert_eq!(modes(&keyboard), before);
+    }
+
+    #[test]
+    fn answers_that_arrive_as_a_pane_closes_are_not_left_for_the_shell() {
+        let (keyboard, mut master) = test_pair();
+        let mut terminal =
+            Session::enter(keyboard.try_clone().unwrap(), keyboard.try_clone().unwrap(), io::pipe().unwrap().0)
+                .unwrap();
+        // However busy the machine is, the answers come before the wait that `enter` set for them ends.
+        terminal.answers_due = terminal.answers_due.map(|due| due + Duration::from_secs(60));
+        let answering = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            master.write_all(b"\x1b]11;rgb:1/2/3\x1b\\\x1b[6;16;8t\x1b[?62;22c").unwrap();
+            master
+        });
+        terminal.restore();
+        let mut master = answering.join().unwrap();
+
+        // The shell's terminal modes would echo a late answer after the leave sequence.
+        let mut output = Vec::new();
+        let mut ready = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        while wait_ready(&mut ready, 200) > 0 {
+            let mut chunk = [0; 256];
+            let n = master.read(&mut chunk).unwrap();
+            assert_ne!(n, 0);
+            output.extend_from_slice(&chunk[..n]);
+        }
+        assert!(output.starts_with(ENTER) && output.ends_with(LEAVE), "{:?}", String::from_utf8_lossy(&output));
     }
 }
