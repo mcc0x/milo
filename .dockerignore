@@ -1,0 +1,13 @@
+# Only the relay runtime and the assets it serves enter the build context.
+**
+!hosted/Dockerfile
+!hosted/docker-entrypoint.sh
+!hosted/bindings.ts
+!hosted/edge.ts
+!hosted/providers.ts
+!hosted/result.ts
+!hosted/server.ts
+!hosted/service.ts
+!dashboard/public/favicon.png
+!dashboard/app/meadow/desktop.webp
+!dashboard/app/meadow/mobile.webp
