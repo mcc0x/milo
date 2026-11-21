@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::json::Value;
-use crate::when::{self, Detail};
+use crate::when::{self, Detail, HOUR};
 
 use super::Today;
-use super::sqlite::{self, Poll};
+use super::sqlite::{self, Outcome, Poll};
 
 const GUARD: &str = "PRAGMA query_only=ON;\nPRAGMA trusted_schema=OFF;\n";
 
@@ -66,9 +66,7 @@ SELECT count(*) AS steps, max(at) AS last_ms, coalesce(sum(unverified),0) AS unv
        sum(coalesce(json_extract(data,'$.tokens.reasoning'),0)) AS reasoning,
        sum(coalesce(json_extract(data,'$.tokens.cache.read'),0)) AS cache_read,
        sum(coalesce(json_extract(data,'$.tokens.cache.write'),0)) AS cache_write,
-       sum(json_extract(data,'$.cost')) AS cost, count(json_extract(data,'$.cost')) AS priced
-FROM step;
-";
+       sum(json_extract(data,'$.cost')) AS cost, count(json_extract(data,'$.cost')) AS priced";
 
 /// Which generation of session tables a database uses. Only one generation is
 /// ever counted, because an upgraded database holds its steps in both.
@@ -147,7 +145,22 @@ impl Store {
                      SELECT 1 FROM session_message n WHERE n.session_id=m.session_id AND n.time_created>={since})"
             ),
         };
-        format!("{GUARD}WITH step AS ({steps}){TOTALS}")
+        // Whatever is dated after `now` is not counted yet, and will be without another write.
+        // A time with a fraction is held to the same bounds as the steps above.
+        let ahead = |table: &str| {
+            format!(
+                "SELECT CAST(min(time_created) AS INTEGER) AS at FROM {table}
+                 WHERE typeof(time_created) IN ('integer','real') AND time_created>={until}"
+            )
+        };
+        let ahead = match self {
+            Self::V1 => ahead("message"),
+            Self::V2 { legacy: false } => ahead("session_message"),
+            Self::V2 { legacy: true } => {
+                format!("SELECT min(at) FROM ({} UNION ALL {})", ahead("session_message"), ahead("message"))
+            }
+        };
+        format!("{GUARD}WITH step AS ({steps}){TOTALS}, ({ahead}) AS ahead_ms\nFROM step;\n")
     }
 }
 
@@ -216,13 +229,20 @@ pub(super) struct Activity {
     pub last: Option<i64>,
 }
 
-impl Activity {
+/// One read of the totals: the activity, and the earliest row dated after
+/// the read's own second, in milliseconds.
+struct Totals {
+    activity: Activity,
+    ahead: Option<i64>,
+}
+
+impl Totals {
     /// Refuse totals that include rows Milo cannot vouch for.
     fn parse(bytes: &[u8], store: Store, since: i64) -> Option<Self> {
         let mut rows = Value::parse(bytes)?.elements()?;
         let row = rows.next().filter(|_| rows.next().is_none())?;
-        let [steps, last, invalid, unverified, cost, priced] =
-            row.fields(["steps", "last_ms", "invalid", "unverified", "cost", "priced"]);
+        let [steps, last, invalid, unverified, cost, priced, ahead] =
+            row.fields(["steps", "last_ms", "invalid", "unverified", "cost", "priced", "ahead_ms"]);
         if invalid?.unsigned()? != 0 || unverified?.unsigned()? != 0 {
             return None;
         }
@@ -239,7 +259,17 @@ impl Activity {
             Some(value) => Some(value.integer()?.div_euclid(1000)),
             None => None,
         };
-        Some(Self { since, store, steps, tokens, cost, last })
+        let ahead = ahead.and_then(Value::integer);
+        Some(Self { activity: Activity { since, store, steps, tokens, cost, last }, ahead })
+    }
+
+    /// The first second at which the same database gives other totals: when
+    /// a row dated ahead comes due, or when the local day ends.
+    fn stand_until(&self) -> i64 {
+        // No local day is longer than 25 hours or shorter than 23.
+        let tomorrow = self.activity.since.saturating_add(26 * HOUR);
+        let midnight = Today::at(tomorrow, when::local_day(tomorrow)).since;
+        self.ahead.map_or(midnight, |ms| midnight.min(ms.div_euclid(1000)))
     }
 }
 
@@ -329,23 +359,34 @@ pub(super) fn database_in(home: Option<&Path>, data: Option<&Path>, named: Optio
     Some(data.join("opencode").join(named.unwrap_or(Path::new("opencode.db"))))
 }
 
+/// Only totals that were read stand for the database until it is written again.
 pub(super) fn poll(path: Option<PathBuf>, wait: Duration) -> Poll<Report> {
-    Poll::new(path, wait, |path, now, wait| Some(read(path, now, wait)))
+    Poll::new(path, wait, |path, now, wait| Some(read_outcome(path, now, wait)))
+}
+
+pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Report {
+    read_outcome(path, now, wait).value
 }
 
 /// Both queries share one wait, so a busy database costs at most that long.
-pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Report {
+fn read_outcome(path: &Path, now: i64, wait: Duration) -> Outcome<Report> {
+    let unsettled = |value| Outcome { value, stands_until: None };
     if !sqlite::is_database(path) {
-        return Report::Missing;
+        return unsettled(Report::Missing);
     }
     let deadline = Instant::now() + wait;
     let shape = [GUARD, SHAPE].concat();
-    let Some(shape) = sqlite::query(sqlite::executable(), path, &shape, wait) else { return Report::Unreadable };
-    let Some(store) = Store::detect(&shape) else { return Report::Unsupported };
+    let Some(shape) = sqlite::query(sqlite::executable(), path, &shape, wait) else {
+        return unsettled(Report::Unreadable);
+    };
+    let Some(store) = Store::detect(&shape) else { return unsettled(Report::Unsupported) };
     let since = Today::at(now, when::local_day(now)).since;
     let left = deadline.saturating_duration_since(Instant::now());
-    match sqlite::query(sqlite::executable(), path, &store.totals(since, now), left) {
-        Some(totals) => Activity::parse(&totals, store, since).map_or(Report::Unsupported, Report::Today),
-        None => Report::Unreadable,
+    let Some(totals) = sqlite::query(sqlite::executable(), path, &store.totals(since, now), left) else {
+        return unsettled(Report::Unreadable);
+    };
+    match Totals::parse(&totals, store, since) {
+        Some(totals) => Outcome { stands_until: Some(totals.stand_until()), value: Report::Today(totals.activity) },
+        None => unsettled(Report::Unsupported),
     }
 }

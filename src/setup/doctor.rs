@@ -160,7 +160,7 @@ fn inspect(store: &Store, root: Option<&Path>) -> Result<(String, Shown), String
         discovered = discover_worktree(Path::new("."));
         discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note)
     };
-    let host = Host::probe(false);
+    let host = Host::probe(false, rex::viewers);
     report_with_worktree(store, worktree, target.as_ref(), host.as_ref()).map(|(report, _, tools)| (report, tools))
 }
 

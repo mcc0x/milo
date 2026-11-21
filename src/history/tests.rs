@@ -1000,3 +1000,95 @@ fn an_oversized_subject_can_be_paged_without_moving_the_commit_cursor() {
         assert!(active_row(&screen, "first chapter"));
     }
 }
+
+/// The descriptor of the read that is running, if one is.
+fn reading(history: &History) -> Option<i32> {
+    history.listing.as_ref().map(listing::Listing::fd)
+}
+
+/// Lets the read that is running finish. The next frame takes its result.
+fn arrive(history: &History) {
+    let mut ready = [libc::pollfd { fd: reading(history).expect("a read"), events: libc::POLLIN, revents: 0 }];
+    assert_eq!(crate::term::wait_ready(&mut ready, 30_000), 1, "Git did not list the commit's files");
+    history.listing_releases.as_ref().unwrap().fetch_add(1, Ordering::Relaxed);
+}
+
+/// Two commits, newest first: one that added `newer.txt`, one that added `older.txt`.
+fn impatient(f: &Fixture) -> History {
+    f.write("older.txt", "one\n");
+    f.commit("older");
+    f.write("newer.txt", "one\ntwo\n");
+    f.commit("newer");
+    open(f).impatient(Arc::new(AtomicUsize::new(0)))
+}
+
+#[test]
+fn a_commit_still_being_read_says_so_takes_the_next_key_and_then_shows_its_files() {
+    let f = Fixture::new();
+    let mut history = impatient(&f);
+    assert_eq!(history.key(Key::Enter), After::Stay);
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "newer").contains("▾"));
+    let opened = rows.iter().position(|row| row.contains("newer")).unwrap();
+    assert_eq!(rows[opened + 1].trim(), "Reading files…");
+
+    assert_eq!(history.key(Key::Down), After::Stay);
+    assert!(active_row(&draw(&mut history, 65, 12), "older"));
+    assert_eq!(history.next_frame(), Some(LISTING_LOOK), "the loop is asked to look again without a key");
+
+    arrive(&history);
+    let screen = draw(&mut history, 65, 12);
+    assert_eq!(history.next_frame(), None);
+    let rows = screen.text();
+    assert!(row(&rows, "newer.txt").contains("+2"), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains("Reading files")), "{rows:?}");
+    assert!(active_row(&screen, "older"), "the cursor stays where the key left it");
+}
+
+#[test]
+fn files_read_for_one_commit_are_never_shown_under_the_commit_opened_meanwhile() {
+    let f = Fixture::new();
+    let mut history = impatient(&f);
+    history.key(Key::Enter);
+    history.key(Key::Down);
+    history.key(Key::Enter);
+    // A descriptor's number can be used again, so name the commit being read.
+    let read = history.listing.as_ref().map(|listing| listing.hash.as_str());
+    assert_eq!(read, Some(history.entries[0].commit.hash.as_str()), "one read at a time");
+
+    // The newer commit's files arrive while the older one is open.
+    arrive(&history);
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(row(&rows, "older").contains("▾") && rows.iter().any(|row| row.contains("Reading files")), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains(".txt")), "{rows:?}");
+
+    arrive(&history);
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(rows.iter().any(|row| row.contains("older.txt")), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains("newer.txt")), "{rows:?}");
+
+    // What was read for the commit that was closed is kept for it, not read again.
+    history.key(Key::Up);
+    history.key(Key::Enter);
+    assert!(reading(&history).is_none());
+    let rows = draw(&mut history, 65, 12).text();
+    assert!(rows.iter().any(|row| row.contains("newer.txt")), "{rows:?}");
+}
+
+#[test]
+fn files_follow_their_commit_when_another_lands_while_they_are_read() {
+    let f = Fixture::new();
+    let mut history = impatient(&f);
+    history.key(Key::Enter);
+    f.write("landed.txt", "one\n");
+    f.commit("landed");
+    assert!(history.check());
+    while reading(&history).is_some() {
+        arrive(&history);
+        draw(&mut history, 65, 12);
+    }
+    let rows = draw(&mut history, 65, 12).text();
+    let opened = rows.iter().position(|row| row.contains("newer") && row.contains("▾")).expect("the open commit");
+    assert!(rows[opened + 1].contains("newer.txt"), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.contains("landed.txt") || row.contains("Reading files")), "{rows:?}");
+}

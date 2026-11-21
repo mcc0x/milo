@@ -2,12 +2,20 @@
 
 mod draw;
 mod input;
+mod listing;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
+
+use self::listing::Listing;
 
 use crate::git::{Commit, CommitFilesError, DiffFiles, HistoryVersion, Repo};
 use crate::help::Page;
@@ -22,6 +30,12 @@ use crate::watch::Scope;
 const LIMIT: usize = 300;
 /// Show the first few files without losing the commit or the next row.
 const FILE_PREVIEW: usize = 8;
+/// How long a key waits for Git to list a commit's files before the pane
+/// says it is reading them and takes the next key. Most commits are listed
+/// within it, and then show no such note.
+const PATIENCE: Duration = Duration::from_millis(40);
+/// How soon the pane looks again for files that Git is still reading.
+const LISTING_LOOK: Duration = Duration::from_millis(10);
 
 struct Entry {
     commit: Commit,
@@ -84,6 +98,11 @@ pub struct History {
     remote_boundary: Option<usize>,
     uncommitted: usize,
     open: Option<OpenCommit>,
+    /// The one read of a commit's files that is still running.
+    listing: Option<Listing>,
+    patience: Duration,
+    #[cfg(test)]
+    listing_releases: Option<Arc<AtomicUsize>>,
     rows: Vec<TimelineRow>,
     cursor: usize,
     top: usize,
@@ -112,6 +131,11 @@ impl History {
             remote_boundary: None,
             uncommitted: 0,
             open: None,
+            listing: None,
+            // Tests see a commit's files in the frame after the key, unless they ask otherwise.
+            patience: if cfg!(test) { Duration::from_secs(60) } else { PATIENCE },
+            #[cfg(test)]
+            listing_releases: None,
             rows: Vec::new(),
             cursor: 0,
             top: 0,
@@ -131,6 +155,14 @@ impl History {
         };
         history.load();
         history
+    }
+
+    /// Never waits for Git on a key, and takes each result only when the test releases it.
+    #[cfg(test)]
+    pub(crate) fn impatient(mut self, releases: Arc<AtomicUsize>) -> Self {
+        self.patience = Duration::ZERO;
+        self.listing_releases = Some(releases);
+        self
     }
 
     pub fn with_follow_new(mut self, follow: bool) -> Self {
@@ -172,7 +204,7 @@ impl History {
         if !self.version.as_ref().is_some_and(|version| version.matches(&self.repo)) {
             let Some(commits) = self.repo.history(LIMIT + 1) else { return };
             self.replace_commits(commits, selected, uncommitted);
-        } else if self.load_files() || self.uncommitted != uncommitted {
+        } else if self.load_files(self.patience) || self.uncommitted != uncommitted {
             self.uncommitted = uncommitted;
             self.rebuild_in_place(selected);
         }
@@ -211,7 +243,7 @@ impl History {
         self.version = Some(self.repo.history_version());
         self.clicked = None;
         self.open = open;
-        self.load_files();
+        self.load_files(self.patience);
         self.uncommitted = uncommitted;
         if follow {
             self.top = 0;
@@ -268,7 +300,8 @@ impl History {
                     }
                     None => self.rows.push(TimelineRow::Note(match open.error {
                         Some(CommitFilesError::ShallowBoundary) => "Shallow history: parent unavailable.",
-                        _ => "Git did not answer for this commit.",
+                        Some(CommitFilesError::Git) => "Git did not answer for this commit.",
+                        None => "Reading files…",
                     })),
                 }
             }
@@ -287,23 +320,70 @@ impl History {
         } else {
             Some(OpenCommit { index: i, all_files: false, error: None })
         };
-        self.load_files();
+        self.load_files(self.patience);
         self.build_rows(Some(TimelineRow::Commit(i)));
     }
 
-    fn load_files(&mut self) -> bool {
+    /// Starts reading the open commit's files unless they are kept or a read
+    /// is running, and takes a result that arrives within the pane's patience.
+    /// Returns whether the open commit's rows changed.
+    fn load_files(&mut self, patience: Duration) -> bool {
         let Some(open) = &mut self.open else { return false };
-        let entry = &mut self.entries[open.index];
+        let entry = &self.entries[open.index];
         if entry.files.is_some() {
             return false;
         }
-        match self.repo.files_at(&entry.commit.hash) {
+        if self.listing.is_none() {
+            match Listing::start(self.repo.commit_files(), &entry.commit.hash) {
+                Ok(listing) => self.listing = Some(listing),
+                Err(_) => return open.error.replace(CommitFilesError::Git) != Some(CommitFilesError::Git),
+            }
+        }
+        self.collect_files(patience)
+    }
+
+    /// Keeps a finished read with its commit, wherever that is in the timeline
+    /// now, and then reads the open commit if it was not the one read. A commit
+    /// opened in between waits for the one read to end: no second read runs.
+    fn collect_files(&mut self, patience: Duration) -> bool {
+        #[cfg(test)]
+        if self.listing_releases.as_ref().is_some_and(|releases| releases.load(Ordering::Relaxed) == 0) {
+            return false;
+        }
+        let Some(listed) = self.listing.as_ref().and_then(|listing| listing.finished(patience)) else { return false };
+        #[cfg(test)]
+        if let Some(releases) = &self.listing_releases {
+            releases.fetch_sub(1, Ordering::Relaxed);
+        }
+        let hash = self.listing.take().map(|mut listing| std::mem::take(&mut listing.hash)).unwrap_or_default();
+        // A commit that left the timeline while it was read has nowhere to keep its files.
+        let index = self.entries.iter().position(|entry| entry.commit.hash == hash);
+        let Some(open) = self.open.as_mut().filter(|open| Some(open.index) == index) else {
+            if let (Ok(files), Some(index)) = (listed, index) {
+                self.entries[index].files = Some(files);
+            }
+            return self.load_files(Duration::ZERO);
+        };
+        match listed {
             Ok(files) => {
-                entry.files = Some(files);
+                self.entries[open.index].files = Some(files);
                 open.error = None;
                 true
             }
             Err(error) => open.error.replace(error) != Some(error),
+        }
+    }
+
+    /// Shows files that arrived after the pane stopped waiting for them.
+    fn take_listed_files(&mut self) {
+        let selected = self.selected();
+        if !self.collect_files(Duration::ZERO) {
+            return;
+        }
+        self.rebuild_in_place(selected);
+        // As when a key opens a commit at the edge, but not under a click's pointer.
+        if self.clicked.is_none() && selected == self.open_index().map(TimelineRow::Commit) {
+            self.keep_preview_in_view();
         }
     }
 
@@ -320,8 +400,13 @@ impl Pane for History {
         self.reading.as_ref().map_or_else(Self::help_page, Pane::help)
     }
 
+    /// While a commit's files are read, the next frame looks for them: this
+    /// reaches the loop through a pane that wraps this one, as a descriptor
+    /// of its own would not.
     fn next_frame(&self) -> Option<Duration> {
-        self.reading.as_ref().and_then(Pane::next_frame)
+        let reader = self.reading.as_ref().and_then(Pane::next_frame);
+        let listing = self.listing.as_ref().map(|_| LISTING_LOOK);
+        reader.into_iter().chain(listing).min()
     }
 
     fn notice(&self) -> Option<&'static str> {
@@ -342,6 +427,11 @@ impl Pane for History {
 
     fn git_busy(&self) -> bool {
         self.reading.is_none() && self.repo.busy()
+    }
+
+    fn draw(&mut self, s: &mut Screen) {
+        self.take_listed_files();
+        self.draw_contents(s);
     }
 
     fn check(&mut self) -> bool {
@@ -385,9 +475,5 @@ impl Pane for History {
             }
             after
         }
-    }
-
-    fn draw(&mut self, s: &mut Screen) {
-        self.draw_contents(s);
     }
 }

@@ -207,7 +207,7 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Browser editor
 
-Run `milo web` from the project you want to configure, or choose **Browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+Run `milo web` from the project you want to configure, or choose **Browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
 ![The local editor showing pane order, rail side, width and Usage height for an example worktree](https://github.com/mcc0x/milo/blob/main/docs/img/web-settings.webp)
 
@@ -484,7 +484,11 @@ History counts commits to push against the branch's tracked remote branch. `no b
 
 Expand a commit to see its seven-character ID beside the file count. Narrow panes keep that space for the subject instead.
 
-History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room.
+History lists the latest 300 commits. If there are older ones, `G` takes you to the oldest displayed commit, with `Older commits not shown.` underneath when there is room. A subject longer than 4,096 bytes is cut there and ends with `…`.
+
+Expanding a commit that touched thousands of files shows `Reading files…` under it while Git lists and counts them. The pane keeps taking keys meanwhile, and the files appear under their commit when they are ready, wherever the cursor has gone.
+
+<p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/history-reading-files.webp" width="543" alt="History with the newest commit open and Reading files… under it, while the cursor has already moved to the commit below"></p>
 
 A shallow clone has only part of the project's history. If you expand a commit whose parent is beyond the shallow boundary, History says `Shallow history: parent unavailable.` It does not show every file as new. After fetching more history, press `r` to reload. A genuine first commit still shows its added files.
 
@@ -883,7 +887,7 @@ OpenCode saves no limits on this machine, so Milo shows none for it. What it doe
 | Cost | The sum OpenCode recorded for those steps, in US dollars. It is OpenCode's estimate from model prices, not a bill: a subscription or an unpriced model records zero, and Milo shows nothing rather than `$0`. A `+` means some steps recorded no cost. |
 | Limits | Unknown. OpenCode asks its own servers for allowances and budgets when you open them, and does not save the answer. Milo does not ask and does not use OpenCode's saved sign-in. |
 
-Milo reads `~/.local/share/opencode/opencode.db`, or the same file under an absolute `$XDG_DATA_HOME`, or the file `$OPENCODE_DB` names. It uses `/usr/bin/sqlite3` in read-only mode for at most a second, at least 20 seconds apart. The queries return sums and times only: message text never leaves the database, and the tables that hold OpenCode's sign-in are not read. The line can lag OpenCode by about half a minute; press `r` to read now.
+Milo reads `~/.local/share/opencode/opencode.db`, or the same file under an absolute `$XDG_DATA_HOME`, or the file `$OPENCODE_DB` names. It uses `/usr/bin/sqlite3` in read-only mode for at most a second, at least 20 seconds apart, and reads a database nothing has written to since the last read again only every five minutes. The queries return sums and times only: message text never leaves the database, and the tables that hold OpenCode's sign-in are not read. The line can lag OpenCode by about half a minute; press `r` to read now.
 
 The figures were checked against databases written by OpenCode 1.2.0, 1.19.6, 2.2.0 and 2.3.2. They match `opencode stats --days 0`, except that Milo does not count a forked session's copied steps again on the day OpenCode 1 is upgraded to 2. Milo shows nothing, and `milo doctor` reports OpenCode's activity as unknown, when the database has other tables, when a step from today is malformed, when one of today's sessions was created by a version other than 1.x or 2.x, or when OpenCode 1 is still writing to a database OpenCode 2 has upgraded. Title requests are not counted, nor are OpenCode 2's compaction requests, because OpenCode does not record them as steps. [Usage sources](https://github.com/mcc0x/milo/blob/main/docs/usage-sources.md) has the evidence, the limits of this reading, and why Amp and Gemini CLI are not read.
 
@@ -1402,6 +1406,16 @@ sh tests/reader-compare.sh REVISION > report.tsv    # this checkout beside that 
 
 `tests/reader_bench.rs` and `tests/rex_lab.rs` use only what a built Milo offers from outside: its commands, what it draws in a terminal and, in the lab, the requests its browser editor accepts. So they can check a build they were not compiled with: set `MILO_TEST_BINARY` to a Milo built from another branch. Where a check depends on a feature that only some builds have, ask the build rather than the branch. The reader report's `syntax` column, for instance, says whether each build coloured each file as code, so a file in a language one build knows and the other does not is timed as code for the first and as plain text for the second.
 
+Three more timing tests follow the reader's. `tests/bench/report.rs` holds what they share: the variables above, the turn-about order and the report. `tests/web_bench/`, `tests/history_bench/` and `tests/usage_idle/` each hold such a report against the revision in its name.
+
+```sh
+cargo test --release --locked --test web_bench -- --ignored --nocapture
+cargo test --release --locked --test history_bench -- --ignored --nocapture
+cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocapture
+```
+
+`tests/web_bench.rs` starts `milo web --no-open` in a throwaway home, outside Rex and beside a stand-in for Rex that answers at once or after a pause. It times the link, the first authenticated state, and that state when a stand-in for a browser asks 100 milliseconds after the link. `tests/history_bench.rs` opens a five-file commit and a six-thousand-file one in a generated repository, and times the frame that lists the files, the frame after Down sent with Enter, and Down alone; in a second repository of commits with two-megabyte subjects it times the first frame and Down. Both take `MILO_BENCH_BASE`. `src/usage/tests/idle.rs` is inside the crate, because only there can it run the pane's timer twenty times without waiting twenty intervals: it counts the `sqlite3` processes an idle pane starts for a small and a large pair of generated databases, and the looks until a new row shows. Compare its figures between two checkouts.
+
 ## Commit messages
 
 One line in the imperative that says what the commit does for someone using or reading milo ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.
@@ -1444,6 +1458,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/history.rs` | Keeps commits, opened file lists, and selection state. |
 | `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
 | `src/history/input.rs` | Handles history keys and mouse clicks. |
+| `src/history/listing.rs` | Reads one commit's files off the pane's loop. |
 | `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
 | `src/home.rs` | Runs Home, the picker `milo` opens, with settings and maintenance in the same terminal session. |
 | `src/home/mascot.rs` | Draws the mascot in coloured cells at four sizes. |
@@ -1538,6 +1553,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/menu.rs` | Streams the pane's readings as one JSON snapshot per line for the menu app, using global preferences. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
 | `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
+| `src/usage/signature.rs` | Tells from a database's files whether it was written since the last read. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
@@ -1546,12 +1562,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
+| `src/usage/tests/idle.rs` | Counts the SQLite reads of an idle pane and how soon a new row shows, at two database sizes. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
 | `src/usage/tests/menu_stream.rs` | Checks that the stream agrees with the pane, follows global preferences, and stops when its reader is gone. |
 | `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
 | `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
 | `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
 | `src/usage/tests/tools.rs` | Checks which tools have a place, and the frame for each combination and choice. |
+| `src/usage/tests/unchanged.rs` | Checks when an unchanged database is left unread, and each write, removal, failure and passing of time that reads it again. |
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
@@ -1562,6 +1580,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
 | `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
 | `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
+| `tests/bench/report.rs` | Chooses the builds a timing test runs and writes its report beside a base build's. |
+| `tests/bench/terminal.rs` | Runs a pane in a terminal for a timing test and finds its frames. |
+| `tests/history_bench.rs` | Times listing a small and a large commit's files in History, and Down meanwhile. |
+| `tests/history_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/install.sh` | Checks both installers with stand-ins for Git, Cargo and curl: which source is built, the macOS and checksum checks, and removal only with a matching receipt. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
@@ -1576,8 +1598,12 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
+| `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
+| `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
+| `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
+| `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/web-smoke.cjs` | Saves layout and usage tool choices, turns Discord presence, its names and its application on and off, and exports, previews, imports and undoes a settings bundle under Hosts in the browser editor of a built binary in Chromium, then closes it. |
 
 ---
@@ -1604,8 +1630,11 @@ Outside the project, milo keeps two things in its state folder for the editor: t
 - On macOS, file-system notifications wake the Git panes. Outline and History filter writes to files and directories Git has reported as ignored. FSEvents excludes up to eight directories directly; Milo filters the remaining paths before waking a pane. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. While the editor is open, the reader pauses Git refreshes until it returns to the diff; saving still opens and checks the file. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
 - A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
-- The outline asks Git on a separate thread, so its keys are answered while Git reads a large project. It goes on showing what Git last said and takes the new answer in whole, never part of it. A change reported while Git was being asked brings another check, a reload with `r` replaces an answer still on its way, and an answer that arrives while Git holds the index is dropped and asked for again. History and the reader still ask in the loop.
+- The outline asks Git on a separate thread, so its keys are answered while Git reads a large project. It goes on showing what Git last said and takes the new answer in whole, never part of it. A change reported while Git was being asked brings another check, a reload with `r` replaces an answer still on its way, and an answer that arrives while Git holds the index is dropped and asked for again. History and the reader still refresh Git in the loop.
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened. Adding an unrelated untracked file does not require recounting edits in tracked files. With the same tracked status and comparison base, an ordinary save recounts only the edited files; changes that could affect rename detection or other files use the full comparison. A working reader reuses the Git status from its current refresh.
+- History reads a commit's file list on a thread of its own, one commit at a time. A key waits 40 milliseconds for it, which most commits need less than; after that the pane says it is reading, goes on taking keys, and looks for the list every 10 milliseconds until it arrives, also when the pane follows a shell. A list that arrives late is kept with its commit, found again by its hash, and is never shown under another.
+- Usage does not query a tool's SQLite database again while its files are as a successful read left them: the same file, size, times and header for the database and its write-ahead log. That holds only if the files had been left alone for two seconds before the read and did not change during it, and only until a saved record dated ahead of the clock comes due or the local day ends. A failed read, a missing file and `r` always read, and an unchanged database is still read every five minutes. Limits get less latitude than activity: oh-my-pi's database is left unread only without a write-ahead log, because with one a commit can reach readers without its files changing. In write-ahead mode it is read at every look, as before.
+- `milo web` prints its link before it reads the settings. If asked to open the browser, it first checks where the Rex apps are connected, then starts the browser while it reads Git, the Rex tab and the settings. The listener holds a browser's first requests until the editor is whole, so no page is served from a half-read state.
 - In the editor, undo and redo replace only the rows spanned by the recorded byte range. Syntax state above that range stays cached; a changed row can still change how later rows are coloured.
 - Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.
 - Printable bases use Unicode 17.0.0 East Asian Width: wide and fullwidth characters take two cells; ambiguous characters take one. Combining marks stay with their base where applicable. Milo omits default-ignorable formatting characters, including emoji variation selectors, but preserves spacing Hangul fillers. Width is measured by scalar, not by full grapheme cluster.

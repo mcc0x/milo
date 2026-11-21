@@ -8,6 +8,7 @@ mod http;
 mod menu;
 mod omp;
 mod opencode;
+mod signature;
 mod sqlite;
 mod status;
 mod time;
@@ -873,9 +874,12 @@ impl Today {
         Self { day, since: high }
     }
 
+    /// The kept midnight stands only while it is still where this date begins:
+    /// a change of time zone can move it without changing the date.
     fn since(&mut self, now: i64) -> i64 {
         let day = when::local_day(now);
-        if self.day != day {
+        let begins_here = when::local_day(self.since) == day && when::local_day(self.since - 1) != day;
+        if self.day != day || !begins_here {
             *self = Self::at(now, day);
         }
         self.since
@@ -1080,11 +1084,17 @@ impl Usage {
         self.collect_omp();
         self.opencode.collect();
         self.accounts.collect(now);
+        let cutoff = self.today.since(now);
         if manual {
             self.omp.reload(now, clock);
             self.opencode.poll.reload(now, clock);
         } else {
             self.omp.start(now, clock);
+            // The local day can move under totals nothing has written to since, as when the
+            // time zone changes. Those say nothing of the day the pane now shows.
+            if matches!(self.opencode.report, opencode::Report::Today(read) if read.since != cutoff) {
+                self.opencode.poll.forget();
+            }
             self.opencode.poll.start(now, clock);
         }
         self.accounts.start(now, manual);
@@ -1092,7 +1102,6 @@ impl Usage {
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         self.check_limits(&mut claude_budget);
         self.codex.check(self.codex_dir.as_deref(), now, clock, manual, &mut codex_budget);
-        let cutoff = self.today.since(now);
         let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, clock, manual, &mut claude_budget);
         #[cfg(test)]
         {

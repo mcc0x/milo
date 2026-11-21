@@ -1,0 +1,21 @@
+# base revision: fa34ca44f40ad89907eeede40bf40b052bc34b57
+# timed checkout: ec0f025f41ce9c76bcd5cfff11e55accdc27a917
+# Apple M5 Pro; Darwin 27.2.0 arm64; rustc 1.100.0 (0ef1bc386 2026-11-09) (Homebrew)
+# milo web bench: time from starting the process, 10 runs, microseconds
+# macos aarch64; timed: milo 0.1.5
+# base: milo 0.1.5
+# state-after-browser: the state is asked for 100ms after the link
+# rex-pane-slow: the stand-in for Rex takes 0.15s to answer
+# outside-rex: Rex was asked 0 times before the state was served
+# rex-pane: Rex was asked 1 times before the state was served
+# rex-pane-slow: Rex was asked 1 times before the state was served
+scenario	measure	samples	median	min	max	base_median	ratio
+outside-rex	link	10	8022	6356	11930	28687	0.28
+outside-rex	state	10	28921	23370	34804	29080	0.99
+outside-rex	state-after-browser	10	113926	104922	116708	128975	0.88
+rex-pane	link	10	5685	4581	6889	30634	0.19
+rex-pane	state	10	29918	22703	423150	30922	0.97
+rex-pane	state-after-browser	10	108958	104397	114807	125371	0.87
+rex-pane-slow	link	10	11413	3960	15669	221762	0.05
+rex-pane-slow	state	10	222385	214097	440192	222111	1.00
+rex-pane-slow	state-after-browser	10	217234	206636	224873	321684	0.68

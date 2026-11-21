@@ -274,7 +274,8 @@ fn a_hidden_tool_is_neither_shown_nor_looked_for() {
     assert!(usage.opencode.poll.fd().is_none(), "OpenCode's database was read");
     assert!(usage.omp.fd().is_some(), "Claude Code still has OMP's reports to read");
     let codex = Reading { at: Timestamp::seconds(now), windows: Limits::default() };
-    assert!(!usage.keep(omp::Reports { codex: Some(codex), claude: None }), "a hidden tool's report is dropped");
+    let hidden = omp::Reports { codex: Some(codex), ..Default::default() };
+    assert!(!usage.keep(hidden), "a hidden tool's report is dropped");
     opencode_today(&mut usage, now);
     every_size(&mut usage, |w, h, rows| {
         let text = rows.join("\n");
@@ -369,7 +370,7 @@ fn leftovers_and_unrelated_files_are_not_a_tool_but_a_saved_report_is() {
     usage.check();
     let week = Window { minutes: 10_080, percent: 32.0, resets: Some(now + DAY), observed: now };
     let claude = Reading { at: Timestamp::seconds(now), windows: Limits::new([None, Some(week)]) };
-    assert!(usage.keep(omp::Reports { codex: None, claude: Some(claude) }));
+    assert!(usage.keep(omp::Reports { claude: Some(claude), ..Default::default() }));
     assert_eq!(
         [usage.codex.presence(usage.codex.reported(now)), usage.claude.presence(usage.claude.reported(now))],
         [Presence::Absent, Presence::Reading]

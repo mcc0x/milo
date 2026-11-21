@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::json::Value;
 
-use super::sqlite::{self, Poll};
+use super::sqlite::{self, Outcome, Poll};
 use super::time::{self, Timestamp};
 use super::{CLOCK_SKEW, Limits, ModelWeek, Reading, Window};
 
@@ -56,6 +56,13 @@ UNION ALL
 SELECT h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at,
        NULL, NULL, h.window_label, 1
 FROM history h WHERE h.rank=1 AND h.account_key=h.newest
+UNION ALL
+SELECT 'milo:ahead', at, NULL, NULL, NULL, NULL, NULL, NULL, 2
+FROM (SELECT min(at) AS at FROM (
+    SELECT observed_ms AS at FROM reports WHERE typeof(observed_ms)='integer' AND observed_ms>{latest}
+    UNION ALL
+    SELECT recorded_at FROM usage_history WHERE typeof(recorded_at)='integer' AND recorded_at>{latest}
+)) WHERE at IS NOT NULL
 ORDER BY observed_ms,limit_id;
 "
     )
@@ -81,16 +88,31 @@ pub(super) fn database_in(home: Option<&Path>, dir: Option<&Path>) -> Option<Pat
 pub(super) struct Reports {
     pub claude: Option<Reading>,
     pub codex: Option<Reading>,
+    /// The earliest saved observation dated too far ahead of the clock to
+    /// count yet, in milliseconds. The reports change when it comes due.
+    pub ahead: Option<i64>,
+}
+
+impl Reports {
+    /// The first second at which the same database gives other reports.
+    fn stand_until(&self) -> i64 {
+        self.ahead.map_or(i64::MAX, |ms| ms.div_euclid(1000).saturating_sub(CLOCK_SKEW))
+    }
 }
 
 /// A missing database clears the saved reports; any other failure keeps them.
+/// These are limits, so only a database without a write-ahead log is ever
+/// left unread: with one, what a reader sees can change without its files changing.
 pub(super) fn poll(path: Option<PathBuf>, wait: Duration) -> Poll<Reports> {
-    Poll::new(path, wait, |path, now, wait| {
-        read(path, now, wait).or_else(|| {
-            let missing = std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
-            missing.then(Reports::default)
-        })
-    })
+    let read: sqlite::Reader<Reports> = |path, now, wait| {
+        if let Some(reports) = read(path, now, wait) {
+            let stands_until = Some(reports.stand_until());
+            return Some(Outcome { value: reports, stands_until });
+        }
+        let missing = std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+        missing.then(|| Outcome { value: Reports::default(), stands_until: None })
+    };
+    Poll::new(path, wait, read).never_settled_with_a_log()
 }
 
 pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Option<Reports> {
@@ -100,7 +122,7 @@ pub(super) fn read(path: &Path, now: i64, wait: Duration) -> Option<Reports> {
 
 /// Reconstruct each newest snapshot without bringing back obsolete windows.
 pub(super) fn parse(bytes: &[u8], now: i64) -> Option<Reports> {
-    let mut reports = Reports { claude: None, codex: None };
+    let mut reports = Reports::default();
     // sqlite3 prints nothing for a select that returns no rows.
     if bytes.is_empty() {
         return Some(reports);
@@ -110,6 +132,10 @@ pub(super) fn parse(bytes: &[u8], now: i64) -> Option<Reports> {
             "provider", "observed_ms", "limit_id", "used_fraction", "reset_ms", "duration_ms", "tier", "window_label",
             "history_row",
         ]);
+        if provider.and_then(|v| v.string(20)).as_deref() == Some("milo:ahead") {
+            reports.ahead = at.and_then(Value::integer);
+            continue;
+        }
         let Some(at) = at.and_then(Timestamp::millis).filter(|at| at.seconds <= now.saturating_add(CLOCK_SKEW)) else {
             continue;
         };

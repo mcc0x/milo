@@ -92,23 +92,17 @@ impl Rex {
 
 impl Host {
     /// Asks this computer and the Rex server of this terminal. It starts no server.
-    pub(crate) fn probe(forwarded: bool) -> Option<Self> {
+    /// A caller that already checked where the apps are can reuse that answer.
+    pub(crate) fn probe(forwarded: bool, viewers: impl FnOnce() -> Option<Viewers>) -> Option<Self> {
         if cfg!(test) {
             return None;
         }
-        let rex =
-            rex::server(None).map(|server| Rex { server, command: rex::command_version(), viewers: rex::viewers() });
+        let rex = rex::server(None).map(|server| Rex { server, command: rex::command_version(), viewers: viewers() });
         Some(Self { name: computer_name(), rex, forwarded })
     }
 
     pub(crate) fn warning(&self) -> Option<&'static str> {
         self.rex.as_ref().and_then(|rex| rex.compatibility().warning())
-    }
-
-    /// Whether every Rex app showing this host runs somewhere else, so a
-    /// browser opened here would be on a screen nobody is looking at.
-    pub(crate) fn seen_from_elsewhere(&self) -> bool {
-        self.rex.as_ref().is_some_and(|rex| rex.viewers == Some(Viewers::Elsewhere))
     }
 
     /// The lines `milo doctor` prints about the host.

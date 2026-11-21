@@ -62,7 +62,7 @@ pub(crate) enum TransferReply {
 
 impl Editor {
     /// `forwarded` says the page is opened from another computer, through a Rex forward.
-    pub(crate) fn open(forwarded: bool) -> Self {
+    pub(crate) fn open(forwarded: bool, viewers: impl FnOnce() -> Option<rex::Viewers>) -> Self {
         let inside = rex::inside();
         let store = Store::real();
         let target = inside.then(rex::Target::current).flatten();
@@ -76,13 +76,8 @@ impl Editor {
         editor.setup.alerts = Alerts::real();
         editor.setup.refresh_alerts();
         editor.setup.presence = editor.setup.presence.take().map(presence::Control::starting_helper);
-        editor.host = Host::probe(forwarded);
+        editor.host = Host::probe(forwarded, viewers);
         editor
-    }
-
-    /// Whether every Rex app showing this host runs on another computer.
-    pub(crate) fn seen_from_elsewhere(&self) -> bool {
-        self.host.as_ref().is_some_and(Host::seen_from_elsewhere)
     }
 
     pub(crate) fn telegram_chats(&self, token: &str) -> Result<String, alerts::TelegramChatsError> {
@@ -448,7 +443,7 @@ impl Editor {
             Action::Doctor => {
                 self.doctor = None;
                 if let Some(host) = &self.host {
-                    self.host = Host::probe(host.forwarded);
+                    self.host = Host::probe(host.forwarded, rex::viewers);
                 }
                 let setup = &self.setup;
                 let target = if setup.inside { self.require_tab().map(|()| setup.target.as_ref()) } else { Ok(None) };

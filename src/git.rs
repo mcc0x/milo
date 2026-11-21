@@ -104,6 +104,54 @@ pub(crate) enum CommitFilesError {
     Git,
 }
 
+/// Reads the files commits touched. It owns its paths, so that a read can
+/// run off the pane's loop while the repository stays with the pane.
+pub(crate) struct CommitFiles {
+    root: PathBuf,
+    shallow_file: Option<PathBuf>,
+}
+
+impl CommitFiles {
+    /// Reads the files touched by this commit, compared with its first parent.
+    pub(crate) fn at(&self, hash: &str) -> Result<DiffFiles, CommitFilesError> {
+        parent_history(&self.root, self.shallow_file.as_deref(), hash)?;
+        let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Files).map_err(|_| CommitFilesError::Git)?;
+        Ok(parse_files(&raw))
+    }
+}
+
+/// Git treats a shallow boundary as a root, even when the commit has a parent.
+fn parent_history(root: &Path, shallow_file: Option<&Path>, hash: &str) -> Result<(), CommitFilesError> {
+    let Some(file) = shallow_file else { return Ok(()) };
+    match read::file(file, DIFF_LIMIT) {
+        Content::Gone => return Ok(()),
+        Content::Bytes(bytes) => {
+            if !bytes.split(|&b| b == b'\n').any(|oid| oid == hash.as_bytes()) {
+                return Ok(());
+            }
+        }
+        _ => return Err(CommitFilesError::Git),
+    }
+
+    // A shallow marker alone is not enough: a depth-limited clone can
+    // mark a genuine root. Read the actual header, not Git's ancestry view.
+    let hash = CommitId::parse(hash).ok_or(CommitFilesError::Git)?.0;
+    let raw = run::limited_output(root, &[], &["cat-file", "commit", "--end-of-options", hash], DIFF_LIMIT)
+        .map_err(|_| CommitFilesError::Git)?;
+    let mut headers = raw.split(|&b| b == b'\n');
+    if !headers.next().is_some_and(|line| line.starts_with(b"tree ")) {
+        return Err(CommitFilesError::Git);
+    }
+    if let Some(parent) = headers.next().and_then(|line| line.strip_prefix(b"parent ")) {
+        return Err(if parent.len() == hash.len() && parent.iter().all(u8::is_ascii_hexdigit) {
+            CommitFilesError::ShallowBoundary
+        } else {
+            CommitFilesError::Git
+        });
+    }
+    Ok(())
+}
+
 /// An object name supplied by the caller, not a branch name or revision expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitId<'a>(&'a str);
@@ -848,43 +896,12 @@ impl Repo {
         parse::commit_version(&raw, id)
     }
 
-    /// Git treats a shallow boundary as a root, even when the commit has a parent.
     fn check_parent_history(&self, hash: &str) -> Result<(), CommitFilesError> {
-        let Some(file) = &self.shallow_file else { return Ok(()) };
-        match read::file(file, DIFF_LIMIT) {
-            Content::Gone => return Ok(()),
-            Content::Bytes(bytes) => {
-                if !bytes.split(|&b| b == b'\n').any(|oid| oid == hash.as_bytes()) {
-                    return Ok(());
-                }
-            }
-            _ => return Err(CommitFilesError::Git),
-        }
-
-        // A shallow marker alone is not enough: a depth-limited clone can
-        // mark a genuine root. Read the actual header, not Git's ancestry view.
-        let hash = CommitId::parse(hash).ok_or(CommitFilesError::Git)?.0;
-        let raw = run::limited_output(&self.root, &[], &["cat-file", "commit", "--end-of-options", hash], DIFF_LIMIT)
-            .map_err(|_| CommitFilesError::Git)?;
-        let mut headers = raw.split(|&b| b == b'\n');
-        if !headers.next().is_some_and(|line| line.starts_with(b"tree ")) {
-            return Err(CommitFilesError::Git);
-        }
-        if let Some(parent) = headers.next().and_then(|line| line.strip_prefix(b"parent ")) {
-            return Err(if parent.len() == hash.len() && parent.iter().all(u8::is_ascii_hexdigit) {
-                CommitFilesError::ShallowBoundary
-            } else {
-                CommitFilesError::Git
-            });
-        }
-        Ok(())
+        parent_history(&self.root, self.shallow_file.as_deref(), hash)
     }
 
-    /// Reads the files touched by this commit, compared with its first parent.
-    pub(crate) fn files_at(&self, hash: &str) -> Result<DiffFiles, CommitFilesError> {
-        self.check_parent_history(hash)?;
-        let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Files).map_err(|_| CommitFilesError::Git)?;
-        Ok(parse_files(&raw))
+    pub(crate) fn commit_files(&self) -> CommitFiles {
+        CommitFiles { root: self.root.clone(), shallow_file: self.shallow_file.clone() }
     }
 
     /// Finds the change for one path without asking Git for any line counts.
@@ -1176,7 +1193,7 @@ mod tests {
         assert_eq!(repo.tracked().unwrap().collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
         assert!(repo.paths_incomplete());
 
-        let diff = repo.files_at(&repo.ends().tip).unwrap();
+        let diff = repo.commit_files().at(&repo.ends().tip).unwrap();
         assert_eq!(diff.unrepresented, 1);
         assert_eq!(diff.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
 
@@ -1463,7 +1480,7 @@ mod tests {
         fs::remove_file(f.root.join("unrelated.txt")).unwrap();
 
         assert!(
-            matches!(repo.files_at(hash), Err(CommitFilesError::Git)),
+            matches!(repo.commit_files().at(hash), Err(CommitFilesError::Git)),
             "the commit's line counts should be unavailable"
         );
         let file = repo.changed_file_at(hash, "page.txt").unwrap().unwrap();

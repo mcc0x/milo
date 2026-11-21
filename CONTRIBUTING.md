@@ -254,6 +254,16 @@ sh tests/reader-compare.sh REVISION > report.tsv    # this checkout beside that 
 
 `tests/reader_bench.rs` and `tests/rex_lab.rs` use only what a built Milo offers from outside: its commands, what it draws in a terminal and, in the lab, the requests its browser editor accepts. So they can check a build they were not compiled with: set `MILO_TEST_BINARY` to a Milo built from another branch. Where a check depends on a feature that only some builds have, ask the build rather than the branch. The reader report's `syntax` column, for instance, says whether each build coloured each file as code, so a file in a language one build knows and the other does not is timed as code for the first and as plain text for the second.
 
+Three more timing tests follow the reader's. `tests/bench/report.rs` holds what they share: the variables above, the turn-about order and the report. `tests/web_bench/`, `tests/history_bench/` and `tests/usage_idle/` each hold such a report against the revision in its name.
+
+```sh
+cargo test --release --locked --test web_bench -- --ignored --nocapture
+cargo test --release --locked --test history_bench -- --ignored --nocapture
+cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocapture
+```
+
+`tests/web_bench.rs` starts `milo web --no-open` in a throwaway home, outside Rex and beside a stand-in for Rex that answers at once or after a pause. It times the link, the first authenticated state, and that state when a stand-in for a browser asks 100 milliseconds after the link. `tests/history_bench.rs` opens a five-file commit and a six-thousand-file one in a generated repository, and times the frame that lists the files, the frame after Down sent with Enter, and Down alone; in a second repository of commits with two-megabyte subjects it times the first frame and Down. Both take `MILO_BENCH_BASE`. `src/usage/tests/idle.rs` is inside the crate, because only there can it run the pane's timer twenty times without waiting twenty intervals: it counts the `sqlite3` processes an idle pane starts for a small and a large pair of generated databases, and the looks until a new row shows. Compare its figures between two checkouts.
+
 ## Commit messages
 
 One line in the imperative that says what the commit does for someone using or reading milo ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.
@@ -296,6 +306,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/history.rs` | Keeps commits, opened file lists, and selection state. |
 | `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
 | `src/history/input.rs` | Handles history keys and mouse clicks. |
+| `src/history/listing.rs` | Reads one commit's files off the pane's loop. |
 | `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
 | `src/home.rs` | Runs Home, the picker `milo` opens, with settings and maintenance in the same terminal session. |
 | `src/home/mascot.rs` | Draws the mascot in coloured cells at four sizes. |
@@ -390,6 +401,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/menu.rs` | Streams the pane's readings as one JSON snapshot per line for the menu app, using global preferences. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
 | `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
+| `src/usage/signature.rs` | Tells from a database's files whether it was written since the last read. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
@@ -398,12 +410,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
+| `src/usage/tests/idle.rs` | Counts the SQLite reads of an idle pane and how soon a new row shows, at two database sizes. |
 | `src/usage/tests/layout.rs` | Checks usage frames at different sizes and times. |
 | `src/usage/tests/menu_stream.rs` | Checks that the stream agrees with the pane, follows global preferences, and stops when its reader is gone. |
 | `src/usage/tests/opencode/` | Holds the session tables each checked OpenCode release creates. |
 | `src/usage/tests/opencode_activity.rs` | Checks OpenCode totals, unknown states, and the pane's row against those tables. |
 | `src/usage/tests/status_line.rs` | Checks Claude Code status-line and saved-cache readings. |
 | `src/usage/tests/tools.rs` | Checks which tools have a place, and the frame for each combination and choice. |
+| `src/usage/tests/unchanged.rs` | Checks when an unchanged database is left unread, and each write, removal, failure and passing of time that reads it again. |
 | `src/usage/time.rs` | Parses reported timestamps with enough precision to order them. |
 | `src/walk.rs` | Lists files and folders outside Git. |
 | `src/watch.rs` | Delivers macOS file-change notifications to the pane loop. |
@@ -414,6 +428,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
 | `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
 | `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
+| `tests/bench/report.rs` | Chooses the builds a timing test runs and writes its report beside a base build's. |
+| `tests/bench/terminal.rs` | Runs a pane in a terminal for a timing test and finds its frames. |
+| `tests/history_bench.rs` | Times listing a small and a large commit's files in History, and Down meanwhile. |
+| `tests/history_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/install.sh` | Checks both installers with stand-ins for Git, Cargo and curl: which source is built, the macOS and checksum checks, and removal only with a matching receipt. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
@@ -428,6 +446,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
+| `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
+| `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
+| `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
+| `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/web-smoke.cjs` | Saves layout and usage tool choices, turns Discord presence, its names and its application on and off, and exports, previews, imports and undoes a settings bundle under Hosts in the browser editor of a built binary in Chromium, then closes it. |
