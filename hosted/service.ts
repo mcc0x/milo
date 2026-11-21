@@ -55,7 +55,7 @@ type Client = {
   active: number;
   counts: Partial<Record<Route, number>>;
 };
-type FinishProof = { hash: Buffer; attempts: number; reviewed: boolean };
+type FinishProof = { hash: Buffer; attempts: number };
 
 type Claim = { credential: string; digest?: string };
 
@@ -69,7 +69,7 @@ type Step =
   | { kind: "discord-exchange" }
   | { kind: "discord-ready"; credential: string; channel: string; browser?: string; finish?: FinishProof };
 
-type Pair = { device: string; expires: number; client: Client; step: Step; claimed?: Claim };
+type Pair = { device: string; expires: number; client: Client; step: Step; reviewed?: true; claimed?: Claim };
 type BoundChat = { chat: number; nextSend: number; sending: boolean; digests: Set<string> };
 type Options = {
   origin?: string;
@@ -124,7 +124,7 @@ export async function createService({
   const absolute = (path: string) => production ? `${PRODUCTION_ORIGIN}${path}` : path;
   const finishSecret = production ? randomBytes(32) : undefined;
   const finishMac = (value: string) => createHmac("sha256", finishSecret!).update(value).digest();
-  const finishProof = (code: string): FinishProof => ({ hash: finishMac(`code:${code}`), attempts: 0, reviewed: false });
+  const finishProof = (code: string): FinishProof => ({ hash: finishMac(`code:${code}`), attempts: 0 });
   const browserFinish = (browser: string) => finishMac(`browser:${browser}`).subarray(0, 4).toString("hex").toUpperCase();
   const botId = telegram && /^([1-9]\d{0,15}):[A-Za-z0-9_-]{1,128}$/.exec(telegram.token)?.[1];
   if (telegram && (!botId || !Number.isSafeInteger(Number(botId)))) throw new Error("Invalid Telegram bot configuration.");
@@ -329,22 +329,21 @@ export async function createService({
     const metadata = step.kind === "discord-ready"
       ? { provider: "discord", label: `Discord channel · ${step.channel}`, chat: "" }
       : { provider: "telegram", label: `Telegram DM · ${step.chat}`, chat: String(step.chat) };
-    if (production) {
-      const finish = step.finish!;
-      if (review) {
-        finish.reviewed = true;
-        return json(metadata);
-      }
-      if (!finish.reviewed) return error(409, "Review the destination before saving.");
-      if (step.kind === "telegram-ready" && (!telegramCaughtUp || telegramCanSend?.() === false)) {
-        return error(503, "Telegram is not ready; try again later.");
-      }
+    if (review) {
+      pair.reviewed = true;
+      return json(metadata);
+    }
+    if (production && !pair.reviewed) return error(409, "Review the destination before saving.");
+    if (production && step.kind === "telegram-ready" && (!telegramCaughtUp || telegramCanSend?.() === false)) {
+      return error(503, "Telegram is not ready; try again later.");
+    }
+    if (pair.reviewed) {
       if (pair.claimed) return json({ ...metadata, credential: pair.claimed.credential });
       sweep();
       if (recoveries.size >= 256) return error(503, "Too many recently saved pairings; try again later.");
     }
     if (step.kind === "discord-ready") {
-      if (production) retainClaim(pair, { credential: step.credential });
+      if (pair.reviewed) retainClaim(pair, { credential: step.credential });
       else forget(pair);
       return json({ ...metadata, credential: step.credential });
     }
@@ -355,7 +354,7 @@ export async function createService({
     const hashed = digest(credential);
     bindingStore?.insert(hashed, step.chat);
     remember(hashed, step.chat);
-    if (production) retainClaim(pair, { credential, digest: hashed });
+    if (pair.reviewed) retainClaim(pair, { credential, digest: hashed });
     else forget(pair);
     return json({ ...metadata, credential });
   }
@@ -480,11 +479,11 @@ export async function createService({
           report("Telegram binding revocation could not reach its issuing store.");
           return error(503, "The issuing Telegram store is unavailable.");
         }
-        for (const pair of recoveries.values()) if (pair.claimed?.digest === hashed) forget(pair);
       } else {
         if (!binding) return error(401, "Telegram binding is missing or revoked.");
         bindingStore?.remove(hashed);
       }
+      for (const pair of recoveries.values()) if (pair.claimed?.digest === hashed) forget(pair);
       bindings.delete(hashed);
       binding?.digests.delete(hashed);
       if (binding && !binding.digests.size && !binding.sending) chats.delete(binding.chat);
@@ -546,7 +545,7 @@ export async function createService({
       if (request.headers.has("origin")) return error(403, "Use Milo's local API proxy.");
       if (url.search) return error(400, "Unexpected query parameters.");
       if (method === "POST" && path === "/v1/pair") return limited("pair", clientIp, (client) => start(request, client));
-      const review = production && path === "/v1/preview";
+      const review = path === "/v1/preview";
       if (method === "POST" && (review || path === "/v1/claim")) return limited("claim", clientIp, () => claim(request, review));
       if ((method === "POST" && path === "/v1/send") || (method === "DELETE" && path === "/v1/binding")) {
         return limited("binding", clientIp, () => relay(path, request));

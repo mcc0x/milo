@@ -673,3 +673,20 @@ test("production Telegram pauses sends until its poll catches up and applies ver
   expect(ledger.store.load(10)).toEqual([]);
   expect((await publicApi(service, "send", text, client, auth)).status).toBe(401);
 });
+
+test("local preview returns only destination metadata and allows the reviewed claim to be retried", async () => {
+  const fixture = telegramFixture();
+  const service = await createService({ telegram, fetch: fixture.fetch });
+  const { deviceKey, confirmation } = await requestTelegramConfirmation(service, fixture);
+  const proof = { deviceKey };
+  expect((await api(service, "preview", proof)).status).toBe(202);
+  fixture.tap(confirmation);
+  await service.pollTelegram();
+  const metadata = { provider: "telegram", label: "Telegram DM · 123", chat: "123" };
+  expect(await (await api(service, "preview", proof)).json()).toEqual(metadata);
+  const claim = await (await api(service, "claim", proof)).json();
+  expect(claim).toEqual({ ...metadata, credential: expect.stringMatching(/^milorelay_[A-Za-z0-9_-]{43}$/) });
+  expect(await (await api(service, "claim", proof)).json()).toEqual(claim);
+  expect((await removeBinding(service, { Authorization: `Bearer ${claim.credential}` })).status).toBe(204);
+  expect((await api(service, "claim", proof)).status).toBe(404);
+});
