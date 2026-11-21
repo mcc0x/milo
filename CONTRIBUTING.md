@@ -37,6 +37,8 @@ Then run the program and look at what you changed. Text checks cannot tell you w
 
 When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
 
+The website in `site/` is a Next.js static export, built with Bun 1.4 and Node.js 26. In that directory, `bun install` and `bun run dev` start it for editing. Before a pull request, run `bun test && bun run build`, then `bun run preview` and look at the built pages in a browser. Railway runs the same build and serves `site/dist` with `site/Caddyfile`.
+
 Describe the pull request under the headings in `.github/pull_request_template.md`: **What changed** and **Verification**. GitHub fills them in when you open a pull request in the browser. A body passed on the command line (`gh pr create --body` or `--body-file`) replaces the template, so write the same headings yourself. Add **Compatibility** when a user or packager has to act.
 
 A pull request that changes anything you can see (the website, a terminal pane, the macOS app or any other visible surface) must show real screenshots of the affected UI under **Screenshots** in its description. Show before and after when it changes an existing design, and desktop and mobile when both are affected. A change with nothing to see needs no screenshot; leave the section out.

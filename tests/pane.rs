@@ -1499,7 +1499,19 @@ fn an_account_reaches_the_pane_doctor_and_menu_stream_and_no_setting_redirects_i
 
     let mut stream = command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut lines = BufReader::new(stream.stdout.take().unwrap()).lines();
-    let line = lines.find(|line| line.as_ref().is_ok_and(|line| line.contains("deepseek"))).unwrap().unwrap();
+    // Each account is looked at on a thread of its own, even when a saved
+    // answer spares the request, and the stream does not hold a line back for
+    // one: an account still being looked at reads "Asking the provider" until
+    // a later line, a second apart. Both looks only read a file here, so the
+    // line with both must come within a few.
+    let settled = |line: &String| line.contains("deepseek") && !line.contains("Asking the provider");
+    let line = lines
+        .by_ref()
+        .take(10)
+        .map(Result::unwrap)
+        .inspect(|line| eprintln!("menu stream: {line}"))
+        .find(settled)
+        .expect("a line with both accounts' saved answers");
     assert!(
         line.contains(r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#),
         "{line}"

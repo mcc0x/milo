@@ -1,14 +1,5 @@
 @import './terminal.css';
 
-@font-face {
-  font-family: Bricolage;
-  src: url('./fonts/bricolage-grotesque-latin.woff2') format('woff2');
-  font-weight: 400 800;
-  /* Preloaded, so it is nearly always there for the first paint; if not,
-     the text shows at once and changes face when it arrives. */
-  font-display: swap;
-}
-
 :root {
   color-scheme: light;
   --page: #d8e7fe;
@@ -152,6 +143,10 @@ button[data-copy]:hover { background: var(--blue); }
 button[data-copy]:active { scale: .96; }
 button[data-copy][data-state='copied'] { background: #b2d8c3; color: #203b30; }
 button[data-copy][data-state='copied']::before { content: '✓ '; }
+/* Copying needs the script; the command can still be selected. */
+@media (scripting: none) {
+  button[data-copy] { display: none; }
+}
 
 .source {
   display: flex;
