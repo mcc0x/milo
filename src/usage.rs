@@ -1,7 +1,10 @@
-//! Shows the last reported usage limits and today's local Claude Code and OpenCode activity.
+//! Shows the last reported usage limits, today's local Claude Code and
+//! OpenCode activity, and what providers report for accounts the user turned on.
 
+mod accounts;
 mod draw;
 mod files;
+mod http;
 mod menu;
 mod omp;
 mod opencode;
@@ -21,7 +24,7 @@ use crate::help::{self, Page};
 use crate::json::Value;
 use crate::keys::Key;
 use crate::pane::{After, External, Pane};
-use crate::preferences::{Show, UsageTool, UsageTools};
+use crate::preferences::{Show, UsageAccounts, UsageTool, UsageTools};
 use crate::screen::Screen;
 use crate::watch::Scope;
 use crate::when::{DAY, MINUTE};
@@ -40,6 +43,7 @@ const CODEX_DEFERRED_LIMIT: usize = 512;
 const CLAUDE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 4096;
 const SAVED_LIMITS: &str = "claude-limits.json";
+const NO_TOOLS: &str = "Usage tools: none found";
 
 /// An ordinary figure has at most three digits. Keep them ready for each frame.
 static PERCENT_TEXT: [[u8; 4]; 101] = {
@@ -944,6 +948,7 @@ pub struct Usage {
     claude_config: Option<PathBuf>,
     omp: sqlite::Poll<omp::Reports>,
     opencode: OpenCode,
+    accounts: accounts::Accounts,
     codex: Codex,
     claude: Claude,
     today: Today,
@@ -966,6 +971,7 @@ impl Usage {
         let (omp, opencode) = (omp::database(home.as_deref()), opencode::database(home.as_deref()));
         let mut usage = usage.with_databases(omp, opencode, sqlite::QUERY_WAIT);
         usage.preference_note = note;
+        usage.accounts = accounts::Accounts::open(prefs.usage_accounts);
         usage
     }
 
@@ -994,6 +1000,11 @@ impl Usage {
         self.omp = omp::poll(omp.filter(|_| self.reads_omp()), wait);
         self.opencode = OpenCode::new(opencode.filter(|_| self.tools[UsageTool::OpenCode] != Show::Hide), wait);
         self
+    }
+
+    /// The descriptor of a local database read that is still running.
+    fn database_fd(&self) -> Option<RawFd> {
+        self.omp.fd().or_else(|| self.opencode.poll.fd())
     }
 
     fn reads_omp(&self) -> bool {
@@ -1033,6 +1044,7 @@ impl Usage {
             claude_config: None,
             omp: omp::poll(None, sqlite::QUERY_WAIT),
             opencode: OpenCode::new(None, sqlite::QUERY_WAIT),
+            accounts: accounts::Accounts::none(),
             codex: Codex::default(),
             claude: Claude::default(),
             today: Today::at(now, when::local_day(now)),
@@ -1058,6 +1070,7 @@ impl Usage {
     fn refresh(&mut self, now: i64, clock: Instant, manual: bool) -> bool {
         self.collect_omp();
         self.opencode.collect();
+        self.accounts.collect(now);
         if manual {
             self.omp.reload(now, clock);
             self.opencode.poll.reload(now, clock);
@@ -1065,6 +1078,7 @@ impl Usage {
             self.omp.start(now, clock);
             self.opencode.poll.start(now, clock);
         }
+        self.accounts.start(now, manual);
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         self.check_limits(&mut claude_budget);
@@ -1111,11 +1125,22 @@ impl Usage {
 
 /// What doctor says about usage, from one bounded, read-only look: a line for
 /// each tool that is found or always shown, and none for a tool that is
-/// hidden or absent. Transcripts are found but not read.
-pub fn doctor(tools: UsageTools) -> Vec<String> {
+/// hidden or absent. Transcripts are found but not read. An account that is
+/// turned on is described from its settings and last saved answer; doctor
+/// does not ask its provider.
+pub fn doctor(tools: UsageTools, chosen: UsageAccounts) -> Vec<String> {
     let home = paths::home();
-    let usage = Usage::for_home(home.as_deref(), when::now(), tools);
-    usage.doctor(omp::database(home.as_deref()), opencode::database(home.as_deref()), sqlite::QUERY_WAIT)
+    let now = when::now();
+    let usage = Usage::for_home(home.as_deref(), now, tools);
+    let mut lines =
+        usage.doctor(omp::database(home.as_deref()), opencode::database(home.as_deref()), sqlite::QUERY_WAIT);
+    let accounts = accounts::doctor(chosen, now);
+    // With an account to describe, there is something to say besides that no tool was found.
+    if !accounts.is_empty() {
+        lines.retain(|line| line != NO_TOOLS);
+    }
+    lines.extend(accounts);
+    lines
 }
 
 impl Usage {
@@ -1153,7 +1178,7 @@ impl Usage {
             }
         }
         if lines.is_empty() && UsageTool::ALL.into_iter().any(|tool| self.tools[tool] != Show::Hide) {
-            lines.push("Usage tools: none found".into());
+            lines.push(NO_TOOLS.into());
         }
         lines
     }
@@ -1183,14 +1208,15 @@ impl Pane for Usage {
     }
 
     /// One job is watched at a time. A finished job's descriptor stays
-    /// readable, so the other is picked up as soon as the first is collected.
+    /// readable, so the next is picked up as soon as the first is collected.
     fn external_fd(&self) -> Option<RawFd> {
-        self.omp.fd().or_else(|| self.opencode.poll.fd())
+        self.database_fd().or_else(|| self.accounts.fd())
     }
 
     fn check_external(&mut self) -> External {
         let omp = self.collect_omp();
-        if self.opencode.collect() || omp { External::Redraw } else { External::Unchanged }
+        let accounts = self.accounts.collect(self.now());
+        if self.opencode.collect() || omp || accounts { External::Redraw } else { External::Unchanged }
     }
 
     fn draw(&mut self, screen: &mut Screen) {
@@ -1253,11 +1279,12 @@ impl Pane for Usage {
         let today = self.today.since;
         let claude = self.claude.presence(self.claude.reported(self.now())).relevant(self.tools[UsageTool::Claude]);
         let opencode = self.opencode.presence(today).relevant(self.tools[UsageTool::OpenCode]);
-        Page::new(help_rows(claude, opencode))
+        let accounts = self.accounts.iter().next().is_some();
+        Page::new(help_rows(claude, opencode, accounts))
     }
 }
 
-fn help_rows(claude: bool, opencode: bool) -> Vec<help::HelpRow> {
+fn help_rows(claude: bool, opencode: bool, accounts: bool) -> Vec<help::HelpRow> {
     use help::{HelpRow, heading, key, note};
     let mut rows = vec![
         heading("Usage limits"),
@@ -1291,6 +1318,18 @@ fn help_rows(claude: bool, opencode: bool) -> Vec<help::HelpRow> {
             note("its local database."),
             note("Cost is its estimate."),
             note("It saves no limits."),
+            HelpRow::new(),
+        ]);
+    }
+    if accounts {
+        rows.extend([
+            heading("Accounts"),
+            note("Balances, spend and"),
+            note("credits come from the"),
+            note("provider you turned on."),
+            note("They are not limits."),
+            note("r asks again, at most"),
+            note("every 30 seconds."),
             HelpRow::new(),
         ]);
     }

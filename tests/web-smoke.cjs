@@ -23,6 +23,9 @@ const section = (page, name) => page.getByRole('navigation').getByRole('button',
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, tool, name) =>
   page.getByRole('group', {name: `${tool} usage`, exact: true}).getByRole('radio', {name, exact: true});
+const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
+const accountChoice = (page, account, name) =>
+  page.getByRole('group', {name: account, exact: true}).getByRole('radio', {name, exact: true});
 
 async function withMilo(binary, cwd, env, run) {
   const server = spawn(binary, ['web', '--no-open', '--port', '0'], {
@@ -85,6 +88,14 @@ async function chooseUsageTools(page, binary, cwd, env) {
   for (const tool of usageTools) {
     assert(await usageChoice(page, tool, 'Auto').isChecked(), `${tool} starts on Auto`);
   }
+  // Accounts are asked about online, so each starts hidden, and trying one out saves nothing.
+  for (const account of usageAccounts) {
+    assert(await accountChoice(page, account, 'Hide').isChecked(), `${account} starts on Hide`);
+  }
+  await accountChoice(page, 'DeepSeek balance', 'Auto').click();
+  await page.getByText('Asks the provider with the key you set for Milo.').waitFor();
+  await accountChoice(page, 'DeepSeek balance', 'Hide').click();
+  await accountChoice(page, 'DeepSeek balance', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
   await usageChoice(page, 'OpenCode', 'Hide').click();
   await usageChoice(page, 'OpenCode', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
   await page.getByText('Never shown, and never looked for.').waitFor();

@@ -1403,3 +1403,104 @@ fn rustfmt_formats_a_rust_draft_where_it_is_installed() {
     tty.shows("Saved");
     assert_eq!(fs::read_to_string(&file).unwrap(), "fn main() {\n    let x = 1;\n}\n");
 }
+
+/// Serves canned provider replies on a loopback port and counts the requests.
+fn loopback_provider(replies: &'static [(&'static str, &'static str, &'static str)]) -> (u16, std::sync::Arc<AtomicU32>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = std::sync::Arc::new(AtomicU32::new(0));
+    let counted = requests.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).is_ok_and(|read| read == 1) {
+                head.push(byte[0]);
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            let head = String::from_utf8_lossy(&head);
+            let path = head.split(' ').nth(1).unwrap_or_default();
+            let (status, body) = replies
+                .iter()
+                .find(|(prefix, ..)| path.starts_with(prefix))
+                .map_or(("404 Not Found", ""), |&(_, status, body)| (status, body));
+            let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    (port, requests)
+}
+
+#[test]
+fn an_account_is_asked_only_when_turned_on_and_reaches_the_pane_doctor_and_menu_stream() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::Stdio;
+
+    let (port, requests) = loopback_provider(&[
+        ("/deepseek/user/balance", "200 OK", include_str!("../src/usage/tests/accounts/deepseek-balance.json")),
+        ("/openrouter/", "429 Too Many Requests", "{}"),
+    ]);
+    let project = Project::new();
+    let milo = env!("CARGO_BIN_EXE_milo");
+    let command = || {
+        let mut command = project.command(milo);
+        command
+            .env_remove("REX_CONFIG")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("OPENCODE_DB")
+            .env_remove("CODEX_HOME")
+            .env("XDG_DATA_HOME", project.0.join("data"))
+            .env("MILO_TEST_USAGE_PORT", port.to_string())
+            .env("MILO_OPENROUTER_API_KEY", "sk-or-loopback-test-key");
+        command
+    };
+    let config = project.0.join("config/milo");
+    fs::create_dir_all(&config).unwrap();
+    let keys = config.join("usage-accounts.conf");
+    fs::write(&keys, "MILO_DEEPSEEK_API_KEY = sk-loopback-test-key\n").unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(command().args(["setup", "--skip-onboarding"]).status().unwrap().success());
+
+    // Keys alone turn nothing on: the pane, doctor and menu stream all leave the providers alone.
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
+    // The pane moves the cursor across spaces, so only single words arrive whole.
+    pane.until("show");
+    pane.master.write_all(b"rq").unwrap();
+    assert!(pane.wait_for_exit().success());
+    let report = command().arg("doctor").output().unwrap();
+    assert!(!String::from_utf8_lossy(&report.stdout).contains("DeepSeek"));
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+    fs::write(config.join("preferences.conf"), "usage_deepseek = auto\nusage_openrouter = always\n").unwrap();
+    let mut pane = Terminal::sized(command().arg("usage"), 80, 4);
+    pane.until("granted");
+    pane.until("limited");
+    assert!(!pane.output().contains('%'), "{}", pane.output());
+    pane.master.write_all(b"q").unwrap();
+    assert!(pane.wait_for_exit().success());
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+    let report = command().arg("doctor").output().unwrap();
+    let report = String::from_utf8(report.stdout).unwrap();
+    assert!(report.contains("Usage accounts: DeepSeek shown once it has a figure; OpenRouter always shown"), "{report}");
+    assert!(report.contains("DeepSeek balance: asks api.deepseek.com with MILO_DEEPSEEK_API_KEY from "), "{report}");
+    assert!(report.contains("  last answer: ¥110.00 balance, "), "{report}");
+    assert!(report.contains("  last attempt: the provider rate limited the request"), "{report}");
+    assert!(!report.contains("loopback-test-key"), "{report}");
+
+    // The menu's reader and a second pane use the saved answers instead of asking again.
+    let mut stream = command().args(["usage", "--menu-stream"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut lines = BufReader::new(stream.stdout.take().unwrap()).lines();
+    let line = lines.find(|line| line.as_ref().is_ok_and(|line| line.contains("deepseek"))).unwrap().unwrap();
+    assert!(
+        line.contains(r#"{"id":"deepseek","name":"DeepSeek","windows":[],"detail":"¥110.00 balance · ¥10.00 granted"}"#),
+        "{line}"
+    );
+    assert!(line.contains(r#"{"id":"openrouter","name":"OpenRouter","windows":[],"detail":"Rate limited"}"#), "{line}");
+    drop(stream.stdin.take());
+    assert!(stream.wait().unwrap().success());
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    for saved in ["deepseek.json", "openrouter.json"] {
+        let saved = fs::read_to_string(project.0.join("state/milo/accounts").join(saved)).unwrap();
+        assert!(!saved.contains("loopback-test-key"), "{saved}");
+    }
+}

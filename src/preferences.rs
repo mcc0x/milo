@@ -171,6 +171,71 @@ impl std::ops::IndexMut<UsageTool> for UsageTools {
     }
 }
 
+/// An account whose figures only its provider's service can report. Unlike a
+/// tool, nothing on this machine says it is in use, so each starts hidden and
+/// Milo asks the provider only after the user has chosen to show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageAccount {
+    DeepSeek,
+    OpenRouter,
+    Devin,
+    Copilot,
+}
+
+impl UsageAccount {
+    pub const ALL: [Self; 4] = [Self::DeepSeek, Self::OpenRouter, Self::Devin, Self::Copilot];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DeepSeek",
+            Self::OpenRouter => "OpenRouter",
+            Self::Devin => "Devin",
+            Self::Copilot => "Copilot",
+        }
+    }
+
+    /// The account's name in the preferences file and in the browser editor's fields.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "usage_deepseek",
+            Self::OpenRouter => "usage_openrouter",
+            Self::Devin => "usage_devin",
+            Self::Copilot => "usage_copilot",
+        }
+    }
+}
+
+/// One choice for each account, in `UsageAccount::ALL` order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsageAccounts([Show; 4]);
+
+impl Default for UsageAccounts {
+    fn default() -> Self {
+        Self([Show::Hide; 4])
+    }
+}
+
+impl UsageAccounts {
+    /// Whether any account may be asked about at all.
+    pub fn any(self) -> bool {
+        self.0.iter().any(|&show| show != Show::Hide)
+    }
+}
+
+impl std::ops::Index<UsageAccount> for UsageAccounts {
+    type Output = Show;
+
+    fn index(&self, account: UsageAccount) -> &Show {
+        &self.0[account as usize]
+    }
+}
+
+impl std::ops::IndexMut<UsageAccount> for UsageAccounts {
+    fn index_mut(&mut self, account: UsageAccount) -> &mut Show {
+        &mut self.0[account as usize]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub icons: IconMode,
@@ -182,6 +247,7 @@ pub struct Preferences {
     pub history_follow_new: bool,
     pub usage_large_figures: bool,
     pub usage_tools: UsageTools,
+    pub usage_accounts: UsageAccounts,
     /// Whether the Rex listener may title tabs that nobody has named.
     pub tab_titles: bool,
 }
@@ -198,6 +264,7 @@ impl Default for Preferences {
             history_follow_new: false,
             usage_large_figures: false,
             usage_tools: UsageTools::default(),
+            usage_accounts: UsageAccounts::default(),
             tab_titles: false,
         }
     }
@@ -328,6 +395,8 @@ impl Preferences {
                 _ => {
                     if let Some(tool) = UsageTool::ALL.into_iter().find(|tool| tool.key() == key) {
                         self.usage_tools[tool] = Show::parse(value).ok_or_else(|| invalid(key))?;
+                    } else if let Some(account) = UsageAccount::ALL.into_iter().find(|account| account.key() == key) {
+                        self.usage_accounts[account] = Show::parse(value).ok_or_else(|| invalid(key))?;
                     }
                 }
             }
@@ -340,6 +409,10 @@ impl Preferences {
         let tool = |tool: UsageTool| {
             let show = self.usage_tools[tool];
             (tool.key(), (before.usage_tools[tool] != show).then(|| show.value()))
+        };
+        let account = |account: UsageAccount| {
+            let show = self.usage_accounts[account];
+            (account.key(), (before.usage_accounts[account] != show).then(|| show.value()))
         };
         update_guarded(
             path,
@@ -361,6 +434,10 @@ impl Preferences {
                 tool(UsageTool::Codex),
                 tool(UsageTool::Claude),
                 tool(UsageTool::OpenCode),
+                account(UsageAccount::DeepSeek),
+                account(UsageAccount::OpenRouter),
+                account(UsageAccount::Devin),
+                account(UsageAccount::Copilot),
                 ("tab_titles", boolean(before.tab_titles, self.tab_titles)),
             ],
             check,
@@ -639,6 +716,29 @@ mod tests {
             Preferences::for_pane_in(&config, Some(&root)),
             (global, Some("milo doctor: worktree prefs ignored"))
         );
+    }
+
+    #[test]
+    fn accounts_stay_hidden_until_chosen_and_a_choice_is_saved_like_a_tools() {
+        let f = Fixture::folder();
+        let config = f.root.join("milo");
+        let file = config_file(&config, None);
+        fs::create_dir_all(&config).unwrap();
+        fs::write(&file, "usage_codex = always\n").unwrap();
+        let (before, _) = Preferences::resolve_in(&config, None).unwrap();
+        assert!(!before.usage_accounts.any());
+        assert!(UsageAccount::ALL.into_iter().all(|account| before.usage_accounts[account] == Show::Hide));
+
+        let mut chosen = before;
+        chosen.usage_accounts[UsageAccount::DeepSeek] = Show::Auto;
+        chosen.save_in(before, &file, || Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "usage_codex = always\nusage_deepseek = auto\n");
+        let (after, _) = Preferences::resolve_in(&config, None).unwrap();
+        assert_eq!(after, chosen);
+        assert!(after.usage_accounts.any() && after.usage_accounts[UsageAccount::Devin] == Show::Hide);
+
+        fs::write(&file, "usage_openrouter = yes\n").unwrap();
+        assert!(Preferences::resolve_in(&config, None).unwrap_err().to_string().contains("usage_openrouter"));
     }
 
     #[test]
