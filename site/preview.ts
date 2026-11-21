@@ -6,6 +6,7 @@ const dist = join(import.meta.dir, 'dist');
 const port = Number(process.env.PORT ?? 4173);
 
 Bun.serve({
+  hostname: 'localhost',
   port,
   async fetch(request) {
     // Every published path is plain ASCII, and the URL parser has already resolved any `..`.
