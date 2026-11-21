@@ -128,6 +128,11 @@ Milo’s Rex files are checked against API revision 18. A newer server is noted 
 
 The computer’s name stays on that computer and in the pages its editor serves. It is not sent to Telegram, Discord or the relay.
 
+<picture>
+  <source media="(max-width: 600px)" srcset="img/web-hosts-mobile.webp">
+  <img src="img/web-hosts.webp" width="760" alt="The Hosts page of the browser editor on an example computer named studio: its Rex version, API revision and host ID with a Checked mark, the command that opens another host's settings, and the start of Copy settings between hosts">
+</picture>
+
 ### Open another host’s settings
 
 On the computer you are using, run:
@@ -138,6 +143,8 @@ milo web --host studio --project /home/you/src/app   # that worktree's settings;
 ```
 
 Milo checks that the host answers, starts `milo web` there in a Rex session of its own named `milo-settings`, and carries it to your computer with `rex forward`. It then prints the private link and opens it. The page says `studio · forwarded` in its session bar, and **Hosts** and **Health** show that host, so you can tell which settings you are editing.
+
+![Health in a forwarded editor: All good, and a card naming the example host buildbox, its Rex version and API, and that these settings were opened from another computer through a Rex forward. The session bar reads buildbox · forwarded](img/web-health-host.webp)
 
 The protections are the same as for a local editor:
 
@@ -167,6 +174,8 @@ milo settings undo                               # takes the last import back
 ```
 
 The same steps are under **Hosts** in the browser editor: tick the groups, **Create bundle**, paste it into **Import** on the other host, **Preview**, then **Import**. With `milo web --host` you can do both ends from one computer.
+
+![Import under Hosts, in the editor of an example host buildbox opened through a forward: a table of four settings with their values now and after import, a note that four settings already match, and an Import 4 settings button beside Preview](img/web-hosts-import.webp)
 
 | Group | What it carries |
 | --- | --- |
