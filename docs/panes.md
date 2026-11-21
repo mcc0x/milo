@@ -97,6 +97,93 @@ The reader also labels hidden differences next to the text: `[tab]` versus `[4 s
 
 Press `n` or `N` to jump to the next or previous change. The Reader briefly shows your position (for example, `Change 2 of 5`) or `No changes` if there is nothing to jump to. Navigation wraps in both directions.
 
+## Editing files
+
+The reader only reads until you ask it to edit. Press `e`, or open the file with `milo view FILE --edit`, and the file's text becomes a draft with a cursor. It works the same in the reader Outline opens in its own pane, in the floating reader in Rex and in `milo view`. The last row lists the main keys, `Ctrl-G` opens help, and [keys and marks](keys.md#editing-in-the-reader) has the whole list.
+
+The draft is yours alone until you save: the file on disk is not touched by typing, pasting, undoing or formatting. While you edit, the reader shows the draft with its code colours and no change marks. When you stop, it shows the file again at the same lines, with a fresh diff, and Outline still has the file selected.
+
+The editor is for small changes. It has one cursor and no selection or search. The cursor moves one character at a time, so an accent written as a separate mark takes a key press of its own.
+
+### What can be edited
+
+A working file can be edited when it is a regular file, is reached without passing through a link, holds UTF-8 text with no NUL bytes, is no larger than 2 MiB and can be written by you. A byte-order mark is allowed. Anything else stays read-only. The last row then has no `e edit`, and `e` or help says why:
+
+| It says | Because |
+| --- | --- |
+| `this is a commit` | The reader shows the file as of a commit, from History or `--commit` |
+| `this is a link` | The file is a link; the reader shows where it points |
+| `reached through a link` | A folder on the way to the file is a link |
+| `the project moved` | The project's folder was renamed or replaced after the reader opened |
+| `outside the project` | The path leads out of the project |
+| `the file is gone` | The file was removed; the reader may still show its removed lines |
+| `not a regular file` | It is a folder, a device or a pipe |
+| `not text` | It holds NUL bytes or is not UTF-8, which a save could not keep, or Git treats it as binary |
+| `shown as a picture` | The reader is showing it as a picture |
+| `it cannot be shown` | The reader shows a note in its place, such as `Too large to show.` |
+| `too large` | It grew past 2 MiB since the reader read it |
+| `no write permission` | You may read it but not write it |
+| `it cannot be read` | The file or a folder on the way could not be opened |
+
+A draft cannot grow past 2 MiB either: a key or paste that would take it there is refused.
+
+### Saving
+
+`Ctrl-S` writes the draft into the file that was read. Milo does not put a new file in its place, so the file keeps its permissions, owner, other names and attributes. The bytes you did not edit stay the same: a byte-order mark is kept, every line keeps its own ending when a file mixes `LF` and `CRLF`, and a file with no final line break is not given one. A new line takes the ending most of the file uses.
+
+Before it writes, milo opens the file again and reads it. Nothing is overwritten unexpectedly:
+
+- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written and the pane asks `Changed on disk: o overwrite · Esc back`. Only `o` writes your draft over it.
+- If the file is gone, it is not made again.
+- If the file has become a link, or a folder on the way has become a link or moved, the save is refused. Milo never writes through a link.
+- If you no longer have permission to write, the save is refused.
+
+In each case the draft stays open, and the last row says what happened. If the write itself fails part of the way, milo puts the old contents back where it can and says whether it could.
+
+A save writes in place, not through a temporary file; that is what keeps the file's links and attributes. A crash or power loss in the middle of a save can therefore leave a partly written file.
+
+### Leaving unsaved changes
+
+`Esc`, `Ctrl-Q` and `Ctrl-C` stop editing. With unsaved changes they ask `Unsaved edits: s save · d discard · Esc back` first. `q` is a letter while you edit.
+
+A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. One draft is kept for each file, and a later one replaces it. A process that is killed outright, or a machine that loses power, keeps nothing.
+
+In Rex, opening another file from Outline or History replaces the floating reader. While that reader has unsaved changes, the pane says `The open reader has unsaved edits.` and leaves it alone.
+
+## Formatting
+
+While editing, `Ctrl-F` gives the draft to a formatter and puts its answer in place of the draft as one change. The file is not touched: look the result over, press `Ctrl-Z` to take it back, or discard it with the draft. Only `Ctrl-S` writes it. If the formatter fails, the draft is left exactly as it was and the last row shows the first line of what the formatter said.
+
+Milo runs a formatter you have installed. It does not install one, download one or run one through a package runner. For each kind of file, the first of these found is used:
+
+| Files | Formatter | Run as |
+| --- | --- | --- |
+| `.rs` | rustfmt | `rustfmt --edition E --emit stdout` |
+| `.go` | gofmt | `gofmt` |
+| `.py`, `.pyi` | ruff, then black | `ruff format --no-cache --stdin-filename ./NAME -`<br>`black --quiet --stdin-filename ./NAME -` |
+| `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`, `.json`, `.jsonc`, `.css` | prettier, then biome, then deno | `prettier --stdin-filepath ./NAME`<br>`biome format --stdin-file-path ./NAME`<br>`deno fmt --ext EXT -` |
+| `.scss`, `.less`, `.html`, `.md`, `.yaml`, `.yml` | prettier, then deno | As above |
+| `.vue` | prettier | As above |
+| `.toml` | taplo | `taplo format --stdin-filepath ./NAME -` |
+| `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh` | clang-format | `clang-format --assume-filename=NAME` |
+| `.sh`, `.bash` | shfmt | `shfmt --filename ./NAME` |
+| `.lua` | stylua | `stylua --stdin-filepath ./NAME -` |
+| `.swift` | swift-format | `swift-format format --assume-filename ./NAME -` |
+| `.tf`, `.tfvars` | terraform | `terraform fmt -no-color -` |
+
+`NAME` is the file's name and `EXT` its extension. For Rust, `E` is the edition in the nearest `Cargo.toml` at or above the file within the project, or 2021; the option is left out when a `rustfmt.toml` there sets an edition. Other kinds of file, including some the reader colours such as Kotlin, Ruby, Java, C#, PHP and SQL, have no formatter: `Ctrl-F` says `No formatter for this kind of file.` and the last row does not offer it.
+
+How a formatter is run:
+
+- **Only when you press `Ctrl-F`.** Opening, reading and editing a file never start one. Help looks for the program so that it can name it, and does not run it.
+- **By name, from where you installed it.** The program is looked for in the folders of `PATH` that are written in full. A folder written relative to where milo runs, such as `.` or `node_modules/.bin`, is skipped, so a project cannot supply the program. If none is installed, the last row says which to install, for example `Not installed: ruff or black.`
+- **On the draft, not the file.** The draft goes in on standard input and the formatted text comes back on standard output. The formatter is not asked to write anything.
+- **In the file's folder, with the file's name.** That is how a formatter finds the project's settings, such as `rustfmt.toml`, `pyproject.toml` or `.prettierrc`. Those settings belong to the project, and some formatters load code named in them: Prettier loads plugins and JavaScript settings files. Format files only in a project you trust, as you would in an editor.
+- **For at most ten seconds.** After that the formatter is stopped together with anything it started. An answer that is empty, is not UTF-8 text or is larger than 2 MiB is refused.
+- **Keeping the file's line endings.** If the file uses `CRLF` and the formatter answers with `LF`, the draft gets `CRLF` back. A byte-order mark is not given to the formatter and is kept.
+
+The pane shows `Formatting with NAME…` and does not redraw until the formatter is done.
+
 ## Reading pictures
 
 The working-file reader can show PNG, JPEG, GIF, WebP, HEIC and HEIF, TIFF, BMP, ICO and ICNS, SVG, PSD and the first page of a PDF, where conversion is supported. It fits the picture without changing its proportions. On macOS, `/usr/bin/sips` converts other formats and resizes large PNGs; other systems show only PNGs that do not need conversion. Ordinary text still shows as text if a file has a picture extension. At a commit, the reader shows the stored file as text or a note, not as a picture.

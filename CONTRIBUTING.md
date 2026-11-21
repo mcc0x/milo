@@ -51,9 +51,11 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, and Rex through `src/rex.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
-**It stays read-only.** milo never changes a repository. Every git command it runs only reads.
+**It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
+
+**It starts no program the user did not ask for.** Opening and showing a file never run anything from the project or for it. A formatter runs only on `Ctrl-F`, is found by a fixed name in the folders of `PATH` written in full, and is given the draft on standard input. Never install, download or run a tool through a package runner.
 
 ## Style
 
@@ -164,6 +166,16 @@ Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for lang
 
 The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long.
 
+### Adding a formatter
+
+`src/format.rs` has the table of formatters: `KINDS` maps file extensions to the tools tried in order, and each `Tool` is a program's name and its arguments. A formatter belongs there only if it reads the text on standard input and writes the formatted text to standard output, leaves the file alone, needs no network and exits with a failure when it cannot format. Give it the file's name with `Name`, which is passed as `./name` so that it cannot be read as an option.
+
+1. Check the command against the real program, including what it does with text it cannot parse and whether it writes a cache into the folder it runs in.
+2. Add the `Tool` and its row in `KINDS`, with the names as they read in `Not installed: …`. Keep those names within 24 characters: they are a row of the help page.
+3. Add the row to the formatter table in `docs/panes.md`.
+
+The tests use stand-ins written by `format::tests::stand_in`, so they pass on a machine with no formatter installed. `rustfmt_formats_a_rust_draft_where_it_is_installed` in `tests/pane.rs` runs the real program where there is one.
+
 ### Checking failures and speed
 
 `src/usage/tests/failures.rs` breaks each local usage source in five ways: missing, rotated, locked, stale, and written in a shape Milo does not know. The pane may then show only a figure the source reported, marked as old once it is; a source that cannot be read is unknown. A new source goes through the same five tests with its own files, using the helpers there.
@@ -198,6 +210,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/diff.rs` | Parses whole-file diffs and marks what changed within a line. |
 | `src/diff/words.rs` | Finds the words that differ between paired lines, within fixed limits. |
 | `src/fixture.rs` | Makes throwaway projects and Git repositories for tests. |
+| `src/format.rs` | Finds an installed formatter for a kind of file and runs it over a draft, within limits. |
 | `src/fs_ops.rs` | Opens files without following final links and stages atomic replacements. |
 | `src/git.rs` | Finds repositories and keeps their status, file lists, and history. |
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
@@ -210,7 +223,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
 | `src/icons.rs` | Chooses file and folder symbols and their colours. |
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
-| `src/keys.rs` | Decodes keys, mouse events, paste markers, and terminal replies. |
+| `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
@@ -220,10 +233,16 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
 | `src/read.rs` | Reads regular files and the names that file links point to. |
-| `src/reader.rs` | Keeps reader state and handles navigation and updates. |
+| `src/reader.rs` | Keeps reader state, handles navigation and updates, and starts and ends an edit. |
+| `src/reader/buffer.rs` | Holds the lines of a draft with their endings, and its undo history. |
 | `src/reader/content.rs` | Locates files and loads text, diffs, or pictures. |
+| `src/reader/disk.rs` | Reads a file to edit and saves a draft only into the file it was read from. |
 | `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
+| `src/reader/edit.rs` | Edits a draft: cursor, keys, questions, formatting, and drawing. |
+| `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
+| `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
+| `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, and the listener. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
@@ -282,7 +301,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `tests/install.sh` | Checks which source the installer builds, with stand-ins for Git and Cargo. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
-| `tests/pane.rs` | Checks pane startup, input, and cleanup through a real terminal. |
+| `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |
 | `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
 | `tests/reader_bench.rs` | Times the reader's first frame and scrolling on generated files. |
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
