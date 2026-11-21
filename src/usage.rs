@@ -1078,8 +1078,10 @@ impl Usage {
             self.opencode.poll.reload(now, clock);
         } else {
             self.omp.start(now, clock);
-            // Totals for another local day, as after a change of time zone, say nothing of this one.
-            if matches!(self.opencode.report, opencode::Report::Today(read) if read.since != cutoff) {
+            // The local day can move under totals nothing has written to since, as when the
+            // time zone changes. Ask the clock itself: the pane keeps its own midnight by date.
+            let midnight = Today::at(now, when::local_day(now)).since;
+            if matches!(self.opencode.report, opencode::Report::Today(read) if read.since != midnight) {
                 self.opencode.poll.forget();
             }
             self.opencode.poll.start(now, clock);

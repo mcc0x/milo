@@ -278,10 +278,26 @@ fn every_generation_of_opencode_tables_says_when_a_step_dated_ahead_comes_due() 
 }
 
 #[test]
-fn totals_read_for_another_local_day_are_read_again_though_nothing_was_written() {
+fn totals_are_read_again_when_the_time_zone_moves_midnight_within_the_same_date() {
+    // The zone belongs to the whole process, so the check runs in one of its own.
+    const CHILD: &str = "MILO_TEST_USAGE_ZONE";
+    const TEST: &str =
+        "usage::tests::unchanged::totals_are_read_again_when_the_time_zone_moves_midnight_within_the_same_date";
     if !sqlite_installed() {
         return;
     }
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env("TZ", "UTC")
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && printed.contains("1 passed"), "{printed}");
+        return;
+    }
+
     let f = Fixture::folder();
     let noon = local_noon();
     let db = busy_day(&f, RELEASES[3], noon);
@@ -300,8 +316,18 @@ fn totals_read_for_another_local_day_are_read_again_though_nothing_was_written()
     };
     assert!(look(&mut usage, 0));
     assert!(!look(&mut usage, 1));
-    // The pane's day moved under totals that were read for the day before, as a time zone can move it.
-    let opencode::Report::Today(read) = &mut usage.opencode.report else { panic!("no totals") };
-    read.since -= DAY;
-    assert!(look(&mut usage, 2));
+    assert_eq!(steps_today(Some(Some(usage.opencode.report))), Some(2));
+
+    unsafe extern "C" {
+        /// Has the C library read the zone from the environment again.
+        fn tzset();
+    }
+    // Nine hours east it is the same date, and the day began nine hours earlier.
+    // SAFETY: This process runs this one test, and no other thread reads the environment here.
+    unsafe { std::env::set_var("TZ", "Asia/Tokyo") };
+    // SAFETY: tzset takes no arguments and only reads the variable just set.
+    unsafe { tzset() };
+    assert_eq!(when::local_day(noon), when::local_day(noon - 12 * HOUR), "the date did not change");
+    assert!(look(&mut usage, 2), "totals for the old zone's day were kept");
+    assert_eq!(steps_today(Some(Some(usage.opencode.report))), Some(3), "a step from before the old midnight");
 }
