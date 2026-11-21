@@ -276,7 +276,7 @@ milo alerts off                       # ends it at once
 
 The same choices are under **Integrations → Alert forwarding** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
 
-In the browser, choose **Set up destination** (or **Change destination**) to manage a Telegram chat or Discord channel. Saving a destination and turning forwarding on are separate choices.
+In the browser, choose **Set up destination** (or **Manage destinations**). For Telegram, enter the bot token and look for a chat in its recent updates. If your chat isn’t listed, message the bot there and try again, or enter the chat ID or public `@channel` yourself. Bots already using a webhook need manual entry; Milo doesn’t disconnect their webhook. Looking for chats doesn’t save a destination or turn on forwarding.
 
 <picture>
   <source media="(max-width: 600px)" srcset="https://github.com/mcc0x/milo/blob/main/docs/img/web-alerts-mobile.webp">

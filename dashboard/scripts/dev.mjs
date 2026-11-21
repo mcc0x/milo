@@ -23,7 +23,7 @@ const server = createServer(async (req, res) => {
   if (!upstream) { res.writeHead(503).end(); return; }
   if (!req.url?.startsWith('/api/')) { await handle(req, res); return; }
   const read = req.url === '/api/state' && req.method === 'GET';
-  const write = ['/api/action', '/api/close'].includes(req.url) && req.method === 'POST';
+  const write = ['/api/action', '/api/close', '/api/telegram-chats'].includes(req.url) && req.method === 'POST';
   if (!read && !write) { res.writeHead(404).end(); return; }
   if (write && req.headers.origin !== origin) { res.writeHead(403).end(); return; }
   const headers = { authorization: req.headers.authorization ?? '', origin: upstream.origin };

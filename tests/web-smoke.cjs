@@ -505,23 +505,139 @@ async function confirmFromMobileFooter(browser, url, exited) {
   console.log('Mobile Done: cancel retained the draft, confirm closed the editor');
 }
 
+async function checkTelegramWizard(page, destination) {
+  const url = new URL(page.url());
+  const authorization = `Bearer ${url.hash.slice(1)}`;
+  const initial = await page.request.get(new URL('/api/state', url).href, {headers: {authorization}});
+  assert(initial.ok(), 'the real editor supplied the initial fixture state');
+  let state = await initial.json();
+  const initialVersion = state.version;
+  const fakeToken = 'smoke-test-token-not-a-credential';
+  const chatId = '-1001234567890';
+  const providerError = 'provider diagnostic must not appear in the dashboard';
+  const replies = [
+    {json: {chats: [{id: '42', title: 'Direct chat'}, {id: chatId, title: 'Build room'}]}},
+    {json: {chats: []}},
+    {status: 502, json: {error: providerError}},
+    {status: 409, json: {error: providerError}},
+  ];
+  let releaseLookup;
+  const lookupGate = new Promise(resolve => { releaseLookup = resolve; });
+  let lookups = 0;
+  const received = [];
+  const lookupPath = '**/api/telegram-chats';
+  const actionPath = '**/api/action';
+  const discover = async route => {
+    const request = route.request();
+    assert.equal(request.method(), 'POST');
+    assert(request.headers().authorization === authorization, 'chat lookup uses the editor session key');
+    assert.deepEqual(request.postDataJSON(), {token: fakeToken});
+    const reply = replies[lookups++];
+    assert(reply, 'unexpected chat lookup');
+    if (lookups === 1) await lookupGate;
+    await route.fulfill(reply);
+  };
+  const saveTelegram = async route => {
+    const action = route.request().postDataJSON();
+    if (action.action !== 'alerts' || action.field !== 'telegram') return route.fallback();
+    received.push(action);
+    state = {...state, version: state.version + 1, alerts: {...state.alerts,
+      destination: 'telegram', telegram: {saved: true, chat: action.value.chat}}};
+    await route.fulfill({json: state});
+  };
+  // No discovery or Telegram save reaches Telegram, even with a packaged editor.
+  await page.route(lookupPath, discover);
+  await page.route(actionPath, saveTelegram);
+  try {
+    const wizard = dialog(page, 'Destinations / Telegram');
+    const token = wizard.getByRole('textbox', {name: 'Bot token', exact: true});
+    const chat = wizard.getByRole('combobox', {name: 'Telegram chat', exact: true});
+    const manualChat = wizard.getByRole('textbox', {name: 'Chat ID or @channel', exact: true});
+    const find = button(wizard, 'Find chats');
+    const manual = button(wizard, 'Enter chat manually');
+    const save = button(wizard, 'Save Telegram');
+    const telegram = button(page, 'Telegram');
+    const open = async name => {
+      await button(destination, name).click();
+      await telegram.click();
+    };
+    const assertReset = async () => {
+      assert.equal(await token.inputValue(), '', 'starting over clears the token');
+      assert.equal(await chat.count() + await manualChat.count(), 0, 'starting over clears the chat step');
+    };
+
+    await open('Set up destination');
+    await manual.click();
+    assert(await manualChat.evaluate(element => element === document.activeElement), 'manual entry receives keyboard focus');
+    await token.fill(fakeToken);
+    await manualChat.fill('@not-saved');
+    await button(wizard, 'Back to destinations').click();
+    assert(await telegram.evaluate(element => element === document.activeElement), 'Back restores focus to Telegram');
+    await telegram.click();
+    await assertReset();
+
+    await token.fill(` ${fakeToken} `);
+    await find.click();
+    await status(wizard, 'Looking for recent chats').waitFor();
+    assert(await find.isDisabled(), 'lookup cannot repeat while pending');
+    assert(await manual.isEnabled(), 'manual entry remains available during lookup');
+    releaseLookup();
+    await chat.waitFor();
+    assert.equal(await chat.inputValue(), '', 'discovery does not select a chat for the user');
+    await chat.selectOption({label: `Build room · ${chatId}`});
+    await save.click();
+    await wizard.getByText(`Current destination · ${chatId}`, {exact: true}).waitFor();
+    await assertReset();
+
+    for (const [index, text] of ['No recent chats found', 'Couldn’t find chats', 'Couldn’t find chats'].entries()) {
+      await token.fill(fakeToken);
+      await find.click();
+      await status(wizard, text).waitFor();
+      assert.equal(await wizard.getByText(providerError).count(), 0, 'lookup never displays provider errors');
+      await manual.click();
+      await manualChat.fill(index === 2 ? '@public_channel' : '-1009876543210');
+      if (index === 2) {
+        await save.click();
+        await wizard.getByText('Current destination · @public_channel', {exact: true}).waitFor();
+        await assertReset();
+      } else {
+        if (index === 0) await button(wizard, 'Close destinations').click();
+        else await page.keyboard.press('Escape');
+        await wizard.waitFor({state: 'hidden'});
+        await open('Manage destinations');
+        await assertReset();
+      }
+    }
+    assert.equal(lookups, replies.length);
+    assert.deepEqual(received, [chatId, '@public_channel'].map((chat, index) => ({
+      action: 'alerts', field: 'telegram', value: {token: fakeToken, chat}, version: initialVersion + index,
+    })), 'discovered and manual chat IDs use the same Telegram save action');
+    await button(wizard, 'Close destinations').click();
+  } finally {
+    releaseLookup();
+    await page.unroute(lookupPath, discover);
+    await page.unroute(actionPath, saveTelegram);
+  }
+}
+
 async function checkAlerts(page) {
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
   const destination = page.getByRole('region', {name: 'Destination', exact: true});
   assert.equal(await page.getByRole('switch', {name: 'Alert forwarding'}).count(), 0, 'cannot enable forwarding without a destination');
   assert.equal(await button(page, 'Send test').count(), 0, 'cannot send to an unconfigured destination');
+  await checkTelegramWizard(page, destination);
+  await page.reload(); // Drop the route fixture's Telegram destination before testing real settings.
+  await section(page, 'Integrations').click();
+  await button(page, 'Alert forwarding').click();
   await button(destination, 'Set up destination').click();
-  await button(page, 'Telegram').click();
-  await page.getByRole('textbox', {name: 'Bot token'}).fill('unsaved example');
-  await button(page, 'Back to destinations').click();
   await button(page, 'Discord').click();
   const webhook = page.getByRole('textbox', {name: 'Webhook link'});
   await webhook.fill('unsaved example');
   await button(page, 'Close destinations').click();
   await button(destination, 'Set up destination').click();
   await button(page, 'Telegram').click();
-  assert.equal(await page.getByRole('textbox', {name: 'Bot token'}).inputValue(), '', 'switching providers clears the token');
+  assert.equal(await page.getByRole('textbox', {name: 'Bot token'}).inputValue(), '', 'closing the Discord editor leaves Telegram empty');
   await button(page, 'Back to destinations').click();
   await button(page, 'Discord').click();
   assert.equal(await webhook.inputValue(), '', 'closing destination setup forgets unsaved credentials');

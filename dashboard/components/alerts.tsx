@@ -1,8 +1,8 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { ChoiceSetting, SwitchSetting } from "./controls";
-import { useSession } from "./session";
+import { useSession, type TelegramChat } from "./session";
 import IntegrationSwitch from "./integration-switch";
 import "./alerts.css";
 
@@ -31,12 +31,13 @@ function AlertGroup({ id, title, children }: { id: string; title: string; childr
 
 // A masked text control avoids password-manager prompts. No name or default
 // value for a secret: it can leave the form only through the explicit POST.
-function DestinationInput({ id, label, disabled, secret = false, initial, children }: {
+function DestinationInput({ id, label, disabled, secret = false, initial, onInput, children }: {
   id: string;
   label: string;
   disabled: boolean;
   secret?: boolean;
   initial?: string;
+  onInput?: () => void;
   children?: ReactNode;
 }) {
   return (
@@ -44,7 +45,7 @@ function DestinationInput({ id, label, disabled, secret = false, initial, childr
       <label className="setting-label" htmlFor={id}>{label}</label>
       <div className={children ? "alerts-entry" : undefined}>
       <input type="text" id={id} className={secret ? "masked" : undefined} placeholder={secret ? " " : undefined}
-        autoComplete="off" autoCapitalize="off" spellCheck={false} required disabled={disabled} defaultValue={initial} />
+        autoComplete="off" autoCapitalize="off" spellCheck={false} required disabled={disabled} defaultValue={initial} onInput={onInput} />
         {children}
       </div>
     </div>
@@ -53,6 +54,118 @@ function DestinationInput({ id, label, disabled, secret = false, initial, childr
 
 function valueOf(form: HTMLFormElement, id: string) {
   return (form.elements.namedItem(id) as HTMLInputElement).value.trim();
+}
+
+function DestinationSave({ name, label, disabled }: { name: Destination; label: string; disabled: boolean }) {
+  return (
+    <button type="submit" id={`alerts-${name}-save`} aria-label={`Save ${label}`} className="button primary alerts-save" disabled={disabled}>
+      <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>
+      Save
+    </button>
+  );
+}
+
+type TelegramStep =
+  | { kind: "token" | "loading" | "empty" | "error" | "manual" }
+  | { kind: "choose"; chats: TelegramChat[] };
+const telegramStart = { kind: "token" } as const;
+const telegramStatus = {
+  token: "", manual: "",
+  loading: "Looking for recent chats…",
+  empty: "No recent chats found. Message the bot and try again, or enter the chat manually.",
+  error: "Couldn’t find chats. Try again or enter the chat manually. Bots with a webhook need manual entry.",
+  choose: "Choose a chat to save.",
+} satisfies Record<TelegramStep["kind"], string>;
+const telegramTokenId = "alerts-telegram-token";
+const telegramChatId = "alerts-telegram-chat";
+
+function TelegramSetup({ form, busy, savedChat, save }: {
+  form: RefObject<HTMLFormElement | null>;
+  busy: boolean;
+  savedChat: string;
+  save: (value: { token: string; chat: string }) => void;
+}) {
+  const { findTelegramChats } = useSession();
+  const [step, setStep] = useState<TelegramStep>(telegramStart);
+  const request = useRef<AbortController | null>(null);
+  useLayoutEffect(() => () => request.current?.abort(), []);
+  useLayoutEffect(() => {
+    if (step.kind === "manual") {
+      (form.current?.elements.namedItem(telegramChatId) as HTMLInputElement | null)?.focus();
+    }
+  }, [form, step.kind]);
+
+  const canSave = step.kind === "choose" || step.kind === "manual";
+
+  function cancelLookup() {
+    request.current?.abort();
+    request.current = null;
+  }
+
+  function reset() {
+    cancelLookup();
+    setStep(telegramStart);
+  }
+
+  async function find() {
+    if (busy || request.current || !form.current) return;
+    const input = form.current.elements.namedItem(telegramTokenId) as HTMLInputElement;
+    input.value = input.value.trim();
+    if (!input.reportValidity()) return;
+    const lookup = new AbortController();
+    request.current = lookup;
+    setStep({ kind: "loading" });
+    try {
+      const { chats } = await findTelegramChats(input.value, lookup.signal);
+      if (!lookup.signal.aborted) setStep(chats.length ? { kind: "choose", chats } : { kind: "empty" });
+    } catch {
+      if (!lookup.signal.aborted) setStep({ kind: "error" });
+    } finally {
+      if (request.current === lookup) request.current = null;
+    }
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    if (!canSave) {
+      void find();
+      return;
+    }
+    const current = event.currentTarget;
+    save({ token: valueOf(current, telegramTokenId), chat: valueOf(current, telegramChatId) });
+  }
+
+  return (
+    <form id="alerts-telegram" className="secret-form alerts-form alerts-telegram-form" autoComplete="off" ref={form}
+      onSubmit={submit} onReset={reset}>
+      <p className="setting-detail">Get a token from <strong>@BotFather</strong>. Message the bot, send it a command in your group, or add it as a channel admin and post there.</p>
+      <DestinationInput id={telegramTokenId} label="Bot token" disabled={busy} secret
+        onInput={() => { if (step.kind !== "manual") reset(); }}>
+        <button type="button" className={`button ${canSave ? "secondary" : "primary"}`} disabled={busy}
+          aria-disabled={step.kind === "loading" || undefined} onClick={find}>Find chats</button>
+      </DestinationInput>
+      <p className="setting-detail alerts-telegram-status" role="status">{telegramStatus[step.kind]}</p>
+      {step.kind === "choose" ? (
+        <div className="alerts-field">
+          <label className="setting-label" htmlFor={telegramChatId}>Telegram chat</label>
+          <select id={telegramChatId} defaultValue="" required disabled={busy}>
+            <option value="" disabled>Choose a chat</option>
+            {step.chats.map(({ id, title }) => <option key={id} value={id}>{title} · {id}</option>)}
+          </select>
+        </div>
+      ) : step.kind === "manual" ? (
+        <DestinationInput id={telegramChatId} label="Chat ID or @channel" disabled={busy} initial={savedChat} />
+      ) : null}
+      <div className="button-row alerts-telegram-actions">
+        {step.kind !== "manual" ? (
+          <button type="button" className="button text-button" disabled={busy}
+            onClick={() => { cancelLookup(); setStep({ kind: "manual" }); }}>Enter chat manually</button>
+        ) : null}
+        {canSave ? <DestinationSave name="telegram" label="Telegram" disabled={busy} /> : null}
+      </div>
+    </form>
+  );
 }
 
 export default function Alerts() {
@@ -95,13 +208,6 @@ export default function Alerts() {
     // Secrets never enter React state, and the response never repopulates them.
     form.current?.reset();
     command("alerts", { field, value });
-  }
-
-  function saveTelegram(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (busy) return;
-    const form = event.currentTarget;
-    send("telegram", { token: valueOf(form, "alerts-telegram-token"), chat: valueOf(form, "alerts-telegram-chat") });
   }
 
   function saveDiscord(event: FormEvent<HTMLFormElement>) {
@@ -187,31 +293,24 @@ export default function Alerts() {
                 {destinations.map(([name, label]) => editor === name && (
                   <div key={name}>
                     {alerts[name].saved && <p className="setting-detail">{destination === name ? "Current destination" : "Saved destination"}{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p>}
-                    <form id={`alerts-${name}`} className="secret-form alerts-form" autoComplete="off" ref={form}
-                      onSubmit={name === "telegram" ? saveTelegram : saveDiscord}>
-                      {name === "discord" ? (
+                    {name === "telegram" ? (
+                      <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={value => {
+                        manager.current?.querySelector<HTMLElement>("h2")?.focus();
+                        send("telegram", value);
+                      }} />
+                    ) : (
+                      <form id="alerts-discord" className="secret-form alerts-form" autoComplete="off" ref={form}
+                        onSubmit={saveDiscord}>
                         <ol className="setting-detail alerts-steps" aria-label="Discord setup steps">
                           <li>In Discord, open <strong>Edit Channel</strong> for the channel you want Milo to post in.</li>
                           <li>Go to <strong>Integrations → Webhooks</strong>. Choose a webhook or create one.</li>
                           <li>Select <strong>Copy Webhook URL</strong>, paste it below, then choose <strong>Save</strong>.</li>
                         </ol>
-                      ) : (
-                        <ol className="setting-detail alerts-steps" aria-label="Telegram setup steps">
-                          <li>In Telegram, open <strong>@BotFather</strong>. Create a bot with <strong>/newbot</strong> or copy an existing bot’s token.</li>
-                          <li>Start a chat with the bot, or add it to your group or channel with permission to post.</li>
-                          <li>Enter the chat ID or public <strong>@channel</strong> and paste the bot token below.</li>
-                        </ol>
-                      )}
-                      {name === "telegram" && <DestinationInput key={alerts.telegram.chat} id="alerts-telegram-chat" label="Chat"
-                        disabled={busy} initial={alerts.telegram.chat} />}
-                      <DestinationInput id={name === "telegram" ? "alerts-telegram-token" : "alerts-discord-link"}
-                        label={name === "telegram" ? "Bot token" : "Webhook link"} disabled={busy} secret>
-                            <button type="submit" id={`alerts-${name}-save`} aria-label={`Save ${label}`} className="button primary alerts-save" disabled={busy}>
-                              <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>
-                              Save
-                            </button>
-                      </DestinationInput>
-                          </form>
+                        <DestinationInput id="alerts-discord-link" label="Webhook link" disabled={busy} secret>
+                          <DestinationSave name="discord" label="Discord" disabled={busy} />
+                        </DestinationInput>
+                      </form>
+                    )}
                     {alerts[name].saved && <div className="button-row">
                       <button type="button" className="button text-button" disabled={busy}
                         onClick={() => confirm(`Forget ${label}?`,

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{self, IoSlice, Read, Write};
 use std::sync::Arc;
@@ -24,11 +25,12 @@ pub(super) enum Route {
     State,
     Action,
     Close,
+    TelegramChats,
 }
 
 impl Route {
     pub(super) fn authenticated(&self) -> bool {
-        matches!(self, Self::State | Self::Action | Self::Close)
+        !matches!(self, Self::Static(_))
     }
 }
 
@@ -117,13 +119,14 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
         ("GET", "/api/state") => Route::State,
         ("POST", "/api/action") => Route::Action,
         ("POST", "/api/close") => Route::Close,
+        ("POST", "/api/telegram-chats") => Route::TelegramChats,
         ("GET", path) => Route::Static(Asset::at(path).ok_or(Rejection::NotFound)?),
         _ => return Err(Rejection::NotFound),
     };
     if route.authenticated() && !authorization.is_some_and(|header| same_secret(header, access.bearer)) {
         return Err(Rejection::Unauthorized);
     }
-    let expects_json = matches!(route, Route::Action | Route::Close);
+    let expects_json = matches!(route, Route::Action | Route::Close | Route::TelegramChats);
     let body_len = match length {
         Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
             value.parse::<usize>().ok().filter(|&len| len <= MAX_BODY).ok_or(Rejection::BodyTooLarge)?
@@ -156,6 +159,15 @@ pub(super) fn close_version(body: &[u8]) -> Option<u64> {
         return None;
     }
     version?.unsigned()
+}
+
+pub(super) fn telegram_token(body: &[u8]) -> Option<Cow<'_, str>> {
+    let mut token = None;
+    let mut valid = true;
+    crate::json::settings_object(std::str::from_utf8(body).ok()?, |member| {
+        valid &= member.key.is("token") && token.replace(member.value).is_none();
+    })?;
+    token.filter(|_| valid)?.string(128)
 }
 
 #[derive(Default)]
@@ -286,6 +298,10 @@ impl Response {
         Self::new("200 OK", Some(JSON), Body::Snapshot(body), "")
     }
 
+    pub(super) fn json_owned(body: String) -> Self {
+        Self::new("200 OK", Some(JSON), Body::Owned(body.into_bytes()), "")
+    }
+
     pub(super) fn no_content() -> Self {
         Self::new("204 No Content", None, Body::Borrowed(b""), "")
     }
@@ -296,6 +312,10 @@ impl Response {
 
     pub(super) fn conflict(message: &str) -> Self {
         Self::error("409 Conflict", message)
+    }
+
+    pub(super) fn bad_gateway(message: &str) -> Self {
+        Self::error("502 Bad Gateway", message)
     }
 
     pub(super) fn busy() -> Self {
@@ -395,6 +415,38 @@ mod tests {
         assert_eq!(incoming("POST", "/api/close", "\r\nOrigin: http://127.0.0.1:4321"), Err(Rejection::Unauthorized));
         let headers = format!("{valid}\r\nContent-Type: application/json\r\nContent-Length: 13");
         assert_eq!(incoming("POST", "/api/close", &headers), Ok((Route::Close, 13)));
+    }
+
+    #[test]
+    fn telegram_chats_requires_an_authenticated_same_origin_json_post() {
+        let path = "/api/telegram-chats";
+        let bearer = "\r\nAuthorization: Bearer the-token";
+        let origin = "\r\nOrigin: http://127.0.0.1:4321";
+        let headers = format!("{bearer}{origin}\r\nContent-Type: application/json\r\nContent-Length: 2");
+        assert_eq!(incoming("POST", path, &headers), Ok((Route::TelegramChats, 2)));
+        assert_eq!(incoming("GET", path, bearer), Err(Rejection::NotFound));
+        assert_eq!(incoming("POST", path, bearer), Err(Rejection::Forbidden));
+        assert_eq!(incoming("POST", path, origin), Err(Rejection::Unauthorized));
+        assert_eq!(incoming("POST", path, &format!("{bearer}{origin}")), Err(Rejection::LengthRequired));
+        assert_eq!(
+            incoming("POST", path, &format!("{bearer}{origin}\r\nContent-Length: 2")),
+            Err(Rejection::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn telegram_discovery_accepts_only_a_single_bounded_token_string() {
+        assert_eq!(telegram_token(br#"{"token":"key"}"#).as_deref(), Some("key"));
+        for body in [
+            "{}",
+            r#"{"token":1}"#,
+            r#"{"token":"a","token":"b"}"#,
+            r#"{"token":"a","offset":1}"#,
+            r#"{"token":"a"}null"#,
+        ] {
+            assert_eq!(telegram_token(body.as_bytes()), None);
+        }
+        assert_eq!(telegram_token(format!(r#"{{"token":"{}"}}"#, "x".repeat(129)).as_bytes()), None);
     }
 
     #[test]

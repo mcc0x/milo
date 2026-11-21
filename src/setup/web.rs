@@ -56,6 +56,20 @@ impl Editor {
         editor
     }
 
+    pub(crate) fn telegram_chats(&self, token: &str) -> Result<String, alerts::TelegramChatsError> {
+        let alerts = self.setup.alerts.as_ref().ok_or(alerts::TelegramChatsError::Unavailable)?;
+        let chats = alerts.telegram_chats(token.trim())?;
+        let mut out = String::from("{\"chats\":[");
+        for (index, (id, title)) in chats.iter().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            write!(out, "{{\"id\":\"{id}\",\"title\":{}}}", Quoted(title)).expect("writing to a string");
+        }
+        out.push_str("]}");
+        Ok(out)
+    }
+
     fn new(
         store: Option<Store>,
         inside: bool,

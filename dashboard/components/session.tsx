@@ -16,6 +16,7 @@ type PendingAction = {request: QueuedAction; pending?: number; replacedNumbers?:
 type FocusOwner = {element: HTMLElement; id: string; headingId?: string; heading: boolean};
 type Confirmation = {title: string; note: string; label: string};
 type Toast = {text: string; error: boolean};
+export type TelegramChat = {id: string; title: string};
 
 type Snapshot = {
   state: SessionState | undefined;
@@ -46,6 +47,7 @@ interface SessionActions {
   draftValue<T>(field: string): T;
   edit(field: string, value: unknown): boolean;
   command(action: string, payload?: Payload): void;
+  findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   confirm(title: string, note: string, label: string, action: () => void): void;
   discard(group: GroupKey | 'all'): void;
   notify(text: string, error?: boolean): void;
@@ -286,14 +288,14 @@ function createEditor(): Editor {
     publish();
   }
 
-  async function api<T>(path: string, method = 'GET', payload?: unknown): Promise<T> {
+  async function api<T>(path: string, method = 'GET', payload?: unknown, signal?: AbortSignal): Promise<T> {
     if (!token) throw new Error('The session key is missing. Open the URL printed by milo web, including everything after #.');
     const headers: Record<string, string> = {Authorization: `Bearer ${token}`};
     if (payload !== undefined) headers['Content-Type'] = 'application/json';
     let response: Response;
     let data: unknown = null;
     try {
-      response = await fetch(path, {method, headers, body: JSON.stringify(payload), cache: 'no-store', credentials: 'omit', redirect: 'error'});
+      response = await fetch(path, {method, headers, body: JSON.stringify(payload), cache: 'no-store', credentials: 'omit', redirect: 'error', signal});
       if (response.status !== 204) {
         data = await response.json().catch(error => {
           if (response.ok) throw error;
@@ -301,7 +303,7 @@ function createEditor(): Editor {
         });
       }
     } catch {
-      connected = false;
+      if (!signal?.aborted) connected = false;
       throw new Error('The local editor did not answer. Reconnect, or run milo web again if the session has ended.');
     }
     if (!response.ok) {
@@ -311,6 +313,10 @@ function createEditor(): Editor {
     }
     connected = true;
     return data as T;
+  }
+
+  function findTelegramChats(botToken: string, signal: AbortSignal) {
+    return api<{chats: TelegramChat[]}>('/api/telegram-chats', 'POST', {token: botToken}, signal);
   }
 
   async function keepDraftAlive() {
@@ -554,7 +560,7 @@ function createEditor(): Editor {
   return {
     start, subscribe, getSnapshot: () => snapshot, getServerSnapshot: () => initialSnapshot,
     actions: {
-      draftValue, edit, command, confirm, discard, notify, trackNumericDraft, commitNumericDraft,
+      draftValue, edit, command, findTelegramChats, confirm, discard, notify, trackNumericDraft, commitNumericDraft,
       applyNumericDraft, applyNumericDrafts, hasNumericDraft: field => numericDrafts.has(field),
       connect, dropEdit, done, requestSave, finishSave, finishConfirmation,
     },

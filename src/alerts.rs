@@ -13,6 +13,7 @@ mod forward;
 mod message;
 mod secret;
 mod send;
+mod telegram;
 #[cfg(test)]
 mod tests;
 
@@ -32,6 +33,11 @@ const SETTINGS_LIMIT: u64 = 1 << 12;
 /// Named by tests to send to a stand-in on this machine. A release build
 /// does not read it: nothing changes where an installed Milo sends a secret.
 const TEST_ENDPOINT: &str = "MILO_ALERTS_TEST_ENDPOINT";
+
+pub(crate) enum TelegramChatsError {
+    InvalidToken,
+    Unavailable,
+}
 
 const NO_DESTINATION: &str =
     "Choose where alerts go first: milo alerts telegram CHAT, or milo alerts discord. Nothing was turned on.";
@@ -283,7 +289,7 @@ impl Alerts {
     fn address(&self, destination: Destination, secret: &str) -> String {
         let base = self.stand_in.as_deref();
         match destination {
-            Destination::Telegram => format!("{}/bot{secret}/sendMessage", base.unwrap_or("https://api.telegram.org")),
+            Destination::Telegram => format!("{}/bot{secret}/sendMessage", base.unwrap_or(telegram::API)),
             Destination::Discord => format!("{}/api/v10/webhooks/{secret}", base.unwrap_or("https://discord.com")),
         }
     }
@@ -382,6 +388,14 @@ impl Alerts {
         let mut settings = self.editable()?;
         chat.clone_into(&mut settings.telegram_chat);
         self.keep(settings, Destination::Telegram, token)
+    }
+
+    /// Finds recent Telegram chats without saving a token or changing subscriptions.
+    pub(crate) fn telegram_chats(&self, token: &str) -> Result<Vec<(i64, String)>, TelegramChatsError> {
+        if !valid_token(token) {
+            return Err(TelegramChatsError::InvalidToken);
+        }
+        telegram::discover(self.stand_in.as_deref(), token).ok_or(TelegramChatsError::Unavailable)
     }
 
     /// Saves a Discord webhook link.
