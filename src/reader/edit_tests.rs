@@ -798,3 +798,25 @@ fn a_question_waits_for_its_answer_before_a_formatter_runs() {
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Formatting with gofmt…");
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Formatted with gofmt · ^Z undoes");
 }
+
+#[test]
+fn a_kept_draft_put_off_is_still_there_after_another_save() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "one\n");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "kept ");
+    drop(reader);
+
+    let mut reader = open(&f, "notes.txt");
+    reader.key(Key::Char('e'));
+    reader.key(Key::Esc);
+    typed(&mut reader, "other ");
+    reader.key(Key::Ctrl(b's'));
+    reader.key(Key::Esc);
+    assert_eq!(fs::read_to_string(f.root.join("notes.txt")).unwrap(), "other one\n");
+
+    reader.key(Key::Char('e'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
+    reader.key(Key::Char('r'));
+    assert_eq!(draft(&reader), "kept one\n");
+}

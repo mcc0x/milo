@@ -187,8 +187,12 @@ impl Lab {
             std::env::var_os("MILO_TEST_BINARY").map_or_else(|| env!("CARGO_BIN_EXE_milo").into(), PathBuf::from);
         let milo = milo.canonicalize().unwrap_or_else(|e| panic!("no Milo at {}: {e}", milo.display()));
         // A Unix socket's path is limited to about a hundred bytes, which the
-        // usual temporary folder on macOS nearly uses up on its own.
-        let root = Path::new("/tmp").canonicalize().unwrap().join(format!("milo-rex-lab-{}", std::process::id()));
+        // usual temporary folder on macOS nearly uses up on its own. Each
+        // lab of this process has a folder, and so a server, of its own.
+        static LABS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let lab = LABS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("milo-rex-lab-{}-{lab}", std::process::id());
+        let root = Path::new("/tmp").canonicalize().unwrap().join(name);
         let _ = fs::remove_dir_all(&root);
         for dir in ["bin", "state", "tmp", "home/.config", "home/.local/state"] {
             fs::create_dir_all(root.join(dir)).unwrap();

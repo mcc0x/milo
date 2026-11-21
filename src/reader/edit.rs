@@ -258,12 +258,11 @@ impl Editor {
         disk::save(entry, &mut self.original, &self.buffer.text(), overwrite)
     }
 
+    /// A draft kept from an earlier reader stays until the user restores or deletes it:
+    /// saving something else is not an answer to that question.
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
         self.sync_mark();
-        if let Some(draft) = self.place.draft() {
-            draft.forget();
-        }
         self.say("Saved", now);
     }
 
