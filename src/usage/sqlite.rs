@@ -13,13 +13,36 @@ use std::time::{Duration, Instant};
 use crate::fs_ops;
 
 use super::files;
+use super::signature::Signature;
 
 const INTERVAL: Duration = Duration::from_secs(20);
+/// A database whose files have not changed is still read again this often,
+/// in case a write left its files looking as they did.
+const BACKSTOP: Duration = Duration::from_secs(5 * 60);
 pub(super) const QUERY_WAIT: Duration = Duration::from_secs(1);
 const MAX_OUTPUT: usize = 64 * 1024;
 
+/// What a reader found in a database.
+pub(super) struct Outcome<T> {
+    pub(super) value: T,
+    /// The first second at which the same database would read differently,
+    /// as when a record dated ahead of the clock comes due or the local day
+    /// ends. None when the answer does not stand for the database at all.
+    pub(super) stands_until: Option<i64>,
+}
+
 /// Reads one database at `path` as of `now`, within the given wait.
-pub(super) type Reader<T> = fn(&Path, i64, Duration) -> Option<T>;
+pub(super) type Reader<T> = fn(&Path, i64, Duration) -> Option<Outcome<T>>;
+
+/// A read that succeeded on files that were the same before and after it,
+/// and had been left alone for a while before it.
+struct Settled {
+    signature: Signature,
+    /// The seconds for which the answer stands, from the read's own.
+    from: i64,
+    until: i64,
+    read: Instant,
+}
 
 /// A slow database read runs off the pane's event loop.
 pub(super) struct Poll<T> {
@@ -27,7 +50,8 @@ pub(super) struct Poll<T> {
     wait: Duration,
     read: Reader<T>,
     last: Option<Instant>,
-    job: Option<Job<T>>,
+    job: Option<Job<(T, Option<Settled>)>>,
+    settled: Option<Settled>,
 }
 
 /// One read on its own thread. Its descriptor becomes readable when the result is ready.
@@ -68,7 +92,7 @@ impl<T: Send + 'static> Job<T> {
 
 impl<T: Send + 'static> Poll<T> {
     pub(super) fn new(path: Option<PathBuf>, wait: Duration, read: Reader<T>) -> Self {
-        Self { path, wait, read, last: None, job: None }
+        Self { path, wait, read, last: None, job: None, settled: None }
     }
 
     /// Only the initial read and deliberate reloads announce themselves.
@@ -81,18 +105,39 @@ impl<T: Send + 'static> Poll<T> {
     }
 
     /// None means there is no completed query; a completed query can also fail.
+    /// A failed query settles nothing, so the next look reads again.
     pub(super) fn collect(&mut self) -> Option<Option<T>> {
         let result = self.job.as_ref()?.finished()?;
         self.job = None;
-        Some(result)
+        let (value, settled) = result.map_or((None, None), |(value, settled)| (Some(value), settled));
+        self.settled = settled;
+        Some(value)
     }
 
-    /// Limit background reads; a deliberate reload is not held by the cooldown.
+    /// Limit background reads, and skip one whose answer is already known:
+    /// the files are as a settled read left them and its answer still stands.
+    /// A deliberate reload is held by neither.
     pub(super) fn start(&mut self, now: i64, clock: Instant) {
         if self.last.is_some_and(|last| clock.saturating_duration_since(last) < INTERVAL) {
             return;
         }
+        if self.job.is_none() && self.unchanged(now, clock) {
+            self.last = Some(clock);
+            return;
+        }
         self.launch(now, clock, self.last.is_none());
+    }
+
+    fn unchanged(&self, now: i64, clock: Instant) -> bool {
+        let (Some(settled), Some(path)) = (&self.settled, &self.path) else { return false };
+        (settled.from..settled.until).contains(&now)
+            && clock.saturating_duration_since(settled.read) < BACKSTOP
+            && Signature::of(path).as_ref() == Some(&settled.signature)
+    }
+
+    /// Reads at the next look, whatever the files say.
+    pub(super) fn forget(&mut self) {
+        self.settled = None;
     }
 
     /// Reuse an in-flight read instead of making the database serve both.
@@ -108,7 +153,18 @@ impl<T: Send + 'static> Poll<T> {
         let Some(path) = self.path.clone() else { return };
         let (read, wait) = (self.read, self.wait);
         self.last = Some(clock);
-        self.job = Job::start(checking, move || read(&path, now, wait)).ok();
+        self.job = Job::start(checking, move || {
+            let before = Signature::of(&path);
+            let outcome = read(&path, now, wait)?;
+            // A write during the read may or may not be in the answer.
+            let settled = outcome
+                .stands_until
+                .zip(before)
+                .filter(|(_, before)| before.quiet(now) && Signature::of(&path).as_ref() == Some(before))
+                .map(|(until, signature)| Settled { signature, from: now, until, read: clock });
+            Some((outcome.value, settled))
+        })
+        .ok();
     }
 }
 
@@ -222,7 +278,7 @@ pub(super) fn capture(mut child: Child, max: usize, deadline: Instant) -> Option
 mod tests {
     use super::*;
 
-    fn unused(_: &Path, _: i64, _: Duration) -> Option<()> {
+    fn unused(_: &Path, _: i64, _: Duration) -> Option<Outcome<()>> {
         None
     }
 
@@ -254,7 +310,7 @@ mod tests {
         poll.job = Some(
             Job::start(false, move || {
                 gate.recv_timeout(Duration::from_secs(5)).ok()?;
-                Some(())
+                Some(((), None))
             })
             .unwrap(),
         );
@@ -284,5 +340,41 @@ mod tests {
         // SAFETY: WNOHANG does not block and a null status pointer is allowed.
         assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
         assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn a_read_that_fails_on_unchanged_files_is_tried_again_at_the_next_look() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        /// Succeeds once, then fails as a busy database does.
+        fn once(_: &Path, _: i64, _: Duration) -> Option<Outcome<()>> {
+            (READS.fetch_add(1, Ordering::Relaxed) == 0).then_some(Outcome { value: (), stands_until: Some(i64::MAX) })
+        }
+        fn finish(poll: &mut Poll<()>) -> Option<()> {
+            loop {
+                if let Some(read) = poll.collect() {
+                    return read;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        let folder = crate::fixture::Fixture::folder();
+        let path = folder.root.join("any.db");
+        std::fs::write(&path, [0; 512]).unwrap();
+        // The file was written just now; the looks come a minute later.
+        let (now, clock) = (crate::when::now() + 60, Instant::now());
+        let mut poll = Poll::new(Some(path), QUERY_WAIT, once);
+        poll.start(now, clock);
+        assert!(finish(&mut poll).is_some());
+        poll.start(now, clock + INTERVAL);
+        assert!(poll.fd().is_none(), "the files are as the read left them");
+
+        poll.reload(now, clock + INTERVAL);
+        assert!(finish(&mut poll).is_none());
+        poll.start(now, clock + INTERVAL * 2);
+        assert!(poll.fd().is_some(), "a failed read says nothing of files that did not change");
+        finish(&mut poll);
     }
 }

@@ -4,11 +4,13 @@ mod accounts;
 mod activity;
 mod codex;
 mod failures;
+mod idle;
 mod layout;
 mod menu_stream;
 mod opencode_activity;
 mod status_line;
 mod tools;
+mod unchanged;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};

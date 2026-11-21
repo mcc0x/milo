@@ -8,6 +8,7 @@ mod http;
 mod menu;
 mod omp;
 mod opencode;
+mod signature;
 mod sqlite;
 mod status;
 mod time;
@@ -1071,11 +1072,16 @@ impl Usage {
         self.collect_omp();
         self.opencode.collect();
         self.accounts.collect(now);
+        let cutoff = self.today.since(now);
         if manual {
             self.omp.reload(now, clock);
             self.opencode.poll.reload(now, clock);
         } else {
             self.omp.start(now, clock);
+            // Totals for another local day, as after a change of time zone, say nothing of this one.
+            if matches!(self.opencode.report, opencode::Report::Today(read) if read.since != cutoff) {
+                self.opencode.poll.forget();
+            }
             self.opencode.poll.start(now, clock);
         }
         self.accounts.start(now, manual);
@@ -1083,7 +1089,6 @@ impl Usage {
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         self.check_limits(&mut claude_budget);
         self.codex.check(self.codex_dir.as_deref(), now, clock, manual, &mut codex_budget);
-        let cutoff = self.today.since(now);
         let claude = self.claude.check(self.claude_dir.as_deref(), cutoff, clock, manual, &mut claude_budget);
         #[cfg(test)]
         {
