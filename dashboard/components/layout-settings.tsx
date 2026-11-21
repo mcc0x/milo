@@ -5,8 +5,13 @@ import { useSession } from './session';
 import type { PaneRole } from './session-state';
 
 const roleNames = { outline: 'Outline', history: 'History', usage: 'Usage' };
+const panePaths = {
+  outline: 'M6 3v14a2 2 0 0 0 2 2h10M6 8h12M6 13h8',
+  history: 'M6 3v4m0 6v8m4-11h9m-9 5h6M9 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
+  usage: 'M4 18v-5m6 5V5m6 13V9m4 12H3',
+};
 
-const directions = [[-1, '←', 'up', 'earlier'], [1, '→', 'down', 'later']] as const;
+const directions = [[-1, '↑', 'up', 'earlier'], [1, '↓', 'down', 'later']] as const;
 const sides = [['left', 'Left'], ['right', 'Right']] as const;
 
 function PanePicker({ disabled }: { disabled: boolean }) {
@@ -15,15 +20,17 @@ function PanePicker({ disabled }: { disabled: boolean }) {
 
   return (
     <fieldset className="pane-picker" disabled={disabled}>
-      <legend className="sr-only">Panes in rail order</legend>
+      <legend className="setting-subheading">Panes in rail order</legend>
       <ol className="pane-list">
         {order.map((role, index) => {
           const field = `layout.panes.${role}`;
           return (
-            <li className="pane-line" key={role}>
+            <li className="pane-line" data-pane={role} key={role}>
               <label>
                 <input id={`enable-${role}`} type="checkbox" checked={draftValue<boolean>(field)}
                   onChange={event => edit(field, event.currentTarget.checked)} />{roleNames[role]}
+                <svg className="pane-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"
+                  strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={panePaths[role]}/></svg>
               </label>
               <div className="button-row">
                 {directions.map(([delta, arrow, direction, description]) => (
@@ -88,9 +95,10 @@ export default function LayoutSettings() {
   return (
     <GroupCard group="layout" title="Pane layout" actions={<LayoutActions />}>
       <PanePicker disabled={disabled} />
+      <h3 className="setting-subheading rail-sizing">Position &amp; size</h3>
       <ChoiceSetting field="layout.side" label="Rail side" value={draftValue<'left' | 'right'>('layout.side')}
         choices={sides} disabled={disabled} onChange={value => edit('layout.side', value)} />
-      <NumberInput field="layout.width" label="Rail width" detail="Percentage of the tab." percent
+      <NumberInput field="layout.width" label="Rail width" percent
         value={draftValue<number>('layout.width')} drafts={session} min={0.000001} max={99.999999} step="any" disabled={disabled} />
       <NumberInput field="layout.usage_rows" label="Usage height" detail="Rows. Changing this restores automatic pane heights."
         value={draftValue<number>('layout.usage_rows')} drafts={session} min={1} max={4294967295} step={1} disabled={disabled} />

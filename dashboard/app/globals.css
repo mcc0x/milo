@@ -204,14 +204,18 @@ h1, h2, h3, p, figure { margin: 0; }
 .choice-strip:disabled { opacity: .6; }
 @media (forced-colors: active) { .choice-strip input:checked + span { outline: 2px solid Highlight; } }
 .pane-picker { margin: 0; padding: .35rem 0; border: 0; min-width: 0; }
-.pane-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
-.pane-line { display: grid; align-content: start; justify-content: center; gap: .1rem; }
-.pane-line + .pane-line { border-inline-start: 1px solid var(--line); }
-.pane-line > label { display: flex; align-items: center; justify-content: center; gap: .35rem; min-height: 1.8rem; cursor: pointer; font-size: .85rem; font-weight: 600; }
-.pane-line input { margin: 0; width: 1rem; height: 1rem; accent-color: var(--blue); }
-.pane-line .button { min-height: 1.65rem; min-width: 1.85rem; padding: 0; border: 0; background: transparent; font-size: .9rem; }
+.pane-list { display: grid; gap: .1rem; margin: 0; padding: 0; list-style: none; }
+.pane-line { display: flex; align-items: center; justify-content: space-between; gap: .4rem; }
+.pane-line > label { display: flex; flex: 1; align-items: center; gap: .55rem; min-height: 2.4rem; cursor: pointer; font-size: .87rem; font-weight: 640; }
+.pane-glyph { order: -1; width: 2rem; height: 2rem; padding: .38rem; border-radius: .6rem; color: #275f88; background: #dfedfb; }
+.pane-line[data-pane="history"] .pane-glyph { color: #665087; background: #ece6f7; }
+.pane-line[data-pane="usage"] .pane-glyph { color: #286451; background: #def1e9; }
+.pane-line > label:has(:not(:checked)[type=checkbox]) .pane-glyph { color: #667581; background: #e6ebee; }
+.pane-line input { order: 1; margin-inline: auto .2rem; width: 1rem; height: 1rem; accent-color: var(--blue); }
+.pane-line .button { min-height: 2rem; min-width: 2rem; padding: 0; border: 0; background: transparent; color: var(--blue); font-size: 1rem; }
 .pane-line .button:disabled { opacity: .3; }
-.pane-line .button-row { gap: 0; justify-content: center; flex-wrap: nowrap; }
+.pane-line .button-row { gap: 0; flex-wrap: nowrap; border-radius: .65rem; background: #e6eef6; }
+.rail-sizing + .setting { border-block-start: 0; }
 
 .button-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
 .button { min-height: 2.4rem; padding: .4rem .7rem; border: 1px solid transparent; border-radius: .5rem; background: transparent; font-size: .82rem; font-weight: 670; line-height: 1.25; text-align: center; }
