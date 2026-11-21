@@ -144,7 +144,7 @@ fn a_file_changed_on_disk_is_not_overwritten_without_asking() {
     // Another program rewrites the file in place, then replaces it with a new file.
     fs::write(&file, "theirs\n").unwrap();
     reader.key(Key::Ctrl(b's'));
-    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: o overwrite · Esc back");
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: c compare · o overwrite · Esc back");
     assert_eq!(fs::read_to_string(&file).unwrap(), "theirs\n");
     reader.key(Key::Esc);
     assert!(reader.editing() && draft(&reader) == "mine one\n");
@@ -153,7 +153,7 @@ fn a_file_changed_on_disk_is_not_overwritten_without_asking() {
     fs::write(&other, "one\n").unwrap();
     fs::rename(&other, &file).unwrap();
     reader.key(Key::Ctrl(b's'));
-    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: o overwrite · Esc back");
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: c compare · o overwrite · Esc back");
     assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
 
     // Only the explicit answer writes over it.
@@ -167,6 +167,131 @@ fn a_file_changed_on_disk_is_not_overwritten_without_asking() {
 }
 
 #[test]
+fn comparison_scrolls_in_diff_colours_and_returns_to_the_same_draft() {
+    let f = Fixture::folder();
+    let original = "start row\nshared middle\nend row\nmore context\nlast line\n";
+    f.write("notes.txt", original);
+    let file = f.root.join("notes.txt");
+    let mut reader = editing(&f, "notes.txt");
+    reader.key(Key::End);
+    typed(&mut reader, "-mine");
+    reader.key(Key::Left);
+    let before = drawn(&mut reader, 60, 4);
+    let edited = draft(&reader);
+    let external = "disk head\nshared middle\ndisk tail\nmore context\nlast line\n";
+    fs::write(&file, external).unwrap();
+    let original_disk = fs::metadata(&file).unwrap();
+    reader.key(Key::Ctrl(b's'));
+    let narrow = drawn(&mut reader, 28, 4);
+    assert!(narrow[3].contains("c compare o overwrite Esc"), "{narrow:?}");
+    reader.key(Key::Char('c'));
+
+    let mut screen = Screen::sized(60, 4);
+    reader.draw(&mut screen);
+    let rows = screen.text();
+    assert!(rows[0].contains("- Disk  + Draft"), "{rows:?}");
+    assert!(rows[1].contains("- disk head") && rows[2].contains("+ start row-mine"), "{rows:?}");
+    let output = String::from_utf8(screen.emitted()).unwrap();
+    assert!(output.contains("\x1b[0;31mdisk head") && output.contains("\x1b[0;32mstart row-mine"), "{output:?}");
+
+    reader.key(Key::PgDn);
+    let rows = drawn(&mut reader, 60, 5);
+    assert!(rows[2].contains("shared middle") && !rows[2].contains(['+', '-']), "{rows:?}");
+    assert!(rows[3].contains("- disk tail"), "{rows:?}");
+    drawn(&mut reader, 28, 4);
+    reader.key(Key::End);
+    assert!(drawn(&mut reader, 28, 4)[2].contains("last line"));
+    reader.key(Key::Home);
+    assert!(drawn(&mut reader, 60, 4)[1].contains("- disk head"));
+    assert_eq!(reader.key(Key::Char('o')), After::Ignored);
+    assert_eq!(reader.key(Key::Ctrl(b's')), After::Ignored);
+    assert_eq!(reader.key(Key::Ctrl(b'z')), After::Ignored);
+    assert_eq!(reader.paste(Some("ignored")), After::Ignored);
+    assert_eq!(reader.key(Key::Ctrl(b'g')), After::Help);
+    reader.help().assert_rows_fit(26);
+    assert_eq!(fs::read_to_string(&file).unwrap(), external);
+    assert_eq!(original_disk.modified().unwrap(), fs::metadata(&file).unwrap().modified().unwrap());
+    assert_eq!(draft(&reader), edited);
+
+    reader.key(Key::Esc);
+    assert!(drawn(&mut reader, 60, 4)[3].contains("c compare"));
+    reader.key(Key::Esc);
+    assert_eq!(drawn(&mut reader, 60, 4), before);
+    typed(&mut reader, "!");
+    assert!(draft(&reader).starts_with("start row-min!e\n"));
+    reader.key(Key::Ctrl(b'z'));
+    assert_eq!(draft(&reader), edited);
+    reader.key(Key::Ctrl(b'z'));
+    assert_eq!(draft(&reader), original);
+    reader.key(Key::Ctrl(b'y'));
+    assert_eq!(draft(&reader), edited);
+    assert_eq!(fs::read_to_string(&file).unwrap(), external);
+}
+
+#[test]
+fn comparing_names_invisible_changes_to_the_files_bytes() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "\u{feff}same\r\n");
+    let file = f.root.join("notes.txt");
+    let mut reader = editing(&f, "notes.txt");
+    fs::write(file, "same").unwrap();
+    reader.key(Key::Ctrl(b's'));
+    reader.key(Key::Char('c'));
+    let rows = drawn(&mut reader, 60, 4);
+    assert!(rows[1].contains("- same [no LF]"), "{rows:?}");
+    assert!(rows[2].contains("+ same [BOM] [CRLF]"), "{rows:?}");
+}
+
+#[test]
+fn overwrite_refuses_a_binary_or_oversized_replacement_even_after_compare() {
+    for (bytes, reason) in [
+        (b"invalid \xff".to_vec(), "the file is no longer text"),
+        (b"binary\0".to_vec(), "the file is no longer text"),
+        (vec![b'x'; usize::try_from(content::LIMIT + 1).unwrap()], "the file is now too large"),
+    ] {
+        let f = Fixture::folder();
+        f.write("notes.txt", "original\n");
+        let file = f.root.join("notes.txt");
+        let mut reader = editing(&f, "notes.txt");
+        typed(&mut reader, "my ");
+        fs::write(&file, "external edit\n").unwrap();
+        reader.key(Key::Ctrl(b's'));
+        reader.key(Key::Char('c'));
+        assert!(drawn(&mut reader, 60, 4)[1].contains("external edit"));
+        fs::write(&file, &bytes).unwrap();
+        reader.key(Key::Esc);
+        reader.key(Key::Char('o'));
+        assert!(drawn(&mut reader, 60, 4)[3].contains(reason));
+        assert!(reader.editing() && draft(&reader) == "my original\n");
+        reader.key(Key::Ctrl(b's'));
+        assert!(drawn(&mut reader, 60, 4)[3].contains(reason));
+        assert!(fs::read(&file).unwrap() == bytes);
+    }
+}
+
+#[test]
+fn compare_does_not_authorize_overwrite_at_a_moved_project_path() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "original\n");
+    let file = f.root.join("notes.txt");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "my ");
+    fs::write(&file, "external edit\n").unwrap();
+    reader.key(Key::Ctrl(b's'));
+    reader.key(Key::Char('c'));
+    let moved = f.root.with_file_name("moved");
+    fs::rename(&f.root, &moved).unwrap();
+    f.write("notes.txt", "unrelated\n");
+    assert!(drawn(&mut reader, 60, 4)[1].contains("external edit"));
+    reader.key(Key::Esc);
+    reader.key(Key::Char('o'));
+    assert!(drawn(&mut reader, 60, 4)[3].contains("Not saved: the path to the file changed."));
+    assert_eq!(fs::read_to_string(file).unwrap(), "unrelated\n");
+    assert_eq!(fs::read_to_string(moved.join("notes.txt")).unwrap(), "external edit\n");
+    assert_eq!(draft(&reader), "my original\n");
+}
+
+#[test]
 fn saving_and_closing_a_changed_file_asks_first_and_then_closes() {
     let f = Fixture::folder();
     f.write("notes.txt", "one\n");
@@ -177,7 +302,26 @@ fn saving_and_closing_a_changed_file_asks_first_and_then_closes() {
     reader.key(Key::Esc);
     reader.key(Key::Char('s'));
     assert!(reader.editing());
-    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: o overwrite · Esc back");
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: c compare · o overwrite · Esc back");
+    reader.key(Key::Char('c'));
+    assert!(drawn(&mut reader, 60, 4)[1].contains("- theirs"));
+    fs::write(&file, "latest\n").unwrap();
+    reader.key(Key::Esc);
+    reader.key(Key::Char('o'));
+    assert!(reader.editing());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "latest\n");
+    assert!(drawn(&mut reader, 60, 4)[3].contains("Changed on disk"));
+    reader.key(Key::Char('c'));
+    assert!(drawn(&mut reader, 60, 4)[1].contains("- latest"));
+    reader.key(Key::Esc);
+    // Even a byte-for-byte replacement is newer if its file identity changed.
+    let replacement = f.root.join("replacement");
+    fs::write(&replacement, "latest\n").unwrap();
+    fs::rename(replacement, &file).unwrap();
+    reader.key(Key::Char('o'));
+    assert!(reader.editing());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "latest\n");
+    assert!(drawn(&mut reader, 60, 4)[3].contains("Changed on disk"));
     reader.key(Key::Char('o'));
     assert!(!reader.editing());
     assert_eq!(fs::read_to_string(&file).unwrap(), "mine one\n");
