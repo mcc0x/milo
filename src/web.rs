@@ -46,17 +46,13 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     let bearer = format!("Bearer {token}");
     let url = format!("{origin}/#{token}");
     let access = Access { host: &host, origin: &origin, bearer: &bearer };
-    let editor = Editor::open();
-    if STOP.load(Ordering::Relaxed) {
-        return Ok(());
-    }
     {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "{url}")
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("could not print the editor URL: {error}"))?;
     }
-    let launcher = if open_browser && !STOP.load(Ordering::Relaxed) {
+    let mut launcher = if open_browser && !STOP.load(Ordering::Relaxed) {
         match Launch::start(&url) {
             Ok(launcher) => Some(launcher),
             Err(error) => {
@@ -67,7 +63,55 @@ pub(crate) fn run(open_browser: bool, port: u16) -> Result<(), String> {
     } else {
         None
     };
+    // The browser starts while the editor reads Git, Rex and the settings. The
+    // listener already holds its connections, and none is answered before the
+    // editor is whole.
+    let opened = open_beside(&wake.0, &mut launcher, Editor::open);
+    let Some(editor) = opened.map_err(|error| format!("could not open the editor: {error}"))? else {
+        return Ok(());
+    };
     serve(listener, &wake.0, &access, editor, launcher).map_err(|error| format!("settings server: {error}"))
+}
+
+/// Opens the editor on a thread of its own and keeps the browser handoff in
+/// order meanwhile: Rex may take as long as it likes to answer, and the file
+/// that holds the session's link must still go when its time is up or Milo is
+/// stopped. Returns None when stopped first; the opening is then left behind
+/// for the end of the process, having changed nothing.
+fn open_beside<T: Send + 'static>(
+    wake: &PipeReader,
+    launcher: &mut Option<Launch>,
+    open: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<Option<T>> {
+    let (ready, done) = io::pipe()?;
+    let opening = std::thread::Builder::new().spawn(move || {
+        let opened = open();
+        // Closing the write end wakes the wait below after the editor is whole.
+        drop(done);
+        opened
+    })?;
+    let mut fds = [wake, &ready].map(|pipe| libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+    loop {
+        let check = launcher.as_mut().and_then(|launch| launch.poll(Instant::now()));
+        if check.is_none() {
+            *launcher = None;
+        }
+        let timeout = check.map_or(-1, |at| crate::term::milliseconds(at.saturating_duration_since(Instant::now())));
+        let woken = crate::term::wait_ready(&mut fds, timeout);
+        let failed = (woken < 0).then(io::Error::last_os_error);
+        if STOP.load(Ordering::Relaxed) || fds[0].revents != 0 {
+            *launcher = None;
+            return Ok(None);
+        }
+        match failed {
+            Some(error) if error.kind() != io::ErrorKind::Interrupted => return Err(error),
+            Some(_) => continue,
+            None => {}
+        }
+        if fds[1].revents != 0 {
+            return opening.join().map(Some).map_err(|_| io::Error::other("the editor could not be opened"));
+        }
+    }
 }
 
 fn random_token() -> io::Result<String> {
@@ -620,6 +664,51 @@ mod tests {
     fn session_authority_matches_browser_origin_serialization() {
         assert_eq!(http_authority((Ipv4Addr::LOCALHOST, 80).into()), "127.0.0.1");
         assert_eq!(http_authority((Ipv4Addr::LOCALHOST, 6110).into()), "127.0.0.1:6110");
+    }
+
+    /// A browser handoff made by an opener that runs `script`, and a count of the files left of it.
+    fn handoff(folder: &Fixture, script: &str) -> (Option<Launch>, impl Fn() -> usize) {
+        let mut opener = std::process::Command::new("/bin/sh");
+        opener.args(["-c", script]);
+        let launch = Launch::spawn(&folder.root, opener, "http://127.0.0.1:6110/#0123456789abcdef").unwrap();
+        let root = folder.root.clone();
+        (Some(launch), move || std::fs::read_dir(&root).unwrap().count())
+    }
+
+    #[test]
+    fn a_failed_handoff_is_removed_while_the_editor_is_still_opening() {
+        let folder = Fixture::folder();
+        let (mut launcher, left) = handoff(&folder, "exit 1");
+        let (wake, _running) = io::pipe().unwrap();
+        let (release, gate) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let opening = scope.spawn(|| open_beside(&wake, &mut launcher, move || gate.recv().is_ok()));
+            let until = Instant::now() + IO_TIMEOUT * 4;
+            while left() != 0 {
+                assert!(Instant::now() < until, "the handoff outlived its opener while Rex was still asked");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            release.send(()).unwrap();
+            assert_eq!(opening.join().unwrap().unwrap(), Some(true));
+        });
+        assert!(launcher.is_none());
+    }
+
+    #[test]
+    fn stopping_while_the_editor_opens_removes_the_handoff_without_waiting_for_it() {
+        let folder = Fixture::folder();
+        let (mut launcher, left) = handoff(&folder, "exit 0");
+        let (wake, stop) = io::pipe().unwrap();
+        // Rex never answers: the opening is still waiting when the test ends.
+        let (_never, gate) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let opening = scope.spawn(|| open_beside(&wake, &mut launcher, move || gate.recv().is_ok()));
+            assert_eq!(left(), 1);
+            drop(stop);
+            assert_eq!(opening.join().unwrap().unwrap(), None);
+        });
+        assert_eq!(left(), 0);
+        assert!(launcher.is_none());
     }
 
     #[test]

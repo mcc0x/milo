@@ -37,7 +37,7 @@ impl Launch {
         Self::spawn(root, Command::new(program), url)
     }
 
-    fn spawn(root: &Path, mut command: Command, url: &str) -> io::Result<Self> {
+    pub(super) fn spawn(root: &Path, mut command: Command, url: &str) -> io::Result<Self> {
         let name = super::random_token()?;
         let (handoff, mut file) = Temp::create(root.join(format!("milo-web-{name}.html")))?;
         // The editor URL is constructed from a numeric loopback address and a hex token.
