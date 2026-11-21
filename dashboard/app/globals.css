@@ -18,12 +18,22 @@
 [hidden] { display: none !important; }
 body {
   margin: 0; min-block-size: 100vh; min-block-size: 100dvh; display: flex; flex-direction: column;
-  background:
-    radial-gradient(ellipse at 100% 0%, #cbf6f3, transparent 55%),
-    radial-gradient(ellipse at 0% 100%, #e1d8fc, transparent 60%),
-    radial-gradient(ellipse at 100% 100%, #e2d9fd, transparent 60%),
-    linear-gradient(120deg, #d8defb, var(--sky) 55%, #d9ebfd);
+  isolation: isolate;
+  background: #cbe5fc;
   -webkit-font-smoothing: antialiased;
+}
+/* Resize the open sky between the illustrated edges without tiling the meadow. */
+body::before {
+  content: ''; position: fixed; inset: -4px; z-index: -1; pointer-events: none;
+  border-image: url('./meadow/desktop.webp') 224 0 416 fill / 14.583vw 0 27.083vw / 0 stretch;
+  filter: blur(2px); opacity: .86;
+}
+@media (max-width: 600px) and (orientation: portrait) {
+  body::before {
+    border-image-source: url('./meadow/mobile.webp');
+    border-image-slice: 410 0 825 fill;
+    border-image-width: 56.63vw 0 113.95vw;
+  }
 }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
