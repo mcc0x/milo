@@ -159,15 +159,22 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
     panel.current?.querySelector<HTMLElement>("[data-setup-focus]")?.focus();
   }
 
-  async function check() {
+  async function check(replacement?: string) {
     const current = connection.current;
     if (busy || step.kind !== "waiting" || !current.pair || current.request) return;
     const { deviceKey } = current.pair;
-    const finishCode = step.mode === "production" ? finishField.current?.value.trim().toUpperCase() ?? "" : undefined;
-    if (finishCode !== undefined && !exact(finishPattern, finishCode)) {
-      setStep({ ...step, note: "Enter the eight-character finish code to check the connection." });
-      finishField.current?.focus();
-      return;
+    const field = finishField.current;
+    let finishCode: string | undefined;
+    if (step.mode === "production") {
+      if (!field) return;
+      finishCode = (replacement ?? field.value).trim().toUpperCase();
+      if (!exact(finishPattern, finishCode)) {
+        if (replacement !== undefined) field.value = "";
+        setStep({ ...step, note: "Enter the eight-character finish code to check the connection." });
+        field.focus();
+        return;
+      }
+      field.value = finishCode;
     }
     const request = new AbortController();
     current.request = request;
@@ -274,16 +281,28 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
         <>
           {step.kind === "waiting" ? (
             <>
-              <p className="setting-detail">{setup.instructions} {step.mode === "production" ?
-                `Enter the finish code shown ${provider === "telegram" ? "in the chat" : "on the confirmation page"}.` :
+              <p className="setting-detail" id={`alerts-${provider}-instructions`}>{setup.instructions} {step.mode === "production" ?
+                `Copy the finish code ${provider === "telegram" ? "from the bot’s reply" : "from the confirmation page"}, then return to this tab and paste it to review. If you type it, choose Check connection.` :
                 "Then come back and check the connection."}</p>
               {step.mode === "production" ? (
                 <div className="secret-form alerts-form">
                   <div className="alerts-field">
                     <label className="setting-label" htmlFor={`alerts-${provider}-finish`}>Finish code</label>
-                    <input id={`alerts-${provider}-finish`} ref={finishField} type="password" autoComplete="off"
-                      autoCapitalize="characters" spellCheck={false} maxLength={8} readOnly={step.checking} disabled={busy}
-                      data-setup-focus onKeyDown={event => { if (event.key === "Enter") void check(); }} />
+                    <input id={`alerts-${provider}-finish`} ref={finishField} type="password" autoComplete="one-time-code"
+                      autoCapitalize="characters" spellCheck={false} readOnly={step.checking} disabled={busy}
+                      aria-describedby={`alerts-${provider}-instructions`} data-setup-focus
+                      onKeyDown={event => { if (event.key === "Enter") void check(); }}
+                      onPaste={event => {
+                        event.preventDefault();
+                        void check(event.clipboardData.getData("text/plain"));
+                      }}
+                      onInput={event => {
+                        if (event.currentTarget !== document.activeElement) return;
+                        const inputType = event.nativeEvent instanceof InputEvent ? event.nativeEvent.inputType : "";
+                        if (!inputType || inputType === "insertReplacementText" || inputType === "insertFromPaste") {
+                          void check(event.currentTarget.value);
+                        }
+                      }} />
                   </div>
                 </div>
               ) : null}
@@ -293,7 +312,7 @@ export default function HostedAlertsSetup({ provider, label, busy, replacingActi
             {step.kind === "waiting" ? (
               <>
                 <button type="button" className="button primary" disabled={busy} aria-disabled={step.checking}
-                  data-setup-focus={step.mode === "local" ? "" : undefined} onClick={check}>Check connection</button>
+                  data-setup-focus={step.mode === "local" ? "" : undefined} onClick={() => void check()}>Check connection</button>
                 {step.openManually ? <button type="button" className="button text-button" disabled={step.checking}
                   onClick={openPairingPage}>Open {label}</button> : null}
               </>

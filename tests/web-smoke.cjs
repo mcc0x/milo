@@ -549,7 +549,7 @@ async function checkHostedConnections(page, destination) {
     assert(next, 'hosted requests require a user action');
     const body = request.postDataJSON();
     assert.deepEqual(body, next.request);
-    if (!next.save) return route.fulfill(next.response);
+    if (!next.save) return route.fulfill(await next.response);
     const {provider, chat} = next.save;
     saved.push(body);
     const alerts = {...state.alerts};
@@ -626,12 +626,27 @@ async function checkHostedConnections(page, destination) {
         await popup.close();
         await check.waitFor();
         assert.equal(await finish.count(), mode === 'production' ? 1 : 0, 'only production requires a finish code');
+        if (mode === 'production') {
+          assert.equal(await finish.getAttribute('autocomplete'), 'one-time-code');
+          assert(await finish.evaluate(input => input === document.activeElement), 'the finish field is focused on return');
+        }
         assert.equal(responses.length, 0, 'the start request completed without automatically checking or saving');
       };
-      const preview = async (deviceKey, response, code) => {
+      const preview = async (deviceKey, response, code, activate = () => check.click()) => {
         responses.push({request: {action: 'preview', provider, deviceKey, ...(code ? {finishCode: code} : {})}, response});
-        await check.click();
+        await activate();
       };
+      const paste = text => finish.evaluate((input, text) => {
+        const clipboardData = new DataTransfer();
+        clipboardData.setData('text/plain', text);
+        input.dispatchEvent(new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData}));
+      }, text);
+      const autofill = text => finish.evaluate((input, {text, inputType}) => {
+        input.value = text;
+        // Browsers report autofill as an input event, sometimes without an inputType.
+        input.dispatchEvent(inputType ? new InputEvent('input', {bubbles: true, inputType}) : new Event('input', {bubbles: true}));
+      }, {text, inputType: index === 0 ? 'insertReplacementText' : ''});
+      const copiedCode = ` \n${finishCode.toLowerCase()}\r\n`;
       if (index === 0) {
         const deviceKey = 'e'.repeat(43);
         await startPair(deviceKey, 'production');
@@ -658,27 +673,49 @@ async function checkHostedConnections(page, destination) {
           await check.click();
           await status(wizard, 'Enter the eight-character finish code').waitFor();
           assert.equal(hostedRequests, requestsBeforeCode, 'production sends no preview without an entered code');
-          await finish.fill('deadbeef');
-          await preview(deviceKey, {status: 400, json: {error: diagnostic}}, 'DEADBEEF');
+          await finish.pressSequentially('deadbeef');
+          assert.equal(hostedRequests, requestsBeforeCode, 'typing a code still requires Check or Enter');
+          await preview(deviceKey, {status: 400, json: {error: diagnostic}}, 'DEADBEEF', () => finish.press('Enter'));
           await status(wizard, 'The finish code did not match').waitFor();
           assert.equal(await wizard.getByText(diagnostic).count(), 0);
-          await finish.fill(finishCode);
           if (index === 0) {
+            await finish.fill(finishCode);
             await preview(deviceKey, {json: {provider, label, credential, chat}}, finishCode);
             await status(wizard, 'Couldn’t check the connection').waitFor();
             assert.equal(await approve.count(), 0, 'review must never accept a credential');
           }
+          await finish.focus();
+          await preview(deviceKey, {json: {provider, label, chat}}, finishCode, () => autofill(copiedCode));
         } else {
-          await finish.fill(finishCode);
+          const requestsBeforePaste = hostedRequests;
+          await paste(`${finishCode}A`);
+          await status(wizard, 'Enter the eight-character finish code').waitFor();
+          assert.equal(await finish.inputValue(), '', 'malformed clipboard content is not retained or truncated to a code');
+          assert.equal(hostedRequests, requestsBeforePaste, 'malformed clipboard content sends no preview');
+
+          let complete;
+          const pending = new Promise(resolve => { complete = resolve; });
+          try {
+            await preview(deviceKey, pending, finishCode, () => paste(copiedCode));
+            await status(wizard, 'Checking the connection').waitFor();
+            await finish.press('Enter');
+            await paste(copiedCode);
+          } finally {
+            complete({json: {provider, label, chat}});
+          }
+          await proposal.waitFor();
+          assert.equal(hostedRequests, requestsBeforePaste + 1, 'pasting and pressing Enter during a preview makes only one request');
         }
-        await preview(deviceKey, {json: {provider, label, chat}}, production ? finishCode : undefined);
+        if (!production) await preview(deviceKey, {json: {provider, label, chat}});
         await proposal.waitFor();
+        assert(await proposal.evaluate(heading => heading === document.activeElement), 'review focuses the proposed destination');
         await wizard.getByText(label, {exact: true}).waitFor();
         await wizard.getByText('Saving does not turn forwarding on.', {exact: true}).waitFor();
         assert.equal(saved.length, index, 'previewing a destination does not save it');
         const markup = await wizard.innerHTML();
         assert(!markup.includes(credential) && !markup.includes(deviceKey) && !markup.includes(finishCode),
           'the proposal never renders secrets');
+        assert.equal(page.url(), editorUrl.href, 'the finish code never enters the local URL');
         assert.equal(await finish.count(), 0, 'review unmounts the finish code input');
         if (attempt !== 'save') {
           const requestsBeforeCancel = hostedRequests;
