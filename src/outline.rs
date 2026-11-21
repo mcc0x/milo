@@ -495,7 +495,7 @@ impl Pane for Outline {
             key("↑↓   ", "select a result"),
             key("←→   ", "pan long paths"),
             key("Enter", "open file"),
-            key("Esc  ", "return to the tree"),
+            key("Esc  ", "back to tree"),
         ]);
         if self.repo.git {
             rows.extend([
