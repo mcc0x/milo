@@ -22,11 +22,8 @@ const status = (page, text) => page.getByRole('status').filter({hasText: text});
 const reopenNote = page => page.getByRole('region', {name: 'Project session'}).getByText('Reopen panes to apply.', {exact: true});
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
-const usageChoice = (page, tool, name) =>
-  page.getByRole('group', {name: `${tool} usage`, exact: true}).getByRole('radio', {name, exact: true});
+const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
-const accountChoice = (page, account, name) =>
-  page.getByRole('group', {name: account, exact: true}).getByRole('radio', {name, exact: true});
 
 async function withMilo(binary, cwd, env, run) {
   const server = spawn(binary, ['web', '--no-open', '--port', '0'], {
@@ -87,20 +84,21 @@ async function saveNumbers(page, cwd) {
 async function chooseUsageTools(page, binary, cwd, env) {
   await section(page, 'Usage').click();
   for (const tool of usageTools) {
-    assert(await usageChoice(page, tool, 'Auto').isChecked(), `${tool} starts on Auto`);
+    assert.equal(await usageChoice(page, tool).inputValue(), 'auto', `${tool} starts on Auto`);
   }
   // Accounts are asked about online, so each starts hidden, and trying one out saves nothing.
+  const accounts = page.locator('summary').filter({hasText: 'Provider accounts'});
+  assert.equal(await usageChoice(page, 'DeepSeek balance').count(), 0, 'optional accounts start collapsed');
+  await accounts.click();
   for (const account of usageAccounts) {
-    assert(await accountChoice(page, account, 'Hide').isChecked(), `${account} starts on Hide`);
+    assert.equal(await usageChoice(page, account).inputValue(), 'hide', `${account} starts on Hide`);
   }
-  await accountChoice(page, 'DeepSeek balance', 'Auto').click();
-  await page.getByText('Asks the provider with the key you set for Milo.').waitFor();
-  await accountChoice(page, 'DeepSeek balance', 'Hide').click();
-  await accountChoice(page, 'DeepSeek balance', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
-  await usageChoice(page, 'OpenCode', 'Hide').click();
-  await usageChoice(page, 'OpenCode', 'Hide').and(page.locator(':checked')).waitFor({state: 'attached'});
-  await page.getByText('Never shown, and never looked for.').waitFor();
-  await usageChoice(page, 'Claude Code', 'Always show').click();
+  await usageChoice(page, 'DeepSeek balance').selectOption('auto');
+  await accounts.getByText('1 enabled').waitFor();
+  await usageChoice(page, 'DeepSeek balance').selectOption('hide');
+  await usageChoice(page, 'OpenCode').selectOption('hide');
+  await accounts.getByText('0 enabled').waitFor();
+  await usageChoice(page, 'Claude Code').selectOption('always');
   await status(page, dirty).waitFor({state: 'attached'});
   const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
   await assert.rejects(readFile(preferences), {code: 'ENOENT'}, 'a draft writes no preferences');
@@ -115,7 +113,7 @@ async function chooseUsageTools(page, binary, cwd, env) {
   await saved.waitFor({state: 'hidden'});
   await reopenNote(page).waitFor();
   assert.equal(await readFile(preferences, 'utf8'), 'usage_claude = always\nusage_opencode = hide\n');
-  assert(await usageChoice(page, 'Codex', 'Auto').isChecked(), 'Codex was left on Auto');
+  assert.equal(await usageChoice(page, 'Codex').inputValue(), 'auto', 'Codex was left on Auto');
   // What the panes read is what the controls saved, and a hidden tool is not looked for.
   const doctor = execFileSync(binary, ['doctor'], {cwd, env, encoding: 'utf8'});
   assert.match(doctor, /^ {2}Usage tools: Claude Code always shown; OpenCode hidden; others automatic$/m);
@@ -363,9 +361,9 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
 
 async function usageToolsPersisted(page) {
   await section(page, 'Usage').click();
-  const expected = [['Codex', 'Auto'], ['Claude Code', 'Always show'], ['OpenCode', 'Hide']];
+  const expected = [['Codex', 'auto'], ['Claude Code', 'always'], ['OpenCode', 'hide']];
   for (const [tool, name] of expected) {
-    assert(await usageChoice(page, tool, name).isChecked(), `${tool} persisted as ${name}`);
+    assert.equal(await usageChoice(page, tool).inputValue(), name, `${tool} persisted as ${name}`);
   }
   await section(page, 'Layout').click();
   await page.getByRole('heading', {name: 'Pane layout', exact: true}).waitFor();

@@ -138,6 +138,27 @@ h1, h2, h3, p, figure { margin: 0; }
 .group-controls { padding-block: 0; }
 .group-controls > * + * { border-block-start: 1px solid var(--line); }
 .setting-subheading { padding-block: .7rem .1rem; color: var(--blue); font-size: .78rem; font-weight: 700; }
+.usage-settings { display: grid; gap: 1rem; min-width: 0; }
+.usage-settings .setting-subheading + .group-controls > p { margin: 0; padding-block: .1rem .4rem; }
+.usage-source { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: .62rem; padding-block: .32rem; font-size: .86rem; font-weight: 620; }
+.usage-settings .usage-source { border: 0; }
+.usage-mark { display: grid; place-items: center; inline-size: 2.15rem; block-size: 2.15rem; border-radius: .67rem; background: #e5eaf2; }
+.usage-mark img { object-fit: contain; }
+.usage-source[data-provider="claude"] .usage-mark { background: #ffebde; }
+.usage-source:is([data-provider="codex"],[data-provider="deepseek"]) .usage-mark { background: #e0ebff; }
+.usage-source:is([data-provider="devin"],[data-provider="copilot"]) .usage-mark { background: #eae4fc; }
+.usage-source select { border: 1px solid transparent; border-radius: 1rem; padding: .25rem .45rem; min-width: 5rem; font-size: .79rem; font-weight: 650; cursor: pointer; background-color: #e7ebef; color: #475664; }
+.usage-source select[data-choice="auto"] { color: #255282; background-color: #deebfb; }
+.usage-source select[data-choice="always"] { color: #245d49; background-color: #daeee4; }
+.usage-source select:disabled { cursor: default; opacity: .65; }
+@media (pointer: coarse) { .usage-source select { min-height: 44px; } }
+.usage-accounts { margin-top: .35rem; }
+.usage-accounts summary { display: flex; align-items: center; gap: .45rem; min-height: 2.75rem; cursor: pointer; list-style: none; color: var(--ink); font-size: .88rem; font-weight: 670; }
+.usage-accounts summary::-webkit-details-marker { display: none; }
+.usage-accounts summary span { margin-inline-start: auto; color: var(--muted); font: .73rem var(--mono); }
+.usage-accounts summary::after { content: ''; width: .42rem; height: .42rem; margin-inline: .25rem; border: solid var(--blue); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); }
+.usage-accounts[open] summary::after { transform: rotate(45deg); }
+.usage-accounts > p { margin: 0; padding-bottom: .35rem; max-width: 62ch; }
 .setting { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding-block: .45rem; }
 .setting-info { min-width: 0; }
 .setting-label { display: block; font-size: .88rem; font-weight: 670; }

@@ -77,17 +77,15 @@ export default function Integrations() {
 
   return (
     <div className="integrations">
-      <header className="group-titleline">
-        <div>
+      <header className="integration-heading">
+        <button type="button" className="integration-back" aria-label="Back to integrations" title="Back to integrations"
+          disabled={!detail} onClick={() => setDetail(null)}>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2"
+            strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6"/></svg>
+        </button>
           <h2 id="integrations-title" tabIndex={-1} ref={heading}
             aria-describedby={immediate ? 'integration-timing' : undefined}>{detail ? names[detail] : 'Integrations'}</h2>
-          {immediate ? <p className="setting-detail" id="integration-timing">Applies immediately</p> : null}
-        </div>
-        {detail ? (
-          <button type="button" className="button text-button" aria-label="Back to integrations" onClick={() => setDetail(null)}>
-            <span aria-hidden="true">← </span>Back to integrations
-          </button>
-        ) : null}
+        {immediate ? <p className="setting-detail" id="integration-timing">Applies immediately</p> : null}
       </header>
       {!detail ? (
         <ul className="integrations-list" role="list">

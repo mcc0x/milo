@@ -4,6 +4,14 @@
   gap: 1.15rem;
 }
 
+.integration-heading { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: .35rem; }
+.integration-heading h2 { font-size: 1rem; letter-spacing: -.02em; }
+.integration-heading p { grid-column: 2; margin: 0; }
+.integration-back { display: grid; place-items: center; width: 2rem; height: 2rem; padding: 0; border: 0; border-radius: .5rem; background: transparent; color: var(--blue); }
+.integration-back:disabled { color: #758391; }
+.integration-back:not(:disabled):hover { background: var(--tint); }
+@media (pointer: coarse) { .integration-back { width: 44px; height: 44px; } }
+
 .integrations-list {
   margin: 0;
   padding: 0;
