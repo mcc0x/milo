@@ -382,6 +382,11 @@ impl Tree {
         self.row_of_node(*self.index.get(path)?)
     }
 
+    /// Files in the same visibility scope as the tree, irrespective of folds.
+    pub(crate) fn files(&self, pending_only: bool) -> impl Iterator<Item = &Rc<str>> {
+        self.nodes.iter().filter(move |n| !n.dir && (!pending_only || n.is_pending_file())).map(|n| &n.path)
+    }
+
     fn row_of_node(&self, id: u32) -> Option<usize> {
         let at = self.node(id).visible_at;
         self.rows.get(at).filter(|row| row.node == id).map(|_| at)

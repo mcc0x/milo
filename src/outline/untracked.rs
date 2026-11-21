@@ -202,8 +202,7 @@ impl Outline {
             }
         }
         if let Some(i) = newest
-            && self.follow_activity
-            && self.attention.following(now)
+            && self.follows_activity(now)
         {
             let path = self.pending[i].path.clone();
             self.follow(&path);

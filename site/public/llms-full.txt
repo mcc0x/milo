@@ -9,14 +9,14 @@ Source: https://github.com/mcc0x/milo/blob/main/README.md
 <p align="center">
   <a href="https://usemilo.net">
     <img src="https://github.com/mcc0x/milo/blob/main/docs/img/milo-readme-banner.webp" width="960" alt="Milo — Your Git workspace, inside Rex. Browse files, commits and diffs, edit code, track agent usage, save pane layouts, and get alerts in Discord or Telegram.">
-  </a><br>
-  <a href="https://usemilo.net">
-    <picture>
-      <source media="(max-width: 600px)" srcset="https://github.com/mcc0x/milo/blob/main/docs/img/web-demo-mobile.webp">
-      <img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-demo.webp" width="960" alt="Milo’s web demo: a file tree and commit history beside a Claude Code transcript, with Codex and Claude usage percentages above it">
-    </picture>
   </a>
-  <br><sub><a href="https://usemilo.net">Watch the demo</a> cycle through Claude Code, Codex and omp in <a href="https://www.superlogical.com/rex">Rex</a>. The project and usage figures are examples.</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/mcc0x/milo/releases/latest"><img alt="Latest Milo release" src="https://img.shields.io/github/v/release/mcc0x/milo?label=version&amp;color=4178a6"></a>
+  <a href="https://github.com/mcc0x/milo/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/mcc0x/milo?style=flat&amp;label=stars&amp;color=4178a6"></a>
+  <a href="https://github.com/mcc0x/milo/blob/main/Cargo.toml"><img alt="Core CLI: 1 direct dependency" src="https://img.shields.io/badge/core%20CLI-1%20dependency-4178a6"></a>
+  <a href="https://github.com/mcc0x/milo/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4178a6"></a>
 </p>
 
 ## Install
@@ -387,6 +387,8 @@ Untracked files appear before Milo counts their lines. In a wide outline, `?` me
 
 If filtering or folding hides the selected file, Outline keeps the cursor on its nearest visible folder. Press `r` to refresh counts, including offscreen files.
 
+Press `/` and type part of a filename or path to find it without opening each folder. If the tree is showing changed files only, search uses that same filter. Use the arrow keys to choose a result and `Enter` to read it. Press `Esc` to leave the search without losing your place in the tree. [See Outline path search.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-outline-comparison.webp)
+
 ## Comparing commits
 
 History counts commits to push against the branch's tracked remote branch. `no branch tracked` means there is no tracked branch, not that all commits have been pushed. Milo can still use the remote's default branch to mark commits for comparison. `no remote` means the project has no remote configured.
@@ -452,11 +454,15 @@ The reader also labels hidden differences next to the text: `[tab]` versus `[4 s
 
 Press `n` or `N` to jump to the next or previous change. The Reader briefly shows your position (for example, `Change 2 of 5`) or `No changes` if there is nothing to jump to. Navigation wraps in both directions.
 
+Press `c` to fold long unchanged stretches, leaving a little context around each change. Click a folded row to read just that stretch, or use `Tab` and `Enter`. Press `c` again to see the full file. [See the same diff in both views.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-reader-comparison.webp)
+
 ## Editing files
 
 The reader only reads until you ask it to edit. Press `e`, or open the file with `milo view FILE --edit`, and the file's text becomes a draft with a cursor. It works the same in the reader Outline opens in its own pane, in the floating reader in Rex and in `milo view`. The last row lists the main keys, `Ctrl-G` opens help, and [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md#editing-in-the-reader) has the whole list.
 
 The draft is yours alone until you save: the file on disk is not touched by typing, pasting, undoing or formatting. While you edit, the reader shows the draft with its code colours and no change marks. When you stop, it shows the file again at the same lines, with a fresh diff, and Outline still has the file selected.
+
+If another program edits the file before you save, choose `c` at **Changed on disk** to compare the disk version (`−`) with your unsaved draft (`+`). Comparing does not write or merge anything. Press `Esc` to return to the choice, then `Esc` again to continue editing. [See the save conflict and comparison.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-compare-comparison.webp)
 
 The editor is for small changes. It has one cursor and no selection or search, and it edits a file that exists: it does not make a new one. The cursor moves one character at a time, so an accent written as a separate mark takes a key press of its own.
 
@@ -488,7 +494,7 @@ A draft cannot grow past 2 MiB either: a key or paste that would take it there i
 
 Before it writes, milo opens the file again and reads it. Nothing is overwritten unexpectedly:
 
-- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written and the pane asks `Changed on disk: o overwrite · Esc back`. Only `o` writes your draft over it.
+- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written. **Changed on disk** lets you compare, explicitly overwrite, or return to editing. If the file changes again before you confirm, Milo asks again.
 - If the file is gone, it is not made again.
 - If the file has become a link, or a folder on the way has become a link or moved, the save is refused. Milo never writes through a link.
 - If you no longer have permission to write, the save is refused.
@@ -582,6 +588,7 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | `e` | Open every folder; press again to restore your choices |
 | `n` / `N` | Jump to the next or previous changed file, including inside closed folders. If there’s nowhere to jump, the tree says why. |
 | `c` | Switch between the whole tree and changed files only |
+| `/` | Find files by name or path; arrows choose a result, `Enter` reads it and `Esc` returns to the tree |
 | `r` | Reload |
 | `q` | Quit |
 
@@ -606,6 +613,8 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
 | `n` / `N` | Next or previous block of added or removed lines |
+| `c` | Switch between the full diff and changes with nearby context |
+| `Tab`, then `Enter` | Select and expand a folded stretch of unchanged lines; clicking the fold expands it too |
 | `e` | Edit the file, or say why it is read-only |
 | `q` or `Esc` | Close |
 
@@ -639,7 +648,7 @@ Questions take the place of the last row and wait for one of the keys they list.
 | Question | Keys |
 | --- | --- |
 | `Unsaved edits` | `s` save and stop editing, `d` discard the draft, `Esc` go back to it |
-| `Changed on disk` | `o` write your draft over the file as it is now, `Esc` go back without writing |
+| `Changed on disk` | `c` compare disk and draft, `o` overwrite the confirmed version, `Esc` back without writing |
 | `Kept draft found` | `r` put the kept draft in place of the text, `d` delete it, `Esc` decide later |
 
 ### Usage and setup
