@@ -548,9 +548,12 @@ fn hosted_error(error: crate::alerts::relay::ConnectError) -> Response {
         ConnectError::Proof => Response::bad_request("The finish code did not match. Check the code and try again."),
         ConnectError::Expired => Response::error("404 Not Found", "This connection expired or was already claimed."),
         ConnectError::Busy => Response::error("429 Too Many Requests", "Too many connection requests. Try again shortly."),
-        ConnectError::Disabled => {
-            Response::error("503 Service Unavailable", "This provider is not enabled in Milo's connection service.")
-        }
+        // The relay answers 503 for a provider it has switched off, and equally for a passing
+        // limit: Telegram still catching up, or too many pairings waiting.
+        ConnectError::Disabled => Response::error(
+            "503 Service Unavailable",
+            "Milo's connection service cannot set up this provider right now. Try again later.",
+        ),
         ConnectError::Unavailable => Response::bad_gateway("Could not reach Milo's connection service."),
     }
 }
@@ -594,6 +597,23 @@ mod tests {
         assert!(wire.ends_with(br#"{"cleanupConfirmed":true}"#));
         assert!(hosted_replay(&mut receipts, "discarded", end, &editor).is_none());
         assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn a_relay_503_is_reported_as_temporary_not_as_a_provider_switched_off() {
+        use crate::alerts::relay::ConnectError;
+
+        // The relay also answers 503 while Telegram catches up or pairings are at their limit.
+        let mut response = hosted_error(ConnectError::Disabled);
+        let mut wire = Vec::new();
+        while !response.write_to(&mut wire).unwrap() {}
+        let reply = String::from_utf8(wire).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 503 Service Unavailable\r\n"), "{reply}");
+        let body = reply.split_once("\r\n\r\n").unwrap().1.to_ascii_lowercase();
+        assert!(body.contains("try again"), "{body}");
+        for claim in ["not enabled", "disabled", "not configured", "unconfigured"] {
+            assert!(!body.contains(claim), "{body}");
+        }
     }
 
     #[test]
