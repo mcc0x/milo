@@ -625,12 +625,27 @@ local function choose(text)
   out:close()
 end
 choose("")
+local missing = choice .. "/missing"
+local open, ground_reads = io.open, {}
+io.open = function(path, mode)
+  if mode == "r" then ground_reads[path] = (ground_reads[path] or 0) + 1 end
+  return open(path, mode)
+end
+local function shared_grounds_read_once()
+  assert(ground_reads[choice] == 1, "only one preference read per view")
+  assert(ground_reads[missing] == 1, "only one attempt to read a missing preference per view")
+  ground_reads = {}
+end
 local here, there = titled_tab(9, nil, "here"), titled_tab(10, nil, "there")
-titling.on, titling.grounds, titling.relabels = false, choice, {}
+titling.on, titling.grounds, titling.relabels = false, choice .. "\n" .. missing, {}
 windows, processes, asks = { here, there }, { here = shell_in("/my project"), there = shell_in("/my project") }, titling.asks
 boot(loadfile(arg[1]))
 assert(titling.asks == asks + 1)
+shared_grounds_read_once()
 moved("here", "/other")
+ground_reads = {}
+changed()
+shared_grounds_read_once() -- Different cwd answers can still depend on the same files.
 moved("here", "/my project")
 front("there", shell_in("/my project", "claude"))
 assert(titling.asks == asks + 2 and #titling.relabels == 0)
@@ -642,12 +657,16 @@ front("there", shell_in("/my project", "claude"))
 assert(there.label == "project · claude" and titling.asks == asks + 3)
 front("there", shell_in("/my project", "claude"))
 assert(titling.asks == asks + 3, "unchanged grounds must not start Milo")
+ground_reads = {}
 changed()
 assert(here.label == "project" and titling.asks == asks + 4)
+shared_grounds_read_once()
 choose("")
 titling.on = false
 changed()
 assert(here.label == "Window 00000009" and there.label == "Window 0000000a" and titling.asks == asks + 5)
+shared_grounds_read_once()
+io.open = open
 
 -- A listener keeps answers for a limited number of folders and then starts
 -- again. A tab that stayed where it was is asked about afresh, so it still

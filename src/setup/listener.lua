@@ -84,7 +84,7 @@ local function named_elsewhere(window_id, record, default)
   return true
 end
 
-local function retitle(window_id)
+local function retitle(window_id, readings)
   local record = titled[window_id]
   local session_id, default = record.session_id, "Window " .. window_id:sub(-8)
   if named_elsewhere(window_id, record, default) then return end
@@ -101,7 +101,7 @@ local function retitle(window_id)
   -- moved. A failed lookup leaves the label alone and can try again on a
   -- later event, without starting Milo for every event during a failure.
   if changed or retry or record.cached then
-    local title, cached = titles.ask(cwd, agent)
+    local title, cached = titles.ask(cwd, agent, readings)
     record.cached = cached
     if title == nil then
       record.retry_at = os.time() + title_retry_seconds
@@ -155,7 +155,8 @@ end
 local function sync_titles(session_id, view)
   if not titles then return end
   claims = claims or titles.owned()
-  local seen = {}
+  -- Tabs can share preference files, but the next event must read them anew.
+  local seen, readings = {}, {}
   for _, window in ipairs(view.windows or {}) do
     local window_id = window.window_id
     local record = titled[window_id]
@@ -178,7 +179,7 @@ local function sync_titles(session_id, view)
       end
     end
     seen[window_id], record.label, record.order = true, window.label, order
-    retitle(window_id)
+    retitle(window_id, readings)
   end
   drop_titles(session_id, seen)
 end

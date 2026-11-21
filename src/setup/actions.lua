@@ -609,13 +609,20 @@ if ... == "listener" then
 
   -- What a file holds now: its bytes, "" for an empty one or a folder, and
   -- false for one that is not there.
-  local function reading(path)
-    local file = io.open(path, "r")
-    if not file then return false end
-    -- Far more than Milo accepts in a preference file, so any two it would read differ here.
-    local text = file:read(1048576)
-    file:close()
-    return text or ""
+  local function reading(path, readings)
+    local text = readings[path]
+    if text == nil then
+      local file = io.open(path, "r")
+      if file then
+        -- Far more than Milo accepts in a preference file, so any two it would read differ here.
+        text = file:read(1048576) or ""
+        file:close()
+      else
+        text = false
+      end
+      readings[path] = text
+    end
+    return text
   end
 
   -- Milo's answers by directory, so that a change it has already answered
@@ -623,9 +630,9 @@ if ... == "listener" then
   -- it depends on, and stands while they read the same. One without grounds
   -- is not kept.
   local answers, kept = {}, 0
-  local function stands(answer)
+  local function stands(answer, readings)
     for path, text in pairs(answer.grounds) do
-      if reading(path) ~= text then return false end
+      if reading(path, readings) ~= text then return false end
     end
     return true
   end
@@ -640,9 +647,10 @@ if ... == "listener" then
     return true
   end
 
-  local function ask(cwd, agent)
+  local function ask(cwd, agent, readings)
+    readings = readings or {}
     local answer = answers[cwd]
-    if answer and not stands(answer) then answers[cwd], kept, answer = nil, kept - 1, nil end
+    if answer and not stands(answer, readings) then answers[cwd], kept, answer = nil, kept - 1, nil end
     local who = agent or ""
     local known = answer and (answer.untitled and "" or answer.titles[who])
     if known then return known, true end
@@ -650,7 +658,7 @@ if ... == "listener" then
     local title, rest = (reply or ""):match("^=([^\r\n]*)(.*)")
     if not title then return end
     local grounds = {}
-    for path in rest:gmatch("[^\r\n]+") do grounds[path] = reading(path) end
+    for path in rest:gmatch("[^\r\n]+") do grounds[path] = reading(path, readings) end
     if not next(grounds) then return title end
     -- For the same files, keep the earlier readings: they were taken before Milo read them.
     if not (answer and same_files(answer.grounds, grounds)) then
