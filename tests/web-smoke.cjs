@@ -874,6 +874,8 @@ async function checkTelegramWizard(page, destination) {
   const fakeToken = 'smoke-test-token-not-a-credential';
   const chatId = '-1001234567890';
   const providerError = 'provider diagnostic must not appear in the dashboard';
+  const rejectedChat = '@not-a-channel';
+  const saveError = 'Enter a valid Telegram chat ID or @channel.';
   const replies = [
     {json: {chats: [{id: '42', title: 'Direct chat'}, {id: chatId, title: 'Build room'}]}},
     {json: {chats: []}},
@@ -898,10 +900,17 @@ async function checkTelegramWizard(page, destination) {
   };
   const saveTelegram = async route => {
     const action = route.request().postDataJSON();
-    if (action.action !== 'alerts' || action.field !== 'telegram') return route.fallback();
+    if (action.action !== 'alerts') return route.fallback();
+    if (action.field === 'refresh') {
+      state = {...state, version: state.version + 1};
+      return route.fulfill({json: state});
+    }
+    if (action.field !== 'telegram') return route.fallback();
     received.push(action);
+    if (action.value.chat === rejectedChat) return route.fulfill({status: 400, json: {error: saveError}});
     state = {...state, version: state.version + 1, alerts: {...state.alerts,
-      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat}}};
+      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat,
+        consent: null, needs_local_forget: false}}};
     await route.fulfill({json: state});
   };
   // No discovery or Telegram save reaches Telegram, even with a packaged editor.
@@ -956,8 +965,13 @@ async function checkTelegramWizard(page, destination) {
       await status(wizard, text).waitFor();
       assert.equal(await wizard.getByText(providerError).count(), 0, 'lookup never displays provider errors');
       await manual.click();
-      await manualChat.fill(index === 2 ? '@public_channel' : '-1009876543210');
+      await manualChat.fill(index === 2 ? rejectedChat : '-1009876543210');
       if (index === 2) {
+        await save.click();
+        await status(wizard, saveError).waitFor();
+        assert.equal(await token.inputValue(), fakeToken, 'a refused save retains the bot token');
+        assert.equal(await manualChat.inputValue(), rejectedChat, 'a refused save retains the chat to correct');
+        await manualChat.fill('@public_channel');
         await save.click();
         await wizard.getByText('Saved destination · @public_channel', {exact: true}).waitFor();
         await assertReset();
@@ -970,7 +984,7 @@ async function checkTelegramWizard(page, destination) {
       }
     }
     assert.equal(lookups, replies.length);
-    assert.deepEqual(received, [chatId, '@public_channel'].map((chat, index) => ({
+    assert.deepEqual(received, [chatId, rejectedChat, '@public_channel'].map((chat, index) => ({
       action: 'alerts', field: 'telegram', value: {token: fakeToken, chat}, version: initialVersion + index,
     })), 'discovered and manual chat IDs use the same Telegram save action');
     await button(wizard, 'Close destinations').click();

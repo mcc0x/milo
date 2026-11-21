@@ -12,7 +12,7 @@ const groupKeys = ['layout', 'preferences', 'account'] as const;
 type Payload = {field?: string; value?: unknown; group?: GroupKey | 'all'; scope?: Scope};
 type QueuedAction = Payload & {action: string};
 type NumericDraft = {control: HTMLInputElement; scale: number};
-type PendingAction = {request: QueuedAction; pending?: number; replacedNumbers?: Map<string, NumericDraft>};
+type PendingAction = {request: QueuedAction; pending?: number; replacedNumbers?: Map<string, NumericDraft>; onApplied?: () => void};
 type FocusOwner = {element: HTMLElement; id: string; headingId?: string; heading: boolean};
 type Confirmation = {title: string; note: string; label: string};
 type Toast = {text: string; error: boolean};
@@ -51,7 +51,7 @@ type Snapshot = {
 interface SessionActions {
   draftValue<T>(field: string): T;
   edit(field: string, value: unknown): boolean;
-  command(action: string, payload?: Payload): void;
+  command(action: string, payload?: Payload, onApplied?: () => void): void;
   findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   hostedConnect(request: HostedConnectRequest, signal: AbortSignal): Promise<{status: number; data: unknown}>;
   saveHostedConnection(request: HostedSaveRequest): Promise<HostedSaveResult>;
@@ -268,17 +268,17 @@ function createEditor(): Editor {
     }
   }
 
-  function command(action: string, payload: Payload = {}) {
+  function command(action: string, payload: Payload = {}, onApplied?: () => void) {
     if ((action === 'try' || (action === 'save' && payload.group === 'layout')) && !applyNumericDrafts()) return;
     const replacesLayout = action === 'capture' || (action === 'inherit' && payload.group === 'layout') ||
       (action === 'discard' && (payload.group === 'layout' || payload.group === 'all'));
     const replaced = replacesLayout && numericDrafts.size ? new Map(numericDrafts) : undefined;
-    enqueue({action, ...payload}, replaced);
+    enqueue({action, ...payload}, replaced, onApplied);
   }
 
-  function enqueue(request: QueuedAction, replacedNumbers?: Map<string, NumericDraft>) {
+  function enqueue(request: QueuedAction, replacedNumbers?: Map<string, NumericDraft>, onApplied?: () => void) {
     if (!state || closing || ended) return;
-    const queued: PendingAction = {request, replacedNumbers};
+    const queued: PendingAction = {request, replacedNumbers, onApplied};
     if (paused && request.action === 'discard' && request.group === 'all') {
       queued.pending = queue.length;
       queue.unshift(queued);
@@ -410,7 +410,7 @@ function createEditor(): Editor {
     if (!state || running || paused || !queue.length || closing || ended) return;
     running = true;
     while (queue.length) {
-      const {request, pending, replacedNumbers} = queue[0];
+      const {request, pending, replacedNumbers, onApplied} = queue[0];
       try {
         state = await api<SessionState>('/api/action', 'POST', {...request, version: state.version});
         queue.splice(0, 1 + (pending ?? 0));
@@ -449,6 +449,7 @@ function createEditor(): Editor {
         setToast(localError, true);
         break;
       }
+      if (!state.message?.error) onApplied?.();
     }
     const openSave = saveRequested;
     saveRequested = false;

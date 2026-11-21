@@ -224,6 +224,15 @@ export default function Alerts() {
       });
   }
 
+  function saveTelegram(value: { token: string; chat: string }) {
+    const submitted = form.current;
+    command("alerts", { field: "telegram", value }, () => {
+      if (!submitted || form.current !== submitted) return;
+      manager.current?.querySelector<HTMLElement>("h2")?.focus();
+      submitted.reset();
+    });
+  }
+
   function saveDiscord(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!busy) send("discord", valueOf(event.currentTarget, "alerts-discord-link"));
@@ -319,10 +328,7 @@ export default function Alerts() {
                         `This removes the saved ${label} destination and its secret from ${alerts.place}. Forwarding to it ends.`,
                         "Forget", () => send("forget", name)) : undefined}>
                       {name === "telegram" ? (
-                        <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={value => {
-                          manager.current?.querySelector<HTMLElement>("h2")?.focus();
-                          send("telegram", value);
-                        }} />
+                        <TelegramSetup form={form} busy={busy} savedChat={alerts.telegram.chat} save={saveTelegram} />
                       ) : (
                         <form id="alerts-discord" className="secret-form alerts-form" autoComplete="off" ref={form}
                           onSubmit={saveDiscord}>
