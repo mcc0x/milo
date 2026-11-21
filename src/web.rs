@@ -482,6 +482,15 @@ fn respond_hosted_connect(body: &[u8], editor: &mut Editor, receipts: &mut Vec<H
         Err(error) => return plain(hosted_error(error)),
     };
     let Some((version, key)) = request.save() else {
+        if request.provider() == crate::alerts::Destination::Telegram
+            && let Err(error) = editor.check_telegram_reconnect()
+        {
+            return Completion {
+                response: Response::conflict(&error),
+                snapshot: Some(Arc::new(editor.state())),
+                close: false,
+            };
+        }
         return plain(match request.run() {
             Ok(Connected::Ready(reply)) => Response::json_owned(reply),
             Ok(Connected::Pending) => Response::pairing_pending(),

@@ -331,8 +331,16 @@ function createEditor(): Editor {
   }
 
   async function hostedConnect(request: HostedConnectRequest, signal: AbortSignal) {
+    const before = state;
     const response = await sessionFetch('/api/hosted-connect', 'POST', request, signal);
     if (!response.ok) await response.body?.cancel();
+    if (response.status === 409 && request.provider === 'telegram') {
+      const refreshed = await api<SessionState>('/api/state', 'GET', undefined, signal).catch(() => null);
+      if (refreshed && !signal.aborted && state === before) {
+        state = refreshed;
+        publish();
+      }
+    }
     return {status: response.status, data: response.ok ? await response.json() as unknown : null};
   }
 

@@ -133,6 +133,12 @@ impl<'a> ConnectionRequest<'a> {
         Ok(Self { origin, operation })
     }
 
+    pub(crate) fn provider(&self) -> Destination {
+        match self.operation {
+            Pairing::Start(provider) | Pairing::Preview { provider, .. } | Pairing::Save { provider, .. } => provider,
+        }
+    }
+
     pub(crate) fn save(&self) -> Option<(u64, &str)> {
         match &self.operation {
             Pairing::Save { version, key, .. } => Some((*version, key)),

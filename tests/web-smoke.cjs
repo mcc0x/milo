@@ -551,11 +551,13 @@ async function checkHostedConnections(page, destination) {
   };
   const hostedPath = '**/api/hosted-connect';
   const actionPath = '**/api/action';
+  const statePath = '**/api/state';
   const responses = [];
   const saved = [];
   const scoped = [];
   const alertConsents = {telegram: 'a'.repeat(32), discord: 'b'.repeat(32)};
   let hostedRequests = 0;
+  const editorState = route => route.fulfill({json: state});
   const hosted = async route => {
     const request = route.request();
     assert.equal(request.method(), 'POST');
@@ -570,7 +572,8 @@ async function checkHostedConnections(page, destination) {
     saved.push(body);
     const alerts = {...state.alerts};
     alerts.destination ??= provider;
-    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider], ...(chat ? {chat} : {})};
+    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider],
+      ...(provider === 'telegram' ? {chat, needs_local_forget: false} : {})};
     state = {...state, version: state.version + 1, alerts, message: null};
     await route.fulfill({json: state});
   };
@@ -592,6 +595,13 @@ async function checkHostedConnections(page, destination) {
       const provider = providers.find(({provider}) => provider === value);
       assert(provider && alerts[value].saved, 'the test targets a saved provider');
       message = {text: `${provider.name} accepted the test message.`, error: false};
+    } else if (field === 'forget_local') {
+      assert.equal(value, 'telegram', 'local forget is scoped to Telegram');
+      assert(alerts.telegram.needs_local_forget);
+      scoped.push({field, value});
+      alerts.telegram = {saved: false, active: false, chat: '', consent: null, needs_local_forget: false};
+      alerts.destination = 'discord';
+      message = {text: 'Removed from this machine only.', error: false};
     } else {
       assert.fail(`unexpected alert action during hosted setup: ${field}`);
     }
@@ -795,11 +805,45 @@ async function checkHostedConnections(page, destination) {
       {field: 'forwarding', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: false}},
     ]);
+
+    // Another local editor restored an old credential just before the user tried to reconnect.
+    await button(manager, 'Telegram').click();
+    const telegram = dialog(page, 'Destinations / Telegram');
+    const connect = button(telegram, 'Connect with Milo');
+    const launchCount = launches.length;
+    state = {...state, alerts: {...state.alerts, telegram: {...state.alerts.telegram, needs_local_forget: true}}};
+    await page.route(statePath, editorState);
+    responses.push({request: {action: 'start', provider: 'telegram'}, response: {status: 409}});
+    await connect.click();
+    const forgetLocal = button(telegram, 'Forget on this Mac');
+    await forgetLocal.waitFor();
+    assert.equal(await connect.count(), 0, 'legacy Telegram cannot start another pairing');
+    assert.equal(launches.length, launchCount, 'the blocked start does not open a provider page');
+    await forgetLocal.click();
+    const forget = dialog(page, 'Forget Telegram on this Mac?');
+    await forget.getByText(/does not revoke the connection on the relay/).waitFor();
+    await forget.getByText(/send \/stop/).waitFor();
+    const actionsBeforeCancel = scoped.length;
+    await button(forget, 'Keep editing').click();
+    assert.equal(scoped.length, actionsBeforeCancel);
+    await forgetLocal.click();
+    await button(forget, 'Forget on this Mac').click();
+    await connect.waitFor();
+    assert.deepEqual(scoped.at(-1), {field: 'forget_local', value: 'telegram'});
+    await button(telegram, 'Back to destinations').click();
+    assert(await manager.getByRole('switch', {name: 'Forward to Discord'}).isChecked(),
+      'forgetting Telegram locally keeps Discord forwarding');
+    await button(manager, 'Discord').click();
+    const discord = dialog(page, 'Destinations / Discord');
+    assert.equal(await button(discord, 'Forget on this Mac').count(), 0, 'Discord has no local-only removal action');
+    await button(discord, 'Forget Discord…').waitFor();
+    await button(discord, 'Back to destinations').click();
     await button(manager, 'Close destinations').click();
   } finally {
     await context.unroute(outsideEditor, openProvider);
     await page.unroute(hostedPath, hosted);
     await page.unroute(actionPath, alertAction);
+    await page.unroute(statePath, editorState);
   }
 }
 
