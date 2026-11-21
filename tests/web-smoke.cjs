@@ -285,7 +285,7 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   await section(page, 'Integrations').click();
   await button(page, 'Discord presence').click();
   const card = page.getByRole('region', {name: 'Discord presence', exact: true});
-  const turnOn = button(card, 'Turn on…');
+  const turnOn = card.getByRole('switch', {name: 'Discord presence', checked: false});
   const question = dialog(page, 'Turn on Discord presence?');
   const names = dialog(page, 'Show these names on Discord?');
   const choice = name => card.getByRole('radio', {name, exact: true});
@@ -305,7 +305,7 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   await turnOn.click();
   await button(question, 'Turn on').click();
   await status(page, 'Discord presence is on. Discord is showing “In a Rex session”.').waitFor();
-  await button(card, 'Turn off').waitFor();
+  await card.getByRole('switch', {name: 'Discord presence', checked: true}).waitFor();
   assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
   await until(() => shown(), 'the helper introduced itself and set the activity');
   assert.deepEqual(last(0), {v: 1, client_id: milo});
@@ -326,6 +326,8 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   await button(names, 'Show names').click();
   await status(page, 'Discord presence shows the name of the session in front.').waitFor();
   await choice('Session name').and(page.locator(':checked')).waitFor({state: 'attached'});
+  await button(card, 'What others can see').hover();
+  await card.getByRole('tooltip').filter({hasText: 'May add the name of the Rex session in front.'}).waitFor();
   assert.equal(await readFile(file, 'utf8'), 'presence = true\ndetails = session\n');
   await until(() => shown()?.state === 'Session: smoke session', 'the session in front is named, and its folder is not');
 
@@ -337,20 +339,23 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
 
   // An application of your own replaces Milo's until you go back.
   assert.equal(await card.getByRole('textbox', {name: 'Application ID'}).count(), 0);
-  await card.getByText('Use your own Discord app', {exact: true}).click();
-  await button(card, 'Use my own').click();
-  await page.getByRole('alert').filter({hasText: 'Enter the Application ID of your own Discord application'}).waitFor();
-  await card.getByRole('textbox', {name: 'Application ID', exact: true}).fill(own);
-  await button(card, 'Use my own').click();
+  const appSettings = button(page, 'Custom App Setup');
+  await appSettings.click();
+  const app = dialog(page, 'Discord app settings');
+  await button(app, 'Use my own').click();
+  await app.getByRole('alert').filter({hasText: 'Enter an Application ID of 17 to 19 digits.'}).waitFor();
+  await app.getByRole('textbox', {name: 'Application ID', exact: true}).fill(own);
+  await button(app, 'Use my own').click();
   await status(page, `Discord presence uses your application ${own}.`).waitFor();
   await until(() => last(0).client_id === own, 'the helper introduced the other application');
   assert.equal(await readFile(file, 'utf8'), `presence = true\napplication_id = ${own}\n`);
-  await button(card, 'Use Milo’s application').click();
+  await appSettings.click();
+  await button(app, 'Use Milo’s application').click();
   await status(page, 'Discord presence uses Milo\'s application.').waitFor();
   await until(() => last(0).client_id === milo, 'the helper is back under Milo\'s application');
   assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
 
-  await button(card, 'Turn off').click();
+  await card.getByRole('switch', {name: 'Discord presence', checked: true}).click();
   await status(page, 'Discord presence is off.').waitFor();
   await turnOn.waitFor();
   await until(() => discord.connections() === 0, 'turning presence off closed the connection to Discord');
@@ -504,7 +509,7 @@ async function checkAlerts(page) {
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
   const destination = page.getByRole('region', {name: 'Destination', exact: true});
-  assert.equal(await button(page, 'Turn on…').count(), 0, 'cannot enable forwarding without a destination');
+  assert.equal(await page.getByRole('switch', {name: 'Alert forwarding'}).count(), 0, 'cannot enable forwarding without a destination');
   assert.equal(await button(page, 'Send test').count(), 0, 'cannot send to an unconfigured destination');
   await button(destination, 'Set up destination').click();
   await button(page, 'Add Discord').click();

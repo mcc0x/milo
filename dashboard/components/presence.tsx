@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useSession } from "./session";
+import IntegrationSwitch from "./integration-switch";
 import "./presence.css";
 
 const details = [
@@ -14,16 +15,16 @@ const details = [
 
 type Detail = (typeof details)[number][0];
 
-// A public application ID can survive navigation without becoming a settings draft.
-let applicationDraft = "";
-
 function showsMore(next: Detail, saved: Detail) {
   return (next !== "generic" && saved === "generic") || (next === "both" && saved !== "both") ||
     (next === "session" && saved === "project") || (next === "project" && saved === "session");
 }
 
 export default function Presence() {
-  const { state, paused, queue, closing, command, confirm, notify } = useSession();
+  const { state, paused, queue, closing, command, confirm } = useSession();
+  const appDialog = useRef<HTMLDialogElement>(null);
+  const [showHint, setShowHint] = useState(false);
+  const [error, setError] = useState("");
   const application = useRef<HTMLInputElement>(null);
   const presence = state.presence;
   if (!presence) return null;
@@ -46,11 +47,11 @@ export default function Presence() {
     if (!input) return;
     const id = input.value.trim();
     if (!/^[1-9]\d{16,18}$/.test(id)) {
-      notify("Enter the Application ID of your own Discord application: a number of 17 to 19 digits.", true);
+      setError("Enter an Application ID of 17 to 19 digits.");
       input.focus();
       return;
     }
-    applicationDraft = input.value = "";
+    appDialog.current?.close();
     command("presence", { field: "application", value: id });
   }
 
@@ -61,7 +62,14 @@ export default function Presence() {
     <section className="presence-settings" aria-labelledby="integrations-title">
       <div className="presence-preview">
         <figure className="presence-example">
-          <figcaption>Activity preview</figcaption>
+          <figcaption><span>Activity preview</span>{" "}
+            <span className="presence-hint" onMouseEnter={() => setShowHint(true)} onMouseLeave={() => setShowHint(false)}>
+              <button type="button" aria-label="What others can see" aria-describedby={showHint ? "presence-hint" : undefined}
+                onFocus={() => setShowHint(true)} onClick={() => setShowHint(true)} onBlur={() => setShowHint(false)}
+                onKeyDown={event => { if (event.key === "Escape") setShowHint(false); }}>!</button>
+              {showHint && <span role="tooltip" id="presence-hint">{details.find(([key]) => key === presence.details)?.[2]}</span>}
+            </span>
+          </figcaption>
           <div className="presence-activity">
             {own ? (
               <svg className="presence-app-mark" width="36" height="36" viewBox="0 0 36 36"
@@ -77,22 +85,13 @@ export default function Presence() {
               <p>In a Rex session</p>
             </div>
           </div>
-          <p className="setting-detail">{details.find(([key]) => key === presence.details)?.[2]}</p>
         </figure>
-        <div className="presence-action">
-          <span className="group-origin" id="presence-state">{presence.enabled ? "On" : "Off"}</span>
-          <button type="button" className={`button ${presence.enabled ? "secondary" : "primary"}`}
-            id="presence-change" disabled={waiting} aria-describedby="presence-state presence-status" onClick={() => {
-              if (presence.enabled) command("presence", { value: "off" });
-              else confirm("Turn on Discord presence?", disclosure, "Turn on", () => command("presence", { value: "on" }));
-            }}>
-            {presence.enabled ? "Turn off" : "Turn on…"}
-          </button>
-        </div>
+        <IntegrationSwitch id="presence-change" label="Discord presence" enabled={presence.enabled} disabled={waiting}
+          onClick={() => {
+            if (presence.enabled) command("presence", { value: "off" });
+            else confirm("Turn on Discord presence?", disclosure, "Turn on", () => command("presence", { value: "on" }));
+          }}/>
       </div>
-      <p className="setting-detail presence-status" id="presence-status">
-        <strong>Last checked:</strong> {presence.status}
-      </p>
       <div className="presence-sharing">
         <h3 className="setting-label" id="presence-sharing-label">Sharing options</h3>
         <fieldset className="choice-strip" disabled={waiting} aria-labelledby="presence-sharing-label"
@@ -105,44 +104,38 @@ export default function Presence() {
             </label>
           ))}
         </fieldset>
-        <p className="setting-detail" id="presence-details-detail">
-          Anyone who can see your Discord activity can see what you share while a Rex app has a session open here.
+        <p className="setting-detail presence-audience" id="presence-details-detail">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>
+          </svg>
+          <span>Your Discord activity settings control who can see these details while a Rex session is open.</span>
         </p>
       </div>
-      <div className="presence-application-options">
-        <details>
-          <summary>Use your own Discord app</summary>
-          {own ? (
-            <p className="setting-detail">Application ID: {own}. Discord shows your app’s own name and icon.</p>
-          ) : (
-            <>
-              <p className="setting-detail" id="presence-application-detail">
-                Create an app in the <a href="https://discord.com/developers/applications"
-                  target="_blank" rel="noreferrer">Discord Developer Portal</a> and copy its Application ID.
-                Discord shows that app’s name and icon. No bot or token is needed.
-              </p>
-              <form onSubmit={useOwnApplication}>
-                <label className="setting-label" htmlFor="presence-application">Application ID</label>
-                <div className="presence-application-input">
-                  <input ref={application} type="text" id="presence-application" inputMode="numeric"
-                    autoComplete="off" spellCheck={false} aria-describedby="presence-application-detail"
-                    defaultValue={applicationDraft} disabled={waiting}
-                    onChange={event => { applicationDraft = event.currentTarget.value.trim(); }} />
-                  <button type="submit" className="button secondary" id="presence-own" disabled={waiting}>
-                    Use my own
-                  </button>
-                </div>
-              </form>
-            </>
-          )}
-        </details>
-        {own ? (
-          <button type="button" className="button text-button" id="presence-official" disabled={waiting}
-            onClick={() => command("presence", { field: "application", value: "official" })}>
-            Use Milo’s application
-          </button>
-        ) : null}
-      </div>
+      <p className="setting-detail presence-status" id="presence-status">
+        <strong>Last checked:</strong> {presence.status}
+      </p>
+      <dialog id="presence-app-dialog" ref={appDialog} className="presence-app-dialog" aria-labelledby="presence-app-title"
+        onClose={() => { setError(""); application.current?.form?.reset(); }}>
+        <h3 id="presence-app-title">Discord app settings</h3>
+        <p className="setting-detail" id="presence-application-detail">
+          {own ? "Your app supplies the name and icon for this activity." : "Milo supplies the name and icon. To use your own, enter its public ID from the "}
+          {!own && <><a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Discord Developer Portal</a>.</>}
+        </p>
+        <form onSubmit={useOwnApplication}>
+          <label className="setting-label" htmlFor="presence-application">Application ID</label>
+          <input key={own || "official"} ref={application} id="presence-application" inputMode="numeric"
+            autoComplete="off" spellCheck={false} defaultValue={own || ""} disabled={waiting}
+            aria-describedby={error ? "presence-app-error" : "presence-application-detail"} aria-invalid={!!error}
+            onChange={() => setError("")} />
+          {error && <p role="alert" id="presence-app-error">{error}</p>}
+          <div className="presence-app-actions">
+            {own && <button type="button" className="button text-button" disabled={waiting}
+              onClick={() => { appDialog.current?.close(); command("presence", { field: "application", value: "official" }); }}>Use Milo’s application</button>}
+            <button type="button" className="button secondary" onClick={() => appDialog.current?.close()}>Cancel</button>
+            <button type="submit" className="button primary" disabled={waiting}>Use my own</button>
+          </div>
+        </form>
+      </dialog>
     </section>
   );
 }

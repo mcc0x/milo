@@ -1,11 +1,13 @@
 .alert-settings { display: grid; min-width: 0; gap: 1.05rem; }
 .alerts-heading { margin-block-end: .25rem; font-size: .9rem; font-weight: 730; }
 
-.alerts-destination { display: grid; gap: .45rem; }
+.alerts-destination { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(52%); align-items: center; gap: .45rem .85rem; }
+.alerts-destination > .button-row { justify-content: flex-end; }
+.alerts-destination > p { grid-column: 1/-1; }
 .alerts-destination-line {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  justify-content: start;
   flex-wrap: wrap;
   gap: .2rem .65rem;
 }

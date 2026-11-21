@@ -2,6 +2,7 @@
 
 import { useLayoutEffect, useRef, useState } from 'react';
 import Alerts from './alerts';
+import HeaderAction from './header-action';
 import { GroupCard, SwitchSetting } from './controls';
 import Presence from './presence';
 import { useSession } from './session';
@@ -98,6 +99,13 @@ export default function Integrations() {
         <h2 id="integrations-title" tabIndex={-1} ref={heading}
           aria-describedby={timing ? 'integration-timing' : undefined}>{detail ? names[detail] : 'Integrations'}</h2>
         {timing ? <p className="setting-detail" id="integration-timing">{timing}</p> : null}
+        {detail === 'presence' && available.presence && (
+          <HeaderAction mode="text-icon" label="Custom App Setup" popup="dialog"
+            onClick={() => document.querySelector<HTMLDialogElement>('#presence-app-dialog')?.showModal()}
+            icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <path d="M4 7h4m5 0h7M4 17h9m5 0h2"/><circle cx="10.5" cy="7" r="2.5"/><circle cx="15.5" cy="17" r="2.5"/>
+            </svg>}/>
+        )}
       </header>
       {!detail ? (
         <ul className="integrations-list" role="list">

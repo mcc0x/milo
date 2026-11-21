@@ -5,14 +5,13 @@
 }
 
 .presence-preview {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: .4rem .8rem;
+  gap: .75rem;
 }
 
 .presence-example {
-  flex: 1 1 12rem;
   max-inline-size: 19rem;
   min-width: 0;
 }
@@ -40,20 +39,17 @@
 .presence-app-mark { flex: none; border-radius: .45rem; }
 svg.presence-app-mark { background: #3b3d4b; color: #d6d6e2; }
 
-.presence-action, .presence-application-input {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: .4rem;
-}
-
+.presence-audience { display: flex; align-items: baseline; gap: .4rem; max-width: 54ch; }
+.presence-audience svg { flex: none; align-self: flex-start; margin-top: .15em; color: var(--blue); }
+.presence-settings { display: flex; flex-direction: column; }
 .presence-status {
-  max-inline-size: 62ch;
-  margin-block-start: .55rem;
+  margin: auto 0 0;
+  padding-block-start: .9rem;
+  text-align: center;
   overflow-wrap: anywhere;
 }
 
-.presence-sharing, .presence-application-options {
+.presence-sharing {
   border-block-start: 1px solid var(--line);
   margin-block-start: .55rem;
 }
@@ -66,30 +62,16 @@ svg.presence-app-mark { background: #3b3d4b; color: #d6d6e2; }
   margin-block: .25rem;
 }
 
-.presence-application-options {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: .25rem .5rem;
-  padding-block-start: .1rem;
-}
-
-.presence-application-options details { min-width: 0; max-inline-size: 62ch; }
-.presence-application-options summary {
-  inline-size: fit-content;
-  min-block-size: 2.4rem;
-  padding-block: .55rem;
-  cursor: pointer;
-  color: var(--blue);
-  font-size: .83rem;
-  font-weight: 670;
-}
-
-.presence-application-options details > p { margin-block-start: 0; }
-.presence-application-options form { margin-block-start: .55rem; }
-.presence-application-input { margin-block-start: .2rem; }
-.presence-application-input input { max-inline-size: 100%; }
-.presence-application-options a { color: var(--blue); }
+.presence-hint { position: relative; display: inline-block; }
+.presence-hint button { border: 0; border-radius: 50%; background: #ffdf89; color: #654600; width: 1.25rem; height: 1.25rem; font-weight: 750; cursor: help; }
+.presence-hint [role=tooltip] { position: absolute; z-index: 2; left: -4rem; top: 100%; width: min(14rem, 60vw); padding: .55rem .7rem; border-radius: .55rem; background: #253447; color: white; font-weight: 500; box-shadow: 0 4px 14px #15243425; }
+.presence-app-dialog { width: min(24rem, calc(100vw - 2rem)); padding: 1.15rem; }
+.presence-app-dialog h3 { margin-bottom: .4rem; }
+.presence-app-dialog a { color: var(--blue); }
+.presence-app-dialog form { margin-top: .85rem; }
+.presence-app-dialog input { width: 100%; margin-top: .25rem; }
+.presence-app-actions { margin-top: .8rem; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .35rem; }
+#presence-app-error { color: #9f3232; font-size: .8rem; }
 
 @container presence (max-width: 18rem) {
   .presence-sharing .choice-strip {
@@ -99,7 +81,7 @@ svg.presence-app-mark { background: #3b3d4b; color: #d6d6e2; }
 }
 
 @media (pointer: coarse) {
-  .presence-application-options summary, #presence-application { min-block-size: 2.75rem; }
+  #presence-application { min-block-size: 2.75rem; }
   #presence-application { font-size: 1rem; }
 }
 

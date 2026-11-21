@@ -3,6 +3,7 @@
 import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ChoiceSetting, SettingRow, SwitchSetting } from "./controls";
 import { useSession } from "./session";
+import IntegrationSwitch from "./integration-switch";
 import "./alerts.css";
 
 const destinations = [["telegram", "Telegram"], ["discord", "Discord"]] as const;
@@ -109,6 +110,7 @@ export default function Alerts() {
     <div className="alert-settings">
       <AlertGroup id="group-alerts" title="Destination">
         <div className="alerts-destination">
+          <div className="alerts-destination-copy">
           <div className="alerts-destination-line">
             <p className="setting-label">{target ?? "No destination"}</p>
             <span className="setting-detail alerts-status" id="group-alerts-status" role="status"
@@ -116,12 +118,10 @@ export default function Alerts() {
           </div>
           {!target ? <p className="setting-detail">Choose a Telegram chat or Discord channel. Saving won’t turn forwarding on.</p> : null}
           {alerts.note ? <p className="setting-detail disclosure-text">{alerts.note}</p> : null}
+          </div>
           <div className="button-row">
             {(enabled || target) ? (
-              <button type="button" className={`button ${enabled ? "secondary" : "primary"}`}
-                id="alerts-toggle" disabled={busy} onClick={toggleForwarding}>
-                {enabled ? "Turn off" : "Turn on…"}
-              </button>
+              <IntegrationSwitch id="alerts-toggle" label="Alert forwarding" enabled={enabled} disabled={busy} onClick={toggleForwarding}/>
             ) : null}
             <button type="button" className={`button ${target || destinationsOpen ? "secondary" : "primary"}`}
               id="alerts-destinations-toggle" aria-expanded={destinationsOpen} aria-controls="alerts-destinations"

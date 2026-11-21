@@ -297,8 +297,23 @@ h1, h2, h3, p, figure { margin: 0; }
 .context-worktree { font-family: var(--mono); }
 #save-groups h3 { margin: 1rem 0 .4rem; font-size: .9rem; }
 #done { flex: none; margin-inline-start: auto; min-height: 2.75rem; border-radius: 2rem; }
-dialog { width: min(28rem, 100% - 2rem); border: 1px solid var(--line); border-radius: .85rem; background: var(--paper); color: var(--ink); padding: 1.3rem; box-shadow: 0 15px 50px #102b4b40; }
-dialog::backdrop { background: #14294461; }
+dialog {
+  width: min(28rem, 100% - 2rem); margin: auto; padding: 1.3rem;
+  border: 1px solid #ffffffbc; border-radius: 1rem;
+  background: var(--paper); color: var(--ink);
+  box-shadow: inset 0 1px 0 #ffffffde, inset 0 -1px 0 #d5e5ed80, 0 12px 40px -12px #233d5866;
+}
+dialog::backdrop { background: #182e483d; }
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  dialog {
+    background: linear-gradient(120deg, #ffffffeb, #edf6ffc9 60%, #ffffffd9);
+    -webkit-backdrop-filter: blur(18px) saturate(125%);
+    backdrop-filter: blur(18px) saturate(125%);
+  }
+}
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  dialog { background: Canvas; color: CanvasText; border-color: CanvasText; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
 dialog h2 { font-size: 1.22rem; letter-spacing: -.03em; }
 dialog p { margin-block-start: .4rem; color: var(--muted); }
 .dialog-actions { margin-block-start: 1.05rem; justify-content: end; }
