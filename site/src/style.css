@@ -143,9 +143,9 @@ button[data-copy]:hover { background: var(--blue); }
 button[data-copy]:active { scale: .96; }
 button[data-copy][data-state='copied'] { background: #b2d8c3; color: #203b30; }
 button[data-copy][data-state='copied']::before { content: '✓ '; }
-/* Keep the button's place while the script that enables it loads, so the command does not move. */
-@media (scripting: enabled) {
-  button[data-copy][hidden] { display: block; visibility: hidden; }
+/* Copying needs the script; the command can still be selected. */
+@media (scripting: none) {
+  button[data-copy] { display: none; }
 }
 
 .source {

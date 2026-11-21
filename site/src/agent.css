@@ -180,3 +180,7 @@
 
 .terminal[data-still] :is(.agent-session, .agent-chrome) { transition: none; }
 .terminal[data-still] :is(.agent-step, .composer-caret, .activity-glyph) { animation: none; }
+/* Before the script can make a still of it, reduced motion already holds the opening frame. */
+@media (prefers-reduced-motion: reduce) {
+  .terminal :is(.agent-step, .composer-caret, .activity-glyph) { animation: none; }
+}

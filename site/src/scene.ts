@@ -21,6 +21,7 @@ export const harnesses = [
   { id: 'codex', name: 'Codex', version: '0.170.0', model: 'GPT-5.6 Sol high' },
   { id: 'omp', name: 'omp', version: '19.0.0', model: 'GPT-5.6 Sol high' },
 ] as const;
+export type Harness = typeof harnesses[number];
 
 // One pass of the demo, in milliseconds from its start. Each effect follows
 // its cause by a beat: the agent's edit appears, then the outline marks the
@@ -139,7 +140,7 @@ const reportedAfter = {
   codex: { ...usageReports, codex: usageReports.codex - 2 },
 };
 
-export function frameAt(phase: Phase, harness: typeof harnesses[number]['id']): Frame {
+export function frameAt(phase: Phase, harness: Harness['id']): Frame {
   const stage = order.indexOf(phase);
   const committed = stage >= committedAt;
   // omp runs a Codex model in this scene, so it changes the Codex report.

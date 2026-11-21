@@ -6,13 +6,15 @@ import lockup from '../images/milo-lockup.webp';
 import milo from '../images/milo.webp';
 import omp from '../images/omp.svg';
 import rex from '../images/rex.png';
-import { demoLabel } from '../scene';
 import '../style.css';
 import '../guide.css';
 import '../agent.css';
 import '../usage.css';
-import { Enhance } from './enhance';
+import { Bubble } from './bubble';
+import { CopyAnnouncer, CopyButton, CopyStatus } from './copy';
+import { Demo } from './demo/demo';
 import './fonts';
+import { PaneStrip } from './pane-strip';
 
 const title = 'milo — The little things that make Rex feel like home';
 const description = 'A file tree, commit history, diffs, and agent usage, right where you want them. Milo remembers how you like your panes.';
@@ -53,7 +55,7 @@ const openCodePaths = (
 
 export default function Home() {
   return (
-    <>
+    <CopyAnnouncer>
       <a className="skip-link" href="#main">Skip to content</a>
       <main id="main" tabIndex={-1}>
         <section className="hero" aria-labelledby="title">
@@ -79,73 +81,18 @@ export default function Home() {
             <div className="install">
               <span className="install-prompt" aria-hidden="true">$</span>
               <code id="install-command" translate="no">brew install mcc0x/milo/milo</code>
-              <button id="copy-command" data-copy="install-command" type="button" aria-describedby="install-command" hidden>Copy</button>
+              <CopyButton id="copy-command" target="install-command" />
             </div>
-            <p id="copy-feedback" className="visually-hidden" role="status"></p>
+            <CopyStatus />
             <ul className="bubbles" role="list" aria-label="Integrations">
-              <li><span><img src={claude.src} width="192" height="192" alt="Claude Code" /></span></li>
-              <li><span><img src={omp.src} width="120" height="90" alt="OMP" /></span></li>
-              <li><span><img src={codex.src} width="192" height="192" alt="Codex" /></span></li>
-              <li><span><svg viewBox="0 0 24 30" role="img" aria-label="OpenCode">{openCodePaths}</svg></span></li>
+              <Bubble><img src={claude.src} width="192" height="192" alt="Claude Code" /></Bubble>
+              <Bubble><img src={omp.src} width="120" height="90" alt="OMP" /></Bubble>
+              <Bubble><img src={codex.src} width="192" height="192" alt="Codex" /></Bubble>
+              <Bubble><svg viewBox="0 0 24 30" role="img" aria-label="OpenCode">{openCodePaths}</svg></Bubble>
             </ul>
           </div>
 
-          <div className="demo-panes" id="demo-panes" role="group" aria-label="Demo panes" hidden>
-            <button type="button" value="agent" aria-controls="demo" aria-pressed="true">Agent</button>
-            <button type="button" value="outline" aria-controls="demo" aria-pressed="false">Outline</button>
-            <button type="button" value="reader" aria-controls="demo" aria-pressed="false">Reader</button>
-            <button type="button" value="history" aria-controls="demo" aria-pressed="false">History</button>
-            <button type="button" value="usage" aria-controls="demo" aria-pressed="false">Usage</button>
-          </div>
-          <div className="terminal" id="demo" data-view="whole" data-still="" translate="no" role="img" aria-label={demoLabel} aria-describedby="demo-fallback demo-still-caption">
-            <div className="rex-titlebar">
-              <span className="window-lights"><i></i><i></i><i></i></span>
-              <span className="rex-tab">tidebook</span><span className="rex-tab rex-tab-new" hidden>zsh</span><span>Rex</span>
-            </div>
-            <div className="terminal-panes">
-              <p className="demo-fallback" id="demo-fallback">The interactive preview needs JavaScript.</p>
-              <section className="term-pane outline">
-                <div className="pane-body" id="outline-pane"></div>
-              </section>
-              <section className="term-pane history">
-                <div className="pane-body" id="history-pane"></div>
-              </section>
-              <section className="term-pane usage">
-                <div className="usage-strip">
-                  <span><img src={codex.src} width="20" height="20" alt="Codex" /><strong id="codex-usage"></strong><small className="usage-reset term-muted">Resets in 38m</small></span>
-                  <span><img src={claude.src} width="20" height="20" alt="Claude" /><strong id="claude-usage"></strong><small className="usage-reset term-muted">Resets in 1h 24m</small></span>
-                </div>
-              </section>
-              <section className="term-pane agent" id="agent-pane">
-                <div className="agent-session" id="agent-session" tabIndex={-1}>
-                  <header className="agent-banner" id="agent-banner"></header>
-                  <div id="agent-transcript"></div>
-                </div>
-                <div className="agent-chrome">
-                  <div className="agent-activity" id="agent-activity" hidden></div>
-                  <div className="agent-composer">
-                    <div className="composer-model" id="composer-model"></div>
-                    <div className="composer-line">
-                      <span className="composer-prompt" id="composer-prompt"></span>
-                      <span><span className="composer-text" id="composer-text"></span><i className="composer-caret"></i><span className="composer-placeholder" id="composer-placeholder"></span></span>
-                    </div>
-                  </div>
-                  <div className="composer-hint" id="composer-hint"></div>
-                </div>
-              </section>
-              <div className="term-pane shell-pane">
-                <div className="term-line shell-prompt">tidebook <span className="term-blue">main</span> › <span className="composer-caret"></span></div>
-              </div>
-              <section className="reader" id="reader-pane" hidden>
-                <header className="pane-head"><span>›_ milo view weather.ts</span><i className="pane-tools"></i></header>
-                <div className="reader-content" id="reader-content"></div>
-              </section>
-            </div>
-          </div>
-          <div className="demo-footer">
-            <button className="caption-toggle" id="demo-playback" type="button" aria-controls="demo" aria-label="Pause demo" title="Pause demo" hidden><span className="caption" id="caption" aria-hidden="true"></span></button>
-            <p className="caption" id="demo-still-caption" role="status">All of it stays in view, <strong>beside your work</strong>.</p>
-          </div>
+          <Demo />
         </section>
         <section className="features" aria-labelledby="features-title">
           <h2 id="features-title">What’s in Milo?</h2>
@@ -158,7 +105,7 @@ export default function Home() {
             <span><svg viewBox="0 0 24 30" aria-hidden="true">{openCodePaths}</svg>OpenCode</span>.
           </p>
           <div className="feature-grid">
-            <article className="feature feature-panes">
+            <PaneStrip>
               <h3 className="visually-hidden">Workspace panes</h3>
               <dl>
                 <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v14h5M5 7h5" /><rect x="11" y="4" width="8" height="6" rx="1.5" /><rect className="pane-leaf" x="11" y="14" width="8" height="6" rx="1.5" /></svg>Outline</dt><dd>A Git-aware file tree that points out what changed.</dd></div>
@@ -166,7 +113,7 @@ export default function Home() {
                 <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6C9 4 6 4 3 5v13c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1zm0 0v13" /><path className="pane-ink" d="m15 10 3-.6" pathLength="1" /></svg>Reader</dt><dd>Open a file or read its diff without leaving your tab.</dd></div>
                 <div><dt><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18a9 9 0 1 1 16 0" /><path className="pane-needle" d="m12 14 4-5" /><circle cx="12" cy="15" r="1.5" /></svg>Usage</dt><dd>Check your agent limits and when they reset.</dd></div>
               </dl>
-            </article>
+            </PaneStrip>
             <article className="feature feature-memory">
               <svg viewBox="0 0 24 24" aria-hidden="true"><g className="layout-window"><rect x="2" y="4" width="20" height="16" rx="2.5" /><path d="M2 8h20" /><path className="layout-divider" d="M10 8v12" /></g></svg>
               <h3>Layouts</h3>
@@ -189,7 +136,7 @@ export default function Home() {
             <img className="companions" src={companions.src} width="544" height="356" alt="Rex with a magnifying glass beside Milo, pointing ahead." loading="lazy" />
             <h2 id="companion-title">Your Rex deserves a companion.</h2>
           </header>
-          <div className="brew-pill"><code id="setup-command" translate="no">brew install mcc0x/milo/milo</code><button type="button" data-copy="setup-command" aria-describedby="setup-command" hidden>Copy</button></div>
+          <div className="brew-pill"><code id="setup-command" translate="no">brew install mcc0x/milo/milo</code><CopyButton target="setup-command" /></div>
           <p>Then run <code translate="no">milo</code> in Rex.</p>
         </section>
       </main>
@@ -207,7 +154,6 @@ export default function Home() {
           </nav>
         </div>
       </footer>
-      <Enhance />
-    </>
+    </CopyAnnouncer>
   );
 }

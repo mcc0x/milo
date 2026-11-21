@@ -87,9 +87,13 @@
   margin-block-end: .45rem;
 }
 .demo-panes:not([hidden]) { display: flex; }
-/* The picker's place is kept while the script that shows it loads. */
-@media (scripting: enabled) and (prefers-reduced-motion: reduce) and (max-width: 45rem) {
+/* The picker's place is kept while the script that shows it loads. Browsers
+   that cannot say whether scripting is on are treated as having it. */
+@media (prefers-reduced-motion: reduce) and (max-width: 45rem) {
   .demo-panes[hidden] { display: flex; visibility: hidden; }
+}
+@media (scripting: none) {
+  .demo-panes[hidden] { display: none; }
 }
 .demo-panes button {
   flex: 1 0 auto;
@@ -197,8 +201,12 @@
   grid-template-rows: calc(var(--usage-height) + var(--usage-extra, 0px)) auto calc(var(--line) * 13 + 2 * var(--pane-y));
   grid-template-areas: 'outline usage' 'outline agent' 'history agent';
 }
+/* The server draws the opening of the scene and the script plays it. Where
+   there is no scripting, a notice stands in for a window that would never
+   move, and the still's caption for the playback control. A browser that
+   cannot say whether scripting is on is treated as having it. */
 .demo-fallback {
-  display: grid;
+  display: none;
   grid-area: 1 / 1 / -1 / -1;
   min-block-size: 100%;
   place-items: center;
@@ -206,16 +214,12 @@
   color: var(--term-muted);
   text-align: center;
 }
-/* The id outranks the phone rules that choose which pane to show, so the
-   window is the same height before and after the script draws it. */
-.terminal[data-ready] .demo-fallback,
-#demo:not([data-ready]) .terminal-panes > :not(.demo-fallback) { display: none; }
-/* The page is painted before its script arrives. Say that the preview needs
-   JavaScript only where there is none, or when the script is long overdue. */
-@media (scripting: enabled) {
-  .terminal:not([data-ready]) .demo-fallback { animation: fallback-overdue 0s 5s backwards; }
+@media (scripting: none) {
+  .demo-fallback { display: grid; }
+  /* The ids outrank the rules that choose which pane and caption to show. */
+  #demo .terminal-panes > :not(.demo-fallback), #demo-playback { display: none; }
+  #demo-still-caption { display: block; }
 }
-@keyframes fallback-overdue { from { visibility: hidden; } }
 .terminal[data-expanded] .terminal-panes { --usage-extra: 3rem; }
 .terminal:not([data-still]) .terminal-panes {
   transition: --usage-extra .62s cubic-bezier(.25, .7, .25, 1);
@@ -389,8 +393,8 @@
     flex-direction: column;
     min-height: var(--phone-pane-height);
   }
-  .terminal:not([data-ready]) .terminal-panes {
-    min-height: calc(var(--phone-pane-height) + var(--usage-height) + 1px);
+  @media (scripting: none) {
+    .terminal-panes { min-height: calc(var(--phone-pane-height) + var(--usage-height) + 1px); }
   }
   .demo-fallback { flex: 1; }
   .term-pane { display: none; min-height: inherit; border: 0; }

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 
 export const metadata: Metadata = {
   title: 'Page not found — milo',
@@ -31,8 +32,7 @@ export default function NotFound() {
       <main>
         <img src="/apple-touch-icon.png" width="180" height="180" alt="" fetchPriority="low" />
         <h1>Nothing here.</h1>
-        {/* A full page load: the home page's styles and demo start from a clean document. */}
-        <p>That page does not exist. <a href="/">Go to milo</a>.</p>
+        <p>That page does not exist. <Link href="/">Go to milo</Link>.</p>
       </main>
     </div>
   );
