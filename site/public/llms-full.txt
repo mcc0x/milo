@@ -392,6 +392,8 @@ History lists the latest 300 commits. If there are older ones, `G` takes you to 
 
 Expanding a commit that touched thousands of files shows `Reading files…` under it while Git lists and counts them. The pane keeps taking keys meanwhile, and the files appear under their commit when they are ready, wherever the cursor has gone.
 
+<p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/history-reading-files.webp" width="543" alt="History with the newest commit open and Reading files… under it, while the cursor has already moved to the commit below"></p>
+
 A shallow clone has only part of the project's history. If you expand a commit whose parent is beyond the shallow boundary, History says `Shallow history: parent unavailable.` It does not show every file as new. After fetching more history, press `r` to reload. A genuine first commit still shows its added files.
 
 ## Reading files
@@ -1283,7 +1285,7 @@ sh tests/reader-compare.sh REVISION > report.tsv    # this checkout beside that 
 
 `tests/reader_bench.rs` and `tests/rex_lab.rs` use only what a built Milo offers from outside: its commands, what it draws in a terminal and, in the lab, the requests its browser editor accepts. So they can check a build they were not compiled with: set `MILO_TEST_BINARY` to a Milo built from another branch. Where a check depends on a feature that only some builds have, ask the build rather than the branch. The reader report's `syntax` column, for instance, says whether each build coloured each file as code, so a file in a language one build knows and the other does not is timed as code for the first and as plain text for the second.
 
-Three more timing tests follow the reader's. `tests/bench/report.rs` holds what they share: the variables above, the turn-about order and the report.
+Three more timing tests follow the reader's. `tests/bench/report.rs` holds what they share: the variables above, the turn-about order and the report. `tests/web_bench/`, `tests/history_bench/` and `tests/usage_idle/` each hold such a report against the revision in its name.
 
 ```sh
 cargo test --release --locked --test web_bench -- --ignored --nocapture
@@ -1455,6 +1457,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/bench/report.rs` | Chooses the builds a timing test runs and writes its report beside a base build's. |
 | `tests/bench/terminal.rs` | Runs a pane in a terminal for a timing test and finds its frames. |
 | `tests/history_bench.rs` | Times listing a small and a large commit's files in History, and Down meanwhile. |
+| `tests/history_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/install.sh` | Checks both installers with stand-ins for Git, Cargo and curl: which source is built, the macOS and checksum checks, and removal only with a matching receipt. |
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
@@ -1468,10 +1471,12 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
+| `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
 | `tests/web.rs` | Runs `milo web` beside a Rex stand-in that answers late: the link first, the state only once whole, a clean end in between. |
 | `tests/web_bench.rs` | Times the settings link and the first state, outside Rex and beside a slow one. |
+| `tests/web_bench/baseline-fa34ca4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/web-smoke.cjs` | Saves layout and usage tool choices and turns Discord presence, its names and its application on and off in the browser editor of a built binary in Chromium, then closes it. |
 
 ---

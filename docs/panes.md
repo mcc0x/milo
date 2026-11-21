@@ -43,6 +43,8 @@ History lists the latest 300 commits. If there are older ones, `G` takes you to 
 
 Expanding a commit that touched thousands of files shows `Reading files…` under it while Git lists and counts them. The pane keeps taking keys meanwhile, and the files appear under their commit when they are ready, wherever the cursor has gone.
 
+<p align="center"><img src="img/history-reading-files.webp" width="543" alt="History with the newest commit open and Reading files… under it, while the cursor has already moved to the commit below"></p>
+
 A shallow clone has only part of the project's history. If you expand a commit whose parent is beyond the shallow boundary, History says `Shallow history: parent unavailable.` It does not show every file as new. After fetching more history, press `r` to reload. A genuine first commit still shows its added files.
 
 ## Reading files

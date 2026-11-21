@@ -1,0 +1,10 @@
+# base revision: fa34ca44f40ad89907eeede40bf40b052bc34b57
+# timed checkout: ec0f025f41ce9c76bcd5cfff11e55accdc27a917
+# Apple M5 Pro; Darwin 27.2.0 arm64; rustc 1.100.0 (0ef1bc386 2026-11-09) (Homebrew)
+# milo usage idle bench: 20 timer ticks 20s apart with nothing written
+# base: read at every tick in either journal mode; timed with rollback journals only
+journal	size	database_bytes	sqlite3_started	read_ms	ticks_to_fresh	base_sqlite3_started	base_read_ms	base_ticks_to_fresh
+rollback	small	77824	3	7	1	60	174	1
+rollback	large	32817152	3	403	1	60	8140	1
+write-ahead	small	77824	22	85	1	60	-	1
+write-ahead	large	32817152	22	8102	1	60	-	1

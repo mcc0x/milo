@@ -1,0 +1,18 @@
+# base revision: fa34ca44f40ad89907eeede40bf40b052bc34b57
+# timed checkout: ec0f025f41ce9c76bcd5cfff11e55accdc27a917
+# Apple M5 Pro; Darwin 27.2.0 arm64; rustc 1.100.0 (0ef1bc386 2026-11-09) (Homebrew)
+# milo history bench: 60x50 terminal, 10 runs, microseconds
+# macos aarch64; timed: milo 0.1.5
+# base: milo 0.1.5
+# formatter-sweep: 6000 files of 60 functions, one in 40 moved
+# down-while-opening: Enter and Down sent together, to the next frame
+# long-subjects: 40 commits whose subjects are 400000 words each
+scenario	measure	samples	median	min	max	base_median	ratio
+five-files	show-files	10	8269	6226	11552	8885	0.93
+five-files	down	200	28	11	113	27	1.02
+five-files	down-while-opening	10	8423	5705	10082	9437	0.89
+formatter-sweep	show-files	10	248477	237722	269650	252632	0.98
+formatter-sweep	down	200	17	12	84	16	1.04
+formatter-sweep	down-while-opening	10	42081	41350	43081	252662	0.17
+long-subjects	first-paint	10	192912	137297	199311	296996	0.65
+long-subjects	down	200	181	162	340	73754	0.00
