@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openBindings } from "./bindings";
+import { validTelegramText } from "./edge";
 
 const origin = "http://127.0.0.1:6120";
 const discord = { clientId: "100100100100100100", clientSecret: "fixture-secret", redirectUri: `${origin}/discord/callback` };
@@ -583,6 +584,36 @@ test("Telegram polling stays single-flight and can be cancelled", async () => {
   expect(fixture.calls.filter(({ method }) => method === "getUpdates")).toHaveLength(1);
 });
 
+test("Telegram waits on an idle queue only after an immediate poll finds it empty", async () => {
+  const replies: (unknown[] | null)[] = [[], [], null, []];
+  const fixture = telegramFixture({ updates: async () => {
+    const result = replies.shift();
+    return result ? Response.json({ ok: true, result }) : new Response(null, { status: 502 });
+  } });
+  const service = await createService({ telegram, fetch: fixture.fetch });
+  const delays = [];
+  for (let i = 0; i < 4; i++) delays.push(await service.pollTelegram());
+  expect(delays).toEqual([0, 0, 2000, 0]);
+  expect(fixture.calls.filter(({ method }) => method === "getUpdates").map(({ body }) => body.timeout)).toEqual([0, 25, 25, 0]);
+});
+
+test("a throttled send says how long to wait in the body Milo's sender reads", async () => {
+  let now = 0;
+  const fixture = telegramFixture({
+    alert: async () => Response.json({ ok: false, error_code: 429, parameters: { retry_after: 35 } }, { status: 429 }),
+  });
+  const service = await createService({ telegram, fetch: fixture.fetch, now: () => now });
+  const auth = await claimTelegram(service, fixture);
+  const throttled = async () => {
+    const response = await api(service, "send", { text: "<code>fixture</code>" }, auth);
+    return [response.status, response.headers.get("retry-after"), (await response.json()).retry_after];
+  };
+  expect(await throttled()).toEqual([429, "35", 35]);
+  now += 30_000;
+  expect(await throttled()).toEqual([429, "5", 5]);
+  expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(1);
+});
+
 test("Discord bounds concurrent exchanges and drains expired webhook cleanup in batches", async () => {
   let now = 0;
   let exchanges = 0;
@@ -644,6 +675,13 @@ test("production revocation must reach the exact issuing ledger even if Telegram
   expect((await removeBinding(active, auth, PRODUCTION_ORIGIN)).status).toBe(204);
   expect(ledger.store.load(10)).toEqual([]);
   expect((await removeBinding(active, auth, PRODUCTION_ORIGIN)).status).toBe(204);
+});
+
+test("production takes every Telegram message Milo words", async () => {
+  // `cargo test alerts` checks that this list is what Milo sends.
+  const texts: string[] = await Bun.file(new URL("./milo-alert-texts.json", import.meta.url)).json();
+  expect(texts.length).toBeGreaterThan(0);
+  expect(texts.filter((text) => !validTelegramText(text, true))).toEqual([]);
 });
 
 test("production Telegram pauses sends until its poll catches up and applies verified stops", async () => {

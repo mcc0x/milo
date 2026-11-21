@@ -222,7 +222,9 @@ impl Client {
         let mut header = [0; 8];
         match self.stream.read_exact(&mut header) {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return None,
+            // Linux resets a connection whose other end closed with something still unread, such as
+            // this stand-in's last reply, where macOS only ends it.
+            Err(error) if matches!(error.kind(), ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset) => return None,
             Err(error) => panic!("{error}"),
         }
         let opcode = u32::from_le_bytes(header[..4].try_into().unwrap());

@@ -16,6 +16,7 @@ Usage: milo alerts
        milo alerts test [telegram | discord]
        milo alerts on|off [telegram | discord]
        milo alerts forget telegram | discord
+       milo alerts forget telegram --local-only
 
 Mirror Rex alerts to a Telegram chat, a Discord channel, or both. Forwarding
 is opt-in, and Rex's own notifications stay as they are.
@@ -35,7 +36,11 @@ the program's short name. text adds the line the program gave Rex.
 test sends one message written by Milo to the named or selected destination.
 on and off with a provider affect only that provider. Without a provider, off
 pauses all forwarding and on resumes it (or starts with the selected destination
-if none are chosen). forget removes a saved destination and its secret.";
+if none are chosen). forget removes a saved destination and its secret.
+forget telegram --local-only is only for a Telegram chat connected with Milo
+whose connection service is gone for good, so that forget can never revoke
+the connection. It removes the connection from this machine and revokes
+nothing: send /stop to Milo's bot in that chat to revoke it.";
 
 const USAGE: &str = "unexpected arguments; see milo alerts --help";
 
@@ -67,6 +72,7 @@ pub(crate) fn command(action: Option<&OsStr>, rest: &[OsString]) -> Result<(), S
         [Some("off")] => alerts.disable()?,
         [Some("off"), Some(name)] => alerts.set_forwarding(destination(name)?, false)?,
         [Some("forget"), Some(name)] => alerts.forget(destination(name)?)?,
+        [Some("forget"), Some("telegram"), Some("--local-only")] => alerts.forget_telegram_locally()?,
         [Some("run")] => {
             return forward::run(&alerts).map_err(|error| format!("could not mirror Rex alerts: {error}"));
         }

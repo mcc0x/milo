@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 
 const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
 const LINK: &str = "https://discord.com/api/webhooks/1234567890/SYNTHETIC_synthetic-SYNTHETIC0";
+/// A connection in the form the development relay gives. The production
+/// relay, which a build speaks to unless told otherwise, never issued it, so
+/// Milo asks no relay about it: for these tests its relay is gone for good.
+const LOST_CONNECTION: &str = "milorelay_SYNTHETICsyntheticSYNTHETICsyntheticSYNTHET";
 /// Says each time it is started, then prints what the test writes, and stays.
 /// With `ends-once` in place the stream ends after what is written so far, as
 /// it does when the Rex server stops; the next one prints what comes after.
@@ -200,6 +204,7 @@ impl Home {
             .env("MILO_ALERTS_KEYCHAIN", self.keychain())
             .env_remove("XDG_STATE_HOME")
             .env_remove("XDG_CONFIG_HOME")
+            .env_remove("MILO_RELAY_ORIGIN")
             .stdin(Stdio::null());
         milo
     }
@@ -229,6 +234,24 @@ impl Home {
     fn save_discord(&self) {
         let (ok, printed) = self.run_with(&["alerts", "discord"], &format!("{LINK}\n"));
         assert!(ok, "{printed}");
+    }
+
+    /// Puts a connection made with Connect with Milo in place of the saved
+    /// bot token for `chat`, which only the browser editor can do.
+    fn connect_telegram_through_a_lost_relay(&self, chat: &str) {
+        let secret = format!("{LOST_CONNECTION}:{chat}");
+        if cfg!(target_os = "macos") {
+            let saved = Command::new("/usr/bin/security")
+                .args(["add-generic-password", "-U", "-s", "net.usemilo.alerts", "-a", "telegram", "-w", &secret])
+                .arg(self.keychain())
+                .status()
+                .unwrap();
+            assert!(saved.success());
+        } else {
+            let file = self.root.join(".local/state/milo/alerts-secrets");
+            let secrets = fs::read_to_string(&file).unwrap();
+            fs::write(&file, secrets.replace(TOKEN, &secret)).unwrap();
+        }
     }
 
     /// Has the stand-in `rex` print one terminal event.
@@ -548,4 +571,29 @@ fn a_program_s_text_is_sent_only_when_chosen_and_can_mention_nobody() {
     assert_eq!(sent, "a program **sent a notification**\n`SYNTHETIC title: hello @\u{200b}here <@\u{200b}123>`");
     // "done" was not among the chosen kinds.
     assert!(!texts.iter().any(|text| text.contains("finished")), "{texts:?}");
+}
+
+#[test]
+fn a_connection_no_relay_can_revoke_is_forgotten_only_on_this_machine_and_only_when_asked() {
+    let Some(home) = Home::new() else { return };
+    let (saved, why) = home.run_with(&["alerts", "telegram", "42"], &format!("{TOKEN}\n"));
+    assert!(saved, "{why}");
+    home.save_discord();
+    home.run(&["alerts", "on", "discord"]);
+    home.connect_telegram_through_a_lost_relay("42");
+
+    let (forgotten, why) = home.run_with(&["alerts", "forget", "telegram"], "");
+    assert!(!forgotten && why.contains("milo alerts forget telegram --local-only"), "{why}");
+    assert!(home.run(&["alerts"]).contains("Telegram: saved"));
+    let (misused, why) = home.run_with(&["alerts", "forget", "discord", "--local-only"], "");
+    assert!(!misused && why.contains("unexpected arguments"), "{why}");
+
+    let report = home.run(&["alerts", "forget", "telegram", "--local-only"]);
+    assert!(report.contains("nothing proves that it is revoked") && report.contains("send /stop"), "{report}");
+    let status = home.run(&["alerts"]);
+    assert!(status.contains("Telegram: not saved; forwarding off"), "{status}");
+    assert!(status.contains("Discord: saved; forwarding on"), "{status}");
+    home.blocked("a", "SYNTHETIC approve?");
+    assert!(home.received(1));
+    assert!(home.destination.requests()[0].path.starts_with("/api/v10/webhooks/"));
 }

@@ -573,6 +573,11 @@ impl Alerts {
         self.locked(|edit| edit.set_forwarding(destination, enabled))
     }
 
+    /// Removes a saved Telegram connection from this machine without asking a relay to revoke it.
+    fn forget_telegram_locally(&self) -> Result<String, String> {
+        self.locked(|edit| edit.forget_telegram_locally())
+    }
+
     pub(crate) fn disable(&self) -> Result<String, String> {
         self.locked(|edit| edit.disable())
     }
@@ -779,7 +784,8 @@ impl AlertsEdit<'_> {
         {
             return Err(
                 "Could not disconnect the saved Telegram connection. Retry in its original relay environment before \
-                 connecting Telegram again."
+                 connecting Telegram again. If that relay is gone for good, milo alerts forget telegram --local-only \
+                 removes the connection from this machine without revoking it."
                     .into(),
             );
         }
@@ -791,6 +797,10 @@ impl AlertsEdit<'_> {
             let saved = self.saved_secret(destination).map_err(|_| self.alerts.secret_read_error())?;
             self.revoke_telegram(saved.as_deref(), None)?;
         }
+        self.discard(destination)
+    }
+
+    fn discard(&self, destination: Destination) -> Result<(), String> {
         self.alerts
             .secrets
             .remove(destination)
@@ -927,9 +937,45 @@ impl AlertsEdit<'_> {
             .into())
     }
 
-    /// Removes a saved destination and its secret. Mirroring to it ends
-    /// first, and settings that cannot be read do not stand in the way.
+    /// Removes a saved destination and its secret.
     fn forget(&self, destination: Destination) -> Result<String, String> {
+        self.disarm_then(destination, || self.revoke_and_discard(destination))?;
+        Ok(format!("Removed the saved {} destination and its secret.", destination.title()))
+    }
+
+    /// The way out when the relay that issued a hosted Telegram connection is
+    /// gone for good, so that no revocation can ever be confirmed. No relay is
+    /// asked anything and the connection is not revoked: the answer says so.
+    /// `forget` and `remove` never fall back to this; only the user chooses it.
+    fn forget_telegram_locally(&self) -> Result<String, String> {
+        const UNREVOKED: &str = "Removed the saved Telegram connection from this machine only. No relay was asked to \
+                                 revoke it, and nothing proves that it is revoked. To revoke every Milo connection to \
+                                 that chat, send /stop to Milo's bot in Telegram.";
+        let telegram = Destination::Telegram;
+        let mut unrevoked = false;
+        let ended = self.disarm_then(telegram, || {
+            let saved = self.saved_secret(telegram).map_err(|_| self.alerts.secret_read_error())?;
+            self.discard(telegram)?;
+            unrevoked = saved.as_deref().and_then(secret::telegram_binding).is_some();
+            Ok(())
+        });
+        // The warning is owed once the connection is gone, even if mirroring elsewhere did not start again.
+        match (ended, unrevoked) {
+            (Ok(()), true) => Ok(UNREVOKED.into()),
+            (Ok(()), false) => Ok(format!("Removed the saved {} destination and its secret.", telegram.title())),
+            (Err(error), true) => Err(format!("{UNREVOKED}\n{error}")),
+            (Err(error), false) => Err(error),
+        }
+    }
+
+    /// Ends mirroring to a destination and saves that before `discard` takes
+    /// its secret away, so that a removal that fails leaves it off. Settings
+    /// that cannot be read do not stand in the way.
+    fn disarm_then(
+        &self,
+        destination: Destination,
+        discard: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         let read = self.settings();
         let unreadable = read.is_err();
         let mut settings = read.unwrap_or_default();
@@ -947,10 +993,9 @@ impl AlertsEdit<'_> {
         if restart {
             self.alerts.stop()?;
         }
-        // Restart unrelated targets even when the relay cannot revoke this one.
+        // Restart unrelated targets even when this one's secret cannot be revoked or removed.
         let restarted = if restart { self.alerts.start_if_active(&settings) } else { Ok(()) };
-        self.revoke_and_discard(destination).and(restarted)?;
-        Ok(format!("Removed the saved {} destination and its secret.", destination.title()))
+        discard().and(restarted)
     }
 }
 
