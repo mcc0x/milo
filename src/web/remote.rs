@@ -120,7 +120,6 @@ fn pause(wake: &PipeReader, wait: Duration) -> bool {
 /// successful TCP connection alone might be to an unrelated local process.
 fn wait_forward(output: &mut (impl Read + AsRawFd), wake: &PipeReader, port: u16) -> io::Result<bool> {
     let deadline = Instant::now() + FORWARD_WAIT;
-    let origin = loopback_origin(port);
     let mut fds = [
         libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
         libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 },
@@ -153,8 +152,11 @@ fn wait_forward(output: &mut (impl Read + AsRawFd), wake: &PipeReader, port: u16
         filled += read;
         if let Some(end) = line[..filled].iter().position(|&byte| byte == b'\n') {
             let line = std::str::from_utf8(&line[..end]).unwrap_or_default();
-            let url = line.trim_end_matches(['\r', '/']);
-            if url == origin || (port == 80 && url == "http://127.0.0.1:80") {
+            let address = line.trim_end_matches(['\r', '/']).strip_prefix("http://").unwrap_or_default();
+            // Rex preview.21 prints "localhost" even for the explicit IPv4 bind.
+            let (name, reported_port) =
+                address.split_once(':').map_or((address, Ok(80)), |(name, port)| (name, port.parse::<u16>()));
+            if matches!(name, "localhost" | "127.0.0.1") && reported_port == Ok(port) {
                 return Ok(true);
             }
             break;
@@ -284,8 +286,10 @@ mod tests {
         for (report, result) in [
             (String::new(), Err(io::ErrorKind::UnexpectedEof)),
             (format!("http://0.0.0.0:{port}/\n"), Err(io::ErrorKind::InvalidData)),
+            (format!("http://unrelated.example:{port}/\n"), Err(io::ErrorKind::InvalidData)),
             ("http://127.0.0.1:0/\n".into(), Err(io::ErrorKind::InvalidData)),
             (format!("http://127.0.0.1:{port}/\n"), Ok(true)),
+            (format!("http://localhost:{port}\n"), Ok(true)),
         ] {
             let (mut output, mut rex) = io::pipe().unwrap();
             rex.write_all(report.as_bytes()).unwrap();
