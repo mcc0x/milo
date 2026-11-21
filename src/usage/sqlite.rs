@@ -30,15 +30,31 @@ pub(super) struct Poll<T> {
     job: Option<Job<T>>,
 }
 
-struct Job<T> {
+/// One read on its own thread. Its descriptor becomes readable when the result is ready.
+pub(super) struct Job<T> {
     ready: PipeReader,
     result: Receiver<Option<T>>,
     thread: JoinHandle<()>,
-    checking: bool,
+    pub(super) checking: bool,
+}
+
+impl<T> Job<T> {
+    pub(super) fn fd(&self) -> RawFd {
+        self.ready.as_raw_fd()
+    }
+
+    /// None while the read is still running; a finished read can also have failed.
+    pub(super) fn finished(&self) -> Option<Option<T>> {
+        match self.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Disconnected) => Some(None),
+            Err(TryRecvError::Empty) => None,
+        }
+    }
 }
 
 impl<T: Send + 'static> Job<T> {
-    fn start(checking: bool, read: impl FnOnce() -> Option<T> + Send + 'static) -> io::Result<Self> {
+    pub(super) fn start(checking: bool, read: impl FnOnce() -> Option<T> + Send + 'static) -> io::Result<Self> {
         let (ready, done) = io::pipe()?;
         let (send, result) = mpsc::sync_channel(1);
         let thread = thread::Builder::new().spawn(move || {
@@ -61,16 +77,12 @@ impl<T: Send + 'static> Poll<T> {
     }
 
     pub(super) fn fd(&self) -> Option<RawFd> {
-        self.job.as_ref().map(|job| job.ready.as_raw_fd())
+        self.job.as_ref().map(Job::fd)
     }
 
     /// None means there is no completed query; a completed query can also fail.
     pub(super) fn collect(&mut self) -> Option<Option<T>> {
-        let result = match self.job.as_ref()?.result.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Disconnected) => None,
-            Err(TryRecvError::Empty) => return None,
-        };
+        let result = self.job.as_ref()?.finished()?;
         self.job = None;
         Some(result)
     }
@@ -186,11 +198,12 @@ pub(super) fn query(executable: &OsStr, path: &Path, sql: &str, wait: Duration) 
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    capture(child, deadline)
+    capture(child, MAX_OUTPUT, deadline)
 }
 
-fn capture(mut child: Child, deadline: Instant) -> Option<Vec<u8>> {
-    let captured = child.stdout.take().and_then(|pipe| files::read_pipe(pipe, MAX_OUTPUT, deadline));
+/// The output of a child that exits successfully in time. Any other child is killed and reaped.
+pub(super) fn capture(mut child: Child, max: usize, deadline: Instant) -> Option<Vec<u8>> {
+    let captured = child.stdout.take().and_then(|pipe| files::read_pipe(pipe, max, deadline));
     if let Some(bytes) = captured {
         loop {
             match child.try_wait() {
@@ -227,7 +240,7 @@ mod tests {
         child.stdout = Some(output);
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let deadline = Instant::now() + Duration::from_millis(250);
-        assert!(capture(child, deadline).is_none());
+        assert!(capture(child, MAX_OUTPUT, deadline).is_none());
         assert!(Instant::now() >= deadline);
         // SAFETY: WNOHANG does not block and a null status pointer is allowed.
         assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);

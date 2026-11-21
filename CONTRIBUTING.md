@@ -67,7 +67,7 @@ Push the release commit to `main`, then wait for **Apple Silicon release tests**
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -176,6 +176,8 @@ close the reader on an unsaved draft and gets the draft back at the next edit.
 
 A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
 
+An account is different: its figure exists only on a provider's servers, so nothing on disk says it is in use. It needs an entry in `UsageAccount`, which starts hidden, and an adapter in `src/usage/accounts.rs` that names the documented endpoint, the `MILO_…` settings it reads, how often it may be asked, and how to read the reply into a `Figure` with its own `Kind` and `Unit`. Never give an account a limit window: a balance, a spend or a count of credits must not become a percentage or reach the menu bar badge. Never read a key another tool saved, and never test against the real provider. Unit tests serve fixtures from a loopback port through `Sources::test`. That stand-in and the plain-HTTP address it uses are compiled only under `cfg(test)`: an installed binary has no setting, variable or file that sends a key anywhere but the provider's HTTPS host, and `tests/pane.rs` checks the built binary for that. Do not add one.
+
 ### Adding a language to the reader
 
 Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for language tables, and `src/syntax/delimiters.rs` for strings and comments whose closing marks depend on the opener. `src/syntax/markup.rs` reads HTML and XML, and `src/syntax/markdown.rs` reads Markdown; those two are not code and have walkers of their own. Adding a language normally means changing only the tables:
@@ -200,6 +202,8 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 ### Checking failures and speed
 
 `src/usage/tests/failures.rs` breaks each local usage source in five ways: missing, rotated, locked, stale, and written in a shape Milo does not know. The pane may then show only a figure the source reported, marked as old once it is; a source that cannot be read is unknown. A new source goes through the same five tests with its own files, using the helpers there.
+
+`src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
 `tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame that shows the file and the frame after each key, through a real terminal:
 
@@ -291,6 +295,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/tree.rs` | Builds file and folder rows, folds, and changed-file counts. |
 | `src/ui.rs` | Shares headings, status styles, icons, and scroll marks. |
 | `src/usage.rs` | Collects the latest limits and today's Claude Code and OpenCode activity, and works out which tools are in use. |
+| `src/usage/accounts.rs` | Asks providers about accounts the user turned on, and keeps each figure in its own unit. |
 | `src/usage/draw.rs` | Lays out the tools that have a place, with their figures, reset times, and hints. |
 | `src/usage/draw/digits.rs` | Draws large figures from text blocks when pictures are unavailable. |
 | `src/usage/draw/figure.rs` | Builds coloured PNG figures from the stored masks. |
@@ -303,11 +308,14 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/usage/marks/codex.svg` | Wraps the original Codex bitmap in SVG. |
 | `src/usage/marks/figures.alpha` | Stores compressed alpha masks for usage figures. |
 | `src/usage/marks/generate-figures.py` | Regenerates the figure masks from the pinned Inter font. |
+| `src/usage/http.rs` | Sends one bounded GET through curl with the key on standard input. |
 | `src/usage/omp.rs` | Reads saved oh-my-pi limit reports through SQLite. |
 | `src/usage/opencode.rs` | Reads today's token and cost totals from OpenCode's session database. |
 | `src/usage/sqlite.rs` | Runs bounded, read-only SQLite queries off the pane loop. |
 | `src/usage/status.rs` | Reads Claude Code's saved cache and handles status-line reports. |
 | `src/usage/tests.rs` | Shares usage fixtures and checks oh-my-pi ingestion. |
+| `src/usage/tests/accounts.rs` | Checks accounts against a loopback provider: units, visibility, keys, limits, and stale answers. |
+| `src/usage/tests/accounts/` | Holds replies in the shape each provider documents, with made-up values. |
 | `src/usage/tests/activity.rs` | Checks Claude Code's daily token totals across sessions. |
 | `src/usage/tests/codex.rs` | Checks Codex session reports, order, and missing data. |
 | `src/usage/tests/failures.rs` | Checks each usage source when missing, rotated, locked, stale, or in an unknown shape. |
