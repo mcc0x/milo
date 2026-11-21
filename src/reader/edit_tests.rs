@@ -167,6 +167,43 @@ fn a_file_changed_on_disk_is_not_overwritten_without_asking() {
 }
 
 #[test]
+fn editing_pauses_working_reader_refresh_but_still_checks_for_a_save_conflict() {
+    let f = Fixture::new();
+    f.write("notes.txt", "one\n");
+    f.commit("first");
+    let mut reader = open(&f, "notes.txt");
+    let watching = reader.watch_scope();
+    assert!(!watching.roots.is_empty());
+
+    reader.key(Key::Char('e'));
+    let idle = reader.watch_scope_after_input(&watching).unwrap();
+    assert!(idle.complete && idle.roots.is_empty());
+    assert!(reader.watch_scope_after_input(&idle).is_none());
+    typed(&mut reader, "mine ");
+
+    f.write("notes.txt", "theirs\n");
+    reader.filesystem_changed();
+    assert!(reader.check());
+    assert_eq!(reader.body.lines()[0].text, "one");
+    assert_eq!(draft(&reader), "mine one\n");
+
+    f.write(".git/index.lock", "");
+    assert!(!reader.git_busy());
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: o overwrite · Esc back");
+    assert_eq!(fs::read_to_string(f.root.join("notes.txt")).unwrap(), "theirs\n");
+    fs::remove_file(f.root.join(".git/index.lock")).unwrap();
+
+    reader.key(Key::Esc);
+    reader.key(Key::Esc);
+    reader.key(Key::Char('d'));
+    assert!(!reader.editing());
+    assert!(!reader.watch_scope_after_input(&idle).unwrap().roots.is_empty());
+    let rows = drawn(&mut reader, 60, 5);
+    assert!(rows.iter().any(|row| row.contains("+ theirs")), "{rows:?}");
+}
+
+#[test]
 fn saving_and_closing_a_changed_file_asks_first_and_then_closes() {
     let f = Fixture::folder();
     f.write("notes.txt", "one\n");
