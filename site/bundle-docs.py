@@ -10,7 +10,7 @@ parser.add_argument('--check', action='store_true', help='fail if the published 
 args = parser.parse_args()
 repo = site.parent
 base = 'https://github.com/mcc0x/milo/blob/main/'
-files = ['README.md', 'docs/setup.md', 'docs/panes.md', 'docs/keys.md', 'docs/usage.md',
+files = ['README.md', 'docs/setup.md', 'docs/panes.md', 'docs/keys.md', 'docs/usage.md', 'docs/presence.md',
          'skills/milo/SKILL.md', 'CONTRIBUTING.md', 'docs/internals.md']
 parts = ['# Milo — full documentation\n\nDocumentation from the main branch. The pinned release may not include every feature described here.']
 for name in files:

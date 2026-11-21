@@ -24,6 +24,8 @@ pub(crate) fn run() -> Result<String, String> {
 
     let settings = crate::setup::doctor::remove().map_err(|e| format!("{e}\nThe Milo executable was not removed."))?;
     let removed = install.remove(&path, id).map_err(|e| format!("{settings}\n{e}"))?;
+    // The helper would go on showing the activity from the removed program, and a later install would start with presence on.
+    crate::presence::turn_off();
     Ok(format!("{removed}\n{settings}"))
 }
 

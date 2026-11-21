@@ -324,7 +324,7 @@ function renderConnection() {
 }
 
 function affectsDraft({action}) {
-  return action !== 'doctor' && action !== 'menubar';
+  return action !== 'doctor' && action !== 'menubar' && action !== 'presence';
 }
 
 function hasUnsavedChanges() {
@@ -808,7 +808,126 @@ function workflowView() {
     setting('workflow.tab_titles', 'Title Rex tabs', 'Unnamed tabs only: project, worktree and agent.', 'switch', {disabled}),
   ]), groupCard('account', 'Claude Code', '', [
     setting('account.claude_limits', 'Show Claude Code limits', state.account.claude_status, 'switch', {disabled: !account.editable}),
-  ])];
+  ]), ...presenceView()];
+}
+
+// What was typed for an application ID, kept while the page redraws around it.
+let applicationDraft;
+const presenceDetails = [['generic', 'Generic'], ['session', 'Session name'], ['project', 'Project name'], ['both', 'Both names']];
+const presenceShows = {
+  generic: 'Only the fixed line. No names.',
+  session: 'Also the name of the Rex session in front.',
+  project: 'Also the folder name of the Git project in the focused pane.',
+  both: 'Also the session name and the project’s folder name.',
+};
+// Whether a choice shows a name that the saved one does not, which is asked about first.
+const showsMore = (next, saved) =>
+  (['session', 'both'].includes(next) && !['session', 'both'].includes(saved)) ||
+  (['project', 'both'].includes(next) && !['project', 'both'].includes(saved));
+
+function presenceView() {
+  const presence = state.presence;
+  if (!presence) return [];
+  const waiting = paused || queue.some(item => item.action === 'presence');
+  const card = node('section', 'settings-group');
+  const header = node('header', 'group-header');
+  const titleline = node('div', 'group-titleline');
+  const heading = node('h2', '', 'Discord presence');
+  heading.id = 'group-presence';
+  card.setAttribute('aria-labelledby', heading.id);
+  const current = node('span', 'group-origin', presence.enabled ? 'On' : 'Off');
+  current.id = 'presence-state';
+  titleline.append(heading, current);
+  const disclosure = node('p', '', presence.public[presence.details]);
+  disclosure.id = 'presence-public';
+  header.append(titleline, disclosure);
+
+  const details = node('div', 'setting');
+  const detailsInfo = node('div', 'setting-info');
+  const shows = node('span', 'setting-detail', presenceShows[presence.details]);
+  shows.id = 'presence-details-detail';
+  detailsInfo.append(node('span', 'setting-label', 'Shows'), shows);
+  const choices = node('fieldset', 'choice-strip');
+  choices.disabled = waiting;
+  choices.setAttribute('aria-describedby', shows.id);
+  choices.append(node('legend', 'sr-only', 'What Discord presence shows'));
+  for (const [key, text] of presenceDetails) {
+    const choice = node('label');
+    const radio = node('input');
+    radio.type = 'radio';
+    radio.name = 'presence-details';
+    radio.id = `presence-details-${key}`;
+    radio.checked = key === presence.details;
+    radio.addEventListener('change', () => {
+      const choose = () => command('presence', {field: 'details', value: key});
+      if (presence.enabled && showsMore(key, presence.details)) {
+        confirm('Show these names on Discord?', presence.public[key], 'Show names', choose);
+        // Until the answer, the page shows the saved choice.
+        render();
+      } else choose();
+    });
+    choice.append(radio, node('span', '', text));
+    choices.append(choice);
+  }
+  details.append(detailsInfo, choices);
+
+  const application = node('div', 'setting');
+  const info = node('div', 'setting-info');
+  const own = presence.application_id;
+  const help = node('span', 'setting-detail', own ? `Your own application, ${own}.` : presence.help);
+  help.id = 'presence-application-detail';
+  const wrap = node('div', 'setting-input');
+  if (own) {
+    info.append(node('span', 'setting-label', 'Shown under'), help);
+    const reset = button('Use Milo’s application', 'secondary', 'presence-official',
+      () => command('presence', {field: 'application', value: 'official'}), waiting);
+    reset.setAttribute('aria-describedby', help.id);
+    wrap.append(reset);
+  } else {
+    const label = node('label', 'setting-label', 'Shown under Milo’s application');
+    const input = node('input');
+    input.id = label.htmlFor = 'presence-application';
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.placeholder = 'Your Application ID';
+    input.value = applicationDraft ?? '';
+    input.setAttribute('aria-describedby', help.id);
+    input.addEventListener('input', () => { applicationDraft = input.value.trim(); });
+    info.append(label, help);
+    const use = button('Use my own', 'secondary', 'presence-own', () => {
+      const id = (applicationDraft ?? '').trim();
+      if (!/^[1-9]\d{16,18}$/.test(id)) {
+        notify('Enter the Application ID of your own Discord application: a number of 17 to 19 digits.', true);
+        byId('presence-application').focus();
+        return;
+      }
+      applicationDraft = undefined;
+      command('presence', {field: 'application', value: id});
+    }, waiting);
+    wrap.append(input, use);
+  }
+  application.append(info, wrap);
+
+  const now = node('div', 'setting');
+  const status = node('span', 'setting-detail', presence.status);
+  status.id = 'presence-status';
+  const nowInfo = node('div', 'setting-info');
+  nowInfo.append(node('span', 'setting-label', 'Now'), status);
+  const change = presence.enabled
+    ? button('Turn off', 'secondary', 'presence-change', () => command('presence', {value: 'off'}), waiting)
+    : button('Turn on…', 'secondary', 'presence-change', () => {
+      confirm('Turn on Discord presence?', presence.public[presence.details], 'Turn on',
+        () => command('presence', {value: 'on'}));
+    }, waiting);
+  change.setAttribute('aria-describedby', `${status.id} ${disclosure.id}`);
+  now.append(nowInfo, change);
+
+  const controls = node('div', 'group-controls');
+  controls.append(details, application, now);
+  card.append(header, controls);
+  return [card];
 }
 
 function menuBarView() {
