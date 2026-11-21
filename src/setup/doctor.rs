@@ -18,6 +18,7 @@ use super::profiles::{LayoutError, Scope};
 use super::rex_files::{LISTENER_STATE_MISMATCH, LOADER_CONFLICT};
 use super::{lock, rex_files};
 use crate::git::discover_worktree;
+use crate::host::Host;
 use crate::preferences::{IconMode, Preferences, Show, Source, UsageAccount, UsageAccounts, UsageTool, UsageTools};
 use crate::{rex, usage};
 
@@ -159,15 +160,17 @@ fn inspect(store: &Store, root: Option<&Path>) -> Result<(String, Shown), String
         discovered = discover_worktree(Path::new("."));
         discovered.as_ref().map(|root| root.as_deref()).map_err(|&note| note)
     };
-    report_with_worktree(store, worktree, target.as_ref()).map(|(report, _, tools)| (report, tools))
+    let host = Host::probe(false);
+    report_with_worktree(store, worktree, target.as_ref(), host.as_ref()).map(|(report, _, tools)| (report, tools))
 }
 
 pub(super) fn health_anchored(
     store: &Store,
     root: Option<&Path>,
     target: Result<Option<&rex::Target>, &'static str>,
+    host: Option<&Host>,
 ) -> Result<Health, String> {
-    let (_, health, _) = report_with_worktree(store, Ok(root), target.ok().flatten())?;
+    let (_, health, _) = report_with_worktree(store, Ok(root), target.ok().flatten(), host)?;
     // The missing original tab matters more than other warnings, but it
     // shouldn't hide a definite problem with the installation.
     Ok(match target {
@@ -180,11 +183,18 @@ fn report_with_worktree(
     store: &Store,
     worktree: Result<Option<&Path>, &'static str>,
     target: Option<&rex::Target>,
+    host: Option<&Host>,
 ) -> Result<(String, Health, Shown), String> {
     let mut health = Health::Good;
     let mut tools = Shown::default();
     let mut out = String::from(TITLE);
     out.push('\n');
+    if let Some(host) = host {
+        host.report(&mut out);
+        if let Some(warning) = host.warning() {
+            health.warn(warning);
+        }
+    }
     match worktree {
         Ok(Some(path)) => writeln!(out, "Worktree: {path:?}").unwrap(),
         Ok(None) => out.push_str("Worktree: none detected\n"),

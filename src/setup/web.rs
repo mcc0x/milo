@@ -4,6 +4,7 @@ use std::fmt::{self, Display, Write as _};
 
 use super::claude::ClaudeSnapshot;
 use super::*;
+use crate::host::Host;
 use crate::json::{self, Value};
 use crate::menubar;
 use crate::preferences::{Show, UsageAccount};
@@ -31,6 +32,8 @@ pub(crate) struct Editor {
     // A local-only browser edit can dismiss this save without hiding a later reminder.
     reopen_panes: Option<u64>,
     directory: Option<String>,
+    /// The computer and Rex this editor runs on, asked when it opened and again by a health check.
+    host: Option<Host>,
 }
 
 pub(crate) enum HostedSaveError {
@@ -47,7 +50,8 @@ pub(crate) enum CloseError {
 }
 
 impl Editor {
-    pub(crate) fn open() -> Self {
+    /// `forwarded` says the page is opened from another computer, through a Rex forward.
+    pub(crate) fn open(forwarded: bool) -> Self {
         let inside = rex::inside();
         let store = Store::real();
         let target = inside.then(rex::Target::current).flatten();
@@ -61,7 +65,13 @@ impl Editor {
         editor.setup.alerts = Alerts::real();
         editor.setup.refresh_alerts();
         editor.setup.presence = editor.setup.presence.take().map(presence::Control::starting_helper);
+        editor.host = Host::probe(forwarded);
         editor
+    }
+
+    /// Whether every Rex app showing this host runs on another computer.
+    pub(crate) fn seen_from_elsewhere(&self) -> bool {
+        self.host.as_ref().is_some_and(Host::seen_from_elsewhere)
     }
 
     pub(crate) fn telegram_chats(&self, token: &str) -> Result<String, alerts::TelegramChatsError> {
@@ -140,7 +150,7 @@ impl Editor {
         if let Err(why) = setup.reload_prefs() {
             setup.report(Err(why));
         }
-        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory }
+        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory, host: None }
     }
 
     fn load_account(&mut self) {
@@ -292,6 +302,11 @@ impl Editor {
         } else {
             out.push_str("null");
         }
+        out.push_str(",\"host\":");
+        match &self.host {
+            Some(host) => host.json(&mut out),
+            None => out.push_str("null"),
+        }
         out.push_str(",\"alerts\":");
         match (&setup.alerts, &setup.alert_summary) {
             (Some(alerts), Some(summary)) => alerts_state(&mut out, alerts, summary),
@@ -405,9 +420,14 @@ impl Editor {
             }
             Action::Doctor => {
                 self.doctor = None;
+                if let Some(host) = &self.host {
+                    self.host = Host::probe(host.forwarded);
+                }
                 let setup = &self.setup;
                 let target = if setup.inside { self.require_tab().map(|()| setup.target.as_ref()) } else { Ok(None) };
-                self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
+                let health =
+                    doctor::health_anchored(setup.store()?, setup.root.as_deref(), target, self.host.as_ref())?;
+                self.doctor = Some(health);
                 None
             }
             Action::Presence(edit) if self.setup.presence.is_some() => {
