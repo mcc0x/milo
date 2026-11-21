@@ -201,11 +201,8 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
     let failed = |error: io::Error| format!("could not start the Rex forward: {error}");
     carried.forward = Some(carried.editor.forward(port, host_port).map_err(failed)?);
     carried.watch = Some(carried.editor.watch().map_err(failed)?);
-    let output = carried
-        .forward
-        .as_mut()
-        .and_then(|forward| forward.stdout.as_mut())
-        .expect("Rex forward stdout was piped");
+    let output =
+        carried.forward.as_mut().and_then(|forward| forward.stdout.as_mut()).expect("Rex forward stdout was piped");
     let ready = wait_forward(output, wake, port)
         .map_err(|error| format!("the Rex forward to {host} did not start listening on 127.0.0.1:{port}: {error}"))?;
     if !ready {

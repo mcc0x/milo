@@ -476,6 +476,8 @@ Untracked files appear before Milo counts their lines. In a wide outline, `?` me
 
 If filtering or folding hides the selected file, Outline keeps the cursor on its nearest visible folder. Press `r` to refresh counts, including offscreen files.
 
+Press `/` and type part of a filename or path to find it without opening each folder. If the tree is showing changed files only, search uses that same filter. Use the arrow keys to choose a result and `Enter` to read it. Press `Esc` to leave the search without losing your place in the tree. [See Outline path search.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-outline-comparison.webp)
+
 ## Comparing commits
 
 History counts commits to push against the branch's tracked remote branch. `no branch tracked` means there is no tracked branch, not that all commits have been pushed. Milo can still use the remote's default branch to mark commits for comparison. `no remote` means the project has no remote configured.
@@ -541,11 +543,15 @@ The reader also labels hidden differences next to the text: `[tab]` versus `[4 s
 
 Press `n` or `N` to jump to the next or previous change. The Reader briefly shows your position (for example, `Change 2 of 5`) or `No changes` if there is nothing to jump to. Navigation wraps in both directions.
 
+Press `c` to fold long unchanged stretches, leaving a little context around each change. Click a folded row to read just that stretch, or use `Tab` and `Enter`. Press `c` again to see the full file. [See the same diff in both views.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-reader-comparison.webp)
+
 ## Editing files
 
 The reader only reads until you ask it to edit. Press `e`, or open the file with `milo view FILE --edit`, and the file's text becomes a draft with a cursor. It works the same in the reader Outline opens in its own pane, in the floating reader in Rex and in `milo view`. The last row lists the main keys, `Ctrl-G` opens help, and [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md#editing-in-the-reader) has the whole list.
 
 The draft is yours alone until you save: the file on disk is not touched by typing, pasting, undoing or formatting. While you edit, the reader shows the draft with its code colours and no change marks. When you stop, it shows the file again at the same lines, with a fresh diff, and Outline still has the file selected.
+
+If another program edits the file before you save, choose `c` at **Changed on disk** to compare the disk version (`−`) with your unsaved draft (`+`). Comparing does not write or merge anything. Press `Esc` to return to the choice, then `Esc` again to continue editing. [See the save conflict and comparison.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-compare-comparison.webp)
 
 The editor is for small changes. It has one cursor and no selection or search, and it edits a file that exists: it does not make a new one. The cursor moves one character at a time, so an accent written as a separate mark takes a key press of its own.
 
@@ -577,7 +583,7 @@ A draft cannot grow past 2 MiB either: a key or paste that would take it there i
 
 Before it writes, milo opens the file again and reads it. Nothing is overwritten unexpectedly:
 
-- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written and the pane asks `Changed on disk: o overwrite · Esc back`. Only `o` writes your draft over it.
+- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written. **Changed on disk** lets you compare, explicitly overwrite, or return to editing. If the file changes again before you confirm, Milo asks again.
 - If the file is gone, it is not made again.
 - If the file has become a link, or a folder on the way has become a link or moved, the save is refused. Milo never writes through a link.
 - If you no longer have permission to write, the save is refused.
@@ -671,6 +677,7 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | `e` | Open every folder; press again to restore your choices |
 | `n` / `N` | Jump to the next or previous changed file, including inside closed folders. If there’s nowhere to jump, the tree says why. |
 | `c` | Switch between the whole tree and changed files only |
+| `/` | Find files by name or path; arrows choose a result, `Enter` reads it and `Esc` returns to the tree |
 | `r` | Reload |
 | `q` | Quit |
 
@@ -695,6 +702,8 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
 | `n` / `N` | Next or previous block of added or removed lines |
+| `c` | Switch between the full diff and changes with nearby context |
+| `Tab`, then `Enter` | Select and expand a folded stretch of unchanged lines; clicking the fold expands it too |
 | `e` | Edit the file, or say why it is read-only |
 | `q` or `Esc` | Close |
 
@@ -728,7 +737,7 @@ Questions take the place of the last row and wait for one of the keys they list.
 | Question | Keys |
 | --- | --- |
 | `Unsaved edits` | `s` save and stop editing, `d` discard the draft, `Esc` go back to it |
-| `Changed on disk` | `o` write your draft over the file as it is now, `Esc` go back without writing |
+| `Changed on disk` | `c` compare disk and draft, `o` overwrite the confirmed version, `Esc` back without writing |
 | `Kept draft found` | `r` put the kept draft in place of the text, `d` delete it, `Esc` decide later |
 
 ### Usage and setup
@@ -1234,6 +1243,8 @@ The [source map](https://github.com/mcc0x/milo/blob/main/CONTRIBUTING.md#source-
 
 Put the pane in a module under `src/` and implement `pane::Pane`: `draw` fills a `Screen`, `help` returns its own `Page::new` guide, and `key` handles pane-specific input. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to keep the frame. For outside changes, add `watch_scope` and `check`; for timed redraws, add `next_frame`. A pane with no watch or timer sleeps until input, resize or a signal.
 
+A `check` runs in the pane loop, and no key is read until it returns. Where it can take long, as Git can in a large project, start the work on a thread and return: `unfinished_check` gives the loop a descriptor that becomes readable when the answer is ready, and `finish_check` takes the answer in. Show nothing of an answer until all of it can be shown, drop one that an earlier load has overtaken, and return false from `finish_check` when another look is needed. The loop takes no other look while one is away, rests after it for four times as long as it took, and looks again soon if a change was reported meanwhile. `src/outline/refresh.rs` is the example.
+
 Declare the module in `src/main.rs`. Add the command to `Command`, the argument parser, `dispatch` and `--help`. Use the shared loop; choose whether the pane starts loaded, does a first check or shows `Reading…` on a slow open.
 
 ### Changing the Rex layout
@@ -1446,6 +1457,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
 | `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
 | `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/outline/refresh.rs` | Refreshes the outline's Git state away from the pane loop and takes the answer in whole. |
 | `src/outline/untracked.rs` | Fills in line counts for new files after the first frame, without following links. |
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
@@ -1592,6 +1604,7 @@ Outside the project, milo keeps two things in its state folder for the editor: t
 - On macOS, file-system notifications wake the Git panes. Outline and History filter writes to files and directories Git has reported as ignored. FSEvents excludes up to eight directories directly; Milo filters the remaining paths before waking a pane. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. While the editor is open, the reader pauses Git refreshes until it returns to the diff; saving still opens and checks the file. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
 - A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.
+- The outline asks Git on a separate thread, so its keys are answered while Git reads a large project. It goes on showing what Git last said and takes the new answer in whole, never part of it. A change reported while Git was being asked brings another check, a reload with `r` replaces an answer still on its way, and an answer that arrives while Git holds the index is dropped and asked for again. History and the reader still ask in the loop.
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened. Adding an unrelated untracked file does not require recounting edits in tracked files. With the same tracked status and comparison base, an ordinary save recounts only the edited files; changes that could affect rename detection or other files use the full comparison. A working reader reuses the Git status from its current refresh.
 - In the editor, undo and redo replace only the rows spanned by the recorded byte range. Syntax state above that range stays cached; a changed row can still change how later rows are coloured.
 - Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.

@@ -287,6 +287,162 @@ fn both_jump_keys_work_in_a_committed_file() {
     }
 }
 
+fn review_fixture(f: &Fixture) -> String {
+    let original = (1..=60).map(|n| format!("line {n}\n")).collect::<String>();
+    f.write("page.txt", &original);
+    f.commit("before");
+    original.replace("line 11\n", "edited 11\n").replace("line 41\n", "edited 41\n")
+}
+
+#[test]
+fn changes_only_keeps_context_and_jump_position_in_working_and_committed_diffs() {
+    let f = Fixture::new();
+    let edited = review_fixture(&f);
+    f.write("page.txt", &edited);
+    let path = f.root.join("page.txt");
+    let working = Reader::open(&path).unwrap();
+    f.commit("after");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let commits = repo.history(1).unwrap();
+    let id = CommitId::parse(&commits[0].hash).unwrap();
+    let committed = Reader::at_commit(&path, id).unwrap();
+    for mut reader in [working, committed] {
+        let full = drawn(&mut reader, 60, 24);
+        assert!(full[23].contains("c changes only"), "{full:?}");
+        assert_eq!(reader.key(Key::Char('c')), After::Stay);
+        let compact = drawn(&mut reader, 60, 24);
+        for label in [
+            "… 7 unchanged lines",
+            "… 23 unchanged lines",
+            "… 16 unchanged lines",
+            "line 8",
+            "line 14",
+            "line 38",
+            "line 44",
+            "+ edited 11",
+            "+ edited 41",
+            "c full file",
+        ] {
+            assert!(compact.iter().any(|row| row.contains(label)), "{label}: {compact:?}");
+        }
+        for hidden in ["line 7", "line 15", "line 37", "line 45"] {
+            assert!(!compact.iter().any(|row| row.ends_with(hidden)), "{hidden}: {compact:?}");
+        }
+
+        assert_eq!(reader.key(Key::Char('n')), After::Stay);
+        let next = drawn(&mut reader, 20, 4);
+        assert!(next[..3].iter().any(|row| row.contains("- line 41")), "{next:?}");
+        assert!(next[3].contains("Change 2 of 2"), "{next:?}");
+        assert_eq!(reader.key(Key::Char('c')), After::Stay);
+        let next_full = drawn(&mut reader, 20, 4);
+        assert!(next_full[..3].iter().any(|row| row.contains("- line 41")), "{next_full:?}");
+        assert_eq!(reader.key(Key::Char('N')), After::Stay);
+        let previous = drawn(&mut reader, 20, 4);
+        assert!(previous[..3].iter().any(|row| row.contains("- line 11")), "{previous:?}");
+        assert!(previous[3].contains("Change 1 of 2"), "{previous:?}");
+    }
+}
+
+#[test]
+fn folds_expand_individually_with_tab_enter_and_a_mouse_click() {
+    let f = Fixture::new();
+    let edited = review_fixture(&f);
+    f.write("page.txt", &edited);
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    drawn(&mut reader, 60, 24);
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let first = drawn(&mut reader, 60, 24);
+    assert!(first[1].contains("… 7 unchanged lines · Enter"), "{first:?}");
+
+    assert_eq!(reader.key(Key::Ctrl(b'i')), After::Stay);
+    let second = drawn(&mut reader, 60, 24);
+    let fold = second.iter().position(|row| row.contains("… 23 unchanged lines · Enter")).unwrap();
+    assert_eq!(reader.key(Key::Enter), After::Stay);
+    let expanded = drawn(&mut reader, 60, 24);
+    assert!(expanded[fold].contains("15   line 15"), "{expanded:?}");
+    assert!(expanded[1].contains("… 7 unchanged lines"), "{expanded:?}");
+    assert_eq!(reader.key(Key::Click(59, 1)), After::Ignored); // scrollbar
+    assert_eq!(reader.key(Key::Click(6, 1)), After::Stay);
+    let clicked = drawn(&mut reader, 60, 24);
+    assert!(clicked[1].contains("1   line 1"), "{clicked:?}");
+    assert!(clicked.iter().any(|row| row.ends_with("line 15")), "{clicked:?}");
+
+    drawn(&mut reader, 15, 9);
+    assert_eq!(reader.key(Key::Char('G')), After::Stay);
+    let narrow = drawn(&mut reader, 15, 9);
+    assert!(narrow[7].contains("… 16 hidden"), "{narrow:?}");
+    assert_eq!(reader.key(Key::Click(1, 7)), After::Stay);
+    let last = drawn(&mut reader, 15, 9);
+    assert!(last[7].contains("line 45"), "{last:?}");
+}
+
+#[test]
+fn reopening_the_full_file_keeps_a_scrolled_anchor_inside_a_fold() {
+    let f = Fixture::new();
+    let edited = review_fixture(&f);
+    f.write("page.txt", &edited);
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    drawn(&mut reader, 60, 9);
+    for _ in 0..20 {
+        reader.key(Key::Down);
+    }
+    let full = drawn(&mut reader, 60, 9);
+    assert!(full[1].contains("line 27"), "{full:?}");
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let folded = drawn(&mut reader, 60, 9);
+    assert!(folded[1].contains("… 23 unchanged lines"), "{folded:?}");
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    assert_eq!(drawn(&mut reader, 60, 9), full);
+}
+
+#[test]
+fn a_changed_working_patch_rebuilds_folds_without_losing_the_file_anchor() {
+    let f = Fixture::new();
+    let edited = review_fixture(&f);
+    f.write("page.txt", &edited);
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    drawn(&mut reader, 60, 9);
+    for _ in 0..20 {
+        reader.key(Key::Down);
+    }
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    f.write("page.txt", &edited.replace("line 26\n", "new edit\n"));
+    reader.filesystem_changed();
+    reader.check();
+    let compact = drawn(&mut reader, 60, 24);
+    assert!(compact.iter().any(|row| row.contains("+ new edit")), "{compact:?}");
+    assert!(compact.iter().any(|row| row.contains("… 8 unchanged lines")), "{compact:?}");
+    assert!(compact[23].contains("c full file"), "{compact:?}");
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let full = drawn(&mut reader, 60, 9);
+    assert!(full[1].contains("line 27"), "{full:?}");
+}
+
+#[test]
+fn folding_skips_to_the_right_syntax_state_after_each_hidden_range() {
+    let f = Fixture::new();
+    let original = format!(
+        "{}/* hidden opener\n{}let inside_fold = true;\nold comment\n{}\n*/\n{}let after_fold = true;\nlet old = false;\n",
+        "// before\n".repeat(10),
+        "foo();\n".repeat(10),
+        "bar();\n".repeat(15),
+        "// after\n".repeat(10),
+    );
+    f.write("page.rs", &original);
+    f.commit("before");
+    f.write("page.rs", &original.replace("old comment", "new comment").replace("let old", "let new"));
+    let mut reader = Reader::open(&f.root.join("page.rs")).unwrap();
+    drawn(&mut reader, 60, 24);
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let mut screen = Screen::sized(60, 24);
+    reader.draw(&mut screen);
+    let out = String::from_utf8(screen.emitted()).unwrap();
+    assert!(out.contains("\x1b[0;3;2mlet inside_fold = true;"), "{out:?}");
+    assert!(runs(&out).iter().any(|(codes, text)| *codes == "0;35" && text.starts_with("let")), "{out:?}");
+    assert!(screen.text().iter().any(|row| row.ends_with("let after_fold = true;")));
+}
+
 #[test]
 fn the_reader_counts_added_and_removed_lines_and_numbers_only_the_current_file() {
     let f = Fixture::new();

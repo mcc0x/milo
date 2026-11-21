@@ -95,6 +95,8 @@ The [source map](#source-map) lists the files under `src/` and `tests/`.
 
 Put the pane in a module under `src/` and implement `pane::Pane`: `draw` fills a `Screen`, `help` returns its own `Page::new` guide, and `key` handles pane-specific input. Return `After::Leave` to close, `After::Stay` to draw again, or `After::Ignored` to keep the frame. For outside changes, add `watch_scope` and `check`; for timed redraws, add `next_frame`. A pane with no watch or timer sleeps until input, resize or a signal.
 
+A `check` runs in the pane loop, and no key is read until it returns. Where it can take long, as Git can in a large project, start the work on a thread and return: `unfinished_check` gives the loop a descriptor that becomes readable when the answer is ready, and `finish_check` takes the answer in. Show nothing of an answer until all of it can be shown, drop one that an earlier load has overtaken, and return false from `finish_check` when another look is needed. The loop takes no other look while one is away, rests after it for four times as long as it took, and looks again soon if a change was reported meanwhile. `src/outline/refresh.rs` is the example.
+
 Declare the module in `src/main.rs`. Add the command to `Command`, the argument parser, `dispatch` and `--help`. Use the shared loop; choose whether the pane starts loaded, does a first check or shows `Reading…` on a slow open.
 
 ### Changing the Rex layout
@@ -307,6 +309,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
 | `src/outline/draw.rs` | Lays out and draws the full tree and short strip. |
 | `src/outline/input.rs` | Handles outline navigation, folds, and file opening. |
+| `src/outline/refresh.rs` | Refreshes the outline's Git state away from the pane loop and takes the answer in whole. |
 | `src/outline/untracked.rs` | Fills in line counts for new files after the first frame, without following links. |
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |

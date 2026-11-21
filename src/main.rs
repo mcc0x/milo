@@ -404,7 +404,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::PeekOutline(origin) => {
             let result = run(Start::Reading(Path::new(".")), &|| {
                 Ok(workflow::project(open_repo(None)?, None, |repo, prefs| {
-                    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek())
+                    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek().refreshing_away())
                 }))
             });
             setup::return_from_peek(origin);
@@ -478,7 +478,7 @@ fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
 }
 
 fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
-    Box::new(Outline::with_preferences(repo, rex::inside(), prefs))
+    Box::new(Outline::with_preferences(repo, rex::inside(), prefs).refreshing_away())
 }
 
 fn history(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {

@@ -34,6 +34,8 @@ Untracked files appear before Milo counts their lines. In a wide outline, `?` me
 
 If filtering or folding hides the selected file, Outline keeps the cursor on its nearest visible folder. Press `r` to refresh counts, including offscreen files.
 
+Press `/` and type part of a filename or path to find it without opening each folder. If the tree is showing changed files only, search uses that same filter. Use the arrow keys to choose a result and `Enter` to read it. Press `Esc` to leave the search without losing your place in the tree. [See Outline path search.](img/pane-outline-comparison.webp)
+
 ## Comparing commits
 
 History counts commits to push against the branch's tracked remote branch. `no branch tracked` means there is no tracked branch, not that all commits have been pushed. Milo can still use the remote's default branch to mark commits for comparison. `no remote` means the project has no remote configured.
@@ -99,11 +101,15 @@ The reader also labels hidden differences next to the text: `[tab]` versus `[4 s
 
 Press `n` or `N` to jump to the next or previous change. The Reader briefly shows your position (for example, `Change 2 of 5`) or `No changes` if there is nothing to jump to. Navigation wraps in both directions.
 
+Press `c` to fold long unchanged stretches, leaving a little context around each change. Click a folded row to read just that stretch, or use `Tab` and `Enter`. Press `c` again to see the full file. [See the same diff in both views.](img/pane-reader-comparison.webp)
+
 ## Editing files
 
 The reader only reads until you ask it to edit. Press `e`, or open the file with `milo view FILE --edit`, and the file's text becomes a draft with a cursor. It works the same in the reader Outline opens in its own pane, in the floating reader in Rex and in `milo view`. The last row lists the main keys, `Ctrl-G` opens help, and [keys and marks](keys.md#editing-in-the-reader) has the whole list.
 
 The draft is yours alone until you save: the file on disk is not touched by typing, pasting, undoing or formatting. While you edit, the reader shows the draft with its code colours and no change marks. When you stop, it shows the file again at the same lines, with a fresh diff, and Outline still has the file selected.
+
+If another program edits the file before you save, choose `c` at **Changed on disk** to compare the disk version (`−`) with your unsaved draft (`+`). Comparing does not write or merge anything. Press `Esc` to return to the choice, then `Esc` again to continue editing. [See the save conflict and comparison.](img/pane-compare-comparison.webp)
 
 The editor is for small changes. It has one cursor and no selection or search, and it edits a file that exists: it does not make a new one. The cursor moves one character at a time, so an accent written as a separate mark takes a key press of its own.
 
@@ -135,7 +141,7 @@ A draft cannot grow past 2 MiB either: a key or paste that would take it there i
 
 Before it writes, milo opens the file again and reads it. Nothing is overwritten unexpectedly:
 
-- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written and the pane asks `Changed on disk: o overwrite · Esc back`. Only `o` writes your draft over it.
+- If the file no longer holds what your edit started from, or another file has been put in its place, nothing is written. **Changed on disk** lets you compare, explicitly overwrite, or return to editing. If the file changes again before you confirm, Milo asks again.
 - If the file is gone, it is not made again.
 - If the file has become a link, or a folder on the way has become a link or moved, the save is refused. Milo never writes through a link.
 - If you no longer have permission to write, the save is refused.
