@@ -1,7 +1,7 @@
 .hero .demo-footer { margin-bottom: 0; }
 .features { --cell-pad: clamp(1.25rem, 2.3vw, 2rem); padding-block: 1rem clamp(3rem, 7vw, 6rem); }
 .features h2, .field-notes h2 { margin: 0 0 .4rem; font-size: clamp(1.65rem, 3vw, 2.6rem); line-height: 1.1; letter-spacing: -.045em; font-weight: 680; }
-.feature-intro { max-width: 68ch; margin: 0 0 1.35rem; color: var(--secondary); font-size: clamp(.97rem, 1.18vw, 1.08rem); line-height: 1.65; text-wrap: pretty; }
+.feature-intro { max-width: 68ch; margin: 0 0 1.35rem; color: var(--ink); font-size: clamp(.97rem, 1.18vw, 1.08rem); font-weight: 500; line-height: 1.65; text-wrap: pretty; }
 .feature-intro span { white-space: nowrap; font-weight: 600; color: var(--ink); }
 .feature-intro :is(img, svg) { display: inline-block; width: 1em; height: 1em; object-fit: contain; margin-right: .25em; vertical-align: -.14em; }
 .feature-intro .omp-mark { background: #242831; border-radius: .22em; padding: .08em; }
