@@ -316,7 +316,7 @@ fn totals_are_read_again_when_the_time_zone_moves_midnight_within_the_same_date(
     };
     assert!(look(&mut usage, 0));
     assert!(!look(&mut usage, 1));
-    assert_eq!(steps_today(Some(Some(usage.opencode.report))), Some(2));
+    assert_eq!(usage.opencode.today(usage.today.since(noon)).map(|shown| shown.steps), Some(2));
 
     unsafe extern "C" {
         /// Has the C library read the zone from the environment again.
@@ -329,5 +329,6 @@ fn totals_are_read_again_when_the_time_zone_moves_midnight_within_the_same_date(
     unsafe { tzset() };
     assert_eq!(when::local_day(noon), when::local_day(noon - 12 * HOUR), "the date did not change");
     assert!(look(&mut usage, 2), "totals for the old zone's day were kept");
-    assert_eq!(steps_today(Some(Some(usage.opencode.report))), Some(3), "a step from before the old midnight");
+    let shown = usage.opencode.today(usage.today.since(noon)).map(|shown| shown.steps);
+    assert_eq!(shown, Some(3), "the pane shows the new day's steps, one from before the old midnight");
 }

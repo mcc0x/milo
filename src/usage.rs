@@ -865,9 +865,12 @@ impl Today {
         Self { day, since: high }
     }
 
+    /// The kept midnight stands only while it is still where this date begins:
+    /// a change of time zone can move it without changing the date.
     fn since(&mut self, now: i64) -> i64 {
         let day = when::local_day(now);
-        if self.day != day {
+        let begins_here = when::local_day(self.since) == day && when::local_day(self.since - 1) != day;
+        if self.day != day || !begins_here {
             *self = Self::at(now, day);
         }
         self.since
@@ -1079,9 +1082,8 @@ impl Usage {
         } else {
             self.omp.start(now, clock);
             // The local day can move under totals nothing has written to since, as when the
-            // time zone changes. Ask the clock itself: the pane keeps its own midnight by date.
-            let midnight = Today::at(now, when::local_day(now)).since;
-            if matches!(self.opencode.report, opencode::Report::Today(read) if read.since != midnight) {
+            // time zone changes. Those say nothing of the day the pane now shows.
+            if matches!(self.opencode.report, opencode::Report::Today(read) if read.since != cutoff) {
                 self.opencode.poll.forget();
             }
             self.opencode.poll.start(now, clock);
