@@ -37,6 +37,20 @@ Then run the program and look at what you changed. Text checks cannot tell you w
 
 When updating the README, guides, agent skill or this file, run `python3 site/bundle-docs.py` and commit the refreshed `site/public/llms-full.txt`. CI checks that the published copy matches these sources.
 
+Describe the pull request under the headings in `.github/pull_request_template.md`: **What changed** and **Verification**. GitHub fills them in when you open a pull request in the browser. A body passed on the command line (`gh pr create --body` or `--body-file`) replaces the template, so write the same headings yourself. Add **Compatibility** when a user or packager has to act.
+
+A pull request that changes anything you can see (the website, a terminal pane, the macOS app or any other visible surface) must show real screenshots of the affected UI under **Screenshots** in its description. Show before and after when it changes an existing design, and desktop and mobile when both are affected. A change with nothing to see needs no screenshot; leave the section out.
+
+Give every screenshot alt text that says what it shows, for people who cannot see the image: `![Changes pane after the fix, with the deleted file listed once](…)`. GitHub's default, the file name, says nothing. Replace it, in `alt="…"` too when GitHub inserts an `<img>` tag.
+
+Label the pull request with the existing labels that fit, not every one that could. Usually that is one kind and one or two areas:
+
+- **Kind:** `bug`, `enhancement` or `documentation`.
+- **Area:** `ux` for what the user sees or does, `integrations` for Rex, coding agents and usage sources, `reliability` for recovery and regression checks, `performance` for speed and resource use, `accessibility` for barriers to people with disabilities.
+- **State:** `in review` once it is ready to be read.
+
+Nothing adds these for you, except that Dependabot labels its own pull requests. If GitHub does not let you set labels, say which fit and a maintainer will add them. Do not create new labels in a pull request.
+
 ## Tagging a release
 
 Push the release commit to `main`, then wait for **Apple Silicon release tests** to pass on that exact commit before creating its tag. On an arm64 macOS runner, GitHub Actions runs `sh tests/install.sh` and `cargo test --release --locked`, then drives the browser editor of a release build in Chromium with `tests/web-smoke.cjs`. GitHub requires that check for tag creation and updates, including when a release creates its tag through the web UI. If releasing from another branch, run **Release tests** on that branch from the Actions tab first.
@@ -184,7 +198,9 @@ One line in the imperative that says what the commit does for someone using or r
 
 ## Reporting a bug
 
-Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. For anything that looks like a security problem (milo running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+Use the **Bug report** form on GitHub; it adds the `bug` label. Say what you ran, what you saw and what you expected. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description. A screenshot or pasted output helps but is optional; remove anything private first, such as tokens, account names, paths and repository contents, and give images alt text. For anything that looks like a security problem (milo running something, or showing something, that it should not), please report it privately to the maintainer rather than in a public issue.
+
+To ask for something new, use the **Feature request** form, which adds `enhancement`. Describe the problem and the outcome you want; a design is not needed.
 
 ## Licence
 
