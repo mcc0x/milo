@@ -10,6 +10,7 @@ export const PORT = 6120;
 export const MAX_BODY = 32 * 1024;
 const MAX_PAIR_BODY = 1024;
 export const PRODUCTION_ORIGIN = "https://connect.usemilo.net";
+export const TELEGRAM_RETRY_AFTER = 5;
 const CALLBACK = "/discord/callback";
 const FINISH = "/discord/finish";
 const TTL = 10 * 60_000;
@@ -498,7 +499,8 @@ export async function createService({
     if (bindings.get(hashed) !== binding) return error(401, "Telegram binding is missing or revoked.");
     if (!tg || !username) return error(503, "Telegram is not enabled.");
     if (production && (!telegramCaughtUp || telegramCanSend?.() === false)) {
-      return error(503, "Telegram is not ready; try again later.");
+      return json({ error: "Telegram is not ready; try again later.", retry_after: TELEGRAM_RETRY_AFTER },
+        503, { "Retry-After": String(TELEGRAM_RETRY_AFTER) });
     }
     const time = now();
     if (binding.nextSend > time) return rateLimited(Math.ceil((binding.nextSend - time) / 1000));

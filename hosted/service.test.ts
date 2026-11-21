@@ -755,16 +755,24 @@ test("production Telegram pauses sends until its poll catches up and applies ver
   const service = await createService({ origin: PRODUCTION_ORIGIN, bindingStore: ledger.store, telegram,
     fetch: fixture.fetch, telegramCanSend: () => fresh, onTelegramBacklog: () => { backlogs++; } });
   const text = { text: "Rex: a program finished" };
-  expect((await publicApi(service, "send", text, client, auth)).status).toBe(503);
+  const blockedSend = async () => {
+    const response = await publicApi(service, "send", text, client, auth);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toHaveProperty("retry_after", 5);
+    expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(0);
+  };
+  await blockedSend();
   for (let i = 0; i < 20; i++) fixture.message("A normal private message");
   expect(await service.pollTelegram()).toBe(-1);
   expect(backlogs).toBe(1);
-  expect((await publicApi(service, "send", text, client, auth)).status).toBe(503);
+  await blockedSend();
   expect(await service.pollTelegram()).toBe(0);
   fresh = false;
-  expect((await publicApi(service, "send", text, client, auth)).status).toBe(503);
+  await blockedSend();
   fresh = true;
   expect((await publicApi(service, "send", text, client, auth)).status).toBe(204);
+  expect(fixture.calls.filter(({ body }) => body.parse_mode)).toHaveLength(1);
   fixture.message("/stop");
   expect(await service.pollTelegram()).toBe(0);
   expect(backlogs).toBe(2);

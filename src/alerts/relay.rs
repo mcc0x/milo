@@ -364,7 +364,7 @@ fn fields<'a, const N: usize>(object: &'a str, names: [&str; N]) -> Option<[Opti
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::net::TcpListener;
     use std::thread;
@@ -376,11 +376,12 @@ mod tests {
 
     const DEVICE: &str = concat!("aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaa");
     const LINK_KEY: &str = concat!("bbbbbbbbbb", "bbbbbbbbbb", "bbbbbbbbbb", "bbbbbbbbbb", "bbb");
-    const CAPABILITY: &str = concat!("milorelay_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
+    pub(in crate::alerts) const CAPABILITY: &str =
+        concat!("milorelay_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
     const PROD_CAPABILITY: &str = concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
     const MANUAL: &str = "123456:syntheticSYNTHETICsynthetic00";
 
-    fn with_replies<T>(replies: &[(u16, &str)], act: impl FnOnce(&str) -> T) -> (T, Vec<String>) {
+    pub(in crate::alerts) fn with_replies<T>(replies: &[(u16, &str)], act: impl FnOnce(&str) -> T) -> (T, Vec<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -659,6 +660,26 @@ mod tests {
                 send::Outcome::Uncertain(None),
             ],
         );
+    }
+
+    #[test]
+    fn only_a_relay_503_with_a_valid_hint_can_be_retried() {
+        let replies = [
+            (503, r#"{"retry_after":5}"#),
+            (502, r#"{"retry_after":5}"#),
+            (503, r#"{"error":"The issuing Telegram store is unavailable."}"#),
+            (503, r#"{"retry_after":0}"#),
+            (503, r#"{"retry_after":"5"}"#),
+            (503, r#"{"retry_after":86401}"#),
+        ];
+        let (outcomes, _) = with_replies(&replies, |origin| {
+            let request = Origin::Test(origin.to_owned()).send_request(CAPABILITY, "text").unwrap();
+            replies.map(|_| send::post(&request, None))
+        });
+        assert_eq!(outcomes[0], send::Outcome::Unavailable(Duration::from_secs(5)));
+        for (outcome, (code, _)) in outcomes.into_iter().zip(replies).skip(1) {
+            assert_eq!(outcome, send::Outcome::Uncertain(Some(code)));
+        }
     }
 
     #[test]
