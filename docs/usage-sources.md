@@ -185,7 +185,7 @@ A harness. ACUs are its own compute unit, not an upstream model account.
 - **Plan restriction.** The page states that the consumption API is for Enterprise plans and that Teams and self-serve organizations receive `403`, which Milo shows as "access was denied". It needs a service user or [personal access token](https://docs.devin.ai/api-reference/personal-access-tokens) with `ViewOrgConsumption`. A personal access token carries all of its owner's permissions, so a service user limited to that permission is the safer key.
 - **Scope.** The whole organization, not one person. The per-user variant needs a user identifier Milo has no documented way to learn from the key's owner alone, so it is not used.
 - **Not available.** ACUs left in a plan or cycle. The cycle list is an enterprise-level endpoint.
-- **Not verified live.** Schema only; no Enterprise account was available. No rate limit is published beyond the `429` response, so Milo asks at most every 15 minutes and honours `Retry-After`.
+- **Not verified live.** Schema only; no Enterprise account was available. No rate limit is published beyond the `429` response, so Milo asks at most every 15 minutes, once more when the billing day ends, and honours `Retry-After`.
 
 ## Cursor
 

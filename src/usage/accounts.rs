@@ -385,7 +385,7 @@ impl UsageAccount {
                 let used = used.and_then(amount)?;
                 // A key without a limit reports null. One that has overspent reports less than nothing left.
                 let figure = match left.filter(|left| !left.null()) {
-                    Some(left) => dollars(Kind::LimitLeft, left.number()?.max(0.0)),
+                    Some(left) => dollars(Kind::LimitLeft, left.number()?.max(0.0).abs()),
                     None => dollars(Kind::Used, used),
                 };
                 let detail = |kind, value: Option<Value<'_>>| {
@@ -401,7 +401,9 @@ impl UsageAccount {
             Self::Copilot => {
                 let [period, items] = reply.fields(["timePeriod", "usageItems"]);
                 let [year, month] = period?.fields(["year", "month"]);
-                let (year, month) = (year?.integer()?, month?.unsigned().filter(|month| (1..=12).contains(month))?);
+                // A year outside the calendar would overflow the arithmetic that dates its months.
+                let year = year?.integer().filter(|year| (1970..=9999).contains(year))?;
+                let month = month?.unsigned().filter(|month| (1..=12).contains(month))?;
                 let month = i64::try_from(month).ok()?;
                 let (start, end) = (month_start(year, month), month_start(year, month + 1));
                 if !(start..end).contains(&now) {
@@ -426,6 +428,10 @@ impl UsageAccount {
                 if !any {
                     return Some(Err(Failure::Nothing));
                 }
+                // Finite quantities can still add up to a sum that is not a count.
+                if !credits.is_finite() {
+                    return None;
+                }
                 let figure = Figure { kind: Kind::UsedThisMonth, unit: Unit::AiCredits, value: credits };
                 reading(figure, [None, None], Some(end), false)
             }
@@ -436,7 +442,8 @@ impl UsageAccount {
 /// A count or a sum of money the provider wrote as a number or as decimal text.
 fn amount(value: Value<'_>) -> Option<f64> {
     let number = value.number().or_else(|| value.string(32)?.parse::<f64>().ok())?;
-    (number.is_finite() && number >= 0.0).then_some(number)
+    // A debt too small to show is written as "-0.00". Nothing is owed, so it is zero.
+    (number.is_finite() && number >= 0.0).then_some(number.abs())
 }
 
 /// The first second of a month in UTC. Month 13 is January of the next year.
@@ -673,7 +680,11 @@ impl Sources {
             },
         };
         let fetched = match answer {
-            Ok(reading) => Fetched { reading: Some(reading), failure: None, asked: now, next: now + rest },
+            Ok(reading) => {
+                // A count says nothing once its period ends, so the next period is asked about then.
+                let next = reading.until.map_or(now + rest, |until| until.min(now + rest));
+                Fetched { reading: Some(reading), failure: None, asked: now, next }
+            }
             Err(failure) => {
                 // The last answer still describes the account when the provider merely did not give a new one.
                 let earlier = before.and_then(|saved| saved.reading).filter(|_| failure != Failure::Nothing);
