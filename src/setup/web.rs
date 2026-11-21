@@ -49,6 +49,17 @@ pub(crate) enum CloseError {
     Trial(&'static str),
 }
 
+/// What the editor answers to a request to move settings between hosts.
+pub(crate) enum TransferReply {
+    /// A bundle or a preview. The editor is as it was.
+    Data(String),
+    /// Saved settings changed; this is the editor's new state.
+    Changed(String),
+    /// The draft or the saved files are not what the request was made against.
+    Stale(String),
+    Refused(String),
+}
+
 impl Editor {
     /// `forwarded` says the page is opened from another computer, through a Rex forward.
     pub(crate) fn open(forwarded: bool) -> Self {
@@ -343,7 +354,9 @@ impl Editor {
             }
             None => out.push_str("null"),
         }
-        out.push('}');
+        // Whether an import is kept that the page can offer to take back.
+        let undo = setup.store.as_ref().is_some_and(|store| transfer::undo_available(&store.state));
+        write!(out, ",\"transfer\":{{\"undo\":{undo}}}}}").expect("writing to a string");
         out
     }
 
@@ -529,6 +542,105 @@ impl Editor {
         self.doctor = None;
         self.load_account();
         Ok(self.setup.claude_save_feedback().map(Cow::Borrowed))
+    }
+
+    /// Exports chosen settings, previews an import, applies it, or takes the last one back.
+    pub(crate) fn transfer(&mut self, body: &[u8]) -> TransferReply {
+        use TransferReply::{Changed, Data, Refused, Stale};
+        const DRAFT_OPEN: &str = "Save or discard your unsaved changes first, so an import does not replace them.";
+        const STALE_DRAFT: &str = "The editor changed in another request. Reload it and try again.";
+
+        let Some(request) = Value::parse(body) else { return Refused(BAD_ACTION.into()) };
+        let [action, groups, scope, bundle, here, basis, version] =
+            request.fields(["action", "groups", "scope", "bundle", "here", "basis", "version"]);
+        let Some(action) = action.and_then(|action| action.string(8)) else { return Refused(BAD_ACTION.into()) };
+        let Some(store) = self.setup.store.clone() else { return Refused(UNAVAILABLE.into()) };
+        let home = paths::home();
+        let root = self.setup.root.clone();
+        let place = transfer::Place {
+            config: &store.config,
+            state: &store.state,
+            home: home.as_deref(),
+            worktree: root.as_deref(),
+        };
+        // A project of the bundle goes to this editor's worktree only when the page says which.
+        let maps = || -> Result<Vec<(String, PathBuf)>, String> {
+            let Some(name) = here.filter(|here| !here.null()) else { return Ok(Vec::new()) };
+            let name = name.string(128).ok_or(BAD_ACTION)?.into_owned();
+            let root = root.clone().ok_or("Open Settings from a Git worktree to apply a project's settings to it.")?;
+            Ok(vec![(name, root)])
+        };
+        let plan = || -> Result<transfer::Plan, String> {
+            let bundle = bundle.and_then(|bundle| bundle.string(transfer::BUNDLE_LIMIT)).ok_or(BAD_ACTION)?;
+            transfer::plan(&place, &bundle, &maps()?)
+        };
+        let current = |editor: &Self| version.and_then(Value::unsigned) == Some(editor.version);
+        let result = match action.as_ref() {
+            "export" => {
+                let chosen: Option<Vec<transfer::Group>> = groups
+                    .and_then(Value::elements)
+                    .and_then(|names| names.map(|name| transfer::Group::parse(&name.string(16)?)).collect());
+                let scopes = scope.and_then(|scope| transfer::Scopes::parse(&scope.string(8)?));
+                let (Some(chosen), Some(scopes)) = (chosen, scopes) else { return Refused(BAD_ACTION.into()) };
+                return match transfer::export(&place, &chosen, scopes) {
+                    Ok(bundle) => Data(format!("{{\"bundle\":{}}}", Quoted(&bundle))),
+                    Err(why) => Refused(why),
+                };
+            }
+            "preview" => {
+                return match plan() {
+                    Ok(plan) => Data(plan.json()),
+                    Err(why) => Refused(why),
+                };
+            }
+            "apply" => {
+                if !current(self) {
+                    return Stale(STALE_DRAFT.into());
+                }
+                if self.setup.dirty() || self.setup.trial.is_some() {
+                    return Refused(DRAFT_OPEN.into());
+                }
+                let plan = match plan() {
+                    Ok(plan) => plan,
+                    Err(why) => return Refused(why),
+                };
+                let reviewed = basis.and_then(|basis| basis.string(16));
+                if reviewed.as_deref() != Some(plan.basis().as_str()) {
+                    return Stale(transfer::STALE.into());
+                }
+                transfer::apply(&place, plan).map(|count| {
+                    let settings = if count == 1 { "1 setting".to_owned() } else { format!("{count} settings") };
+                    format!("Imported {settings}. Undo is in Hosts if you change your mind.")
+                })
+            }
+            "undo" => {
+                if !current(self) {
+                    return Stale(STALE_DRAFT.into());
+                }
+                if self.setup.dirty() || self.setup.trial.is_some() {
+                    return Refused(DRAFT_OPEN.into());
+                }
+                transfer::undo(&place).map(|_| "The last import was taken back.".to_owned())
+            }
+            _ => return Refused(BAD_ACTION.into()),
+        };
+        match result {
+            Ok(text) => {
+                // The saved files changed underneath the draft, which was clean.
+                let reloaded = self.setup.reload_prefs().and(self.setup.reload_layout());
+                self.doctor = None;
+                self.reopen_panes = Some(self.version + 1);
+                self.setup.message = None;
+                match reloaded {
+                    Ok(()) => self.setup.report_text(Ok(text.into())),
+                    Err(why) => self.setup.report(Err(why)),
+                }
+                self.version += 1;
+                Changed(self.state())
+            }
+            Err(why) if why == transfer::STALE => Stale(why),
+            Err(why) => Refused(why),
+        }
     }
 }
 

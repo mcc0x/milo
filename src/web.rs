@@ -404,7 +404,13 @@ impl Client {
                 Input::Wait => return Ok(Progress::Wait),
                 Input::Disconnected => return Ok(Progress::Done),
                 Input::Rejected(rejection) => (rejection.response(), false),
-                Input::Ready(route @ (Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect)) => {
+                Input::Ready(
+                    route @ (Route::Action
+                    | Route::Close
+                    | Route::TelegramChats
+                    | Route::HostedConnect
+                    | Route::Transfer),
+                ) => {
                     return Ok(Progress::Job(EditorJob { route, request: std::mem::take(input) }));
                 }
                 Input::Ready(route) => {
@@ -430,7 +436,7 @@ fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
         Route::Static(asset) => asset.response(),
         Route::State => Response::json(Arc::clone(snapshot)),
-        Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect => {
+        Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect | Route::Transfer => {
             unreachable!("route runs on the editor worker")
         }
     }
@@ -460,6 +466,9 @@ impl EditorJob {
         if self.route == Route::HostedConnect {
             return respond_hosted_connect(body, editor, hosted);
         }
+        if self.route == Route::Transfer {
+            return respond_transfer(body, editor);
+        }
         let (response, snapshot) = match editor.action(body) {
             Ok(state) => {
                 let snapshot = Arc::new(state);
@@ -488,6 +497,23 @@ fn respond_close(body: &[u8], editor: &mut Editor) -> (Response, bool) {
         )),
     };
     (response, false)
+}
+
+/// A preview or an export answers with its own data and leaves the editor
+/// as it was. An import or its undo answers with the editor's new state.
+fn respond_transfer(body: &[u8], editor: &mut Editor) -> Completion {
+    use crate::setup::web::TransferReply::{Changed, Data, Refused, Stale};
+
+    let unchanged = |response| Completion { response, snapshot: None, close: false };
+    match editor.transfer(body) {
+        Data(data) => unchanged(Response::json_owned(data)),
+        Changed(state) => {
+            let snapshot = Arc::new(state);
+            Completion { response: Response::json(Arc::clone(&snapshot)), snapshot: Some(snapshot), close: false }
+        }
+        Stale(why) => unchanged(Response::conflict(&why)),
+        Refused(why) => unchanged(Response::bad_request(&why)),
+    }
 }
 
 fn respond_telegram_chats(body: &[u8], editor: &Editor) -> Response {

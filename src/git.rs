@@ -270,6 +270,17 @@ pub(crate) fn discover_worktree(dir: &Path) -> Result<Option<PathBuf>, &'static 
     Ok(raw.map(|raw| PathBuf::from(OsStr::from_bytes(&raw))).filter(|root| root.is_absolute()))
 }
 
+/// The ID of the commit a checkout's history starts from. Clones of one
+/// repository share it whatever folder they are in, so it tells whether two
+/// checkouts on different computers are the same project. A repository with
+/// no commit, or a shallow clone cut short of its start, has none to compare.
+pub(crate) fn root_commit(root: &Path) -> Option<String> {
+    if run::output(root, &[], &["rev-parse", "--is-shallow-repository"])?.as_slice() != b"false\n" {
+        return None;
+    }
+    run::optional_oid(root, &[], &["rev-list", "--max-parents=0", "--max-count=1", "HEAD"])?
+}
+
 /// What people call a checkout: its repository and, in a linked worktree, that worktree's folder.
 pub struct Checkout {
     pub root: PathBuf,

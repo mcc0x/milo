@@ -160,10 +160,19 @@ impl Change {
     }
 }
 
-#[cfg(test)]
 impl Change {
+    /// An edit between two exact images, such as the one that takes an earlier edit back.
+    pub(super) fn between(path: PathBuf, before: Option<Image>, after: Option<Image>) -> Option<Self> {
+        (after != before).then_some(Self { path, before, after, private_parent: false })
+    }
+
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The file as the edit expects to find it, and as it leaves it.
+    pub(super) fn images(&self) -> (Option<&Image>, Option<&Image>) {
+        (self.before.as_ref(), self.after.as_ref())
     }
 }
 

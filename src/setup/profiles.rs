@@ -92,6 +92,19 @@ impl Location {
     }
 }
 
+/// The layout saved for a worktree, or globally for `None`, and the edit that
+/// would save `layout` in its place. It plans a file of Milo's own and no Rex file.
+pub(super) fn profile_edit(
+    config: &Path,
+    root: Option<&Path>,
+    layout: Option<&Layout>,
+) -> Result<(Option<Layout>, Option<Change>), &'static str> {
+    let location = Location::new(config, root)?;
+    let (current, before) = location.load()?.unzip();
+    let change = layout.and_then(|layout| location.change(before, Some(layout)));
+    Ok((current, change))
+}
+
 fn selected(config: &Path, root: Option<&Path>) -> Result<Option<(Layout, Scope)>, LayoutError> {
     let select = |root, scope| {
         let location = Location::new(config, root).map_err(LayoutError::ProfileDirectory)?;
