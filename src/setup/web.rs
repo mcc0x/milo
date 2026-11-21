@@ -230,17 +230,32 @@ impl Editor {
         out.push_str(",\"presence\":");
         // Read now, not when the editor opened: the helper's state changes on its own.
         match setup.presence.as_ref().and_then(|control| control.status().ok()) {
-            // The ID is text: it is too long a number for a browser to keep exact.
-            Some((setting, state)) => write!(
-                out,
-                "{{\"enabled\":{},\"application_id\":{},\"status\":{},\"public\":{},\"help\":{}}}",
-                setting.enabled,
-                Optional(setting.application.map(|id| format!("\"{id}\""))),
-                Quoted(state.sentence()),
-                Quoted(presence::PUBLIC),
-                Quoted(presence::APPLICATION_HELP),
-            )
-            .expect("writing to a string"),
+            Some(status) => {
+                let setting = status.setting;
+                let own = setting.application.is_some();
+                // An ID is text: it is too long a number for a browser to keep exact.
+                write!(
+                    out,
+                    concat!(
+                        "{{\"enabled\":{},\"details\":\"{}\",\"application_id\":{},\"official_id\":\"{}\",",
+                        "\"status\":{},\"help\":{},\"public\":{{"
+                    ),
+                    setting.enabled,
+                    setting.details.value(),
+                    Optional(setting.application.map(|id| format!("\"{id}\""))),
+                    presence::OFFICIAL_APPLICATION,
+                    Quoted(&status.sentence()),
+                    Quoted(presence::APPLICATION_HELP),
+                )
+                .expect("writing to a string");
+                // What each choice of names would make public, to show before it is chosen.
+                for (i, details) in presence::Details::ALL.into_iter().enumerate() {
+                    let comma = if i == 0 { "" } else { "," };
+                    write!(out, "{comma}\"{}\":{}", details.value(), Quoted(presence::public(details, own)))
+                        .expect("writing to a string");
+                }
+                out.push_str("}}");
+            }
             None => out.push_str("null"),
         }
         out.push('}');
@@ -325,10 +340,10 @@ impl Editor {
                 self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
                 None
             }
-            Action::Presence(change) if self.setup.presence.is_some() => {
+            Action::Presence(edit) if self.setup.presence.is_some() => {
                 // One global choice, saved at once like the menu app, and no part of a draft.
-                let result = match change {
-                    Some(application) => self.setup.enable_presence(Some(application)),
+                let result = match edit {
+                    Some(change) => self.setup.change_presence(change),
                     None => self.setup.disable_presence(),
                 };
                 Some(result.map(Cow::Owned))
@@ -450,8 +465,8 @@ enum Action {
     Undo,
     Doctor,
     Menubar(menubar::Action),
-    /// Turn Discord presence on for an application, or off.
-    Presence(Option<u64>),
+    /// Change Discord presence, or with `None` turn it off.
+    Presence(Option<presence::Change>),
 }
 
 impl Action {
@@ -495,10 +510,20 @@ impl Action {
                 })
             }
             [None, Some(value), None, None] if action.is("presence") => {
-                Self::Presence(match value.string(19)?.as_ref() {
+                Self::Presence(match value.string(3)?.as_ref() {
+                    "on" => Some(presence::Change::Enable),
                     "off" => None,
-                    application => Some(presence::application_id(application)?),
+                    _ => return None,
                 })
+            }
+            [Some(field), Some(value), None, None] if action.is("presence") => {
+                let value = value.string(19)?;
+                Self::Presence(Some(match field.string(11)?.as_ref() {
+                    "details" => presence::Change::Details(presence::Details::parse(&value)?),
+                    "application" if value == "official" => presence::Change::Application(None),
+                    "application" => presence::Change::Application(Some(presence::application_id(&value)?)),
+                    _ => return None,
+                }))
             }
             [None, None, None, None] => match action.string(7)?.as_ref() {
                 "capture" => Self::Capture,
@@ -1215,29 +1240,43 @@ mod tests {
         let store = fixture_store(&f);
         let file = store.config.join("discord.conf");
         let mut editor = outside(store, None);
-        let presence = |json: &str| {
+        // Enabled, the details, the person's own application, the status line, and what a choice makes public.
+        let presence = |json: &str, shown: &str| {
             let state = Value::parse(json.as_bytes()).unwrap();
             let presence = field(state, "presence");
             let id = field(presence, "application_id");
             (
                 field(presence, "enabled").boolean().unwrap(),
+                field(presence, "details").string(8).unwrap().into_owned(),
                 (!id.null()).then(|| id.string(19).unwrap().into_owned()),
                 field(presence, "status").string(400).unwrap().into_owned(),
-                field(presence, "public").string(600).unwrap().into_owned(),
+                field(field(presence, "public"), shown).string(900).unwrap().into_owned(),
             )
         };
-        let (enabled, id, status, public) = presence(&editor.state());
+        let start = editor.state();
+        let (enabled, details, id, status, public) = presence(&start, "generic");
         assert!(!enabled && id.is_none());
+        assert_eq!(details, "generic");
         assert_eq!(status, "Milo is not connected to Discord and shows nothing there.");
-        assert_eq!(public, presence::PUBLIC, "the page says what becomes public before anything is turned on");
+        assert_eq!(public, presence::public(presence::Details::Generic, false));
+        // The page holds what every choice would make public before any is turned on.
+        for choice in presence::Details::ALL {
+            assert_eq!(presence(&start, choice.value()).4, presence::public(choice, false));
+        }
+        let official = field(field(Value::parse(start.as_bytes()).unwrap(), "presence"), "official_id");
+        assert!(official.is("1573574411418599586"));
 
         let draft = set(&mut editor, "workflow.tab_titles", "true");
         for request in [
             r#""action":"presence""#,
-            r#""action":"presence","value":"on""#,
+            r#""action":"presence","value":"yes""#,
             r#""action":"presence","value":true"#,
-            r#""action":"presence","value":1234567890123456789"#,
-            r#""action":"presence","value":"12345678901234567890""#,
+            r#""action":"presence","value":"1234567890123456789""#,
+            r#""action":"presence","field":"details","value":"titles""#,
+            r#""action":"presence","field":"details","value":true"#,
+            r#""action":"presence","field":"application","value":1234567890123456789"#,
+            r#""action":"presence","field":"application","value":"12345678901234567890""#,
+            r#""action":"presence","field":"token","value":"secret""#,
             r#""action":"presence","value":"off","group":"preferences""#,
         ] {
             assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION, "{request}");
@@ -1245,25 +1284,40 @@ mod tests {
         assert_eq!(editor.state(), draft);
         assert!(!file.exists());
 
-        let on = action(&mut editor, &format!(r#""action":"presence","value":"{ID}""#)).unwrap();
-        let (enabled, id, ..) = presence(&on);
-        assert!(enabled);
-        assert_eq!(id.as_deref(), Some(ID), "the ID survives as text");
-        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\n"));
+        // Turning it on needs no application ID: Milo's own is used.
+        let on = action(&mut editor, r#""action":"presence","value":"on""#).unwrap();
+        let (enabled, details, id, ..) = presence(&on, "generic");
+        assert!(enabled && id.is_none());
+        assert_eq!(details, "generic");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "presence = true\n");
         let state = Value::parse(on.as_bytes()).unwrap();
         assert!(field(field(state, "message"), "text").string(400).unwrap().starts_with("Discord presence is on."));
         assert_eq!(field(state, "dirty").boolean(), Some(true), "the pane preference draft is kept");
         assert!(!editor.setup.store().unwrap().config.join("preferences.conf").exists());
 
+        let both = action(&mut editor, r#""action":"presence","field":"details","value":"both""#).unwrap();
+        assert_eq!(presence(&both, "both").1, "both");
+        let own = action(&mut editor, &format!(r#""action":"presence","field":"application","value":"{ID}""#)).unwrap();
+        let (_, _, id, _, public) = presence(&own, "both");
+        assert_eq!(id.as_deref(), Some(ID), "the ID survives as text");
+        assert_eq!(public, presence::public(presence::Details::Both, true), "the notice names the person's own application");
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\ndetails = both\n"));
+
         let off = action(&mut editor, r#""action":"presence","value":"off""#).unwrap();
-        let (enabled, id, status, _) = presence(&off);
+        let (enabled, details, id, status, _) = presence(&off, "both");
         assert!(!enabled);
-        assert_eq!(id.as_deref(), Some(ID), "the application is remembered for next time");
+        assert_eq!((details.as_str(), id.as_deref()), ("both", Some(ID)), "the choices are remembered for next time");
         assert_eq!(status, "Milo is not connected to Discord and shows nothing there.");
-        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = false\napplication_id = {ID}\n"));
+
+        let reset = action(&mut editor, r#""action":"presence","field":"application","value":"official""#).unwrap();
+        assert!(presence(&reset, "generic").2.is_none());
+        action(&mut editor, r#""action":"presence","field":"details","value":"generic""#).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "presence = false\n");
 
         // Another surface changed the choice; the page shows what is saved now.
-        fs::write(&file, format!("presence = true\napplication_id = {ID}\n")).unwrap();
-        assert!(presence(&editor.state()).0);
+        fs::write(&file, "presence = true\ndetails = project\n").unwrap();
+        let (enabled, details, ..) = presence(&editor.state(), "project");
+        assert!(enabled);
+        assert_eq!(details, "project");
     }
 }

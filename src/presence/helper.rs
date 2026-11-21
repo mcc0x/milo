@@ -1,17 +1,19 @@
 //! The one background process that sets the Discord activity.
 //!
 //! It runs only while presence is on. It sleeps until Rex says an app opened
-//! or left a session, Discord says something, or it is asked to stop. The
-//! only timer is the wait before looking for a missing Discord again, and
-//! that runs only while a Rex app has a session open.
+//! or left a session, or that what is in front changed; until Discord says
+//! something; or until it is asked to stop. The only timer is the wait
+//! before looking for a missing Discord again, and that runs only while a
+//! Rex app has a session open.
 
 use std::ffi::OsStr;
 use std::os::fd::AsRawFd as _;
 use std::time::{Duration, Instant};
 
 use super::discord::{self, Connection, Ended, Failure};
-use super::{Control, Phase};
-use crate::rex::{AppActivity, AppObserver};
+use super::{Control, Details, Phase, label};
+use crate::git;
+use crate::rex::{AppActivity, AppObserver, Front, FrontParts};
 use crate::setup::lock;
 use crate::term;
 
@@ -46,15 +48,22 @@ pub(super) fn run(rex: &OsStr) -> i32 {
     // Read the choice again under the lock: turning presence off stops the lock's holder,
     // and a helper that takes the lock afterwards must find it off.
     let Ok(setting) = control.setting() else { return 1 };
-    let Some(application) = setting.application.filter(|_| setting.enabled) else { return 0 };
-    let Some(observer) = AppObserver::start(rex) else { return 1 };
+    if !setting.enabled {
+        return 0;
+    }
+    // The script asks Rex about sessions only for the names the person chose to show.
+    let parts = FrontParts { session: setting.details.session(), directory: setting.details.project() };
+    let Some(observer) = AppObserver::start(rex, parts) else { return 1 };
     let socket_dir = discord::socket_dir(|name| std::env::var_os(name));
     let mut helper = Helper {
         control: &control,
-        application,
+        application: setting.application_id(),
+        details: setting.details,
         socket_dir: &socket_dir,
         connection: None,
         retry: Some(Instant::now()),
+        names: None,
+        shown: None,
         phase: None,
     };
     helper.watch(observer, stop.as_raw_fd());
@@ -68,10 +77,15 @@ pub(super) fn run(rex: &OsStr) -> i32 {
 struct Helper<'a> {
     control: &'a Control,
     application: u64,
+    details: Details,
     socket_dir: &'a std::path::Path,
     connection: Option<Connection>,
     /// When to look for Discord next. `None` once Discord has refused, until the helper is replaced.
     retry: Option<Instant>,
+    /// The second line that belongs with what is in front now.
+    names: Option<String>,
+    /// The second line Discord was last given, while the activity is up.
+    shown: Option<Option<String>>,
     phase: Option<Phase>,
 }
 
@@ -103,7 +117,10 @@ impl Helper<'_> {
             }
             if fds[1].revents != 0 {
                 match observer.read() {
-                    AppActivity::Active => active = Some(true),
+                    AppActivity::Active(front) => {
+                        self.names = names(self.details, &front);
+                        active = Some(true);
+                    }
                     AppActivity::Idle => active = Some(false),
                     AppActivity::Unchanged => {}
                     AppActivity::Closed => return,
@@ -115,29 +132,46 @@ impl Helper<'_> {
         }
     }
 
-    /// Puts the activity up, if it is not up and Discord may be asked.
+    /// Puts the activity up if it is not up, and tells Discord again only
+    /// when its second line is no longer the one that was sent.
     fn show(&mut self) {
-        if self.connection.is_some() || self.retry.is_none_or(|at| Instant::now() < at) {
+        if self.connection.is_none() {
+            if self.retry.is_none_or(|at| Instant::now() < at) {
+                return;
+            }
+            match Connection::open(self.socket_dir, self.application) {
+                Ok(connection) => {
+                    self.connection = Some(connection);
+                    self.shown = None;
+                }
+                Err(Failure::Missing) => return self.lose(),
+                Err(Failure::UnknownApplication) => {
+                    self.retry = None;
+                    return self.note(Phase::Refused);
+                }
+            }
+        }
+        if self.shown.as_ref() == Some(&self.names) {
             return;
         }
-        let opened = Connection::open(self.socket_dir, self.application).and_then(|mut connection| {
-            connection.set_activity().map_err(|_| Failure::Missing)?;
-            Ok(connection)
-        });
-        match opened {
-            Ok(connection) => {
-                self.connection = Some(connection);
-                self.note(Phase::Showing);
-            }
-            Err(Failure::Missing) => {
-                self.retry = Some(Instant::now() + RETRY);
-                self.note(Phase::Waiting);
-            }
-            Err(Failure::UnknownApplication) => {
-                self.retry = None;
-                self.note(Phase::Refused);
-            }
+        let sent =
+            self.connection.as_mut().is_some_and(|connection| connection.set_activity(self.names.as_deref()).is_ok());
+        if sent {
+            self.shown = Some(self.names.clone());
+            // A changed line is noted too, for `milo presence` to repeat.
+            self.phase = None;
+            self.note(Phase::Showing);
+        } else {
+            self.lose();
         }
+    }
+
+    /// Discord is not there, or stopped listening. Look for it again later.
+    fn lose(&mut self) {
+        self.connection = None;
+        self.shown = None;
+        self.retry = Some(Instant::now() + RETRY);
+        self.note(Phase::Waiting);
     }
 
     /// Takes the activity down and lets go of Discord.
@@ -145,6 +179,8 @@ impl Helper<'_> {
         if let Some(connection) = self.connection.take() {
             connection.clear();
         }
+        self.shown = None;
+        self.names = None;
         if self.retry.is_some() {
             // Look for Discord at once when a Rex app next opens a session.
             self.retry = Some(Instant::now());
@@ -156,15 +192,12 @@ impl Helper<'_> {
         let Some(connection) = self.connection.as_mut() else { return };
         match connection.receive() {
             Ok(()) => {}
-            Err(Ended::Lost) => {
-                self.connection = None;
-                self.retry = Some(Instant::now() + RETRY);
-                self.note(Phase::Waiting);
-            }
+            Err(Ended::Lost) => self.lose(),
             Err(Ended::Rejected) => {
                 if let Some(connection) = self.connection.take() {
                     connection.clear();
                 }
+                self.shown = None;
                 self.retry = None;
                 self.note(Phase::Rejected);
             }
@@ -174,7 +207,49 @@ impl Helper<'_> {
     fn note(&mut self, phase: Phase) {
         if self.phase != Some(phase) {
             self.phase = Some(phase);
-            self.control.note_phase(phase);
+            let names = self.shown.as_ref().and_then(|names| names.as_deref()).filter(|_| phase == Phase::Showing);
+            self.control.note_phase(phase, names);
         }
+    }
+}
+
+/// The second line for what is in front, holding only the names the person
+/// chose to show. A name that is unknown or unfit to show is left out.
+fn names(details: Details, front: &Front) -> Option<String> {
+    let session = front.session.as_deref().filter(|_| details.session()).and_then(label::display_name);
+    let project = front
+        .directory
+        .as_deref()
+        .filter(|_| details.project())
+        // The project is the folder name of the Git repository, never where it is or where it came from.
+        .and_then(|dir| git::checkout(dir).ok().flatten())
+        .and_then(|checkout| label::display_name(&checkout.project));
+    label::line(session.as_deref(), project.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+
+    #[test]
+    fn only_the_chosen_names_are_shown_and_a_project_is_its_repository_folder_name() {
+        let f = Fixture::new();
+        f.write("src/deep/file.txt", "text\n");
+        f.commit("first");
+        let project = f.root.file_name().unwrap().to_str().unwrap().to_owned();
+        let front = Front { session: Some("release notes".into()), directory: Some(f.root.join("src/deep")) };
+        assert_eq!(names(Details::Generic, &front), None);
+        assert_eq!(names(Details::Session, &front).as_deref(), Some("Session: release notes"));
+        assert_eq!(names(Details::Project, &front), Some(format!("Project: {project}")));
+        let both = names(Details::Both, &front).unwrap();
+        assert_eq!(both, format!("Project: {project} · Session: release notes"));
+        assert!(!both.contains('/'), "no part of the path is shown: {both}");
+
+        // Outside a Git project there is no project to name, and the folder's own name is not used instead.
+        let plain = Fixture::folder();
+        let outside = Front { session: Some("/Users/someone/client".into()), directory: Some(plain.root.clone()) };
+        assert_eq!(names(Details::Both, &outside), None);
+        assert_eq!(names(Details::Both, &Front::default()), None);
     }
 }

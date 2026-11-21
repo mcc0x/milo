@@ -70,6 +70,8 @@ enum Panel {
     Workflow,
     Health,
     Diagnostics,
+    /// The choices for Discord presence, opened from Workflow.
+    Presence,
     Save(SaveKind),
     Confirm(Confirm),
     Exit,
@@ -107,7 +109,12 @@ enum Confirm {
     Repair,
     Remove,
     RemoveMenuBar,
+    /// Turning Discord presence on.
     Presence,
+    /// Showing a name on Discord that is not shown yet.
+    PresenceDetails(presence::Details),
+    /// Using a Discord application of the person's own.
+    PresenceApp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,7 +147,11 @@ enum Row {
     ClaudeLimits,
     MenuBar,
     RemoveMenuBar,
+    /// Opens the Discord presence choices.
+    PresenceOpen,
     Presence,
+    PresenceDetails,
+    PresenceApp,
     PresenceId,
     SaveClaude,
     SavePrefs,
@@ -182,7 +193,7 @@ const WORKFLOW: &[Row] = &[
     Row::UseGlobalPrefs,
     Row::ClaudeLimits,
     Row::SaveClaude,
-    Row::Presence,
+    Row::PresenceOpen,
     Row::MenuBar,
     Row::RemoveMenuBar,
 ];
@@ -209,9 +220,11 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     menu_installed: Option<bool>,
     presence: Option<presence::Control>,
     /// The saved Discord presence choice and what its helper last did, if they could be read.
-    presence_view: Option<(presence::Setting, presence::State)>,
+    presence_view: Option<presence::Status>,
     /// The digits typed so far for a Discord application ID.
     application_draft: String,
+    /// What Discord shows now, for the row's detail line.
+    presence_note: String,
     panel: Panel,
     selected: usize,
     save_from: Option<(Panel, Option<Row>)>,
@@ -296,6 +309,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             presence,
             presence_view: None,
             application_draft: String::new(),
+            presence_note: String::new(),
             panel: if inside { Panel::Layout } else { Panel::Workflow },
             selected: 0,
             save_from: None,
@@ -359,6 +373,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Layout if self.scope == Scope::Global => &LAYOUT[..4],
             Panel::Layout => LAYOUT,
             Panel::Tune => TUNE,
+            Panel::Presence => &[Row::Presence, Row::PresenceDetails, Row::PresenceApp, Row::Back],
             Panel::Appearance => &[
                 Row::Icons,
                 Row::Activity,
@@ -383,7 +398,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 &[Row::Cancel, Row::SaveGlobal, Row::SaveWorktree]
             }
             Panel::Save(_) => &[Row::Cancel, Row::SaveGlobal],
-            Panel::Confirm(Confirm::Presence) => &[Row::Cancel, Row::PresenceId, Row::Continue],
+            Panel::Confirm(Confirm::PresenceApp) => &[Row::Cancel, Row::PresenceId, Row::Continue],
             Panel::Confirm(_) => &[Row::Cancel, Row::Continue],
             Panel::Exit => &[Row::Cancel, Row::SaveAndExit, Row::Discard],
         }
@@ -399,7 +414,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.visible = draw::Visible::default();
         self.modal_click.clear();
         self.message = None;
-        if panel == Panel::Workflow {
+        if matches!(panel, Panel::Workflow | Panel::Presence) {
             // The helper comes and goes with Rex and Discord, so say what is true now.
             self.reload_presence();
         }
@@ -420,6 +435,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     fn back(&mut self) {
         let (panel, selected) = match self.panel {
             Panel::Tune => (Panel::Layout, Some(Row::Tune)),
+            Panel::Presence => (Panel::Workflow, Some(Row::PresenceOpen)),
             Panel::Exit => self.exit_from.take().expect("exit prompt has an editor to return to"),
             Panel::Save(_) if self.exit_from.is_some() => (Panel::Exit, Some(Row::Cancel)),
             Panel::Save(_) => self.save_from.take().expect("save prompt has an editor to return to"),
@@ -431,7 +447,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::Repair) => (Panel::Health, Some(Row::Repair)),
             Panel::Confirm(Confirm::Remove) => (Panel::Health, Some(Row::Remove)),
             Panel::Confirm(Confirm::RemoveMenuBar) => (Panel::Workflow, Some(Row::RemoveMenuBar)),
-            Panel::Confirm(Confirm::Presence) => (Panel::Workflow, Some(Row::Presence)),
+            Panel::Confirm(Confirm::Presence) => (Panel::Presence, Some(Row::Presence)),
+            Panel::Confirm(Confirm::PresenceDetails(_)) => (Panel::Presence, Some(Row::PresenceDetails)),
+            Panel::Confirm(Confirm::PresenceApp) => (Panel::Presence, Some(Row::PresenceApp)),
             Panel::Diagnostics => (Panel::Health, Some(Row::Diagnostics)),
             _ => (Panel::Layout, None),
         };
@@ -442,7 +460,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let next = match self.panel {
             Panel::Layout | Panel::Tune => Panel::Appearance,
             Panel::Appearance => Panel::Workflow,
-            Panel::Workflow => Panel::Health,
+            Panel::Workflow | Panel::Presence => Panel::Health,
             Panel::Health | Panel::Diagnostics => Panel::Layout,
             Panel::Save(_) | Panel::Confirm(_) | Panel::Exit => return,
         };
@@ -844,11 +862,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn reload_presence(&mut self) {
         self.presence_view = self.presence.as_ref().and_then(|control| control.status().ok());
+        self.presence_note =
+            self.presence_view.as_ref().map(|status| status.sentence().into_owned()).unwrap_or_default();
     }
 
-    /// Turns Discord presence on at once: it is one global choice, not part of a draft.
-    fn enable_presence(&mut self, application: Option<u64>) -> Result<String, &'static str> {
-        let result = self.presence.as_ref().ok_or(PRESENCE_UNAVAILABLE)?.enable(application);
+    /// Saves one change to Discord presence at once: it is one global choice, not part of a draft.
+    fn change_presence(&mut self, change: presence::Change) -> Result<String, &'static str> {
+        let result = self.presence.as_ref().ok_or(PRESENCE_UNAVAILABLE)?.apply(change);
         self.reload_presence();
         result
     }
@@ -859,25 +879,53 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         result
     }
 
+    fn report_presence(&mut self, result: Result<String, &'static str>) {
+        self.report_text(result.map(Cow::Owned).map_err(Cow::Borrowed));
+    }
+
     /// Turning presence off needs no question. Turning it on first says what becomes public.
     fn choose_presence(&mut self) {
-        let Some((setting, _)) = self.presence_view else { return };
-        if setting.enabled {
+        let Some(status) = &self.presence_view else { return };
+        if status.setting.enabled {
             let result = self.disable_presence();
-            self.report_text(result.map(Cow::Owned).map_err(Cow::Borrowed));
-            return;
+            self.report_presence(result);
+        } else {
+            self.select_panel(Panel::Confirm(Confirm::Presence), None);
         }
-        self.application_draft = setting.application.map(|id| id.to_string()).unwrap_or_default();
-        let ready = setting.application.is_some();
-        self.select_panel(Panel::Confirm(Confirm::Presence), ready.then_some(Row::Cancel).or(Some(Row::PresenceId)));
-        self.show_application_draft();
+    }
+
+    /// Moves to the next choice of names. One that would show a name not
+    /// shown now is asked about first; while presence is off it is only saved.
+    fn choose_presence_details(&mut self) {
+        let Some(status) = &self.presence_view else { return };
+        let setting = status.setting;
+        let next = setting.details.next();
+        if setting.enabled && next.shows_more_than(setting.details) {
+            self.select_panel(Panel::Confirm(Confirm::PresenceDetails(next)), None);
+        } else {
+            let result = self.change_presence(presence::Change::Details(next));
+            self.report_presence(result);
+        }
+    }
+
+    /// Goes back to Milo's application from a person's own, or asks for the ID of theirs.
+    fn choose_presence_application(&mut self) {
+        let Some(status) = &self.presence_view else { return };
+        if status.setting.application.is_some() {
+            let result = self.change_presence(presence::Change::Application(None));
+            self.report_presence(result);
+        } else {
+            self.application_draft.clear();
+            self.select_panel(Panel::Confirm(Confirm::PresenceApp), Some(Row::PresenceId));
+            self.show_application_draft();
+        }
     }
 
     /// The row has no room for the whole number, so the notice shows what was typed.
     fn show_application_draft(&mut self) {
         let text = if self.application_draft.is_empty() {
             Cow::Borrowed(
-                "Type your Discord application ID. Pasted text is not read here: milo presence enable APPLICATION_ID takes one.",
+                "Type your Discord application ID. Pasted text is not read here: milo presence application APPLICATION_ID takes one.",
             )
         } else {
             Cow::Owned(format!("Application ID: {}", self.application_draft))
@@ -893,12 +941,23 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         self.show_application_draft();
     }
 
-    fn confirm_presence(&mut self) {
-        let result = self.enable_presence(presence::application_id(&self.application_draft));
+    /// Carries out what a presence question asked about.
+    fn confirm_presence(&mut self, confirm: Confirm) -> After {
+        let change = match confirm {
+            Confirm::Presence => presence::Change::Enable,
+            Confirm::PresenceDetails(details) => presence::Change::Details(details),
+            Confirm::PresenceApp => match presence::application_id(&self.application_draft) {
+                Some(own) => presence::Change::Application(Some(own)),
+                None => return After::Ignored,
+            },
+            _ => return After::Ignored,
+        };
+        let result = self.change_presence(change);
         if result.is_ok() {
             self.back();
         }
-        self.report_text(result.map(Cow::Owned).map_err(Cow::Borrowed));
+        self.report_presence(result);
+        After::Stay
     }
 
     fn use_global(&mut self) -> SaveNotice {
@@ -1003,8 +1062,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             | Row::HistoryFollow
             | Row::TabTitles => self.saved_prefs.is_none(),
             Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
-            Row::Presence => self.presence_view.is_none(),
-            Row::Continue if self.panel == Panel::Confirm(Confirm::Presence) => {
+            Row::Presence | Row::PresenceDetails | Row::PresenceApp => self.presence_view.is_none(),
+            Row::Continue if self.panel == Panel::Confirm(Confirm::PresenceApp) => {
                 presence::application_id(&self.application_draft).is_none()
             }
             Row::Repair | Row::Remove => self.trial.is_some(),
@@ -1029,8 +1088,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 return After::Stay;
             }
             Row::MenuBar | Row::RemoveMenuBar => return After::Ignored,
+            Row::PresenceOpen => {
+                self.select_panel(Panel::Presence, None);
+                return After::Stay;
+            }
             Row::Presence => {
                 self.choose_presence();
+                return After::Stay;
+            }
+            Row::PresenceDetails => {
+                self.choose_presence_details();
+                return After::Stay;
+            }
+            Row::PresenceApp => {
+                self.choose_presence_application();
                 return After::Stay;
             }
             Row::PresenceId => {
@@ -1056,9 +1127,8 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     self.change_menu_app(MenuAction::Uninstall);
                     return After::Stay;
                 }
-                Panel::Confirm(Confirm::Presence) => {
-                    self.confirm_presence();
-                    return After::Stay;
+                Panel::Confirm(confirm @ (Confirm::Presence | Confirm::PresenceDetails(_) | Confirm::PresenceApp)) => {
+                    return self.confirm_presence(confirm);
                 }
                 _ => return After::Ignored,
             },
@@ -1283,7 +1353,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 self.next_panel();
                 return After::Stay;
             }
-            Key::Char(digit @ '0'..='9') if self.panel == Panel::Confirm(Confirm::Presence) => {
+            Key::Char(digit @ '0'..='9') if self.panel == Panel::Confirm(Confirm::PresenceApp) => {
                 self.type_application_digit(digit);
                 return After::Stay;
             }
@@ -1316,7 +1386,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 self.back();
                 return After::Stay;
             }
-            Key::Esc if matches!(self.panel, Panel::Tune | Panel::Diagnostics) => {
+            Key::Esc if matches!(self.panel, Panel::Tune | Panel::Presence | Panel::Diagnostics) => {
                 self.back();
                 return After::Stay;
             }

@@ -61,7 +61,7 @@ Usage: milo
        milo web [--port PORT] [--no-open]
        milo doctor
        milo setup --repair | --remove
-       milo presence [status] | enable [APPLICATION_ID] [--yes] | disable
+       milo presence [status] | enable | details DETAILS | application ID | disable
        milo view FILE [--commit ID | --edit]
        milo PATH
        milo [setup] --skip-onboarding

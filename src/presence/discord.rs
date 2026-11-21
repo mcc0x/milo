@@ -6,8 +6,9 @@
 //! of JSON. Setting an activity needs the public ID of a Discord application
 //! and nothing else: no token, secret or sign-in.
 //!
-//! The activity is the same fixed text for everyone. Nothing about a
-//! session, a tab, a project, a file or a command is ever put in a frame.
+//! The activity is one fixed line. A second line is added only when the
+//! person chose to show the session or project name, and holds only what
+//! `label` made of those names. Nothing else is ever put in a frame.
 
 use std::ffi::OsString;
 use std::io::{self, Read as _, Write as _};
@@ -112,10 +113,11 @@ impl Connection {
         self.stream.as_raw_fd()
     }
 
-    /// Shows the activity on the user's Discord profile.
-    pub(super) fn set_activity(&mut self) -> io::Result<()> {
+    /// Shows the activity on the user's Discord profile, with `names` as
+    /// its second line when the person chose to show any.
+    pub(super) fn set_activity(&mut self, names: Option<&str>) -> io::Result<()> {
         self.requests += 1;
-        send(&mut self.stream, FRAME, &activity(self.process, self.requests))
+        send(&mut self.stream, FRAME, &activity(self.process, self.requests, names))
     }
 
     /// Takes the activity down and ends the connection. Discord also drops
@@ -225,11 +227,27 @@ fn handshake(application: u64) -> String {
     format!(r#"{{"v":1,"client_id":"{application}"}}"#)
 }
 
-/// Everything Milo ever tells Discord to show: one fixed line.
-fn activity(process: u32, request: u64) -> String {
+/// Everything Milo ever tells Discord to show: the fixed line, and the names the person chose to add.
+fn activity(process: u32, request: u64, names: Option<&str>) -> String {
+    let state = names.map(|names| format!(r#","state":{}"#, quoted(names))).unwrap_or_default();
     format!(
-        r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{process},"activity":{{"details":"{DETAILS}"}}}},"nonce":"milo-{request}"}}"#
+        r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{process},"activity":{{"details":"{DETAILS}"{state}}}}},"nonce":"milo-{request}"}}"#
     )
+}
+
+/// Text as a JSON string.
+fn quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' | '\\' => out.extend(['\\', c]),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The same command with no activity, which takes the activity down.
@@ -256,8 +274,13 @@ mod tests {
     fn the_activity_holds_one_fixed_line_and_nothing_about_the_work() {
         assert_eq!(handshake(1_234_567_890_123_456_789), r#"{"v":1,"client_id":"1234567890123456789"}"#);
         assert_eq!(
-            activity(42, 1),
+            activity(42, 1, None),
             r#"{"cmd":"SET_ACTIVITY","args":{"pid":42,"activity":{"details":"In a Rex session"}},"nonce":"milo-1"}"#
+        );
+        // Chosen names are a second line, written so that no character can end the text early.
+        assert_eq!(
+            activity(42, 3, Some("Project: milo · Session: say \"hi\" \\ \u{1}")),
+            r#"{"cmd":"SET_ACTIVITY","args":{"pid":42,"activity":{"details":"In a Rex session","state":"Project: milo · Session: say \"hi\" \\ \u0001"}},"nonce":"milo-3"}"#
         );
         assert_eq!(no_activity(42, 2), r#"{"cmd":"SET_ACTIVITY","args":{"pid":42},"nonce":"milo-2"}"#);
     }

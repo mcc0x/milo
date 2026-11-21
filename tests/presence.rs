@@ -16,7 +16,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-const APPLICATION: &str = "1234567890123456789";
+/// Milo's own Discord application, which presence uses unless a person gives another.
+const APPLICATION: &str = "1573574411418599586";
 const READY: &str = r#"{"cmd":"DISPATCH","data":{"v":1,"config":{},"user":{"id":"1","username":"stand-in"}},"evt":"READY","nonce":null}"#;
 /// Longer than the helper waits before looking for Discord again.
 const RETRY: Duration = Duration::from_secs(20);
@@ -24,7 +25,8 @@ static NEXT: AtomicU32 = AtomicU32::new(0);
 
 /// A `rex` that prints what the test writes to a file, as the helper's
 /// script prints what Rex tells it, and that does nothing as a listener.
-const REX: &str = "#!/bin/sh\ncase \" $* \" in\n*\" -e \"*) echo $$ > \"$HOME/rex-pid\"; exec tail -n +1 -f \"$HOME/rex-says\" ;;\nesac\n";
+/// It keeps what the script was asked to look at, for the test to read.
+const REX: &str = "#!/bin/sh\ncase \" $* \" in\n*\" -e \"*) echo $$ > \"$HOME/rex-pid\"; printf '%s' \"$6\" > \"$HOME/rex-asked\"; exec tail -n +1 -f \"$HOME/rex-says\" ;;\nesac\n";
 
 struct Home {
     root: PathBuf,
@@ -77,7 +79,31 @@ impl Home {
     }
 
     fn enable(&self) -> String {
-        self.say(&["presence", "enable", APPLICATION, "--yes"])
+        self.say(&["presence", "enable", "--yes"])
+    }
+
+    /// What the helper's script was told it may ask Rex about.
+    fn rex_asked(&self) -> String {
+        fs::read_to_string(self.root.join("rex-asked")).unwrap_or_default()
+    }
+
+    /// Rex reports the session in front by its label and the folder its focused pane works in.
+    fn rex_shows(&self, session: Option<&str>, directory: Option<&std::path::Path>) {
+        let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let session = session.map_or("-".into(), |label| hex(label.as_bytes()));
+        let directory = directory.map_or("-".into(), |dir| hex(dir.to_str().unwrap().as_bytes()));
+        self.rex_says(&format!("active {session} {directory}"));
+    }
+
+    /// A Git project in a folder of that name, somewhere under a path that must never be shown.
+    fn project(&self, name: &str) -> PathBuf {
+        let dir = self.root.join("private-clients").join(name);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        let git = Command::new("git").args(["init", "-q"]).arg(&dir).env("GIT_CONFIG_NOSYSTEM", "1").status().unwrap();
+        assert!(git.success());
+        let remote = ["remote", "add", "origin", "git@example.com:secret-owner/secret-repo.git"];
+        assert!(Command::new("git").arg("-C").arg(&dir).args(remote).status().unwrap().success());
+        dir
     }
 
     /// What Rex would report: `active` once an app has a session open, `idle` once none has.
@@ -214,13 +240,20 @@ impl Client {
 
     /// The activity that was set, checked to be the fixed line and nothing more. Returns the helper's process ID.
     fn activity(&mut self, request: u32) -> i32 {
+        self.shows(request, None)
+    }
+
+    /// The activity that was set, checked to hold the fixed line, exactly
+    /// these names as its second line, and nothing else.
+    fn shows(&mut self, request: u32, names: Option<&str>) -> i32 {
         let (opcode, payload) = self.frame().expect("an activity");
         assert_eq!(opcode, 1);
         let pid: i32 = payload.split_once(r#""pid":"#).unwrap().1.split_once(',').unwrap().0.parse().unwrap();
+        let state = names.map(|names| format!(r#","state":"{names}""#)).unwrap_or_default();
         assert_eq!(
             payload,
             format!(
-                r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{pid},"activity":{{"details":"In a Rex session"}}}},"nonce":"milo-{request}"}}"#
+                r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{pid},"activity":{{"details":"In a Rex session"{state}}}}},"nonce":"milo-{request}"}}"#
             )
         );
         self.send(1, &format!(r#"{{"cmd":"SET_ACTIVITY","data":{{}},"evt":null,"nonce":"milo-{request}"}}"#));
@@ -268,7 +301,10 @@ fn the_activity_follows_rex_from_the_first_app_to_the_last_and_goes_when_turned_
     second.cleared(helper, 2);
     assert!(asked.elapsed() < Duration::from_secs(5), "turning presence off clears it at once");
     assert!(soon(|| !alive(helper) && !alive(rex)), "the helper and its watch on Rex are gone");
-    assert!(home.say(&["presence"]).starts_with(&format!("Discord presence: off\nApplication ID: {APPLICATION}\n")));
+    assert!(home.say(&["presence"]).starts_with(&format!(
+        "Discord presence: off\nApplication: Milo's, {APPLICATION}\nDetails: generic, which shows the fixed line and no names\n"
+    )));
+    assert_eq!(home.rex_asked(), r#"{"session":false,"directory":false}"#, "Rex was asked about no session");
     home.rex_says("active");
     assert!(discord.quiet(), "nothing connects once presence is off");
 }
@@ -368,11 +404,11 @@ fn while_presence_is_off_nothing_connects_to_discord_or_stays_running() {
     let discord = home.discord();
     home.rex_says("active");
 
-    let refused = home.milo(&["presence", "enable", APPLICATION]);
+    let refused = home.milo(&["presence", "enable"]);
     assert!(!refused.status.success(), "with nobody to ask, presence stays off");
     let said = String::from_utf8(refused.stderr).unwrap();
     assert!(said.contains("Anyone who can see your Discord activity sees it") && said.contains("--yes"), "{said}");
-    assert!(home.say(&["presence"]).starts_with("Discord presence: off\nApplication ID: not set."));
+    assert!(home.say(&["presence"]).starts_with("Discord presence: off\nApplication: Milo's, "));
     assert!(!home.root.join(".config/milo/discord.conf").exists());
 
     assert!(home.milo(&["listen"]).status.success());
@@ -382,4 +418,107 @@ fn while_presence_is_off_nothing_connects_to_discord_or_stays_running() {
     assert!(discord.pending().is_none(), "nothing connected to Discord");
     assert_eq!(home.rex_pid(), None, "nothing started watching Rex");
     assert!(!home.root.join(".local/state/milo/presence.lock").exists(), "no helper ever took its lock");
+}
+
+#[test]
+fn chosen_names_follow_what_is_in_front_and_go_when_they_are_no_longer_chosen() {
+    let home = Home::new();
+    let discord = home.discord();
+    let (site, tool) = (home.project("client-site"), home.project("internal-tool"));
+    home.rex_shows(Some("release notes"), Some(&site.join("src")));
+
+    // With nobody to ask, names are not turned on, and the refusal says what they would show.
+    let refused = home.milo(&["presence", "enable", "--details", "both"]);
+    assert!(!refused.status.success());
+    let said = String::from_utf8(refused.stderr).unwrap();
+    assert!(said.contains("as in “Project: milo · Session: release-notes”") && said.contains("--yes"), "{said}");
+    assert!(!home.root.join(".config/milo/discord.conf").exists());
+
+    assert!(home.say(&["presence", "enable", "--details", "both", "--yes"]).starts_with("Discord presence is on."));
+    assert_eq!(home.rex_asked(), r#"{"session":true,"directory":true}"#);
+    let mut client = discord.welcome(Duration::from_secs(30));
+    let helper = client.shows(1, Some("Project: client-site · Session: release notes"));
+    assert!(
+        home.status_says("Discord is showing “In a Rex session” with “Project: client-site · Session: release notes”.")
+    );
+
+    // Another pane of the same project and session changes nothing, so Discord is told nothing.
+    home.rex_shows(Some("release notes"), Some(&site));
+    // Another session and project in front replace both names on the same connection.
+    home.rex_shows(Some("fix-login"), Some(&tool));
+    assert_eq!(client.shows(2, Some("Project: internal-tool · Session: fix-login")), helper);
+    // Outside a Git project only the session is named, never the folder.
+    home.rex_shows(Some("fix-login"), Some(&home.root.join("private-clients")));
+    client.shows(3, Some("Session: fix-login"));
+    // A label that could be a path or an address is left out whole.
+    home.rex_shows(Some("~/private-clients/client-site"), Some(&tool));
+    client.shows(4, Some("Project: internal-tool"));
+    // When Rex cannot say which session is in front, no name of any session is shown.
+    home.rex_shows(None, None);
+    client.shows(5, None);
+    assert!(home.status_says("with no name"));
+    home.rex_shows(Some("release notes"), Some(&site));
+    client.shows(6, Some("Project: client-site · Session: release notes"));
+
+    // Discord restarts: the names in front now are shown again, once.
+    drop(client);
+    drop(discord);
+    fs::remove_file(home.root.join("run/discord-ipc-0")).unwrap();
+    let discord = home.discord();
+    let mut client = discord.welcome(RETRY);
+    assert_eq!(client.shows(1, Some("Project: client-site · Session: release notes")), helper);
+
+    // Showing one name less takes the other down at once: the old activity is cleared before the new one is set.
+    assert!(home.say(&["presence", "details", "project"]).contains("the folder name of the Git project in front"));
+    client.cleared(helper, 2);
+    assert_eq!(home.rex_asked(), r#"{"session":false,"directory":true}"#, "the session's label is no longer asked for");
+    let mut client = discord.welcome(Duration::from_secs(30));
+    let project_only = client.shows(1, Some("Project: client-site"));
+    assert_ne!(project_only, helper);
+
+    // Back to no names: Rex is asked about no session, and none is shown even if one were reported.
+    assert!(home.say(&["presence", "details", "generic"]).contains("the fixed line and no names"));
+    client.cleared(project_only, 2);
+    assert_eq!(home.rex_asked(), r#"{"session":false,"directory":false}"#);
+    let mut client = discord.welcome(Duration::from_secs(30));
+    let generic = client.activity(1);
+    home.rex_shows(Some("fix-login"), Some(&tool));
+    assert!(discord.quiet());
+
+    // Raising the details again needs a yes, and without one the activity stays as it is.
+    let refused = home.milo(&["presence", "details", "session"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8(refused.stderr).unwrap().contains("The details were left as they were"));
+    assert!(alive(generic));
+    assert!(home.say(&["presence", "disable"]).starts_with("Discord presence is off."));
+    client.cleared(generic, 2);
+}
+
+#[test]
+fn an_application_of_your_own_is_kept_until_you_go_back_to_milos() {
+    const OWN: &str = "1234567890123456789";
+    let home = Home::new();
+    let discord = home.discord();
+    home.rex_says("active");
+    // A choice saved by the release before Milo had an application of its own.
+    fs::write(home.root.join(".config/milo/discord.conf"), format!("presence = false\napplication_id = {OWN}\n"))
+        .unwrap();
+    assert!(
+        home.say(&["presence"])
+            .starts_with(&format!("Discord presence: off\nApplication: your own, {OWN}\nDetails: generic"))
+    );
+
+    home.enable();
+    let mut client = discord.accept_within(Duration::from_secs(30));
+    assert_eq!(client.frame(), Some((0, format!(r#"{{"v":1,"client_id":"{OWN}"}}"#))), "the saved application is kept");
+    client.send(1, READY);
+    let helper = client.activity(1);
+
+    assert!(
+        home.say(&["presence", "application", "official"]).starts_with("Discord presence uses Milo's application.")
+    );
+    client.cleared(helper, 2);
+    let mut official = discord.welcome(Duration::from_secs(30));
+    official.activity(1);
+    assert_eq!(fs::read_to_string(home.root.join(".config/milo/discord.conf")).unwrap(), "presence = true\n");
 }

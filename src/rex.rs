@@ -324,14 +324,32 @@ impl Drop for ShellObserver {
     }
 }
 
-/// Whether a Rex app has a session open, which is all the presence helper learns about Rex.
+/// What the presence helper learns about Rex: whether a Rex app has a
+/// session open and, only when asked for, what is in front.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AppActivity {
     Unchanged,
-    Active,
+    Active(Front),
     Idle,
     /// The script ended, as it does when the Rex server stops.
     Closed,
+}
+
+/// The one session that a Rex app on this computer is showing. Both parts
+/// are unknown unless the script was asked for them and could tell.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Front {
+    /// The session's label, as Rex holds it.
+    pub session: Option<String>,
+    /// Where the program in that session's focused pane is working.
+    pub directory: Option<PathBuf>,
+}
+
+/// Which parts of `Front` the script may ask Rex about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrontParts {
+    pub session: bool,
+    pub directory: bool,
 }
 
 /// A local Rex script that says when the first Rex app attaches to a
@@ -344,9 +362,12 @@ pub struct AppObserver {
 
 impl AppObserver {
     /// `rex` is the program to run, since the Rex server's own path leaves it out.
-    pub fn start(rex: &OsStr) -> Option<Self> {
+    /// With no `parts`, the script asks Rex for nothing but its connected apps.
+    pub fn start(rex: &OsStr, parts: FrontParts) -> Option<Self> {
+        let args = format!(r#"{{"session":{},"directory":{}}}"#, parts.session, parts.directory);
         let mut child = Command::new(rex)
-            .args(["--autostart=false", "do", "--all", "--fail-fast", "-e", include_str!("rex_presence.lua")])
+            .args(["--autostart=false", "do", "--all", "--fail-fast", "--args", &args, "-e"])
+            .arg(include_str!("rex_presence.lua"))
             // The script hears every session, whichever pane or app started the helper.
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK")
@@ -433,11 +454,19 @@ impl Report for AppActivity {
     const CLOSED: Self = Self::Closed;
 
     fn decode(line: &[u8]) -> Option<Self> {
-        match line {
-            b"milo-rex active" => Some(Self::Active),
-            b"milo-rex idle" => Some(Self::Idle),
-            _ => None,
+        let report = line.strip_prefix(b"milo-rex ")?;
+        if report == b"idle" {
+            return Some(Self::Idle);
         }
+        let mut words = report.split(|&b| b == b' ');
+        if words.next()? != b"active" {
+            return None;
+        }
+        // A name or folder the script left out, or wrote in a way that cannot be read, is not known.
+        let mut field = || words.next().filter(|word| *word != b"-").and_then(unhex);
+        let session = field().and_then(|label| String::from_utf8(label).ok());
+        let directory = field().map(|path| PathBuf::from(OsString::from_vec(path))).filter(|path| path.is_absolute());
+        Some(Self::Active(Front { session, directory }))
     }
 
     fn unchanged(&self) -> bool {
@@ -509,7 +538,15 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
     if code == b"-" {
         return Some(ShellChange::Unreported);
     }
-    if !code.len().is_multiple_of(2) || !code.starts_with(b"2f") {
+    if !code.starts_with(b"2f") {
+        return None;
+    }
+    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(unhex(code)?))))
+}
+
+/// The bytes a script wrote as lowercase hex, which may hold anything but a NUL.
+fn unhex(code: &[u8]) -> Option<Vec<u8>> {
+    if !code.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(code.len() / 2);
@@ -525,7 +562,7 @@ fn decode_change(line: &[u8]) -> Option<ShellChange> {
         }
         bytes.push(byte);
     }
-    Some(ShellChange::Directory(PathBuf::from(OsString::from_vec(bytes))))
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -607,6 +644,26 @@ mod tests {
         assert!(parse("block:01a1f929-dc65-7cc5-9ba2-cac3108697bf"));
         assert!(!parse("block:01a1f929dc65-7-cc5-9ba2-cac3108697bf"));
         assert!(!parse("block:------------------------------------"));
+    }
+
+    #[test]
+    fn an_app_report_names_what_is_in_front_only_in_whole_readable_fields() {
+        use super::{AppActivity, Front};
+        let mut decoder = Frame::<AppActivity>::default();
+        let front = |session: Option<&str>, directory: Option<&str>| {
+            AppActivity::Active(Front { session: session.map(str::to_owned), directory: directory.map(Into::into) })
+        };
+        assert_eq!(decoder.read(b"milo-rex idle\n"), AppActivity::Idle);
+        assert_eq!(decoder.read(b"milo-rex active\n"), front(None, None));
+        assert_eq!(decoder.read(b"milo-rex active - -\n"), front(None, None));
+        // "a b" and "/p q", with the spaces inside the fields and not between them.
+        assert_eq!(decoder.read(b"milo-rex active 612062 2f702071\n"), front(Some("a b"), Some("/p q")));
+        assert_eq!(decoder.read(b"milo-rex active - 2f70\n"), front(None, Some("/p")));
+        // A label that is not text, a folder that is not a whole path, and a broken field are all unknown.
+        assert_eq!(decoder.read(b"milo-rex active ff 70\n"), front(None, None));
+        assert_eq!(decoder.read(b"milo-rex active 6g 2f7\n"), front(None, None));
+        // Anything else the script or Rex prints is not a report.
+        assert_eq!(decoder.read(b"listening: 8 handlers\nmilo-rex busy\n"), AppActivity::Unchanged);
     }
 
     #[test]

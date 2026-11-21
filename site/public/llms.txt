@@ -14,7 +14,7 @@ milo does not write to the project it displays. The v0.1.4 prebuilt release is f
 - [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Rex actions, new shell tabs and the Claude Code status line.
 - [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md): Keyboard shortcuts and what the panes show.
 - [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md): Where the figures come from and what they mean.
-- [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the application ID you supply, and its limits.
+- [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the opt-in session and project names, Milo's Discord application or your own, and its limits.
 - [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md): Pane sizes, history and the file reader.
 
 ## Developing milo

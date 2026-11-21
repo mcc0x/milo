@@ -305,8 +305,21 @@ fn report_with_worktree(
     .unwrap();
     let presence = crate::presence::Control::at(store.config.clone(), store.state.clone());
     match presence.status() {
-        Ok((setting, _)) if !setting.enabled => out.push_str("Discord presence: off\n"),
-        Ok((_, state)) => writeln!(out, "Discord presence: on. {}", state.sentence()).unwrap(),
+        Ok(status) if !status.setting.enabled => out.push_str("Discord presence: off\n"),
+        Ok(status) => {
+            let setting = status.setting;
+            let application = match setting.application {
+                Some(own) => format!("your own application {own}"),
+                None => "Milo's application".to_owned(),
+            };
+            writeln!(
+                out,
+                "Discord presence: on, under {application}, details {}. {}",
+                setting.details.value(),
+                status.sentence()
+            )
+            .unwrap()
+        }
         Err(_) => {
             health.warn("Milo could not read the Discord presence setting.");
             writeln!(

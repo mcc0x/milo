@@ -170,9 +170,11 @@ close the reader on an unsaved draft and gets the draft back at the next edit.
 
 ### Changing Discord presence
 
-[Discord presence](docs/presence.md) is the one thing Milo publishes, so its rules are strict. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed text in `src/presence/discord.rs`. Never add a session, tab, project or file name, a path, a command or a terminal's text to it, by default or behind a setting, and keep `src/rex_presence.lua` asking Rex only whether an app has a session open. Whatever the activity holds must be said in `presence::PUBLIC`, which every surface shows before turning presence on.
+[Discord presence](docs/presence.md) is the one thing Milo publishes, so its rules are strict. It stays off until someone turns it on, and off means no process, no socket and no timer: `tests/presence.rs` checks that. The activity is the fixed line in `src/presence/discord.rs`, under Milo's public application ID or one the person gave. Milo holds no bot, token or secret for either, and none may be added.
 
-`presence::Control` is the only way to read or change the choice, so `milo presence`, Settings and the browser editor cannot disagree. One helper holds `presence.lock` for as long as it runs; a second gives up rather than set the activity in turn.
+A second line is shown only for the *details* a person chose: the name of the session in front, the folder name of the Git project in its focused pane, or both. The default shows neither, and a choice saved by an earlier release must go on showing only what it showed. `src/rex_presence.lua` may look at sessions only for a name that was chosen, and never reads a tab's or terminal's title, a screen, a command line or a status text. Every name goes through `src/presence/label.rs`, which keeps one short line of plain text and drops whole anything that could be a path or an address. Never show a path, a remote address, a branch, a file name or a command, by default or behind a setting. When the script cannot tell which one session is in front, it reports none, and no name is shown. `presence::public` says what each choice shows, and every surface shows that text before turning presence on or adding a name.
+
+`presence::Control` is the only way to read or change the choice, so `milo presence`, Settings and the browser editor cannot disagree. One helper holds `presence.lock` for as long as it runs; a second gives up rather than set the activity in turn. A change to the details or the application replaces the helper, which takes the old activity down first.
 
 No test may reach a real Discord. The helper looks for Discord's socket in one folder, the first of `XDG_RUNTIME_DIR`, `TMPDIR`, `TMP` and `TEMP` that is set, so a test that starts a helper gives it an environment in which the first of those names a folder of the test's own, and listens there as a stand-in. Do the same when trying a build by hand, and do not publish to your own Discord account from a test. With Rex installed, `cargo test --test rex_lab -- --ignored discord_presence` checks the watch on a disposable Rex server. What a real Discord app then displays can only be checked by hand with a test application and account.
 
@@ -265,9 +267,10 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/pane.rs` | Defines the pane interface and runs the shared terminal loop. |
 | `src/paths.rs` | Finds milo's configuration and state folders. |
 | `src/picture.rs` | Loads pictures and converts them to PNG for the terminal. |
-| `src/presence.rs` | Keeps the one Discord presence choice and turns it on, off, and into a status for every settings surface. |
-| `src/presence/discord.rs` | Speaks Discord's local RPC protocol: the socket, the frames, and the one fixed activity. |
-| `src/presence/helper.rs` | Runs the single background process that shows the activity while a Rex app has a session open. |
+| `src/presence.rs` | Keeps the one Discord presence choice, says what each choice makes public, and turns it on, off, and into a status for every settings surface. |
+| `src/presence/discord.rs` | Speaks Discord's local RPC protocol: the socket, the frames, the fixed activity and its optional second line. |
+| `src/presence/helper.rs` | Runs the single background process that shows the activity while a Rex app has a session open, and the chosen names of what is in front. |
+| `src/presence/label.rs` | Makes a session or project name fit to show, or leaves it out. |
 | `src/read.rs` | Reads regular files and the names that file links point to. |
 | `src/reader.rs` | Keeps reader state, handles navigation and updates, and starts and ends an edit. |
 | `src/reader/buffer.rs` | Holds the lines of a draft with their endings, and its undo history. |
@@ -280,7 +283,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
-| `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open, and nothing else. |
+| `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Draws setup choices, the save preview, and the layout sketch. |
 | `src/setup/actions.lua` | Defines Rex actions that arrange, add, or close milo panes or name a session for its project. |
@@ -350,4 +353,4 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
-| `tests/web-smoke.cjs` | Saves layout and usage tool choices and turns Discord presence on and off in the browser editor of a built binary in Chromium, then closes it. |
+| `tests/web-smoke.cjs` | Saves layout and usage tool choices and turns Discord presence, its names and its application on and off in the browser editor of a built binary in Chromium, then closes it. |

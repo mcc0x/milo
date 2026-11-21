@@ -276,19 +276,23 @@ async function until(happened, what) {
 }
 
 async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
-  const id = '1234567890123456789';
+  const milo = '1573574411418599586';
+  const own = '1234567890123456789';
   const file = join(env.XDG_CONFIG_HOME, 'milo', 'discord.conf');
+  // The last thing each kind of frame said: who connected, and what Discord was told to show.
+  const last = opcode => discord.frames.filter(([code, payload]) => code === opcode &&
+    (opcode === 0 || payload.includes('"activity"'))).map(([, payload]) => JSON.parse(payload)).at(-1);
+  const shown = () => last(1)?.args.activity;
   await section(page, 'Workflow').click();
   const card = page.getByRole('region', {name: 'Discord presence', exact: true});
   const turnOn = button(card, 'Turn on…');
   const question = dialog(page, 'Turn on Discord presence?');
-  await card.getByText('Anyone who can see your Discord activity sees it').waitFor();
+  const names = dialog(page, 'Show these names on Discord?');
+  const choice = name => card.getByRole('radio', {name, exact: true});
+  await card.getByText('Discord will show Milo\'s name and icon with the line “In a Rex session”').waitFor();
   await card.getByText('Milo is not connected to Discord and shows nothing there.').waitFor();
+  assert(await choice('Generic').isChecked(), 'no names are shown unless chosen');
 
-  await turnOn.click();
-  await page.getByRole('alert').filter({hasText: 'Enter your Discord application ID first'}).waitFor();
-  assert.equal(await question.count(), 0, 'nothing is asked before there is an application to show');
-  await card.getByRole('textbox', {name: 'Application ID', exact: true}).fill(id);
   await turnOn.click();
   await question.getByText('Milo sends nothing else: no session, tab, project or file names').waitFor();
   await button(question, 'Keep editing').click();
@@ -296,31 +300,62 @@ async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
   await assert.rejects(readFile(file), {code: 'ENOENT'}, 'reading what becomes public saves nothing');
   assert.equal(discord.frames.length, 0, 'Discord is not contacted before presence is turned on');
 
+  // No application ID is asked for: Milo's own is used.
   await turnOn.click();
   await button(question, 'Turn on').click();
   await status(page, 'Discord presence is on. Discord is showing “In a Rex session”.').waitFor();
   await button(card, 'Turn off').waitFor();
-  assert.equal(await readFile(file, 'utf8'), `presence = true\napplication_id = ${id}\n`);
-  await until(() => discord.frames.length === 2, 'the helper introduced itself and set the activity');
-  const [handshake, activity] = discord.frames;
-  assert.deepEqual(handshake, [0, `{"v":1,"client_id":"${id}"}`]);
-  assert.equal(activity[0], 1);
-  const sent = JSON.parse(activity[1]);
-  assert.deepEqual(sent, {
-    cmd: 'SET_ACTIVITY', args: {pid: sent.args.pid, activity: {details: 'In a Rex session'}}, nonce: 'milo-1',
-  }, 'the activity is one fixed line and nothing about the work');
+  assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
+  await until(() => shown(), 'the helper introduced itself and set the activity');
+  assert.deepEqual(last(0), {v: 1, client_id: milo});
+  // Rex reports a session in front, and none of it is shown while no names are chosen.
+  assert.deepEqual(shown(), {details: 'In a Rex session'}, 'the activity is one fixed line and nothing about the work');
   assert.equal(execFileSync(binary, ['presence'], {cwd, env, encoding: 'utf8'}),
-    'Discord presence: on\nApplication ID: 1234567890123456789\nDiscord is showing “In a Rex session”.\n');
+    `Discord presence: on\nApplication: Milo's, ${milo}\nDetails: generic, which shows the fixed line and no names\n` +
+    'Discord is showing “In a Rex session”.\n');
+
+  // A name is not shown until the page has said what it shows and been told to go ahead.
+  await choice('Session name').click();
+  await names.getByText('They will also see the name of the Rex session in front on this computer').waitFor();
+  await button(names, 'Keep editing').click();
+  await names.waitFor({state: 'hidden'});
+  assert(await choice('Generic').isChecked(), 'backing out keeps what was shown');
+  assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
+  await choice('Session name').click();
+  await button(names, 'Show names').click();
+  await status(page, 'Discord presence shows the name of the session in front.').waitFor();
+  await choice('Session name').and(page.locator(':checked')).waitFor({state: 'attached'});
+  assert.equal(await readFile(file, 'utf8'), 'presence = true\ndetails = session\n');
+  await until(() => shown()?.state === 'Session: smoke session', 'the session in front is named, and its folder is not');
+
+  // Showing less asks nothing and takes the name down.
+  await choice('Generic').click();
+  await status(page, 'Discord presence shows the fixed line and no names.').waitFor();
+  await until(() => shown() && !('state' in shown()), 'the name is gone');
+  assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
+
+  // An application of your own replaces Milo's until you go back.
+  await button(card, 'Use my own').click();
+  await page.getByRole('alert').filter({hasText: 'Enter the Application ID of your own Discord application'}).waitFor();
+  await card.getByRole('textbox', {name: 'Shown under Milo’s application', exact: true}).fill(own);
+  await button(card, 'Use my own').click();
+  await status(page, `Discord presence uses your application ${own}.`).waitFor();
+  await until(() => last(0).client_id === own, 'the helper introduced the other application');
+  assert.equal(await readFile(file, 'utf8'), `presence = true\napplication_id = ${own}\n`);
+  await button(card, 'Use Milo’s application').click();
+  await status(page, 'Discord presence uses Milo\'s application.').waitFor();
+  await until(() => last(0).client_id === milo, 'the helper is back under Milo\'s application');
+  assert.equal(await readFile(file, 'utf8'), 'presence = true\n');
 
   await button(card, 'Turn off').click();
   await status(page, 'Discord presence is off.').waitFor();
   await turnOn.waitFor();
   await until(() => discord.connections() === 0, 'turning presence off closed the connection to Discord');
-  assert.deepEqual(discord.frames.slice(2).map(([opcode, payload]) => [opcode, JSON.parse(payload)]),
-    [[1, {cmd: 'SET_ACTIVITY', args: {pid: sent.args.pid}, nonce: 'milo-2'}]], 'the activity was taken down first');
-  assert.equal(await readFile(file, 'utf8'), `presence = false\napplication_id = ${id}\n`);
+  const [, final] = discord.frames.at(-1);
+  assert(!final.includes('"activity"'), 'the activity was taken down before the connection closed');
+  assert.equal(await readFile(file, 'utf8'), 'presence = false\n');
   assert.equal(await status(page, clean).count(), 1, 'presence is saved at once and leaves no draft');
-  console.log('Discord presence: asked first, shown to the stand-in for Discord, and taken down when turned off');
+  console.log('Discord presence: asked first, names only once chosen, own application and back, taken down when turned off');
   await section(page, 'Layout').click();
 }
 
@@ -484,7 +519,9 @@ async function main() {
   try {
     await Promise.all([mkdir(cwd), mkdir(home), mkdir(join(fixture, 'bin'))]);
     const rex = join(fixture, 'bin', 'rex');
-    await writeFile(rex, '#!/bin/sh\ncase " $* " in *" -e "*) echo "milo-rex active"; exec sleep 600 ;; esac\n');
+    // It reports a session called "smoke session" in front, working in /tmp.
+    const front = 'milo-rex active 736d6f6b652073657373696f6e 2f746d70';
+    await writeFile(rex, `#!/bin/sh\ncase " $* " in *" -e "*) echo "${front}"; exec sleep 600 ;; esac\n`);
     await chmod(rex, 0o700);
     discord = await standInForDiscord(env.XDG_RUNTIME_DIR);
     execFileSync('git', ['init', '-q', '--template='], {cwd, env});

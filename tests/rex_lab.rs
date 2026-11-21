@@ -895,7 +895,8 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
     let discord = std::os::unix::net::UnixListener::bind(lab.root.join("tmp/discord-ipc-0")).unwrap();
     discord.set_nonblocking(true).unwrap();
 
-    let on = lab.milo(&["presence", "enable", "1234567890123456789", "--yes"]);
+    // Asking for both names makes the script look at sessions, which this server must accept.
+    let on = lab.milo(&["presence", "enable", "--details", "both", "--yes"]);
     assert!(on.contains("Nothing is shown until a Rex app opens a session."), "{on}");
     lab.new_session("more", "another tab", &first);
     std::thread::sleep(Duration::from_secs(2));

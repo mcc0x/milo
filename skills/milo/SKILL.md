@@ -27,8 +27,10 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
   integration. Do not change Rex's global theme, font or keyboard shortcuts.
 - Discord presence is off unless the user turned it on, and it publishes on
   their Discord profile. `milo presence` reports it without changing anything.
-  Run `milo presence enable` or `disable` only when the user asks, and never
-  pass `--yes` for them: it skips the notice of what becomes public.
+  Run `milo presence enable`, `details`, `application` or `disable` only when
+  the user asks, and never pass `--yes` for them: it skips the notice of what
+  becomes public. Never raise the details to `session`, `project` or `both`
+  on your own: they show the session's name or the project's folder name.
 
 ## Commands
 
