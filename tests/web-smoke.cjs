@@ -3,7 +3,8 @@
 const assert = require('node:assert/strict');
 const {execFileSync, spawn} = require('node:child_process');
 const {once} = require('node:events');
-const {mkdir, mkdtemp, readFile, rm} = require('node:fs/promises');
+const {chmod, mkdir, mkdtemp, readFile, rm, writeFile} = require('node:fs/promises');
+const {createServer} = require('node:net');
 const {tmpdir} = require('node:os');
 const {basename, join, resolve} = require('node:path');
 const {createInterface} = require('node:readline');
@@ -221,6 +222,97 @@ async function manageMenuApp(page, url, env) {
   await section(page, 'Layout').click();
 }
 
+// Stands in for the Discord app: listens where the presence helper looks,
+// answers the handshake as Discord does, and keeps every frame it is sent.
+async function standInForDiscord(folder) {
+  const frames = [];
+  let open = 0;
+  const server = createServer(socket => {
+    open += 1;
+    let received = Buffer.alloc(0);
+    socket.on('data', data => {
+      received = Buffer.concat([received, data]);
+      while (received.length >= 8 && received.length >= 8 + received.readUInt32LE(4)) {
+        const opcode = received.readUInt32LE(0);
+        const end = 8 + received.readUInt32LE(4);
+        const payload = received.subarray(8, end).toString();
+        received = received.subarray(end);
+        frames.push([opcode, payload]);
+        if (opcode === 0) {
+          const ready = Buffer.from('{"cmd":"DISPATCH","data":{"v":1,"config":{}},"evt":"READY","nonce":null}');
+          const header = Buffer.alloc(8);
+          header.writeUInt32LE(1, 0);
+          header.writeUInt32LE(ready.length, 4);
+          socket.write(Buffer.concat([header, ready]));
+        }
+      }
+    });
+    socket.on('error', () => {});
+    socket.on('close', () => { open -= 1; });
+  });
+  await mkdir(folder);
+  server.listen(join(folder, 'discord-ipc-0'));
+  await once(server, 'listening');
+  return {frames, connections: () => open, close: () => server.close()};
+}
+
+async function until(happened, what) {
+  const deadline = Date.now() + timeout;
+  while (!happened()) {
+    assert(Date.now() < deadline, what);
+    await delay(20);
+  }
+}
+
+async function turnPresenceOnAndOff(page, binary, cwd, env, discord) {
+  const id = '1234567890123456789';
+  const file = join(env.XDG_CONFIG_HOME, 'milo', 'discord.conf');
+  await section(page, 'Workflow').click();
+  const card = page.getByRole('region', {name: 'Discord presence', exact: true});
+  const turnOn = button(card, 'Turn on…');
+  const question = dialog(page, 'Turn on Discord presence?');
+  await card.getByText('Anyone who can see your Discord activity sees it').waitFor();
+  await card.getByText('Milo is not connected to Discord and shows nothing there.').waitFor();
+
+  await turnOn.click();
+  await page.getByRole('alert').filter({hasText: 'Enter your Discord application ID first'}).waitFor();
+  assert.equal(await question.count(), 0, 'nothing is asked before there is an application to show');
+  await card.getByRole('textbox', {name: 'Application ID', exact: true}).fill(id);
+  await turnOn.click();
+  await question.getByText('Milo sends nothing else: no session, tab, project or file names').waitFor();
+  await button(question, 'Keep editing').click();
+  await question.waitFor({state: 'hidden'});
+  await assert.rejects(readFile(file), {code: 'ENOENT'}, 'reading what becomes public saves nothing');
+  assert.equal(discord.frames.length, 0, 'Discord is not contacted before presence is turned on');
+
+  await turnOn.click();
+  await button(question, 'Turn on').click();
+  await status(page, 'Discord presence is on. Discord is showing “In a Rex session”.').waitFor();
+  await button(card, 'Turn off').waitFor();
+  assert.equal(await readFile(file, 'utf8'), `presence = true\napplication_id = ${id}\n`);
+  await until(() => discord.frames.length === 2, 'the helper introduced itself and set the activity');
+  const [handshake, activity] = discord.frames;
+  assert.deepEqual(handshake, [0, `{"v":1,"client_id":"${id}"}`]);
+  assert.equal(activity[0], 1);
+  const sent = JSON.parse(activity[1]);
+  assert.deepEqual(sent, {
+    cmd: 'SET_ACTIVITY', args: {pid: sent.args.pid, activity: {details: 'In a Rex session'}}, nonce: 'milo-1',
+  }, 'the activity is one fixed line and nothing about the work');
+  assert.equal(execFileSync(binary, ['presence'], {cwd, env, encoding: 'utf8'}),
+    'Discord presence: on\nApplication ID: 1234567890123456789\nDiscord is showing “In a Rex session”.\n');
+
+  await button(card, 'Turn off').click();
+  await status(page, 'Discord presence is off.').waitFor();
+  await turnOn.waitFor();
+  await until(() => discord.connections() === 0, 'turning presence off closed the connection to Discord');
+  assert.deepEqual(discord.frames.slice(2).map(([opcode, payload]) => [opcode, JSON.parse(payload)]),
+    [[1, {cmd: 'SET_ACTIVITY', args: {pid: sent.args.pid}, nonce: 'milo-2'}]], 'the activity was taken down first');
+  assert.equal(await readFile(file, 'utf8'), `presence = false\napplication_id = ${id}\n`);
+  assert.equal(await status(page, clean).count(), 1, 'presence is saved at once and leaves no draft');
+  console.log('Discord presence: asked first, shown to the stand-in for Discord, and taken down when turned off');
+  await section(page, 'Layout').click();
+}
+
 async function usageToolsPersisted(page) {
   await section(page, 'Appearance').click();
   const expected = [['Codex', 'Auto'], ['Claude Code', 'Always show'], ['OpenCode', 'Hide']];
@@ -367,15 +459,23 @@ async function main() {
   const home = join(fixture, 'home');
   // Do not inherit REX_*, GIT_* or settings overrides from the developer's shell.
   const env = {
-    PATH: process.env.PATH,
+    // A stand-in for rex comes first, so the presence helper hears that an app has a session open.
+    PATH: `${join(fixture, 'bin')}:${process.env.PATH}`,
     HOME: home,
     XDG_CONFIG_HOME: join(home, '.config'),
     XDG_STATE_HOME: join(home, '.local', 'state'),
     GIT_CONFIG_NOSYSTEM: '1',
+    // The only folder the presence helper looks for Discord in: never the developer's own Discord.
+    XDG_RUNTIME_DIR: join(fixture, 'r'),
   };
   let browser;
+  let discord;
   try {
-    await Promise.all([mkdir(cwd), mkdir(home)]);
+    await Promise.all([mkdir(cwd), mkdir(home), mkdir(join(fixture, 'bin'))]);
+    const rex = join(fixture, 'bin', 'rex');
+    await writeFile(rex, '#!/bin/sh\ncase " $* " in *" -e "*) echo "milo-rex active"; exec sleep 600 ;; esac\n');
+    await chmod(rex, 0o700);
+    discord = await standInForDiscord(env.XDG_RUNTIME_DIR);
     execFileSync('git', ['init', '-q', '--template='], {cwd, env});
     browser = await chromium.launch({executablePath: process.env.CHROME_BIN, env});
     const desktop = await browser.newContext();
@@ -388,6 +488,7 @@ async function main() {
       await saveNumbers(page, cwd);
       await chooseUsageTools(page, binary, cwd, env);
       await manageMenuApp(page, url, env);
+      await turnPresenceOnAndOff(page, binary, cwd, env, discord);
       await movePaneDuringPendingEdit(page);
       await discardFocusedNumber(page);
       await pressAfterNumberEdit(page);
@@ -406,6 +507,11 @@ async function main() {
     try {
       await browser?.close();
     } finally {
+      // A failed run must not leave the presence helper behind.
+      try {
+        execFileSync(binary, ['presence', 'disable'], {cwd, env, stdio: 'ignore'});
+      } catch { /* The cleanup below still runs. */ }
+      discord?.close();
       await rm(fixture, {recursive: true, force: true});
     }
   }

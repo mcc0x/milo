@@ -1,7 +1,7 @@
 //! Runs Milo's Rex integration against a disposable Rex server.
 //!
 //! The server, its settings and state, the home directory and two Git
-//! worktrees live in one throwaway folder, `/tmp/milo-rex-lab-PID`. Every
+//! worktrees live in one throwaway folder, `/tmp/milo-rex-lab-PID-N`. Every
 //! `rex` this test runs names that server's socket and cannot start another
 //! server. Programs the lab's server starts inherit the lab's home and its
 //! `REX_SERVER`; the test checks that in a lab terminal and on the listener's
@@ -34,6 +34,7 @@ use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -188,7 +189,10 @@ impl Lab {
         let milo = milo.canonicalize().unwrap_or_else(|e| panic!("no Milo at {}: {e}", milo.display()));
         // A Unix socket's path is limited to about a hundred bytes, which the
         // usual temporary folder on macOS nearly uses up on its own.
-        let root = Path::new("/tmp").canonicalize().unwrap().join(format!("milo-rex-lab-{}", std::process::id()));
+        // Each test here has a lab of its own.
+        static LABS: AtomicU32 = AtomicU32::new(0);
+        let lab = format!("milo-rex-lab-{}-{}", std::process::id(), LABS.fetch_add(1, Ordering::Relaxed));
+        let root = Path::new("/tmp").canonicalize().unwrap().join(lab);
         let _ = fs::remove_dir_all(&root);
         for dir in ["bin", "state", "tmp", "home/.config", "home/.local/state"] {
             fs::create_dir_all(root.join(dir)).unwrap();
@@ -874,4 +878,31 @@ fn rails_follow_their_worktree_through_new_tabs_resizes_renames_and_a_restart() 
     let [fresh, barrier] = scene.a_restart_brings_everything_back(&before, &other_session);
     scene.a_restored_rail_is_remembered_only_if_milo_runs_in_it(&two, &other_session, [&fresh, &barrier]);
     scene.a_restored_rail_needs_confirmation_to_rebuild(&two);
+}
+
+/// The lab has scripts attached to its sessions, as the listener and the
+/// presence helper's own watch are, but no Rex app. Discord presence is for a
+/// person with Rex open, so here nothing may be shown. The stand-in for
+/// Discord listens in the lab's temporary folder, the only place the helper
+/// looks: it is never the Discord app of whoever runs this.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the_server() {
+    let mut lab = Lab::start();
+    let [first, _] = lab.worktrees();
+    lab.new_session("lab", "first tab", &first);
+    lab.start_app();
+    let discord = std::os::unix::net::UnixListener::bind(lab.root.join("tmp/discord-ipc-0")).unwrap();
+    discord.set_nonblocking(true).unwrap();
+
+    let on = lab.milo(&["presence", "enable", "1234567890123456789", "--yes"]);
+    assert!(on.contains("Nothing is shown until a Rex app opens a session."), "{on}");
+    lab.new_session("more", "another tab", &first);
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(discord.accept().is_err(), "scripts attached to sessions are not a person using Rex");
+    assert!(lab.milo(&["presence"]).contains("Nothing is shown until a Rex app opens a session."));
+
+    lab.stop_server();
+    assert!(soon(|| lab.milo(&["presence"]).contains("Milo's presence helper is not running")));
+    assert!(discord.accept().is_err());
 }

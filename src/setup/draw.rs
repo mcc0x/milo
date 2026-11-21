@@ -40,6 +40,9 @@ impl RowHit {
     }
 }
 
+// Each row on screen has a place in `Visible::rows`.
+const _: () = assert!(super::WORKFLOW.len() <= TUNE.len());
+
 #[derive(Default)]
 pub(super) struct Visible {
     current: bool,
@@ -295,6 +298,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     Panel::Confirm(Confirm::Repair) => "Repair?",
                     Panel::Confirm(Confirm::Remove) => "Remove?",
                     Panel::Confirm(Confirm::RemoveMenuBar) => "Remove app?",
+                    Panel::Confirm(Confirm::Presence) => "Discord?",
                     _ => self.panel.title(),
                 }
             } else {
@@ -374,6 +378,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::RemoveMenuBar) => {
                 "Remove only the menu bar app. The Milo CLI and pane settings stay as they are."
             }
+            Panel::Confirm(Confirm::Presence) => crate::presence::PUBLIC,
         })
     }
 
@@ -561,6 +566,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::Capture if self.trial.is_some() => "Undo the current trial first.",
             Row::Capture if self.target.is_none() => "Open setup from a tiled Rex shell to use this action.",
             Row::SaveWorktree => self.root.as_deref().and_then(|root| root.to_str()).unwrap_or(cell.detail),
+            Row::Presence => match self.presence_view {
+                Some((setting, state)) if setting.enabled => state.sentence(),
+                Some(_) => cell.detail,
+                None => "Could not read the saved Discord presence choice. Milo will leave it alone.",
+            },
             Row::ClaudeLimits | Row::SaveClaude => match self.claude {
                 Claude::Foreign => "Milo will leave your Claude Code status line alone.",
                 Claude::NotOwned => "You already added Milo to this Claude Code status line.",
@@ -766,6 +776,24 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 ),
                 None => unreachable!("the menu bar action is hidden when unavailable"),
             },
+            Row::Presence => Cell::toggle(
+                "Discord presence",
+                "Discord",
+                self.presence_view.is_some_and(|(setting, _)| setting.enabled),
+                "Show “In a Rex session” on your Discord profile while Rex is in use. Off until you turn it on, and it asks first.",
+            ),
+            Row::PresenceId => Cell::choice(
+                "Application ID",
+                "App ID",
+                if crate::presence::application_id(&self.application_draft).is_some() {
+                    "Ready"
+                } else if self.application_draft.is_empty() {
+                    "Needed"
+                } else {
+                    "Typing"
+                },
+                "The 17 to 19 digit ID of a Discord application you created at discord.com/developers/applications. Its name and icon are what Discord shows. Type the digits. Enter here clears them.",
+            ),
             Row::RemoveMenuBar => Cell::action(
                 "Remove Milo menu bar app…",
                 "Remove app…",
@@ -812,6 +840,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 Panel::Confirm(Confirm::RemoveMenuBar) => {
                     Cell::action("Remove app now", "Remove app now", "Remove Milo from the menu bar.")
                 }
+                Panel::Confirm(Confirm::Presence) => Cell::action(
+                    "Show it on my Discord profile",
+                    "Show on Discord",
+                    "Saves the choice and starts showing “In a Rex session” while Rex is in use.",
+                ),
                 _ => unreachable!("only confirmation pages have a continue row"),
             },
         }
@@ -843,6 +876,7 @@ impl Panel {
             Self::Confirm(Confirm::Repair) => "Repair integration?",
             Self::Confirm(Confirm::Remove) => "Remove integration?",
             Self::Confirm(Confirm::RemoveMenuBar) => "Remove menu app?",
+            Self::Confirm(Confirm::Presence) => "Turn on Discord presence?",
             Self::Exit => "Unsaved changes",
         }
     }

@@ -323,7 +323,8 @@ pub(crate) fn setup_status(failed: bool) {
     }
 }
 
-fn listen() -> io::Result<PipeReader> {
+/// A pipe that a signal handler writes to, so that a wait on it ends.
+fn wake_pipe() -> io::Result<PipeReader> {
     let (reader, writer) = io::pipe()?;
     // A signal just before a wait must still wake it, without ever
     // blocking the handler or leaving the event loop stuck reading.
@@ -334,6 +335,21 @@ fn listen() -> io::Result<PipeReader> {
         }
     }
     WAKE.store(writer.into_raw_fd(), Ordering::Relaxed);
+    Ok(reader)
+}
+
+/// For a helper with no terminal: a pipe that becomes readable when the
+/// process is asked to end, which also sets `TERMINATED`.
+pub fn termination() -> io::Result<PipeReader> {
+    let reader = wake_pipe()?;
+    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        install(sig, on_term)?;
+    }
+    Ok(reader)
+}
+
+fn listen() -> io::Result<PipeReader> {
+    let reader = wake_pipe()?;
     install(libc::SIGWINCH, on_winch)?;
     for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
         install(sig, on_term)?;

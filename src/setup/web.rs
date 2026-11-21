@@ -49,7 +49,9 @@ impl Editor {
         } else {
             (crate::preferences::worktree(Path::new(".")), None)
         };
-        Self::new(store, inside, target, root, window, rex::run)
+        let mut editor = Self::new(store, inside, target, root, window, rex::run);
+        editor.setup.presence = editor.setup.presence.take().map(presence::Control::starting_helper);
+        editor
     }
 
     fn new(
@@ -221,6 +223,22 @@ impl Editor {
         } else {
             out.push_str("null");
         }
+        out.push_str(",\"presence\":");
+        // Read now, not when the editor opened: the helper's state changes on its own.
+        match setup.presence.as_ref().and_then(|control| control.status().ok()) {
+            // The ID is text: it is too long a number for a browser to keep exact.
+            Some((setting, state)) => write!(
+                out,
+                "{{\"enabled\":{},\"application_id\":{},\"status\":{},\"public\":{},\"help\":{}}}",
+                setting.enabled,
+                Optional(setting.application.map(|id| format!("\"{id}\""))),
+                Quoted(state.sentence()),
+                Quoted(presence::PUBLIC),
+                Quoted(presence::APPLICATION_HELP),
+            )
+            .expect("writing to a string"),
+            None => out.push_str("null"),
+        }
         out.push('}');
         out
     }
@@ -302,6 +320,14 @@ impl Editor {
                 let target = if setup.inside { self.require_tab().map(|()| setup.target.as_ref()) } else { Ok(None) };
                 self.doctor = Some(doctor::health_anchored(setup.store()?, setup.root.as_deref(), target)?);
                 None
+            }
+            Action::Presence(change) if self.setup.presence.is_some() => {
+                // One global choice, saved at once like the menu app, and no part of a draft.
+                let result = match change {
+                    Some(application) => self.setup.enable_presence(Some(application)),
+                    None => self.setup.disable_presence(),
+                };
+                Some(result.map(Cow::Owned))
             }
             Action::Menubar(action) if menubar::installed().is_some() => {
                 // Install also opens an existing app, replacing it only when the bundled copy differs.
@@ -420,6 +446,8 @@ enum Action {
     Undo,
     Doctor,
     Menubar(menubar::Action),
+    /// Turn Discord presence on for an application, or off.
+    Presence(Option<u64>),
 }
 
 impl Action {
@@ -460,6 +488,12 @@ impl Action {
                     "install" => menubar::Action::Install,
                     "uninstall" => menubar::Action::Uninstall,
                     _ => return None,
+                })
+            }
+            [None, Some(value), None, None] if action.is("presence") => {
+                Self::Presence(match value.string(19)?.as_ref() {
+                    "off" => None,
+                    application => Some(presence::application_id(application)?),
                 })
             }
             [None, None, None, None] => match action.string(7)?.as_ref() {
@@ -1131,5 +1165,64 @@ mod tests {
         assert!(action(&mut editor, r#""action":"doctor""#).is_err());
         let state = editor.state();
         assert!(field(Value::parse(state.as_bytes()).unwrap(), "doctor").null());
+    }
+
+    #[test]
+    fn discord_presence_is_one_saved_choice_that_only_an_explicit_action_changes() {
+        const ID: &str = "1234567890123456789";
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let file = store.config.join("discord.conf");
+        let mut editor = outside(store, None);
+        let presence = |json: &str| {
+            let state = Value::parse(json.as_bytes()).unwrap();
+            let presence = field(state, "presence");
+            let id = field(presence, "application_id");
+            (
+                field(presence, "enabled").boolean().unwrap(),
+                (!id.null()).then(|| id.string(19).unwrap().into_owned()),
+                field(presence, "status").string(400).unwrap().into_owned(),
+                field(presence, "public").string(600).unwrap().into_owned(),
+            )
+        };
+        let (enabled, id, status, public) = presence(&editor.state());
+        assert!(!enabled && id.is_none());
+        assert_eq!(status, "Milo is not connected to Discord and shows nothing there.");
+        assert_eq!(public, presence::PUBLIC, "the page says what becomes public before anything is turned on");
+
+        let draft = set(&mut editor, "workflow.tab_titles", "true");
+        for request in [
+            r#""action":"presence""#,
+            r#""action":"presence","value":"on""#,
+            r#""action":"presence","value":true"#,
+            r#""action":"presence","value":1234567890123456789"#,
+            r#""action":"presence","value":"12345678901234567890""#,
+            r#""action":"presence","value":"off","group":"preferences""#,
+        ] {
+            assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION, "{request}");
+        }
+        assert_eq!(editor.state(), draft);
+        assert!(!file.exists());
+
+        let on = action(&mut editor, &format!(r#""action":"presence","value":"{ID}""#)).unwrap();
+        let (enabled, id, ..) = presence(&on);
+        assert!(enabled);
+        assert_eq!(id.as_deref(), Some(ID), "the ID survives as text");
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\n"));
+        let state = Value::parse(on.as_bytes()).unwrap();
+        assert!(field(field(state, "message"), "text").string(400).unwrap().starts_with("Discord presence is on."));
+        assert_eq!(field(state, "dirty").boolean(), Some(true), "the pane preference draft is kept");
+        assert!(!editor.setup.store().unwrap().config.join("preferences.conf").exists());
+
+        let off = action(&mut editor, r#""action":"presence","value":"off""#).unwrap();
+        let (enabled, id, status, _) = presence(&off);
+        assert!(!enabled);
+        assert_eq!(id.as_deref(), Some(ID), "the application is remembered for next time");
+        assert_eq!(status, "Milo is not connected to Discord and shows nothing there.");
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = false\napplication_id = {ID}\n"));
+
+        // Another surface changed the choice; the page shows what is saved now.
+        fs::write(&file, format!("presence = true\napplication_id = {ID}\n")).unwrap();
+        assert!(presence(&editor.state()).0);
     }
 }

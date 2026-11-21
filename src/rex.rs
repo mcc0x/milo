@@ -276,7 +276,7 @@ fn reader_command(exe: &Path, file: &Path, commit: Option<&str>) -> String {
 pub struct ShellObserver {
     child: Child,
     output: ChildStdout,
-    frame: Frame,
+    frame: Frame<ShellChange>,
 }
 
 pub enum ShellChange {
@@ -324,6 +324,72 @@ impl Drop for ShellObserver {
     }
 }
 
+/// Whether a Rex app has a session open, which is all the presence helper learns about Rex.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AppActivity {
+    Unchanged,
+    Active,
+    Idle,
+    /// The script ended, as it does when the Rex server stops.
+    Closed,
+}
+
+/// A local Rex script that says when the first Rex app attaches to a
+/// session and when the last one leaves, without periodic CLI calls.
+pub struct AppObserver {
+    child: Child,
+    output: ChildStdout,
+    frame: Frame<AppActivity>,
+}
+
+impl AppObserver {
+    /// `rex` is the program to run, since the Rex server's own path leaves it out.
+    pub fn start(rex: &OsStr) -> Option<Self> {
+        let mut child = Command::new(rex)
+            .args(["--autostart=false", "do", "--all", "--fail-fast", "-e", include_str!("rex_presence.lua")])
+            // The script hears every session, whichever pane or app started the helper.
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
+            .env_remove("REX_CLIENT")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let output = child.stdout.take().expect("observer stdout was piped");
+        let observer = Self { child, output, frame: Frame::default() };
+        // SAFETY: The file descriptor is an open, privately owned pipe read end.
+        let nonblocking = unsafe { libc::fcntl(observer.fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        (nonblocking == 0).then_some(observer)
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.output.as_raw_fd()
+    }
+
+    pub fn read(&mut self) -> AppActivity {
+        self.frame.drain(&mut self.output)
+    }
+}
+
+impl Drop for AppObserver {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The `rex` to run from a process that Rex may have started with a path
+/// that leaves `rex` out: the one on the path, or else that Rex itself.
+pub fn program() -> OsString {
+    let on_path =
+        std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("rex").is_file()));
+    match parent_program() {
+        Some(parent) if !on_path && parent.file_name() == Some(OsStr::new("rex")) => parent.into_os_string(),
+        _ => "rex".into(),
+    }
+}
+
 /// Use real block IDs, never CLI labels, positions or suffixes.
 fn exact_block(id: &OsStr) -> Option<&str> {
     exact_id(id, "block:")
@@ -341,38 +407,82 @@ pub(crate) fn exact_id<'a>(id: &'a OsStr, kind: &str) -> Option<&'a str> {
     .then_some(id)
 }
 
-#[derive(Default)]
-struct Frame {
-    line: Vec<u8>,
-    oversized: bool,
+/// What an observer script prints: an update a line, of which the latest counts.
+trait Report: Sized {
+    const UNCHANGED: Self;
+    const CLOSED: Self;
+    fn decode(line: &[u8]) -> Option<Self>;
+    fn unchanged(&self) -> bool;
 }
 
-impl Frame {
-    fn drain(&mut self, input: &mut impl io::Read) -> ShellChange {
-        let mut latest = ShellChange::Unchanged;
+impl Report for ShellChange {
+    const UNCHANGED: Self = Self::Unchanged;
+    const CLOSED: Self = Self::Closed;
+
+    fn decode(line: &[u8]) -> Option<Self> {
+        decode_change(line)
+    }
+
+    fn unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+impl Report for AppActivity {
+    const UNCHANGED: Self = Self::Unchanged;
+    const CLOSED: Self = Self::Closed;
+
+    fn decode(line: &[u8]) -> Option<Self> {
+        match line {
+            b"milo-rex active" => Some(Self::Active),
+            b"milo-rex idle" => Some(Self::Idle),
+            _ => None,
+        }
+    }
+
+    fn unchanged(&self) -> bool {
+        *self == Self::Unchanged
+    }
+}
+
+struct Frame<T> {
+    line: Vec<u8>,
+    oversized: bool,
+    report: std::marker::PhantomData<T>,
+}
+
+impl<T> Default for Frame<T> {
+    fn default() -> Self {
+        Self { line: Vec::new(), oversized: false, report: std::marker::PhantomData }
+    }
+}
+
+impl<T: Report> Frame<T> {
+    fn drain(&mut self, input: &mut impl io::Read) -> T {
+        let mut latest = T::UNCHANGED;
         let mut bytes = [0; 8192];
         // Coalesce queued updates without letting a busy producer starve input.
         for _ in 0..8 {
             match input.read(&mut bytes) {
-                Ok(0) if matches!(latest, ShellChange::Unchanged) => return ShellChange::Closed,
+                Ok(0) if latest.unchanged() => return T::CLOSED,
                 Ok(0) => break,
                 Ok(n) => {
                     let update = self.read(&bytes[..n]);
-                    if !matches!(update, ShellChange::Unchanged) {
+                    if !update.unchanged() {
                         latest = update;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => return ShellChange::Closed,
+                Err(_) => return T::CLOSED,
             }
         }
         latest
     }
 
-    fn read(&mut self, mut bytes: &[u8]) -> ShellChange {
+    fn read(&mut self, mut bytes: &[u8]) -> T {
         const LINE_LIMIT: usize = b"milo-cwd ".len() + 2 * 16384;
-        let mut latest = ShellChange::Unchanged;
+        let mut latest = T::UNCHANGED;
         while !bytes.is_empty() {
             let newline = bytes.iter().position(|&b| b == b'\n');
             let fragment = &bytes[..newline.unwrap_or(bytes.len())];
@@ -382,7 +492,7 @@ impl Frame {
             }
             let Some(end) = newline else { break };
             if !self.oversized
-                && let Some(update) = decode_change(&self.line)
+                && let Some(update) = T::decode(&self.line)
             {
                 latest = update;
             }

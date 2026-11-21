@@ -70,6 +70,10 @@ Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside 
 
 On an Apple Silicon Mac running macOS 13 or later, run `milo menubar install`. The Homebrew and release binaries include the app; it only runs if you install it. See [menu bar setup and removal](docs/usage.md#macos-menu-bar).
 
+## Discord presence
+
+Optionally show **In a Rex session** on your Discord profile while a Rex app has a session open. It is off until you turn it on with `milo presence enable APPLICATION_ID`, in Settings or in the browser editor, and each of them says what becomes public first. Milo sends that one fixed line and nothing about your sessions, projects, files or commands. You supply the ID of a Discord application you create; no token or sign-in is involved. See [Discord presence](docs/presence.md) for setup, privacy and limits.
+
 ## Reader
 
 <p align="center">
@@ -91,11 +95,12 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
+| `milo presence [status]` / `enable [APPLICATION_ID]` / `disable` | Show or change the optional [Discord presence](docs/presence.md) |
 
 `milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
 
 ## Documentation
 
-[Setup and removal](docs/setup.md) · [Keys and marks](docs/keys.md) · [Usage limits](docs/usage.md) · [Pane behaviour](docs/panes.md) · [How it works](docs/internals.md)
+[Setup and removal](docs/setup.md) · [Keys and marks](docs/keys.md) · [Usage limits](docs/usage.md) · [Discord presence](docs/presence.md) · [Pane behaviour](docs/panes.md) · [How it works](docs/internals.md)
 
 [Contributing](CONTRIBUTING.md) · [MIT licence](LICENSE)

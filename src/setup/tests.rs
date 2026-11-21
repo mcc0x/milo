@@ -690,6 +690,7 @@ fn every_settings_control_fits_a_narrow_row_when_selected() {
         Panel::Confirm(Confirm::Repair),
         Panel::Confirm(Confirm::Remove),
         Panel::Confirm(Confirm::RemoveMenuBar),
+        Panel::Confirm(Confirm::Presence),
         Panel::Exit,
     ];
     for panel in panels {
@@ -1320,4 +1321,81 @@ fn narrow_rails_keep_tabs_scrolled_rows_and_footer_actions_mouse_accessible() {
     let rows = frame(&mut pane, 10, 5);
     assert_eq!(pane.key(click_at(&rows, 4, "q")), After::Leave);
     assert!(!f.root.join("init.lua").exists());
+}
+
+#[test]
+fn discord_presence_says_what_becomes_public_before_turning_on_and_turns_off_at_once() {
+    const ID: &str = "1234567890123456789";
+    let f = Fixture::folder();
+    let file = f.root.join("config/discord.conf");
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("presence does not call Rex"));
+    assert_eq!(choose(&mut pane, Row::FollowActivity), After::Stay);
+    let draft = pane.prefs;
+    let presence_row = |pane: &mut Setup<_>| {
+        frame(pane, 80, 24).into_iter().find(|row| row.contains("Discord presence")).expect("a presence row")
+    };
+    assert!(presence_row(&mut pane).trim_end().ends_with("Off"));
+
+    assert_eq!(choose(&mut pane, Row::Presence), After::Stay);
+    assert_eq!(pane.panel, Panel::Confirm(Confirm::Presence));
+    let page = frame(&mut pane, 80, 24).join(" ");
+    let page = page.split_whitespace().collect::<Vec<_>>().join(" ");
+    for said in [
+        "Turn on Discord presence?",
+        "the name and icon of your Discord application with the line “In a Rex session”",
+        "Anyone who can see your Discord activity sees it",
+        "no session, tab, project or file names, no paths and no commands",
+        "Type your Discord application ID.",
+    ] {
+        assert!(page.contains(said), "{said:?} is missing from {page:?}");
+    }
+    assert!(pane.selected_row() == Some(Row::PresenceId), "nothing can be turned on by pressing Enter twice");
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "an application ID is needed first");
+
+    for digit in ID.chars() {
+        assert_eq!(pane.key(Key::Char(digit)), After::Stay);
+    }
+    assert!(frame(&mut pane, 80, 24).iter().any(|row| row.contains(&format!("Application ID: {ID}"))));
+    assert_eq!(pane.key(Key::Char('q')), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow);
+    assert!(pane.selected_row() == Some(Row::Presence));
+    assert!(!file.exists(), "reading about it and backing out saves nothing");
+
+    assert_eq!(choose(&mut pane, Row::Presence), After::Stay);
+    for digit in ID[..16].chars() {
+        pane.key(Key::Char(digit));
+    }
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "too short to be an application ID");
+    assert_eq!(choose(&mut pane, Row::PresenceId), After::Stay, "Enter on the ID clears it");
+    for digit in ID.chars() {
+        pane.key(Key::Char(digit));
+    }
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow);
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\n"));
+    assert!(pane.message.as_ref().is_some_and(|(text, _)| text.starts_with("Discord presence is on.")));
+    assert!(presence_row(&mut pane).trim_end().ends_with("On"));
+
+    assert_eq!(choose(&mut pane, Row::Presence), After::Stay);
+    assert_eq!(pane.panel, Panel::Workflow, "turning it off asks nothing");
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = false\napplication_id = {ID}\n"));
+    assert!(pane.message.as_ref().is_some_and(|(text, _)| text.starts_with("Discord presence is off.")));
+    assert!(presence_row(&mut pane).trim_end().ends_with("Off"));
+
+    // The application is remembered, and the question is asked again all the same.
+    assert_eq!(choose(&mut pane, Row::Presence), After::Stay);
+    assert!(pane.selected_row() == Some(Row::Cancel));
+    assert_eq!(pane.key(Key::Enter), After::Stay);
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = false\napplication_id = {ID}\n"));
+    assert_eq!(choose(&mut pane, Row::Presence), After::Stay);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\n"));
+    assert!(pane.prefs == draft && pane.prefs_dirty(), "the pane preference draft is neither saved nor lost");
+
+    // A choice Milo cannot read is left alone and cannot be changed from here.
+    fs::write(&file, "presence = maybe\n").unwrap();
+    pane.select_panel(Panel::Workflow, Some(Row::Presence));
+    assert_eq!(pane.key(Key::Enter), After::Ignored);
+    assert!(frame(&mut pane, 80, 24).join(" ").contains("Could not read the saved Discord presence choice."));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "presence = maybe\n");
 }

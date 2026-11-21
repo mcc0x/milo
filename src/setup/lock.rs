@@ -1,5 +1,6 @@
 //! Process-owned file locks are not inherited by children. The setup lock
-//! lasts through a save; the listener lock stays open when milo becomes Rex.
+//! lasts through a save; the listener lock stays open when milo becomes Rex;
+//! the presence lock lasts as long as the one helper that talks to Discord.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -11,6 +12,8 @@ use std::time::{Duration, Instant};
 use crate::fs_ops;
 
 const LISTENER_LOCK: &CStr = c"listener.lock";
+/// Held by the one process that may set the user's Discord activity.
+pub(crate) const PRESENCE_LOCK: &CStr = c"presence.lock";
 /// How long a listener asked to stop is given to wind down.
 const WIND_DOWN: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(10);
@@ -82,8 +85,8 @@ fn holder(file: &File) -> io::Result<Option<libc::pid_t>> {
     Ok((lock.l_type != libc::F_UNLCK as _ && lock.l_pid > 1).then_some(lock.l_pid))
 }
 
-fn existing(dir: &Path) -> io::Result<Option<File>> {
-    match fs_ops::open_dir(dir).and_then(|directory| open(&directory, LISTENER_LOCK, libc::O_RDONLY)) {
+fn existing(dir: &Path, name: &CStr) -> io::Result<Option<File>> {
+    match fs_ops::open_dir(dir).and_then(|directory| open(&directory, name, libc::O_RDONLY)) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -92,9 +95,30 @@ fn existing(dir: &Path) -> io::Result<Option<File>> {
 
 /// The marker can outlive its listener; only a kernel lock proves it is running.
 pub(super) fn running(dir: &Path) -> io::Result<bool> {
-    match existing(dir)? {
+    held(dir, LISTENER_LOCK)
+}
+
+/// Whether another process holds the lock called `name`.
+pub(crate) fn held(dir: &Path, name: &CStr) -> io::Result<bool> {
+    match existing(dir, name)? {
         Some(lock) => holder(&lock).map(|pid| pid.is_some()),
         None => Ok(false),
+    }
+}
+
+/// Takes the lock called `name` for as long as the returned file stays open.
+/// A holder that is winding down is waited for, up to `patience`.
+pub(crate) fn hold(dir: &Path, name: &CStr, patience: Duration) -> io::Result<Option<File>> {
+    let lock = create(dir, name)?;
+    let asked = Instant::now();
+    loop {
+        if take(&lock)? {
+            return Ok(Some(lock));
+        }
+        if asked.elapsed() >= patience {
+            return Ok(None);
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -138,11 +162,17 @@ fn keep_across_exec(lock: &File) -> io::Result<()> {
 /// Ends the listener if one is running, and returns once another could
 /// start in its place.
 pub(super) fn stop(dir: &Path) -> io::Result<()> {
-    stop_when(dir, |asked| asked.elapsed() >= WIND_DOWN)
+    stop_holder(dir, LISTENER_LOCK)
 }
 
-fn stop_when(dir: &Path, mut expired: impl FnMut(Instant) -> bool) -> io::Result<()> {
-    let Some(lock) = existing(dir)? else { return Ok(()) };
+/// Ends the process holding the lock called `name`, if there is one, and
+/// returns once the lock is free.
+pub(crate) fn stop_holder(dir: &Path, name: &CStr) -> io::Result<()> {
+    stop_when(dir, name, |asked| asked.elapsed() >= WIND_DOWN)
+}
+
+fn stop_when(dir: &Path, name: &CStr, mut expired: impl FnMut(Instant) -> bool) -> io::Result<()> {
+    let Some(lock) = existing(dir, name)? else { return Ok(()) };
     for _ in 0..2 {
         let Some(listener) = holder(&lock)? else { return Ok(()) };
         // SAFETY: The system has just identified the holder of the listener
@@ -187,7 +217,7 @@ mod tests {
     fn a_lock_nobody_holds_names_no_process() {
         let f = Fixture::folder();
         create(&f.root, LISTENER_LOCK).unwrap();
-        let lock = existing(&f.root).unwrap().unwrap();
+        let lock = existing(&f.root, LISTENER_LOCK).unwrap().unwrap();
         // SAFETY: Asking for file status flags does not access user memory.
         let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0);
@@ -227,7 +257,7 @@ mod tests {
         }
         let mut retried = false;
         let stopped = started.exists()
-            && stop_when(&f.root, |asked| {
+            && stop_when(&f.root, LISTENER_LOCK, |asked| {
                 // Expire the first grace period only once the child has handled the signal.
                 if !retried && first_signal.exists() {
                     retried = true;

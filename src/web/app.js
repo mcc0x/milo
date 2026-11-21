@@ -324,7 +324,7 @@ function renderConnection() {
 }
 
 function affectsDraft({action}) {
-  return action !== 'doctor' && action !== 'menubar';
+  return action !== 'doctor' && action !== 'menubar' && action !== 'presence';
 }
 
 function hasUnsavedChanges() {
@@ -798,7 +798,74 @@ function workflowView() {
     setting('workflow.tab_titles', 'Title Rex tabs', 'Unnamed tabs only: project, worktree and agent.', 'switch', {disabled}),
   ]), groupCard('account', 'Claude Code', '', [
     setting('account.claude_limits', 'Show Claude Code limits', state.account.claude_status, 'switch', {disabled: !account.editable}),
-  ])];
+  ]), ...presenceView()];
+}
+
+// What was typed for the application ID, kept while the page redraws around it.
+let applicationDraft;
+
+function presenceView() {
+  const presence = state.presence;
+  if (!presence) return [];
+  const card = node('section', 'settings-group');
+  const header = node('header', 'group-header');
+  const titleline = node('div', 'group-titleline');
+  const heading = node('h2', '', 'Discord presence');
+  heading.id = 'group-presence';
+  card.setAttribute('aria-labelledby', heading.id);
+  const current = node('span', 'group-origin', presence.enabled ? 'On' : 'Off');
+  current.id = 'presence-state';
+  titleline.append(heading, current);
+  const disclosure = node('p', '', presence.public);
+  disclosure.id = 'presence-public';
+  header.append(titleline, disclosure);
+
+  const application = node('div', 'setting');
+  const info = node('div', 'setting-info');
+  const label = node('label', 'setting-label', 'Application ID');
+  const help = node('span', 'setting-detail',
+    presence.enabled ? 'Turn presence off to use another application.' : presence.help);
+  help.id = 'presence-application-detail';
+  const input = node('input');
+  input.id = label.htmlFor = 'presence-application';
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.placeholder = '17 to 19 digits';
+  input.disabled = presence.enabled;
+  input.value = presence.enabled ? presence.application_id : applicationDraft ?? presence.application_id ?? '';
+  input.setAttribute('aria-describedby', help.id);
+  input.addEventListener('input', () => { applicationDraft = input.value.trim(); });
+  info.append(label, help);
+  const wrap = node('div', 'setting-input');
+  wrap.append(input);
+  application.append(info, wrap);
+
+  const now = node('div', 'setting');
+  const status = node('span', 'setting-detail', presence.status);
+  status.id = 'presence-status';
+  const nowInfo = node('div', 'setting-info');
+  nowInfo.append(node('span', 'setting-label', 'Now'), status);
+  const waiting = paused || queue.some(item => item.action === 'presence');
+  const change = presence.enabled
+    ? button('Turn off', 'secondary', 'presence-change', () => command('presence', {value: 'off'}), waiting)
+    : button('Turn on…', 'secondary', 'presence-change', () => {
+      const id = (applicationDraft ?? presence.application_id ?? '').trim();
+      if (!/^[1-9]\d{16,18}$/.test(id)) {
+        notify('Enter your Discord application ID first: a number of 17 to 19 digits.', true);
+        byId('presence-application').focus();
+        return;
+      }
+      confirm('Turn on Discord presence?', presence.public, 'Turn on', () => command('presence', {value: id}));
+    }, waiting);
+  change.setAttribute('aria-describedby', `${status.id} ${disclosure.id}`);
+  now.append(nowInfo, change);
+
+  const controls = node('div', 'group-controls');
+  controls.append(application, now);
+  card.append(header, controls);
+  return [card];
 }
 
 function menuBarView() {
