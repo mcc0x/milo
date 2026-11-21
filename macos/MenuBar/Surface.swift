@@ -396,25 +396,20 @@ private struct UsageLimitRow: View {
 private struct UsageGlyph: View {
     let id: String
 
-    private static let codex = load("codex")
-    private static let claude = load("claude")
-
-    private static func load(_ name: String) -> NSImage? {
-        guard let url = Bundle.main.url(forResource: name, withExtension: "png") else { return nil }
-        return NSImage(contentsOf: url)
-    }
-
-    private var image: NSImage? {
-        switch id {
-        case "codex": return Self.codex
-        case "claude": return Self.claude
-        default: return nil
+    private static let images: [String: NSImage] = {
+        var images: [String: NSImage] = [:]
+        for name in ["codex", "claude", "deepseek", "devin", "openrouter", "copilot", "opencode"] {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
+                  let image = NSImage(contentsOf: url) else { continue }
+            image.isTemplate = ["openrouter", "copilot", "opencode"].contains(name)
+            images[name] = image
         }
-    }
+        return images
+    }()
 
     var body: some View {
         Group {
-            if let image {
+            if let image = Self.images[id] {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)

@@ -24,7 +24,7 @@ mkdir -p "$app/Contents/MacOS" "$resources/Tools" "$tmp/Milo.iconset"
 (cd "$repo" && cargo build --locked --release --target "$rust_target" --target-dir "$repo/target")
 install -m 755 "$repo/target/$rust_target/release/milo" "$resources/Tools/milo"
 swiftc -O -swift-version 5 -parse-as-library -target "$arch-apple-macos$MACOSX_DEPLOYMENT_TARGET" "$repo"/macos/MenuBar/*.swift -o "$app/Contents/MacOS/Milo"
-cp "$repo"/src/usage/marks/claude.png "$repo"/src/usage/marks/codex.png "$repo/site/src/images/milo-lockup.webp" "$resources/"
+cp "$repo"/src/usage/marks/*.png "$repo/src/usage/marks/LobeHub-LICENSE.txt" "$repo/site/src/images/milo-lockup.webp" "$resources/"
 for size in 16 32 128 256 512; do
     for scale in 1 2; do
         pixels=$((size * scale)); suffix=''; [ "$scale" = 1 ] || suffix=@2x

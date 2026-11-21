@@ -7,12 +7,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::pane::Pane as _;
-use crate::preferences::Preferences;
+use crate::preferences::{Preferences, UsageAccounts};
 use crate::{paths, term, when};
 
 use super::{
-    Activity, Reading, SAVED_LIMITS, Show, Source, Usage, UsageTool, UsageTools, Window,
-    claude_sources, codex_sessions, draw, omp, opencode, sqlite,
+    Activity, Reading, SAVED_LIMITS, Show, Source, Usage, UsageTool, UsageTools, Window, accounts, claude_sources,
+    codex_sessions, draw, omp, opencode, sqlite,
 };
 
 const INTERVAL: Duration = Duration::from_secs(30);
@@ -22,16 +22,24 @@ pub fn menu_stream() -> io::Result<()> {
     let home = home.as_deref();
     let config = paths::config_dir();
     let config = config.as_deref();
-    let mut usage = Usage::for_home(home, when::now(), global_tools(config).unwrap_or_default())
-        .with_databases(omp::database(home), opencode::database(home), sqlite::QUERY_WAIT);
+    let (tools, chosen) = global_choices(config).unwrap_or_default();
+    let mut usage = Usage::for_home(home, when::now(), tools).with_databases(
+        omp::database(home),
+        opencode::database(home),
+        sqlite::QUERY_WAIT,
+    );
+    usage.accounts = accounts::Accounts::open(chosen);
     snapshots(io::stdin(), io::stdout().lock(), |line, request| {
-        if request.is_some() && let Some(tools) = global_tools(config) {
+        if request.is_some()
+            && let Some((tools, chosen)) = global_choices(config)
+        {
             usage.apply_menu_tools(home, tools);
+            usage.accounts.choose(chosen, accounts::Sources::installed);
         }
         let settled = usage.refresh(usage.now(), Instant::now(), request.unwrap_or(false));
         // The pane repaints when its SQLite jobs finish. Here a complete refresh
         // is one line, so collect both bounded reads before publishing it.
-        while let Some(fd) = usage.external_fd() {
+        while let Some(fd) = usage.database_fd() {
             ready(&mut [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }], None)?;
             usage.check_external();
         }
@@ -39,7 +47,10 @@ pub fn menu_stream() -> io::Result<()> {
         // even if the usual poll is later.
         // A busy transcript can span several bounded reads. Don't wait a full
         // idle interval between batches, or a partial daily total lingers.
-        let interval = if settled { INTERVAL } else { Duration::from_secs(1) };
+        // A provider can take seconds to answer, so its figure follows in a
+        // later line rather than holding this one back.
+        let waiting = !settled || usage.accounts.pending();
+        let interval = if waiting { Duration::from_secs(1) } else { INTERVAL };
         let wait = interval.min(usage.next_frame().unwrap_or(interval));
         usage.menu_snapshot(line);
         Ok(wait)
@@ -47,9 +58,9 @@ pub fn menu_stream() -> io::Result<()> {
 }
 
 /// Reload the global layer only. Keep its last valid visibility if an edit is temporarily invalid.
-pub(super) fn global_tools(dir: Option<&Path>) -> Option<UsageTools> {
-    let Some(dir) = dir else { return Some(UsageTools::default()) };
-    Preferences::resolve_in(dir, None).ok().map(|(prefs, _)| prefs.usage_tools)
+pub(super) fn global_choices(dir: Option<&Path>) -> Option<(UsageTools, UsageAccounts)> {
+    let Some(dir) = dir else { return Some(Default::default()) };
+    Preferences::resolve_in(dir, None).ok().map(|(prefs, _)| (prefs.usage_tools, prefs.usage_accounts))
 }
 
 impl Usage {
@@ -125,6 +136,17 @@ impl Usage {
                 write!(output, r#","detail":"{activity}""#).unwrap();
             }
             output.push('}');
+        }
+        // An account has no windows: money, credits and compute units are
+        // written out, and never offered to the badge as a share of a limit.
+        for account in self.accounts.iter() {
+            if !account.presence(now).placed(account.show) {
+                continue;
+            }
+            let detail = draw::account_text(account.status(now));
+            let (id, name) = (account.which.id(), account.which.label());
+            write!(output, r#"{separator}{{"id":"{id}","name":"{name}","windows":[],"detail":"{detail}"}}"#).unwrap();
+            separator = ",";
         }
         output.push_str("]}\n");
     }

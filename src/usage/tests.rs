@@ -1,5 +1,6 @@
 //! Checks usage frames and provider ingestion with fixtures instead of live data.
 
+mod accounts;
 mod activity;
 mod codex;
 mod failures;
