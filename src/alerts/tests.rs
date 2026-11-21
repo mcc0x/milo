@@ -614,7 +614,13 @@ fn the_alert_transaction_holds_the_config_lock_through_a_credential_write() {
             Ok(())
         })
         .unwrap();
-    assert!(probe.try_lock().is_ok());
+    // A program another test is starting holds a copy of the lock's descriptor
+    // until it begins to run, so the lock can outlast the transaction by a moment.
+    let ended = Instant::now();
+    while probe.try_lock().is_err() {
+        assert!(ended.elapsed() < Duration::from_secs(5), "the lock outlived its transaction");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
