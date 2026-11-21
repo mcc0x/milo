@@ -1,12 +1,20 @@
 # How milo works
 
-Milo is read-only when looking at a project. It keeps the user's Git settings, such as global ignore rules, but overrides settings that could run a program. That includes hooks, content filters, external diff and text converters, file-system monitors and on-demand fetching. It caps Git's time and output. Git reports a change to the commit recorded for a submodule; milo does not inspect uncommitted or untracked files inside it.
+Milo only reads a project, with one exception: the reader writes a file when you save an edit of it. It keeps the user's Git settings, such as global ignore rules, but overrides settings that could run a program. That includes hooks, content filters, external diff and text converters, file-system monitors and on-demand fetching. It caps Git's time and output. Git reports a change to the commit recorded for a submodule; milo does not inspect uncommitted or untracked files inside it.
 
 The reader can show where a file link points without reading its target. It refuses a path through a folder link that leaves the project and does not read devices or pipes as files. Text from the project cannot send terminal controls.
 
+## Writing
+
+An edit is a draft in memory. A save opens the file from the project folder the reader holds, without following a link, checks that it is a regular file, and reads it again. It writes only if the file is the one the edit was read from and still holds the same bytes, or if the user answers the question that says it does not. The write goes into the open file, so its permissions, owner, other names and attributes are not touched, and each line keeps the ending it was read with. See [editing files](panes.md#editing-files).
+
+A formatter is a program of a fixed name, found in the folders of `PATH` that are written in full. It runs only when asked for, in a process group of its own, for at most ten seconds, with the draft on its standard input. It is not given the file to write. See [formatting](panes.md#formatting).
+
+Outside the project, milo keeps two things in its state folder for the editor: the draft of a reader that was ended with unsaved changes, and, in Rex, a mark that a floating reader has unsaved changes so that another pane does not replace it. The mark names the reader's process and is ignored once that process is gone.
+
 ## Updates and drawing
 
-- One terminal loop handles replies, input, help and checks for changes. It ignores bracketed paste rather than treating pasted text as keys. If opening takes more than a moment, it draws `Reading…`; when it can identify a project, it shows its name too. A blocked loading-frame write yields once the pane is ready.
+- One terminal loop handles replies, input, help and checks for changes. Pasted text is never read as keys: it is skipped, or handed whole to a pane that is taking text. If opening takes more than a moment, it draws `Reading…`; when it can identify a project, it shows its name too. A blocked loading-frame write yields once the pane is ready.
 - On macOS, file-system notifications wake the Git panes. Outline and History filter writes to files and directories Git has reported as ignored. FSEvents excludes up to eight directories directly; Milo filters the remaining paths before waking a pane. The working reader uses its file's status and watches the wider project rather than reading all of Git status for exclusions. Watched panes check about every 30 seconds as a safety net; without notifications they check about every two seconds.
 - A pane with nothing to watch, like setup or a reader at a commit, sleeps until input, a resize or a signal. Panes can also schedule a redraw without a file change. An ignored key does not rebuild the frame; terminal replies, resizes and scheduled checks do.
 - After a check, milo waits at least four times as long as that check took, so repeated changes do not keep it busy indefinitely.

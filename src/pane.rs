@@ -99,6 +99,16 @@ pub trait Pane {
         None
     }
 
+    /// The pane is taking text: `?`, `q` and Ctrl-C are keys for it, and pasted text is kept for it.
+    fn editing(&self) -> bool {
+        false
+    }
+
+    /// Takes text pasted while `editing`, or `None` if the paste was too long to keep.
+    fn paste(&mut self, _text: Option<&str>) -> After {
+        After::Ignored
+    }
+
     /// Handles a pane's own keys, including closing on q.
     fn key(&mut self, key: Key) -> After;
 }
@@ -247,8 +257,12 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
     if terminal_reply(screen, key) {
         return After::Stay;
     }
+    let editing = pane.editing();
     match (key, &mut *help) {
-        (Key::Ctrl(b'c') | Key::Eof, _) => After::Leave,
+        (Key::Eof, _) => After::Leave,
+        // A pane with unsaved text asks before it closes.
+        (Key::Ctrl(b'c'), None) if editing => pane.key(key),
+        (Key::Ctrl(b'c'), _) if !editing => After::Leave,
         // The pane still sees focus changes while its help is up.
         (Key::Focus(_), _) => pane.key(key),
         (_, Some(page)) => {
@@ -257,7 +271,7 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
             }
             After::Stay
         }
-        (Key::Char('?'), None) => {
+        (Key::Char('?'), None) if !editing => {
             if Page::fits(screen) {
                 *help = Some(pane.help());
             }
@@ -441,7 +455,15 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
             return Err(format!("cannot use this terminal: {e}"));
         }
     };
-    run_entered(start, open, &mut terminal)
+    let result = run_entered(start, open, &mut terminal);
+    terminal.restore();
+    // The terminal is the shell's again, so this line stays on screen. It
+    // holds a file's name, and it must not wait for a terminal that has stopped reading.
+    if let Some(note) = crate::reader::take_rescue_note() {
+        let safe: String = note.chars().filter(|c| !c.is_control()).collect();
+        terminal.finish(format!("milo: {safe}\n").as_bytes());
+    }
+    result
 }
 
 enum Exit {
@@ -492,6 +514,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     let mut pointer = None;
     let mut highlighted = None;
     let mut first_frame = true;
+    let mut keys = Vec::new();
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         let resized = term::RESIZED.swap(false, Ordering::Relaxed);
         if first_frame || resized {
@@ -547,10 +570,12 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
             .chain(screen.picture_redraw_due().map(|due| due.saturating_duration_since(now)))
             .min();
         let timeout_ms = wait.map_or(-1, milliseconds);
+        terminal.keep_pastes(help.is_none() && pane.editing());
         match terminal.wait(timeout_ms, watcher.fd(), pane.external_fd()) {
             Wait::Input => {
                 let mut overlay_changed = false;
-                for key in terminal.receive() {
+                keys.extend(terminal.receive());
+                for key in keys.drain(..) {
                     if let Key::Hover(x, y) = key {
                         if tracking && !overlay_changed && pane_row_available(screen, &help, &pace, y) {
                             pointer = Some((x, y));
@@ -575,7 +600,14 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                         focused = Some(value);
                     }
                     let had_help = help.is_some();
-                    match route_key(pane.as_mut(), screen, &mut help, key) {
+                    let after = match key {
+                        Key::Paste => {
+                            let text = terminal.pasted();
+                            if had_help { After::Ignored } else { pane.paste(text.as_deref()) }
+                        }
+                        _ => route_key(pane.as_mut(), screen, &mut help, key),
+                    };
+                    match after {
                         After::Ignored => {}
                         After::Stay => redraw = true,
                         After::OpenWeb => return Ok(Exit::OpenWeb),

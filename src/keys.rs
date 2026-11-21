@@ -1,5 +1,6 @@
 //! Decodes keys, mouse events, focus and other terminal replies from input.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::os::fd::AsRawFd;
@@ -11,6 +12,8 @@ use crate::term::{milliseconds, wait_ready};
 const SEQUENCE_WAIT: Duration = Duration::from_millis(25);
 const READ_SIZE: usize = 4096;
 const PASTE_END: &[u8] = b"\x1b[201~";
+/// The longest paste kept for a pane that is taking text.
+const PASTE_LIMIT: usize = 1 << 20;
 
 /// A second click on the same item within this long opens it.
 pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -39,6 +42,8 @@ pub enum Key {
     Ctrl(u8),
     Enter,
     Esc,
+    Backspace,
+    Delete,
     Up,
     Down,
     Left,
@@ -53,6 +58,8 @@ pub enum Key {
     Hover(usize, usize),
     WheelUp,
     WheelDown,
+    /// Pasted text was kept; `Input::pasted` hands it over.
+    Paste,
     /// The pane gained or lost keyboard focus.
     Focus(bool),
     /// The terminal reported its default background colour.
@@ -99,11 +106,60 @@ pub struct Input {
     pending: Vec<u8>,
     /// An overlong sequence is ignored through its terminator, not decoded as keys.
     discard: Option<Sequence>,
+    paste: Paste,
+}
+
+/// Clipboard text between the terminal's paste marks. It is never read as
+/// keys, and is kept only for a pane that is taking text.
+#[derive(Default)]
+struct Paste {
     /// While pasting, how many bytes of the end marker have been seen.
-    paste_end: Option<usize>,
+    end: Option<usize>,
+    keep: bool,
+    /// The text of the paste under way, if it is being kept.
+    text: Option<Vec<u8>>,
+    too_long: bool,
+    /// Finished pastes, oldest first, or `None` for one that was too long to keep.
+    done: VecDeque<Option<String>>,
+}
+
+impl Paste {
+    fn start(&mut self) {
+        self.end = Some(0);
+        self.text = self.keep.then(Vec::new);
+        self.too_long = false;
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let Some(text) = &mut self.text else { return };
+        if self.too_long || text.len() + bytes.len() > PASTE_LIMIT {
+            self.too_long = true;
+            *text = Vec::new();
+        } else {
+            text.extend_from_slice(bytes);
+        }
+    }
+
+    fn finish(&mut self, keys: &mut Vec<Key>) {
+        self.end = None;
+        if let Some(text) = self.text.take() {
+            self.done.push_back((!self.too_long).then(|| String::from_utf8_lossy(&text).into_owned()));
+            keys.push(Key::Paste);
+        }
+    }
 }
 
 impl Input {
+    /// Whether to keep pasted text for the pane instead of skipping it.
+    pub fn keep_pastes(&mut self, keep: bool) {
+        self.paste.keep = keep;
+    }
+
+    /// The text of the oldest `Key::Paste` not yet handed over, or `None` if it was too long to keep.
+    pub fn pasted(&mut self) -> Option<String> {
+        self.paste.done.pop_front().flatten()
+    }
+
     pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
         let mut buf = [0u8; READ_SIZE];
         let mut read_input = false;
@@ -124,7 +180,7 @@ impl Input {
             read_input = true;
             self.feed(&buf[..n], keys);
             if self.pending.is_empty() || self.discard.is_some() {
-                if n < buf.len() && self.paste_end.is_none() {
+                if n < buf.len() && self.paste.end.is_none() {
                     return;
                 }
                 deadline = None;
@@ -155,10 +211,10 @@ impl Input {
             }
         }
         if self.pending.is_empty() {
-            self.pending.extend_from_slice(decode(bytes, &mut self.paste_end, keys));
+            self.pending.extend_from_slice(decode(bytes, &mut self.paste, keys));
         } else {
             self.pending.extend_from_slice(bytes);
-            let left = decode(&self.pending, &mut self.paste_end, keys).len();
+            let left = decode(&self.pending, &mut self.paste, keys).len();
             let used = self.pending.len() - left;
             self.pending.drain(..used);
         }
@@ -195,13 +251,18 @@ fn wait_for_sequence(keyboard: &File, until: Instant) -> bool {
     }
 }
 
-/// Skips clipboard text without copying it or turning it into keys.
-fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
-    let Some(mut matched) = *end else { return 0 };
+/// Passes over clipboard text without turning it into keys, keeping it if a pane wants it.
+fn skip_paste(bytes: &[u8], paste: &mut Paste, keys: &mut Vec<Key>) -> usize {
+    let Some(mut matched) = paste.end else { return 0 };
     let mut used = 0;
     while used < bytes.len() {
         if matched == 0 {
-            let Some(i) = bytes[used..].iter().position(|&c| c == PASTE_END[0]) else { break };
+            let text = &bytes[used..];
+            let Some(i) = text.iter().position(|&c| c == PASTE_END[0]) else {
+                paste.push(text);
+                break;
+            };
+            paste.push(&text[..i]);
             used += i + 1;
             matched = 1;
         } else {
@@ -210,15 +271,20 @@ fn skip_paste(bytes: &[u8], end: &mut Option<usize>) -> usize {
             if byte == PASTE_END[matched] {
                 matched += 1;
                 if matched == PASTE_END.len() {
-                    *end = None;
+                    paste.finish(keys);
                     return used;
                 }
             } else {
+                // The end marker did not complete, so what looked like it was text.
+                paste.push(&PASTE_END[..matched]);
                 matched = usize::from(byte == PASTE_END[0]);
+                if matched == 0 {
+                    paste.push(&[byte]);
+                }
             }
         }
     }
-    *end = Some(matched);
+    paste.end = Some(matched);
     bytes.len()
 }
 
@@ -260,9 +326,9 @@ impl Sequence {
 }
 
 /// Decodes complete keys and returns any partial sequence at the end.
-fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec<Key>) -> &'a [u8] {
+fn decode<'a>(mut bytes: &'a [u8], paste: &mut Paste, keys: &mut Vec<Key>) -> &'a [u8] {
     loop {
-        bytes = &bytes[skip_paste(bytes, paste_end)..];
+        bytes = &bytes[skip_paste(bytes, paste, keys)..];
         let Some((&c, rest)) = bytes.split_first() else { return bytes };
         let (key, tail) = match c {
             0x1b => match rest {
@@ -296,7 +362,7 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
                     } else {
                         match (sequence, body[end]) {
                             (Sequence::Csi, b'~') if answer == b"200" => {
-                                *paste_end = Some(0);
+                                paste.start();
                                 None
                             }
                             (Sequence::Csi, fin @ 0x40..=0x7e) => csi(answer, fin),
@@ -312,6 +378,7 @@ fn decode<'a>(mut bytes: &'a [u8], paste_end: &mut Option<usize>, keys: &mut Vec
                 }
             },
             b'\r' | b'\n' => (Some(Key::Enter), rest),
+            0x7f => (Some(Key::Backspace), rest),
             1..=26 => (Some(Key::Ctrl(c + b'a' - 1)), rest),
             b' '..=b'~' => (Some(Key::Char(char::from(c))), rest),
             _ => {
@@ -388,6 +455,7 @@ fn csi(params: &[u8], fin: u8) -> Option<Key> {
         b'c' if params.starts_with(b"?") => Key::Answered,
         b'~' => match params.split(|&c| c == b';').next()? {
             b"1" | b"7" => Key::Home,
+            b"3" => Key::Delete,
             b"4" | b"8" => Key::End,
             b"5" => Key::PgUp,
             b"6" => Key::PgDn,
@@ -570,5 +638,46 @@ mod tests {
     #[test]
     fn a_malformed_utf8_key_does_not_swallow_the_next_key() {
         assert_eq!(keys(b"\xf0\x80q"), [Key::Char('q')]);
+    }
+
+    #[test]
+    fn the_keys_that_erase_text_decode() {
+        assert_eq!(keys(b"\x7f\x1b[3~\x08\t"), [Key::Backspace, Key::Delete, Key::Ctrl(b'h'), Key::Ctrl(b'i')]);
+    }
+
+    #[test]
+    fn a_kept_paste_is_handed_over_whole_and_never_read_as_keys() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.keep_pastes(true);
+        // The end marker can arrive in pieces, and a piece that only looks like its start is text.
+        for part in [b"j\x1b[".as_slice(), b"200~s q\r\x03\x1b[201", b"x\x1b", b"[201", b"~k"] {
+            input.feed(part, &mut keys);
+        }
+        assert_eq!(keys, [Key::Char('j'), Key::Paste, Key::Char('k')]);
+        assert_eq!(input.pasted().as_deref(), Some("s q\r\x03\x1b[201x"));
+        assert_eq!(input.pasted(), None);
+
+        // A pane that is not taking text gets neither the text nor a key for it.
+        keys.clear();
+        input.keep_pastes(false);
+        input.feed(b"\x1b[200~skipped\x1b[201~k", &mut keys);
+        assert_eq!(keys, [Key::Char('k')]);
+        assert_eq!(input.pasted(), None);
+    }
+
+    #[test]
+    fn a_paste_too_long_to_keep_is_reported_without_its_text() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.keep_pastes(true);
+        input.feed(b"\x1b[200~", &mut keys);
+        for _ in 0..=PASTE_LIMIT / READ_SIZE {
+            input.feed(&[b'x'; READ_SIZE], &mut keys);
+        }
+        input.feed(b"\x1b[201~\x1b[200~short\x1b[201~", &mut keys);
+        assert_eq!(keys, [Key::Paste, Key::Paste]);
+        assert_eq!(input.pasted(), None);
+        assert_eq!(input.pasted().as_deref(), Some("short"));
     }
 }
