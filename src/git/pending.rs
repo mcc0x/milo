@@ -406,9 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn recounting_one_file_includes_its_former_children_but_not_matching_siblings() {
+    fn single_path_counts_include_former_children_but_not_matching_siblings() {
+        check_folder_to_file_count(":(top)page");
+        check_folder_to_file_count("src/[a]*?");
+    }
+
+    fn check_folder_to_file_count(path: &str) {
         let f = Fixture::new();
-        let path = "src/[a]*?";
         let child = format!("{path}/old");
         let content = "a recognizable line\n".repeat(20);
         f.write(&child, &content);
