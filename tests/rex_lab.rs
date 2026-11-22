@@ -1132,10 +1132,10 @@ fn preview_layout_and_observer() {
         ));
         let rect: Vec<f64> = rect.split_whitespace().map(|component| component.parse().unwrap()).collect();
         let &[x, y, w, h] = rect.as_slice() else { panic!("expected a tiled rectangle, got {rect:?}") };
-        let fraction = |value: f64| (value * 1_000_000.0).round() as u32;
+        let fraction = |value: f64| (value * 1_000_000.0).round();
         let (x0, y0) = (fraction(x), fraction(y));
         let (width, height) = (fraction(x + w) - x0, fraction(y + h) - y0);
-        assert!(width > 0 && height > 0 && x0 + width <= 1_000_000 && y0 + height <= 1_000_000);
+        assert!(x0 >= 0.0 && y0 >= 0.0 && width > 0.0 && height > 0.0 && x0 + width <= 1e6 && y0 + height <= 1e6);
         format!("show {viewer_pid} tile {x0} {y0} {width} {height}")
     };
     let move_block = |block: &str, beside: &str| {
@@ -1177,10 +1177,10 @@ fn preview_layout_and_observer() {
         file
     };
     let alive = |pid: u32| lab.command("/bin/ps").args(["-p", &pid.to_string(), "-o", "pid="]).output().unwrap().status.success();
-    let check_focus = || {
+    let check_focus = |expected: &str| {
         let check = format!(
             "local s=assert(rex.session.view{{}}); assert(s.active_window_id=='{tab}'); \
-             for _,w in ipairs(s.windows) do if w.window_id=='{tab}' then assert(w.focused_block_id=='{main}') end end"
+             for _,w in ipairs(s.windows) do if w.window_id=='{tab}' then assert(w.focused_block_id=='{expected}', 'focus: '..tostring(w.focused_block_id)); return end end; error('missing working tab')"
         );
         scope(&check);
     };
@@ -1190,8 +1190,10 @@ fn preview_layout_and_observer() {
         ("above", "vertical", "before", &rail),
         ("below", "vertical", "after", &rail),
     ] {
+        // A launch from the focused sidebar must not steal keyboard focus either.
+        lab.rex(&["focus", "-s", &session, caller]);
         assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
-        check_focus();
+        check_focus(caller);
         let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\n");
         assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
@@ -1314,7 +1316,7 @@ fn preview_layout_and_observer() {
             lab.rex(&["focus", "-s", &session, block]);
             let extra = format!(r#","main":"{main}"{owner}"#);
             assert_eq!(request("focus", block, block, &extra).trim(), "ok");
-            check_focus();
+            check_focus(&main);
             // Outlive the CLI connection/request timeout without layout events.
             std::thread::sleep(Duration::from_millis(3100));
             assert!(alive(watch_pid()));
