@@ -617,8 +617,8 @@ fn old_production_telegram_is_blocked_before_repair_and_only_forgotten_locally()
     for credential in [CAPABILITY.to_owned(), format!("{CAPABILITY}:42")] {
         alerts.secrets.set(telegram, &credential).unwrap();
         assert!(alerts.summary().unwrap().telegram_needs_local_forget);
-        assert!(alerts.check_telegram_reconnect().unwrap_err().contains("Forget on this Mac"));
-        assert!(alerts.set_telegram(TOKEN, "43").unwrap_err().contains("Forget on this Mac"));
+        assert!(alerts.check_telegram_reconnect().unwrap_err().contains("local-only Forget action"));
+        assert!(alerts.set_telegram(TOKEN, "43").unwrap_err().contains("local-only Forget action"));
         let settings = alerts.settings().unwrap();
         assert!(settings.active(telegram) && settings.active(discord));
         assert_eq!(alerts.secret(telegram).unwrap(), credential);
@@ -714,7 +714,8 @@ fn a_connection_no_relay_can_revoke_is_removed_only_by_the_local_forget_and_disc
     assert_eq!(alerts.secret(telegram).unwrap(), format!("{CAPABILITY}:42"));
 
     let report = alerts.forget_telegram_locally().unwrap();
-    assert!(report.contains("this machine only") && report.contains("nothing proves that it is revoked"), "{report}");
+    assert!(report.contains("locally saved Telegram connection"), "{report}");
+    assert!(report.contains("nothing proves that it is revoked"), "{report}");
     assert!(report.contains("send /stop"), "{report}");
     let settings = alerts.settings().unwrap();
     assert_eq!(Destination::ALL.map(|destination| settings.active(destination)), [false, true]);

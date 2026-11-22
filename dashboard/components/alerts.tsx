@@ -186,6 +186,8 @@ export default function Alerts() {
   if (!alerts) return null;
 
   const busy = paused || running || closing;
+  const forgetHost = state.host?.forwarded ? `“${state.host.name}”` : "this host";
+  const localForgetLabel = `Forget on ${forgetHost}`;
   const active = destinations.filter(([name]) => alerts[name].active);
   const saved = destinations.filter(([name]) => alerts[name].saved);
   const targetLabels = { telegram: `Telegram chat ${alerts.telegram.chat}`, discord: "Discord channel" };
@@ -214,11 +216,11 @@ export default function Alerts() {
   }
 
   function forgetTelegramLocally() {
-    confirm("Forget Telegram on this Mac?",
-      "This removes the saved Telegram connection and stops its forwarding on this Mac. Discord is not changed. " +
+    confirm(`Forget Telegram on ${forgetHost}?`,
+      `This removes the saved Telegram connection and stops its forwarding on ${forgetHost}. Discord is not changed. ` +
       "It does not revoke the connection on the relay. If the original relay is still available, send /stop to Milo’s bot " +
       "in the original chat to revoke all Milo connections to that chat.",
-      "Forget on this Mac", () => {
+      localForgetLabel, () => {
         manager.current?.querySelector<HTMLElement>("h2")?.focus();
         send("forget_local", "telegram");
       });
@@ -317,10 +319,10 @@ export default function Alerts() {
                   <div key={name}>
                     {alerts[name].saved ? <p className="setting-detail alerts-saved-destination">Saved destination{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p> : null}
                     {name === "telegram" && alerts.telegram.needs_local_forget ? (
-                      <div className="alerts-setup">
-                        <p className="setting-detail">Milo can’t disconnect this Telegram connection using the current relay. Return to the original relay if possible, or forget the connection on this Mac before connecting again.</p>
+                      <div className="alerts-setup alerts-local-forget">
+                        <p className="setting-detail">Milo can’t disconnect this Telegram connection using the current relay. Return to the original relay if possible, or forget the connection on {forgetHost} before connecting again.</p>
                         <button type="button" className="button alerts-forget" id="alerts-forget-telegram-local"
-                          disabled={busy} onClick={forgetTelegramLocally}>Forget on this Mac</button>
+                          disabled={busy} onClick={forgetTelegramLocally}>{localForgetLabel}</button>
                       </div>
                     ) : <HostedAlertsSetup provider={name} label={label} busy={busy}
                       replacingActive={alerts[name].active}

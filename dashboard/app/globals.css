@@ -322,6 +322,7 @@ dialog {
   background: var(--paper); color: var(--ink);
   box-shadow: inset 0 1px 0 #ffffffde, inset 0 -1px 0 #d5e5ed80, 0 12px 40px -12px #233d5866;
 }
+#confirm { overflow-wrap: anywhere; }
 dialog::backdrop { background: #182e483d; }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   dialog {

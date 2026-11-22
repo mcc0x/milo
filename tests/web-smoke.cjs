@@ -678,6 +678,10 @@ async function checkHostedConnections(page, destination) {
     const action = route.request().postDataJSON();
     if (action.action !== 'alerts') return route.fallback();
     const {field, value} = action;
+    if (field === 'refresh') {
+      assert.equal(value, null);
+      return editorState(route);
+    }
     const alerts = {...state.alerts};
     let message = null;
     if (field === 'forwarding') {
@@ -698,7 +702,7 @@ async function checkHostedConnections(page, destination) {
       scoped.push({field, value});
       alerts.telegram = {saved: false, active: false, chat: '', consent: null, needs_local_forget: false};
       alerts.destination = 'discord';
-      message = {text: 'Removed from this machine only.', error: false};
+      message = {text: 'Removed the locally saved Telegram connection.', error: false};
     } else {
       assert.fail(`unexpected alert action during hosted setup: ${field}`);
     }
@@ -928,19 +932,33 @@ async function checkHostedConnections(page, destination) {
     await page.route(statePath, editorState);
     responses.push({request: {action: 'start', provider: 'telegram'}, response: {status: 409}});
     await connect.click();
-    const forgetLocal = button(telegram, 'Forget on this Mac');
+    const forgetLocal = button(telegram, 'Forget on this host');
     await forgetLocal.waitFor();
     assert.equal(await connect.count(), 0, 'legacy Telegram cannot start another pairing');
     assert.equal(launches.length, launchCount, 'the blocked start does not open a provider page');
     await forgetLocal.click();
-    const forget = dialog(page, 'Forget Telegram on this Mac?');
+    const forget = dialog(page, 'Forget Telegram on this host?');
+    await forget.getByText(/stops its forwarding on this host/).waitFor();
     await forget.getByText(/does not revoke the connection on the relay/).waitFor();
     await forget.getByText(/send \/stop/).waitFor();
     const actionsBeforeCancel = scoped.length;
     await button(forget, 'Keep editing').click();
     assert.equal(scoped.length, actionsBeforeCancel);
-    await forgetLocal.click();
-    await button(forget, 'Forget on this Mac').click();
+    // The same recovery in a forwarded editor must name the affected host.
+    state = {...state, host: {name: 'studio', forwarded: true, rex: null}};
+    await page.reload();
+    await page.getByText('studio · forwarded', {exact: true}).waitFor();
+    await section(page, 'Integrations').click();
+    await button(page, 'Alert forwarding').click();
+    await button(destination, 'Manage destinations').click();
+    await button(manager, 'Telegram').click();
+    await telegram.getByText(/forget the connection on “studio”/).waitFor();
+    await button(telegram, 'Forget on “studio”').click();
+    const forgetForwarded = dialog(page, 'Forget Telegram on “studio”?');
+    await forgetForwarded.getByText(/stops its forwarding on “studio”/).waitFor();
+    await forgetForwarded.getByText(/does not revoke the connection on the relay/).waitFor();
+    assert.doesNotMatch(await forgetForwarded.innerText(), /this Mac|this host/);
+    await button(forgetForwarded, 'Forget on “studio”').click();
     await connect.waitFor();
     assert.deepEqual(scoped.at(-1), {field: 'forget_local', value: 'telegram'});
     await button(telegram, 'Back to destinations').click();
@@ -948,7 +966,7 @@ async function checkHostedConnections(page, destination) {
       'forgetting Telegram locally keeps Discord forwarding');
     await button(manager, 'Discord').click();
     const discord = dialog(page, 'Destinations / Discord');
-    assert.equal(await button(discord, 'Forget on this Mac').count(), 0, 'Discord has no local-only removal action');
+    assert.equal(await button(discord, 'Forget on “studio”').count(), 0, 'Discord has no local-only removal action');
     await button(discord, 'Forget Discord…').waitFor();
     await button(discord, 'Back to destinations').click();
     await button(manager, 'Close destinations').click();

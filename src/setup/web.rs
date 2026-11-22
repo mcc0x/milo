@@ -1686,11 +1686,11 @@ mod tests {
         fs::write(&secrets, format!("telegram = {CAPABILITY}:42\n")).unwrap();
         fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600)).unwrap();
         editor.setup.alerts = Some(alerts);
-        assert!(editor.check_telegram_reconnect().unwrap_err().contains("Forget on this Mac"));
+        assert!(editor.check_telegram_reconnect().unwrap_err().contains("local-only Forget action"));
         let state = editor.state();
         assert!(state.contains(r#""needs_local_forget":true"#) && !state.contains(CAPABILITY));
         let state = change_alert(&mut editor, "forget_local", "\"telegram\"").unwrap();
-        assert!(state.contains(r#""needs_local_forget":false"#) && state.contains("this machine only"));
+        assert!(state.contains(r#""needs_local_forget":false"#) && state.contains("locally saved Telegram connection"));
         editor.check_telegram_reconnect().unwrap();
     }
 
