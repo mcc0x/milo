@@ -2,7 +2,7 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use super::content::NOT_TEXT;
+use super::content::{CommittedTarget, NOT_TEXT};
 use super::*;
 use crate::fixture::Fixture;
 use crate::git::CommitId;
@@ -91,7 +91,7 @@ fn committed_file_paths_normalize_dot_components_and_repeated_slashes() {
         (f.root.as_path(), absolute.as_path()),
         (f.root.parent().unwrap(), absolute.as_path()),
     ] {
-        let mut reader = Reader::at_commit_from(cwd, path, id).unwrap();
+        let mut reader = CommittedTarget::resolve_from(cwd, path, id).unwrap().load();
         assert_eq!(reader.path, "sub/deep/page.txt");
         assert_eq!(drawn(&mut reader, 60, 6)[1], " 1 + stored content");
     }
@@ -111,7 +111,7 @@ fn committed_file_paths_reject_parent_components() {
 
     for path in [Path::new("sub/../page.txt"), absolute.as_path()] {
         assert_eq!(
-            Reader::at_commit_from(&f.root, path, id).err(),
+            CommittedTarget::resolve_from(&f.root, path, id).err(),
             Some("File paths at a commit cannot contain '..'.")
         );
     }
@@ -787,7 +787,7 @@ fn jumping_wraps_even_when_two_changes_share_the_last_page_top() {
     kinds[10] = LineKind::Add;
     kinds[94] = LineKind::Add;
     kinds[96] = LineKind::Del;
-    let source = Source::Committed { short_id: "123abcd".into(), time: 0 };
+    let source = Source::Committed { project: PathBuf::new(), hash: "123abcd".into(), time: 0 };
     let mut reader = Reader::new("page.txt".into(), source, Preferences::default().icons, None);
     reader.body = Body::Text(Text::new(
         (1..).zip(kinds).map(|(number, kind)| Line::new(kind, number, "")).collect(),
@@ -1231,7 +1231,7 @@ fn a_non_utf8_commit_path_cannot_select_a_different_file() {
     let outside = Fixture::folder();
     for cwd in [&project.root, &outside.root] {
         assert_eq!(
-            Reader::at_commit_from(cwd, &invalid, id).err(),
+            CommittedTarget::resolve_from(cwd, &invalid, id).err(),
             Some("File paths at a commit must be UTF-8."),
         );
     }

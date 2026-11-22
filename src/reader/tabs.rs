@@ -12,6 +12,7 @@ use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::content::{CommittedTarget, WorkingTarget};
 use super::inbox::{Inbox, Request};
 use super::rescue::{self, Mark};
 use super::{Reader, Source};
@@ -109,26 +110,42 @@ impl Tabs {
     /// Shows the file asked for: in the tab that has it, or in a new one.
     /// Returns false if it could not be opened, which the shown tab then says.
     pub(super) fn open(&mut self, request: &Request, now: Instant) -> bool {
-        let opened = match &request.commit {
-            Some(id) => CommitId::parse(id)
+        let opened = if let Some(id) = &request.commit {
+            CommitId::parse(id)
                 .ok_or("That is not a commit ID.")
-                .and_then(|id| Reader::at_commit(&request.file, id)),
-            None => Reader::open(&request.file).ok_or("That file is not in a folder."),
+                .and_then(|id| CommittedTarget::resolve(&request.file, id))
+                .map(|target| {
+                    if !self.select_existing(|tab| target.matches(tab)) {
+                        self.add(target.load());
+                    }
+                })
+        } else {
+            WorkingTarget::resolve(&request.file).ok_or("That file is not in a folder.").map(|target| {
+                if !self.select_existing(|tab| target.matches(tab)) {
+                    self.add(target.load());
+                }
+            })
         };
         match opened {
-            Ok(reader) => {
-                let tab = self.tabs.iter().position(|tab| tab.same_file(&reader)).unwrap_or_else(|| {
-                    self.tabs.push(reader);
-                    self.tabs.len() - 1
-                });
-                self.select(tab);
-                true
-            }
+            Ok(()) => true,
             Err(why) => {
                 self.reader_mut().say(why, now);
                 false
             }
         }
+    }
+
+    fn select_existing(&mut self, matches: impl FnMut(&Reader) -> bool) -> bool {
+        let Some(tab) = self.tabs.iter().position(matches) else { return false };
+        self.select(tab);
+        true
+    }
+
+    fn add(&mut self, reader: Reader) {
+        self.tabs.push(reader);
+        // The first snapshot was just loaded. Rescope so the pane loop still
+        // reconciles it after installing the watcher, without forcing a second diff now.
+        self.activate(self.tabs.len() - 1);
     }
 
     fn select(&mut self, tab: usize) {
@@ -137,11 +154,15 @@ impl Tabs {
         }
     }
 
-    /// Brings a tab forward as its file is now, not as it was when the tab was last shown.
-    fn show(&mut self, tab: usize) {
+    fn activate(&mut self, tab: usize) {
         self.shown = tab;
         self.closing = false;
         self.rescope.set(true);
+    }
+
+    /// Brings a tab forward as its file is now, not as it was when the tab was last shown.
+    fn show(&mut self, tab: usize) {
+        self.activate(tab);
         let reader = self.reader_mut();
         if !reader.git_busy() {
             reader.filesystem_changed();
@@ -230,7 +251,7 @@ impl Tabs {
     /// The commit a tab shows its file at, as the strip writes it after the name.
     fn commit(&self, tab: usize) -> Option<&str> {
         match &self.tabs[tab].source {
-            Source::Committed { short_id, .. } => Some(short_id),
+            Source::Committed { hash, .. } => Some(super::short_commit_id(hash)),
             Source::Working(_) | Source::Handed(_) => None,
         }
     }
@@ -562,6 +583,22 @@ mod tests {
     }
 
     #[test]
+    fn a_new_working_tab_reconciles_a_save_before_its_watch_starts() {
+        let f = Fixture::new();
+        f.write("a.txt", "first\n");
+        f.write("b.txt", "before opening\n");
+        f.commit("two files");
+        let mut tabs = Tabs::placed(reader(&f, "a.txt"), None);
+        let previous = tabs.watch_scope();
+        ask(&mut tabs, &f, "b.txt");
+        f.write("b.txt", "saved in the gap\n");
+        assert!(tabs.watch_scope_after_input(&previous).is_some());
+        // No filesystem event: the pane's post-open reconciliation must see it.
+        assert!(tabs.check());
+        assert!(drawn(&mut tabs, 64, 10).iter().any(|row| row.ends_with("saved in the gap")));
+    }
+
+    #[test]
     fn a_tab_keeps_its_place_draft_cursor_and_undo_history_while_another_is_shown() {
         let f = Fixture::folder();
         let long: String = (1..=40).map(|n| format!("line {n}\n")).collect();
@@ -645,6 +682,126 @@ mod tests {
         let rows = drawn(&mut tabs, 60, 6);
         assert_eq!(rows[5], " That is not a commit ID. · ? help");
         assert_eq!(rows[0].matches("b.txt").count(), 2);
+    }
+
+    #[test]
+    fn working_tabs_keep_directory_aliases_distinct_and_follow_retargets_when_shown() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new();
+        f.write("one/page.txt", "original body\n");
+        f.write("two/page.txt", "retargeted body\n");
+        f.commit("two directories");
+        let alias = f.root.join("alias");
+        symlink("one", &alias).unwrap();
+        let mut tabs = Tabs::placed(reader(&f, "one/page.txt"), None);
+        ask(&mut tabs, &f, "alias/page.txt");
+        assert_eq!(tabs.tabs.len(), 2);
+        assert!(drawn(&mut tabs, 80, 6)[2].ends_with("original body"));
+        tabs.key(Key::Ctrl(b'p'));
+
+        fs::remove_file(&alias).unwrap();
+        symlink("two", &alias).unwrap();
+        ask(&mut tabs, &f, "alias/page.txt");
+        assert_eq!(tabs.tabs.len(), 2);
+        assert!(drawn(&mut tabs, 80, 6)[2].ends_with("retargeted body"));
+    }
+
+    #[test]
+    fn working_tab_identity_is_not_the_lossy_label() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let f = Fixture::folder();
+        f.write("page\u{fffd}.txt", "body of the UTF-8 file\n");
+        let mut tabs = Tabs::placed(reader(&f, "page\u{fffd}.txt"), None);
+        let request = Request { file: f.root.join(OsStr::from_bytes(b"page\xff.txt")), commit: None };
+        for _ in 0..2 {
+            assert!(tabs.open(&request, Instant::now()));
+        }
+        assert_eq!(tabs.tabs.len(), 2);
+        assert_eq!(tabs.shown, 1);
+        assert_eq!(tabs.tabs[0].path, tabs.tabs[1].path);
+    }
+
+    #[test]
+    fn a_replaced_project_root_does_not_reuse_a_working_tab() {
+        let f = Fixture::folder();
+        f.write("page.txt", "old body\n");
+        let mut tabs = Tabs::placed(reader(&f, "page.txt"), None);
+        fs::rename(&f.root, f.root.with_file_name("previous-project")).unwrap();
+        f.write("page.txt", "new body\n");
+        ask(&mut tabs, &f, "page.txt");
+        assert_eq!(tabs.tabs.len(), 2);
+        assert!(drawn(&mut tabs, 80, 6)[2].ends_with("new body"));
+    }
+
+    #[test]
+    fn commit_tabs_use_the_full_hash_and_refuse_an_abbreviation_that_becomes_ambiguous() {
+        const FIRST: &str = "1c299ef8d83dfc68f9618e553977b5d69c5baae3";
+        const SECOND: &str = "1c299ef48afd14d6aede3a4a71160692f42f1f79";
+        const SHORT: &str = "1c299ef";
+
+        // These SHA-1 commit objects have the same seven visible hex digits.
+        let f = Fixture::folder();
+        f.git(&["init", "-q", "--template=", "-b", "main", "--object-format=sha1"]);
+        let put_commit = |text, tree, subject| {
+            f.write("page.txt", text);
+            f.git(&["add", "--", "page.txt"]);
+            f.git(&["write-tree"]);
+            let object = f.root.parent().unwrap().join("commit-object");
+            fs::write(
+                &object,
+                format!(
+                    "tree {tree}\nauthor Milo Test <test@example.com> 981173106 +0000\n\
+                     committer Milo Test <test@example.com> 981173106 +0000\n\n{subject}\n"
+                ),
+            )
+            .unwrap();
+            f.git(&["hash-object", "-w", "-t", "commit", object.to_str().unwrap()]);
+        };
+        put_commit("original commit body\n", "ca3065e5729199ac4562442eea80513faff45a76", "First 21709");
+        let mut tabs = Tabs::placed(reader(&f, "page.txt"), None);
+        let open = |tabs: &mut Tabs, id: &str| {
+            tabs.open(&Request { file: f.root.join("page.txt"), commit: Some(id.into()) }, Instant::now())
+        };
+        assert!(open(&mut tabs, SHORT));
+        assert!(open(&mut tabs, FIRST));
+        assert_eq!(tabs.tabs.len(), 2);
+        assert!(drawn(&mut tabs, 80, 6)[2].ends_with("original commit body"));
+        put_commit("colliding commit body\n", "2f530c2257e83f9c24bf86c70ccd31251ec81f0d", "Second 3305");
+
+        tabs.key(Key::Ctrl(b'p'));
+        assert!(!open(&mut tabs, SHORT));
+        assert_eq!(tabs.shown, 0);
+        assert!(open(&mut tabs, SECOND));
+        assert_eq!(tabs.tabs.len(), 3);
+        assert!(drawn(&mut tabs, 80, 6)[2].ends_with("colliding commit body"));
+    }
+
+    #[test]
+    fn a_commit_tab_does_not_bypass_a_new_shallow_boundary_or_match_another_project() {
+        let f = Fixture::new();
+        f.write("page.txt", "parent body\n");
+        f.commit("parent");
+        f.write("page.txt", "commit body\n");
+        f.commit("child");
+        let mut repo = crate::git::Repo::open(&f.root).unwrap();
+        repo.read();
+        let hash = repo.history(1).unwrap()[0].hash.clone();
+        let other = Fixture::folder();
+        other.git(&["clone", "-q", "--no-local", f.root.to_str().unwrap(), "other"]);
+        let mut tabs = Tabs::placed(reader(&f, "page.txt"), None);
+        let open = |tabs: &mut Tabs, root: &Path| {
+            tabs.open(&Request { file: root.join("page.txt"), commit: Some(hash.clone()) }, Instant::now())
+        };
+        assert!(open(&mut tabs, &f.root));
+        assert!(open(&mut tabs, &other.root.join("other")));
+        assert_eq!(tabs.tabs.len(), 3);
+        fs::write(f.root.join(".git/shallow"), format!("{hash}\n")).unwrap();
+        assert!(!open(&mut tabs, &f.root));
+        assert_eq!(tabs.shown, 2);
+        assert!(drawn(&mut tabs, 80, 6)[5].contains("Git did not answer for this commit."));
     }
 
     #[test]

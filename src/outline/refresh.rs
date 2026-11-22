@@ -112,6 +112,51 @@ mod tests {
         o.finish_check()
     }
 
+    /// Times the part of an automatic Git refresh during which Outline cannot
+    /// answer a key, separately from the time the background worker takes.
+    #[test]
+    #[ignore = "a benchmark; run alone with --release --ignored --nocapture"]
+    fn adopting_edits_in_a_large_worktree() {
+        use std::time::{Duration, Instant};
+
+        let f = Fixture::new();
+        for folder in 0..100 {
+            let dir = f.root.join(format!("pkg{folder:03}"));
+            fs::create_dir(&dir).unwrap();
+            for file in 0..500 {
+                fs::write(dir.join(format!("file{file:03}")), "base\n").unwrap();
+            }
+        }
+        f.commit("base");
+        let mut o = open(&f).refreshing_away();
+        let mut samples = [Vec::new(), Vec::new(), Vec::new()];
+        for lines in 1..=21 {
+            f.write("pkg000/file000", &"edit\n".repeat(lines));
+            let start = Instant::now();
+            o.check();
+            let away = Instant::now();
+            let fd = o.unfinished_check().unwrap();
+            let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+            assert_eq!(term::wait_ready(&mut fds, 60_000), 1);
+            let ready = Instant::now();
+            assert_eq!(o.finish_check(), Some(true));
+            let done = Instant::now();
+            let row = o.tree.row_of("pkg000/file000").and_then(|at| o.tree.row(at)).unwrap();
+            assert_eq!((row.add, row.del), (lines as u64, 1));
+            // The first edit makes a previously clean file pending.
+            if lines > 1 {
+                for (samples, elapsed) in samples.iter_mut().zip([away - start, ready - away, done - ready]) {
+                    samples.push(elapsed);
+                }
+            }
+        }
+        for (label, mut samples) in ["launch", "worker", "adopt"].into_iter().zip(samples) {
+            samples.sort_unstable();
+            let us = |d: Duration| d.as_micros();
+            println!("{label}\t20 samples\tp50={} us\tp95={} us", us(samples[9]), us(samples[18]));
+        }
+    }
+
     #[test]
     fn a_refresh_away_from_the_loop_shows_what_a_check_in_the_loop_shows() {
         let f = project();

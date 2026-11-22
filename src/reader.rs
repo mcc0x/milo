@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::diff::{Line, LineKind};
-use crate::git::{Commit, Kind, PendingFile, Repo};
+use crate::git::{Commit, CommitVersion, Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::{Direction, Key};
 use crate::pane::{After, Pane};
@@ -99,7 +99,8 @@ enum JumpNotice {
 enum Source {
     Working(Box<WorkingFile>),
     Committed {
-        short_id: String,
+        project: PathBuf,
+        hash: String,
         time: i64,
     },
     /// The working file as it was when read, marked with a handed-over patch's edits.
@@ -181,9 +182,12 @@ impl OpenReader {
         match self {
             Self::Here => Ok(match target {
                 ReadFile::Working(path) => Reader::open(&repo.root.join(path)),
-                ReadFile::Committed { commit, file } => {
-                    Some(Reader::committed(repo, &file.path, &commit.hash, commit.time, Some(file)))
-                }
+                ReadFile::Committed { commit, file } => Some(Reader::committed(
+                    repo,
+                    file.path.clone(),
+                    CommitVersion { hash: commit.hash.clone(), time: commit.time },
+                    Some(file),
+                )),
             }),
             Self::Floating(last) => {
                 // What `milo view` is given: a working file in full, a file at a commit as Git names it.
@@ -286,19 +290,11 @@ impl Text {
     }
 }
 
-impl Reader {
-    /// Whether `other` shows the same file of the same project, or the same file at the same commit.
-    fn same_file(&self, other: &Reader) -> bool {
-        self.path == other.path
-            && match (&self.source, &other.source) {
-                (Source::Working(ours), Source::Working(theirs)) => ours.repo.root == theirs.repo.root,
-                (Source::Committed { short_id: ours, .. }, Source::Committed { short_id: theirs, .. }) => {
-                    ours == theirs
-                }
-                _ => false,
-            }
-    }
+fn short_commit_id(hash: &str) -> &str {
+    &hash[..hash.len().min(7)]
+}
 
+impl Reader {
     /// Whether the file is being edited and the draft is not what was last saved.
     fn unsaved(&self) -> bool {
         self.editor.as_ref().is_some_and(|editor| editor.dirty())

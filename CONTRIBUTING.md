@@ -294,6 +294,18 @@ python3 tests/settings-bench.py target/release/milo
 
 The usage fixtures time transcript appends and SQLite reads with a writer still connected. They check token totals, window freshness and how often four loopback account providers are asked, including after a rate limit and a reopen. The settings fixture times reads during a competing save as well as independent edits and startup; its timings include loopback HTTP and Python JSON decoding. Neither fixture needs provider credentials. For delivery, saturation and idle measurements of the hosted relay, use its [isolated container benchmark](hosted/README.md#benchmark-the-shipped-relay).
 
+For repeated work after a pane has opened, use a release build and run these separately:
+
+```sh
+python3 tests/backend_refresh.py target/release/milo
+cargo test --release --locked --bin milo adopting_edits_in_a_large_worktree -- --ignored --nocapture
+python3 tests/backend_reader.py target/release/milo
+```
+
+The first counts Git commands through discovery, saves, a 24-save burst, staging and a commit. It waits for the changed counts or subject on screen. `--fixture sparse-checkout` tests a sparse index; `--idle-seconds 31.5` includes the macOS backup check. Linux polls instead of receiving FSEvents, so compare counts on the same platform. The Rust fixture separates the cost of launching a refresh, reading Git on the worker and taking its result into Outline. It repeatedly edits a path near the beginning of a 50,000-entry index; a path near the end need not cost the same.
+
+The reader probe uses a private inbox and real terminal, not a Rex server. It times showing, switching and closing large working and committed tabs, paging a handed patch and rereading a changed file. It reports resident memory separately from Git subprocess counts, and holds a Git command to see whether input is answered during a load. Pass `--base /path/to/earlier/milo` to alternate the builds on the same files. These are new pane processes and warm filesystem caches, not measurements from a freshly booted machine.
+
 `tests/menu-bench.sh` times the macOS menu app with made-up frames, on a Mac with a menu bar to draw in:
 
 ```sh
@@ -477,6 +489,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
 | `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
 | `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
+| `tests/backend_reader.py` | Profiles reader tabs, large handed patches, memory and input during a held Git read in a disposable terminal. |
+| `tests/backend_refresh.py` | Counts real Git processes through project discovery, warm refresh and watcher bursts in synthetic worktrees. |
 | `tests/bench/report.rs` | Chooses the builds a timing test runs and writes its report beside a base build's. |
 | `tests/bench/terminal.rs` | Runs a pane in a terminal for a timing test and finds its frames. |
 | `tests/history_bench.rs` | Times listing a small and a large commit's files in History, and Down meanwhile. |

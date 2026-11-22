@@ -24,6 +24,10 @@ impl Root {
         Ok(Self { dir, identity: (metadata.dev(), metadata.ino()) })
     }
 
+    pub(super) fn same_directory(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+
     /// Git still needs a pathname. Check that it names the directory we are holding.
     pub(super) fn at_path(&self, path: &Path) -> Result<bool, LookupError> {
         match fs::symlink_metadata(path) {
