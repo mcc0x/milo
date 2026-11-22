@@ -144,6 +144,11 @@ impl Page {
         Self { rows, top: 0, footer: HintHits::default() }
     }
 
+    /// Adds rows under those the page was made with.
+    pub fn extend(&mut self, rows: impl IntoIterator<Item = HelpRow>) {
+        self.rows.extend(rows);
+    }
+
     #[cfg(test)]
     pub fn assert_rows_fit(&self, room: usize) {
         for row in &self.rows {

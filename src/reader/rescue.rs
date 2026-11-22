@@ -15,18 +15,18 @@ use super::content::LIMIT;
 use crate::fs_ops::{self, Temp};
 use crate::paths;
 
-/// What to tell the user once the terminal is theirs again.
-static NOTE: Mutex<Option<String>> = Mutex::new(None);
+/// What to tell the user once the terminal is theirs again: a line for each draft.
+static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// The line about a draft kept by a reader that has just closed, once.
-pub fn take_note() -> Option<String> {
-    NOTE.lock().ok()?.take()
+/// The lines about drafts kept by a reader that has just closed, once.
+pub fn take_notes() -> Vec<String> {
+    NOTES.lock().map(|mut notes| std::mem::take(&mut *notes)).unwrap_or_default()
 }
 
 /// Leaves a line for the user to read once the terminal is theirs again.
 pub(super) fn tell(note: String) {
-    if let Ok(mut slot) = NOTE.lock() {
-        *slot = Some(note);
+    if let Ok(mut notes) = NOTES.lock() {
+        notes.push(note);
     }
 }
 
@@ -36,7 +36,7 @@ pub(super) fn state_dir() -> Option<PathBuf> {
 }
 
 /// A private folder under the state folder, made if it is missing.
-fn private_dir(state: &Path, name: &str) -> io::Result<PathBuf> {
+pub(super) fn private_dir(state: &Path, name: &str) -> io::Result<PathBuf> {
     let dir = state.join(name);
     DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
     // Refuse a link left where the folder should be.
@@ -45,7 +45,7 @@ fn private_dir(state: &Path, name: &str) -> io::Result<PathBuf> {
 }
 
 /// A name no other path shares in practice: the 64-bit FNV-1a of the path.
-fn hashed(text: &[u8]) -> String {
+pub(super) fn hashed(text: &[u8]) -> String {
     let hash = text
         .iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));

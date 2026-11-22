@@ -49,7 +49,7 @@ use git::{CommitId, Repo};
 use history::History;
 use outline::Outline;
 use pane::{Open, Pane, Start};
-use reader::Reader;
+use reader::{Reader, Tabs};
 
 const USAGE: &str = "\
 milo — file, history, usage, and reader panes for your terminal
@@ -136,8 +136,12 @@ Editing in the reader (also opened by milo view FILE --edit):
   Esc           stop editing; asks first if there are unsaved changes
   Ctrl-G        help
 
+Tabs in the reader, once the outline or history in Rex has opened a second file:
+  Ctrl-N Ctrl-P next/previous tab
+  Ctrl-W        close this tab; asks first if it has unsaved changes
+
 Ctrl-C quits; while a file is being edited it stops editing, and asks first
-if there are unsaved edits. Press ? for help
+if there are unsaved edits, in any tab. Press ? for help
 when the pane has room. The outline, history and reader support the mouse
 wheel, Page Up/Down and Home/End.
 
@@ -417,14 +421,14 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             } else {
                 Reader::open(path).ok_or_else(|| format!("{} is not in a directory", path.display()))?
             };
-            Ok(Box::new(reader))
+            Ok(Box::new(Tabs::new(reader)))
         }),
         Command::Edit(file) => run(Start::Reading(file_dir(Path::new(file))), &|| {
             let path = Path::new(file);
             let mut reader = Reader::open(path).ok_or_else(|| format!("{} is not in a directory", path.display()))?;
             // A file that cannot be edited opens for reading and says why.
             reader.edit(std::time::Instant::now());
-            Ok(Box::new(reader))
+            Ok(Box::new(Tabs::new(reader)))
         }),
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
         Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),

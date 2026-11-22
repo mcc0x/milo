@@ -8,12 +8,14 @@ mod draw;
 mod edit;
 #[cfg(test)]
 mod edit_tests;
+mod inbox;
 mod rescue;
+mod tabs;
 #[cfg(test)]
 mod tests;
 mod working_path;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,8 @@ use crate::watch::{Ignored, Scope};
 use changes::{Folds, Review};
 use disk::{ReadOnly, SaveError};
 use edit::{Editor, Place, Step};
-pub use rescue::take_note as take_rescue_note;
+pub use rescue::take_notes as take_rescue_notes;
+pub use tabs::Tabs;
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
@@ -114,15 +117,46 @@ pub enum ReadFile<'a> {
     Committed { commit: &'a Commit, file: &'a PendingFile },
 }
 
-/// Opens a file here, or replaces the last floating reader in Rex.
+/// Opens a file here, or in the floating reader in Rex.
 pub enum OpenReader {
     Here,
-    Floating { block: Option<String> },
+    Floating(Option<Floated>),
+}
+
+/// The floating reader a pane last opened, and the project whose files are its tabs.
+pub struct Floated {
+    pub block: String,
+    pub root: PathBuf,
+}
+
+/// What the floating reader already open does about one more file.
+#[derive(Debug, PartialEq, Eq)]
+enum Offer {
+    /// It shows the file in a tab.
+    Taken,
+    /// It can only be replaced, and has no unsaved edits to lose by that.
+    Replace,
+    /// It can only be replaced, which would end it with unsaved edits.
+    Unsaved,
+}
+
+impl Floated {
+    /// Offers a file of the project at `root` to this reader. A reader keeps to
+    /// the project it was opened for, so another project's file is never a tab of it.
+    fn offer(&self, state: &Path, root: &Path, file: &Path, commit: Option<&str>) -> Offer {
+        if self.root == root && inbox::send(state, &self.block, file, commit) {
+            Offer::Taken
+        } else if rescue::block_has_draft(state, &self.block) {
+            Offer::Unsaved
+        } else {
+            Offer::Replace
+        }
+    }
 }
 
 impl OpenReader {
     pub fn new(inside_rex: bool) -> Self {
-        if inside_rex { Self::Floating { block: None } } else { Self::Here }
+        if inside_rex { Self::Floating(None) } else { Self::Here }
     }
 
     pub fn open(&mut self, repo: &Repo, target: ReadFile<'_>) -> Result<Option<Reader>, &'static str> {
@@ -133,18 +167,23 @@ impl OpenReader {
                     Some(Reader::committed(repo, &file.path, &commit.hash, commit.time, Some(file)))
                 }
             }),
-            Self::Floating { block } => {
-                // Replacing the reader would end it and leave its edits only as a kept draft.
-                if let (Some(open), Some(state)) = (block.as_deref(), rescue::state_dir())
-                    && rescue::block_has_draft(&state, open)
-                {
-                    return Err("The open reader has unsaved edits.");
-                }
-                let (path, hash) = match target {
-                    ReadFile::Working(path) => (path, None),
-                    ReadFile::Committed { commit, file } => (file.path.as_str(), Some(commit.hash.as_str())),
+            Self::Floating(last) => {
+                // What `milo view` is given: a working file in full, a file at a commit as Git names it.
+                let (file, commit) = match target {
+                    ReadFile::Working(path) => (repo.root.join(path), None),
+                    ReadFile::Committed { commit, file } => (PathBuf::from(&file.path), Some(commit.hash.as_str())),
                 };
-                *block = Some(rex::open(&repo.root, path, hash, block.as_deref())?);
+                if let (Some(open), Some(state)) = (last.as_ref(), rescue::state_dir()) {
+                    match open.offer(&state, &repo.root, &file, commit) {
+                        Offer::Taken if rex::focus(&open.block, &file) => return Ok(None),
+                        Offer::Taken => return Err("Rex did not show the reader."),
+                        Offer::Unsaved => return Err("The open reader has unsaved edits."),
+                        Offer::Replace => {}
+                    }
+                }
+                let previous = last.as_ref().map(|open| open.block.as_str());
+                let block = rex::open(&repo.root, &file, commit, previous)?;
+                *last = Some(Floated { block, root: repo.root.clone() });
                 Ok(None)
             }
         }
@@ -230,6 +269,36 @@ impl Text {
 }
 
 impl Reader {
+    /// Whether `other` shows the same file of the same project, or the same file at the same commit.
+    fn same_file(&self, other: &Reader) -> bool {
+        self.path == other.path
+            && match (&self.source, &other.source) {
+                (Source::Working(ours), Source::Working(theirs)) => ours.repo.root == theirs.repo.root,
+                (Source::Committed { short_id: ours, .. }, Source::Committed { short_id: theirs, .. }) => {
+                    ours == theirs
+                }
+                _ => false,
+            }
+    }
+
+    /// Whether the file is being edited and the draft is not what was last saved.
+    fn unsaved(&self) -> bool {
+        self.editor.as_ref().is_some_and(|editor| editor.dirty())
+    }
+
+    /// Whether the draft is waiting for the answer to a question.
+    fn asking(&self) -> bool {
+        self.editor.as_ref().is_some_and(|editor| editor.asking())
+    }
+
+    /// Says `text` for a while, where the reader or its draft says such things.
+    fn say(&mut self, text: &'static str, now: Instant) {
+        match &mut self.editor {
+            Some(editor) => editor.say(text, now),
+            None => self.change_notice = Some((JumpNotice::Said { lead: "", text }, now + CHANGE_NOTICE)),
+        }
+    }
+
     pub(super) fn working_repo(&self) -> Option<&Repo> {
         match &self.source {
             Source::Working(work) => Some(&work.repo),
@@ -554,7 +623,6 @@ impl Reader {
             file: work.repo.root.join(&work.relative),
             root: work.repo.root.clone(),
             state: self.state.clone(),
-            block: std::env::var("REX_BLOCK").ok().filter(|_| !cfg!(test) && rex::inside()),
             tools: self.tools.clone(),
         };
         Ok(Editor::open(original, syntax::for_file(&self.path), self.top_line(), place))

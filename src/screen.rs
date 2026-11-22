@@ -235,6 +235,8 @@ impl Default for Pictures {
 pub struct Screen {
     pub w: usize,
     pub h: usize,
+    /// Rows above row 0 that a pane drawn under another's strip leaves alone.
+    top: usize,
     cur: Vec<Cell>,
     prev: Vec<Cell>,
     marks: Marks,
@@ -255,6 +257,7 @@ impl Screen {
         Screen {
             w: 0,
             h: 0,
+            top: 0,
             cur: Vec::new(),
             prev: Vec::new(),
             marks: Marks::default(),
@@ -325,6 +328,16 @@ impl Screen {
         self.pictures.resize_due = None;
     }
 
+    /// Draws with the top `rows` rows left out: row 0 for `draw` is the row under them.
+    pub fn below(&mut self, rows: usize, draw: impl FnOnce(&mut Screen)) {
+        let rows = rows.min(self.h);
+        self.top += rows;
+        self.h -= rows;
+        draw(self);
+        self.top -= rows;
+        self.h += rows;
+    }
+
     pub fn clear(&mut self) {
         self.cur.fill(BLANK);
         if std::mem::take(&mut self.marks_flushed) {
@@ -375,7 +388,7 @@ impl Screen {
         if pictures.resize_due.is_some() {
             return;
         }
-        let at = Placement { id: picture.id, x, y, cols, rows };
+        let at = Placement { id: picture.id, x, y: y + self.top, cols, rows };
         if let Some(wanted) = pictures.wanted.iter_mut().find(|wanted| wanted.id == at.id) {
             *wanted = at;
             return;
@@ -396,7 +409,7 @@ impl Screen {
         let cells = if width == 0 {
             &mut [][..]
         } else {
-            let start = y * self.w + x;
+            let start = (y + self.top) * self.w + x;
             &mut self.cur[start..start + width]
         };
         (cells, &mut self.marks)
@@ -408,6 +421,7 @@ impl Screen {
         if width == 0 {
             return &mut [];
         }
+        let y = y + self.top;
         let row = &mut self.cur[y * self.w..(y + 1) * self.w];
         let start = x - usize::from(row[x].glyph == CONT);
         let end = x + width;
@@ -420,7 +434,7 @@ impl Screen {
         if used == 0 {
             return;
         }
-        let start = y * self.w;
+        let start = (y + self.top) * self.w;
         if starts_on_cont && x > 0 {
             self.cur[start + x - 1].glyph = BLANK.glyph;
         }

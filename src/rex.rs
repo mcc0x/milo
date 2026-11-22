@@ -257,22 +257,33 @@ pub fn inside() -> bool {
 }
 
 /// Opens a floating reader in the caller's tab and returns its block ID.
+/// `file` is what the reader is given: a path, or with `commit` the name Git has for the file.
 /// The old reader stays in place if the replacement cannot be created.
-pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str>) -> Result<String, &'static str> {
+pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&str>) -> Result<String, &'static str> {
     let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
-    let (_, name) = file.rsplit_once('/').unwrap_or(("", file));
-    let path = if commit.is_some() { file.into() } else { root.join(file) };
-    let command = reader_command(&exe, &path, commit);
+    let command = reader_command(&exe, file, commit);
     let previous = previous.map(json).unwrap_or_else(|| "null".into());
     let args = format!(
         r#"{{"label":{},"cwd":{},"command":{command},"previous":{previous}}}"#,
-        reader_label(name),
+        file_label(file),
         json(&root.to_string_lossy()),
     );
     script(Some(&target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
         .filter(|reply| exact_block(OsStr::new(reply)).is_some())
         .ok_or("Rex did not open the file.")
+}
+
+/// Brings the floating reader in `block` to the front, named after the file it now shows.
+pub fn focus(block: &str, file: &Path) -> bool {
+    let Some(target) = Target::current() else { return false };
+    let args = format!(r#"{{"block":{},"label":{}}}"#, json(block), file_label(file));
+    script(Some(&target), &target.session, include_str!("rex_reader_show.lua"), ["--args", &args]).is_some()
+}
+
+/// The label of a reader showing `file`: the file's name.
+fn file_label(file: &Path) -> String {
+    reader_label(&file.file_name().unwrap_or_default().to_string_lossy())
 }
 
 /// Quote a Rex label without changing the path passed to the reader.
