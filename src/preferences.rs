@@ -561,9 +561,9 @@ fn update_guarded(
     })
 }
 
-// Preserve the explicit override from an experimental release, even in a
-// worktree that would otherwise inherit a different global placement.
-fn saved_value<'a>(key: &str, value: &'a str) -> &'a str {
+// Saved layers and exported bundles may carry this experimental override.
+// Preserve its scope even when the worktree would otherwise inherit a different placement.
+pub(crate) fn saved_value<'a>(key: &str, value: &'a str) -> &'a str {
     if key == "preview_placement" && value == "floating" { PreviewPlacement::Right.value() } else { value }
 }
 

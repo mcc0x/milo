@@ -341,6 +341,7 @@ fn read_line(section: &mut Section, key: &str, value: &str) -> Result<(), &'stat
             None => section.skipped.push("layout (written in a form this Milo does not know)".into()),
         }
     } else if let Some(known) = travelling_key(key) {
+        let value = preferences::saved_value(known, value);
         if preferences::valid_choice(known, value) {
             section.choices.retain(|(earlier, _)| *earlier != known);
             section.choices.push((known, value.to_owned()));

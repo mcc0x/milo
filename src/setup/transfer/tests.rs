@@ -139,7 +139,10 @@ fn workflow_bundles_carry_preview_placement_without_changing_version_or_inherita
     let mut b = Host::new();
     b.worktree = Some(second.root.clone());
     b.write("preferences.conf", "icons = off\n");
-    let preview = b.with(|place| plan(place, &bundle, &[])).unwrap();
+    // A v1 bundle written by the experimental build must preserve the worktree
+    // override on import too, rather than inheriting the global Above.
+    let legacy_bundle = bundle.replace("preview_placement = right", "preview_placement = floating");
+    let preview = b.with(|place| plan(place, &legacy_bundle, &[])).unwrap();
     let report = preview.report("bundle.txt");
     assert!(report.contains("Preview placement: right → above"), "{report}");
     assert!(report.contains("Preview placement: inherited → right"), "{report}");
@@ -150,12 +153,10 @@ fn workflow_bundles_carry_preview_placement_without_changing_version_or_inherita
     let old = "milo-settings 1\n[global]\nfollow_activity = false\n";
     let preview = b.with(|place| plan(place, old, &[])).unwrap();
     assert_eq!(b.with(|place| apply(place, preview)).unwrap(), 1);
-    for invalid in ["center", "floating"] {
-        let bundle = format!("milo-settings 1\n[global]\npreview_placement = {invalid}\n");
-        let preview = b.with(|place| plan(place, &bundle, &[])).unwrap();
-        assert_eq!(preview.changes(), 0);
-        assert!(preview.report("bundle.txt").contains("Preview placement (a choice this Milo does not know)"));
-    }
+    let unknown = "milo-settings 1\n[global]\npreview_placement = center\n";
+    let preview = b.with(|place| plan(place, unknown, &[])).unwrap();
+    assert_eq!(preview.changes(), 0);
+    assert!(preview.report("bundle.txt").contains("Preview placement (a choice this Milo does not know)"));
     assert_eq!(
         b.read("preferences.conf").as_deref(),
         Some("icons = off\npreview_placement = above\nfollow_activity = false\n")
