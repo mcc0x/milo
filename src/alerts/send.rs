@@ -52,6 +52,9 @@ impl Outcome {
             Self::Refused(code) => format!("{name} refused the request (HTTP {code}); check the chat or channel"),
             Self::Uncertain(Some(code)) => format!("{name} delivery could not be confirmed (HTTP {code})"),
             Self::Uncertain(None) => format!("{name} delivery could not be confirmed"),
+            Self::Failed(Some(code)) if hosted_telegram => {
+                format!("the Telegram relay's address answered without the relay (HTTP {code})")
+            }
             Self::Failed(Some(code)) => format!("{name} answered with a server error (HTTP {code})"),
             Self::Failed(None) if hosted_telegram => "the Telegram relay could not be reached".into(),
             Self::Failed(None) => format!("{name} could not be reached"),
@@ -72,6 +75,9 @@ pub(super) fn post(request: &Request, running: Option<&AtomicI32>) -> Outcome {
         200..=299 if !request.relay => Outcome::Sent,
         429 => Outcome::Wait(retry_after(&body)),
         503 if request.relay => relay_retry_after(&body).map_or(Outcome::Uncertain(Some(code)), Outcome::Unavailable),
+        // The relay gives a well-formed send neither status: only what stands in front of it
+        // does, as while no relay is running. Nothing was forwarded and the binding is untouched.
+        403 | 404 if request.relay => Outcome::Failed(Some(code)),
         400..=499 => Outcome::Refused(code),
         _ if request.relay => Outcome::Uncertain(Some(code)),
         500..=599 => Outcome::Failed(Some(code)),
