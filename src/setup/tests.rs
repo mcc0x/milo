@@ -916,7 +916,7 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
     assert_eq!(pane.panel, Panel::Workflow);
     let rows = frame(&mut pane, 75, 23);
     assert!(rows.iter().any(|row| row.contains("Show Claude Code limits")));
-    assert!(rows.iter().any(|row| row.contains("Keep the starting project open")));
+    assert!(rows.iter().any(|row| row.contains("Outside Rex, keep the starting project open.")));
     assert!(!rows.iter().any(|row| row.contains("Arrange new shell tabs")));
     pane.key(Key::Char('1'));
     let rows = frame(&mut pane, 28, 10);
@@ -1016,8 +1016,10 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert!(!pane.rows().contains(&Row::MenuBar), "opening uses the same verified installer");
 
     pane.menu_installed = Some(true);
-
-    let rows = frame(&mut pane, 80, 20);
+    let rows = frame(&mut pane, 80, 12);
+    assert!(!rows.iter().any(|row| row.contains("Remove Milo menu bar app…")));
+    assert_eq!(pane.key(Key::End), After::Stay);
+    let rows = frame(&mut pane, 80, 12);
     let remove = click_label(&rows, "Remove Milo menu bar app…");
     assert_eq!(pane.key(remove), After::Stay);
     assert_eq!(pane.panel, Panel::Confirm(Confirm::RemoveMenuBar));
@@ -1077,7 +1079,7 @@ fn appearance_changes_its_live_sample_without_global_writes() {
 }
 
 #[test]
-fn settings_show_all_controls_and_selected_help_before_the_sample() {
+fn settings_keep_selected_help_when_controls_scroll_and_show_samples_when_there_is_room() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("drawing does not call Rex"));
     for (tab, moves, label, detail, summary, sample) in [
@@ -1088,9 +1090,13 @@ fn settings_show_all_controls_and_selected_help_before_the_sample() {
         for _ in 0..moves {
             assert_eq!(pane.key(Key::Down), After::Stay);
         }
-        for (width, height) in [(18, 16), (80, 18), (18, 24), (80, 24)] {
+        for (width, height) in [(80, 8), (18, 16), (80, 18), (18, 24), (80, 24)] {
             let rows = frame(&mut pane, width, height);
-            assert_eq!(pane.visible.len, pane.rows().len(), "{width}x{height}: {rows:?}");
+            if height == 24 {
+                assert_eq!(pane.visible.len, pane.rows().len(), "{width}x{height}: {rows:?}");
+            } else if height == 8 {
+                assert!(pane.visible.len < pane.rows().len(), "{width}x{height}: {rows:?}");
+            }
             assert!(rows.iter().any(|row| row.starts_with('›') && row.contains(label)), "{rows:?}");
             let help_text = if width == 18 { summary } else { detail };
             assert!(rows.iter().any(|row| !row.starts_with('›') && row.contains(help_text)), "{rows:?}");

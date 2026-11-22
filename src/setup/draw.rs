@@ -161,10 +161,14 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let rows = self.rows();
         let narrow = s.w < NARROW;
         let narrow_editor = narrow && tab.is_some() && !rows.is_empty();
+        let preferences = matches!(self.panel, Panel::Appearance | Panel::Workflow);
         if !narrow_editor && self.panel != Panel::Exit && end.saturating_sub(y) > rows.len().clamp(1, 3) {
-            y += usize::from(end >= 12);
+            // In preference lists, keep the blank rows only if there is also room for selected help.
+            let spare = end.saturating_sub(y + rows.len());
+            let padding = usize::from(end >= 12 && (!preferences || spare >= 6));
+            y += padding;
             self.title(s, y);
-            y += 1 + usize::from(end >= 12);
+            y += 1 + padding;
         }
         if self.panel == Panel::Diagnostics {
             self.draw_diagnostics(s, y, end);
@@ -244,18 +248,28 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 (top, top + summary_rows)
             } else {
                 let next = (y + rows.len()).min(form_end);
+                let detail_space = if preferences {
+                    // Keep several choices in view while reserving room for selected help.
+                    form_end.saturating_sub(y + rows.len().min(3))
+                } else {
+                    form_end.saturating_sub(next + 1)
+                };
+                let mut rows_end = form_end;
                 let mut content_end = next;
-                if !narrow
-                    && let Some((row, cell)) = selected
-                    && next + 1 < form_end
-                {
-                    let detail = self.detail(row, cell);
-                    for (i, line) in wrap(detail, form_width - 3).take(form_end - next - 1).enumerate() {
-                        s.put(2, next + 1 + i, form_width - 3, line, FAINT);
-                        content_end = next + 2 + i;
+                if !narrow && detail_space > 0 && let Some((row, cell)) = selected {
+                    let lines = wrap(self.detail(row, cell), form_width - 3).take(detail_space);
+                    let count = lines.clone().count();
+                    if count > 0 {
+                        let gap = usize::from(next + count < form_end);
+                        rows_end = next.min(form_end - count - gap);
+                        let top = rows_end + gap;
+                        for (i, line) in lines.enumerate() {
+                            s.put(2, top + i, form_width - 3, line, FAINT);
+                        }
+                        content_end = top + count;
                     }
                 }
-                (form_end, content_end)
+                (rows_end, content_end)
             };
         self.draw_rows(s, y, rows_end, form_width);
 
@@ -617,6 +631,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 .filter(|note| !note.is_empty())
                 .unwrap_or(cell.detail),
             Row::Icons if self.icon_override.is_some() => "MILO_ICONS overrides this saved icon choice.",
+            Row::FollowProject if !self.inside => "Outside Rex, keep the starting project open.",
             Row::SaveGlobal if self.panel == Panel::Save(SaveKind::Layout) && self.scope == Scope::Worktree => {
                 "Updates the global default without changing this worktree's override."
             }
