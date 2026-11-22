@@ -67,7 +67,8 @@ Usage: milo
        milo settings export GROUPS | import FILE [--apply] | undo
        milo doctor
        milo setup --repair | --remove
-       milo presence [status] | enable | details DETAILS | application ID | disable
+       milo presence [status] | enable | disable
+       milo presence details DETAILS | application ID
        milo view FILE [--commit ID | --edit]
        milo review PATCH [--from NAME] [--float]
        milo PATH
@@ -75,18 +76,25 @@ Usage: milo
        milo listen [--stop]
        milo alerts [--help]
        milo claude-status
-       milo --help | --version
+       milo --help [COMMAND] | --version
 
 Bare milo opens Home. milo PATH opens the outline at PATH.
+milo COMMAND --help, or milo --help COMMAND, explains one command briefly.
 On first launch, milo and milo setup share a short welcome guide.
---skip-onboarding marks the guide skipped and exits without opening a terminal or changing settings.
+--skip-onboarding marks the guide skipped and exits without opening a terminal
+  or changing settings.
 milo setup saves a Rex layout and can enable Claude Code usage limits.
-milo web opens local Settings in your browser. Use --no-open to print the link without opening it.
-milo web --host HOST opens the Settings of another Rex host here, through a Rex forward that ends with it.
+milo web opens local Settings in your browser. Use --no-open to print the link
+  without opening it.
+milo web --host HOST opens the Settings of another Rex host here, through a Rex
+  forward that ends with it.
 milo doctor explains local preferences, integration health and usage sources.
-milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose. It is off until you turn it on.
-milo presence shows or changes the optional Discord Rich Presence, which is off until you turn it on.
-milo settings copies chosen pane settings to another host as a file, shows what an import would change, and undoes it.
+milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose.
+  It is off until you turn it on.
+milo presence shows or changes the optional Discord Rich Presence, which is off
+  until you turn it on.
+milo settings copies chosen pane settings to another host as a file, shows what
+  an import would change, and undoes it.
 milo listen and milo claude-status are used by Rex and Claude Code.
 To open a directory named like a command, use a path such as ./history.
 In a git repository the outline shows the whole project and history shows
@@ -97,6 +105,7 @@ wider trees show line counts and what happened to each file.
 Outline (tree):
   ↑↓ or k j     move
   Enter         toggle a folder or open a file
+  /             find a file by its name or path
   Space         toggle a folder
   ← or h        close an open folder or go to the parent
   → or l        open a closed folder
@@ -129,6 +138,8 @@ Reader (also opened by milo view):
   Space / b     page down/up
   g G           top/bottom
   n N           next/previous block of changed lines
+  c             show only the changed lines, or the full file
+  Tab Enter     choose the next run of hidden lines, show it
   e             edit a working text file
   q or Esc      close
 
@@ -596,9 +607,46 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             exit(setup::listen(stop))
         }
         Command::ClaudeStatus => exit(usage::claude_status()),
-        Command::Help(text) => print_line(text.trim_end()),
+        Command::Help(text) => match term::output_columns() {
+            Some(columns) => print_line(&wrapped(text.trim_end(), columns.clamp(GUIDE_LEAST, GUIDE_MOST))),
+            // A pipe or a file gets the lines as they are written, whatever reads them.
+            None => print_line(text.trim_end()),
+        },
         Command::Version => print_line(concat!("milo ", env!("CARGO_PKG_VERSION"))),
     }
+}
+
+/// The widest a guide's prose is left for a person to read, and the narrowest it is broken to.
+const GUIDE_MOST: usize = 80;
+const GUIDE_LEAST: usize = 40;
+
+/// A guide with its prose broken at spaces to fit `columns`. A usage line
+/// and an indented row are a command or a table, and stay as written.
+fn wrapped(text: &str, columns: usize) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / columns);
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if line.starts_with([' ', '\t']) || line.starts_with("Usage:") || width::str_width(line) <= columns {
+            out.push_str(line);
+            continue;
+        }
+        let mut used = 0;
+        for word in line.split(' ') {
+            let wide = width::str_width(word);
+            if used > 0 && used + 1 + wide > columns {
+                out.push('\n');
+                used = 0;
+            } else if used > 0 {
+                out.push(' ');
+                used += 1;
+            }
+            out.push_str(word);
+            used += wide;
+        }
+    }
+    out
 }
 
 fn print_report(report: Result<String, String>) -> Result<(), String> {
@@ -923,5 +971,38 @@ mod tests {
             let listed = COMMANDS.contains(&word) || word.starts_with(['-', '[']) || word == "PATH";
             assert!(listed, "{word} is in --help and not among the commands a guess can name");
         }
+    }
+
+    #[test]
+    fn a_guide_shown_in_a_terminal_breaks_prose_between_words_and_leaves_commands_whole() {
+        let guide = "Usage: milo web --host HOST [--project DIR] [--port PORT]\n\n\
+                     Edit local settings in your browser. The default port is 6110.\n  \
+                     Ctrl-S        save the draft into the file it was read from\n\
+                     “Quoted” words are measured in columns, not bytes.";
+        let lines: Vec<String> = wrapped(guide, 40).lines().map(str::to_owned).collect();
+        assert_eq!(
+            lines,
+            [
+                "Usage: milo web --host HOST [--project DIR] [--port PORT]",
+                "",
+                "Edit local settings in your browser. The",
+                "default port is 6110.",
+                "  Ctrl-S        save the draft into the file it was read from",
+                "“Quoted” words are measured in columns,",
+                "not bytes.",
+            ]
+        );
+        // Nothing a guide says is dropped or reordered, at any width a terminal is given.
+        let every = std::iter::once(USAGE).chain(COMMANDS.iter().map(|name| command_help(name).unwrap()));
+        for (text, columns) in every.flat_map(|text| [GUIDE_LEAST, 57, GUIDE_MOST].map(|columns| (text, columns))) {
+            let shown = wrapped(text, columns);
+            assert_eq!(shown.split_whitespace().collect::<Vec<_>>(), text.split_whitespace().collect::<Vec<_>>());
+            for line in shown.lines().filter(|line| !line.starts_with(' ') && !line.starts_with("Usage:")) {
+                let one_word = !line.contains(' ');
+                assert!(width::str_width(line) <= columns || one_word, "{columns}: {line}");
+            }
+        }
+        // The full guide is written to 80 columns, so a pipe gets it at that width too.
+        assert_eq!(USAGE.lines().find(|line| width::str_width(line) > GUIDE_MOST), None);
     }
 }
