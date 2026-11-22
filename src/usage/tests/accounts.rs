@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use super::super::accounts::{Accounts, Currency, Failure, Figure, Kind, Reading, Sources, Status, Unit};
+use super::profile::{micros, ready};
 use super::*;
 use crate::preferences::{UsageAccount, UsageAccounts};
 
@@ -848,4 +849,124 @@ fn doctor_describes_an_account_from_its_settings_and_saved_answer_without_asking
     assert!(report.iter().all(|line| !line.contains(KEY)), "{report:?}");
     assert_eq!(provider.requests(), 1);
     assert_eq!(sources.doctor(UsageAccounts::default(), NOW), [""; 0]);
+}
+
+/// One real scheduler check and, if due, its complete worker batch. Passing
+/// the artificial clock to collection avoids mixing real and simulated ticks.
+fn schedule_look(accounts: &mut Accounts, now: i64, clock: Instant, manual: bool) -> (Duration, Option<Duration>) {
+    let start = Instant::now();
+    accounts.start(now, clock, manual);
+    let inline = start.elapsed();
+    if accounts.fd().is_none() {
+        return (inline, None);
+    }
+    while let Some(fd) = accounts.fd() {
+        ready(fd);
+        accounts.collect(clock);
+    }
+    (inline, Some(start.elapsed()))
+}
+
+#[test]
+#[ignore = "a benchmark; run it alone on a release build"]
+fn usage_profile_account_schedule() {
+    if !Path::new(super::super::http::executable()).is_file() {
+        eprintln!("skipping account fixture: curl is not installed");
+        return;
+    }
+    const SECONDS: i64 = 40 * MINUTE;
+    const STEP: i64 = 2;
+    let environment = [
+        ("MILO_DEEPSEEK_API_KEY", KEY),
+        ("MILO_OPENROUTER_API_KEY", "sk-or-test-key-1"),
+        ("MILO_DEVIN_API_KEY", "cog_test_key_22"),
+        ("MILO_DEVIN_ORG", "org-abc123def456"),
+        ("MILO_GITHUB_TOKEN", "github_pat_test_333"),
+        ("MILO_GITHUB_USER", "example-user"),
+    ];
+    let all = UsageAccount::ALL.map(|which| (which, Show::Always));
+    println!("# 40 simulated minutes, two seconds between looks; four canned loopback providers");
+    println!("# credential_checks and settings_reads are modeled from starts and completed workers, not syscall traces");
+    println!(
+        "settings\tphase\tlooks\tmanual\tcredential_checks\tsettings_reads\tsettings_bytes_each\tworker_ticks\tworkers\trequests\tno_job_p50_us\tno_job_p95_us\tlaunch_p50_us\tlaunch_p95_us\tresult_p50_us\tresult_p95_us"
+    );
+    for (mode, enabled, file) in [("hidden", false, false), ("environment", true, false), ("private-file", true, true)] {
+        let (f, provider) = (Fixture::folder(), Provider::start());
+        for (id, body) in [("deepseek", DEEPSEEK), ("openrouter", OPENROUTER), ("devin", DEVIN), ("copilot", COPILOT)] {
+            provider.reply(id, 200, "", body);
+        }
+        let settings_bytes = if file {
+            let mut text = "# Synthetic usage account settings, no live tokens.\n".to_owned();
+            for (key, value) in environment {
+                text.push_str(&format!("{key} = {value}\n"));
+            }
+            f.write("config/usage-accounts.conf", &text);
+            fs::set_permissions(f.root.join("config/usage-accounts.conf"), fs::Permissions::from_mode(0o600)).unwrap();
+            text.len()
+        } else {
+            0
+        };
+        let (keys, chosen) = if enabled && !file { (environment.as_slice(), all.as_slice()) } else if enabled {
+            (&[][..], all.as_slice())
+        } else {
+            (environment.as_slice(), &[][..])
+        };
+        let mut usage = pane(&f, sources(&f, &provider, keys), chosen);
+        let clock = Instant::now();
+        let (mut no_job, mut launch, mut result) = (Vec::new(), Vec::new(), Vec::new());
+        let mut reopen = None;
+        for tick in 0..=SECONDS / STEP {
+            let passed = tick * STEP;
+            let now = NOW + passed;
+            let at = elapsed(clock, passed);
+            if passed == 5 * MINUTE {
+                provider.reply("deepseek", 429, "Retry-After: 1200\r\n", "{}");
+            }
+            let manual = matches!(passed, 10 | 600 | 610);
+            let (inline, complete) = schedule_look(&mut usage.accounts, now, at, manual);
+            if let Some(complete) = complete {
+                launch.push(inline);
+                result.push(complete);
+            } else {
+                no_job.push(inline);
+            }
+            if passed == 5 * MINUTE {
+                provider.reply("deepseek", 200, "", DEEPSEEK);
+            }
+            if enabled && passed == 5 * MINUTE + STEP {
+                let mut second = pane(&f, sources(&f, &provider, keys), chosen);
+                let previous = provider.requests();
+                let (inline, full) = schedule_look(&mut second.accounts, now, at, false);
+                assert_eq!(provider.requests(), previous, "fresh saved answers and Retry-After must survive reopening");
+                for &(which, _) in chosen {
+                    assert_eq!(status(&second, which, now), status(&usage, which, now));
+                }
+                reopen = Some((inline, full.expect("reopening loads the saved answers")));
+            }
+        }
+        for (id, due) in [("deepseek", 6), ("openrouter", 9), ("devin", 4), ("copilot", 4)] {
+            assert_eq!(provider.asked(id).len(), if enabled { due } else { 0 }, "{id}");
+        }
+        let workers = provider.requests();
+        let looks = usize::try_from(SECONDS / STEP + 1).unwrap();
+        let checks = looks * chosen.len() + workers;
+        let reads = if file { checks } else { 0 };
+        let batches = result.len();
+        println!(
+            "{mode}\topen\t{looks}\t3\t{checks}\t{reads}\t{settings_bytes}\t{batches}\t{workers}\t{workers}\t{}\t{}\t{}",
+            micros(&mut no_job),
+            micros(&mut launch),
+            micros(&mut result)
+        );
+        if let Some((inline, complete)) = reopen {
+            let checks = 2 * chosen.len();
+            let reads = if file { checks } else { 0 };
+            let workers = chosen.len();
+            println!(
+                "{mode}\treopen\t1\t0\t{checks}\t{reads}\t{settings_bytes}\t1\t{workers}\t0\t-\t-\t{}\t{}",
+                micros(&mut [inline]),
+                micros(&mut [complete])
+            );
+        }
+    }
 }

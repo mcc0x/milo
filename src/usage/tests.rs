@@ -8,6 +8,7 @@ mod idle;
 mod layout;
 mod menu_stream;
 mod opencode_activity;
+mod profile;
 mod status_line;
 mod tools;
 mod unchanged;

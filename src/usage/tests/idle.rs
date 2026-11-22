@@ -42,7 +42,7 @@ pub(super) fn history(path: &Path, rows: u32, newest_ms: i64, fraction: &str) {
     exec(path, &history_sql(rows, newest_ms, fraction));
 }
 
-fn history_sql(rows: u32, newest_ms: i64, fraction: &str) -> String {
+pub(super) fn history_sql(rows: u32, newest_ms: i64, fraction: &str) -> String {
     let reset = (NOW + DAY) * 1000;
     format!(
         "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<{rows}) \
@@ -109,7 +109,7 @@ fn idle_ticks_and_freshness() {
 }
 
 /// Dates a database, and its write-ahead log if it has one, as written at `at`.
-fn dated(database: &Path, at: i64) {
+pub(super) fn dated(database: &Path, at: i64) {
     let mut log = database.as_os_str().to_owned();
     log.push("-wal");
     last_written(database, at);
