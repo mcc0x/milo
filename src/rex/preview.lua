@@ -1,5 +1,5 @@
 -- Runs in Rex's local CLI. Do not read terminal content, invoke client
--- actions, or ask another server. Native code independently proves geometry.
+-- actions, or ask another server. Native code tracks the pinned window.
 local a = rex.args
 local terminal = "com.superlogical.terminal"
 local preview_label, staging_label = "milo:preview", "milo:preview:starting"
@@ -56,17 +56,23 @@ end
 
 local function local_owner(owner)
   if not exact(owner, "client:") then return end
-  local listed = rex.session.list_clients(session)
-  local pid
-  for _, client in ipairs(listed and listed.clients or {}) do
-    if client.client_id == owner then
-      local info = client.info
-      if pid or not (info and info.kind == "app" and info.platform == "macos"
-        and client.connection_state == "connected" and peer(client.principal)) then return end
-      pid = client.principal.pid
-    end
+  local inspected = rex.call("client.inspect", { client_id = owner })
+  local client = inspected and inspected.client
+  if not (client and client.client_id == owner and client.connection_state == "connected"
+    and client.info and client.info.kind == "app" and client.info.platform == "macos"
+    and peer(client.principal)) then return end
+  -- API 18 lists this connection's attachments; it does not identify the
+  -- displayed session. Distinguish the requested scope from any others.
+  local ids = client.session_ids
+  if type(ids) ~= "table" then return end
+  local length, count, here, elsewhere = #ids, 0, false, false
+  for index, id in pairs(ids) do
+    if type(index) ~= "number" or index < 1 or index > length or index % 1 ~= 0
+      or not exact(id, "session:") then return end
+    count = count + 1
+    if id == a.session then here = true else elsewhere = true end
   end
-  return pid
+  if count == length and here then return client.principal.pid, elsewhere end
 end
 
 local function process(block)
@@ -263,6 +269,7 @@ local function cancel_staged(host, id)
 end
 
 local function publish(host, id)
+  local result = "changed"
   local view = current_view()
   if view and view.active_window_id == a.window then
     local main, window, tiled = locate(view, a.main)
@@ -270,33 +277,45 @@ local function publish(host, id)
     local block, place, layer = locate(view, id)
     if working_pair(host, main, window, tiled) and origin == window and caller_layer.kind == "tiled"
       and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
-      and place == window and layer.kind == "tiled" and local_terminal(block, host) and block.label == staging_label
-      and local_owner(a.owner) == a.owner_pid
-      and rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label } then
-      return "ok"
+      and place == window and layer.kind == "tiled" and local_terminal(block, host) and block.label == staging_label then
+      local pid, multiple_sessions = local_owner(a.owner)
+      if pid == a.owner_pid then
+        if multiple_sessions then
+          result = "sessions"
+        elseif rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label } then
+          return "ok"
+        end
+      end
     end
   end
   cancel_staged(host, id)
-  return "changed"
+  return result
 end
 
-local function open(host, view, caller, window, layer, owner_pid)
+local function open(host, view, caller, window, layer, owner_pid, multiple_sessions)
   if window.zoomed_block_id then return "zoom" end
   if layer.kind ~= "tiled" then return "floating_caller" end
   local main, cwd = working_terminal(view, caller, window, layer, host)
   if not main then return cwd end
   if main.owner ~= caller.owner then return "client" end
   if not unchanged(view) then return "tab" end
+  if multiple_sessions then return "sessions" end
   if a.mode == "identify" then
     return rex.json.encode({ main = main.block_id, window = window.window_id, cwd = cwd,
       owner = caller.owner, owner_pid = owner_pid })
   end
   if window.window_id ~= a.window or main.block_id ~= a.main or cwd ~= a.cwd
-    or caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "changed" end
+    or owner_pid ~= a.owner_pid then return "changed" end
+  local native_window_id = a.native_window_id
+  if type(native_window_id) ~= "number"
+    or not (native_window_id >= 1 and native_window_id <= 4294967295 and native_window_id % 1 == 0) then
+    return "changed"
+  end
   local direction = directions[a.placement]
   if not direction then return "placement" end
   local layout = { block = { flavor = terminal .. ".shell", label = staging_label, options = {
-    command = { a.exe, "preview-anchor", a.url, a.main, a.window, a.owner, tostring(a.owner_pid) },
+    command = { a.exe, "preview-anchor", a.url, a.main, a.window, a.owner, tostring(a.owner_pid),
+      string.format("%.0f", native_window_id) },
     shell = "none", cwd = cwd,
     -- Rex also keeps quick successful exits. Milo displays failures itself
     -- for a bounded time; Rex should close the anchor whenever Milo exits.
@@ -330,21 +349,24 @@ local function one_shot(host, cli_pid)
   local caller, window, layer = locate(view, a.block)
   if not caller or window.window_id ~= view.active_window_id then return "tab" end
   if not local_terminal(caller, host) then return "remote" end
-  local owner_pid = local_owner(caller.owner)
+  if a.mode == "focus" and (layer.kind ~= "tiled" or caller.owner ~= a.owner) then return "focus" end
+  if a.mode == "open" and caller.owner ~= a.owner then return "changed" end
+  local owner_pid, multiple_sessions = local_owner(caller.owner)
   if not owner_pid then return "client" end
   if a.mode == "focus" then
-    if layer.kind ~= "tiled" or caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "focus" end
+    if owner_pid ~= a.owner_pid then return "focus" end
+    if multiple_sessions then return "sessions" end
     return focus(host, view, caller, window, cli_pid)
   end
   local belongs, remote = own_caller(caller, cli_pid)
   if not belongs then return remote and "remote" or "caller" end
-  return open(host, view, caller, window, layer, owner_pid)
+  return open(host, view, caller, window, layer, owner_pid, multiple_sessions)
 end
 
 local function visible(view, window, layer, index)
   if window.window_id ~= view.active_window_id or layer.state == "minimized" then return false end
-  local zoom = window.zoomed_block_id
-  if zoom and zoom ~= a.block then return false end
+  -- Rex reports the original split tree even while a pane is zoomed.
+  if window.zoomed_block_id then return false end
   -- Layer order is back to front. Keep the overlay out of any higher visible
   -- layer, even when its individual blocks happen not to overlap right now.
   for i = index + 1, #window.layers do
@@ -353,15 +375,35 @@ local function visible(view, window, layer, index)
   return true
 end
 
+local function leaf_rect(node)
+  if type(node) ~= "table" then return end
+  local split = node.split
+  if type(split) == "table" then return leaf_rect(split.before) or leaf_rect(split.after) end
+  if split == nil and node.block_id == a.block then return node.rect end
+end
+
+local function tile_state(pid, rect)
+  if type(rect) ~= "table" or rect[5] ~= nil then return end
+  local x, y, w, h = rect[1], rect[2], rect[3], rect[4]
+  if type(x) ~= "number" or type(y) ~= "number" or type(w) ~= "number" or type(h) ~= "number" then return end
+  -- Allow floating-point error at the far edge of a nested split, then round
+  -- edges so adjoining leaves meet and quantized extents stay within the tile.
+  if not (x >= 0 and y >= 0 and w > 0 and h > 0 and x + w <= 1 + 1e-9 and y + h <= 1 + 1e-9) then return end
+  local left, top = math.floor(x * 1000000 + 0.5), math.floor(y * 1000000 + 0.5)
+  local width = math.floor((x + w) * 1000000 + 0.5) - left
+  local height = math.floor((y + h) * 1000000 + 0.5) - top
+  if width > 0 and height > 0 then return string.format("show %d tile %d %d %d %d", pid, left, top, width, height) end
+end
+
 if a.mode ~= "watch" then
   print(one_shot(local_host()))
   return
 end
 
 local host, cli_pid = local_host()
-local last, verified, published, last_revision
-local function emit(pid)
-  local state = pid and ("show " .. tostring(pid) .. " tile") or "hide"
+local last, verified, published, last_revision, owner_allowed
+local function emit(state)
+  state = state or "hide"
   if last ~= state then
     last = state
     io.stdout:write(state, "\n")
@@ -392,7 +434,12 @@ local function track_anchor(block)
   return true
 end
 
-local function refresh()
+local function owner_permitted()
+  local pid, multiple_sessions = local_owner(a.owner)
+  return pid == a.owner_pid and not multiple_sessions
+end
+
+local function refresh(owner_checked)
   local view = current_view()
   if not view then return stop(1) end
   last_revision = view.revision
@@ -426,9 +473,23 @@ local function refresh()
   if window.window_id ~= a.window or place ~= window then return stop() end
   if not local_terminal(main, host) or tiled.kind ~= "tiled" or not track_anchor(block) then return stop(1) end
   if block.label ~= preview_label then return emit() end
-  if not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner
-    or local_owner(a.owner) ~= a.owner_pid then return emit() end
-  emit(a.owner_pid)
+  if not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner then return emit() end
+  if not owner_checked then owner_allowed = owner_permitted() end
+  if not owner_allowed then return emit() end
+  emit(tile_state(a.owner_pid, leaf_rect(layer.layout)))
+end
+
+local function poll_owner()
+  -- Scoped layout events cannot report every change to the app's other
+  -- attachments. Query only that app; reread the layout on recovery.
+  local previous = owner_allowed
+  owner_allowed = owner_permitted()
+  if previous == nil or (owner_allowed and not previous) then
+    refresh(true)
+  elseif previous and not owner_allowed then
+    emit()
+  end
+  rex.after(1, poll_owner)
 end
 
 rex.on("session_view_changed", function(ctx, event)
@@ -460,7 +521,7 @@ end)
 
 emit()
 -- A script attaches to its scoped session after the top-level chunk returns.
-rex.after(0, refresh)
+rex.after(0, poll_owner)
 -- If the launcher disappears before it can validate and publish our block,
 -- close the unused terminal without ever exposing an overlay.
 rex.after(8, function()

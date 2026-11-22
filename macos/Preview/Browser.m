@@ -300,10 +300,10 @@ static SEL PreviewShortcutAction(NSEvent *event) {
     _terminal.toolTip = @"Return to terminal (⇧⌘↩)";
     [_terminal setAccessibilityHelp:@"Keyboard shortcut: Command-Shift-Return."];
 
-    _address = [NSTextField labelWithString:origin];
+    _address = [NSTextField labelWithString:[@"Approximate · " stringByAppendingString:origin]];
     _address.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
     _address.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    _address.toolTip = origin;
+    _address.toolTip = [origin stringByAppendingString:@" — approximate Rex pane placement"];
     _address.textColor = NSColor.secondaryLabelColor;
     [self addSubview:_address];
     _separator = [NSBox new];

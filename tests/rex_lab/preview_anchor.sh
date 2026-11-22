@@ -1,5 +1,7 @@
 # The lab prepends its socket-scoped Rex command and temporary directory.
 # Keep this process as the anchor so Rex's CLI has the real parent it claims.
+# Its final argument is the decimal native window ID, after the Rex scope.
+[ "$#" -eq 6 ] || exit 1
 printf '%s\n' "$$" "$@" > "$ROOT/preview-arguments"
 request="$ROOT/request-$REX_BLOCK"
 watcher=

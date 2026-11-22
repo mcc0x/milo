@@ -11,10 +11,11 @@ pub(crate) struct Anchor<'a> {
     pub window: &'a str,
     pub owner: &'a str,
     pub owner_pid: u32,
+    pub native_window_id: std::num::NonZeroU32,
 }
 
 pub(crate) const EXPECTED: &str = "expected milo preview URL [--placement right|left|above|below]";
-pub(crate) const HELP: &str = "Usage: milo preview URL [--placement right|left|above|below]\n\nOpen an already-running local dev site in this Rex tab on macOS. Example: milo preview http://localhost:3000. Milo adds a tiled terminal anchor beside the main working terminal, not the sidebar. The default is right; change Preview placement in Settings or use --placement once.\n\nUse an HTTP or HTTPS URL on localhost, 127.0.0.1 or [::1], without credentials, a query or a fragment. Milo does not look for servers. Remote sessions are not supported.\n\nThis experimental build has no permission-free placement. If the Accessibility preflight fails, no pane opens. Do not grant Rex or its server Accessibility as a workaround. The overlay hides when its bounds are uncertain.\n\nPick an element to review its structural location, then choose Copy to put it on the clipboard. Nothing is sent to an agent. With the page focused, press Command-Shift-Return to return to the working terminal or Command-W to close the preview. You can also close the anchor pane in Rex, even when the page is hidden.";
+pub(crate) const HELP: &str = "Usage: milo preview URL [--placement right|left|above|below]\n\nOpen a local dev site beside the working terminal in this Rex tab. Right is the default. Change Preview placement in Settings or use --placement once.\n\nExperimental: placement is approximate. Start in a Mac-created working terminal with one visible local Rex window. No Accessibility, Screen Recording or Remote Control permission is needed. The helper pins that window; it never follows a different window. Close the preview if it overlaps Rex chrome or remains visible on the wrong session.\n\nUse HTTP or HTTPS on localhost, 127.0.0.1 or [::1], without credentials, query or fragment. Milo does not search for servers. Remote terminals and floating previews are not supported.\n\nSelect an element, review its structural path, then choose Copy. Nothing is sent to an agent. Command-Shift-Return returns focus; Command-W in the preview closes it. Closing the Rex anchor also closes the preview.";
 
 /// Restrict the authority before passing the literal URL through Rex. WebKit checks
 /// the parsed origin again on navigation. Never echo a rejected URL in an error.
@@ -68,7 +69,7 @@ pub(crate) fn open(url: &str, placement: Option<PreviewPlacement>) -> Result<(),
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use mac::{anchor, require_access};
+pub(crate) use mac::{anchor, pin_window};
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn open(_: &str, _: Option<PreviewPlacement>) -> Result<(), String> {

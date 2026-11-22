@@ -1,8 +1,8 @@
 #import "Anchor.h"
 #import "Browser.h"
+#import "Chrome.h"
 
 #import <AppKit/AppKit.h>
-#import <ApplicationServices/ApplicationServices.h>
 #import <dispatch/dispatch.h>
 #import <errno.h>
 #import <fcntl.h>
@@ -11,17 +11,11 @@
 #import <stdio.h>
 #import <string.h>
 #import <math.h>
-#import <sys/ioctl.h>
-#import <termios.h>
 #import <unistd.h>
 
-static const double LayoutProofInterval = 1.0;
-static const double LayoutProofTimeout = 6.0;
-static const double ProofInterval = 0.15;
-static const double ProofLifetime = 0.35;
-static const float AXMessageTimeout = 0.05f;
-static const NSUInteger MarkerLength = 32;
-static const char AccessibilityUnavailable[] = "macOS Accessibility is unavailable for this launch context. No permission was requested.";
+static const NSTimeInterval SampleInterval = 0.25;
+static const NSTimeInterval SampleLifetime = 0.60;
+enum { FractionScale = 1000000 };
 
 typedef struct {
     CGRect window;
@@ -33,24 +27,8 @@ static BOOL SameGeometry(Geometry a, Geometry b) {
     return a.windowID == b.windowID && CGRectEqualToRect(a.window, b.window) && CGRectEqualToRect(a.pane, b.pane);
 }
 
-typedef struct {
-    NSTimeInterval deadline;
-    NSTimeInterval (*clock)(void *);
-    void *context;
-} AXBudget;
-
-static NSTimeInterval ProofClock(void *context) {
-    (void)context;
-    return NSProcessInfo.processInfo.systemUptime;
-}
-
-static BOOL AXCanIssue(const AXBudget *budget) {
-    // Leave time for an outstanding synchronous AX message to hit its system timeout.
-    return budget->deadline - budget->clock(budget->context) > AXMessageTimeout;
-}
-
-static BOOL BeforeAXDeadline(const AXBudget *budget) {
-    return budget->clock(budget->context) < budget->deadline;
+static BOOL SampleFresh(NSTimeInterval now, NSTimeInterval started) {
+    return started > 0 && now >= started && now - started < SampleLifetime;
 }
 
 static BOOL ValidRect(CGRect r) {
@@ -62,216 +40,33 @@ static BOOL HasType(id value, CFTypeID type) {
     return value != nil && CFGetTypeID((__bridge CFTypeRef)value) == type;
 }
 
-static BOOL IsAXString(id value, CFStringRef expected) {
-    return HasType(value, CFStringGetTypeID()) && CFEqual((__bridge CFTypeRef)value, expected);
-}
-
-static AXUIElementRef Element(id value) {
-    return HasType(value, AXUIElementGetTypeID()) ? (__bridge AXUIElementRef)value : NULL;
-}
-
-static id Attribute(const AXBudget *budget, AXUIElementRef element, CFStringRef attribute) {
-    CFTypeRef value = NULL;
-    if (!element || !AXCanIssue(budget)) return nil;
-    AXError status = AXUIElementCopyAttributeValue(element, attribute, &value);
-    id result = CFBridgingRelease(value);
-    return status == kAXErrorSuccess && BeforeAXDeadline(budget) ? result : nil;
-}
-
-static NSArray *Attributes(const AXBudget *budget, AXUIElementRef element, NSArray *keys) {
-    if (!AXCanIssue(budget)) return nil;
-    CFArrayRef raw = NULL;
-    AXError status = AXUIElementCopyMultipleAttributeValues(element, (__bridge CFArrayRef)keys, 0, &raw);
-    NSArray *result = CFBridgingRelease(raw);
-    return status == kAXErrorSuccess && BeforeAXDeadline(budget) ? result : nil;
-}
-
-static id ParameterizedAttribute(const AXBudget *budget, AXUIElementRef element, CFStringRef attribute, AXValueRef parameter) {
-    if (!AXCanIssue(budget)) return nil;
-    CFTypeRef raw = NULL;
-    AXError status = AXUIElementCopyParameterizedAttributeValue(element, attribute, parameter, &raw);
-    id result = CFBridgingRelease(raw);
-    return status == kAXErrorSuccess && BeforeAXDeadline(budget) ? result : nil;
-}
-
-static BOOL ReadAXValue(id value, AXValueType type, void *out) {
-    return HasType(value, AXValueGetTypeID()) && AXValueGetValue((__bridge AXValueRef)value, type, out);
-}
-
-typedef enum { MarkerUnreadable, MarkerMissing, MarkerText, MarkerMatched } MarkerStatus;
-
-static MarkerStatus ReadMarker(const AXBudget *budget, AXUIElementRef element, NSString *marker, CGRect frame) {
-    CFRange visible;
-    if (!ReadAXValue(Attribute(budget, element, kAXVisibleCharacterRangeAttribute), kAXValueCFRangeType, &visible) ||
-        visible.location < 0 || visible.location > LONG_MAX - (CFIndex)MarkerLength || visible.length < 0) return MarkerUnreadable;
-    if (visible.length < (CFIndex)MarkerLength) return MarkerMissing;
-
-    // Only the first visible marker-length span is read. Never fetch a pane's AXValue or scrollback.
-    CFRange prefix = CFRangeMake(visible.location, (CFIndex)MarkerLength);
-    AXValueRef parameter = AXValueCreate(kAXValueCFRangeType, &prefix);
-    if (!parameter) return MarkerUnreadable;
-    id text = ParameterizedAttribute(budget, element, kAXStringForRangeParameterizedAttribute, parameter);
-    BOOL readable = HasType(text, CFStringGetTypeID());
-    BOOL matches = readable && CFEqual((__bridge CFTypeRef)text, (__bridge CFStringRef)marker);
-    CGRect markerFrame;
-    BOOL bounded = matches && ReadAXValue(ParameterizedAttribute(budget, element, kAXBoundsForRangeParameterizedAttribute, parameter),
-        kAXValueCGRectType, &markerFrame) && ValidRect(markerFrame) && CGRectContainsRect(frame, markerFrame);
-    CFRelease(parameter);
-    if (bounded) return MarkerMatched;
-    if (matches) return MarkerText;
-    return readable ? MarkerMissing : MarkerUnreadable;
-}
-
-// A bounded walk of the focused window, not the application's other windows or tabs.
-// Roles, not titles or window-chrome insets, define the terminal and its exclusion regions.
-enum { MaxAXNodes = 192, MaxAXDepth = 24, NoNode = -1 };
-
-typedef struct {
-    CGRect frame;
-    int parent;
-    BOOL container;
-} AXNode;
-
-typedef struct {
-    AXNode nodes[MaxAXNodes];
-    int count;
-    int markerNode;
-    AXUIElementRef markerElement;
-    AXUIElementRef focus;
-    BOOL terminalFocused;
-    BOOL markerMissing, markerPresent;
-} AXTree;
-
-@interface MiloAXProof : NSObject {
-@public
-    Geometry geometry;
-    id window, pane, focus;
-    NSTimeInterval layoutCheckedAt;
-}
-@end
-
-@implementation MiloAXProof
-@end
-
-static BOOL IsPalette(id role, id subrole) {
-    return IsAXString(role, kAXMenuRole) || IsAXString(role, kAXMenuItemRole) ||
-        IsAXString(role, kAXSheetRole) || IsAXString(role, CFSTR("AXPopover")) ||
-        IsAXString(role, CFSTR("AXDialog")) || IsAXString(subrole, kAXDialogSubrole) ||
-        IsAXString(subrole, kAXSystemDialogSubrole) || IsAXString(subrole, kAXFloatingWindowSubrole) ||
-        IsAXString(subrole, CFSTR("AXSearchField"));
-}
-
-static CGRect MeasuredFrame(id positionValue, id sizeValue) {
-    CGPoint position;
-    CGSize size;
-    if (!ReadAXValue(positionValue, kAXValueCGPointType, &position) || !ReadAXValue(sizeValue, kAXValueCGSizeType, &size)) {
-        return CGRectNull;
-    }
-    CGRect frame = {position, size};
-    return ValidRect(frame) ? frame : CGRectNull;
-}
-
-static CGRect ElementFrame(const AXBudget *budget, AXUIElementRef element) {
-    static NSArray *keys;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        keys = @[(__bridge NSString *)kAXPositionAttribute, (__bridge NSString *)kAXSizeAttribute];
-    });
-    NSArray *values = Attributes(budget, element, keys);
-    return values.count == 2 ? MeasuredFrame(values[0], values[1]) : CGRectNull;
-}
-
-static BOOL WalkAX(const AXBudget *budget, AXTree *tree, AXUIElementRef element, int parent, unsigned depth, NSString *marker) {
-    if (!element || depth >= MaxAXDepth || tree->count >= MaxAXNodes) return NO;
-    static NSArray *keys;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        keys = @[
-            (__bridge NSString *)kAXRoleAttribute, (__bridge NSString *)kAXSubroleAttribute,
-            (__bridge NSString *)kAXPositionAttribute, (__bridge NSString *)kAXSizeAttribute,
-            (__bridge NSString *)kAXChildrenAttribute,
-        ];
-    });
-    NSArray *values = Attributes(budget, element, keys);
-    if (values.count != keys.count) return NO;
-    id role = values[0], subrole = values[1];
-    if (!HasType(role, CFStringGetTypeID()) || IsPalette(role, subrole) ||
-        (IsAXString(role, kAXWindowRole) != (parent == NoNode))) return NO;
-
-    CGRect frame = MeasuredFrame(values[2], values[3]);
-    BOOL container = IsAXString(role, kAXSplitGroupRole) ||
-        IsAXString(role, kAXGroupRole) || IsAXString(role, kAXScrollAreaRole);
-    BOOL textArea = IsAXString(role, kAXTextAreaRole);
-    int index = tree->count++;
-    tree->nodes[index] = (AXNode){frame, parent, container};
-    NSArray *children = HasType(values[4], CFArrayGetTypeID()) ? values[4] : nil;
-    if (!children) {
-        AXError error;
-        if (!ReadAXValue(values[4], kAXValueAXErrorType, &error) ||
-            (error != kAXErrorNoValue && error != kAXErrorAttributeUnsupported)) return NO;
-    }
-    if (textArea && !CGRectIsNull(frame)) {
-        if (CFEqual(element, tree->focus)) tree->terminalFocused = YES;
-        MarkerStatus status = ReadMarker(budget, element, marker, frame);
-        tree->markerMissing |= status == MarkerMissing;
-        tree->markerPresent |= status == MarkerText || status == MarkerMatched;
-        if (status == MarkerMatched) {
-            // A text pane may be a leaf, but it cannot itself contain other controls to cover.
-            if (tree->markerNode != NoNode || children.count) return NO;
-            tree->markerNode = index;
-            CFRetain(element);
-            tree->markerElement = element;
-        }
-    }
-    for (id child in children) {
-        if (!WalkAX(budget, tree, Element(child), index, depth + 1, marker)) return NO;
-    }
-    return BeforeAXDeadline(budget);
-}
-
-static BOOL IsAncestor(const AXTree *tree, int ancestor, int child) {
-    for (int i = tree->nodes[child].parent; i != NoNode; i = tree->nodes[i].parent) {
-        if (i == ancestor) return YES;
-    }
-    return NO;
-}
-
-static BOOL ClearAXPane(const AXTree *tree) {
-    CGRect pane = tree->nodes[tree->markerNode].frame;
-    if (!CGRectContainsRect(tree->nodes[0].frame, pane)) return NO;
-    for (int i = 1; i < tree->count; ++i) {
-        if (i == tree->markerNode) continue;
-        if (IsAncestor(tree, i, tree->markerNode)) {
-            // Respect clipping by every measurable ancestor of the text area.
-            if (!CGRectIsNull(tree->nodes[i].frame) && !CGRectContainsRect(tree->nodes[i].frame, pane)) return NO;
-            continue;
-        }
-        CGRect sibling = tree->nodes[i].frame;
-        if (CGRectIsNull(sibling)) {
-            if (!tree->nodes[i].container) return NO;
-            continue;
-        }
-        if (!CGRectIsEmpty(CGRectIntersection(sibling, pane))) return NO;
-    }
+static BOOL MetadataNumber(NSDictionary *window, CFStringRef key, double *out) {
+    id value = window[(__bridge NSString *)key];
+    if (!HasType(value, CFNumberGetTypeID())) return NO;
+    double number = [value doubleValue];
+    if (!isfinite(number)) return NO;
+    *out = number;
     return YES;
 }
 
-static BOOL HitTestsMatch(const AXBudget *budget, AXUIElementRef app, AXUIElementRef pane, CGRect frame) {
-    if (!ValidRect(frame)) return NO;
-    CGFloat dx = MIN(1, frame.size.width / 4), dy = MIN(1, frame.size.height / 4);
-    const CGFloat xs[] = {CGRectGetMinX(frame) + dx, CGRectGetMidX(frame), CGRectGetMaxX(frame) - dx};
-    const CGFloat ys[] = {CGRectGetMinY(frame) + dy, CGRectGetMidY(frame), CGRectGetMaxY(frame) - dy};
-    for (unsigned y = 0; y < 3; ++y) {
-        for (unsigned x = 0; x < 3; ++x) {
-            if (!AXCanIssue(budget)) return NO;
-            AXUIElementRef hit = NULL;
-            BOOL matches = AXUIElementCopyElementAtPosition(app, (float)xs[x], (float)ys[y], &hit) == kAXErrorSuccess &&
-                hit && CFEqual(hit, pane);
-            if (hit) CFRelease(hit);
-            if (!matches || !BeforeAXDeadline(budget)) return NO;
-        }
-    }
+static BOOL WindowInteger(NSDictionary *window, CFStringRef key, int64_t lower, int64_t upper, int64_t *out) {
+    double number;
+    if (!MetadataNumber(window, key, &number) || number < lower || number > upper || trunc(number) != number) return NO;
+    *out = (int64_t)number;
     return YES;
+}
+
+static BOOL WindowAlpha(NSDictionary *window, double *alpha) {
+    return MetadataNumber(window, kCGWindowAlpha, alpha) && *alpha >= 0 && *alpha <= 1;
+}
+
+static pid_t PinnedOwner(NSArray *windows, CGWindowID pinned) {
+    id window = windows.firstObject;
+    int64_t number, owner;
+    if (windows.count != 1 || ![window isKindOfClass:NSDictionary.class] ||
+        !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number) || number != pinned ||
+        !WindowInteger(window, kCGWindowOwnerPID, 2, INT_MAX, &owner)) return 0;
+    return (pid_t)owner;
 }
 
 static CGRect WindowBounds(NSDictionary *window) {
@@ -281,108 +76,96 @@ static CGRect WindowBounds(NSDictionary *window) {
         ValidRect(r) ? r : CGRectNull;
 }
 
-static CGWindowID MatchingVisibleWindow(NSArray<NSDictionary *> *windows, pid_t pid, pid_t selfPID,
-    CGRect windowFrame, CGRect paneFrame) {
-    CGWindowID match = kCGNullWindowID;
-    BOOL blocked = NO;
+// Quartz supplies onscreen metadata in front-to-back order. A pinned window is
+// never replaced by another window, even if that window is the only Rex window.
+static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned, pid_t helperPID,
+    CGWindowID panel, const CGRect *normalized) {
+    Geometry none = {0}, geometry = {0};
+    NSUInteger match = NSNotFound;
     int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey);
-    for (NSDictionary *window in windows) {
-        NSNumber *number = window[(__bridge NSString *)kCGWindowNumber];
-        NSNumber *owner = window[(__bridge NSString *)kCGWindowOwnerPID];
-        NSNumber *layer = window[(__bridge NSString *)kCGWindowLayer];
-        if (!HasType(layer, CFNumberGetTypeID())) layer = nil;
-        NSNumber *alpha = window[(__bridge NSString *)kCGWindowAlpha];
-        CGWindowID identifier = number.unsignedIntValue;
-        if (owner && owner.intValue == selfPID) continue;
-        // A normal-level panel cannot cover floating system windows, even with full-display bounds.
-        if (layer && layer.intValue > normal) continue;
-        CGRect frame = WindowBounds(window);
-        BOOL rex = owner && owner.intValue == pid;
-        if (rex && layer && layer.intValue == normal &&
-            CGRectEqualToRect(frame, windowFrame)) {
-            if (!identifier || match || blocked || !alpha || alpha.doubleValue <= 0) return kCGNullWindowID;
-            match = identifier;
-        } else if (!match) {
-            if (alpha && alpha.doubleValue == 0) continue;
-            // An earlier Rex window at the same level could be a palette. Missing z-order metadata is unsafe.
-            if (rex || !identifier || !owner || !layer || CGRectIsNull(frame) ||
-                !CGRectIsEmpty(CGRectIntersection(frame, paneFrame))) blocked = YES;
-        }
+    for (NSUInteger i = 0; i < windows.count; ++i) {
+        NSDictionary *window = windows[i];
+        int64_t owner, layer, number;
+        if (![window isKindOfClass:NSDictionary.class] ||
+            !WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &owner) ||
+            !WindowInteger(window, kCGWindowLayer, INT_MIN, INT_MAX, &layer) ||
+            !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number)) return none;
+        if (pinned && number == pinned && (owner != rexPID || layer != normal)) return none;
+        if (owner != rexPID || layer != normal) continue;
+        double alpha;
+        if (!WindowAlpha(window, &alpha)) return none;
+        if (alpha == 0 && number != pinned) continue;
+        if (alpha == 0 || (pinned && number != pinned) || match != NSNotFound) return none;
+        CGRect bounds = WindowBounds(window);
+        if (CGRectIsNull(bounds)) return none;
+        geometry = (Geometry){bounds, bounds, (CGWindowID)number};
+        match = i;
     }
-    return match;
+    if (match == NSNotFound ||
+        (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))) return none;
+
+    for (NSUInteger i = 0; i < match; ++i) {
+        NSDictionary *window = windows[i];
+        int64_t number, owner;
+        if (panel && WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number) && number == panel &&
+            WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &owner) && owner == helperPID) continue;
+        double alpha;
+        if (!WindowAlpha(window, &alpha)) return none;
+        if (alpha == 0) continue;
+        CGRect bounds = WindowBounds(window);
+        if (CGRectIsNull(bounds) || !CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane))) return none;
+    }
+    return geometry;
 }
 
-static CGWindowID VisibleWindow(pid_t pid, Geometry geometry) {
-    NSArray<NSDictionary *> *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+static NSArray *VisibleWindows(void) {
+    return CFBridgingRelease(CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
-    return MatchingVisibleWindow(windows, pid, getpid(), geometry.window, geometry.pane);
 }
 
-static BOOL Nonmodal(const AXBudget *budget, AXUIElementRef window) {
-    if (!AXCanIssue(budget)) return NO;
-    CFTypeRef value = NULL;
-    AXError status = AXUIElementCopyAttributeValue(window, kAXModalAttribute, &value);
-    BOOL nonmodal = status == kAXErrorSuccess ? value == kCFBooleanFalse :
-        status == kAXErrorAttributeUnsupported || status == kAXErrorNoValue;
-    if (value) CFRelease(value);
-    return nonmodal && BeforeAXDeadline(budget);
+static NSRunningApplication *RexApplication(pid_t pid) {
+    if (pid < 2) return nil;
+    NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    return app && !app.terminated && [app.bundleIdentifier isEqualToString:@"com.superlogical.rex"] ? app : nil;
 }
 
-static BOOL CurrentAXElement(const AXBudget *budget, AXUIElementRef app, CFStringRef key, id expected) {
-    id actual = Attribute(budget, app, key);
-    return Element(actual) && CFEqual((__bridge CFTypeRef)actual, (__bridge CFTypeRef)expected);
+static BOOL FrontmostRex(NSRunningApplication *rex) {
+    return rex && !rex.terminated && rex.active &&
+        NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == rex.processIdentifier;
 }
 
-static BOOL ValidateProof(const AXBudget *budget, AXUIElementRef app, MiloAXProof *proof, pid_t pid,
-    NSString *marker) {
-    Geometry g = proof->geometry;
-    AXUIElementRef window = Element(proof->window), pane = Element(proof->pane);
-    if (!CurrentAXElement(budget, app, kAXFocusedWindowAttribute, proof->window) ||
-        !CurrentAXElement(budget, app, kAXFocusedUIElementAttribute, proof->focus) ||
-        !Nonmodal(budget, window) || !CGRectEqualToRect(ElementFrame(budget, window), g.window) ||
-        !CGRectEqualToRect(ElementFrame(budget, pane), g.pane) || ReadMarker(budget, pane, marker, g.pane) != MarkerMatched ||
-        !HitTestsMatch(budget, app, pane, g.pane)) return NO;
-    return CurrentAXElement(budget, app, kAXFocusedWindowAttribute, proof->window) &&
-        CurrentAXElement(budget, app, kAXFocusedUIElementAttribute, proof->focus) &&
-        VisibleWindow(pid, g) == g.windowID && BeforeAXDeadline(budget);
-}
-
-static MiloAXProof *ProveGeometry(AXUIElementRef app, pid_t pid, NSString *marker,
-    NSTimeInterval now, MiloAXProof *cached, BOOL *markerNeedsRedraw) {
-    *markerNeedsRedraw = NO;
-    AXBudget budget = {now + ProofLifetime, ProofClock, NULL};
-    if (!AXCanIssue(&budget) || !AXIsProcessTrusted()) return nil;
-    if (cached) return ValidateProof(&budget, app, cached, pid, marker) ? cached : nil;
-    __attribute__((objc_precise_lifetime)) id focusedWindow = Attribute(&budget, app, kAXFocusedWindowAttribute);
-    __attribute__((objc_precise_lifetime)) id focusedElement = Attribute(&budget, app, kAXFocusedUIElementAttribute);
-    if (!IsAXString(Attribute(&budget, Element(focusedElement), kAXRoleAttribute), kAXTextAreaRole)) return nil;
-    AXUIElementRef window = Element(focusedWindow);
-    AXTree tree = {.markerNode = NoNode, .focus = Element(focusedElement)};
-    MiloAXProof *proof = nil;
-    BOOL walked = window && tree.focus && Nonmodal(&budget, window) && WalkAX(&budget, &tree, window, NoNode, 0, marker);
-    if (walked && tree.terminalFocused) {
-        // Do not disturb a present marker on placement or occlusion failures, or repaint when AX cannot read it.
-        *markerNeedsRedraw = tree.markerMissing && !tree.markerPresent;
+static BOOL ReadDecimal(const char **cursor, const char *end, uint32_t limit, uint32_t *out) {
+    const char *p = *cursor;
+    if (p == end || *p < '0' || *p > '9') return NO;
+    uint32_t value = 0;
+    while (p != end && *p >= '0' && *p <= '9') {
+        uint32_t digit = (uint32_t)(*p++ - '0');
+        if (value > (limit - digit) / 10) return NO;
+        value = value * 10 + digit;
     }
-    if (walked && tree.markerNode != NoNode && tree.terminalFocused && ClearAXPane(&tree)) {
-        Geometry g = {.window = tree.nodes[0].frame, .pane = tree.nodes[tree.markerNode].frame};
-        g.windowID = VisibleWindow(pid, g);
-        if (g.windowID) {
-            proof = [[MiloAXProof alloc] init];
-            proof->geometry = g;
-            proof->window = focusedWindow;
-            proof->pane = (__bridge id)tree.markerElement;
-            proof->focus = focusedElement;
-            proof->layoutCheckedAt = now;
-            if (!ValidateProof(&budget, app, proof, pid, marker)) proof = nil;
-        }
+    *cursor = p;
+    *out = value;
+    return YES;
+}
+
+static BOOL ReadShow(const char *line, size_t length, pid_t *pid, CGRect *normalized) {
+    const char *end = line + length;
+    if (length < 5 || memcmp(line, "show ", 5)) return NO;
+    const char *p = line + 5;
+    uint32_t process, parts[4];
+    if (!ReadDecimal(&p, end, INT_MAX, &process) || process < 2 ||
+        end - p < 6 || memcmp(p, " tile ", 6)) return NO;
+    p += 6;
+    for (size_t i = 0; i < 4; ++i) {
+        if (i && (p == end || *p++ != ' ')) return NO;
+        if (!ReadDecimal(&p, end, FractionScale, &parts[i])) return NO;
     }
-    if (tree.markerElement) CFRelease(tree.markerElement);
-    if (!BeforeAXDeadline(&budget)) {
-        *markerNeedsRedraw = NO;
-        return nil;
-    }
-    return proof;
+    if (p != end || !parts[2] || !parts[3] ||
+        parts[0] + parts[2] > FractionScale || parts[1] + parts[3] > FractionScale) return NO;
+    *pid = (pid_t)process;
+    *normalized = CGRectMake((CGFloat)parts[0] / FractionScale, (CGFloat)parts[1] / FractionScale,
+        (CGFloat)parts[2] / FractionScale, (CGFloat)parts[3] / FractionScale);
+    return YES;
 }
 
 typedef struct {
@@ -392,7 +175,7 @@ typedef struct {
     BOOL mirrored;
 } PreviewScreen;
 
-// AX and Quartz use the primary display's top-left as origin; AppKit uses its bottom-left.
+// Quartz uses the primary display's top-left as origin; AppKit uses its bottom-left.
 // Do not clip or extrapolate when switching screens or when a window spans displays.
 static BOOL PlaceOnScreen(Geometry geometry, CGRect primary, const PreviewScreen *screens, size_t count,
     NSRect *pane, CGDirectDisplayID *display) {
@@ -434,6 +217,18 @@ static BOOL ScreenFrame(Geometry geometry, NSRect *pane, CGDirectDisplayID *disp
     return PlaceOnScreen(geometry, CGDisplayBounds(CGMainDisplayID()), screens, count, pane, display);
 }
 
+CGWindowID milo_preview_pin_window(pid_t pid) {
+    NSRunningApplication *rex = RexApplication(pid);
+    if (!FrontmostRex(rex)) return kCGNullWindowID;
+    Geometry sampled = SampleGeometry(VisibleWindows(), pid, kCGNullWindowID, getpid(), kCGNullWindowID, NULL);
+    // There is no tile yet. Check just that this window and its current chrome can support placement.
+    NSRect pane;
+    CGDirectDisplayID display;
+    if (!sampled.windowID || !MiloApproximatePane(sampled.window, CGRectMake(0, 0, 1, 1), &sampled.pane) ||
+        !ScreenFrame(sampled, &pane, &display) || !FrontmostRex(rex)) return kCGNullWindowID;
+    return sampled.windowID;
+}
+
 @interface MiloPreviewPanel : NSPanel
 @end
 
@@ -442,11 +237,11 @@ static BOOL ScreenFrame(Geometry geometry, NSRect *pane, CGDirectDisplayID *disp
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
-// Both callers open their output nonblocking. A stalled PTY does not get to hold
-// the AppKit loop or postpone restoring termios; partial writes advance the span.
+// Never let a stopped terminal or a stalled watcher hold the AppKit loop.
 static BOOL WriteAll(int fd, const char *bytes, size_t length) {
     while (length) {
         ssize_t count = write(fd, bytes, length);
+        if (count < 0 && errno == EINTR) continue;
         if (count <= 0) return NO;
         bytes += count;
         length -= (size_t)count;
@@ -464,114 +259,46 @@ static void WriteDiagnostic(int fd, const char *reason) {
     if (length > 0 && (size_t)length < sizeof(line)) WriteAll(fd, line, (size_t)length);
 }
 
-static BOOL QuietTTY(int fd, struct termios *saved) {
-    if (tcgetattr(fd, saved) != 0) return NO;
-    struct termios quiet = *saved;
-    quiet.c_lflag &= ~(ECHO | ECHONL);
-    return tcsetattr(fd, TCSANOW, &quiet) == 0;
-}
-
-static BOOL RestoreTTY(int fd, const struct termios *saved) {
-    return tcsetattr(fd, TCSANOW, saved) == 0;
-}
-
-static BOOL MarkerFits(unsigned short columns, unsigned short rows) {
-    return columns >= MarkerLength && rows >= 2;
-}
-
-static BOOL CanProbeLayout(BOOL requestedInFront, BOOL markerReady, BOOL menuOpen) {
-    return requestedInFront && markerReady && !menuOpen;
-}
-
-static BOOL LayoutDeadlineElapsed(NSTimeInterval now, NSTimeInterval *since, BOOL canProbe) {
-    if (!canProbe) {
-        *since = 0;
-        return NO;
-    }
-    if (!*since) *since = now;
-    return now - *since >= LayoutProofTimeout;
-}
-
-static BOOL ProofFresh(NSTimeInterval now, NSTimeInterval started) {
-    return started > 0 && now >= started && now - started < ProofLifetime;
-}
-
-static BOOL CreditVisiblePanel(NSTimeInterval now, NSTimeInterval started, BOOL visible, BOOL *everShown) {
-    BOOL provedVisible = visible && ProofFresh(now, started);
-    *everShown = *everShown || provedVisible;
-    return provedVisible;
-}
-
-static void UpdateMenuState(CFStringRef notification, BOOL *menuOpen, NSTimeInterval *unprovenSince) {
-    if (CFEqual(notification, kAXMenuOpenedNotification)) {
-        *menuOpen = YES;
-        *unprovenSince = 0;
-    } else if (CFEqual(notification, kAXMenuClosedNotification)) {
-        *menuOpen = NO;
-    }
-}
-
-static BOOL RestoreMarkerTerminal(int fd, BOOL alternateScreen, const struct termios *saved) {
-    // Restore modes even if there is no space for the alternate-screen escape.
-    BOOL restored = !saved || RestoreTTY(fd, saved);
-    if (alternateScreen) {
-        static const char restore[] = "\033[?25h\033[?1049l";
-        restored = WriteAll(fd, restore, sizeof(restore) - 1) && restored;
-    }
-    return restored;
-}
-
 @interface MiloPreviewAnchor : NSObject <NSWindowDelegate> {
     NSURL *_url;
-    NSString *_marker;
+    NSRunningApplication *_rex;
+    CGWindowID _pinned;
     int _stateFD, _tty;
     pid_t _parent;
-    NSRunningApplication *_rex;
-    AXUIElementRef _axApp;
-    AXObserverRef _axObserver;
-    BOOL _menuOpen;
     MiloPreviewPanel *_panel;
     NSTimer *_timer;
     NSMutableArray *_notificationTokens;
     id _keyMonitor;
-    dispatch_queue_t _probeQueue;
+    dispatch_queue_t _sampleQueue;
     dispatch_source_t _stateSource, _parentSource;
     NSMutableArray<dispatch_source_t> *_signalSources;
+    CGRect _normalized;
     Geometry _candidate;
-    MiloAXProof *_cached;
     NSRect _candidateFrame;
     CGDirectDisplayID _candidateDisplay;
-    NSTimeInterval _lastProof, _lastFullAttempt, _lastMarkerPaint, _unprovenSince;
+    NSTimeInterval _lastSample;
     NSUInteger _generation;
-    BOOL _probePending, _requested, _finished, _alternateScreen;
-    BOOL _everShown, _sessionInactive, _screensAsleep;
-    struct termios _savedTTY;
-    BOOL _ttyQuiet;
-    unsigned short _rows, _columns;
-    char _line[32];
+    BOOL _samplePending, _requested, _finished, _sessionInactive, _screensAsleep;
+    char _line[64];
     size_t _lineLength;
     int _status;
 }
-- (instancetype)initWithURL:(NSURL *)url marker:(NSString *)marker stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty;
+- (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
+    stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty;
 - (int)run;
-- (void)receivedAXNotification:(CFStringRef)notification;
 @end
 
-static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
-    (void)observer;
-    (void)element;
-    [(__bridge MiloPreviewAnchor *)context receivedAXNotification:notification];
-}
-
 @implementation MiloPreviewAnchor
-- (instancetype)initWithURL:(NSURL *)url marker:(NSString *)marker stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty {
+- (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
+    stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty {
     if ((self = [super init])) {
         _url = url;
-        _marker = marker;
+        _rex = rex;
+        _pinned = pinned;
         _stateFD = stateFD;
         _parent = parent;
         _tty = tty;
-        _probeQueue = dispatch_queue_create("milo.preview.ax", DISPATCH_QUEUE_SERIAL);
+        _sampleQueue = dispatch_queue_create("milo.preview.window", DISPATCH_QUEUE_SERIAL);
         _notificationTokens = [NSMutableArray array];
         _signalSources = [NSMutableArray array];
     }
@@ -580,13 +307,12 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
 
 - (void)conceal {
     _candidate = (Geometry){0};
-    _lastProof = 0;
+    _lastSample = 0;
     if (_panel.visible) [_panel orderOut:nil];
 }
 
 - (void)invalidate {
     ++_generation;
-    _cached = nil;
     [self conceal];
 }
 
@@ -594,123 +320,45 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     if (_finished) return;
     _finished = YES;
     [self invalidate];
-    BOOL restored = RestoreMarkerTerminal(_tty, _alternateScreen, _ttyQuiet ? &_savedTTY : NULL);
-    _alternateScreen = NO;
-    _ttyQuiet = NO;
-    if (reason || !restored) _status = 1;
-    if (reason && restored) WriteDiagnostic(_tty, reason);
+    if (reason) {
+        _status = 1;
+        WriteDiagnostic(_tty, reason);
+    }
     [NSApp stop:nil];
-    // An AppKit run started by a command-line process needs an event to observe -stop:.
+    // Wake the run loop so a command-line AppKit process observes -stop:.
     NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0
         timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0];
     [NSApp postEvent:wake atStart:YES];
 }
 
-- (BOOL)drawMarker {
-    static const char clear[] = "\033[H\033[2J";
-    static const char narrow[] = "Need 32 columns and two rows.";
-    BOOL fits = MarkerFits(_columns, _rows);
-    const char *text = fits ? _marker.UTF8String : narrow;
-    size_t length = fits ? MarkerLength : MIN((size_t)_columns, sizeof(narrow) - 1);
-    if (!WriteAll(_tty, clear, sizeof(clear) - 1) || !WriteAll(_tty, text, length)) {
-        [self finish:"could not draw the Rex terminal marker"];
-        return NO;
-    }
-    _lastMarkerPaint = NSProcessInfo.processInfo.systemUptime;
-    return YES;
+- (BOOL)canSample {
+    return _requested && !_sessionInactive && !_screensAsleep && FrontmostRex(_rex);
 }
 
-- (BOOL)updateMarker {
-    struct winsize size;
-    if (ioctl(_tty, TIOCGWINSZ, &size) != 0) {
-        [self finish:"the Rex terminal is no longer available"];
-        return NO;
-    }
-    if (!_alternateScreen || size.ws_col != _columns || size.ws_row != _rows) {
-        [self invalidate];
-        static const char alternate[] = "\033[?1049h\033[?25l";
-        if (!_alternateScreen) {
-            if (!QuietTTY(_tty, &_savedTTY)) {
-                [self finish:"could not disable input echo in the preview terminal"];
-                return NO;
-            }
-            _ttyQuiet = YES;
-            _alternateScreen = YES;
-            if (!WriteAll(_tty, alternate, sizeof(alternate) - 1)) {
-                [self finish:"could not set up the Rex terminal marker"];
-                return NO;
-            }
-        }
-        _columns = size.ws_col;
-        _rows = size.ws_row;
-        if (![self drawMarker]) return NO;
-    }
-    return MarkerFits(_columns, _rows);
-}
-
-- (BOOL)frontmostRex {
-    return _rex && !_rex.terminated && _rex.active &&
-        NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == _rex.processIdentifier;
-}
-
-- (void)receivedAXNotification:(CFStringRef)notification {
-    UpdateMenuState(notification, &_menuOpen, &_unprovenSince);
-    [self invalidate];
-}
-
-- (void)pinRex:(pid_t)pid {
-    _rex = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-    if (!_rex || _rex.terminated || ![_rex.bundleIdentifier isEqualToString:@"com.superlogical.rex"]) {
-        [self finish:"the Rex client PID does not identify a running local Rex application"];
-        return;
-    }
-    _axApp = AXUIElementCreateApplication(pid);
-    if (!_axApp || AXObserverCreate(pid, AXChanged, &_axObserver) != kAXErrorSuccess) {
-        [self finish:"could not observe the Rex Accessibility window"];
-        return;
-    }
-    CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(_axObserver), kCFRunLoopCommonModes);
-    const CFStringRef notifications[] = {kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification,
-        kAXLayoutChangedNotification, kAXMenuOpenedNotification, kAXMenuClosedNotification,
-        kAXWindowMovedNotification, kAXWindowResizedNotification};
-    for (size_t i = 0; i < sizeof(notifications) / sizeof(notifications[0]); ++i) {
-        AXError status = AXObserverAddNotification(_axObserver, _axApp, notifications[i], (__bridge void *)self);
-        if (i < 3 && status != kAXErrorSuccess && status != kAXErrorNotificationAlreadyRegistered) {
-            [self finish:"Rex does not expose Accessibility focus/layout notifications needed to safely place the preview"];
-            return;
-        }
-    }
+- (BOOL)acceptsPanelInput {
+    return _panel.visible && _panel.onActiveSpace && [self canSample] &&
+        SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
 }
 
 - (void)handleLine {
     if (_lineLength == 4 && !memcmp(_line, "hide", 4)) {
         _requested = NO;
-        _unprovenSince = 0;
         [self invalidate];
         return;
     }
-    BOOL tiled = _lineLength >= 11 && !memcmp(_line + _lineLength - 5, " tile", 5);
-    if (!tiled || memcmp(_line, "show ", 5)) {
+    pid_t pid;
+    CGRect normalized;
+    if (!ReadShow(_line, _lineLength, &pid, &normalized)) {
         [self finish:"invalid Rex visibility message"];
         return;
     }
-    unsigned long pid = 0;
-    size_t pidEnd = _lineLength - 5;
-    for (size_t i = 5; i < pidEnd; ++i) {
-        unsigned char byte = (unsigned char)_line[i];
-        if (byte < '0' || byte > '9' || pid > ((unsigned long)INT_MAX - (byte - '0')) / 10) {
-            [self finish:"invalid Rex client PID"];
-            return;
-        }
-        pid = pid * 10 + (byte - '0');
-    }
-    if (pid < 2 || (_rex && _rex.processIdentifier != (pid_t)pid)) {
+    if (pid != _rex.processIdentifier) {
         [self finish:"the Rex client changed; reopen the preview in the current Rex client"];
         return;
     }
-    if (!_rex) [self pinRex:(pid_t)pid];
-    if (!_finished && !_requested) {
+    if (!_requested || !CGRectEqualToRect(normalized, _normalized)) {
         _requested = YES;
+        _normalized = normalized;
         [self invalidate];
     }
 }
@@ -739,45 +387,33 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
 }
 
 - (void)returnToTerminal {
-    if (!_panel.keyWindow || ![self frontmostRex] || NSProcessInfo.processInfo.systemUptime - _lastProof >= ProofLifetime) return;
+    if (!_panel.keyWindow || ![self acceptsPanelInput]) return;
     [self invalidate];
     static const char focus[] = "focus\n";
     if (!WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1)) [self finish:"could not return focus to the Rex terminal"];
 }
 
-- (void)applyProof:(MiloAXProof *)result generation:(NSUInteger)generation started:(NSTimeInterval)started
-    completed:(NSTimeInterval)completed full:(BOOL)full redraw:(BOOL)redraw {
-    _probePending = NO;
-    // A stale or unsuccessful full attempt cannot start another walk immediately after it returns.
-    if (full) _lastFullAttempt = completed;
+- (void)applySample:(Geometry)geometry generation:(NSUInteger)generation started:(NSTimeInterval)started {
+    _samplePending = NO;
     if (_finished || generation != _generation) return;
-    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    Geometry proof = result ? result->geometry : (Geometry){0};
     NSRect frame;
     CGDirectDisplayID display;
-    if (!_requested || _menuOpen || _sessionInactive || _screensAsleep || ![self frontmostRex]) {
-        [self invalidate];
+    if (![self canSample] || !geometry.windowID ||
+        !SampleFresh(NSProcessInfo.processInfo.systemUptime, started) || !ScreenFrame(geometry, &frame, &display) ||
+        !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
+        [self conceal];
         return;
     }
-    if (!proof.windowID || !ProofFresh(now, started) || !ScreenFrame(proof, &frame, &display) ||
-        !ProofFresh(ProofClock(NULL), started)) {
-        _cached = nil;
+    if (!SameGeometry(_candidate, geometry) || display != _candidateDisplay ||
+        !NSEqualRects(frame, _candidateFrame)) {
         [self conceal];
-        if (redraw && now - started < ProofLifetime && now - _lastMarkerPaint >= LayoutProofInterval) [self drawMarker];
-        return;
-    }
-    _cached = result;
-    if (full) _lastFullAttempt = started;
-    if (!SameGeometry(_candidate, proof) || display != _candidateDisplay ||
-        !NSEqualRects(frame, _candidateFrame) || now - _lastProof >= ProofLifetime) {
-        [self conceal];
-        _candidate = proof;
+        _candidate = geometry;
         _candidateFrame = frame;
         _candidateDisplay = display;
-        _lastProof = started;
+        _lastSample = started;
         return;
     }
-    _lastProof = started;
+    _lastSample = started;
     if (!_panel) {
         __weak MiloPreviewAnchor *weakSelf = self;
         NSView *browser = MiloPreviewContent(_url, ^{ [weakSelf returnToTerminal]; });
@@ -798,76 +434,50 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         _panel.animationBehavior = NSWindowAnimationBehaviorNone;
         _panel.tabbingMode = NSWindowTabbingModeDisallowed;
         _panel.releasedWhenClosed = NO;
+        _panel.title = @"Milo Preview (Approximate)";
         _panel.delegate = self;
         _panel.contentView = browser;
-        // WebKit startup can outlast a frame proof. Use a fresh sample before ordering the panel.
+        // WebKit startup can outlast a sample. Wait for another one before showing.
         return;
     }
     if (!_panel.visible) {
-        if (![self frontmostRex]) {
-            [self invalidate];
-            return;
-        }
         [_panel setFrame:frame display:NO];
-        if (generation != _generation || ![self frontmostRex] || !ProofFresh(ProofClock(NULL), started)) {
+        if (generation != _generation || ![self canSample] ||
+            !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
             [self invalidate];
-            if (full) _lastFullAttempt = completed;
             return;
         }
-        // Relative ordering at the normal level, never orderFrontRegardless or app activation.
-        [_panel orderWindow:NSWindowAbove relativeTo:(NSInteger)proof.windowID];
-        if (_panel.visible && (!NSEqualRects(_panel.frame, frame) || !ProofFresh(ProofClock(NULL), started))) {
-            [self invalidate];
-            if (full) _lastFullAttempt = completed;
-            return;
-        }
+        // Relative ordering at the normal level, without activating the helper.
+        [_panel orderWindow:NSWindowAbove relativeTo:(NSInteger)_pinned];
+        if (_panel.visible && (!NSEqualRects(_panel.frame, frame) ||
+            !SampleFresh(NSProcessInfo.processInfo.systemUptime, started))) [self invalidate];
     }
 }
 
 - (void)tick {
     if (_finished) return;
     if (getppid() != _parent) { [self finish:NULL]; return; }
-    if (!AXIsProcessTrusted()) { [self finish:AccessibilityUnavailable]; return; }
     if (_rex.terminated) { [self finish:NULL]; return; }
-    BOOL markerReady = [self updateMarker];
-    if (_finished) return;
+    if (![self canSample]) {
+        if (_candidate.windowID || _samplePending) [self invalidate];
+        return;
+    }
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    BOOL inFront = _requested && !_sessionInactive && !_screensAsleep && [self frontmostRex];
-    BOOL canProbe = CanProbeLayout(inFront, markerReady, _menuOpen);
-    if (canProbe) {
-        // A panel may have reached the active Space on the last fresh frame before the cutoff.
-        BOOL visible = _panel.visible && _panel.onActiveSpace && (_panel.occlusionState & NSWindowOcclusionStateVisible);
-        now = ProofClock(NULL);
-        if (!CreditVisiblePanel(now, _lastProof, visible, &_everShown)) {
-            if (_panel.visible) [self invalidate];
-            else if (_lastProof && !ProofFresh(now, _lastProof)) [self conceal];
-        }
-    }
-    if (!_everShown && LayoutDeadlineElapsed(now, &_unprovenSince, canProbe)) {
-        [self finish:"could not verify the Rex pane's Accessibility geometry; close palettes, focus a Rex terminal, and use a window on one display outside full screen"];
-        return;
-    }
-    if (!canProbe) {
-        if (_candidate.windowID || _cached || _probePending) [self invalidate];
-        return;
-    }
-    if (_probePending) return;
-    MiloAXProof *cached = _cached;
-    if (cached && now - cached->layoutCheckedAt >= LayoutProofInterval) cached = nil;
-    if (!cached && now - _lastFullAttempt < LayoutProofInterval) return;
-    _probePending = YES;
+    if ((_lastSample && !SampleFresh(now, _lastSample)) || (_panel.visible && !_panel.onActiveSpace)) [self conceal];
+    if (_samplePending) return;
+    _samplePending = YES;
     NSUInteger generation = _generation;
+    const CGRect normalized = _normalized;
     pid_t pid = _rex.processIdentifier;
-    NSString *marker = _marker;
-    id axApp = (__bridge id)_axApp;
+    CGWindowID pinned = _pinned;
+    NSInteger panelNumber = _panel.windowNumber;
+    CGWindowID panel = panelNumber > 0 && panelNumber <= UINT32_MAX ? (CGWindowID)panelNumber : kCGNullWindowID;
     __weak MiloPreviewAnchor *weakSelf = self;
-    dispatch_async(_probeQueue, ^{
+    dispatch_async(_sampleQueue, ^{
         @autoreleasepool {
-            BOOL redraw;
-            MiloAXProof *result = ProveGeometry((__bridge AXUIElementRef)axApp, pid, marker, now, cached, &redraw);
-            NSTimeInterval completed = ProofClock(NULL);
+            Geometry geometry = SampleGeometry(VisibleWindows(), pid, pinned, getpid(), panel, &normalized);
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf applyProof:result generation:generation started:now completed:completed full:cached == nil redraw:redraw];
+                [weakSelf applySample:geometry generation:generation started:now];
             });
         }
     });
@@ -883,6 +493,11 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     id token = [center addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *event) {
         MiloPreviewAnchor *anchor = weakSelf;
         if (!anchor) return;
+        if ([event.name isEqualToString:NSWorkspaceDidTerminateApplicationNotification]) {
+            NSRunningApplication *app = event.userInfo[NSWorkspaceApplicationKey];
+            if (app.processIdentifier == anchor->_rex.processIdentifier) [anchor finish:NULL];
+            return;
+        }
         if ([event.name isEqualToString:NSWorkspaceSessionDidResignActiveNotification]) anchor->_sessionInactive = YES;
         if ([event.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification]) anchor->_sessionInactive = NO;
         if ([event.name isEqualToString:NSWorkspaceScreensDidSleepNotification]) anchor->_screensAsleep = YES;
@@ -894,19 +509,21 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
 
 - (int)run {
     __weak MiloPreviewAnchor *weakSelf = self;
+    _stateSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)_stateFD, 0, dispatch_get_main_queue());
+    _parentSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)_parent, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
+    if (!_stateSource || !_parentSource) {
+        if (_stateSource) { dispatch_resume(_stateSource); dispatch_source_cancel(_stateSource); }
+        if (_parentSource) { dispatch_resume(_parentSource); dispatch_source_cancel(_parentSource); }
+        [self finish:"could not observe the Rex preview lifecycle"];
+        return _status;
+    }
+
     NSNotificationCenter *workspace = NSWorkspace.sharedWorkspace.notificationCenter;
     for (NSNotificationName name in @[NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidDeactivateApplicationNotification,
         NSWorkspaceDidTerminateApplicationNotification, NSWorkspaceActiveSpaceDidChangeNotification,
         NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceSessionDidBecomeActiveNotification,
         NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification]) [self observe:name center:workspace];
     [self observe:NSApplicationDidChangeScreenParametersNotification center:NSNotificationCenter.defaultCenter];
-
-    _stateSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)_stateFD, 0, dispatch_get_main_queue());
-    _parentSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)_parent, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
-    if (!_stateSource || !_parentSource) {
-        [self finish:"could not observe the Rex preview lifecycle"];
-        return _status;
-    }
     dispatch_source_set_event_handler(_stateSource, ^{ [weakSelf readState]; });
     dispatch_source_set_event_handler(_parentSource, ^{ [weakSelf finish:NULL]; });
     dispatch_resume(_stateSource);
@@ -918,6 +535,7 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i) {
         dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, (uintptr_t)signals[i], 0, dispatch_get_main_queue());
         if (!source || sigaction(signals[i], &ignore, &oldActions[i]) != 0) {
+            if (source) { dispatch_resume(source); dispatch_source_cancel(source); }
             [self finish:"could not observe Rex terminal close signals"];
             break;
         }
@@ -930,8 +548,7 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     _keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:guardedInput handler:^NSEvent *(NSEvent *event) {
         MiloPreviewAnchor *anchor = weakSelf;
         if (!anchor || !anchor->_panel || event.window != anchor->_panel) return event;
-        if (!anchor->_panel.visible || ![anchor frontmostRex] ||
-            NSProcessInfo.processInfo.systemUptime - anchor->_lastProof >= ProofLifetime) {
+        if (![anchor acceptsPanelInput]) {
             [anchor invalidate];
             return nil;
         }
@@ -943,10 +560,11 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         }
         return event;
     }];
-    _timer = [NSTimer timerWithTimeInterval:ProofInterval repeats:YES block:^(NSTimer *timer) {
+    _timer = [NSTimer timerWithTimeInterval:SampleInterval repeats:YES block:^(NSTimer *timer) {
         (void)timer;
         [weakSelf tick];
     }];
+    _timer.tolerance = 0.025;
     [NSRunLoop.mainRunLoop addTimer:_timer forMode:NSRunLoopCommonModes];
     [self tick];
     if (!_finished) [NSApp run];
@@ -955,11 +573,6 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     [_timer invalidate];
     if (_keyMonitor) [NSEvent removeMonitor:_keyMonitor];
     for (NSArray *pair in _notificationTokens) [pair[0] removeObserver:pair[1]];
-    if (_axObserver) {
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(_axObserver), kCFRunLoopCommonModes);
-        CFRelease(_axObserver);
-    }
-    if (_axApp) CFRelease(_axApp);
     for (NSUInteger i = 0; i < _signalSources.count; ++i) {
         dispatch_source_cancel(_signalSources[i]);
         sigaction(signals[i], &oldActions[i], NULL);
@@ -972,17 +585,17 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
 }
 @end
 
-int milo_preview_run(const char *url, const char *marker, int state_fd) {
+int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
     @autoreleasepool {
-        if (!NSThread.isMainThread || !url || !marker || state_fd < 0 || strlen(marker) != MarkerLength ||
-            strspn(marker, "0123456789abcdef") != MarkerLength) {
+        if (!NSThread.isMainThread || !url || !pinned_window || state_fd < 0) {
             fprintf(stderr, "milo preview: invalid native anchor arguments\n");
             return 1;
         }
         NSString *address = [NSString stringWithUTF8String:url];
         NSURL *location = address ? [NSURL URLWithString:address] : nil;
         pid_t parent = getppid();
-        if (!location || parent < 2 || fcntl(state_fd, F_GETFD) < 0) {
+        int inputFlags = fcntl(state_fd, F_GETFL);
+        if (!location || parent < 2 || inputFlags < 0 || fcntl(state_fd, F_SETFL, inputFlags | O_NONBLOCK) < 0) {
             fprintf(stderr, "milo preview: invalid URL or missing Rex watcher\n");
             return 1;
         }
@@ -991,8 +604,10 @@ int milo_preview_run(const char *url, const char *marker, int state_fd) {
             fprintf(stderr, "milo preview: no controlling Rex terminal\n");
             return 1;
         }
-        if (!AXIsProcessTrusted()) {
-            WriteDiagnostic(tty, AccessibilityUnavailable);
+        NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, pinned_window));
+        NSRunningApplication *rex = RexApplication(PinnedOwner(windows, pinned_window));
+        if (!rex) {
+            WriteDiagnostic(tty, "the pinned Rex window is no longer available; reopen the preview");
             close(tty);
             return 1;
         }
@@ -1005,16 +620,10 @@ int milo_preview_run(const char *url, const char *marker, int state_fd) {
             close(tty);
             return 1;
         }
-        AXUIElementRef allApps = AXUIElementCreateSystemWide();
-        AXError timeout = allApps ? AXUIElementSetMessagingTimeout(allApps, AXMessageTimeout) : kAXErrorFailure;
-        if (allApps) CFRelease(allApps);
-        if (timeout != kAXErrorSuccess) {
-            WriteDiagnostic(tty, "could not bound Accessibility geometry requests");
-            close(tty);
-            return 1;
-        }
-        MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location
-            marker:[NSString stringWithUTF8String:marker] stateFD:state_fd parent:parent tty:tty];
+        static const char waiting[] = "Milo Preview: approximate placement. Waiting for a supported, visible Rex tile.\n";
+        WriteAll(tty, waiting, sizeof(waiting) - 1);
+        MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location rex:rex pinned:pinned_window
+            stateFD:state_fd parent:parent tty:tty];
         int status = [anchor run];
         close(tty);
         return status;

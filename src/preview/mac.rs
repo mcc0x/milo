@@ -34,7 +34,8 @@ fn cache() -> io::Result<PathBuf> {
         }
     };
     private(path)?;
-    let dir = path.join("net.usemilo.preview");
+    // Never replace the experimental executable a user may have listed in Accessibility.
+    let dir = path.join("net.usemilo.preview.tiled");
     match DirBuilder::new().mode(0o700).create(&dir) {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
         _ => (),
@@ -68,7 +69,7 @@ fn matches_build(path: &Path) -> io::Result<bool> {
 
 /// Keep the lock through spawn: two Milo versions must each launch the helper
 /// they built. Publish a fresh inode rather than modifying a running executable.
-fn spawn(url: &str, state: Stdio) -> io::Result<Child> {
+fn spawn(first: &str, second: &str, state: Stdio) -> io::Result<Child> {
     let dir = cache()?;
     let lock = fs_ops::open_dir(&dir)?;
     lock.lock()?;
@@ -80,18 +81,21 @@ fn spawn(url: &str, state: Stdio) -> io::Result<Child> {
         drop(file);
         staged.replace(&path)?;
     }
-    // Framework diagnostics may contain page data and must not overwrite the
-    // marker. Only Milo's own static errors belong on the restored anchor tty.
-    Command::new(path).arg(url).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    // Only fixed protocol records belong on stdout; do not relay page diagnostics to the shell.
+    Command::new(path).args([first, second]).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
 }
 
-pub(crate) fn require_access() -> Result<(), String> {
-    let mut check = spawn("--check-access", Stdio::null()).map_err(|e| format!("could not open Milo Preview: {e}"))?;
-    match check.wait().map_err(|e| e.to_string())?.code() {
-        Some(0) => Ok(()),
-        Some(77) => Err("macOS Accessibility is unavailable for this launch context; no pane was opened. This build has no verified permission-free placement. Do not grant Rex or its server Accessibility as a workaround.".into()),
-        _ => Err("could not check Milo Preview accessibility; no pane was opened".into()),
+pub(crate) fn pin_window(owner_pid: u32) -> Result<std::num::NonZeroU32, String> {
+    let check = spawn("--pin-window", &owner_pid.to_string(), Stdio::null())
+        .and_then(Child::wait_with_output)
+        .map_err(|e| format!("could not run the preview window check: {e}"))?;
+    if !check.status.success() {
+        return Err("Preview needs one visible, frontmost local Rex window on one display, outside full screen. Close overlapping Rex windows or palettes and retry; no pane was opened.".into());
     }
+    std::str::from_utf8(&check.stdout)
+        .ok()
+        .and_then(|line| line.trim_end().parse().ok())
+        .ok_or_else(|| "the helper did not identify a native Rex window; no pane was opened".into())
 }
 
 /// The helper and observer run only for this terminal. In particular, failure
@@ -101,8 +105,7 @@ pub(crate) fn anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
     if let Err(error) = &result {
         let input = io::stdin();
         if input.is_terminal() && io::stderr().is_terminal() {
-            // Native restores the terminal before it exits. Keep the
-            // diagnostic visible without keeping WebKit or Rex running.
+            // Keep the diagnostic visible without keeping WebKit or Rex running.
             // Do not let a saturated or flow-stopped PTY keep the parent alive.
             // Use a separate file description so the shell's flags are unchanged.
             if let Ok(mut tty) = crate::term::terminal_output(io::stderr().as_raw_fd())
@@ -145,7 +148,8 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
 
 fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
-    let mut helper = spawn(url, state.into()).map_err(|_| "could not launch the local WebKit helper")?;
+    let mut helper = spawn(url, &anchor.native_window_id.to_string(), state.into())
+        .map_err(|_| "could not launch the local WebKit helper")?;
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
     let mut action = String::new();
     loop {

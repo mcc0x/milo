@@ -152,7 +152,7 @@ static BOOL MiloPaneInRexChrome(CGRect window, CGRect normalized, const MiloRexC
 
 // Call on one serial sampling queue. Both inputs and output use a top-left
 // origin: window and pane are Quartz points; normalized is a unit split-tree rect.
-static BOOL MiloApproximatePane(CGRect window, CGRect normalized, CGRect *pane) {
+static inline BOOL MiloApproximatePane(CGRect window, CGRect normalized, CGRect *pane) {
     static NSTimeInterval expires;
     static MiloRexChrome chrome;
     static BOOL supported;

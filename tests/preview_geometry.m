@@ -1,19 +1,19 @@
-// macOS, no GUI interaction or Accessibility permission needed:
+// macOS, no GUI interaction or permission needed:
 // xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
-//   -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework WebKit -o /tmp/preview-geometry
+//   -framework AppKit -framework CoreGraphics -framework WebKit -o /tmp/preview-geometry
 // /tmp/preview-geometry
-#import <ApplicationServices/ApplicationServices.h>
-
-// Interpose only the two synchronous reads under test. The production loops and budget are unchanged.
-static AXError DelayedAttributes(AXUIElementRef, CFArrayRef, AXCopyMultipleAttributeOptions, CFArrayRef *);
-static AXError DelayedHit(AXUIElementRef, float, float, AXUIElementRef *);
-#define AXUIElementCopyMultipleAttributeValues DelayedAttributes
-#define AXUIElementCopyElementAtPosition DelayedHit
-#import "../macos/Preview/Anchor.m"
-#undef AXUIElementCopyMultipleAttributeValues
-#undef AXUIElementCopyElementAtPosition
 #import <assert.h>
-#import <util.h>
+#import "../macos/Preview/Chrome.h"
+
+// Exercise production remapping with deterministic chrome, not the user's settings.
+static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
+    MiloRexChrome chrome;
+    return MiloDecodeRexChrome(@{}, &chrome) && MiloPaneInRexChrome(window, normalized, &chrome, pane);
+}
+
+#define MiloApproximatePane FixturePane
+#import "../macos/Preview/Anchor.m"
+#undef MiloApproximatePane
 
 static void ScreenPlacement(void) {
     CGRect primary = CGRectMake(0, 0, 1440, 900);
@@ -45,38 +45,6 @@ static void ScreenPlacement(void) {
     assert(!PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
 }
 
-static void AXPaneOverlap(void) {
-    CGRect window = CGRectMake(0, 0, 1200, 900);
-    CGRect tiled = CGRectMake(0, 0, 600, 900);
-    CGRect pane = CGRectMake(480, 200, 280, 400);
-    AXTree tree = {.nodes = {
-        {window, NoNode, NO},
-        {tiled, 0, YES},
-        {tiled, 1, NO},
-        {pane, 0, NO},
-    }, .count = 4, .markerNode = 3};
-    // A separate split group is not a permitted background beneath the marker.
-    assert(!ClearAXPane(&tree));
-    tree.nodes[3].frame = CGRectMake(600, 200, 280, 400);
-    assert(ClearAXPane(&tree));
-
-    tree.nodes[4] = (AXNode){CGRectMake(620, 201, 10, 20), 0, NO};
-    tree.count = 5;
-    assert(!ClearAXPane(&tree));
-    tree.nodes[4].frame = CGRectNull;
-    assert(!ClearAXPane(&tree));
-    tree.count = 4;
-
-    // A partly clipped marker cannot be painted over either.
-    tree.nodes[3].frame = pane;
-    tree.nodes[3].parent = 1;
-    tree.nodes[2].frame = CGRectMake(0, 0, 100, 100);
-    assert(!ClearAXPane(&tree));
-    tree.nodes[3].parent = 0;
-    tree.nodes[3].frame = CGRectMake(1100, 200, 280, 400);
-    assert(!ClearAXPane(&tree));
-}
-
 static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect rect) {
     return @{
         (__bridge NSString *)kCGWindowOwnerPID: @(pid),
@@ -87,214 +55,109 @@ static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect rect) {
     };
 }
 
-static NSDictionary *WithLayer(NSDictionary *metadata, NSNumber *layer) {
+static NSDictionary *Replacing(NSDictionary *metadata, CFStringRef key, id value) {
     NSMutableDictionary *copy = [metadata mutableCopy];
-    copy[(__bridge NSString *)kCGWindowLayer] = layer;
+    if (value) copy[(__bridge NSString *)key] = value;
+    else [copy removeObjectForKey:(__bridge NSString *)key];
     return copy;
 }
 
-static void WindowOrdering(void) {
-    CGRect window = CGRectMake(20, 40, 1000, 800), pane = CGRectMake(700, 100, 240, 600);
-    CGRect offPane = CGRectMake(0, 0, 400, 400);
+static CGWindowID WindowID(NSArray *windows, CGWindowID pinned, const CGRect *normalized) {
+    return SampleGeometry(windows, 100, pinned, 300, 4, normalized).windowID;
+}
+
+static void WindowPinning(void) {
+    CGRect window = CGRectMake(20, 40, 1000, 800);
+    CGRect right = CGRectMake(0.5, 0, 0.5, 1);
+    CGRect overlap = CGRectMake(700, 180, 100, 100);
     NSDictionary *rex = Metadata(100, 1, window);
-    NSDictionary *otherRexWindow = Metadata(100, 2, offPane);
-    NSDictionary *frontApp = Metadata(200, 3, pane);
-    NSDictionary *ownPanel = Metadata(300, 4, pane);
-    NSDictionary *harmless = Metadata(200, 5, offPane);
-    NSDictionary *ambiguous = Metadata(100, 6, window);
-    assert(MatchingVisibleWindow(@[ownPanel, harmless, rex, otherRexWindow], 100, 300, window, pane) == 1);
-    assert(MatchingVisibleWindow(@[frontApp, rex], 100, 300, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[otherRexWindow, rex], 100, 300, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[rex, ambiguous], 100, 300, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[rex, frontApp], 100, 300, window, pane) == 1);
-    assert(MatchingVisibleWindow(@[Metadata(200, 1, window)], 100, 300, window, pane) == kCGNullWindowID);
+    NSDictionary *otherRex = Metadata(100, 2, CGRectMake(0, 0, 10, 10));
+    NSDictionary *occluding = Metadata(200, 3, overlap);
+    NSDictionary *panel = Metadata(300, 4, overlap);
+    NSDictionary *harmless = Metadata(200, 5, CGRectMake(22, 180, 100, 100));
+    NSDictionary *ownPopup = Metadata(300, 6, overlap);
+    NSDictionary *wrongPID = Metadata(200, 1, window);
+    NSDictionary *floating = Replacing(occluding, kCGWindowLayer, @(CGWindowLevelForKey(kCGNormalWindowLevelKey) + 25));
 
-    int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey);
-    NSDictionary *system = WithLayer(Metadata(200, 7, CGRectMake(0, 0, 1440, 900)), @(normal + 20));
-    NSDictionary *rexPopup = WithLayer(Metadata(100, 8, pane), @(normal + 25));
-    NSDictionary *ownPopup = Metadata(300, 9, pane);
-    assert(MatchingVisibleWindow(@[system, rexPopup, ownPanel, ownPopup, rex], 100, 300, window, pane) == 1);
-    assert(MatchingVisibleWindow(@[WithLayer(frontApp, @(normal - 1)), rex], 100, 300, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[WithLayer(harmless, nil), rex], 100, 300, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[WithLayer(rex, @(normal + 25))], 100, 300, window, pane) == kCGNullWindowID);
+    assert(PinnedOwner(@[rex], 1) == 100);
+    assert(!PinnedOwner(@[otherRex], 1));
+    assert(!PinnedOwner(@[rex, otherRex], 1));
+    assert(!PinnedOwner(@[Replacing(rex, kCGWindowOwnerPID, @"100")], 1));
+
+    assert(WindowID(@[rex], 0, NULL) == 1);
+    assert(!WindowID(@[harmless, rex], 0, NULL)); // Preflight has no pane, so checks the window.
+    assert(!WindowID(@[rex, otherRex], 0, NULL)); // Even a disjoint second Rex window is ambiguous.
+    assert(!WindowID(@[otherRex, rex], 1, &right));
+    assert(!WindowID(@[wrongPID, otherRex], 1, &right));
+    assert(!WindowID(@[otherRex], 1, &right)); // Never use a replacement window.
+    assert(!WindowID(@[Replacing(rex, kCGWindowLayer, @25)], 1, &right));
+    assert(!WindowID(@[Replacing(rex, kCGWindowAlpha, @0)], 1, &right));
+    assert(WindowID(@[Replacing(otherRex, kCGWindowAlpha, @0), rex], 1, &right) == 1);
+    assert(WindowID(@[panel, harmless, rex, occluding], 1, &right) == 1);
+    assert(!WindowID(@[occluding, rex], 1, &right));
+    assert(!WindowID(@[floating, rex], 1, &right));
+    assert(!WindowID(@[ownPopup, rex], 1, &right));
+    assert(!WindowID(@[Replacing(occluding, kCGWindowNumber, @4), rex], 1, &right));
+    assert(WindowID(@[Replacing(occluding, kCGWindowAlpha, @0), rex], 1, &right) == 1);
+    assert(!WindowID(@[Replacing(occluding, kCGWindowAlpha, nil), rex], 1, &right));
+    assert(!WindowID(@[Replacing(harmless, kCGWindowBounds, nil), rex], 1, &right));
+    assert(!WindowID(@[rex, Replacing(harmless, kCGWindowLayer, nil)], 1, &right));
+    assert(!WindowID(@[rex, Replacing(harmless, kCGWindowOwnerPID, @100.5)], 1, &right));
 }
 
-static void TerminalEcho(void) {
-    int master, slave;
-    char path[PATH_MAX];
-    assert(openpty(&master, &slave, path, NULL, NULL) == 0);
-    int writer = OpenTTYOutput(path);
-    assert(writer >= 0);
-    struct termios original, saved, current;
-    assert(tcgetattr(slave, &original) == 0);
-    original.c_lflag |= ECHO | ECHONL;
-    assert(tcsetattr(slave, TCSANOW, &original) == 0);
-    assert(QuietTTY(writer, &saved));
-    assert(tcgetattr(slave, &current) == 0);
-    assert(current.c_lflag == (original.c_lflag & ~(ECHO | ECHONL)));
-    assert(RestoreTTY(writer, &saved));
-    assert(tcgetattr(slave, &current) == 0 && current.c_lflag == original.c_lflag);
-    close(writer);
-    close(slave);
-    close(master);
+static void RemapPinnedWindow(void) {
+    CGRect right = CGRectMake(0.5, 0, 0.5, 1);
+    CGRect window = CGRectMake(20, 40, 1000, 800);
+    Geometry initial = SampleGeometry(@[Metadata(100, 1, window)], 100, 1, 300, 4, &right);
+    assert(initial.windowID == 1 && CGRectEqualToRect(initial.window, window));
+    assert(CGRectEqualToRect(initial.pane, CGRectMake(547, 152, 451, 670)));
+
+    CGRect moved = CGRectMake(-1200, 220, 800, 600);
+    Geometry current = SampleGeometry(@[Metadata(100, 1, moved)], 100, 1, 300, 4, &right);
+    assert(current.windowID == initial.windowID && CGRectEqualToRect(current.window, moved));
+    assert(!SameGeometry(initial, current) && CGRectEqualToRect(current.pane, CGRectMake(-773, 332, 351, 470)));
+    PreviewScreen screens[] = {
+        {CGRectMake(0, 0, 1440, 900), CGRectMake(0, 0, 1440, 875), 1, 1, NO},
+        {CGRectMake(-1280, -200, 1280, 1024), CGRectMake(-1280, -180, 1280, 1004), 2, 2, NO},
+    };
+    NSRect frame;
+    CGDirectDisplayID display;
+    assert(PlaceOnScreen(current, screens[0].frame, screens, 2, &frame, &display));
+    assert(display == 2 && NSEqualRects(frame, NSMakeRect(-773, 98, 351, 470)));
+    assert(!WindowID(@[Metadata(100, 2, moved)], 1, &right));
+
+    CGRect tiny = CGRectMake(0, 0, 0.001, 0.001);
+    assert(!WindowID(@[Metadata(100, 1, window)], 1, &tiny));
 }
 
-static void StalledTerminalTeardown(void) {
-    int master, slave;
-    char path[PATH_MAX];
-    assert(openpty(&master, &slave, path, NULL, NULL) == 0);
-    int writer = OpenTTYOutput(path);
-    assert(writer >= 0 && (fcntl(writer, F_GETFL) & O_NONBLOCK));
-    struct termios saved, current;
-    assert(tcgetattr(slave, &current) == 0);
-    current.c_lflag |= ECHO | ECHONL | ISIG;
-    assert(tcsetattr(slave, TCSANOW, &current) == 0);
-    assert(QuietTTY(writer, &saved));
-
-    // No reader drains the private master. Keep it open and stop slave output.
-    static const char filler[1024] = {0};
-    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        assert(tcflow(slave, TCOOFF) == 0);
-        BOOL blocked = NO;
-        for (int i = 0; i < 1024 && !blocked; ++i) blocked = !WriteAll(writer, filler, sizeof(filler));
-        assert(blocked);
-        assert(!RestoreMarkerTerminal(writer, YES, &saved));
-        dispatch_semaphore_signal(finished);
-    });
-    assert(dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
-    assert(tcgetattr(slave, &current) == 0 && current.c_lflag == saved.c_lflag);
-    assert(current.c_cc[VINTR] == saved.c_cc[VINTR] && current.c_cc[VQUIT] == saved.c_cc[VQUIT]);
-    assert(tcflow(slave, TCOON) == 0);
-    close(writer);
-    close(slave);
-    close(master);
-}
-
-static void StartupDeadline(void) {
-    NSTimeInterval since = 0;
-    for (int seconds = 10; seconds < 16; ++seconds) {
-        assert(!LayoutDeadlineElapsed(seconds, &since, YES));
-        assert(since == 10);
+static void WatcherProtocol(void) {
+    pid_t pid;
+    CGRect rect;
+    const char tile[] = "show 123 tile 500000 250000 500000 750000";
+    assert(ReadShow(tile, sizeof(tile) - 1, &pid, &rect));
+    assert(pid == 123 && CGRectEqualToRect(rect, CGRectMake(0.5, 0.25, 0.5, 0.75)));
+    const char *invalid[] = {
+        "show 123 tile", "show 123 float 0 0 1000000 1000000",
+        "show 1 tile 0 0 10 10", "show +123 tile 0 0 10 10", "show 2147483648 tile 0 0 10 10",
+        "show 123 tile 0 0 0 1", "show 123 tile 0 0 1 0", "show 123 tile 0 0 1000001 1",
+        "show 123 tile 900000 0 100001 1", "show 123 tile 0 900000 1 100001",
+        "show 123 tile 0.5 0 10 10", "show 123 tile -1 0 10 10", "show 123 tile 0  0 10 10",
+        "show 123 tile 0 0 10 10 ", "show 123 tile 0 0 10 10\r", "show 123 tile 0 0 10 10 10",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        assert(!ReadShow(invalid[i], strlen(invalid[i]), &pid, &rect));
     }
-    assert(LayoutDeadlineElapsed(16, &since, YES));
-    assert(!LayoutDeadlineElapsed(17, &since, NO) && since == 0);
-    assert(!LayoutDeadlineElapsed(30, &since, YES) && since == 30);
-    assert(LayoutDeadlineElapsed(36, &since, YES));
-}
-
-static void MenuBetweenTicks(void) {
-    NSTimeInterval since = 0;
-    BOOL menuOpen = NO;
-    assert(!LayoutDeadlineElapsed(10, &since, CanProbeLayout(YES, YES, menuOpen)));
-    assert(!LayoutDeadlineElapsed(15.9, &since, CanProbeLayout(YES, YES, menuOpen)));
-    UpdateMenuState(kAXMenuOpenedNotification, &menuOpen, &since);
-    assert(menuOpen && since == 0);
-    UpdateMenuState(kAXMenuClosedNotification, &menuOpen, &since);
-    assert(!menuOpen && !LayoutDeadlineElapsed(16.1, &since, CanProbeLayout(YES, YES, menuOpen)));
-    assert(since == 16.1);
-}
-
-static void PanelProofTiming(void) {
-    NSTimeInterval since = 10, started = 15.9;
-    BOOL everShown = NO;
-    assert(ProofFresh(16, started));
-    assert(!ProofFresh(16.3, started)); // The frame lookup or mutation outlasted the proof.
-    assert(!CreditVisiblePanel(16, started, NO, &everShown) && !everShown);
-    assert(!CreditVisiblePanel(16.3, started, YES, &everShown) && !everShown);
-    assert(CreditVisiblePanel(16, started, YES, &everShown));
-    assert(!(!everShown && LayoutDeadlineElapsed(16, &since, YES))); // Credit before the startup timeout.
-}
-
-static BOOL ProbeSizedTerminal(int tty, unsigned short columns, unsigned short rows, BOOL menuOpen) {
-    struct winsize size = {.ws_col = columns, .ws_row = rows};
-    assert(ioctl(tty, TIOCSWINSZ, &size) == 0);
-    size = (struct winsize){0};
-    assert(ioctl(tty, TIOCGWINSZ, &size) == 0);
-    return CanProbeLayout(YES, MarkerFits(size.ws_col, size.ws_row), menuOpen);
-}
-
-static void StartupAfterResizeOrMenu(void) {
-    int master, slave;
-    assert(openpty(&master, &slave, NULL, NULL, NULL) == 0);
-    NSTimeInterval since = 0;
-    assert(!LayoutDeadlineElapsed(1, &since, ProbeSizedTerminal(slave, 31, 2, NO)) && since == 0);
-    assert(!LayoutDeadlineElapsed(9, &since, ProbeSizedTerminal(slave, 31, 2, NO)) && since == 0);
-    assert(!LayoutDeadlineElapsed(17, &since, ProbeSizedTerminal(slave, 32, 1, NO)) && since == 0);
-    assert(!LayoutDeadlineElapsed(18, &since, ProbeSizedTerminal(slave, 32, 2, NO)) && since == 18);
-    assert(!LayoutDeadlineElapsed(23, &since, ProbeSizedTerminal(slave, 32, 2, YES)) && since == 0);
-    assert(!LayoutDeadlineElapsed(31, &since, ProbeSizedTerminal(slave, 32, 2, YES)) && since == 0);
-    assert(!LayoutDeadlineElapsed(32, &since, ProbeSizedTerminal(slave, 32, 2, NO)) && since == 32);
-    assert(LayoutDeadlineElapsed(38, &since, ProbeSizedTerminal(slave, 32, 2, NO)));
-    close(slave);
-    close(master);
-}
-
-static struct {
-    NSTimeInterval now, delay;
-    size_t calls;
-} axFixture;
-
-static NSTimeInterval TestClock(void *context) {
-    return *(NSTimeInterval *)context;
-}
-
-static AXError DelayedAttributes(AXUIElementRef element, CFArrayRef keys, AXCopyMultipleAttributeOptions options, CFArrayRef *result) {
-    (void)keys;
-    (void)options;
-    axFixture.now += axFixture.delay;
-    NSString *role = (__bridge NSString *)(axFixture.calls++ ? kAXGroupRole : kAXWindowRole);
-    NSArray *row = @[role, NSNull.null, NSNull.null, NSNull.null, @[(__bridge id)element]];
-    *result = (CFArrayRef)CFBridgingRetain(row);
-    return kAXErrorSuccess;
-}
-
-static AXError DelayedHit(AXUIElementRef element, float x, float y, AXUIElementRef *result) {
-    (void)x;
-    (void)y;
-    ++axFixture.calls;
-    axFixture.now += axFixture.delay;
-    *result = element;
-    CFRetain(element);
-    return kAXErrorSuccess;
-}
-
-static void AcquisitionDeadline(void) {
-    AXUIElementRef element = AXUIElementCreateApplication(getpid());
-    AXBudget budget = {ProofLifetime, TestClock, &axFixture.now};
-    CGRect pane = CGRectMake(0, 0, 20, 20);
-    AXTree tree = {.markerNode = NoNode};
-
-    // Each operation finishes within the per-message cap, but a long tree or hit test must stop.
-    axFixture.delay = 0.045;
-    assert(!WalkAX(&budget, &tree, element, NoNode, 0, @"unused"));
-    assert(axFixture.calls == 7 && tree.count == 7 && BeforeAXDeadline(&budget) && !AXCanIssue(&budget));
-    axFixture.now = 0;
-    axFixture.calls = 0;
-    assert(!HitTestsMatch(&budget, element, element, pane));
-    assert(axFixture.calls == 7 && BeforeAXDeadline(&budget) && !AXCanIssue(&budget));
-
-    // An in-flight call returning late is never a successful sample, even if AX returns success.
-    axFixture.now = 0;
-    axFixture.calls = 0;
-    axFixture.delay = ProofLifetime + 0.01;
-    assert(!HitTestsMatch(&budget, element, element, pane));
-    assert(axFixture.calls == 1 && !BeforeAXDeadline(&budget));
-    CFRelease(element);
+    const char embedded[] = "show 123 tile 0 0 10 10\0hide";
+    assert(!ReadShow(embedded, sizeof(embedded) - 1, &pid, &rect));
+    assert(SampleFresh(1.5, 1) && !SampleFresh(1.75, 1) && !SampleFresh(1, 1.01));
 }
 
 int main(void) {
     @autoreleasepool {
         ScreenPlacement();
-        AXPaneOverlap();
-        WindowOrdering();
-        TerminalEcho();
-        StalledTerminalTeardown();
-        StartupDeadline();
-        MenuBetweenTicks();
-        PanelProofTiming();
-        StartupAfterResizeOrMenu();
-        AcquisitionDeadline();
+        WindowPinning();
+        RemapPinnedWindow();
+        WatcherProtocol();
         puts("preview geometry tests passed");
     }
     return 0;

@@ -6,10 +6,14 @@ end
 local session, window, inactive = id("session", 1), id("window", 1), id("window", 2)
 local main, sidebar, preview, other = id("block", 1), id("block", 2), id("block", 3), id("block", 4)
 local app, other_app = id("client", 1), id("client", 2)
+local another_session = id("session", 2)
 local host = "00000000-0000-0000-0000-000000000001"
 local term = "com.superlogical.terminal"
 local exe, url = "/with spaces/milo", "http://localhost:3400/hello?who=$HOME&next=%2Fhere#section"
 local uid, helper, cli, gui = 501, 20, 30, 40
+local native_window = 4294967295
+local show = "show 40 tile 625000 0 375000 1000000"
+local shown = "hide\n" .. show .. "\n"
 local server = "unix:///tmp/rex%20preview.sock"
 local function peer(pid) return { kind = "peer", transport = "unix", uid = uid, pid = pid } end
 local function terminal(block, label)
@@ -33,7 +37,14 @@ local function call(f)
   end
   local after
   f.rex.after = function(delay, fn)
-    if delay == 0 then after = fn else assert(delay == 8); callbacks.deadline = fn end
+    if delay == 0 then
+      after = fn
+    elseif delay == 1 then
+      callbacks.attachment_poll = fn
+    else
+      assert(delay == 8)
+      callbacks.deadline = fn
+    end
   end
   f.rex.stop = function(code) f.stopped = code end
   setfenv(assert(loadfile(script)), env)()
@@ -47,7 +58,7 @@ end
 local function fixture(mode, block)
   local f = {
     gui = { client_id = app, info = { kind = "app", platform = "macos" },
-      connection_state = "connected", principal = peer(gui) },
+      connection_state = "connected", principal = peer(gui), session_ids = { session } },
     cli = peer(cli),
     status = { host_id = host, listeners = { { endpoint = server, transport = "unix", admission = "peer_credentials" } } },
     main = terminal(main, "project"),
@@ -63,6 +74,13 @@ local function fixture(mode, block)
   f.proc[sidebar] = { child = { name = "milo", path = exe, user_id = uid, pid = 11 } }
   f.proc[preview] = { child = { name = "milo", path = exe, user_id = uid, pid = helper } }
   f.tiled = { kind = "tiled", blocks = { f.rail, f.main, f.anchor } }
+  f.leaf = { block_id = preview, rect = { 0.625, 0, 0.375, 1 } }
+  f.main_leaf = { block_id = main, rect = { 0.25, 0, 0.375, 1 } }
+  f.branch = { before = f.main_leaf, after = f.leaf }
+  f.tiled.layout = { rect = { 0, 0, 1, 1 }, split = {
+    before = { block_id = sidebar, rect = { 0, 0, 0.25, 1 } },
+    after = { rect = { 0.25, 0, 0.75, 1 }, split = f.branch },
+  } }
   f.window = { window_id = window, layers = { f.tiled }, focused_block_id = main }
   f.inactive = { window_id = inactive, layers = { { kind = "tiled", blocks = { f.other } } } }
   f.view = { session_id = session, active_window_id = window, revision = 1, windows = { f.window, f.inactive } }
@@ -82,10 +100,15 @@ local function fixture(mode, block)
     block_id = block,
     args = { mode = mode, server = server, uid = uid, pid = helper, session = session, block = block,
       exe = exe, url = url, placement = "right", main = main, window = window, cwd = "/work/project",
-      owner = app, owner_pid = gui },
+      owner = app, owner_pid = gui, native_window_id = native_window },
     call = function(method, a)
       if method == "server.whoami" then return { principal = f.cli } end
       if method == "server.status" then return f.status end
+      if method == "client.inspect" then
+        assert(a.client_id == app and a.session_id == nil)
+        f.inspections = (f.inspections or 0) + 1
+        return { client = f.gui }
+      end
       if method == "block.close" then
         scope(a)
         assert(a.block_id == preview and a.keep_last == true)
@@ -109,7 +132,6 @@ local function fixture(mode, block)
     end,
     session = {
       view = function(a) scope(a); return f.view end,
-      list_clients = function(a) scope(a); return { clients = { f.gui } } end,
       list_blocks = function(a)
         scope(a)
         local blocks = {}
@@ -146,9 +168,9 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   local launch = a.layout.block.options
   assert(launch.shell == "none" and launch.cwd == "/work/project")
   assert(launch.exit.on_completion == true and launch.exit.quick_exit_threshold_ms == 0)
-  assert(#launch.command == 7 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
+  assert(#launch.command == 8 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
     and launch.command[3] == url and launch.command[4] == main and launch.command[5] == window
-    and launch.command[6] == app and launch.command[7] == tostring(gui))
+    and launch.command[6] == app and launch.command[7] == tostring(gui) and launch.command[8] == "4294967295")
   assert(f.placed.api == "split" and a.anchor_id == main and a.direction == p[2] and a.side == p[3])
 end
 
@@ -157,6 +179,25 @@ local function denied(mode, block, change, status)
   change(f)
   assert(call(f)() == status .. "\n" and not f.placed)
 end
+for _, mode in ipairs{ "identify", "open", "focus" } do
+  denied(mode, mode == "focus" and preview or main,
+    function(f) f.gui.session_ids = { session, another_session } end, "sessions")
+end
+for _, invalid in ipairs{ false, {}, { another_session }, { session, false }, { current = session } } do
+  denied("open", main, function(f) f.gui.session_ids = invalid end, "client")
+end
+denied("open", main, function(f) f.gui.session_ids = nil end, "client")
+local duplicates = fixture("open", main)
+duplicates.gui.session_ids = { session, session }
+assert(call(duplicates)() == "ok\n")
+local attached_during_open = fixture("open", main)
+attached_during_open.after_create = function() attached_during_open.gui.session_ids = { session, another_session } end
+assert(call(attached_during_open)() == "sessions\n" and attached_during_open.placed
+  and attached_during_open.canceled and not attached_during_open.published)
+for _, invalid in ipairs{ false, "7", 0, -1, 0.5, 4294967296, math.huge, 0/0 } do
+  denied("open", main, function(f) f.rex.args.native_window_id = invalid end, "changed")
+end
+denied("open", main, function(f) f.rex.args.native_window_id = nil end, "changed")
 denied("open", sidebar, function(f) f.referenced = other end, "stale")
 denied("open", sidebar, function(f) f.referenced = "block:0" end, "stale")
 denied("open", sidebar, function(f) f.view.active_window_id = inactive end, "tab")
@@ -243,44 +284,66 @@ denied("focus", preview, float_anchor, "focus")
 
 local f = fixture("watch", preview)
 local observe = call(f)
-local expected = "hide\nshow 40 tile\n"
+local expected = shown
 assert(observe() == expected)
 local function view_change(state)
   if state then expected = expected .. state .. "\n" end
   assert(observe("session_view_changed") == expected)
 end
 view_change() -- repeated snapshots do not repeatedly emit a state
+f.main_leaf.rect[3], f.leaf.rect = 0.45, { 0.7, 0, 0.3, 1 }
+view_change("show 40 tile 700000 0 300000 1000000")
+view_change()
+-- The visible block list alone is not geometry. The exact tiled leaf must exist.
+f.branch.after = nil
+view_change("hide")
+f.branch.after = f.leaf
+for _, invalid in ipairs{ false, {}, { "0.7", 0, 0.3, 1 }, { 0.7, 0, 0.31, 1 },
+  { 0.7, 0, 0.3, -1 }, { 0.7, 0/0, 0.3, 1 }, { 0.7, 0, 0.0000001, 1 } } do
+  f.leaf.rect = invalid
+  view_change()
+  assert(not f.stopped)
+end
+f.leaf.rect = { 0.0078125, 0.125, 0.9921875, 0.875 }
+view_change("show 40 tile 7813 125000 992187 875000")
+f.main_leaf.rect[3], f.leaf.rect = 0.375, { 0.625, 0, 0.375, 1 }
+view_change(show)
 f.view.active_window_id = inactive
 assert(observe("session_view_changed", nil, { session_id = id("session", 99) }) == expected)
 view_change("hide")
 f.view.active_window_id = window
-view_change("show 40 tile")
+view_change(show)
 f.window.zoomed_block_id = main
 view_change("hide")
 f.window.zoomed_block_id = preview
-view_change("show 40 tile")
+view_change()
+f.window.zoomed_block_id = nil
+view_change(show)
 local float = { kind = "floating", blocks = {} }
 f.window.layers[2] = float
 view_change("hide")
 float.state = "minimized"
-view_change("show 40 tile")
+view_change(show)
 float.state = nil
 view_change("hide")
 f.window.layers[2] = nil
-f.window.zoomed_block_id = nil
-view_change("show 40 tile")
+view_change(show)
+f.tiled.state = "minimized"
+view_change("hide")
+f.tiled.state = nil
+view_change(show)
 f.tiled.blocks = { f.rail, f.main }
 f.detached = true
 view_change("hide")
 assert(not f.stopped)
 f.tiled.blocks, f.detached = { f.rail, f.main, f.anchor }, false
-view_change("show 40 tile")
+view_change(show)
 f.gui.principal = peer(gui + 1)
 view_change("hide") -- even the same client ID cannot substitute another GUI process
 f.gui.client_id, f.anchor.owner = other_app, other_app
 view_change()
 f.gui.client_id, f.anchor.owner, f.gui.principal = app, app, peer(gui)
-view_change("show 40 tile")
+view_change(show)
 assert(observe("block_closed", { block_id = preview }) == expected .. "hide\n" and f.stopped == 0)
 
 for _, main_detached in ipairs{ false, true } do
@@ -288,7 +351,7 @@ for _, main_detached in ipairs{ false, true } do
   local watch_move = call(moved)
   float_anchor(moved)
   if main_detached then moved.tiled.blocks, moved.main_detached = { moved.rail }, true end
-  assert(watch_move("session_view_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 0)
+  assert(watch_move("session_view_changed") == shown .. "hide\n" and moved.stopped == 0)
 end
 
 -- The working block was reattached between the server's view and list responses.
@@ -296,21 +359,21 @@ local returning = fixture("watch", preview)
 local watch_return = call(returning)
 returning.tiled.blocks = { returning.rail, returning.anchor }
 returning.rex.session.list_blocks = function() return { blocks = { { block_id = main, placement = "placed" } } } end
-assert(watch_return("session_view_changed") == "hide\nshow 40 tile\nhide\n" and not returning.stopped)
+assert(watch_return("session_view_changed") == shown .. "hide\n" and not returning.stopped)
 returning.tiled.blocks = { returning.rail, returning.main, returning.anchor }
-assert(watch_return("session_view_changed") == "hide\nshow 40 tile\nhide\nshow 40 tile\n")
+assert(watch_return("session_view_changed") == shown .. shown)
 
 local remote = fixture("watch", preview)
 remote.gui.principal.kind = "tailscale"
 assert(call(remote)() == "hide\n" and not remote.stopped)
 local disconnected = fixture("watch", preview)
 local lost = call(disconnected)
-assert(lost("client_connection_changed", { client_id = app, connection_state = "lost" }) == "hide\nshow 40 tile\nhide\n"
+assert(lost("client_connection_changed", { client_id = app, connection_state = "lost" }) == shown .. "hide\n"
   and disconnected.stopped == 0)
 local absent = fixture("watch", preview)
 local unavailable = call(absent)
 absent.view = nil
-assert(unavailable("active_window_changed") == "hide\nshow 40 tile\nhide\n" and absent.stopped == 1)
+assert(unavailable("active_window_changed") == shown .. "hide\n" and absent.stopped == 1)
 local invalid = fixture("watch", preview)
 invalid.cli.pid = cli + 1
 assert(call(invalid)() == "hide\n" and invalid.stopped == 1)
@@ -323,7 +386,7 @@ assert(first("block_owner_changed") == "hide\n")
 hidden.view.active_window_id = window
 assert(first("active_window_changed") == "hide\n")
 hidden.gui.client_id, hidden.anchor.owner, hidden.gui.principal = app, app, peer(gui)
-assert(first("block_owner_changed") == "hide\nshow 40 tile\n")
+assert(first("block_owner_changed") == shown)
 
 local revisions = fixture("watch", preview)
 local reads = 0
@@ -333,24 +396,46 @@ revisions.rex.session.view = function(args)
   return view(args)
 end
 local events = call(revisions)
-assert(events() == "hide\nshow 40 tile\n" and reads == 1)
-assert(events("session_view_changed", { revision = 1 }) == "hide\nshow 40 tile\n" and reads == 1)
+assert(events() == shown and reads == 1)
+assert(events("session_view_changed", { revision = 1 }) == shown and reads == 1)
 revisions.view.revision, revisions.view.active_window_id = 3, inactive
-assert(events("session_view_changed", { revision = 2 }) == "hide\nshow 40 tile\nhide\n" and reads == 2)
-assert(events("session_view_changed", { revision = 3 }) == "hide\nshow 40 tile\nhide\n" and reads == 2)
+assert(events("session_view_changed", { revision = 2 }) == shown .. "hide\n" and reads == 2)
+assert(events("session_view_changed", { revision = 3 }) == shown .. "hide\n" and reads == 2)
 revisions.view.active_window_id = window
-assert(events("active_window_changed") == "hide\nshow 40 tile\nhide\nshow 40 tile\n" and reads == 3)
+assert(events("active_window_changed") == shown .. shown and reads == 3)
 events("block_owner_changed")
 events("client_connection_changed")
 assert(reads == 5)
 
+local multimode = fixture("watch", preview)
+local original_view = multimode.rex.session.view
+local reads_for_attachment = 0
+multimode.rex.session.view = function(a)
+  reads_for_attachment = reads_for_attachment + 1
+  return original_view(a)
+end
+local poll = call(multimode)
+assert(poll() == shown and reads_for_attachment == 1 and multimode.inspections == 1)
+assert(poll("attachment_poll") == shown and reads_for_attachment == 1 and multimode.inspections == 2)
+-- The client can switch sessions without changing a single field in our view.
+multimode.gui.session_ids = { session, another_session }
+local concealed = shown .. "hide\n"
+assert(poll("attachment_poll") == concealed and reads_for_attachment == 1)
+assert(poll("attachment_poll") == concealed and reads_for_attachment == 1 and not multimode.stopped)
+multimode.gui.session_ids = { session }
+assert(poll("attachment_poll") == shown .. shown and reads_for_attachment == 2)
+assert(poll("attachment_poll") == shown .. shown and reads_for_attachment == 2)
+
 local staged = fixture("watch", preview)
 staged.anchor.label = "milo:preview:starting"
+staged.anchor.owner = nil
 local gate = call(staged)
 assert(gate() == "hide\n")
 staged.anchor.label = "milo:preview"
-assert(gate("session_view_changed") == "hide\nshow 40 tile\n")
-assert(gate("deadline") == "hide\nshow 40 tile\n" and not staged.stopped)
+assert(gate("session_view_changed") == "hide\n")
+staged.anchor.owner = app
+assert(gate("block_owner_changed") == shown)
+assert(gate("deadline") == shown and not staged.stopped)
 local unpublished = fixture("watch", preview)
 unpublished.anchor.label = "milo:preview:starting"
 assert(call(unpublished)("deadline") == "hide\n" and unpublished.stopped == 0)
@@ -375,7 +460,7 @@ for _, side in ipairs{ "main", "anchor" } do
   assert(watch("deadline") == "hide\n" and not initial.stopped)
   initial.detached, initial.main_detached = false, false
   initial.tiled.blocks = { initial.rail, initial.main, initial.anchor }
-  assert(watch("session_view_changed") == "hide\nshow 40 tile\n" and not initial.stopped)
+  assert(watch("session_view_changed") == shown and not initial.stopped)
 end
 
 local wrong_detached = fixture("watch", preview)
@@ -391,14 +476,14 @@ assert(call(mislabeled)() == "hide\n" and mislabeled.stopped == 1)
 local detached_main = fixture("watch", preview)
 local pairing = call(detached_main)
 detached_main.tiled.blocks, detached_main.main_detached = { detached_main.rail, detached_main.anchor }, true
-assert(pairing("session_view_changed") == "hide\nshow 40 tile\nhide\n" and not detached_main.stopped)
+assert(pairing("session_view_changed") == shown .. "hide\n" and not detached_main.stopped)
 detached_main.tiled.blocks, detached_main.main_detached = { detached_main.rail, detached_main.main, detached_main.anchor }, false
-assert(pairing("session_view_changed") == "hide\nshow 40 tile\nhide\nshow 40 tile\n")
-assert(pairing("block_closed", { block_id = main }) == "hide\nshow 40 tile\nhide\nshow 40 tile\nhide\n"
+assert(pairing("session_view_changed") == shown .. shown)
+assert(pairing("block_closed", { block_id = main }) == shown .. shown .. "hide\n"
   and detached_main.stopped == 0)
 local moved = fixture("watch", preview)
 local watch_move = call(moved)
 moved.tiled.blocks = { moved.rail, moved.main }
 moved.inactive.layers[1].blocks = { moved.other, moved.anchor }
 moved.view.active_window_id = inactive
-assert(watch_move("active_window_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 0)
+assert(watch_move("active_window_changed") == shown .. "hide\n" and moved.stopped == 0)

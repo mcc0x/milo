@@ -88,6 +88,7 @@ fn problem(reply: &str) -> &'static str {
         "floating_caller" => "run preview from the tiled working terminal or Milo sidebar, not a floating pane",
         "caller" => "the running Milo process is not in the specified Rex terminal",
         "client" => "the terminal isn't owned by a connected Rex app on this Mac",
+        "sessions" => "the Mac viewer is attached to more than one session or cannot confirm this session; preview needs one unambiguous local Rex session",
         "shell" => "couldn't identify one interactive local working terminal in this Rex tab",
         "stale" => "the sidebar's working terminal is stale or is not in this Rex tab",
         "remote" => "preview is not available for a remote Rex terminal",
@@ -149,11 +150,12 @@ fn resolve_placement(
 
 fn anchor_args(anchor: Anchor<'_>) -> String {
     format!(
-        r#","main":{},"window":{},"owner":{},"owner_pid":{}"#,
+        r#","main":{},"window":{},"owner":{},"owner_pid":{},"native_window_id":{}"#,
         json(anchor.main),
         json(anchor.window),
         json(anchor.owner),
         anchor.owner_pid,
+        anchor.native_window_id,
     )
 }
 
@@ -190,9 +192,9 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .and_then(|pid| u32::try_from(pid).ok())
         .filter(|pid| (2..=2_147_483_647).contains(pid))
         .ok_or("Rex did not identify the working terminal's viewer PID")?;
-    crate::preview::require_access()?;
+    let native_window_id = crate::preview::pin_window(owner_pid)?;
     let placement = resolve_placement(Path::new(cwd.as_ref()), override_placement, crate::paths::config_dir);
-    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid });
+    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid, native_window_id });
     let extra = format!(
         r#","exe":{},"url":{},"placement":{},"cwd":{}{anchor}"#,
         json(exe),

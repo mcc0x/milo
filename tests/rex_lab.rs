@@ -923,6 +923,7 @@ fn preview_layout_and_observer() {
     let viewer = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_viewer.py");
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua");
     let url = "http://localhost:4321/lab/a%2Fb&$HOME";
+    let native_window_id = u32::MAX; // A sentinel; the simulated app has no native window.
     let pid_file = lab.root.join("preview-arguments");
     let nested = lab.root.join("nested-worktree");
     fs::create_dir(&nested).unwrap();
@@ -1018,16 +1019,20 @@ fn preview_layout_and_observer() {
     peer_out.read_line(&mut client).unwrap();
     assert!(client.starts_with("client:"), "{client}");
     let client = client.trim();
-    let owner = format!(r#","window":"{tab}","owner":"{client}","owner_pid":{viewer_pid}"#);
-    let mut viewer_call = |method, args: &str| {
-        writeln!(peer_in, r#"["{method}",{args}]"#).unwrap();
+    let owner = format!(
+        r#","window":"{tab}","owner":"{client}","owner_pid":{viewer_pid},"native_window_id":{native_window_id}"#,
+    );
+    let mut viewer_session = |method, target: &str| {
+        writeln!(peer_in, r#"["{method}",{{"session_id":"{target}"}}]"#).unwrap();
         let mut reply = String::new();
         peer_out.read_line(&mut reply).unwrap();
         assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
     };
-    viewer_call("session.attach", &format!(r#"{{"session_id":"{session}"}}"#));
-    let mut claim = || viewer_call("session.own_block", &format!(r#"{{"session_id":"{session}"}}"#));
-    claim();
+    // Another attachment makes the simulated owner's presented session ambiguous.
+    let background = lab.rex(&["new", "also-attached", "-c", root, "--shell=none", "--json", "--", "/bin/sleep", "120"]);
+    let background = id(&background, "session_id");
+    viewer_session("session.attach", &session);
+    viewer_session("session.own_block", &session);
 
     let stale_env = lab
         .command(&lab.milo)
@@ -1111,6 +1116,28 @@ fn preview_layout_and_observer() {
     }
 
     let scope = |request: &str| lab.rex(&["do", "-s", &session, "-e", request]);
+    let show_for = |block: &str| {
+        let rect = scope(&format!(
+            "local view=assert(rex.session.view{{}}); \
+             local function leaf(node) \
+                if node.block_id=='{block}' then return node.rect end; \
+                local split=node.split; if split then return leaf(split.before) or leaf(split.after) end \
+             end; \
+             for _,w in ipairs(view.windows) do if w.window_id=='{tab}' then \
+                for _,l in ipairs(w.layers) do if l.kind=='tiled' then \
+                    local r=leaf(l.layout); \
+                    if r then print(string.format('%.17g %.17g %.17g %.17g',r[1],r[2],r[3],r[4])); return end \
+                end end \
+             end end; error('no tiled leaf for preview')"
+        ));
+        let rect: Vec<f64> = rect.split_whitespace().map(|component| component.parse().unwrap()).collect();
+        let &[x, y, w, h] = rect.as_slice() else { panic!("expected a tiled rectangle, got {rect:?}") };
+        let fraction = |value: f64| (value * 1_000_000.0).round() as u32;
+        let (x0, y0) = (fraction(x), fraction(y));
+        let (width, height) = (fraction(x + w) - x0, fraction(y + h) - y0);
+        assert!(width > 0 && height > 0 && x0 + width <= 1_000_000 && y0 + height <= 1_000_000);
+        format!("show {viewer_pid} tile {x0} {y0} {width} {height}")
+    };
     let move_block = |block: &str, beside: &str| {
         scope(&format!(
             "assert(rex.session.move_block{{block_id='{block}',anchor_block_id='{beside}',direction='horizontal',side='after'}})"
@@ -1118,6 +1145,11 @@ fn preview_layout_and_observer() {
     };
     let plan = identify(&main, &main);
     let planned_cwd = id(&plan, "cwd");
+    viewer_session("session.attach", &background);
+    assert_eq!(identify(&main, &main).trim(), "sessions");
+    assert_eq!(open(&main, &main, "right", &main, &planned_cwd).trim(), "sessions");
+    assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
+    viewer_session("session.detach", &background);
     move_block(&main, &second_shell);
     lab.rex(&["focus", "-s", &session, &second_tab]);
     assert_eq!(open(&main, &main, "right", &main, &planned_cwd).trim(), "changed");
@@ -1160,7 +1192,7 @@ fn preview_layout_and_observer() {
     ] {
         assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
         check_focus();
-        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n");
+        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\n");
         assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
@@ -1171,11 +1203,18 @@ fn preview_layout_and_observer() {
              return (sp.direction=='{direction}' and sp['{side}'].block_id==b.block_id \
              and (sp.before.block_id=='{main}' or sp.after.block_id=='{main}')) \
              or adjacent(sp.before) or adjacent(sp.after) end; \
-             assert(l.kind=='tiled' and adjacent(l.layout)); print(b.block_id); return end end end \
+             assert(l.kind=='tiled' and adjacent(l.layout)); print(b.block_id..' '..tostring(b.owner)); return end end end \
              end end; error('no preview')"
         ));
-        let block = found.lines().next().unwrap();
-        claim();
+        let mut found = found.split_whitespace();
+        let block = found.next().unwrap();
+        let owner_before_claim = found.next().unwrap();
+        if placement == "above" {
+            // Publishing a split created by a CLI does not itself assign an app owner.
+            assert_eq!(owner_before_claim, "nil");
+        } else {
+            viewer_session("session.own_block", &session);
+        }
         let mut transferred = None;
         if placement == "right" {
             lab.rex(&["focus", "-s", &session, &second_tab]);
@@ -1226,22 +1265,36 @@ fn preview_layout_and_observer() {
             states.set(index + 1);
         };
         let watch_pid = || fs::read_to_string(watch.with_extension("watch.pid")).unwrap().trim().parse::<u32>().unwrap();
-        let show = format!("show {viewer_pid} tile");
+        let mut show = show_for(block);
         expect("hide");
         if let Some((mut other, input, output)) = transferred.take() {
             lab.rex(&["focus", "-s", &session, &tab]);
             std::thread::sleep(Duration::from_millis(250));
             assert_eq!(records(), "hide\n", "preview appeared for a foreign owner before its first show");
-            claim();
+            viewer_session("session.own_block", &session);
             drop((input, output));
             assert!(other.wait().unwrap().success());
         }
+        if placement == "above" {
+            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(records(), "hide\n", "an unowned preview must stay hidden after publication");
+            viewer_session("session.own_block", &session);
+        }
         expect(&show);
         if placement == "right" {
+            let revision = || scope("print(assert(rex.session.view{}).revision)");
+            let before = revision();
+            viewer_session("session.attach", &background);
+            expect("hide");
+            assert_eq!(revision(), before, "other-session attachment changed the scoped layout");
+            viewer_session("session.detach", &background);
+            expect(&show);
+            assert_eq!(revision(), before, "other-session detachment changed the scoped layout");
             scope(&format!("assert(rex.session.detach_block{{block_id='{main}'}})"));
             expect("hide");
             move_block(&main, &rail);
             lab.rex(&["focus", "-s", &session, &main]);
+            show = show_for(block);
             expect(&show);
         }
         let (before, after) = if side == "before" { (block, main.as_str()) } else { (main.as_str(), block) };
@@ -1249,6 +1302,10 @@ fn preview_layout_and_observer() {
             "assert(rex.session.resize_pane{{direction='{direction}', before_block_id='{before}', \
              after_block_id='{after}', ratio=0.4}})"
         ));
+        let resized = show_for(block);
+        assert_ne!(show, resized, "{placement}: Rex's leaf did not move on resize");
+        expect(&resized);
+        let show = resized;
         lab.rex(&["zoom", "-s", &session, &main, "--on"]);
         expect("hide");
         lab.rex(&["zoom", "-s", &session, &main, "--off"]);
@@ -1258,11 +1315,15 @@ fn preview_layout_and_observer() {
             let extra = format!(r#","main":"{main}"{owner}"#);
             assert_eq!(request("focus", block, block, &extra).trim(), "ok");
             check_focus();
-            // Outlive the CLI connection/request timeout without polling the server.
+            // Outlive the CLI connection/request timeout without layout events.
             std::thread::sleep(Duration::from_millis(3100));
             assert!(alive(watch_pid()));
         }
         if placement == "above" {
+            lab.rex(&["zoom", "-s", &session, block, "--on"]);
+            expect("hide");
+            lab.rex(&["zoom", "-s", &session, block, "--off"]);
+            expect(&show);
             // A separate Rex layer still conceals the tiled preview while visible.
             let cover = scope(&format!(
                 "local cover=assert(rex.session.new_layer{{window_id='{tab}',bounds={{0.25,0.2,0.55,0.55}},focus=false, \
@@ -1339,7 +1400,7 @@ fn preview_layout_and_observer() {
     assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
 
     // Run both real children against the simulated viewer. A Python peer
-    // cannot prove Rex GUI geometry, even on a machine with AX access.
+    // has no native Rex window to match the pinned number.
     fs::write(
         &launcher,
         format!(
@@ -1348,7 +1409,7 @@ fn preview_layout_and_observer() {
     )
     .unwrap();
     assert_eq!(launch_startup("right").trim(), "ok");
-    claim();
+    viewer_session("session.own_block", &session);
     let postspawn = lab.view().tab(&tab).pane("milo:preview").block.clone();
     let error_started = Instant::now();
     let capture = || lab.rex(&["capture", "-s", &session, "-b", &postspawn, "--trim"]);
@@ -1374,10 +1435,10 @@ fn preview_layout_and_observer() {
     assert!(soon(|| lab.read("preview-arguments").contains("localhost:4321")));
     let anchor_pid = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
     let anchor_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
-    claim();
+    viewer_session("session.own_block", &session);
     let owned_watch = start_watch(&anchor_block, anchor_pid);
     let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
-    let shown = format!("hide\nshow {viewer_pid} tile\n");
+    let shown = format!("hide\n{}\n", show_for(&anchor_block));
     assert!(soon(|| records() == shown), "{}", records());
     close(&main);
     let closed = format!("{shown}hide\n");

@@ -60,7 +60,7 @@ fn build_preview() {
     let compiled = std::process::Command::new("/usr/bin/xcrun")
         .args(["--sdk", "macosx", "clang", "-target", &format!("{arch}-apple-macos13.0"), "-fobjc-arc", "-Os"])
         .args(["macos/Preview/main.m", "macos/Preview/Anchor.m", "macos/Preview/Browser.m"])
-        .args(["-framework", "AppKit", "-framework", "WebKit", "-framework", "ApplicationServices"])
+        .args(["-framework", "AppKit", "-framework", "WebKit"])
         .args(["-framework", "CoreGraphics", "-Wl,-sectcreate,__TEXT,__info_plist,macos/Preview/Info.plist", "-o"])
         .arg(out)
         .status()

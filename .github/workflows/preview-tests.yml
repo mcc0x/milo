@@ -9,6 +9,7 @@ on:
       - 'src/preview/**'
       - 'macos/Preview/**'
       - 'tests/preview_geometry.m'
+      - 'tests/preview_chrome.m'
 
 permissions:
   contents: read
@@ -36,8 +37,11 @@ jobs:
           persist-credentials: false
       - run: |
           xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
-            -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework WebKit \
+            -framework AppKit -framework CoreGraphics -framework WebKit \
             -o "$RUNNER_TEMP/preview-geometry"
           "$RUNNER_TEMP/preview-geometry"
+          xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_chrome.m \
+            -framework AppKit -framework CoreGraphics -o "$RUNNER_TEMP/preview-chrome"
+          "$RUNNER_TEMP/preview-chrome"
       - name: Verify the preview's native keyboard shortcut without a desktop
         run: sh macos/Preview/tests/smoke.sh --keys-only
