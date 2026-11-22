@@ -960,11 +960,9 @@ impl Repo {
         }
         let limit = limit.to_string();
         let tip = &self.ends().tip;
-        let unpushed = match self.history_target() {
-            Some(target) => self.git(&["rev-list", "-n", &limit, "--end-of-options", &format!("{target}..{tip}")])?,
-            None => Vec::new(),
-        };
-        let raw = self.git(&[
+        let range = self.history_target().map(|target| format!("{target}..{tip}"));
+        let unpushed = range.as_ref().map(|range| ["rev-list", "-n", &limit, "--end-of-options", range]);
+        let log = [
             "log",
             "-n",
             &limit,
@@ -978,8 +976,12 @@ impl Repo {
             "--end-of-options",
             tip,
             "--",
-        ])?;
-        self.require(parse_history(&raw, &unpushed))
+        ];
+        // Which commits are unpushed and what each commit says are separate reads.
+        let (raw, [listed]) =
+            run::alongside(&self.root, self.guard(), [unpushed.as_ref().map(|args| &args[..])], || self.git(&log));
+        let unpushed = if unpushed.is_some() { self.require(listed)? } else { Vec::new() };
+        self.require(parse_history(&raw?, &unpushed))
     }
 }
 
