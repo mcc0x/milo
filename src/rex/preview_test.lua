@@ -29,7 +29,7 @@ local function call(f)
   end
   local after
   f.rex.after = function(delay, fn) assert(delay == 0); after = fn end
-  f.rex.stop = function() f.stopped = true end
+  f.rex.stop = function(code) f.stopped = code end
   setfenv(assert(loadfile(script)), env)()
   if after then after() end
   return function(event, payload, ctx)
@@ -170,10 +170,15 @@ f.window.zoomed_block_id = main
 view_change("hide")
 f.window.zoomed_block_id = preview
 view_change("show 40 tile")
-f.window.zoomed_block_id = nil
 local float = { kind = "floating", blocks = {} }
 f.window.layers[2] = float
 view_change("hide")
+float.state = "minimized"
+view_change("show 40 tile")
+float.state = nil
+view_change("hide")
+f.window.zoomed_block_id = nil
+view_change()
 f.tiled.blocks = { f.rail, f.main }
 float.blocks = { f.anchor }
 view_change("show 40 float")
@@ -196,7 +201,7 @@ f.gui.client_id, f.anchor.owner = other_app, other_app
 view_change()
 f.gui.client_id, f.anchor.owner, f.gui.principal = app, app, peer(gui)
 view_change("show 40 float")
-assert(observe("block_closed", { block_id = preview }) == expected .. "hide\n" and f.stopped)
+assert(observe("block_closed", { block_id = preview }) == expected .. "hide\n" and f.stopped == 0)
 
 local remote = fixture("watch", preview)
 remote.gui.principal.kind = "tailscale"
@@ -204,8 +209,11 @@ assert(call(remote)() == "hide\n" and not remote.stopped)
 local disconnected = fixture("watch", preview)
 local lost = call(disconnected)
 assert(lost("client_connection_changed", { client_id = app, connection_state = "lost" }) == "hide\nshow 40 tile\nhide\n"
-  and disconnected.stopped)
+  and disconnected.stopped == 0)
 local absent = fixture("watch", preview)
 local unavailable = call(absent)
 absent.view = nil
-assert(unavailable("active_window_changed") == "hide\nshow 40 tile\nhide\n" and absent.stopped)
+assert(unavailable("active_window_changed") == "hide\nshow 40 tile\nhide\n" and absent.stopped == 1)
+local invalid = fixture("watch", preview)
+invalid.cli.pid = cli + 1
+assert(call(invalid)() == "hide\n" and invalid.stopped == 1)

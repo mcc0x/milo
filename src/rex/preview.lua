@@ -261,7 +261,7 @@ local function visible(view, window, layer, index)
   if window.window_id ~= view.active_window_id or layer.state == "minimized" then return false end
   if layer.kind ~= "tiled" and layer.kind ~= "floating" then return false end
   local zoom = window.zoomed_block_id
-  if zoom then return layer.kind == "tiled" and zoom == a.block end
+  if zoom and (layer.kind ~= "tiled" or zoom ~= a.block) then return false end
   -- Layer order is back to front. Keep the overlay out of any higher visible
   -- layer, even when its individual blocks happen not to overlap right now.
   for i = index + 1, #window.layers do
@@ -286,31 +286,32 @@ local function emit(pid, layer)
   end
 end
 
-local function stop()
+local function stop(code)
   emit()
-  rex.stop()
+  rex.stop(code or 0)
 end
 
 if not host then
-  emit()
+  stop(1)
   return
 end
 
 local function refresh()
   local view = current_view()
-  if not view then return stop() end
+  if not view then return stop(1) end
   local block, window, layer, index = locate(view, a.block)
   if not block then
     local listed = rex.session.list_blocks(session)
+    if not listed then return stop(1) end
     -- Dragging or detaching can temporarily unplace a living terminal.
     for _, other in ipairs(listed and listed.blocks or {}) do
       if other.block_id == a.block then return emit() end
     end
     return stop()
   end
-  if not local_terminal(block, host) then return stop() end
+  if not local_terminal(block, host) then return stop(1) end
   if not anchor_verified then
-    if block.label ~= "milo:preview" or not own_anchor(block) then return stop() end
+    if block.label ~= "milo:preview" or not own_anchor(block) then return stop(1) end
     anchor_verified = true
   end
   if not visible(view, window, layer, index) then return emit() end

@@ -78,17 +78,16 @@ fn spawn(url: &str, state: Stdio) -> io::Result<Child> {
         drop(file);
         staged.replace(&path)?;
     }
-    Command::new(path).arg(url).stdin(state).stdout(Stdio::piped()).spawn()
+    // Framework diagnostics may contain page data and must not overwrite the
+    // marker. Only Milo's own static errors belong on the restored anchor tty.
+    Command::new(path).arg(url).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
 }
 
 pub(crate) fn require_access() -> Result<(), String> {
     let mut check = spawn("--check-access", Stdio::null()).map_err(|e| format!("could not open Milo Preview: {e}"))?;
     match check.wait().map_err(|e| e.to_string())?.code() {
         Some(0) => Ok(()),
-        Some(77) => {
-            Err("Milo Preview needs macOS Accessibility permission to locate the terminal pane. No pane was opened."
-                .into())
-        }
+        Some(77) => Err("macOS Accessibility is unavailable for this launch context. No permission was requested and no pane was opened.".into()),
         _ => Err("could not check Milo Preview accessibility; no pane was opened".into()),
     }
 }
@@ -96,10 +95,27 @@ pub(crate) fn require_access() -> Result<(), String> {
 /// The helper and observer run only for this terminal. In particular, failure
 /// to start WebKit must not leave the observer waiting for more session events.
 pub(crate) fn anchor(url: &str, main: &OsStr) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+
     let mut watcher = crate::rex::preview_watch()?;
     let result = run(url, main, &mut watcher);
-    let _ = watcher.kill();
-    let _ = watcher.wait();
+    // EOF can reach the helper before Rex's exit status is waitable. Give it
+    // a short grace period, but report nothing from the Rex process itself.
+    let deadline = Instant::now() + Duration::from_millis(80);
+    let status = loop {
+        match watcher.try_wait() {
+            Ok(None) if result.is_ok() && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+            status => break status.ok().flatten(),
+        }
+    };
+    if let Some(status) = status {
+        if !status.success() {
+            return Err("the Rex preview observer failed; the preview was closed".into());
+        }
+    } else {
+        let _ = watcher.kill();
+        let _ = watcher.wait();
+    }
     result
 }
 

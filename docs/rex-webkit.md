@@ -24,7 +24,13 @@ Milo does not patch Rex or install a plugin. On macOS the Cargo build compiles a
 
 The helper needs macOS **Accessibility** access to measure a pane. Milo checks access without prompting. There is no Screen Recording requirement for the preview itself. Rex layout events identify the visible block, not its screen coordinates. A random marker written in the anchor's terminal, the local viewer PID, the focused accessibility window and macOS window order must agree before the helper may draw. If Rex does not expose the required accessibility information, the view stays hidden. There is no fallback to a guessed rectangle. Moving between displays requires fresh proof; windows straddling or on mirrored displays are intentionally unsupported.
 
-The cached executable is `$(getconf DARWIN_USER_CACHE_DIR)/net.usemilo.preview/Milo Preview`. If access is denied, the launcher returns before creating a Rex split or layer; permission changes are up to you. A visible anchor also needs at least 32 columns and two rows for its marker.
+The cached executable is `$(getconf DARWIN_USER_CACHE_DIR)/net.usemilo.preview/Milo Preview`. If access is denied, Milo returns before changing the layout. macOS can attribute a child process’s access to the responsible launcher rather than the helper itself; a grant to Rex or its server may cover **other programs launched through it**. Milo cannot promise a helper-only grant. Leave access off if that scope is inappropriate. The anchor needs at least 32 columns and two rows for its marker.
+
+**What Accessibility reads:** to find the marker, the helper compares the first 32 visible characters of candidate terminal text areas in the focused Rex window. It does not request the whole terminal value, persist those prefixes or send them to the dev page, agent or clipboard.
+
+**Overlay limits:** Rex and the panel are separate processes, so changes are not atomic. A tab, palette or moving divider can change between two observations. The helper hides when it detects uncertainty and waits for stable bounds before showing again. Rex UI drawn inside the pane without a corresponding accessibility element cannot be reliably detected with this method. Palette safety, native full-screen Spaces and focus while the panel is key remain GUI acceptance gates, not guarantees.
+
+If the client does not expose the visible terminal text range or cannot distinguish a palette from the terminal, the robust upstream interface would be a client event keyed by block ID with the owning window, pane-body rectangle, focus and occlusion state. Server-side split ratios alone cannot provide that proof.
 
 ## Selecting an element for an agent
 
