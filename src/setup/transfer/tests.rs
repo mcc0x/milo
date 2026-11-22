@@ -113,6 +113,53 @@ fn an_export_holds_only_the_chosen_groups_and_never_an_account_or_integration_ch
 }
 
 #[test]
+fn workflow_bundles_carry_preview_placement_without_changing_version_or_inheritance() {
+    let (first, second) = two_checkouts();
+    let mut a = Host::new();
+    a.worktree = Some(first.root.clone());
+    a.write("preferences.conf", "preview_placement = above\n");
+    let local = preferences::layer_file(&a.config(), Some(&first.root));
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    fs::write(&local, "changes_only = true\n").unwrap();
+    let workflow = &[Group::Workflow];
+    let bundle = a.with(|place| export(place, workflow, Scopes::Worktree)).unwrap();
+    assert!(!bundle.contains("preview_placement"), "inherited choices do not travel as overrides: {bundle}");
+    let appearance = a.with(|place| export(place, &[Group::Appearance], Scopes::Global)).unwrap();
+    assert!(!appearance.contains("preview_placement"), "{appearance}");
+
+    fs::write(local, "preview_placement = floating\n").unwrap();
+    let bundle = a.with(|place| export(place, workflow, Scopes::All)).unwrap();
+    assert!(bundle.starts_with("milo-settings 1\n"));
+    let (global, project) = bundle.split_once("[project]").unwrap();
+    assert!(global.contains("preview_placement = above\n"));
+    assert!(project.contains("preview_placement = floating\n"));
+
+    let mut b = Host::new();
+    b.worktree = Some(second.root.clone());
+    b.write("preferences.conf", "icons = off\n");
+    let preview = b.with(|place| plan(place, &bundle, &[])).unwrap();
+    let report = preview.report("bundle.txt");
+    assert!(report.contains("Preview placement: right → above"), "{report}");
+    assert!(report.contains("Preview placement: inherited → floating"), "{report}");
+    assert_eq!(b.with(|place| apply(place, preview)).unwrap(), 2);
+    assert_eq!(b.read("preferences.conf").as_deref(), Some("icons = off\npreview_placement = above\n"));
+    assert_eq!(b.worktree_layer(&second.root), "preview_placement = floating\n");
+
+    let old = "milo-settings 1\n[global]\nfollow_activity = false\n";
+    let preview = b.with(|place| plan(place, old, &[])).unwrap();
+    assert_eq!(b.with(|place| apply(place, preview)).unwrap(), 1);
+    let invalid = "milo-settings 1\n[global]\npreview_placement = center\n";
+    let preview = b.with(|place| plan(place, invalid, &[])).unwrap();
+    assert_eq!(preview.changes(), 0);
+    assert!(preview.report("bundle.txt").contains("Preview placement (a choice this Milo does not know)"));
+    assert_eq!(
+        b.read("preferences.conf").as_deref(),
+        Some("icons = off\npreview_placement = above\nfollow_activity = false\n")
+    );
+    assert_eq!(b.worktree_layer(&second.root), "preview_placement = floating\n");
+}
+
+#[test]
 fn an_import_gives_another_host_the_chosen_settings_and_leaves_the_first_host_as_it_was() {
     let a = seeded();
     let b = Host::new();

@@ -61,6 +61,8 @@ Turn on **Arrange new shell tabs** to apply the layout to new shell tabs, includ
 
 Use the appearance choices to preview icons, choose text change marks, and turn animated activity marks off. Usage shows Codex, Claude Code and OpenCode only while each has a figure to show; choose **Always show** or **Hide** for a tool to [decide that yourself](usage.md#which-tools-appear). Use the workflow choices to pin Outline and History to the starting project or follow the shell they were opened beside. Milo does not change Rex's font, theme, shortcuts or notification settings.
 
+**Preview placement** is under **Workflow** in `milo setup` and **Panes → Preview** in `milo web`. Save it globally or for this worktree. It controls where new [Previews](rex-webkit.md) open relative to the working terminal: **Right** (the default), **Left**, **Above**, **Below**, or **Floating**. It doesn't move an open Preview. Pass `--placement` to `milo preview` to override the saved choice for one launch. `milo doctor` shows the resolved preference for the current scope.
+
 **After Rex restarts, a sidebar can come back as shells instead of Milo.** The dividers and pane labels survive, but on Rex preview.21 (server API 18) the running programs do not. To restore the sidebar, focus its tab’s working shell and run **Milo: Arrange This Tab** in the Rex app. Milo checks what’s running before it offers to rebuild. New shell tabs are arranged as before.
 
 **Text zoom is separate from split size.** On Rex preview.21 (server API 18), Milo can read a terminal's cell dimensions, but creating or resizing a terminal does not set the font the Mac app renders. The app exposes relative font actions and an app-wide [starting font size](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-typography-font-size), not an absolute per-pane zoom setting. Milo therefore remembers divider positions, not text zoom, for Outline, History and Usage.
@@ -182,9 +184,11 @@ The same steps are under **Hosts** in the browser editor: tick the groups, **Cre
 | Group | What it carries |
 | --- | --- |
 | `appearance` | Icons, Git text marks, static or animated activity marks |
-| `workflow` | Project following, changed files only, follow writes, follow new commits |
+| `workflow` | Project following, changed files only, follow writes, follow new commits, Preview placement |
 | `usage` | Whether Codex, Claude Code and OpenCode show, and large figures |
 | `layout` | Panes, side, order and proportions of the saved rail |
+
+**Preview placement in bundles.** A global workflow export includes the resolved global choice; a worktree export includes it only if the worktree overrides it. The bundle format is unchanged: importing a bundle without Preview placement leaves it alone, and older versions of Milo skip the field.
 
 **What never travels.** Tokens, webhook links, alert destinations, provider account keys and their on/off choices, Discord presence, the menu app, Claude Code status-line setup, **Title Rex tabs**, **Arrange new shell tabs**, the Rex integration files and everything in the state folder. A bundle that names any of these is imported without them, and the preview lists each line it left out. Set those up on each host.
 

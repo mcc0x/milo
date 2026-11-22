@@ -339,6 +339,11 @@ fn preview_placement_cycles_and_uses_the_terminal_preference_draft_and_scopes() 
         let rows = frame(&mut pane, 80, 24);
         assert!(rows.iter().any(|row| row.contains(label) && row.contains(expected)), "{rows:?}");
         assert_eq!(pane.key(click_label(&rows, label)), After::Stay);
+        if expected == "Right" {
+            let rows = frame(&mut pane, 80, 24);
+            let text = rows.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ");
+            assert!(text.contains("relative to the working terminal."), "{rows:?}");
+        }
         if expected == "Below" {
             assert!(frame(&mut pane, 18, 1)[0].contains("Float"));
         }

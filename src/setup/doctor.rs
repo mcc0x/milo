@@ -227,6 +227,7 @@ fn report_with_worktree(
                 on(p.history_follow_new)
             )
             .unwrap();
+            writeln!(out, "  Preview placement: {}", p.preview_placement.label()).unwrap();
             writeln!(out, "  Narrow usage: {}", if p.usage_large_figures { "large figures" } else { "text" }).unwrap();
             writeln!(out, "  Usage tools: {}", usage_tools(p.usage_tools)).unwrap();
             if p.usage_accounts.any() {
@@ -780,6 +781,24 @@ mod tests {
             claude: fixture.root.join("settings.json"),
             claude_state: None,
         }
+    }
+
+    #[test]
+    fn doctor_shows_the_effective_preview_placement() {
+        let fixture = Fixture::folder();
+        let store = fixture_store(&fixture);
+        let root = &fixture.root;
+        let [global, local] = crate::preferences::layers(&store.config, root);
+        let report = report_for(&store, Some(root)).unwrap();
+        assert!(report.contains("\n  Preview placement: Right\n"), "{report}");
+
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(global, "preview_placement = below\n").unwrap();
+        std::fs::write(local, "preview_placement = floating\n").unwrap();
+        let report = report_for(&store, None).unwrap();
+        assert!(report.contains("\n  Preview placement: Below\n"), "{report}");
+        let report = report_for(&store, Some(root)).unwrap();
+        assert!(report.contains("\n  Preview placement: Floating\n"), "{report}");
     }
 
     #[test]

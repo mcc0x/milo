@@ -72,7 +72,9 @@ impl Group {
     const fn keys(self) -> &'static [&'static str] {
         match self {
             Self::Appearance => &["icons", "static_marks", "text_git_marks"],
-            Self::Workflow => &["project_mode", "follow_activity", "changes_only", "history_follow_new"],
+            Self::Workflow => {
+                &["project_mode", "follow_activity", "changes_only", "history_follow_new", "preview_placement"]
+            }
             Self::Usage => &["usage_large_figures", "usage_codex", "usage_claude", "usage_opencode"],
             Self::Layout => &[],
         }
@@ -95,6 +97,7 @@ fn label(key: &str) -> &'static str {
         "follow_activity" => "Follow writes",
         "changes_only" => "Changed files only",
         "history_follow_new" => "Follow new commits",
+        "preview_placement" => "Preview placement",
         "usage_large_figures" => "Large usage figures",
         "usage_codex" => "Codex in Usage",
         "usage_claude" => "Claude Code in Usage",
