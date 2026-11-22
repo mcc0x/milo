@@ -225,7 +225,7 @@ Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for lang
 3. Add a test with a few idiomatic lines and the classes you expect.
 4. Add its row to the language table in `docs/panes.md`.
 
-The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long.
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long. For the same reason a comment or a string is looked for only at a byte that can begin one: the first byte of each mark in the tables, and those `Dialect::openers` lists for a dialect, which a new opener in `delimiters.rs` must be added to.
 
 ### Adding a formatter
 
@@ -243,7 +243,7 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 
 `src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
-`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft:
+`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft, above lines far wider than the pane and in a file that is one line:
 
 ```sh
 cargo test --release --locked --test reader_bench -- --ignored --nocapture

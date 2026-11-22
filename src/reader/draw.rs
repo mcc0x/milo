@@ -45,6 +45,12 @@ pub(super) struct LinePainter<'a> {
 }
 
 impl LinePainter<'_> {
+    /// The column up to which a line is read to draw it: what is shown, and
+    /// what follows that the colours of what is shown can depend on.
+    pub(super) fn reach(&self) -> usize {
+        self.pan + self.width + self.lang.map_or(0, Lang::lookahead)
+    }
+
     pub(super) fn draw_line(&mut self, s: &mut Screen, y: usize, line: &Line, state: &State) {
         let (sign, text_style, margin_style) = match line.kind {
             LineKind::Same => (" ", Style::PLAIN, FAINT),
@@ -66,7 +72,10 @@ impl LinePainter<'_> {
         let used = s.put(self.x, y, self.width, &text[skip..], text_style);
         if used > 0 {
             if let Some(lang) = lang {
-                lang.scan(text, &mut state.clone(), self.spans);
+                // What is past the right edge is read only where something shown runs into it.
+                let rest = &text[skip..];
+                let shown = if rest.len() <= self.width { text.len() } else { skip + byte_at_col(rest, used) };
+                lang.scan_shown(text, shown, state, self.spans);
                 self.draw_code(s, y, skip, text, used);
             }
             self.draw_edit(s, y, skip, text, &line.changed, used);
