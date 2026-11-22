@@ -10,7 +10,7 @@ An edit is a draft in memory. A save opens the file from the project folder the 
 
 A formatter is a program of a fixed name, found in the folders of `PATH` that are written in full. It runs only when asked for, in a process group of its own, for at most ten seconds, with the draft on its standard input. It is not given the file to write. See [formatting](panes.md#formatting).
 
-Outside the project, milo keeps two things in its state folder for the editor: the draft of a reader that was ended with unsaved changes, and, in Rex, a mark that a floating reader has unsaved changes so that another pane does not replace it. The mark names the reader's process and is ignored once that process is gone.
+Outside the project, milo keeps three things in its state folder for the editor: the draft of a reader that was ended with unsaved changes; in Rex, a mark that a floating reader has unsaved changes in some tab so that another pane does not replace it; and, also in Rex, a pipe under `readers` named after the reader's block, on which the pane that opened it asks for one more file as a tab. The mark names the reader's process and is ignored once that process is gone. The pipe is in a folder only you can use, carries a path and an optional commit ID and nothing back, and is removed when its reader ends. A request is read the way `milo view`'s own arguments are, so it can open a file for reading and nothing more.
 
 ## Updates and drawing
 

@@ -911,7 +911,7 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
 /// The floating reader the outline opens in Rex, edited through Rex's own keys.
 #[test]
 #[ignore = "needs an installed Rex; starts a disposable server"]
-fn a_floating_reader_edits_a_file_and_is_not_replaced_while_it_has_unsaved_changes() {
+fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_edits() {
     let mut lab = Lab::start();
     lab.start_app();
     let dir = lab.root.join("edit");
@@ -920,16 +920,22 @@ fn a_floating_reader_edits_a_file_and_is_not_replaced_while_it_has_unsaved_chang
     fs::write(dir.join("b.txt"), "second\n").unwrap();
     let [session, tab] = lab.new_session("edit", "files", &dir);
     let milo = lab.milo.to_str().unwrap().to_owned();
-    let place = ["-s", session.as_str(), "-w", tab.as_str(), "-c", dir.to_str().unwrap()];
-    let outline = ["--split=left", "--shell=none", "--label", "outline", "--", milo.as_str(), "outline"];
-    lab.rex(&[["run"].as_slice(), &place, &outline].concat());
-
-    // The reader is named after its file; what it runs is checked by what its screen shows.
-    let pane = |label: &str| {
-        let view = lab.view();
-        view.tab(&tab).panes.iter().find(|pane| pane.label == label).map(|pane| pane.block.clone())
+    let outline_in = |session: &str, tab: &str, dir: &Path| {
+        let place = ["-s", session, "-w", tab, "-c", dir.to_str().unwrap()];
+        let outline = ["--split=left", "--shell=none", "--label", "outline", "--", milo.as_str(), "outline"];
+        lab.rex(&[["run"].as_slice(), &place, &outline].concat());
     };
-    let screen = |block: &str| lab.rex(&["capture", "-s", &session, "-b", block, "--trim"]);
+    outline_in(&session, &tab, &dir);
+
+    // The reader is named after the file it was last asked for; what it runs is checked by what its screen shows.
+    let pane_in = |tab: &str, label: &str| {
+        let view = lab.view();
+        view.tab(tab).panes.iter().find(|pane| pane.label == label).map(|pane| pane.block.clone())
+    };
+    let pane = |label: &str| pane_in(&tab, label);
+    let panes = || lab.view().tab(&tab).panes.len();
+    let screen_in = |session: &str, block: &str| lab.rex(&["capture", "-s", session, "-b", block, "--trim"]);
+    let screen = |block: &str| screen_in(&session, block);
     let shows = |block: &str, text: &str| {
         assert!(soon(|| screen(block).contains(text)), "expected {text:?} on:\n{}", screen(block));
     };
@@ -946,6 +952,7 @@ fn a_floating_reader_edits_a_file_and_is_not_replaced_while_it_has_unsaved_chang
     keys(&outline, &["enter"]);
     assert!(soon(|| pane("a.txt").is_some()), "no floating reader in {:?}", lab.view());
     let reader = pane("a.txt").unwrap();
+    let with_reader = panes();
     shows(&reader, "first");
     shows(&reader, "e edit");
     keys(&reader, &["e"]);
@@ -955,32 +962,70 @@ fn a_floating_reader_edits_a_file_and_is_not_replaced_while_it_has_unsaved_chang
     shows(&reader, "typed first");
     assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "first\n");
 
-    // Opening another file would end this reader, so the outline leaves it alone.
+    // A second file is a tab of the same reader, beside the draft, and no second window.
     keys(&outline, &["down", "enter"]);
-    shows(&outline, "The open reader has unsaved edits.");
-    assert!(pane("b.txt").is_none() && pane("a.txt").as_deref() == Some(reader.as_str()));
-
-    keys(&reader, &["ctrl+s"]);
-    shows(&reader, "Saved");
-    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "typed first\n");
-    keys(&outline, &["enter"]);
-    assert!(soon(|| pane("b.txt").is_some() && pane("a.txt").is_none()), "{:?}", lab.view());
-
-    // A reader that Rex closes with unsaved changes keeps them outside the project.
-    let reader = pane("b.txt").unwrap();
+    shows(&reader, "*a.txt  b.txt ×");
     shows(&reader, "second");
+    assert!(soon(|| pane("b.txt").as_deref() == Some(reader.as_str())), "{:?}", lab.view());
+    assert_eq!(panes(), with_reader);
+
+    // The file that already has a tab is shown in it, with its draft, however it is asked for.
+    keys(&outline, &["up", "enter"]);
+    shows(&reader, "*a.txt ×  b.txt");
+    shows(&reader, "typed first");
+    keys(&reader, &["ctrl+n"]);
+    shows(&reader, "*a.txt  b.txt ×");
+    keys(&reader, &["ctrl+p"]);
+    shows(&reader, "*a.txt ×  b.txt");
+    assert_eq!((panes(), fs::read_to_string(dir.join("a.txt")).unwrap().as_str()), (with_reader, "first\n"));
+
+    // Closing the tab asks about its draft; saved, the tab goes and the other file is the whole reader again.
+    keys(&reader, &["ctrl+w"]);
+    shows(&reader, "Unsaved edits");
+    keys(&reader, &["s"]);
+    assert!(soon(|| !screen(&reader).contains("a.txt")), "{}", screen(&reader));
+    shows(&reader, "second");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "typed first\n");
+
+    // Another project's outline, in a session of its own, gets a reader of its own.
+    let other = lab.root.join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("c.txt"), "third\n").unwrap();
+    let [other_session, other_tab] = lab.new_session("other", "files", &other);
+    outline_in(&other_session, &other_tab, &other);
+    assert!(soon(|| pane_in(&other_tab, "outline").is_some()), "{:?}", lab.view());
+    let other_outline = pane_in(&other_tab, "outline").unwrap();
+    assert!(soon(|| screen_in(&other_session, &other_outline).contains("c.txt")));
+    lab.rex(&["send-key", "-s", &other_session, "-b", &other_outline, "enter"]);
+    assert!(soon(|| pane_in(&other_tab, "c.txt").is_some()), "{:?}", lab.view());
+    let other_reader = pane_in(&other_tab, "c.txt").unwrap();
+    assert!(soon(|| screen_in(&other_session, &other_reader).contains("third")));
+    assert!(!screen(&reader).contains("c.txt") && panes() == with_reader, "{}", screen(&reader));
+
+    // A reader that Rex closes keeps the unsaved edits of every tab outside the project.
+    keys(&outline, &["enter"]);
+    shows(&reader, "b.txt  a.txt ×");
     keys(&reader, &["e"]);
     shows(&reader, "^S save");
+    lab.rex(&["send", "-s", &session, "-b", &reader, "also "]);
+    shows(&reader, "b.txt  *a.txt ×");
+    keys(&reader, &["ctrl+p", "e"]);
+    shows(&reader, "^S save");
     lab.rex(&["send", "-s", &session, "-b", &reader, "lost? "]);
-    shows(&reader, "unsaved");
+    shows(&reader, "*b.txt ×  *a.txt");
     lab.rex(&["block", "close", "-s", &session, &reader]);
     let drafts = lab.root.join("home/.local/state/milo/drafts");
-    let kept = || fs::read_dir(&drafts).ok()?.flatten().find_map(|entry| fs::read_to_string(entry.path()).ok());
-    assert!(soon(|| kept().as_deref() == Some("lost? second\n")), "{:?}", kept());
+    let kept = || {
+        let entries = fs::read_dir(&drafts).into_iter().flatten().flatten();
+        let mut kept: Vec<String> = entries.filter_map(|entry| fs::read_to_string(entry.path()).ok()).collect();
+        kept.sort();
+        kept
+    };
+    assert!(soon(|| kept() == ["also typed first\n", "lost? second\n"]), "{:?}", kept());
     assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "second\n");
 
-    // The outline can open it again, and the editor offers the draft back.
-    keys(&outline, &["enter"]);
+    // The outline can open a file again, and the editor offers its draft back.
+    keys(&outline, &["down", "enter"]);
     assert!(soon(|| pane("b.txt").is_some()), "{:?}", lab.view());
     let reader = pane("b.txt").unwrap();
     shows(&reader, "second");
@@ -988,4 +1033,5 @@ fn a_floating_reader_edits_a_file_and_is_not_replaced_while_it_has_unsaved_chang
     shows(&reader, "Kept draft found");
     keys(&reader, &["r", "ctrl+s"]);
     assert!(soon(|| fs::read_to_string(dir.join("b.txt")).unwrap() == "lost? second\n"));
+    assert!(soon(|| kept() == ["also typed first\n"]), "{:?}", kept());
 }

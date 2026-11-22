@@ -253,7 +253,11 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use crate::outline::Outline;
-    use crate::reader::OpenReader;
+    use crate::reader::{Floated, OpenReader};
+
+    fn floated(block: &str) -> Floated {
+        Floated { block: block.into(), root: PathBuf::new() }
+    }
 
     #[test]
     fn retargets_both_pane_and_watcher_only_when_the_project_changes() {
@@ -279,7 +283,7 @@ mod tests {
             preference_note: None,
             focus: Some(false),
         };
-        *pane.pane.reader_opener().unwrap() = OpenReader::Floating { block: Some("block:previous".into()) };
+        *pane.pane.reader_opener().unwrap() = OpenReader::Floating(Some(floated("block:previous")));
         assert!(matches!(pane.observe(first.root.join("src")), External::Unchanged));
         // Break only this fixture's Git discovery while the shell moves. The
         // previous worktree stays visible and recovers without a second cd.
@@ -299,7 +303,7 @@ mod tests {
         assert_eq!(pane.watch_scope().roots.first(), Some(&pane.root));
         assert!(matches!(
             pane.pane.reader_opener(),
-            Some(OpenReader::Floating { block: Some(block) }) if block.as_str() == "block:previous"
+            Some(OpenReader::Floating(Some(open))) if open.block == "block:previous"
         ));
         let mut screen = Screen::sized(30, 8);
         pane.draw(&mut screen);
@@ -327,7 +331,7 @@ mod tests {
             preference_note: None,
             focus: None,
         };
-        *pane.pane.reader_opener().unwrap() = OpenReader::Floating { block: Some("block:kept".into()) };
+        *pane.pane.reader_opener().unwrap() = OpenReader::Floating(Some(floated("block:kept")));
         let mut screen = Screen::sized(60, 8);
         pane.draw(&mut screen);
         pane.key(Key::Char('e'));
@@ -348,7 +352,7 @@ mod tests {
         assert!(screen.bar_at(selected));
         assert!(matches!(
             pane.pane.reader_opener(),
-            Some(OpenReader::Floating { block: Some(block) }) if block.as_str() == "block:kept"
+            Some(OpenReader::Floating(Some(open))) if open.block == "block:kept"
         ));
     }
 
