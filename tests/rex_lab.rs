@@ -1296,7 +1296,7 @@ fn preview_layout_and_observer() {
         } else if placement == "below" {
             float_block(block);
             expect("hide");
-            assert!(soon(|| fs::read_to_string(watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "1")));
+            assert!(soon(|| fs::read_to_string(watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
             close(block);
         } else {
             close(block);

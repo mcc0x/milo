@@ -291,6 +291,15 @@ for _, main_detached in ipairs{ false, true } do
   assert(watch_move("session_view_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 0)
 end
 
+-- The working block was reattached between the server's view and list responses.
+local returning = fixture("watch", preview)
+local watch_return = call(returning)
+returning.tiled.blocks = { returning.rail, returning.anchor }
+returning.rex.session.list_blocks = function() return { blocks = { { block_id = main, placement = "placed" } } } end
+assert(watch_return("session_view_changed") == "hide\nshow 40 tile\nhide\n" and not returning.stopped)
+returning.tiled.blocks = { returning.rail, returning.main, returning.anchor }
+assert(watch_return("session_view_changed") == "hide\nshow 40 tile\nhide\nshow 40 tile\n")
+
 local remote = fixture("watch", preview)
 remote.gui.principal.kind = "tailscale"
 assert(call(remote)() == "hide\n" and not remote.stopped)

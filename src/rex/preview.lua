@@ -402,23 +402,26 @@ local function refresh()
   if not block or not main then
     local listed = rex.session.list_blocks(session)
     if not listed then return stop(1) end
-    local function detached(id)
+    local function placement(id)
       for _, other in ipairs(listed.blocks or {}) do
-        if other.block_id == id then return other.placement == "detached" end
+        if other.block_id == id then return other.placement end
       end
-      return false
     end
-    if (block or detached(a.block)) and (main or detached(a.main)) then
-      -- Publication is independent of placement. A detached anchor has
-      -- no view entry, but Rex still describes its exact block and label.
-      if not block then
-        local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
-        block = described and described.block
-      end
-      if not track_anchor(block) then return stop(1) end
+    local anchor_place = not block and placement(a.block)
+    local main_place = not main and placement(a.main)
+    if (not block and not anchor_place) or (not main and not main_place) then return stop() end
+    -- The list can already see a reattached pane absent from the earlier view.
+    -- Its layout event will supply a fresh view. Stay hidden; it did not close.
+    if (anchor_place and anchor_place ~= "detached") or (main_place and main_place ~= "detached") then
       return emit()
     end
-    return stop()
+    -- A detached anchor has no view entry; check its authoritative label and child.
+    if not block then
+      local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
+      block = described and described.block
+    end
+    if not track_anchor(block) then return stop(1) end
+    return emit()
   end
   if window.window_id ~= a.window or place ~= window then return stop() end
   if not local_terminal(main, host) or tiled.kind ~= "tiled" or not track_anchor(block) then return stop(1) end

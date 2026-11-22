@@ -72,7 +72,7 @@ A disposable AppKit client fixture used that same peer PID and gave the observer
 
 * added a 100-point sidebar (the actual right body narrowed from 300 to 250 points);
 * revealed a 30-point header (the body height changed from 360 to 330 points);
-* covered the body with an in-window palette, or hid it to show another session.
+* added an overlapping sibling view to model a palette, or hid the body to model a same-window session switch. The fixture did not render a second Rex session.
 
 These were measured on-screen **fixture views**, not observations of Rex.app rendering a palette. Rex’s [Mac settings](https://www.superlogical.com/rex/docs/reference/mac-settings) include hover-revealed headers, toolbar placement and a sidebar that can resize panes while preserving window width. Preferences describe behavior, not the current pane viewport or transient overlays. Even an already correctly pinned window can contain the wrong surface. Milo does not use the first window for a PID, guess offsets, or ship this experiment as a fallback.
 
