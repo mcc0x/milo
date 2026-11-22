@@ -59,20 +59,35 @@ class Fixture(BaseHTTPRequestHandler):
             self.end_headers()
         else:
             self.html(f'''<!doctype html><html><head><title>Milo fixture</title><style>
-body {{ margin:0; }} #typed, button, private-component, a {{ position:absolute; display:block; }}
+body {{ margin:0; min-height:120vh; }} #typed, button, private-component, a {{ position:absolute; display:block; }}
+::-webkit-scrollbar {{ width:32px; }} ::-webkit-scrollbar-thumb {{ background:#777; }}
 #typed {{ inset:10px auto auto 12px; width:105px; height:20px; }}
 button {{ inset:10px auto auto 133px; width:75px; height:26px; }}
 private-component {{ inset:52px auto auto 12px; width:250px; height:30px; }}
 #popup {{ inset:98px auto auto 12px; }} #redirect {{ inset:136px auto auto 12px; }}
 #hmr {{ position:absolute; inset:175px auto auto 12px; }}
+#edge {{ position:absolute; top:52px; right:0; width:8px; height:30px; background:#aaa; }}
 </style></head><body><form method="post" action="/form"><input id="typed" name="typed"><button>Submit</button></form>
 <private-component data-credential="FIXTURE-SECRET">FIXTURE-SECRET-TEXT</private-component>
 <a id="popup" href="{other}" target="_blank">Unapproved popup</a>
 <a id="redirect" href="/redirect">Unapproved redirect</a>
 <output id="hmr">waiting</output><img src="{other}" hidden><iframe src="{other}" hidden></iframe>
+<div id="edge"></div>
 <script>
   // This fixture doesn't know about the native picker and has no message bridge.
-  new WebSocket('ws://' + location.host + '/hmr').onmessage = event => {{ hmr.textContent = event.data; }};
+  let marker;
+  new WebSocket('ws://' + location.host + '/hmr').onmessage = event => {{
+    const target = document.querySelector('private-component');
+    if (event.data === 'move' && !marker) {{
+      marker = document.createElement('span');
+      target.before(marker);
+    }}
+    if (event.data === 'reset' && marker) {{
+      marker.remove();
+      marker = null;
+    }}
+    hmr.textContent = event.data;
+  }};
 </script></body></html>''')
 
     def do_POST(self):

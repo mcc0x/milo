@@ -11,6 +11,10 @@ static void CheckPolicies(void) {
     CHECK([PreviewOrigin([NSURL URLWithString:@"HTTP://LOCALHOST:80/a"], YES) isEqual:@"http://localhost"]);
     CHECK([PreviewOrigin([NSURL URLWithString:@"https://[::1]:5443/a"], YES) isEqual:@"https://[::1]:5443"]);
     CHECK([PreviewOrigin([NSURL URLWithString:@"http://127.0.0.1:3000/a?query#fragment"], NO) isEqual:@"http://127.0.0.1:3000"]);
+    NSData *nonRFC = [@"http://127.0.0.1:3000/a?filter[status]=open|{ready}#x^y" dataUsingEncoding:NSUTF8StringEncoding];
+    NSURL *unusual = [NSURL URLWithDataRepresentation:nonRFC relativeToURL:nil];
+    CHECK([PreviewOrigin(unusual, NO) isEqual:@"http://127.0.0.1:3000"]);
+    CHECK(PreviewOrigin(unusual, YES) == nil);
     for (NSString *url in @[@"http://localhost:0/", @"http://localhost:65536/", @"http://user@localhost/", @"http://localhost@elsewhere/",
                              @"http://localhost/a?q", @"http://localhost/#f", @"http://127.1/", @"http://127.0.0.2/",
                              @"http://%6cocalhost/", @"http://localhost.example/", @"http://[::2]/", @"http://localhost./",
@@ -58,10 +62,29 @@ static void Click(NSView *view, CGFloat x, CGFloat y) {
     [window sendEvent:mouse(NSEventTypeLeftMouseUp)];
 }
 
+static void Key(NSWindow *window, NSString *key, unsigned short code, NSEventModifierFlags flags) {
+    [window sendEvent:[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags
+                                           timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:window.windowNumber context:nil
+                                          characters:key charactersIgnoringModifiers:key isARepeat:NO keyCode:code]];
+}
+
 static NSPasteboard *TestBoard;
+static NSPasteboard *(*OriginalNamedPasteboard)(id, SEL, NSPasteboardName);
 
 static NSPasteboard *TestGeneralPasteboard(id receiver, SEL selector) {
     return TestBoard;
+}
+
+static NSPasteboard *TestNamedPasteboard(id receiver, SEL selector, NSPasteboardName name) {
+    return [name isEqualToString:NSPasteboardNameGeneral] ? TestBoard : OriginalNamedPasteboard(receiver, selector, name);
+}
+
+static BOOL HasStatus(NSView *content, NSString *prefix) {
+    for (NSView *view in content.subviews) {
+        if ([view isKindOfClass:NSTextField.class] &&
+            [((NSTextField *)view).stringValue hasPrefix:prefix]) return YES;
+    }
+    return NO;
 }
 
 @interface SmokePanel : NSPanel
@@ -79,6 +102,9 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     CHECK([TestBoard setString:@"smoke sentinel" forType:NSPasteboardTypeString]);
     Method method = class_getClassMethod(NSPasteboard.class, @selector(generalPasteboard));
     IMP original = method_setImplementation(method, (IMP)TestGeneralPasteboard);
+    Method namedMethod = class_getClassMethod(NSPasteboard.class, @selector(pasteboardWithName:));
+    OriginalNamedPasteboard = (NSPasteboard *(*)(id, SEL, NSPasteboardName))
+        method_setImplementation(namedMethod, (IMP)TestNamedPasteboard);
 
     __block BOOL returned = NO;
     NSView *content = MiloPreviewContent(url, ^{ returned = YES; });
@@ -124,20 +150,43 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     // Real native click and key events to a WebKit form.
     Click(web, 80, 23);
     CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"document.activeElement.id") isEqual:@"typed"]; }));
-    NSEvent *key = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
-                                  timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:window.windowNumber context:nil
-                                 characters:@"x" charactersIgnoringModifiers:@"x" isARepeat:NO keyCode:7];
-    [window sendEvent:key];
+    Key(window, @"x", 7, 0);
     CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"document.querySelector('#typed').value") isEqual:@"x"]; }));
+    Key(window, @"z", 6, NSEventModifierFlagCommand);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"typed.value") isEqual:@""]; }));
+    Key(window, @"Z", 6, NSEventModifierFlagCommand | NSEventModifierFlagShift);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"typed.value") isEqual:@"x"]; }));
+    Key(window, @"a", 0, NSEventModifierFlagCommand);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"typed.selectionEnd - typed.selectionStart") isEqual:@1]; }));
+    Key(window, @"c", 8, NSEventModifierFlagCommand);
+    CHECK(WaitFor(^BOOL{ return [[TestBoard stringForType:NSPasteboardTypeString] isEqual:@"x"]; }));
+    Key(window, @"x", 7, NSEventModifierFlagCommand);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"typed.value") isEqual:@""]; }));
+    Key(window, @"v", 9, NSEventModifierFlagCommand);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"typed.value") isEqual:@"x"]; }));
+    [TestBoard clearContents];
+    CHECK([TestBoard setString:@"smoke sentinel" forType:NSPasteboardTypeString]);
     Click(web, 171, 23);
     CHECK(WaitFor(^BOOL{ return [web.URL.path isEqual:@"/form"] && !web.isLoading; }));
     CHECK([Evaluate(web, @"document.title") isEqual:@"Form passed"]);
     [back performClick:nil];
     CHECK(WaitFor(^BOOL{ return [web.URL.path isEqual:@"/start"] && select.enabled && !web.isLoading; }));
 
+    // At native x = clientWidth - 4, reducing the scale to the visual viewport
+    // would miss this eight-point target beside the fixture's classic scrollbar.
+    NSNumber *scrollbar = Evaluate(web, @"innerWidth - document.documentElement.clientWidth");
+    CHECK(scrollbar.integerValue == 32);
+    CGFloat edge = [Evaluate(web, @"document.getElementById('edge').getBoundingClientRect().left + 4") doubleValue];
+    [select performClick:nil];
+    CHECK(WaitFor(^BOOL{ return [window.firstResponder isKindOfClass:MiloPickerSurface.class]; }));
+    Click((NSView *)window.firstResponder, edge, 67);
+    CHECK(WaitFor(^BOOL{ return !copy.isHidden && copy.enabled; }));
+    CHECK([review.string isEqual:@"html:nth-child(1) > body:nth-child(2) > div:nth-child(8)"]);
+    [cancel performClick:nil];
+
     // Native element pick selects the custom element containing planted secrets.
     // Verify no page strings escape, cancel does not copy, and explicit copy does.
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         [select performClick:nil];
         CHECK(WaitFor(^BOOL{ return [window.firstResponder isKindOfClass:MiloPickerSurface.class]; }));
         Click((NSView *)window.firstResponder, 70, 67);
@@ -152,6 +201,14 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
             [reload performClick:nil];
             CHECK(copy.isHidden);
             CHECK(WaitFor(^BOOL{ return select.enabled && !web.isLoading; }));
+        } else if (i == 2) {
+            CHECK([@"move" writeToFile:hmrFile atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+            CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"hmr.textContent") isEqual:@"move"]; }));
+            [copy performClick:nil];
+            CHECK(WaitFor(^BOOL{ return HasStatus(content, @"The page changed."); }));
+            CHECK([[TestBoard stringForType:NSPasteboardTypeString] isEqual:@"smoke sentinel"]);
+            CHECK([@"reset" writeToFile:hmrFile atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+            CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"hmr.textContent") isEqual:@"reset"]; }));
         } else {
             [copy performClick:nil];
             CHECK(WaitFor(^BOOL{ return copy.isHidden && [[TestBoard stringForType:NSPasteboardTypeString] isEqual:path]; }));
@@ -159,18 +216,12 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     }
 
     Click(web, 50, 107); // a target=_blank link to the unapproved port
-    CHECK(WaitFor(^BOOL {
-        for (NSView *view in content.subviews) {
-            if ([view isKindOfClass:NSTextField.class] &&
-                [((NSTextField *)view).stringValue hasPrefix:@"Blocked a navigation"]) return YES;
-        }
-        return NO;
-    }));
+    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Blocked a navigation"); }));
     Click(web, 50, 145); // same-origin path that redirects to that port
     CHECK(WaitFor(^BOOL {
         return [NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".redirect"]];
     }));
-    CHECK(WaitFor(^BOOL{ return !web.isLoading; }));
+    CHECK(WaitFor(^BOOL{ return !web.isLoading && select.enabled && HasStatus(content, @"Blocked a navigation"); }));
     CHECK([Evaluate(web, @"document.title") isEqual:@"Milo fixture"]);
     CHECK(![NSFileManager.defaultManager fileExistsAtPath:escapedRequest]);
     [terminal performClick:nil];
@@ -179,6 +230,7 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     window.contentView = nil;
     [window close];
     method_setImplementation(method, original);
+    method_setImplementation(namedMethod, (IMP)OriginalNamedPasteboard);
     [TestBoard releaseGlobally];
     TestBoard = nil;
 }

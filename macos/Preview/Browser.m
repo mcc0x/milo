@@ -86,14 +86,21 @@ static NSString *PreviewPath(id selection) {
 // means WebKit's main frame. The token lives only in this isolated world/document.
 static NSString *const PreviewPickerScript =
     @"if (self !== top || self.origin !== origin || location.origin !== origin) return null;"
-     "if (mode === 'arm') { globalThis.miloPick = [token, document]; return true; }"
+     "if (mode === 'arm') { globalThis.miloPick = { token, document }; return true; }"
      "const pick = globalThis.miloPick;"
-     "if (!pick || pick[0] !== token || pick[1] !== document) return null;"
-     "if (mode === 'copy') { delete globalThis.miloPick; return true; }"
+     "if (!pick || pick.token !== token || pick.document !== document) return null;"
      "const viewport = self.visualViewport;"
-     "let node = Document.prototype.elementFromPoint.call(document, viewport.offsetLeft + x * viewport.width,"
-     "                                                       viewport.offsetTop + y * viewport.height);"
-     "if (!node) return null;"
+     "const xCSS = viewport.offsetLeft + x * self.innerWidth;"
+     "const yCSS = viewport.offsetTop + y * self.innerHeight;"
+     "let node;"
+     "if (mode === 'copy') {"
+     "    node = pick.target?.deref();"
+     "    delete globalThis.miloPick;"
+     "} else {"
+     "    node = Document.prototype.elementFromPoint.call(document, xCSS, yCSS);"
+     "    if (node) pick.target = new WeakRef(node);"
+     "}"
+     "if (!node?.isConnected) return null;"
      "const nodes = [];"
      "while (node) {"
      "    if (nodes.length === maxDepth) return null;"
@@ -144,6 +151,34 @@ static NSString *const PreviewPickerScript =
 - (void)mouseDown:(NSEvent *)event {
     if (!(event.modifierFlags & NSEventModifierFlagControl)) [super mouseDown:event];
 }
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    // The accessory helper has no Edit menu. Handle only the focused page's
+    // standard editing commands through AppKit's normal responder actions.
+    NSEventModifierFlags modifiers = event.modifierFlags &
+        (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl | NSEventModifierFlagShift);
+    if (self.window.isKeyWindow && self.window.firstResponder == self) {
+        NSString *key = event.charactersIgnoringModifiers.lowercaseString;
+        if ([key isEqualToString:@"z"]) {
+            if (modifiers == NSEventModifierFlagCommand) {
+                [self.undoManager undo];
+                return YES;
+            }
+            if (modifiers == (NSEventModifierFlagCommand | NSEventModifierFlagShift)) {
+                [self.undoManager redo];
+                return YES;
+            }
+        }
+        if (modifiers == NSEventModifierFlagCommand) {
+            SEL action = NULL;
+            if ([key isEqualToString:@"a"]) action = @selector(selectAll:);
+            else if ([key isEqualToString:@"c"]) action = @selector(copy:);
+            else if ([key isEqualToString:@"v"]) action = @selector(paste:);
+            else if ([key isEqualToString:@"x"]) action = @selector(cut:);
+            if (action && [NSApp sendAction:action to:self from:self]) return YES;
+        }
+    }
+    return [super performKeyEquivalent:event];
+}
 @end
 
 typedef NS_ENUM(NSUInteger, PreviewPickState) {
@@ -157,6 +192,8 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     WKWebView *_web;
     WKContentWorld *_pickerWorld;
     WKNavigation *_navigation;
+    WKBackForwardListItem *_committedItem;
+    BOOL _policyCancelled;
     BOOL _rulesReady;
     BOOL _pageCommitted;
     BOOL _observingWeb;
@@ -487,7 +524,7 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     _pickState = PickCopying;
     [self updateChrome:@"Review the path before copying."];
     [self runPicker:@"copy" point:NSZeroPoint expected:PickCopying completion:^(MiloPreviewBrowser *browser, id result) {
-        if (![result isEqual:@YES]) {
+        if (![PreviewPath(result) isEqualToString:browser->_path.string]) {
             [browser finishPick:@"The page changed. Select the element again."];
             return;
         }
@@ -513,6 +550,7 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     BOOL allowed = _rulesReady && action.targetFrame && !action.shouldPerformDownload &&
         [PreviewOrigin(action.request.URL, NO) isEqualToString:_origin];
     if (!allowed && (!action.targetFrame || action.targetFrame.isMainFrame)) {
+        if (action.targetFrame.isMainFrame) _policyCancelled = YES;
         [self finishPick:@"Blocked a navigation outside the preview policy."];
     }
     decisionHandler(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
@@ -528,12 +566,16 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
         caseInsensitiveCompare:@"attachment"] == NSOrderedSame && dispositionType != nil;
     BOOL allowed = _rulesReady && !attachment && response.canShowMIMEType &&
         [PreviewOrigin(resource.URL, NO) isEqualToString:_origin];
-    if (!allowed && response.isForMainFrame) [self finishPick:@"Blocked a navigation outside the preview policy."];
+    if (!allowed && response.isForMainFrame) {
+        _policyCancelled = YES;
+        [self finishPick:@"Blocked a navigation outside the preview policy."];
+    }
     decisionHandler(allowed ? WKNavigationResponsePolicyAllow : WKNavigationResponsePolicyCancel);
 }
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     _navigation = navigation;
+    _policyCancelled = NO;
     _pageCommitted = NO;
     [self finishPick:@""];
 }
@@ -541,21 +583,31 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
     if (navigation != _navigation) return;
     _pageCommitted = [PreviewOrigin(webView.URL, NO) isEqualToString:_origin];
+    _committedItem = _pageCommitted ? webView.backForwardList.currentItem : nil;
     [self finishPick:@""];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    [self webView:webView didFailNavigation:navigation withError:error];
+    if (navigation != _navigation) return;
+    // A failed provisional load does not commit a document. Restore the picker
+    // only if the old history entry and URL are both still current.
+    _pageCommitted = _committedItem && _committedItem == webView.backForwardList.currentItem &&
+        [_committedItem.URL isEqual:webView.URL] && [PreviewOrigin(webView.URL, NO) isEqualToString:_origin];
+    BOOL stopped = [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled;
+    [self finishPick:_policyCancelled || stopped ?
+        _status.stringValue : @"Could not load the local page. Try Reload."];
 }
 
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    if (navigation != _navigation || ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled)) return;
+    if (navigation != _navigation) return;
     _pageCommitted = NO;
+    _committedItem = nil;
     [self finishPick:@"Could not load the local page. Try Reload."];
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
     _pageCommitted = NO;
+    _committedItem = nil;
     [self finishPick:@"Preview stopped. Use Reload to restart it."];
 }
 
@@ -595,10 +647,14 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     decisionHandler(WKPermissionDecisionDeny);
 }
 
+// This public delegate is available on macOS 27 and later. Earlier macOS
+// releases use WebKit's own geolocation policy.
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
 - (void)webView:(WKWebView *)webView requestGeolocationPermissionForOrigin:(WKSecurityOrigin *)origin
     initiatedByFrame:(WKFrameInfo *)frame decisionHandler:(void (^)(WKPermissionDecision))decisionHandler {
     decisionHandler(WKPermissionDecisionDeny);
 }
+#endif
 
 @end
 
