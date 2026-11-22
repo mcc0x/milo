@@ -280,6 +280,34 @@ fn a_missing_or_unsafe_key_is_reported_without_a_request() {
 }
 
 #[test]
+fn a_private_file_error_does_not_hide_environment_accounts_or_survive_the_next_look() {
+    let (f, provider) = (Fixture::folder(), Provider::start());
+    for (id, reply) in [("deepseek", DEEPSEEK), ("devin", DEVIN), ("copilot", COPILOT)] {
+        provider.reply(id, 200, "", reply);
+    }
+    let file = "config/usage-accounts.conf";
+    f.write(file, "MILO_DEVIN_ORG=org-abc123\nMILO_GITHUB_TOKEN=github_pat_test_333\nMILO_GITHUB_USER=example-user\n");
+    fs::set_permissions(f.root.join(file), fs::Permissions::from_mode(0o644)).unwrap();
+    let environment = [("MILO_DEEPSEEK_API_KEY", KEY), ("MILO_DEVIN_API_KEY", "cog_test_key_22")];
+    let accounts = [UsageAccount::DeepSeek, UsageAccount::Devin, UsageAccount::Copilot].map(|a| (a, Show::Always));
+    let mut usage = pane(&f, sources(&f, &provider, &environment), &accounts);
+    usage.accounts.settle(NOW, false);
+    assert!(matches!(status(&usage, UsageAccount::DeepSeek, NOW), Status::Reading(..)));
+    for which in [UsageAccount::Devin, UsageAccount::Copilot] {
+        assert_eq!(status(&usage, which, NOW), Status::Failed(Failure::OpenFile));
+    }
+    assert_eq!(provider.requests(), 1);
+
+    fs::set_permissions(f.root.join(file), fs::Permissions::from_mode(0o600)).unwrap();
+    usage.accounts.settle(NOW + 2, false);
+    let devin = &provider.asked("devin")[0];
+    assert!(devin.contains("/organizations/org-abc123/") && devin.contains("Bearer cog_test_key_22\r\n"));
+    let copilot = &provider.asked("copilot")[0];
+    assert!(copilot.contains("/users/example-user/") && copilot.contains("Bearer github_pat_test_333\r\n"));
+    assert_eq!(provider.requests(), 3);
+}
+
+#[test]
 fn an_account_named_by_its_own_setting_needs_that_setting_in_a_form_that_stays_inside_the_path() {
     let (f, provider) = (Fixture::folder(), Provider::start());
     provider.reply("devin", 200, "", DEVIN);
