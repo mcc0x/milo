@@ -32,11 +32,11 @@ Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
 ## Workspace settings
 
-Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone. With **Title Rex tabs** enabled, tabs you have not named show their project, worktree and agent.
+Run `milo web` in your project to open the [settings dashboard](docs/setup.md#browser-editor). It’s built into the CLI and uses the same settings as `milo setup`. No account, Node.js, or separate install is needed.
 
-Prefer a browser? Run `milo web` in your project. It opens the [local settings editor](docs/setup.md#browser-editor) built into the CLI. It shares settings with `milo setup`; no account or separate install is needed. With several Rex hosts, open another host’s editor with `milo web --host HOST` or [copy selected settings](docs/setup.md#several-rex-hosts) without copying credentials or integrations.
+Choose a pane layout for one worktree or set a global default. Under **Integrations**, you can have Rex arrange new shell tabs, forward alerts to Discord or Telegram, or show Discord presence. To configure [another Rex host](docs/setup.md#several-rex-hosts), run `milo web --host HOST`.
 
-<p align="center"><img src="docs/img/web-settings.webp" width="760" alt="Milo’s browser editor with Outline, History and Usage in order, a left rail at 20% width, and a two-row Usage pane"></p>
+<p align="center"><img src="docs/img/web-settings.webp" width="760" alt="Milo settings for the tidebook worktree. The Integrations page shows Rex automation, Discord presence and alert forwarding, all off."></p>
 
 ## Outline
 
@@ -83,6 +83,8 @@ Optionally show **In a Rex session** on your Discord profile, under Milo's name 
 Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks, or `c` to fold unchanged stretches. In Rex, files opened from the same Outline or History pane share one floating reader as [tabs](docs/panes.md#tabs-in-the-floating-reader). The reader colours [about thirty languages](docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
+
+To review an agent’s edits without mixing in your own uncommitted work, have it pass its recorded patch to `milo review PATCH --float`. Milo opens a [read-only review](docs/panes.md#reviewing-an-agents-edits) in Rex. It checks that the patch still fits, not who wrote it.
 
 ## Commands
 
