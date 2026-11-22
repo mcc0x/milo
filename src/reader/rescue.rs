@@ -77,7 +77,7 @@ impl Drafts {
         let name = self.name();
         let first = dir.join(format!("{name}.draft"));
         if fs::symlink_metadata(&first).is_ok_and(|metadata| metadata.is_file()) {
-            return Some(Draft(first));
+            return Some(Draft { path: first, base: None });
         }
         fs::read_dir(dir)
             .ok()?
@@ -85,16 +85,20 @@ impl Drafts {
             .filter_map(|entry| {
                 let filename = entry.file_name();
                 let tail = filename.to_str()?.strip_prefix(&name)?.strip_prefix('-')?.strip_suffix(".draft")?;
-                let slot = tail.parse::<u128>().ok()?;
-                entry.file_type().ok()?.is_file().then(|| (slot, Draft(entry.path())))
+                // A draft kept before bases were recorded has only its slot.
+                let (slot, base) = tail.split_once('-').map_or((tail, None), |(slot, base)| (slot, Some(base)));
+                let slot = slot.parse::<u128>().ok()?;
+                let draft = Draft { path: entry.path(), base: base.map(str::to_owned) };
+                entry.file_type().ok()?.is_file().then_some((slot, draft))
             })
             .min_by_key(|(slot, _)| *slot)
             .map(|(_, draft)| draft)
     }
 
     /// Updates the restored copy, or adds an independent draft without replacing other copies.
+    /// `base` is the [`base`] of the file text the draft was written over, where that is known.
     /// Returns what to tell the user about it.
-    pub(super) fn keep(&self, bytes: &[u8], restored: Option<&Draft>) -> String {
+    pub(super) fn keep(&self, bytes: &[u8], base: Option<&str>, restored: Option<&Draft>) -> String {
         let write = || {
             let dir = private_dir(&self.state, "drafts")?;
             let name = self.name();
@@ -108,7 +112,10 @@ impl Drafts {
             // have restored it too, and their independently kept copies must not overwrite ours.
             let mut slot = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
             loop {
-                let filename = format!("{name}-{slot:039}.draft");
+                let filename = match base {
+                    Some(base) => format!("{name}-{slot:039}-{base}.draft"),
+                    None => format!("{name}-{slot:039}.draft"),
+                };
                 match fs::hard_link(temp.path(), dir.join(filename)) {
                     Ok(()) => {
                         if let Some(restored) = restored {
@@ -131,12 +138,30 @@ impl Drafts {
     }
 }
 
-pub(super) struct Draft(PathBuf);
+/// Names one version of a file's text, to tell later whether the file still holds it.
+pub(super) fn base(text: &str) -> String {
+    format!("{}-{}", text.len(), hashed(text.as_bytes()))
+}
+
+pub(super) struct Draft {
+    path: PathBuf,
+    /// The [`base`] of the file text this draft was written over, unless it was kept without one.
+    base: Option<String>,
+}
 
 impl Draft {
+    /// Whether this draft is known to have been written over `text`.
+    pub(super) fn written_over(&self, text: &str) -> bool {
+        self.base.as_deref() == Some(&base(text))
+    }
+
+    pub(super) fn base(&self) -> Option<&str> {
+        self.base.as_deref()
+    }
+
     /// The kept text, if it is still text milo can edit.
     pub(super) fn read(&self) -> Option<String> {
-        let file = fs_ops::open_read(&self.0).ok()?;
+        let file = fs_ops::open_read(&self.path).ok()?;
         if !file.metadata().ok()?.is_file() {
             return None;
         }
@@ -147,7 +172,7 @@ impl Draft {
     }
 
     pub(super) fn forget(&self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -210,18 +235,21 @@ mod tests {
         let (temp, mut file) = Temp::create(drafts.dir().join(".legacy")).unwrap();
         file.write_all(b"kept \xc3\xa9\r\n").unwrap();
         temp.replace(&drafts.dir().join(format!("{}.draft", drafts.name()))).unwrap();
-        let note = drafts.keep(b"another copy", None);
+        let note = drafts.keep(b"another copy", Some(&base("its file")), None);
         assert!(note.contains("a.txt") && note.contains("were kept"), "{note}");
         let draft = drafts.first().unwrap();
         assert_eq!(draft.read().as_deref(), Some("kept é\r\n"));
-        assert_eq!(fs::metadata(&draft.0).unwrap().permissions().mode() & 0o777, 0o600);
+        // A draft from before bases were recorded is known to be written over nothing.
+        assert!(!draft.written_over("its file"));
+        assert_eq!(fs::metadata(&draft.path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::metadata(state.join("drafts")).unwrap().permissions().mode() & 0o777, 0o700);
         assert!(Drafts::new(state, f.root.join("b.txt")).first().is_none());
         // Saving a successor to the restored copy removes only its predecessor.
-        assert!(drafts.keep(b"newer", Some(&draft)).contains("were kept"));
+        assert!(drafts.keep(b"newer", None, Some(&draft)).contains("were kept"));
         assert!(draft.read().is_none());
         let other = drafts.first().unwrap();
         assert_eq!(other.read().as_deref(), Some("another copy"));
+        assert!(other.written_over("its file") && !other.written_over("its file, changed"));
         other.forget();
         let newer = drafts.first().unwrap();
         assert_eq!(newer.read().as_deref(), Some("newer"));
