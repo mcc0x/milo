@@ -753,6 +753,8 @@ Single-image GIF, BMP without linked profiles, and single-page TIFF without nest
 
 Leaving an image or movie tab releases its prepared pixels and private movie snapshot. Returning loads the selected working file again. An unchanged movie remembers its paused position; a replaced movie starts from the beginning.
 
+Media file reads run in the background. A canceled read still waiting on the filesystem keeps one of two slots until it returns; the Reader can still switch tabs or close. On macOS, a cloud placeholder must already be downloaded to open as media. Closing the Reader doesn't wait for cloud storage or start a download.
+
 Limits on bytes, pixels and output apply before or during decoding. The macOS helper watchdog also stops a decoder observed above 384 MiB resident memory; this is sampled, not a hard ceiling on instantaneous process memory.
 
 **Markdown.** Headings, paragraphs, lists, quotes, emphasis and code render in the pane's own text styles. Links show text; embedded images show their labels, not fetched pixels. No HTML, scripts, URLs or file references are executed or loaded. `m` switches back and forth without losing the source diff. `e` opens the ordinary source editor; only an explicit save writes. Large previews stop at a labeled limit (512 KiB of text, 20,000 source lines or 32,000 wrapped rows); the source Reader keeps its own limits.
@@ -763,11 +765,11 @@ Median of five release-build starts on an Apple M5 Pro, macOS 27.2.1, FFmpeg 9.0
 
 | Fixture | Input bytes | First frame (ms) | Milo RSS (KiB) |
 | --- | ---: | ---: | ---: |
-| 1920 × 1080 PNG | 215,387 | 142.3 | 8,960 |
-| 1920 × 1080 JPEG | 75,347 | 142.2 | 8,944 |
-| 1920 × 1080 WebP | 46,604 | 139.3 | 8,880 |
-| 1920 × 1080 H.264 MP4, 8 seconds | 5,557,338 | 142.0 | 7,824 |
-| Markdown, 2,048 list items | 114,703 | 19.7 | 8,960 |
+| 1920 × 1080 PNG | 215,387 | 142.0 | 9,056 |
+| 1920 × 1080 JPEG | 75,347 | 143.7 | 9,056 |
+| 1920 × 1080 WebP | 46,604 | 140.3 | 8,992 |
+| 1920 × 1080 H.264 MP4, 8 seconds | 5,557,338 | 141.2 | 7,920 |
+| Markdown, 2,048 list items | 114,703 | 24.1 | 8,976 |
 
 Reproduce with `python3 tests/rich_reader_bench.py target/release/milo`. Fixture generation uses local `ffmpeg` and `cwebp`; the reader doesn't need `cwebp`.
 
