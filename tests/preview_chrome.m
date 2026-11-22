@@ -22,7 +22,8 @@ static void WorkspaceLayouts(void) {
     assert(CGRectGetMaxY(top) > CGRectGetMaxY(bottom));
 
     NSDictionary *vertical = @{@"Workspace.tabStyle": @"vertical", @"Workspace.sidebarWidth": @205,
-                               @"Workspace.paneDensity": @"compact", @"Workspace.interfaceStyle": @"modern"};
+                               @"Workspace.paneDensity": @"compact", @"Workspace.interfaceStyle": @"modern",
+                               @"Workspace.preservesWindowWidthOnSidebarToggle": @NO};
     CGRect left = Body(vertical, Full);
     assert(CGRectEqualToRect(left, CGRectMake(-75, -50, 759, 738)));
     NSMutableDictionary *right = [vertical mutableCopy];
@@ -45,6 +46,39 @@ static void WorkspaceLayouts(void) {
     assert(CGRectGetMaxY(aboveSplit) < CGRectGetMinY(belowSplit));
     assert(CGRectContainsRect(left, leftSplit) && CGRectContainsRect(left, rightSplit));
     assert(CGRectContainsRect(left, aboveSplit) && CGRectContainsRect(left, belowSplit));
+}
+
+static void SidebarWithoutResize(void) {
+    NSString *const preserve = @"Workspace.preservesWindowWidthOnSidebarToggle";
+    NSString *const collapse = @"Workspace.sidebarCollapsed";
+    NSMutableDictionary *prefs = [@{@"Workspace.tabStyle": @"vertical", @"Workspace.sidebarWidth": @205,
+                                    @"Workspace.paneDensity": @"compact"} mutableCopy];
+    CGRect tiles[] = {Full, CGRectMake(0, 0, 0.625, 1), CGRectMake(0.625, 0, 0.375, 1),
+                      CGRectMake(0, 0, 1, 0.375), CGRectMake(0, 0.375, 1, 0.625)};
+    for (NSString *side in @[@"left", @"right"]) {
+        prefs[@"Workspace.sidebarPosition"] = side;
+        for (size_t i = 0; i < sizeof(tiles) / sizeof(*tiles); ++i) {
+            CGRect tile = tiles[i];
+            prefs[preserve] = @NO;
+            prefs[collapse] = @NO;
+            CGRect expanded = Body(prefs, tile);
+            prefs[collapse] = @YES;
+            CGRect collapsed = Body(prefs, tile);
+            CGRect shared = CGRectIntersection(expanded, collapsed);
+            assert(!CGRectIsEmpty(shared));
+            prefs[preserve] = @YES;
+            assert(CGRectEqualToRect(Body(prefs, tile), shared));
+            prefs[collapse] = @NO;
+            assert(CGRectEqualToRect(Body(prefs, tile), shared));
+            [prefs removeObjectForKey:preserve];
+            assert(CGRectEqualToRect(Body(prefs, tile), shared));
+            prefs[preserve] = @"unknown";
+            assert(CGRectEqualToRect(Body(prefs, tile), shared));
+
+            // A normal 37.5% right tile beside a left sidebar is still wide.
+            if (i == 2 && [side isEqualToString:@"left"]) assert(shared.size.width > 250);
+        }
+    }
 }
 
 static void ChromeBehaviors(void) {
@@ -94,6 +128,7 @@ int main(void) {
     @autoreleasepool {
         (void)MiloApproximatePane;
         WorkspaceLayouts();
+        SidebarWithoutResize();
         ChromeBehaviors();
         RejectInvalidInputs();
     }

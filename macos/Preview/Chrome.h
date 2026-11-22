@@ -74,15 +74,21 @@ static BOOL MiloDecodeRexChrome(NSDictionary *prefs, MiloRexChrome *result) {
         BOOL left = [@"left" isEqual:side], collapsed;
         if ((!left && ![@"right" isEqual:side]) ||
             !MiloChromeBoolean(prefs[@"Workspace.sidebarCollapsed"], NO, &collapsed)) return NO;
-        if (!collapsed) {
+        BOOL preservesWidth;
+        BOOL eitherState = !MiloChromeBoolean(prefs[@"Workspace.preservesWindowWidthOnSidebarToggle"], YES,
+                                              &preservesWidth) || preservesWidth;
+        if (eitherState || !collapsed) {
             CGFloat width;
             if (!MiloChromeNumber(prefs[@"Workspace.sidebarWidth"], 240, 167, 480, &width)) return NO;
             MiloChromeInset *inset = left ? &chrome.left : &chrome.right;
-            *inset = (MiloChromeInset){width - 4, width + surround + 4};
+            // With a fixed window width, CGWindow bounds cannot distinguish
+            // an expansion from a collapse. Bound both possible workspace
+            // edges, not just the edge reported by the cached collapse flag.
+            *inset = (MiloChromeInset){eitherState ? 0 : width - 4, width + surround + 4};
         }
         // A shown left sidebar holds the vertical toolbar's title row. With
         // a right or collapsed sidebar, leave room for window controls above panes.
-        chrome.top.high += left && !collapsed ? 6 : 30;
+        chrome.top.high += left && !collapsed && !eitherState ? 6 : 30;
     } else if ([@"horizontal" isEqual:tabs]) {
         id edge = prefs[@"Workspace.tabBarEdge"] ?: @"top";
         BOOL above = [@"top" isEqual:edge];
@@ -108,6 +114,7 @@ static BOOL MiloLoadRexChrome(MiloRexChrome *chrome) {
     NSArray *keys = @[@"Workspace.tabStyle", @"Workspace.tabBarEdge", @"Workspace.sidebarPosition",
                       @"Workspace.sidebarWidth", @"Workspace.sidebarCollapsed", @"Workspace.toolbarBehavior",
                       @"Workspace.paneHeaderVisibility", @"Workspace.showsPaneHeaders", @"Workspace.paneDensity",
+                      @"Workspace.preservesWindowWidthOnSidebarToggle",
                       @"Workspace.terminalPaddingX", @"Workspace.terminalPaddingY", @"Workspace.interfaceStyle"];
     NSDictionary *prefs = CFBridgingRelease(CFPreferencesCopyMultiple((__bridge CFArrayRef)keys, domain,
                                                      kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
