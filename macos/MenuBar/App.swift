@@ -58,26 +58,46 @@ private struct MenuProfile: Codable {
         try FileHandle.standardOutput.write(contentsOf: encoder.encode(Self(paths: paths, installer: installer)))
     }
 
-    static func installed() -> Self? {
-        let apps = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+    enum Installation {
+        case standalone
+        case invalidProfile
+        case installed(MenuProfile)
+
+        var profile: MenuProfile? {
+            if case let .installed(profile) = self { return profile }
+            return nil
+        }
+    }
+
+    static func installed(bundle: URL = Bundle.main.bundleURL,
+                          home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Installation {
+        let apps = home.appendingPathComponent("Applications", isDirectory: true)
+        let expected = apps.appendingPathComponent("Milo.app", isDirectory: true)
+        // Match the install location before checking it. Resolving the leaf symlink could
+        // mistake a standalone app it points to for the installed copy.
+        guard bundle.standardizedFileURL.path == expected.standardizedFileURL.path else { return .standalone }
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: apps.path),
               attributes[.type] as? FileAttributeType == .typeDirectory,
               (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
               ((attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o022) & 0o022 == 0,
-              Bundle.main.bundleURL.resolvingSymlinksInPath().path ==
-                apps.appendingPathComponent("Milo.app", isDirectory: true).resolvingSymlinksInPath().path,
+              (try? FileManager.default.attributesOfItem(atPath: expected.path)[.type]) as? FileAttributeType == .typeDirectory,
               let file = openRegularFile(apps.appendingPathComponent(".milo-menu-profile.plist").path, privateProfile: true)
-        else { return nil }
+        else { return .invalidProfile }
         defer { try? file.close() }
-        guard let data = try? file.readToEnd() else { return nil }
-        return try? PropertyListDecoder().decode(Self.self, from: data)
+        guard let data = try? file.readToEnd(),
+              let profile = try? PropertyListDecoder().decode(Self.self, from: data),
+              validPath(profile.installer.path, absolute: true), profile.installer.digest.count == SHA256.Digest.byteCount,
+              pathKeys.allSatisfy({ key in
+                  guard let path = profile.paths[key] else { return true }
+                  return validPath(path, absolute: workingDirectoryKeys.contains(key))
+              })
+        else { return .invalidProfile }
+        return .installed(profile)
     }
 
     func applyPaths(to environment: inout [String: String]) {
         for key in Self.pathKeys {
-            if let path = paths[key], Self.validPath(path, absolute: Self.workingDirectoryKeys.contains(key)) {
-                environment[key] = path
-            }
+            if let path = paths[key] { environment[key] = path }
         }
     }
 
@@ -102,6 +122,12 @@ private struct MenuProfile: Codable {
 
 @MainActor
 private final class Model: ObservableObject {
+    private let installation: MenuProfile.Installation
+
+    init(installation: MenuProfile.Installation = MenuProfile.installed()) {
+        self.installation = installation
+    }
+
     @Published var snapshot: UsageSnapshot?
     @Published var failure: String?
     @Published private(set) var loginStatus = SMAppService.mainApp.status
@@ -118,6 +144,7 @@ private final class Model: ObservableObject {
     let monitor = ResourceMonitor()
     @Published private(set) var indicator: MenuIndicator = .quota
     @Published private(set) var savingIndicator = false
+    private var pendingIndicator: MenuIndicator?
     private var sleeping = false
 
     private func applyIndicator(_ choice: MenuIndicator) {
@@ -128,7 +155,25 @@ private final class Model: ObservableObject {
 
     func selectIndicator(_ choice: MenuIndicator) {
         guard choice != indicator, !savingIndicator else { return }
-        guard let process = bundledProcess(["menubar", "indicator", choice.rawValue]) else { indicatorError(); return }
+        switch indicatorSaveProcess(choice) {
+        case let .success(process): saveIndicator(choice, using: process)
+        case let .failure(issue): indicatorError(issue)
+        }
+    }
+
+    enum IndicatorSaveIssue: Error {
+        case invalidProfile, writeFailed
+    }
+
+    func indicatorSaveProcess(_ choice: MenuIndicator) -> Result<Process, IndicatorSaveIssue> {
+        if case .invalidProfile = installation { return .failure(.invalidProfile) }
+        guard let process = bundledProcess(["menubar", "indicator", choice.rawValue]) else {
+            return .failure(.writeFailed)
+        }
+        return .success(process)
+    }
+
+    func saveIndicator(_ choice: MenuIndicator, using process: Process) {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -136,23 +181,48 @@ private final class Model: ObservableObject {
         process.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.savingIndicator = false
-                guard process.terminationStatus == 0 else { self.indicatorError(); return }
-                // Let the stream publish the saved choice in order, after any frame already in flight.
-                // NUL reuses cached quota data; a display change must not request a provider refresh.
-                if let input = self.input, (try? input.write(contentsOf: Data([0]))) != nil { return }
-                // A disconnected quota reader need not prevent a local indicator change.
-                self.applyIndicator(choice)
-                self.changed?()
+                guard process.terminationStatus == 0 else {
+                    self.savingIndicator = false
+                    self.indicatorError(.writeFailed)
+                    return
+                }
+                self.indicatorSaved(choice)
             }
         }
-        do { try process.run() } catch { savingIndicator = false; indicatorError() }
+        do { try process.run() } catch { savingIndicator = false; indicatorError(.writeFailed) }
     }
 
-    private func indicatorError() {
+    private func indicatorSaved(_ choice: MenuIndicator) {
+        guard let input else {
+            finishIndicatorSave(choice)
+            changed?()
+            return
+        }
+        // Keep the picker locked until the ordered acknowledgment or disconnect.
+        // NUL reuses cached quota data; a display change must not refresh providers.
+        pendingIndicator = choice
+        do { try input.write(contentsOf: Data([0])) } catch { readerDisconnected() }
+    }
+
+    private func finishIndicatorSave(_ choice: MenuIndicator) {
+        pendingIndicator = nil
+        applyIndicator(choice)
+        savingIndicator = false
+    }
+
+    private func indicatorError(_ issue: IndicatorSaveIssue) {
         let alert = NSAlert()
         alert.messageText = "Couldn’t save the menu bar indicator"
-        alert.informativeText = "Check that Milo can write its global settings, then try again."
+        switch issue {
+        case .invalidProfile:
+            alert.informativeText = """
+                Milo’s install profile at ~/Applications/.milo-menu-profile.plist is missing, invalid or unsafe. \
+                Check that ~/Applications is yours and is not writable by others. \
+                Move an unsafe profile aside, then run `milo menubar install` from the terminal profile you want Milo to use.
+                """
+        case .writeFailed:
+            alert.informativeText = "Check that Milo can write its global settings, then try again."
+        }
         alert.runModal()
     }
 
@@ -163,12 +233,11 @@ private final class Model: ObservableObject {
 
     private var settings: Process?
     private var settingsURL: URL?
-    private let profile = MenuProfile.installed()
 
     private func bundledProcess(_ arguments: [String]) -> Process? {
         guard let tool = Bundle.main.url(forResource: "milo", withExtension: nil, subdirectory: "Tools") else { return nil }
         var environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
-        profile?.applyPaths(to: &environment)
+        installation.profile?.applyPaths(to: &environment)
         let process = Process()
         process.executableURL = tool; process.arguments = arguments
         process.environment = environment
@@ -190,7 +259,7 @@ private final class Model: ObservableObject {
         guard let process = bundledProcess(["web", "--port", "0", "--no-open"]) else { settingsError(); return }
         independentSettings = false
         // A replaced installer path must not turn Settings into a launcher for another program.
-        if let executable = profile?.installer.executable {
+        if let executable = installation.profile?.installer.executable {
             process.executableURL = executable
             independentSettings = true
         }
@@ -259,6 +328,10 @@ private final class Model: ObservableObject {
         guard let process = bundledProcess(["usage", "--menu-stream"]) else {
             failed("The bundled Milo reader is missing. Rebuild the menu app."); return
         }
+        startReader(process)
+    }
+
+    func startReader(_ process: Process) {
         let incoming = Pipe(), outgoing = Pipe()
         process.standardInput = incoming; process.standardOutput = outgoing; process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { failed("Couldn’t start the local reader. Click refresh to retry."); return }
@@ -287,17 +360,37 @@ private final class Model: ObservableObject {
             } catch { /* Report below. Never display malformed data as a limit. */ }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.child === process else { return }
-                self.stop(); self.failed("Usage reader disconnected. Click refresh to reconnect.")
+                self.readerDisconnected()
             }
         }
     }
 
     private enum FeedError: Error { case invalid }
-    private func failed(_ message: String) { snapshot = nil; failure = message; changed?() }
-    func receive(_ frame: UsageSnapshot) {
+    private func readerDisconnected() {
+        stop()
+        failed("Usage reader disconnected. Click refresh to reconnect.")
+    }
+
+    private func failed(_ message: String) {
+        snapshot = nil
+        failure = message
+        if let choice = pendingIndicator { finishIndicatorSave(choice) }
+        changed?()
+    }
+    func receive(_ incoming: UsageSnapshot) {
+        var frame = incoming
+        let choice = MenuIndicator(rawValue: frame.indicator ?? "") ?? .quota
+        if pendingIndicator == nil {
+            applyIndicator(choice)
+        } else if frame.indicatorAck == true {
+            // A different selection can win concurrently. The acknowledgment orders the
+            // frame after the NUL; its value need not match the choice we saved.
+            finishIndicatorSave(choice)
+        }
+        frame.indicatorAck = nil
         // The reader repeats a settled frame about every 30 seconds. Publishing an equal one
         // would have SwiftUI work the whole panel out again, on screen or not.
-        applyIndicator(MenuIndicator(rawValue: frame.indicator ?? "") ?? .quota)
+        frame.indicator = nil
         if snapshot != frame { snapshot = frame }
         if failure != nil { failure = nil }
         changed?()
@@ -312,9 +405,16 @@ private final class Model: ObservableObject {
     }
     func refresh() {
         guard let input else { start(); return }
-        do { try input.write(contentsOf: Data([10])) } catch { stop(); start() }
+        do { try input.write(contentsOf: Data([10])) } catch {
+            stop()
+            if let choice = pendingIndicator {
+                finishIndicatorSave(choice)
+                changed?()
+            }
+            start()
+        }
     }
-    func stop() {
+    private func stop() {
         alerts.clearBaseline()
         try? input?.close(); input = nil
         if let process = child, process.isRunning { process.terminate() }

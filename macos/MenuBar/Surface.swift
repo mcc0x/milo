@@ -6,6 +6,7 @@ struct UsageSnapshot: Codable, Equatable {
     let version: Int
     let providers: [UsageProvider]
     var indicator: String? = nil
+    var indicatorAck: Bool? = nil
 
     func orderedProviders(pinning badge: BadgeReading?) -> some RandomAccessCollection<UsageProvider> {
         pinnedIndices(providers.indices, first: badge?.providerIndex).lazy.map { providers[$0] }
