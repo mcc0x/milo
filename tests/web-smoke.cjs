@@ -411,7 +411,8 @@ async function copySettingsThroughHosts(page, env, cwd) {
   await layout.uncheck();
   await page.getByRole('checkbox', {name: /^Usage display/}).check();
   await create.click();
-  await exported.waitFor();
+  // Export focuses the result on the next animation frame; finish that interaction before typing into Import.
+  await exported.and(page.locator(':focus')).waitFor();
   const bundle = await exported.inputValue();
   assert.match(bundle, /^milo-settings 1\n/);
   assert.match(bundle, /^usage_claude = always$/m);
@@ -428,8 +429,7 @@ async function copySettingsThroughHosts(page, env, cwd) {
   const previewGate = new Promise(resolve => { finishPreview = resolve; });
   await page.route('**/api/transfer', route => previewGate.then(() => route.continue()), {times: 1});
   try {
-    await previewButton.focus();
-    await page.keyboard.press('Enter');
+    await previewButton.press('Enter');
     await previewButton.and(page.locator('[aria-disabled="true"]')).waitFor();
     assert(await previewButton.evaluate(el => el === document.activeElement), 'Preview retains focus while loading');
   } finally {
