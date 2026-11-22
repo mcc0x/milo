@@ -379,6 +379,9 @@ private final class Model: ObservableObject {
     }
     func receive(_ incoming: UsageSnapshot) {
         var frame = incoming
+        // A damaged installed profile still supports the existing quota reader,
+        // but its fallback HOME cannot opt this installation into system sampling.
+        if case .invalidProfile = installation { frame.indicator = nil }
         let choice = MenuIndicator(rawValue: frame.indicator ?? "") ?? .quota
         if pendingIndicator == nil {
             applyIndicator(choice)

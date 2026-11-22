@@ -207,6 +207,13 @@ private enum MenuBench {
         }
         func checkRefusal(_ fault: String) throws {
             let model = Model(installation: MenuProfile.installed(bundle: expected, home: home))
+            var fallback = frame()
+            fallback.indicator = "cpu"
+            model.receive(fallback)
+            precondition(model.indicator == .quota && model.monitor.reading == SystemReading())
+            model.setSleeping(true)
+            model.setSleeping(false)
+            precondition(model.monitor.reading == SystemReading())
             guard case .failure(.invalidProfile) = model.indicatorSaveProcess(.memory) else {
                 preconditionFailure("Expected a repair error for \(fault), not default-profile fallback")
             }
