@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use super::changes::{Fold, Row};
 use super::edit::Editor;
+use super::handed::Handed;
 use super::{Body, JumpNotice, Reader, Source};
 use crate::diff::{Line, LineKind};
 use crate::git::Kind;
@@ -21,6 +22,31 @@ fn text_for_draw(text: &str, pan: usize, width: usize) -> (usize, &str) {
     let rest = &text[skip..];
     let end = if rest.len() <= width { text.len() } else { skip + byte_at_col(rest, width) };
     (skip, &text[..end])
+}
+
+/// Columns of a heading kept for the file's name, whatever is said at its right.
+const NAME_ROOM: usize = 10;
+const PLACE_OF: &str = " of ";
+const PLACE_SPACE: &str = " · ";
+
+fn digits(n: usize) -> usize {
+    n.max(1).ilog10() as usize + 1
+}
+
+/// The words of a heading that say whose patch a file is shown from.
+fn handed_lead(handed: &Handed) -> (&'static str, &str) {
+    match &handed.from {
+        Some(name) => ("patch from ", name.as_str()),
+        None => ("handed-over patch", ""),
+    }
+}
+
+/// Whether a heading `w` columns wide has room, after those words, to say
+/// which of the patch's files this is.
+fn handed_place_fits(handed: &Handed, w: usize) -> bool {
+    let (lead, name) = handed_lead(handed);
+    let place = digits(handed.number) + PLACE_OF.len() + digits(handed.total) + str_width(PLACE_SPACE);
+    handed.total > 1 && lead.len() + str_width(name) + place <= w.saturating_sub(1 + NAME_ROOM)
 }
 
 /// The colours use the terminal's palette so they follow its theme.
@@ -255,20 +281,57 @@ impl Reader {
         }
     }
 
+    /// The hints of one file among several of a handed-over patch. Moving
+    /// between the files is kept longest, and says which file this is where
+    /// the heading has no room to.
+    fn draw_files_hint(&self, s: &mut Screen, handed: &Handed) {
+        const HELP: &str = "? help";
+        let counted = if handed_place_fits(handed, s.w) {
+            String::new()
+        } else {
+            let spelled = format!("[ ] file {} of {}", handed.number, handed.total);
+            if spelled.len() + 3 + HELP.len() + 2 <= s.w {
+                spelled
+            } else {
+                format!("[ ] {}/{}", handed.number, handed.total)
+            }
+        };
+        let files = if counted.is_empty() { "[ ] files" } else { &counted };
+        let fold = self.can_fold().then(|| if self.review.is_compact() { "c full file" } else { "c changes only" });
+        let changes = self.can_fold() || self.has_changes_among_other_lines();
+        let scroll = matches!(self.body, Body::Text(_)).then_some("↑↓ scroll");
+        let mut middle = [""; 4];
+        let mut count = 0;
+        for item in [scroll, Some("q close"), fold, changes.then_some("n N changes")].into_iter().flatten() {
+            middle[count] = item;
+            count += 1;
+        }
+        crate::help::draw_hint(s, files, &middle[..count], HELP);
+    }
+
+    /// Whether `n` has a change to go to and a line that is not one to leave.
+    fn has_changes_among_other_lines(&self) -> bool {
+        matches!(&self.body, Body::Text(text)
+            if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize)
+    }
+
     fn draw_hint(&self, s: &mut Screen) {
-        let files = matches!(&self.source, Source::Handed(handed) if handed.total > 1);
+        if let Source::Handed(handed) = &self.source
+            && handed.total > 1
+        {
+            return self.draw_files_hint(s, handed);
+        }
         if self.can_fold() {
             let action = if self.review.is_compact() { "c full file" } else { "c changes only" };
-            let middle: &[_] = match (files, self.read_only.is_some()) {
-                (true, _) => &["↑↓ scroll", "[ ] files", "q close", "n N changes"],
-                (false, true) => &["↑↓ scroll", "q close", "n N changes"],
-                (false, false) => &["e edit", "↑↓ scroll", "q close", "n N changes"],
+            let middle: &[_] = if self.read_only.is_some() {
+                &["↑↓ scroll", "q close", "n N changes"]
+            } else {
+                &["e edit", "↑↓ scroll", "q close", "n N changes"]
             };
             crate::help::draw_hint(s, action, middle, "? help");
             return;
         }
-        let changes = matches!(&self.body, Body::Text(text)
-            if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize);
+        let changes = self.has_changes_among_other_lines();
         let working = matches!(self.source, Source::Working(_));
         let still = !matches!(self.body, Body::Text(_));
         let action = match (changes, working) {
@@ -276,13 +339,11 @@ impl Reader {
             (true, true) => "n next change",
             (false, _) => "",
         };
-        let middle: &[_] = match (still, self.read_only.is_none(), files) {
-            (true, _, true) => &["[ ] files", "q close"],
-            (false, _, true) => &["↑↓ scroll", "[ ] files", "q close"],
-            (true, true, false) => &["e edit", "q close"],
-            (true, false, false) => &["q close"],
-            (false, true, false) => &["↑↓ scroll", "e edit", "q close"],
-            (false, false, false) => &["↑↓ scroll", "q close"],
+        let middle: &[_] = match (still, self.read_only.is_none()) {
+            (true, true) => &["e edit", "q close"],
+            (true, false) => &["q close"],
+            (false, true) => &["↑↓ scroll", "e edit", "q close"],
+            (false, false) => &["↑↓ scroll", "q close"],
         };
         crate::help::draw_hint(s, action, middle, "? help");
     }
@@ -302,7 +363,6 @@ impl Reader {
 
     fn draw_details(&self, s: &mut Screen) -> usize {
         let mut right = s.w - 1;
-        const NAME_ROOM: usize = 10;
         if let Source::Committed { short_id, time } = &self.source {
             let age = when::short_age(when::now().saturating_sub(*time));
             let ago = if age.count.is_some() { " ago" } else { "" };
@@ -321,23 +381,16 @@ impl Reader {
             }
         } else if let Source::Handed(handed) = &self.source {
             // Whose patch it is said to be comes first: it is what tells this from a file's own changes.
-            let (lead, name) = match &handed.from {
-                Some(name) => ("patch from ", name.as_str()),
-                None => ("handed-over patch", ""),
-            };
+            let (lead, name) = handed_lead(handed);
             let room = right.saturating_sub(NAME_ROOM);
-            let width = lead.len() + str_width(name);
-            let digits = |n: usize| n.max(1).ilog10() as usize + 1;
-            let (of, space) = (" of ", " · ");
-            if width <= room {
+            if lead.len() + str_width(name) <= room {
                 right -= s.put_right(right, 0, name, FAINT);
                 right -= s.put_right(right, 0, lead, FAINT);
-                let place = digits(handed.number) + of.len() + digits(handed.total) + str_width(space);
-                if handed.total > 1 && width + place <= room {
-                    right -= s.put_right(right, 0, space, FAINT);
+                if handed_place_fits(handed, s.w) {
+                    right -= s.put_right(right, 0, PLACE_SPACE, FAINT);
                     s.put_number(right, 0, handed.total as u64, FAINT);
                     right -= digits(handed.total);
-                    right -= s.put_right(right, 0, of, FAINT);
+                    right -= s.put_right(right, 0, PLACE_OF, FAINT);
                     s.put_number(right, 0, handed.number as u64, FAINT);
                     right -= digits(handed.number);
                 }

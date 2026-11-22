@@ -594,6 +594,8 @@ milo review /tmp/edits.patch --from "Claude Code" --float   # from an agent's sh
 | `n` / `N`, `c`, scrolling | As in the reader |
 | `q` or `Esc` | Close |
 
+With more than one file, the last row begins with `[ ] files`. In a pane too narrow for the place in the heading, that hint carries it instead, as `[ ] file 2 of 3` or `[ ] 2/3`, and gives up the other keys first.
+
 The review is read-only: `e` says so, and no file is written, in the project or outside it. The patch is read once when the review opens and is not copied or kept. Milo starts no program for it and asks Git nothing but where the project's top folder is, which the patch's paths are relative to.
 
 ### What Milo checks, and what it cannot
