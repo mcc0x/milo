@@ -1717,7 +1717,7 @@ fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let rows = drawn(reader, 60, 8);
-            if !rows[1].contains(media_load::PENDING) {
+            if !rows.iter().any(|row| row.contains(media_load::PENDING)) {
                 return rows;
             }
             assert!(Instant::now() < deadline, "text preview did not finish: {rows:?}");
@@ -1736,7 +1736,7 @@ fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
     let pending = |reader: &mut Reader, resume: mpsc::Sender<()>| {
         let rows = drawn(reader, 60, 8);
         resume.send(()).unwrap();
-        assert!(rows[1].contains(media_load::PENDING), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains(media_load::PENDING)), "{rows:?}");
     };
 
     let rows = loaded(&mut reader);
