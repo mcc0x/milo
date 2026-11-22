@@ -12,8 +12,8 @@ use crate::fs_ops;
 
 const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Milo Preview"));
 
-/// A stable path for macOS privacy controls, independent of the checkout, PATH,
-/// HOME and the shell's temporary directory. The OS may evict this cache.
+/// Install independently of the checkout, PATH, HOME or shell's temporary directory.
+/// The OS may evict this cache; this location does not establish a privacy identity.
 fn cache() -> io::Result<PathBuf> {
     let mut bytes = [0u8; 1024];
     // SAFETY: bytes is writable for the full size passed to confstr.
@@ -89,7 +89,7 @@ pub(crate) fn require_access() -> Result<(), String> {
     let mut check = spawn("--check-access", Stdio::null()).map_err(|e| format!("could not open Milo Preview: {e}"))?;
     match check.wait().map_err(|e| e.to_string())?.code() {
         Some(0) => Ok(()),
-        Some(77) => Err("macOS Accessibility is unavailable for this launch context. No permission was requested and no pane was opened.".into()),
+        Some(77) => Err("macOS Accessibility is unavailable for this launch context; no pane was opened. This build has no verified permission-free placement. Do not grant Rex or its server Accessibility as a workaround.".into()),
         _ => Err("could not check Milo Preview accessibility; no pane was opened".into()),
     }
 }
