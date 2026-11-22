@@ -135,13 +135,18 @@ pub fn note(text: &'static str) -> HelpRow {
 pub struct Page {
     rows: Vec<HelpRow>,
     top: usize,
+    /// How many rows the last frame had room for, over all its columns.
+    visible: usize,
     footer: HintHits<'static>,
 }
+
+/// A column of a page: the 26 characters of its widest row and a gap.
+const COLUMN: usize = 28;
 
 impl Page {
     /// A page of a pane's own making, from the row builders above.
     pub fn new(rows: Vec<HelpRow>) -> Self {
-        Self { rows, top: 0, footer: HintHits::default() }
+        Self { rows, top: 0, visible: 0, footer: HintHits::default() }
     }
 
     /// Adds rows under those the page was made with.
@@ -176,14 +181,22 @@ impl Page {
         s.clear();
         let (w, h) = (s.w, s.h);
         let shown = h - 1;
-        self.top = self.top.min(self.rows.len().saturating_sub(shown));
-        for (y, row) in self.rows.iter().skip(self.top).take(shown).enumerate() {
-            let mut x = 1;
+        // A page too long for the pane continues in a second column, and a
+        // third, where the pane is wide enough: fewer rows are left to scroll to.
+        let columns = self.rows.len().div_ceil(shown).clamp(1, ((w - 1) / COLUMN).max(1));
+        self.visible = shown * columns;
+        self.top = self.top.min(self.rows.len().saturating_sub(self.visible));
+        for (i, row) in self.rows.iter().skip(self.top).take(self.visible).enumerate() {
+            let column = i / shown;
+            let end = if column + 1 == columns { w - 1 } else { (column + 1) * COLUMN - 1 };
+            let mut x = 1 + column * COLUMN;
             for (text, st) in row {
-                x += s.put(x, y, (w - 1).saturating_sub(x), text, *st);
+                x += s.put(x, i % shown, end.saturating_sub(x), text, *st);
             }
         }
-        ui::thumb(s, w - 1, 0, shown, self.rows.len(), self.top);
+        // The thumb covers the rows still out of sight, so it ends at the bottom with the page.
+        let hidden = self.rows.len().saturating_sub(self.visible);
+        ui::thumb(s, w - 1, 0, shown, shown + hidden, self.top);
         self.footer = draw_hint(s, "↑↓ scroll", &["Esc close"], CLOSE);
     }
 
@@ -205,9 +218,61 @@ impl Page {
         };
         let Some(rows) = key.rows(shown) else { return false };
         let rows = if matches!(key, Key::WheelUp | Key::WheelDown) { rows.signum() } else { rows };
-        let last = self.rows.len().saturating_sub(shown);
+        let last = self.rows.len().saturating_sub(self.visible.max(shown));
         self.top = self.top.saturating_add_signed(rows).min(last);
         true
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    const NAMES: [&str; 9] = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+
+    fn page() -> Page {
+        Page::new(NAMES.iter().map(|name| note(name)).collect())
+    }
+
+    fn drawn(page: &mut Page, w: usize, h: usize) -> Vec<String> {
+        let mut screen = Screen::sized(w, h);
+        page.draw(&mut screen);
+        screen.text()
+    }
+
+    #[test]
+    fn a_long_page_continues_in_a_second_column_only_where_one_fits() {
+        let mut page = page();
+        // Four rows and the hints: one column until the pane has room for two of 28.
+        let narrow = drawn(&mut page, 56, 5);
+        assert_eq!(narrow[..4], [&format!("   {:<52}▐", "one"), "   two", "   three", "   four"]);
+        let wide = drawn(&mut page, 57, 5);
+        assert_eq!(wide[..2], [format!("   {:<25}   {:<25}▐", "one", "five"), format!("   {:<25}   {:<25}▐", "two", "six")]);
+        assert_eq!(wide[3], format!("   {:<25}   eight", "four"));
+        // Three columns hold all nine rows, so nothing is left to scroll to.
+        let all = drawn(&mut page, 85, 5);
+        assert_eq!(all[0], format!("   {:<25}   {:<25}   nine", "one", "five"));
+        assert!(all.iter().all(|row| !row.contains('▐')), "{all:?}");
+        assert!(page.scroll(Key::Down, 5));
+        assert_eq!(drawn(&mut page, 85, 5), all);
+    }
+
+    #[test]
+    fn a_page_that_fits_one_column_stays_in_one_however_wide_the_pane() {
+        let rows = drawn(&mut page(), 120, 10);
+        assert_eq!(rows[..9], NAMES.map(|name| format!("   {name}")));
+    }
+
+    #[test]
+    fn scrolling_columns_stops_with_the_last_row_at_the_bottom_of_the_last_column() {
+        let mut page = page();
+        drawn(&mut page, 57, 4);
+        assert!(page.scroll(Key::End, 4));
+        let end = drawn(&mut page, 57, 4);
+        assert_eq!(end[0], format!("   {:<25}   seven", "four"));
+        assert_eq!(end[2], format!("   {:<25}   {:<25}▐", "six", "nine"));
+        assert!(page.scroll(Key::Up, 4));
+        assert_eq!(drawn(&mut page, 57, 4)[0], format!("   {:<25}   six", "three"));
     }
 }
 
