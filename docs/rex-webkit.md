@@ -1,6 +1,6 @@
 # Local WebKit preview (experimental, macOS)
 
-**Release blocker:** permission-free placement over a real Rex pane is not verified. The current build refuses to open a pane when its Accessibility check fails. Do not grant Rex or its server Accessibility as a workaround.
+**Release blocker:** there is no permission-free placement implementation. If the launcher's Accessibility preflight fails, Milo creates no pane. If the live helper loses access after the anchor is created, it stops; the terminal may briefly show a diagnostic. Do not grant Rex or its server Accessibility as a workaround.
 
 Start your dev server first. In its **local Rex tab**, run:
 

@@ -398,7 +398,7 @@ local function refresh()
   last_revision = view.revision
   local block, window, layer, index = locate(view, a.block)
   local main, place, tiled = locate(view, a.main)
-  if block and layer.kind ~= "tiled" then return stop(1) end
+  if block and layer.kind ~= "tiled" then return stop() end
   if not block or not main then
     local listed = rex.session.list_blocks(session)
     if not listed then return stop(1) end

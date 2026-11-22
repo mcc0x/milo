@@ -288,7 +288,7 @@ for _, main_detached in ipairs{ false, true } do
   local watch_move = call(moved)
   float_anchor(moved)
   if main_detached then moved.tiled.blocks, moved.main_detached = { moved.rail }, true end
-  assert(watch_move("session_view_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 1)
+  assert(watch_move("session_view_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 0)
 end
 
 local remote = fixture("watch", preview)
