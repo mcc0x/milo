@@ -5,6 +5,7 @@
 //! percentage or compared with another.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{Read as _, Write as _};
@@ -546,11 +547,11 @@ impl Sources {
     }
 
     /// The settings file's lines, if it is the user's own private file.
-    fn settings(&self) -> Result<Option<String>, Failure> {
-        let Some(path) = &self.settings else { return Ok(None) };
+    fn settings(&self) -> Result<String, Failure> {
+        let Some(path) = &self.settings else { return Ok(String::new()) };
         let file = match fs_ops::open_read(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
             Err(_) => return Err(Failure::OpenFile),
         };
         let metadata = file.metadata().map_err(|_| Failure::OpenFile)?;
@@ -564,28 +565,30 @@ impl Sources {
         if u64::try_from(text.len()).unwrap_or(u64::MAX) > SETTINGS_LIMIT {
             return Err(Failure::OpenFile);
         }
-        Ok(Some(text))
+        Ok(text)
     }
 
     /// The environment comes first, so one shell can use another key without editing the file.
-    fn credentials(&self, account: UsageAccount) -> Result<Credentials<'_>, Failure> {
+    fn credentials<'a>(
+        &'a self,
+        account: UsageAccount,
+        file: &'a OnceCell<Result<String, Failure>>,
+    ) -> Result<Credentials<'a>, Failure> {
         let environment = |name: &str| {
             let named = self.environment.iter().find(|(known, _)| *known == name);
             named.map(|(_, value)| Cow::Borrowed(value.as_str())).filter(|value| !value.is_empty())
         };
-        let mut file = None;
-        let mut saved = |name: &str| -> Result<Option<Cow<'_, str>>, Failure> {
-            if file.is_none() {
-                file = Some(self.settings()?.unwrap_or_default());
-            }
-            let lines = file.as_deref().unwrap_or_default().lines().map(str::trim);
-            Ok(lines
+        let saved = |name: &str| -> Result<Option<Cow<'a, str>>, Failure> {
+            let text = file.get_or_init(|| self.settings()).as_ref().map_err(|&failure| failure)?;
+            Ok(text
+                .lines()
+                .map(str::trim)
                 .filter(|line| !line.starts_with('#'))
                 .filter_map(|line| line.split_once('='))
                 .find(|(key, _)| key.trim() == name)
                 .map(|(_, value)| value.trim())
                 .filter(|value| !value.is_empty())
-                .map(|value| Cow::Owned(value.to_owned())))
+                .map(Cow::Borrowed))
         };
         let (key, from_environment) = match environment(account.key_name()) {
             Some(key) => (key, true),
@@ -864,9 +867,11 @@ impl Accounts {
     /// Starts a look for each account that is due one, or for all on a deliberate reload.
     pub(super) fn start(&mut self, now: i64, clock: Instant, manual: bool) {
         let Some(sources) = &self.sources else { return };
+        // One private file image per pass, opened only if the environment lacks a value.
+        let file = OnceCell::new();
         for account in &mut self.accounts {
             let which = account.which;
-            let credentials = sources.credentials(which);
+            let credentials = sources.credentials(which, &file);
             let id = credentials.as_ref().map(|credentials| credentials.id(which)).map_err(|&failure| failure);
             account.bind(id);
             let (Ok(credentials), Ok(id)) = (credentials, id) else { continue };
@@ -892,10 +897,12 @@ impl Accounts {
     /// ended a look it was announcing.
     pub(super) fn collect(&mut self, clock: Instant) -> bool {
         let Some(sources) = &self.sources else { return false };
+        // Re-read at completion: never publish a worker's answer under replacement credentials.
+        let file = OnceCell::new();
         let mut changed = false;
         for account in &mut self.accounts {
             let Some(result) = account.job.as_ref().and_then(sqlite::Job::finished) else { continue };
-            let id = sources.credentials(account.which).map(|credentials| credentials.id(account.which));
+            let id = sources.credentials(account.which, &file).map(|credentials| credentials.id(account.which));
             if account.bind(id) {
                 changed = true;
                 continue;
@@ -950,9 +957,10 @@ impl Sources {
         if choices.any() && !curl.exists() {
             lines.push(format!("Usage accounts: {} is missing, so no provider can be asked", curl.display()));
         }
+        let settings = OnceCell::new();
         for account in UsageAccount::ALL.into_iter().filter(|account| choices[*account] != Show::Hide) {
             let title = format!("{} {}", account.label(), account.subject());
-            let credentials = match self.credentials(account) {
+            let credentials = match self.credentials(account, &settings) {
                 Ok(credentials) => credentials,
                 Err(failure) => {
                     let name = match failure {

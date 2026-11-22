@@ -67,6 +67,19 @@ pub(crate) enum TransferReply {
 impl Editor {
     /// `forwarded` says the page is opened from another computer, through a Rex forward.
     pub(crate) fn open(forwarded: bool, viewers: impl FnOnce() -> Option<rex::Viewers>) -> Self {
+        // Host diagnostics do not decide which tab or settings files this editor owns.
+        // Read both before publishing the first state, without making one wait for the other.
+        let draft = std::thread::Builder::new().spawn(Self::open_draft);
+        let host = Host::probe(forwarded, viewers);
+        let mut editor = match draft {
+            Ok(thread) => thread.join().expect("settings startup thread panicked"),
+            Err(_) => Self::open_draft(),
+        };
+        editor.host = host;
+        editor
+    }
+
+    fn open_draft() -> Self {
         let inside = rex::inside();
         let store = Store::real();
         let target = inside.then(rex::Target::current).flatten();
@@ -80,7 +93,6 @@ impl Editor {
         editor.setup.alerts = Alerts::real();
         editor.setup.refresh_alerts();
         editor.setup.presence = editor.setup.presence.take().map(presence::Control::starting_helper);
-        editor.host = Host::probe(forwarded, viewers);
         editor
     }
 

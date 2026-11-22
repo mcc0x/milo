@@ -1598,6 +1598,16 @@ cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocap
 
 `tests/open_bench.rs` generates an ordinary repository of a few hundred files and a large one of fifty thousand, each with an upstream, unpushed commits, edited files and new ones. It times the first frame of the outline, the history and the reader, which is mostly the Git commands a pane runs before it can draw, then opening the outline's search and a letter typed into it. In the history it rewrites a file and times the slowest key pressed while the pane takes that in. It takes `MILO_BENCH_BASE` too. A pane's first frame varies by a few milliseconds from run to run and more on a busy machine, so compare medians of ten runs or more.
 
+To compare backend changes, run each build alone on the same machine:
+
+```sh
+cargo test --release --locked --bin milo usage_profile -- --ignored --nocapture --test-threads=1
+cargo build --release --locked
+python3 tests/settings-bench.py target/release/milo
+```
+
+The usage fixtures time transcript appends and SQLite reads with a writer still connected. They check token totals, window freshness and how often four loopback account providers are asked, including after a rate limit and a reopen. The settings fixture times reads during a competing save as well as independent edits and startup; its timings include loopback HTTP and Python JSON decoding. Neither fixture needs provider credentials. For delivery, saturation and idle measurements of the hosted relay, use its [isolated container benchmark](https://github.com/mcc0x/milo/blob/main/hosted/README.md#benchmark-the-shipped-relay).
+
 `tests/menu-bench.sh` times the macOS menu app with made-up frames, on a Mac with a menu bar to draw in:
 
 ```sh
@@ -1804,6 +1814,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, and opens a floating review of an agent-supplied patch. |
+| `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
@@ -1842,7 +1853,7 @@ Outside the project, milo keeps three things in its state folder for the editor:
 - The tracked file list is kept until the index changes, unpushed work is kept until the comparison changes, and commit file lists are cached once opened. Adding an unrelated untracked file does not require recounting edits in tracked files. With the same tracked status and comparison base, an ordinary save recounts only the edited files; changes that could affect rename detection or other files use the full comparison. A working reader reuses the Git status from its current refresh.
 - History reads a commit's file list on a thread of its own, one commit at a time. A key waits 40 milliseconds for it, which most commits need less than; after that the pane says it is reading, goes on taking keys, and looks for the list every 10 milliseconds until it arrives, also when the pane follows a shell. A list that arrives late is kept with its commit, found again by its hash, and is never shown under another. Quitting or switching projects cancels the current listing and reaps its Git process before the pane is discarded.
 - Usage does not query a tool's SQLite database again while its files are as a successful read left them: the same file, size, times and header for the database and its write-ahead log. That holds only if the files had been left alone for two seconds before the read and did not change during it, and only until a saved record dated ahead of the clock comes due or the local day ends. A failed read, a missing file and `r` always read, and an unchanged database is still read every five minutes. Limits get less latitude than activity: oh-my-pi's database is left unread only without a write-ahead log, because with one a commit can reach readers without its files changing. In write-ahead mode it is read at every look, as before.
-- `milo web` prints its link before it reads the settings. If asked to open the browser, it first checks where the Rex apps are connected, then starts the browser while it reads Git, the Rex tab and the settings. The listener holds a browser's first requests until the editor is whole, so no page is served from a half-read state.
+- `milo web` prints its link before it reads the settings. If asked to open the browser, it first checks where the Rex apps are connected. The editor reads its tab and draft while probing the host's Rex version and viewers, reusing the viewer check if it already made one. The listener holds the first requests until both reads finish. Once open, state reads use the last complete snapshot even if a save is waiting for a settings lock.
 - In the editor, undo and redo replace only the rows spanned by the recorded byte range. Syntax state above that range stays cached; a changed row can still change how later rows are coloured. Those rows are read again only as far as the first one that starts as it did before the edit, and what was known below it is kept.
 - Only changed screen cells are sent to the terminal, in one synchronised update. Milo asks for the background colour and uses it to shade the cursor and added or removed lines.
 - Printable bases use Unicode 17.0.0 East Asian Width: wide and fullwidth characters take two cells; ambiguous characters take one. Combining marks stay with their base where applicable. Milo omits default-ignorable formatting characters, including emoji variation selectors, but preserves spacing Hangul fillers. Width is measured by scalar, not by full grapheme cluster.

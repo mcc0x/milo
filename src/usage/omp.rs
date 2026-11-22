@@ -30,9 +30,8 @@ WITH cache_json AS (
     SELECT *, row_number() OVER (PARTITION BY provider ORDER BY observed_ms DESC,key) AS rank
     FROM reports WHERE provider IN ('anthropic','openai-codex') AND typeof(observed_ms)='integer'
       AND observed_ms BETWEEN 0 AND {latest}
-), history AS (
-    SELECT h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at, h.window_label, h.account_key,
-           first_value(h.account_key) OVER (PARTITION BY h.provider ORDER BY h.recorded_at DESC,h.id DESC) AS newest,
+), ranked_history AS (
+    SELECT h.id, h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at, h.window_label, h.account_key,
            row_number() OVER (
                PARTITION BY h.provider,h.account_key,h.limit_id ORDER BY h.recorded_at DESC,h.id DESC
            ) AS rank
@@ -42,6 +41,14 @@ WITH cache_json AS (
       AND (r.observed_ms IS NULL OR (
           h.recorded_at>r.observed_ms AND substr(r.key,-length(h.account_key)-1)=':'||h.account_key
       ))
+), history_heads AS (
+    -- The newest row per provider is also the newest row in its own account and limit.
+    SELECT provider, recorded_at, limit_id, used_fraction, resets_at, window_label, account_key,
+           first_value(account_key) OVER (PARTITION BY provider ORDER BY recorded_at DESC,id DESC) AS newest
+    FROM ranked_history WHERE rank=1
+), history AS (
+    SELECT provider, recorded_at, limit_id, used_fraction, resets_at, window_label
+    FROM history_heads WHERE account_key=newest
 )
 SELECT r.provider, r.observed_ms, json_extract(l.value,'$.id') AS limit_id,
        json_extract(l.value,'$.amount.usedFraction') AS used_fraction,
@@ -49,13 +56,13 @@ SELECT r.provider, r.observed_ms, json_extract(l.value,'$.id') AS limit_id,
        json_extract(l.value,'$.window.durationMs') AS duration_ms,
        json_extract(l.value,'$.scope.tier') AS tier, NULL AS window_label, 0 AS history_row
 FROM picked r LEFT JOIN json_each(r.limits) l ON l.type='object' AND NOT EXISTS (
-    SELECT 1 FROM history h WHERE h.rank=1 AND h.account_key=h.newest AND h.provider=r.provider
+    SELECT 1 FROM history h WHERE h.provider=r.provider
        AND h.limit_id=CASE l.type WHEN 'object' THEN json_extract(l.value,'$.id') END
 ) WHERE r.rank=1
 UNION ALL
 SELECT h.provider, h.recorded_at, h.limit_id, h.used_fraction, h.resets_at,
        NULL, NULL, h.window_label, 1
-FROM history h WHERE h.rank=1 AND h.account_key=h.newest
+FROM history h
 UNION ALL
 SELECT 'milo:ahead', at, NULL, NULL, NULL, NULL, NULL, NULL, 2
 FROM (SELECT min(at) AS at FROM (

@@ -8,6 +8,7 @@ mod idle;
 mod layout;
 mod menu_stream;
 mod opencode_activity;
+mod profile;
 mod status_line;
 mod tools;
 mod unchanged;
@@ -610,6 +611,35 @@ mod omp_limits {
         let [five, week] = reports.codex.unwrap().windows.base;
         assert_eq!(five.unwrap().percent, 50.0);
         assert!(week.is_none());
+    }
+
+    #[test]
+    fn omp_breaks_history_ties_by_row_id_for_both_the_account_and_its_limits() {
+        let f = Fixture::folder();
+        let Some(path) = sqlite(&f) else { return };
+        let now = NOW * 1000;
+        exec(
+            &path,
+            &format!(
+                "INSERT INTO usage_history(id, provider, account_key, recorded_at, limit_id, used_fraction, window_label)
+                 VALUES (9,'anthropic','oauth|account:zulu',{now},'anthropic:7d',0.375,'7 Day'),
+                        (2,'anthropic','oauth|account:alpha',{now},'anthropic:5h',0.125,'5 Hours'),
+                        (8,'anthropic','oauth|account:zulu',{now},'anthropic:5h',0.50,'5 Hours'),
+                        (7,'anthropic','oauth|account:zulu',{now},'anthropic:5h',0.25,'5 Hours'),
+                        (4,'anthropic','oauth|account:alpha',{now},'anthropic:7d:fable',0.625,'7 Day'),
+                        (10,'anthropic','oauth|account:alpha',{now}-1,'anthropic:7d',0.875,'7 Day');"
+            ),
+        );
+        let limits = omp::read(&path, NOW, TEST_WAIT).unwrap().claude.unwrap().windows;
+        assert_eq!(limits.base.map(|entry| entry.map(|window| window.percent)), [Some(50.0), Some(37.5)]);
+        assert!(limits.model_week.is_none(), "history from the other account must not fill a missing limit");
+
+        // A cache report pins the account despite the history tie and wins over history at the same instant.
+        let week = window("anthropic:7d", "0.75", (NOW + DAY) * 1000, 10_080, "null");
+        report(&path, "alpha", "anthropic", now - 1, &format!("[{week}]"));
+        let limits = omp::read(&path, NOW, TEST_WAIT).unwrap().claude.unwrap().windows;
+        assert_eq!(limits.base.map(|entry| entry.map(|window| window.percent)), [Some(12.5), Some(75.0)]);
+        assert_eq!(limits.model_week.unwrap().window.percent, 62.5);
     }
 
     #[test]

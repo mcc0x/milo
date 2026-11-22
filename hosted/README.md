@@ -69,3 +69,16 @@ bun test
 The tests use local fetch stand-ins only; no credentials, accounts, or provider messages are needed.
 
 `milo-alert-texts.json` lists the Telegram messages Milo words. These tests put each one to the production grammar, and `cargo test alerts` in the repository root checks that the list is what Milo sends. Change a wording in Milo, the list and, if it must, the grammar together.
+
+### Benchmark the shipped relay
+
+From the repository root:
+
+```sh
+docker build -f hosted/Dockerfile -t milo-relay-bench .
+docker run --rm --network none --read-only --mount type=volume,dst=/data \
+  --mount "type=bind,src=$PWD/hosted/relay-bench.ts,dst=/app/hosted/relay-bench.ts,readonly" \
+  milo-relay-bench bun run --no-env-file relay-bench.ts
+```
+
+The fixture uses a fresh anonymous volume, synthetic bindings and in-process provider replies. Requests reach the actual Bun listener over loopback inside the container. It measures readiness, whole Discord pairing flows, idle CPU and block I/O, Telegram send latency with a 25 ms provider, rejection under load, revocation and shutdown. It does not measure ingress, provider latency or production traffic. Run images serially; each needs its own empty volume.
