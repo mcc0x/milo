@@ -11,10 +11,13 @@ local function exact(id, kind)
     and value:sub(19, 19) == "-" and value:sub(24, 24) == "-"
 end
 
+local function valid_pid(pid)
+  return type(pid) == "number" and pid >= 2 and pid <= 2147483647 and pid % 1 == 0
+end
+
 local function peer(principal)
   return principal and principal.kind == "peer" and principal.transport == "unix"
-    and principal.uid == a.uid and type(principal.pid) == "number"
-    and principal.pid >= 2 and principal.pid <= 2147483647 and principal.pid % 1 == 0
+    and principal.uid == a.uid and valid_pid(principal.pid)
 end
 
 local function local_host()
@@ -31,7 +34,7 @@ local function local_host()
   if not (status and exact("host:" .. (status.host_id or ""), "host:")) then return end
   for _, listener in ipairs(status.listeners or {}) do
     if listener.endpoint == a.server and listener.transport == "unix" and listener.admission == "peer_credentials" then
-      return status.host_id
+      return status.host_id, principal.pid
     end
   end
 end
@@ -78,6 +81,40 @@ local function processes(info)
   return all
 end
 
+local remote_names = { ssh = true, sshd = true, ["sshd-session"] = true, mosh = true, ["mosh-client"] = true }
+
+local function process_parent(pid)
+  if not valid_pid(pid) then return end
+  local reply = rex.exec({ "/bin/ps", "-o", "ppid=,uid=,ucomm=", "-p", tostring(pid) },
+    { clear_env = true, timeout = 1 })
+  if not (reply and reply.ok) then return end
+  local ppid, uid, name = reply.stdout:match("^%s*(%d+)%s+(%d+)%s+(.-)%s*$")
+  return tonumber(ppid), tonumber(uid), name
+end
+
+local function own_caller(caller, cli_pid)
+  -- The Rex CLI was started directly by the Milo process that made the
+  -- request. Trace that process to the child Rex launched for this exact PTY,
+  -- not to a PID inferred from focus or even another working terminal.
+  local opener, uid = process_parent(cli_pid)
+  if opener ~= a.pid or uid ~= a.uid then return false end
+  local info = process(caller)
+  local root = info and not info.last_exit and info.child
+  if not (root and valid_pid(root.pid)) then return false end
+  if remote_names[root.name] then return false, true end
+  local login = root.path == "/usr/bin/login" and root.user_id == 0
+  if not login and root.user_id ~= a.uid then return false end
+  local pid = opener
+  for _ = 1, 24 do
+    if pid == root.pid then return not login or pid ~= opener end
+    local parent, owner, name = process_parent(pid)
+    if not parent or owner ~= a.uid or not name then return false end
+    if remote_names[name] then return false, true end
+    pid = parent
+  end
+  return false
+end
+
 local function own_anchor(block)
   local info = process(block)
   for _, child in ipairs(processes(info)) do
@@ -86,23 +123,18 @@ local function own_anchor(block)
   -- Rex's macOS launch can report only its root-owned login process even
   -- after exec has entered Milo. Verify the known anchor PID underneath it.
   local login = info and info.child
-  if login and login.path == "/usr/bin/login" and login.user_id == 0 and type(a.pid) == "number"
-    and a.pid >= 2 and a.pid <= 2147483647 and a.pid % 1 == 0 then
-    local got = rex.exec({ "/bin/ps", "-o", "ppid=,uid=", "-p", tostring(a.pid) }, { clear_env = true, timeout = 1 })
-    if got and got.ok then
-      local ppid, uid = got.stdout:match("^%s*(%d+)%s+(%d+)%s*$")
-      return tonumber(ppid) == login.pid and tonumber(uid) == a.uid
-    end
+  if login and login.path == "/usr/bin/login" and login.user_id == 0 then
+    local ppid, uid = process_parent(a.pid)
+    return ppid == login.pid and uid == a.uid
   end
   return false
 end
 
 local shell_names = { sh = true, bash = true, zsh = true, fish = true, dash = true,
   ksh = true, mksh = true, csh = true, tcsh = true, nu = true }
-local remote_names = { ssh = true, sshd = true, ["sshd-session"] = true, mosh = true, ["mosh-client"] = true }
 local function command_line(child)
   local pid = child.pid
-  if type(pid) ~= "number" or pid < 2 or pid > 2147483647 or pid % 1 ~= 0 then return end
+  if not valid_pid(pid) then return end
   local args = rex.exec({ "/bin/ps", "-ww", "-o", "command=", "-p", tostring(pid) },
     { clear_env = true, timeout = 1 })
   if args and args.ok then return args.stdout:match("^%s*(.-)%s*$") end
@@ -128,17 +160,17 @@ local function interactive(child)
 end
 
 local function shell_cwd(info)
-  local cwd
-  for _, child in ipairs(processes(info)) do
+  local chain = processes(info)
+  for _, child in ipairs(chain) do
     if remote_names[child.name] then return nil, true end
-    if not cwd and shell_names[child.name] and child.user_id == a.uid and type(child.cwd) == "string"
-      and child.cwd:sub(1, 1) == "/" and interactive(child) then
-      -- Prefer the first shell starting from the terminal's own child. A
-      -- nested foreground shell is not a reason to select another pane.
-      cwd = child.cwd
-    end
   end
-  return cwd
+  -- Rex's ancestors are nearest-first; processes() has already put them
+  -- in root-to-foreground order. Pick the deepest interactive shell only.
+  for i = #chain, 1, -1 do
+    local child = chain[i]
+    if shell_names[child.name] and child.user_id == a.uid and type(child.cwd) == "string"
+      and child.cwd:sub(1, 1) == "/" and interactive(child) then return child.cwd end
+  end
 end
 
 local function sidebar_role(block)
@@ -213,16 +245,20 @@ local directions = {
   above = { "vertical", "before" }, below = { "vertical", "after" },
 }
 
-local function open(host, view, caller, window, layer)
+local function open(host, view, caller, window, layer, owner_pid)
   if layer.kind ~= "tiled" or window.zoomed_block_id then return "tab" end
   local main, cwd = working_terminal(view, caller, window, layer, host)
   if not main then return cwd end
   if main.owner ~= caller.owner then return "client" end
   if not unchanged(view) then return "tab" end
-  if a.mode == "identify" then return rex.json.encode({ main = main.block_id, cwd = cwd }) end
-  if main.block_id ~= a.main or cwd ~= a.cwd then return "changed" end
-  local layout = { block = { flavor = terminal .. ".shell", label = "milo:preview",
-    options = { command = { a.exe, "preview-anchor", a.url, main.block_id }, shell = "none", cwd = cwd } } }
+  if a.mode == "identify" then
+    return rex.json.encode({ main = main.block_id, cwd = cwd, owner = caller.owner, owner_pid = owner_pid })
+  end
+  if main.block_id ~= a.main or cwd ~= a.cwd or caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "changed" end
+  local layout = { block = { flavor = terminal .. ".shell", label = "milo:preview", options = {
+    command = { a.exe, "preview-anchor", a.url, main.block_id, a.owner, tostring(a.owner_pid) },
+    shell = "none", cwd = cwd,
+  } } }
   local made, direction
   if a.placement == "floating" then
     made = rex.session.new_layer{ session_id = a.session, window_id = window.window_id,
@@ -245,16 +281,22 @@ local function focus(host, view, caller, window)
   return rex.session.focus_block{ session_id = a.session, block_id = a.main } and "ok" or "focus"
 end
 
-local function one_shot(host)
+local function one_shot(host, cli_pid)
   if not host then return "transport" end
   local view = current_view()
   if not view then return "tab" end
   local caller, window, layer = locate(view, a.block)
   if not caller or window.window_id ~= view.active_window_id then return "tab" end
   if not local_terminal(caller, host) then return "remote" end
-  if not local_owner(caller.owner) then return "client" end
-  if a.mode == "focus" then return focus(host, view, caller, window) end
-  return open(host, view, caller, window, layer)
+  local owner_pid = local_owner(caller.owner)
+  if not owner_pid then return "client" end
+  if a.mode == "focus" then
+    if caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "focus" end
+    return focus(host, view, caller, window)
+  end
+  local belongs, remote = own_caller(caller, cli_pid)
+  if not belongs then return remote and "remote" or "caller" end
+  return open(host, view, caller, window, layer, owner_pid)
 end
 
 local function visible(view, window, layer, index)
@@ -276,7 +318,7 @@ if a.mode ~= "watch" then
 end
 
 local host = local_host()
-local last, anchor_verified, owner, owner_pid
+local last, anchor_verified, last_revision
 local function emit(pid, layer)
   local state = pid and ("show " .. tostring(pid) .. (layer.kind == "floating" and " float" or " tile")) or "hide"
   if last ~= state then
@@ -291,7 +333,7 @@ local function stop(code)
   rex.stop(code or 0)
 end
 
-if not host then
+if not host or not exact(a.owner, "client:") or not valid_pid(a.owner_pid) then
   stop(1)
   return
 end
@@ -299,6 +341,7 @@ end
 local function refresh()
   local view = current_view()
   if not view then return stop(1) end
+  last_revision = view.revision
   local block, window, layer, index = locate(view, a.block)
   if not block then
     local listed = rex.session.list_blocks(session)
@@ -314,22 +357,26 @@ local function refresh()
     if block.label ~= "milo:preview" or not own_anchor(block) then return stop(1) end
     anchor_verified = true
   end
-  if not visible(view, window, layer, index) then return emit() end
-  local pid = local_owner(block.owner)
-  if not pid or (owner and (owner ~= block.owner or owner_pid ~= pid)) then return emit() end
-  owner, owner_pid = block.owner, pid
-  emit(pid, layer)
+  if not visible(view, window, layer, index) or block.owner ~= a.owner
+    or local_owner(a.owner) ~= a.owner_pid then return emit() end
+  emit(a.owner_pid, layer)
 end
 
-for _, event in ipairs{ "session_view_changed", "active_window_changed", "block_owner_changed", "client_connected" } do
+rex.on("session_view_changed", function(ctx, event)
+  if ctx.session_id ~= a.session then return end
+  if type(event.revision) == "number" and type(last_revision) == "number"
+    and event.revision <= last_revision then return end
+  refresh()
+end)
+for _, event in ipairs{ "active_window_changed", "block_owner_changed", "client_connected" } do
   rex.on(event, function(ctx) if ctx.session_id == a.session then refresh() end end)
 end
 rex.on("client_disconnected", function(ctx, event)
-  if owner and ctx.session_id == a.session and event.client_id == owner then stop() end
+  if ctx.session_id == a.session and event.client_id == a.owner then stop() end
 end)
 rex.on("client_connection_changed", function(ctx, event)
   if ctx.session_id == a.session then
-    if owner and event.client_id == owner and event.connection_state ~= "connected" then stop() else refresh() end
+    if event.client_id == a.owner and event.connection_state ~= "connected" then stop() else refresh() end
   end
 end)
 rex.on("block_closed", function(ctx, event)

@@ -1,8 +1,5 @@
 //! An explicit local URL, the user's placement choice, and a Rex-owned terminal anchor.
 
-#[cfg(not(target_os = "macos"))]
-use std::ffi::OsStr;
-
 use crate::preferences::PreviewPlacement;
 
 #[cfg(target_os = "macos")]
@@ -71,7 +68,7 @@ pub(crate) fn open(_: &str, _: Option<PreviewPlacement>) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn anchor(url: &str, _: &OsStr) -> Result<(), String> {
+pub(crate) fn anchor(url: &str, _: &str, _: &str, _: u32) -> Result<(), String> {
     open(url, None)
 }
 

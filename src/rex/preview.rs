@@ -83,6 +83,7 @@ fn problem(reply: &str) -> &'static str {
     match reply {
         "transport" => "couldn't prove Rex is connected directly through the terminal's local socket",
         "tab" => "the terminal is not in the active Rex tab",
+        "caller" => "the running Milo process is not in the specified Rex terminal",
         "client" => "the terminal isn't owned by a connected Rex app on this Mac",
         "shell" => "couldn't identify one interactive local working terminal in this Rex tab",
         "stale" => "the sidebar's working terminal is stale or is not in this Rex tab",
@@ -140,7 +141,9 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .filter(|path| Path::new(path).is_absolute())
         .ok_or("Milo needs an absolute UTF-8 executable path")?;
     let reply = connection.request("identify", &format!(r#","exe":{}"#, json(exe)))?;
-    let [main, cwd] = Value::parse(reply.as_bytes()).ok_or_else(|| problem(&reply).to_owned())?.fields(["main", "cwd"]);
+    let [main, cwd, owner, owner_pid] = Value::parse(reply.as_bytes())
+        .ok_or_else(|| problem(&reply).to_owned())?
+        .fields(["main", "cwd", "owner", "owner_pid"]);
     let main = main
         .and_then(|value| value.string(42))
         .filter(|id| exact_block(OsStr::new(id.as_ref())).is_some())
@@ -149,28 +152,38 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .and_then(|value| value.string(4096))
         .filter(|cwd| !cwd.contains('\0') && Path::new(cwd.as_ref()).is_absolute())
         .ok_or("Rex did not identify the working terminal's directory")?;
+    let owner = owner
+        .and_then(|value| value.string(43))
+        .filter(|id| exact_id(OsStr::new(id.as_ref()), "client:").is_some())
+        .ok_or("Rex did not identify the working terminal's viewer")?;
+    let owner_pid = owner_pid
+        .and_then(Value::unsigned)
+        .filter(|pid| (2..=2_147_483_647).contains(pid))
+        .ok_or("Rex did not identify the working terminal's viewer PID")?;
     crate::preview::require_access()?;
     let placement = override_placement.unwrap_or_else(|| {
         let root = crate::git::worktree(Path::new(cwd.as_ref()));
         Preferences::for_pane(root.as_deref()).0.preview_placement
     });
     let extra = format!(
-        r#","exe":{},"url":{},"placement":{},"main":{},"cwd":{}"#,
+        r#","exe":{},"url":{},"placement":{},"main":{},"cwd":{},"owner":{},"owner_pid":{owner_pid}"#,
         json(exe),
         json(url),
         json(placement.value()),
         json(&main),
         json(&cwd),
+        json(&owner),
     );
     // Arguments go through stdin. The URL is never in Rex CLI argv or an error.
     connection.call("open", &extra)
 }
 
-pub(crate) fn preview_watch() -> Result<Child, String> {
+pub(crate) fn preview_watch(owner: &str, owner_pid: u32) -> Result<Child, String> {
     let connection = Connection::local()?;
+    let extra = format!(r#","owner":{},"owner_pid":{owner_pid}"#, json(owner));
     connection
         .command()
-        .args(["--args", &connection.args("watch", "")])
+        .args(["--args", &connection.args("watch", &extra)])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -178,10 +191,9 @@ pub(crate) fn preview_watch() -> Result<Child, String> {
         .map_err(|_| "couldn't start the local Rex preview observer".into())
 }
 
-pub(crate) fn return_preview_focus(main: &OsStr) -> Result<(), String> {
-    let main = exact_block(main).ok_or("invalid Rex working terminal ID")?;
+pub(crate) fn return_preview_focus(main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
     let connection = Connection::local()?;
-    let extra = format!(r#", "main":{}"#, json(main));
+    let extra = format!(r#","main":{},"owner":{},"owner_pid":{owner_pid}"#, json(main), json(owner));
     connection.call("focus", &extra)
 }
 

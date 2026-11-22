@@ -918,18 +918,37 @@ fn preview_layout_and_observer() {
     use std::sync::mpsc::channel;
 
     let mut lab = Lab::start();
+    // The request runner must be a real PTY descendant, just as Milo is.
+    // It keeps its own PID while invoking Rex and supplies only test inputs.
     let root = lab.root.to_str().unwrap();
     let viewer = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_viewer.py");
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua");
     let url = "http://localhost:4321/lab/a%2Fb&$HOME";
     let pid_file = lab.root.join("preview-arguments");
-    let keep_alive = "while :; do /bin/sleep 10; done\n";
+    let nested = lab.root.join("nested-worktree");
+    fs::create_dir(&nested).unwrap();
+    fs::write(
+        lab.root.join("preview-request"),
+        format!(
+            "read -r target < \"$1\"\n\
+             payload=$(cat \"$1.json\")\n\
+             payload=${{payload/PID_TOKEN/$$}}\n\
+             '{root}/bin/rex' do -s \"$REX_SESSION\" -b \"$target\" '{script}' --args \"$payload\" > \"$1.reply\"\n\
+             mv \"$1.reply\" \"$1.done\"\n"
+        ),
+    )
+    .unwrap();
+    let side_loop = format!(
+        "request='{root}/request-'$REX_BLOCK\n\
+         while :; do if [ -f \"$request\" ]; then /bin/bash '{root}/preview-request' \"$request\"; rm \"$request\"; fi; \
+         /bin/sleep 0.05; done\n"
+    );
     for role in ["outline", "usage"] {
-        fs::write(lab.root.join(role), keep_alive).unwrap();
+        fs::write(lab.root.join(role), &side_loop).unwrap();
     }
     fs::write(
-        lab.root.join("preview-anchor"),
-        format!("printf '%s\\n' \"$$\" \"$1\" \"$2\" > preview-arguments\n{keep_alive}"),
+        nested.join("preview-anchor"),
+        format!("printf '%s\\n' \"$$\" \"$1\" \"$2\" \"$3\" \"$4\" > '{root}/preview-arguments'\nwhile :; do /bin/sleep 10; done\n"),
     )
     .unwrap();
     let created = lab.rex(&["new", "layout", "-c", root, "--shell=none", "--json", "--", "/bin/sh", "-i"]);
@@ -980,6 +999,8 @@ fn preview_layout_and_observer() {
     let mut client = String::new();
     peer_out.read_line(&mut client).unwrap();
     assert!(client.starts_with("client:"), "{client}");
+    let client = client.trim();
+    let owner = format!(r#","owner":"{client}","owner_pid":{viewer_pid}"#);
     let mut viewer_call = |method, args: &str| {
         writeln!(peer_in, r#"["{method}",{args}]"#).unwrap();
         let mut reply = String::new();
@@ -990,30 +1011,70 @@ fn preview_layout_and_observer() {
     let mut claim = || viewer_call("session.own_block", &format!(r#"{{"session_id":"{session}"}}"#));
     claim();
 
+    let stale_env = lab
+        .command(&lab.milo)
+        .env("REX_SESSION", &session)
+        .env("REX_BLOCK", &main)
+        .args(["preview", url, "--placement", "right"])
+        .output()
+        .unwrap();
+    assert!(!stale_env.status.success()
+        && String::from_utf8_lossy(&stale_env.stderr).contains("not in the specified Rex terminal"), "{stale_env:?}");
+
     let socket = lab.socket();
     // SAFETY: geteuid reads this account's own effective user ID.
     let uid = unsafe { libc::geteuid() };
-    let args = |mode: &str, block: &str, pid: u32, extra: &str| {
+    let args = |mode: &str, block: &str, pid: &str, extra: &str| {
         format!(r#"{{"mode":"{mode}","server":"{socket}","uid":{uid},"pid":{pid},"session":"{session}","block":"{block}"{extra}}}"#)
     };
-    let identify = |caller: &str| {
-        let payload = args("identify", caller, std::process::id(), r#","exe":"/bin/bash""#);
-        lab.rex(&["do", "-s", &session, "-b", caller, script, "--args", &payload])
+    let send = |caller: &str, command: &str| {
+        lab.rex(&["send", "-s", &session, "-b", caller, command]);
+        lab.rex(&["send-key", "-s", &session, "-b", caller, "enter"]);
     };
-    let open = |caller: &str, placement: &str, expected: &str, cwd: &str| {
-        let extra = format!(r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}""#);
-        let payload = args("open", caller, std::process::id(), &extra);
-        lab.rex(&["do", "-s", &session, "-b", caller, script, "--args", &payload])
+    fn request_file(lab: &Lab, caller: &str) -> PathBuf {
+        lab.root.join(format!("request-{caller}"))
+    }
+    let request = |mode: &str, origin: &str, target: &str, extra: &str| {
+        let file = request_file(&lab, origin);
+        let done = file.with_extension("done");
+        fs::write(file.with_extension("json"), args(mode, target, "PID_TOKEN", extra)).unwrap();
+        fs::write(&file, format!("{target}\n")).unwrap();
+        if origin == main || origin == another_shell {
+            send(origin, &format!("/bin/bash '{root}/preview-request' '{}'; rm '{}'", file.display(), file.display()));
+        }
+        assert!(soon(|| done.exists() && !file.exists()), "no reply from {origin} for {mode} on {target}");
+        let reply = fs::read_to_string(&done).unwrap();
+        fs::remove_file(done).unwrap();
+        reply
+    };
+    let identify = |origin: &str, target: &str| {
+        request("identify", origin, target, r#","exe":"/bin/bash""#)
+    };
+    let open = |origin: &str, target: &str, placement: &str, expected: &str, cwd: &str| {
+        let extra = format!(
+            r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}"{owner}"#,
+        );
+        request("open", origin, target, &extra)
     };
     let launch = |caller: &str, placement: &str| {
-        let plan = identify(caller);
+        let plan = identify(caller, caller);
         assert_eq!(id(&plan, "main"), main);
-        open(caller, placement, &main, &id(&plan, "cwd"))
+        let cwd = id(&plan, "cwd");
+        assert_eq!(Path::new(&cwd), nested.canonicalize().unwrap());
+        assert_eq!(id(&plan, "owner"), client);
+        open(caller, caller, placement, &main, &cwd)
     };
     let close = |block: &str| lab.rex(&["block", "close", "-s", &session, block]);
-    assert_eq!(identify(&stale).trim(), "stale");
-    assert_eq!(identify(&usage).trim(), "shell");
-    assert_eq!(open(&rail, "right", &main, "/wrong/directory").trim(), "changed");
+    assert_eq!(identify(&stale, &stale).trim(), "stale");
+    assert_eq!(identify(&usage, &usage).trim(), "shell");
+    assert_eq!(identify(&main, &another_shell).trim(), "caller");
+    assert_eq!(identify(&another_shell, &main).trim(), "caller");
+    assert_eq!(open(&main, &another_shell, "right", &another_shell, root).trim(), "caller");
+    assert_eq!(open(&another_shell, &main, "right", &main, root).trim(), "caller");
+    assert_eq!(open(&rail, &rail, "right", &main, "/wrong/directory").trim(), "changed");
+    send(&main, &format!("(cd '{}' && exec /bin/sh -i)", nested.display()));
+    send(&main, &format!("pwd > '{root}/nested-cwd'"));
+    assert!(soon(|| lab.read("nested-cwd").trim().ends_with("/nested-worktree")));
     for block in [&stale, &usage, &another_shell] {
         close(block);
     }
@@ -1035,7 +1096,8 @@ fn preview_layout_and_observer() {
     ] {
         assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
         check_focus();
-        assert!(soon(|| lab.read("preview-arguments").ends_with(&format!("\n{url}\n{main}\n"))));
+        let literal = format!("\n{url}\n{main}\n{client}\n{viewer_pid}\n");
+        assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
         let found = scope(&format!(
@@ -1053,8 +1115,35 @@ fn preview_layout_and_observer() {
         let block = found.next().unwrap();
         let layer = found.next().unwrap();
         claim();
+        let mut transferred = None;
+        if placement == "right" {
+            lab.rex(&["focus", "-s", &session, &second_tab]);
+            let mut other = lab
+                .command("python3")
+                .arg(viewer)
+                .arg(lab.root.join("s.sock"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = other.stdin.take().unwrap();
+            let mut output = BufReader::new(other.stdout.take().unwrap());
+            let mut reply = String::new();
+            output.read_line(&mut reply).unwrap();
+            assert!(reply.starts_with("client:"), "{reply}");
+            for (method, payload) in [
+                ("session.attach", format!(r#"{{"session_id":"{session}"}}"#)),
+                ("session.own_block", format!(r#"{{"session_id":"{session}","block_ids":["{block}"]}}"#)),
+            ] {
+                writeln!(input, r#"["{method}",{payload}]"#).unwrap();
+                reply.clear();
+                output.read_line(&mut reply).unwrap();
+                assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
+            }
+            transferred = Some((other, input, output));
+        }
 
-        let payload = args("watch", block, child, "");
+        let payload = args("watch", block, &child.to_string(), &owner);
         let mut watch = lab
             .command(lab.root.join("bin/rex"))
             .args(["--timeout", "3s", "do", "-s", &session, "-b", block, script, "--args", &payload, "--fail-fast"])
@@ -1077,6 +1166,16 @@ fn preview_layout_and_observer() {
         let kind = if placement == "floating" { "float" } else { "tile" };
         let show = format!("show {viewer_pid} {kind}");
         expect("hide");
+        if let Some((mut other, input, output)) = transferred.take() {
+            lab.rex(&["focus", "-s", &session, &tab]);
+            assert!(matches!(
+                receive.recv_timeout(Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ), "preview appeared for a foreign owner before its first show");
+            claim();
+            drop((input, output));
+            assert!(other.wait().unwrap().success());
+        }
         expect(&show);
         if placement == "floating" {
             scope(&format!("assert(rex.session.resize_layer{{layer_id='{layer}', bounds={{0.25,0.2,0.55,0.55}}}})"));
@@ -1088,8 +1187,8 @@ fn preview_layout_and_observer() {
             expect("hide");
             scope(&format!("assert(rex.session.set_layer_state{{layer_id='{layer}', state='normal', focus=true}})"));
             expect(&show);
-            let extra = format!(r#","main":"{main}""#);
-            let focus = args("focus", block, child, &extra);
+            let extra = format!(r#","main":"{main}"{owner}"#);
+            let focus = args("focus", block, &child.to_string(), &extra);
             assert_eq!(lab.rex(&["do", "-s", &session, "-b", block, script, "--args", &focus]).trim(), "ok");
             check_focus();
             // Outlive the CLI connection/request timeout without polling the server.

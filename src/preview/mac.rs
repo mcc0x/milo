@@ -94,11 +94,11 @@ pub(crate) fn require_access() -> Result<(), String> {
 
 /// The helper and observer run only for this terminal. In particular, failure
 /// to start WebKit must not leave the observer waiting for more session events.
-pub(crate) fn anchor(url: &str, main: &OsStr) -> Result<(), String> {
+pub(crate) fn anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
     use std::time::{Duration, Instant};
 
-    let mut watcher = crate::rex::preview_watch()?;
-    let result = run(url, main, &mut watcher);
+    let mut watcher = crate::rex::preview_watch(owner, owner_pid)?;
+    let result = run(url, main, owner, owner_pid, &mut watcher);
     // EOF can reach the helper before Rex's exit status is waitable. Give it
     // a short grace period, but report nothing from the Rex process itself.
     let deadline = Instant::now() + Duration::from_millis(80);
@@ -119,7 +119,7 @@ pub(crate) fn anchor(url: &str, main: &OsStr) -> Result<(), String> {
     result
 }
 
-fn run(url: &str, main: &OsStr, watcher: &mut Child) -> Result<(), String> {
+fn run(url: &str, main: &str, owner: &str, owner_pid: u32, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
     let mut helper = spawn(url, state.into()).map_err(|e| format!("could not launch the local WebKit helper: {e}"))?;
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
@@ -129,7 +129,7 @@ fn run(url: &str, main: &OsStr, watcher: &mut Child) -> Result<(), String> {
         match actions.read_line(&mut action) {
             Ok(0) => break,
             Ok(_) if action == "focus\n" => {
-                let _ = crate::rex::return_preview_focus(main);
+                let _ = crate::rex::return_preview_focus(main, owner, owner_pid);
             }
             _ => {
                 let _ = helper.kill();

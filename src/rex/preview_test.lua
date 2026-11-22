@@ -50,6 +50,7 @@ local function fixture(mode, block)
     other = terminal(other, "second project"),
     referenced = main,
     shell_command = "-zsh",
+    parents = { [cli] = { helper, uid, "rex" }, [helper] = { block == main and 12 or 11, uid, "milo" } },
     proc = {},
   }
   f.proc[main] = { child = { name = "zsh", path = "/bin/zsh", argv0 = "-zsh", user_id = uid, pid = 12, cwd = "/work/project" } }
@@ -70,7 +71,7 @@ local function fixture(mode, block)
     session_id = session,
     block_id = block,
     args = { mode = mode, server = server, uid = uid, pid = helper, session = session, block = block,
-      exe = exe, url = url, placement = "right", main = main, cwd = "/work/project" },
+      exe = exe, url = url, placement = "right", main = main, cwd = "/work/project", owner = app, owner_pid = gui },
     call = function(method, a)
       if method == "server.whoami" then return { principal = f.cli } end
       if method == "server.status" then return f.status end
@@ -81,6 +82,10 @@ local function fixture(mode, block)
     exec = function(argv)
       if argv[1] == "/bin/sh" then return { ok = true, stdout = tostring(cli) } end
       assert(argv[1] == "/bin/ps")
+      if argv[3] == "ppid=,uid=,ucomm=" then
+        local p = f.parents[tonumber(argv[5])]
+        return p and { ok = true, stdout = string.format("%d %d %s", unpack(p)) } or nil
+      end
       if argv[6] == "12" then return { ok = true, stdout = f.shell_command } end
       assert(argv[6] == "11")
       return { ok = true, stdout = exe .. " outline --shell " .. f.referenced .. "\n" }
@@ -106,8 +111,9 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   assert(a.focus == false and a.layout.block.label == "milo:preview")
   local launch = a.layout.block.options
   assert(launch.shell == "none" and launch.cwd == "/work/project")
-  assert(#launch.command == 4 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
-    and launch.command[3] == url and launch.command[4] == main)
+  assert(#launch.command == 6 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
+    and launch.command[3] == url and launch.command[4] == main
+    and launch.command[5] == app and launch.command[6] == tostring(gui))
   if p[1] == "floating" then
     assert(f.placed.api == "floating" and a.window_id == window and #a.bounds == 4 and not a.anchor_id)
   else
@@ -137,6 +143,30 @@ denied("open", sidebar, function(f) f.cli = peer(cli + 1) end, "transport")
 denied("open", sidebar, function(f) f.status.listeners[1].endpoint = "unix:///tmp/elsewhere.sock" end, "transport")
 denied("open", sidebar, function(f) f.rex.block_id = other end, "transport")
 denied("open", sidebar, function(f) f.rex.args.cwd = "/previous/directory" end, "changed")
+denied("open", sidebar, function(f) f.rex.args.owner = other_app end, "changed")
+denied("open", sidebar, function(f) f.rex.args.owner_pid = gui + 1 end, "changed")
+for _, mode in ipairs{ "identify", "open" } do
+  denied(mode, main, function(f) f.parents[helper][1] = 11 end, "caller")
+  denied(mode, sidebar, function(f) f.parents[helper][1] = 12 end, "caller")
+end
+local wrapped = fixture("open", main)
+wrapped.parents[helper][1] = 14
+wrapped.parents[14] = { 12, uid, "bash" }
+wrapped.proc[main].ancestors = { wrapped.proc[main].child }
+wrapped.proc[main].child = { pid = 12, user_id = 0, path = "/usr/bin/login", name = "login" }
+assert(call(wrapped)() == "ok\n")
+local nested = fixture("open", main)
+local outer = nested.proc[main].child
+local inner = { name = "zsh", path = "/bin/zsh", argv0 = "-zsh", user_id = uid, pid = 13, cwd = "/nested/path" }
+nested.proc[main].ancestors = { inner, outer }
+nested.proc[main].foreground = { name = "git" }
+nested.rex.args.cwd = inner.cwd
+local exec = nested.rex.exec
+nested.rex.exec = function(argv)
+  if argv[6] == "13" then return { ok = true, stdout = "-zsh" } end
+  return exec(argv)
+end
+assert(call(nested)() == "ok\n" and nested.placed.args.layout.block.options.cwd == inner.cwd)
 denied("open", sidebar, function(f) f.rex.args.main = other end, "changed")
 denied("open", sidebar, function(f)
   f.rail.label = "milo:usage"
@@ -151,6 +181,8 @@ denied("focus", preview, function(f) f.rex.args.main = other end, "focus")
 denied("focus", preview, function(f) f.view.active_window_id = inactive end, "tab")
 denied("focus", preview, function(f) f.window.zoomed_block_id = preview end, "focus")
 denied("focus", preview, function(f) f.proc[preview].child.pid = helper + 1 end, "focus")
+denied("focus", preview, function(f) f.rex.args.owner = other_app end, "focus")
+denied("focus", preview, function(f) f.rex.args.owner_pid = gui + 1 end, "focus")
 
 local f = fixture("watch", preview)
 local observe = call(f)
@@ -217,3 +249,32 @@ assert(unavailable("active_window_changed") == "hide\nshow 40 tile\nhide\n" and 
 local invalid = fixture("watch", preview)
 invalid.cli.pid = cli + 1
 assert(call(invalid)() == "hide\n" and invalid.stopped == 1)
+local hidden = fixture("watch", preview)
+hidden.view.active_window_id = inactive
+local first = call(hidden)
+assert(first() == "hide\n")
+hidden.gui.client_id, hidden.anchor.owner, hidden.gui.principal = other_app, other_app, peer(gui + 1)
+assert(first("block_owner_changed") == "hide\n")
+hidden.view.active_window_id = window
+assert(first("active_window_changed") == "hide\n")
+hidden.gui.client_id, hidden.anchor.owner, hidden.gui.principal = app, app, peer(gui)
+assert(first("block_owner_changed") == "hide\nshow 40 tile\n")
+
+local revisions = fixture("watch", preview)
+local reads = 0
+local view = revisions.rex.session.view
+revisions.rex.session.view = function(args)
+  reads = reads + 1
+  return view(args)
+end
+local events = call(revisions)
+assert(events() == "hide\nshow 40 tile\n" and reads == 1)
+assert(events("session_view_changed", { revision = 1 }) == "hide\nshow 40 tile\n" and reads == 1)
+revisions.view.revision, revisions.view.active_window_id = 3, inactive
+assert(events("session_view_changed", { revision = 2 }) == "hide\nshow 40 tile\nhide\n" and reads == 2)
+assert(events("session_view_changed", { revision = 3 }) == "hide\nshow 40 tile\nhide\n" and reads == 2)
+revisions.view.active_window_id = window
+assert(events("active_window_changed") == "hide\nshow 40 tile\nhide\nshow 40 tile\n" and reads == 3)
+events("block_owner_changed")
+events("client_connection_changed")
+assert(reads == 5)
