@@ -183,15 +183,20 @@ impl Page {
         let shown = h - 1;
         // A page too long for the pane continues in a second column, and a
         // third, where the pane is wide enough: fewer rows are left to scroll to.
-        let columns = self.rows.len().div_ceil(shown).clamp(1, ((w - 1) / COLUMN).max(1));
-        self.visible = shown * columns;
-        self.top = self.top.min(self.rows.len().saturating_sub(self.visible));
-        for (i, row) in self.rows.iter().skip(self.top).take(self.visible).enumerate() {
-            let column = i / shown;
-            let end = if column + 1 == columns { w - 1 } else { (column + 1) * COLUMN - 1 };
-            let mut x = 1 + column * COLUMN;
-            for (text, st) in row {
-                x += s.put(x, i % shown, end.saturating_sub(x), text, *st);
+        let most = ((w - 1) / COLUMN).max(1);
+        let (sections, covered) = self.sections(shown).fold((0, 0), |(count, _), rows| (count + 1, rows.end));
+        if most > 1 && sections <= most && covered == self.rows.len() {
+            // The whole page fits, each column ending with a section.
+            (self.top, self.visible) = (0, self.rows.len());
+            for (column, rows) in self.sections(shown).enumerate() {
+                draw_column(s, column, sections, &self.rows[rows]);
+            }
+        } else {
+            let columns = self.rows.len().div_ceil(shown).clamp(1, most);
+            self.visible = shown * columns;
+            self.top = self.top.min(self.rows.len().saturating_sub(self.visible));
+            for (column, rows) in self.rows[self.top..].chunks(shown).take(columns).enumerate() {
+                draw_column(s, column, columns, rows);
             }
         }
         // The thumb covers the rows still out of sight, so it ends at the bottom with the page.
@@ -221,6 +226,33 @@ impl Page {
         let last = self.rows.len().saturating_sub(self.visible.max(shown));
         self.top = self.top.saturating_add_signed(rows).min(last);
         true
+    }
+
+    /// The page as columns of at most `shown` rows that each end where a
+    /// section does: the blank row there is left out. A section longer than
+    /// a column ends the columns short of the page.
+    fn sections(&self, shown: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+        let mut start = Some(0);
+        std::iter::from_fn(move || {
+            let from = start?;
+            if self.rows.len() - from <= shown {
+                start = None;
+                return Some(from..self.rows.len());
+            }
+            let blank = (from + 1..=from + shown).rev().find(|&row| self.rows[row].is_empty());
+            start = blank.map(|row| row + 1);
+            blank.map(|row| from..row)
+        })
+    }
+}
+
+fn draw_column(s: &mut Screen, column: usize, columns: usize, rows: &[HelpRow]) {
+    let end = if column + 1 == columns { s.w - 1 } else { (column + 1) * COLUMN - 1 };
+    for (y, row) in rows.iter().enumerate() {
+        let mut x = 1 + column * COLUMN;
+        for (text, st) in row {
+            x += s.put(x, y, end.saturating_sub(x), text, *st);
+        }
     }
 }
 
@@ -273,6 +305,21 @@ mod column_tests {
         assert_eq!(end[2], format!("   {:<25}   {:<25}▐", "six", "nine"));
         assert!(page.scroll(Key::Up, 4));
         assert_eq!(drawn(&mut page, 57, 4)[0], format!("   {:<25}   six", "three"));
+    }
+
+    #[test]
+    fn columns_break_between_sections_where_the_whole_page_then_fits() {
+        let section = |name| [heading(name), note("first"), note("second"), HelpRow::new()];
+        let mut page = Page::new(["Marks", "Keys", "Mouse"].into_iter().flat_map(section).collect());
+        // Five rows hold a section and most of the next: the next starts a column instead.
+        let rows = drawn(&mut page, 85, 6);
+        assert_eq!(rows[0], format!(" {:<27} {:<27} Mouse", "Marks", "Keys"));
+        assert_eq!(rows[2], format!("   {:<25}   {:<25}   second", "second", "second"));
+        assert_eq!(rows[3..5], ["", ""]);
+        // With room for two columns only, the page scrolls through even ones.
+        let rows = drawn(&mut page, 57, 6);
+        assert_eq!(rows[0], format!(" {:<27}   {:<25}▐", "Marks", "first"));
+        assert_eq!(rows[4], format!(" {:<27}   first", "Keys"));
     }
 }
 
