@@ -389,6 +389,17 @@ if not host or not exact(a.owner, "client:") or not valid_pid(a.owner_pid)
   return
 end
 
+local function track_anchor(block)
+  if not local_terminal(block, host) or block.block_id ~= a.block
+    or (block.label ~= preview_label and block.label ~= staging_label) then return false end
+  if not verified then
+    if not own_anchor(block) then return false end
+    verified = true
+  end
+  if block.label == preview_label then published = true end
+  return true
+end
+
 local function refresh()
   local view = current_view()
   if not view then return stop(1) end
@@ -404,18 +415,21 @@ local function refresh()
       end
       return false
     end
-    if (block or detached(a.block)) and (main or detached(a.main)) then return emit() end
+    if (block or detached(a.block)) and (main or detached(a.main)) then
+      -- Publication is independent of placement. A detached anchor has
+      -- no view entry, but Rex still describes its exact block and label.
+      if not block then
+        local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
+        block = described and described.block
+      end
+      if not track_anchor(block) then return stop(1) end
+      return emit()
+    end
     return stop()
   end
   if window.window_id ~= a.window or place ~= window then return stop() end
-  if not local_terminal(block, host) or not local_terminal(main, host) or tiled.kind ~= "tiled" then return stop(1) end
-  if block.label ~= preview_label and block.label ~= staging_label then return stop(1) end
-  if not verified then
-    if not own_anchor(block) then return stop(1) end
-    verified = true
-  end
+  if not local_terminal(main, host) or tiled.kind ~= "tiled" or not track_anchor(block) then return stop(1) end
   if block.label ~= preview_label then return emit() end
-  published = true
   if not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner
     or local_owner(a.owner) ~= a.owner_pid then return emit() end
   emit(a.owner_pid, layer)
@@ -453,4 +467,9 @@ emit()
 rex.after(0, refresh)
 -- If the launcher disappears before it can validate and publish our block,
 -- close the unused terminal without ever exposing an overlay.
-rex.after(8, function() if not published then stop() end end)
+rex.after(8, function()
+  if published then return end
+  local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
+  if not track_anchor(described and described.block) then return stop(1) end
+  if not published then stop() end
+end)

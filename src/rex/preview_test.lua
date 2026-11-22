@@ -346,6 +346,34 @@ assert(gate("deadline") == "hide\nshow 40 tile\n" and not staged.stopped)
 local unpublished = fixture("watch", preview)
 unpublished.anchor.label = "milo:preview:starting"
 assert(call(unpublished)("deadline") == "hide\n" and unpublished.stopped == 0)
+local staged_detached = fixture("watch", preview)
+staged_detached.anchor.label = "milo:preview:starting"
+staged_detached.detached, staged_detached.tiled.blocks = true, { staged_detached.rail, staged_detached.main }
+assert(call(staged_detached)("deadline") == "hide\n" and staged_detached.stopped == 0)
+
+for _, side in ipairs{ "main", "anchor" } do
+  local initial = fixture("watch", preview)
+  if side == "main" then
+    initial.main_detached, initial.tiled.blocks = true, { initial.rail, initial.anchor }
+  else
+    initial.detached, initial.tiled.blocks = true, { initial.rail, initial.main }
+    -- Miss the publication event while detached; the timer itself must
+    -- recheck the authoritative label rather than using the stale latch.
+    initial.anchor.label = "milo:preview:starting"
+  end
+  local watch = call(initial)
+  assert(watch() == "hide\n" and not initial.stopped)
+  initial.anchor.label = "milo:preview"
+  assert(watch("deadline") == "hide\n" and not initial.stopped)
+  initial.detached, initial.main_detached = false, false
+  initial.tiled.blocks = { initial.rail, initial.main, initial.anchor }
+  assert(watch("session_view_changed") == "hide\nshow 40 tile\n" and not initial.stopped)
+end
+
+local wrong_detached = fixture("watch", preview)
+wrong_detached.detached, wrong_detached.tiled.blocks = true, { wrong_detached.rail, wrong_detached.main }
+wrong_detached.proc[preview].child.pid = helper + 1
+assert(call(wrong_detached)() == "hide\n" and wrong_detached.stopped == 1)
 local forged = fixture("watch", preview)
 forged.parents[cli][1] = 99
 assert(call(forged)() == "hide\n" and forged.stopped == 1)
