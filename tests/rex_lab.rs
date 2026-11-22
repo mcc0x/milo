@@ -1097,8 +1097,11 @@ fn preview_layout_and_observer() {
     lab.rex(&["focus", "-s", &session, &second_tab]);
     assert_eq!(identify(&main, &main).trim(), "tab");
     lab.rex(&["focus", "-s", &session, &tab]);
-    let floated = format!(r#"{{"session_id":"{session}","block_id":"{another_shell}","bounds":[0.1,0.1,0.6,0.6]}}"#);
-    lab.rex(&["api", "call", "session.float_block", &floated]);
+    let float_block = |block: &str| {
+        let floated = format!(r#"{{"session_id":"{session}","block_id":"{block}","bounds":[0.1,0.1,0.6,0.6]}}"#);
+        lab.rex(&["api", "call", "session.float_block", &floated]);
+    };
+    float_block(&another_shell);
     assert_eq!(identify(&another_shell, &another_shell).trim(), "floating_caller");
     send(&main, &format!("(cd '{}' && exec /bin/sh -i)", nested.display()));
     send(&main, &format!("pwd > '{root}/nested-cwd'"));
@@ -1128,6 +1131,8 @@ fn preview_layout_and_observer() {
     assert!(lab.view().tabs.values().all(|tab| !tab.labels().iter().any(|label| label.starts_with("milo:preview"))));
     let _ = fs::remove_file(&pid_file);
     lab.rex(&["focus", "-s", &session, &tab]);
+    assert_eq!(launch(&rail, "floating").trim(), "placement");
+    assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
 
     let start_watch = |block: &str, child: u32| {
         let extra = format!(r#","main":"{main}"{owner}"#);
@@ -1152,7 +1157,6 @@ fn preview_layout_and_observer() {
         ("left", "horizontal", "before", &rail),
         ("above", "vertical", "before", &rail),
         ("below", "vertical", "after", &rail),
-        ("floating", "", "", &rail),
     ] {
         assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
         check_focus();
@@ -1167,13 +1171,10 @@ fn preview_layout_and_observer() {
              return (sp.direction=='{direction}' and sp['{side}'].block_id==b.block_id \
              and (sp.before.block_id=='{main}' or sp.after.block_id=='{main}')) \
              or adjacent(sp.before) or adjacent(sp.after) end; \
-             if '{placement}'=='floating' then assert(l.kind=='floating' and l.layout.block_id==b.block_id) \
-             else assert(l.kind=='tiled' and adjacent(l.layout)) end; print(b.block_id); print(l.layer_id); return end end end \
+             assert(l.kind=='tiled' and adjacent(l.layout)); print(b.block_id); return end end end \
              end end; error('no preview')"
         ));
-        let mut found = found.lines();
-        let block = found.next().unwrap();
-        let layer = found.next().unwrap();
+        let block = found.lines().next().unwrap();
         claim();
         let mut transferred = None;
         if placement == "right" {
@@ -1225,8 +1226,7 @@ fn preview_layout_and_observer() {
             states.set(index + 1);
         };
         let watch_pid = || fs::read_to_string(watch.with_extension("watch.pid")).unwrap().trim().parse::<u32>().unwrap();
-        let kind = if placement == "floating" { "float" } else { "tile" };
-        let show = format!("show {viewer_pid} {kind}");
+        let show = format!("show {viewer_pid} tile");
         expect("hide");
         if let Some((mut other, input, output)) = transferred.take() {
             lab.rex(&["focus", "-s", &session, &tab]);
@@ -1244,31 +1244,41 @@ fn preview_layout_and_observer() {
             lab.rex(&["focus", "-s", &session, &main]);
             expect(&show);
         }
-        if placement == "floating" {
-            scope(&format!("assert(rex.session.resize_layer{{layer_id='{layer}', bounds={{0.25,0.2,0.55,0.55}}}})"));
-            scope(&format!(
-                "local s=assert(rex.session.view{{}}); for _,w in ipairs(s.windows) do for _,l in ipairs(w.layers) do \
-                 if l.layer_id=='{layer}' then assert(l.bounds[1]==0.25 and l.bounds[3]==0.55); return end end end; error('no layer')"
-            ));
-            scope(&format!("assert(rex.session.set_layer_state{{layer_id='{layer}', state='minimized'}})"));
-            expect("hide");
-            scope(&format!("assert(rex.session.set_layer_state{{layer_id='{layer}', state='normal', focus=true}})"));
-            expect(&show);
+        let (before, after) = if side == "before" { (block, main.as_str()) } else { (main.as_str(), block) };
+        scope(&format!(
+            "assert(rex.session.resize_pane{{direction='{direction}', before_block_id='{before}', \
+             after_block_id='{after}', ratio=0.4}})"
+        ));
+        lab.rex(&["zoom", "-s", &session, &main, "--on"]);
+        expect("hide");
+        lab.rex(&["zoom", "-s", &session, &main, "--off"]);
+        expect(&show);
+        if placement == "right" {
+            lab.rex(&["focus", "-s", &session, block]);
             let extra = format!(r#","main":"{main}"{owner}"#);
             assert_eq!(request("focus", block, block, &extra).trim(), "ok");
             check_focus();
             // Outlive the CLI connection/request timeout without polling the server.
             std::thread::sleep(Duration::from_millis(3100));
             assert!(alive(watch_pid()));
-        } else {
-            let (before, after) = if side == "before" { (block, main.as_str()) } else { (main.as_str(), block) };
-            scope(&format!(
-                "assert(rex.session.resize_pane{{direction='{direction}', before_block_id='{before}', \
-                 after_block_id='{after}', ratio=0.4}})"
+        }
+        if placement == "above" {
+            // A separate Rex layer still conceals the tiled preview while visible.
+            let cover = scope(&format!(
+                "local cover=assert(rex.session.new_layer{{window_id='{tab}',bounds={{0.25,0.2,0.55,0.55}},focus=false, \
+                 layout={{block={{flavor='com.superlogical.terminal.shell', \
+                 options={{command={{'/bin/sleep','60'}},cwd='{root}',shell='none'}}}}}}}}).block_ids[1]; \
+                 local s=assert(rex.session.view{{}}); for _,w in ipairs(s.windows) do if w.window_id=='{tab}' then \
+                 for _,l in ipairs(w.layers) do if l.kind=='floating' and l.layout.block_id==cover then print(l.layer_id); return end end \
+                 end end; error('no covering layer')"
             ));
-            lab.rex(&["zoom", "-s", &session, &main, "--on"]);
+            let cover = cover.trim();
             expect("hide");
-            lab.rex(&["zoom", "-s", &session, &main, "--off"]);
+            scope(&format!("assert(rex.session.set_layer_state{{layer_id='{cover}', state='minimized'}})"));
+            expect(&show);
+            scope(&format!("assert(rex.session.set_layer_state{{layer_id='{cover}', state='normal', focus=false}})"));
+            expect("hide");
+            scope(&format!("assert(rex.session.close_layer{{layer_id='{cover}'}})"));
             expect(&show);
         }
         lab.rex(&["focus", "-s", &session, &second_tab]);
@@ -1283,12 +1293,13 @@ fn preview_layout_and_observer() {
             assert!(soon(|| fs::read_to_string(watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
             close(block);
             lab.rex(&["focus", "-s", &session, &main]);
+        } else if placement == "below" {
+            float_block(block);
+            expect("hide");
+            assert!(soon(|| fs::read_to_string(watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "1")));
+            close(block);
         } else {
-            if placement == "floating" {
-                scope(&format!("assert(rex.session.close_layer{{layer_id='{layer}'}})"));
-            } else {
-                close(block);
-            }
+            close(block);
             // Closing the owning PTY can end the subprocess before Rex
             // delivers its final hide. EOF is sufficient for the native pane.
             if let Some(final_state) = records().lines().nth(states.get()) {

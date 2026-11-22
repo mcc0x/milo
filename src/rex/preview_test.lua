@@ -15,6 +15,10 @@ local function peer(pid) return { kind = "peer", transport = "unix", uid = uid, 
 local function terminal(block, label)
   return { block_id = block, label = label, creator_name = term, host_id = host, owner = app }
 end
+local function float_anchor(f)
+  f.tiled.blocks = { f.rail, f.main }
+  f.window.layers[2] = { kind = "floating", blocks = { f.anchor } }
+end
 local function call(f)
   local args = f.rex.args
   local writes, callbacks = {}, {}
@@ -69,10 +73,6 @@ local function fixture(mode, block)
     f.placed = { api = api, args = a }
     if a.layout then
       f.anchor.label = a.layout.block.label
-      if api == "floating" then
-        f.tiled.blocks = { f.rail, f.main }
-        f.window.layers[2] = { kind = "floating", blocks = { f.anchor } }
-      end
       if f.after_create then f.after_create() end
     end
     return { block_ids = { preview } }
@@ -129,7 +129,6 @@ local function fixture(mode, block)
         return {}
       end,
       new_split = function(a) return placed("split", a) end,
-      new_layer = function(a) return placed("floating", a) end,
       focus_block = function(a) return placed("focus", a) end,
     },
   }
@@ -137,7 +136,7 @@ local function fixture(mode, block)
 end
 
 for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", "before" },
-  { "above", "vertical", "before" }, { "below", "vertical", "after" }, { "floating" } } do
+  { "above", "vertical", "before" }, { "below", "vertical", "after" } } do
   local f = fixture("open", sidebar)
   f.rex.args.placement = p[1]
   assert(call(f)() == "ok\n")
@@ -150,11 +149,7 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   assert(#launch.command == 7 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
     and launch.command[3] == url and launch.command[4] == main and launch.command[5] == window
     and launch.command[6] == app and launch.command[7] == tostring(gui))
-  if p[1] == "floating" then
-    assert(f.placed.api == "floating" and a.window_id == window and #a.bounds == 4 and not a.anchor_id)
-  else
-    assert(f.placed.api == "split" and a.anchor_id == main and a.direction == p[2] and a.side == p[3])
-  end
+  assert(f.placed.api == "split" and a.anchor_id == main and a.direction == p[2] and a.side == p[3])
 end
 
 local function denied(mode, block, change, status)
@@ -165,6 +160,7 @@ end
 denied("open", sidebar, function(f) f.referenced = other end, "stale")
 denied("open", sidebar, function(f) f.referenced = "block:0" end, "stale")
 denied("open", sidebar, function(f) f.view.active_window_id = inactive end, "tab")
+denied("open", main, function(f) f.rex.args.placement = "floating" end, "placement")
 denied("open", main, function(f)
   f.tiled.blocks = { f.rail }
   f.inactive.layers[1].blocks = { f.other, f.main }
@@ -173,6 +169,9 @@ end, "changed")
 local raced = fixture("open", main)
 raced.after_create = function() raced.view.active_window_id = inactive end
 assert(call(raced)() == "changed\n" and raced.placed and raced.canceled and not raced.published)
+local floated = fixture("open", main)
+floated.after_create = function() float_anchor(floated) end
+assert(call(floated)() == "changed\n" and floated.placed and floated.canceled and not floated.published)
 local renamed = fixture("open", main)
 renamed.after_create = function()
   renamed.view.active_window_id = inactive
@@ -240,6 +239,7 @@ denied("focus", preview, function(f) f.rex.args.owner = other_app end, "focus")
 denied("focus", preview, function(f) f.rex.args.owner_pid = gui + 1 end, "focus")
 denied("focus", preview, function(f) f.parents[cli][1] = 99 end, "focus")
 denied("focus", preview, function(f) f.anchor.label = "different label" end, "focus")
+denied("focus", preview, float_anchor, "focus")
 
 local f = fixture("watch", preview)
 local observe = call(f)
@@ -266,31 +266,30 @@ float.state = "minimized"
 view_change("show 40 tile")
 float.state = nil
 view_change("hide")
+f.window.layers[2] = nil
 f.window.zoomed_block_id = nil
-view_change()
+view_change("show 40 tile")
 f.tiled.blocks = { f.rail, f.main }
-float.blocks = { f.anchor }
-view_change("show 40 float")
-float.state = "minimized"
-view_change("hide")
-float.state = nil
-view_change("show 40 float")
-f.window.layers[3] = { kind = "floating", blocks = {} }
-view_change("hide")
-f.window.layers[3].state = "minimized"
-view_change("show 40 float")
-float.blocks, f.detached = {}, true
+f.detached = true
 view_change("hide")
 assert(not f.stopped)
-float.blocks, f.detached = { f.anchor }, false
-view_change("show 40 float")
+f.tiled.blocks, f.detached = { f.rail, f.main, f.anchor }, false
+view_change("show 40 tile")
 f.gui.principal = peer(gui + 1)
 view_change("hide") -- even the same client ID cannot substitute another GUI process
 f.gui.client_id, f.anchor.owner = other_app, other_app
 view_change()
 f.gui.client_id, f.anchor.owner, f.gui.principal = app, app, peer(gui)
-view_change("show 40 float")
+view_change("show 40 tile")
 assert(observe("block_closed", { block_id = preview }) == expected .. "hide\n" and f.stopped == 0)
+
+for _, main_detached in ipairs{ false, true } do
+  local moved = fixture("watch", preview)
+  local watch_move = call(moved)
+  float_anchor(moved)
+  if main_detached then moved.tiled.blocks, moved.main_detached = { moved.rail }, true end
+  assert(watch_move("session_view_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 1)
+end
 
 local remote = fixture("watch", preview)
 remote.gui.principal.kind = "tailscale"

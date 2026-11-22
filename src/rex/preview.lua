@@ -262,16 +262,15 @@ local function cancel_staged(host, id)
   end
 end
 
-local function publish(host, id, placement)
+local function publish(host, id)
   local view = current_view()
   if view and view.active_window_id == a.window then
     local main, window, tiled = locate(view, a.main)
     local caller, origin, caller_layer = locate(view, a.block)
     local block, place, layer = locate(view, id)
-    local kind = placement == "floating" and "floating" or "tiled"
     if working_pair(host, main, window, tiled) and origin == window and caller_layer.kind == "tiled"
       and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
-      and place == window and layer.kind == kind and local_terminal(block, host) and block.label == staging_label
+      and place == window and layer.kind == "tiled" and local_terminal(block, host) and block.label == staging_label
       and local_owner(a.owner) == a.owner_pid
       and rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label } then
       return "ok"
@@ -294,6 +293,8 @@ local function open(host, view, caller, window, layer, owner_pid)
   end
   if window.window_id ~= a.window or main.block_id ~= a.main or cwd ~= a.cwd
     or caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "changed" end
+  local direction = directions[a.placement]
+  if not direction then return "placement" end
   local layout = { block = { flavor = terminal .. ".shell", label = staging_label, options = {
     command = { a.exe, "preview-anchor", a.url, a.main, a.window, a.owner, tostring(a.owner_pid) },
     shell = "none", cwd = cwd,
@@ -305,18 +306,10 @@ local function open(host, view, caller, window, layer, owner_pid)
   -- Recheck the created block and original placement before publishing the
   -- label that permits its watcher to show. Never close anything but our
   -- exact unpublished terminal if the layout changed during the request.
-  local made, direction
-  if a.placement == "floating" then
-    made = rex.session.new_layer{ session_id = a.session, window_id = window.window_id,
-      bounds = { 0.15, 0.11, 0.70, 0.78 }, focus = false, layout = layout }
-  else
-    direction = directions[a.placement]
-    if not direction then return "placement" end
-    made = rex.session.new_split{ session_id = a.session, anchor_id = main.block_id,
-      direction = direction[1], side = direction[2], focus = false, layout = layout }
-  end
+  local made = rex.session.new_split{ session_id = a.session, anchor_id = main.block_id,
+    direction = direction[1], side = direction[2], focus = false, layout = layout }
   local id = made and made.block_ids and #made.block_ids == 1 and made.block_ids[1]
-  return exact(id, "block:") and publish(host, id, a.placement) or "placement"
+  return exact(id, "block:") and publish(host, id) or "placement"
 end
 
 local function focus(host, view, caller, window, cli_pid)
@@ -340,7 +333,7 @@ local function one_shot(host, cli_pid)
   local owner_pid = local_owner(caller.owner)
   if not owner_pid then return "client" end
   if a.mode == "focus" then
-    if caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "focus" end
+    if layer.kind ~= "tiled" or caller.owner ~= a.owner or owner_pid ~= a.owner_pid then return "focus" end
     return focus(host, view, caller, window, cli_pid)
   end
   local belongs, remote = own_caller(caller, cli_pid)
@@ -350,9 +343,8 @@ end
 
 local function visible(view, window, layer, index)
   if window.window_id ~= view.active_window_id or layer.state == "minimized" then return false end
-  if layer.kind ~= "tiled" and layer.kind ~= "floating" then return false end
   local zoom = window.zoomed_block_id
-  if zoom and (layer.kind ~= "tiled" or zoom ~= a.block) then return false end
+  if zoom and zoom ~= a.block then return false end
   -- Layer order is back to front. Keep the overlay out of any higher visible
   -- layer, even when its individual blocks happen not to overlap right now.
   for i = index + 1, #window.layers do
@@ -368,8 +360,8 @@ end
 
 local host, cli_pid = local_host()
 local last, verified, published, last_revision
-local function emit(pid, layer)
-  local state = pid and ("show " .. tostring(pid) .. (layer.kind == "floating" and " float" or " tile")) or "hide"
+local function emit(pid)
+  local state = pid and ("show " .. tostring(pid) .. " tile") or "hide"
   if last ~= state then
     last = state
     io.stdout:write(state, "\n")
@@ -406,6 +398,7 @@ local function refresh()
   last_revision = view.revision
   local block, window, layer, index = locate(view, a.block)
   local main, place, tiled = locate(view, a.main)
+  if block and layer.kind ~= "tiled" then return stop(1) end
   if not block or not main then
     local listed = rex.session.list_blocks(session)
     if not listed then return stop(1) end
@@ -432,7 +425,7 @@ local function refresh()
   if block.label ~= preview_label then return emit() end
   if not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner
     or local_owner(a.owner) ~= a.owner_pid then return emit() end
-  emit(a.owner_pid, layer)
+  emit(a.owner_pid)
 end
 
 rex.on("session_view_changed", function(ctx, event)

@@ -124,14 +124,12 @@ static MarkerStatus ReadMarker(const AXBudget *budget, AXUIElementRef element, N
 
 // A bounded walk of the focused window, not the application's other windows or tabs.
 // Roles, not titles or window-chrome insets, define the terminal and its exclusion regions.
-enum { MaxAXNodes = 192, MaxAXDepth = 24, MaxBackgroundChecks = 12, NoNode = -1 };
+enum { MaxAXNodes = 192, MaxAXDepth = 24, NoNode = -1 };
 
 typedef struct {
     CGRect frame;
     int parent;
     BOOL container;
-    BOOL splitGroup;
-    BOOL tiledControl;
 } AXNode;
 
 typedef struct {
@@ -149,8 +147,6 @@ typedef struct {
     Geometry geometry;
     id window, pane, focus;
     NSTimeInterval layoutCheckedAt;
-    CGRect backgrounds[MaxBackgroundChecks];
-    size_t backgroundCount;
 }
 @end
 
@@ -203,12 +199,11 @@ static BOOL WalkAX(const AXBudget *budget, AXTree *tree, AXUIElementRef element,
         (IsAXString(role, kAXWindowRole) != (parent == NoNode))) return NO;
 
     CGRect frame = MeasuredFrame(values[2], values[3]);
-    BOOL splitGroup = IsAXString(role, kAXSplitGroupRole);
-    BOOL container = splitGroup || IsAXString(role, kAXGroupRole) || IsAXString(role, kAXScrollAreaRole);
+    BOOL container = IsAXString(role, kAXSplitGroupRole) ||
+        IsAXString(role, kAXGroupRole) || IsAXString(role, kAXScrollAreaRole);
     BOOL textArea = IsAXString(role, kAXTextAreaRole);
-    BOOL tiledControl = container || textArea || IsAXString(role, kAXSplitterRole) || IsAXString(role, kAXScrollBarRole);
     int index = tree->count++;
-    tree->nodes[index] = (AXNode){frame, parent, container, splitGroup, tiledControl};
+    tree->nodes[index] = (AXNode){frame, parent, container};
     NSArray *children = HasType(values[4], CFArrayGetTypeID()) ? values[4] : nil;
     if (!children) {
         AXError error;
@@ -241,16 +236,7 @@ static BOOL IsAncestor(const AXTree *tree, int ancestor, int child) {
     return NO;
 }
 
-static BOOL InTiledBackground(const AXTree *tree, int sibling) {
-    if (!tree->nodes[sibling].tiledControl) return NO;
-    for (int i = sibling; i != NoNode && !IsAncestor(tree, i, tree->markerNode); i = tree->nodes[i].parent) {
-        if (tree->nodes[i].splitGroup) return YES;
-    }
-    return NO;
-}
-
-static BOOL ClearAXPane(const AXTree *tree, BOOL floating, CGRect *backgrounds, size_t *count) {
-    *count = 0;
+static BOOL ClearAXPane(const AXTree *tree) {
     CGRect pane = tree->nodes[tree->markerNode].frame;
     if (!CGRectContainsRect(tree->nodes[0].frame, pane)) return NO;
     for (int i = 1; i < tree->count; ++i) {
@@ -265,17 +251,7 @@ static BOOL ClearAXPane(const AXTree *tree, BOOL floating, CGRect *backgrounds, 
             if (!tree->nodes[i].container) return NO;
             continue;
         }
-        CGRect intersection = CGRectIntersection(sibling, pane);
-        if (CGRectIsEmpty(intersection)) continue;
-        // Rex's watcher verifies the marked float is topmost. A separate AXSplitGroup may lie
-        // beneath it, but a sibling float, arbitrary control, or uncertain layer is never ignored.
-        if (!floating || !InTiledBackground(tree, i)) return NO;
-        if (CGRectEqualToRect(intersection, pane)) continue; // Already covered by the whole-pane hit test.
-        BOOL duplicate = NO;
-        for (size_t j = 0; j < *count; ++j) duplicate |= CGRectEqualToRect(backgrounds[j], intersection);
-        if (duplicate) continue;
-        if (*count == MaxBackgroundChecks) return NO;
-        backgrounds[(*count)++] = intersection;
+        if (!CGRectIsEmpty(CGRectIntersection(sibling, pane))) return NO;
     }
     return YES;
 }
@@ -358,7 +334,7 @@ static BOOL CurrentAXElement(const AXBudget *budget, AXUIElementRef app, CFStrin
 }
 
 static BOOL ValidateProof(const AXBudget *budget, AXUIElementRef app, MiloAXProof *proof, pid_t pid,
-    NSString *marker, BOOL full) {
+    NSString *marker) {
     Geometry g = proof->geometry;
     AXUIElementRef window = Element(proof->window), pane = Element(proof->pane);
     if (!CurrentAXElement(budget, app, kAXFocusedWindowAttribute, proof->window) ||
@@ -366,22 +342,17 @@ static BOOL ValidateProof(const AXBudget *budget, AXUIElementRef app, MiloAXProo
         !Nonmodal(budget, window) || !CGRectEqualToRect(ElementFrame(budget, window), g.window) ||
         !CGRectEqualToRect(ElementFrame(budget, pane), g.pane) || ReadMarker(budget, pane, marker, g.pane) != MarkerMatched ||
         !HitTestsMatch(budget, app, pane, g.pane)) return NO;
-    if (full) {
-        for (size_t i = 0; i < proof->backgroundCount; ++i) {
-            if (!HitTestsMatch(budget, app, pane, proof->backgrounds[i])) return NO;
-        }
-    }
     return CurrentAXElement(budget, app, kAXFocusedWindowAttribute, proof->window) &&
         CurrentAXElement(budget, app, kAXFocusedUIElementAttribute, proof->focus) &&
         VisibleWindow(pid, g) == g.windowID && BeforeAXDeadline(budget);
 }
 
 static MiloAXProof *ProveGeometry(AXUIElementRef app, pid_t pid, NSString *marker,
-    BOOL floating, NSTimeInterval now, MiloAXProof *cached, BOOL *markerNeedsRedraw) {
+    NSTimeInterval now, MiloAXProof *cached, BOOL *markerNeedsRedraw) {
     *markerNeedsRedraw = NO;
     AXBudget budget = {now + ProofLifetime, ProofClock, NULL};
     if (!AXCanIssue(&budget) || !AXIsProcessTrusted()) return nil;
-    if (cached) return ValidateProof(&budget, app, cached, pid, marker, NO) ? cached : nil;
+    if (cached) return ValidateProof(&budget, app, cached, pid, marker) ? cached : nil;
     __attribute__((objc_precise_lifetime)) id focusedWindow = Attribute(&budget, app, kAXFocusedWindowAttribute);
     __attribute__((objc_precise_lifetime)) id focusedElement = Attribute(&budget, app, kAXFocusedUIElementAttribute);
     if (!IsAXString(Attribute(&budget, Element(focusedElement), kAXRoleAttribute), kAXTextAreaRole)) return nil;
@@ -393,7 +364,7 @@ static MiloAXProof *ProveGeometry(AXUIElementRef app, pid_t pid, NSString *marke
         // Do not disturb a present marker on placement or occlusion failures, or repaint when AX cannot read it.
         *markerNeedsRedraw = tree.markerMissing && !tree.markerPresent;
     }
-    if (walked && tree.markerNode != NoNode && tree.terminalFocused) {
+    if (walked && tree.markerNode != NoNode && tree.terminalFocused && ClearAXPane(&tree)) {
         Geometry g = {.window = tree.nodes[0].frame, .pane = tree.nodes[tree.markerNode].frame};
         g.windowID = VisibleWindow(pid, g);
         if (g.windowID) {
@@ -403,8 +374,7 @@ static MiloAXProof *ProveGeometry(AXUIElementRef app, pid_t pid, NSString *marke
             proof->pane = (__bridge id)tree.markerElement;
             proof->focus = focusedElement;
             proof->layoutCheckedAt = now;
-            if (!ClearAXPane(&tree, floating, proof->backgrounds, &proof->backgroundCount) ||
-                !ValidateProof(&budget, app, proof, pid, marker, YES)) proof = nil;
+            if (!ValidateProof(&budget, app, proof, pid, marker)) proof = nil;
         }
     }
     if (tree.markerElement) CFRelease(tree.markerElement);
@@ -574,7 +544,7 @@ static BOOL RestoreMarkerTerminal(int fd, BOOL alternateScreen, const struct ter
     NSTimeInterval _lastProof, _lastFullAttempt, _lastMarkerPaint, _unprovenSince;
     NSUInteger _generation;
     BOOL _probePending, _requested, _finished, _alternateScreen;
-    BOOL _everShown, _sessionInactive, _screensAsleep, _floating;
+    BOOL _everShown, _sessionInactive, _screensAsleep;
     struct termios _savedTTY;
     BOOL _ttyQuiet;
     unsigned short _rows, _columns;
@@ -719,14 +689,13 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         [self invalidate];
         return;
     }
-    BOOL floating = _lineLength >= 12 && !memcmp(_line + _lineLength - 6, " float", 6);
     BOOL tiled = _lineLength >= 11 && !memcmp(_line + _lineLength - 5, " tile", 5);
-    if ((!floating && !tiled) || memcmp(_line, "show ", 5)) {
+    if (!tiled || memcmp(_line, "show ", 5)) {
         [self finish:"invalid Rex visibility message"];
         return;
     }
     unsigned long pid = 0;
-    size_t pidEnd = _lineLength - (floating ? 6 : 5);
+    size_t pidEnd = _lineLength - 5;
     for (size_t i = 5; i < pidEnd; ++i) {
         unsigned char byte = (unsigned char)_line[i];
         if (byte < '0' || byte > '9' || pid > ((unsigned long)INT_MAX - (byte - '0')) / 10) {
@@ -740,9 +709,8 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         return;
     }
     if (!_rex) [self pinRex:(pid_t)pid];
-    if (!_finished && (!_requested || _floating != floating)) {
+    if (!_finished && !_requested) {
         _requested = YES;
-        _floating = floating;
         [self invalidate];
     }
 }
@@ -891,13 +859,12 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     NSUInteger generation = _generation;
     pid_t pid = _rex.processIdentifier;
     NSString *marker = _marker;
-    BOOL floating = _floating;
     id axApp = (__bridge id)_axApp;
     __weak MiloPreviewAnchor *weakSelf = self;
     dispatch_async(_probeQueue, ^{
         @autoreleasepool {
             BOOL redraw;
-            MiloAXProof *result = ProveGeometry((__bridge AXUIElementRef)axApp, pid, marker, floating, now, cached, &redraw);
+            MiloAXProof *result = ProveGeometry((__bridge AXUIElementRef)axApp, pid, marker, now, cached, &redraw);
             NSTimeInterval completed = ProofClock(NULL);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [weakSelf applyProof:result generation:generation started:now completed:completed full:cached == nil redraw:redraw];

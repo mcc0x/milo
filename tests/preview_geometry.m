@@ -50,34 +50,31 @@ static void AXPaneOverlap(void) {
     CGRect tiled = CGRectMake(0, 0, 600, 900);
     CGRect pane = CGRectMake(480, 200, 280, 400);
     AXTree tree = {.nodes = {
-        {window, NoNode, NO, NO, NO},
-        {tiled, 0, YES, YES, YES},
-        {tiled, 1, NO, NO, YES},
-        {pane, 0, NO, NO, YES},
+        {window, NoNode, NO},
+        {tiled, 0, YES},
+        {tiled, 1, NO},
+        {pane, 0, NO},
     }, .count = 4, .markerNode = 3};
-    CGRect backgrounds[MaxBackgroundChecks];
-    size_t count;
-    assert(!ClearAXPane(&tree, NO, backgrounds, &count));
-    assert(ClearAXPane(&tree, YES, backgrounds, &count));
-    assert(count == 1 && CGRectEqualToRect(backgrounds[0], CGRectMake(480, 200, 120, 400)));
+    // A separate split group is not a permitted background beneath the marker.
+    assert(!ClearAXPane(&tree));
+    tree.nodes[3].frame = CGRectMake(600, 200, 280, 400);
+    assert(ClearAXPane(&tree));
 
-    // A separate AX branch or a control other than ordinary tiled background is uncertain.
-    tree.nodes[4] = (AXNode){CGRectMake(520, 201, 10, 20), 0, NO, NO, YES};
+    tree.nodes[4] = (AXNode){CGRectMake(620, 201, 10, 20), 0, NO};
     tree.count = 5;
-    assert(!ClearAXPane(&tree, YES, backgrounds, &count));
-    tree.nodes[4].parent = 1;
-    tree.nodes[4].tiledControl = NO;
-    assert(!ClearAXPane(&tree, YES, backgrounds, &count));
+    assert(!ClearAXPane(&tree));
     tree.nodes[4].frame = CGRectNull;
-    assert(!ClearAXPane(&tree, YES, backgrounds, &count));
+    assert(!ClearAXPane(&tree));
     tree.count = 4;
 
-    // Even a reported float cannot be painted over a partly clipped terminal.
+    // A partly clipped marker cannot be painted over either.
+    tree.nodes[3].frame = pane;
     tree.nodes[3].parent = 1;
-    assert(!ClearAXPane(&tree, YES, backgrounds, &count));
+    tree.nodes[2].frame = CGRectMake(0, 0, 100, 100);
+    assert(!ClearAXPane(&tree));
     tree.nodes[3].parent = 0;
-    tree.nodes[3].frame = CGRectMake(600, 200, 280, 400);
-    assert(ClearAXPane(&tree, NO, backgrounds, &count) && count == 0);
+    tree.nodes[3].frame = CGRectMake(1100, 200, 280, 400);
+    assert(!ClearAXPane(&tree));
 }
 
 static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect rect) {
@@ -276,14 +273,6 @@ static void AcquisitionDeadline(void) {
     axFixture.calls = 0;
     assert(!HitTestsMatch(&budget, element, element, pane));
     assert(axFixture.calls == 7 && BeforeAXDeadline(&budget) && !AXCanIssue(&budget));
-
-    // Each call gets the same deadline, including consecutive float background grids.
-    axFixture.now = 0;
-    axFixture.calls = 0;
-    axFixture.delay = 0.020;
-    assert(HitTestsMatch(&budget, element, element, pane));
-    assert(!HitTestsMatch(&budget, element, element, pane));
-    assert(axFixture.calls == 15 && !AXCanIssue(&budget));
 
     // An in-flight call returning late is never a successful sample, even if AX returns success.
     axFixture.now = 0;
