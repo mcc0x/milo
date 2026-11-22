@@ -72,6 +72,14 @@ static void Key(NSWindow *window, NSString *key, unsigned short code, NSEventMod
     [window sendEvent:KeyEvent(window, key, code, flags)];
 }
 
+static void DispatchKeyThroughApplication(NSEvent *event) {
+    [NSApp postEvent:event atStart:YES];
+    NSEvent *queued = [NSApp nextEventMatchingMask:NSEventMaskKeyDown untilDate:NSDate.distantPast
+                                            inMode:NSDefaultRunLoopMode dequeue:YES];
+    CHECK(queued == event);
+    [NSApp sendEvent:queued];
+}
+
 static void CheckShortcuts(void) {
     NSEventModifierFlags shortcut = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, shortcut)) == @selector(returnToTerminal:));
@@ -245,9 +253,15 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     Click(web, 80, 23);
     CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"document.activeElement.id") isEqual:@"typed"]; }));
     CHECK(window.firstResponder == web);
-    Key(window, @"\r", 36, NSEventModifierFlagCommand | NSEventModifierFlagShift);
+    // Positive control: ordinary Shift-Return must reach the focused page.
+    CHECK([Evaluate(web, @"window.returnKeyDowns") isEqual:@0]);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\r", 36, NSEventModifierFlagShift));
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"window.returnKeyDowns") isEqual:@1]; }));
+    CHECK(returns == 1);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\r", 36, NSEventModifierFlagCommand | NSEventModifierFlagShift));
     CHECK(WaitFor(^BOOL{ return returns == 2; }));
     CHECK([Evaluate(web, @"document.activeElement.id") isEqual:@"typed"]);
+    CHECK([Evaluate(web, @"window.returnKeyDowns") isEqual:@1]);
     [window orderOut:nil];
     window.contentView = nil;
     [window close];
@@ -269,6 +283,6 @@ int main(int argc, char **argv) {
         [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory];
         [NSApp finishLaunching];
         DoSmoke([NSURL URLWithString:@(argv[1])], @(argv[2]), @(argv[3]));
-        puts("Native WebKit navigation, form, websocket hot reload, element picker and origin policy passed.");
+        puts("Native WebKit navigation, form, websocket hot reload, element picker, origin policy and terminal shortcut passed.");
     }
 }

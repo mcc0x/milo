@@ -39,3 +39,5 @@ jobs:
             -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework WebKit \
             -o "$RUNNER_TEMP/preview-geometry"
           "$RUNNER_TEMP/preview-geometry"
+      - name: Verify the preview's native keyboard shortcut without a desktop
+        run: sh macos/Preview/tests/smoke.sh --keys-only

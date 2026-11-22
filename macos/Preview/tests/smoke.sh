@@ -84,6 +84,12 @@ private-component {{ inset:52px auto auto 12px; width:250px; height:30px; }}
 <div id="edge"></div>
 <script>
   // This fixture doesn't know about the native picker and has no message bridge.
+  window.returnKeyDowns = 0;
+  document.getElementById('typed').addEventListener('keydown', event => {{
+    if (event.key !== 'Enter') return;
+    ++window.returnKeyDowns;
+    event.preventDefault();
+  }});
   let marker;
   new WebSocket('ws://' + location.host + '/hmr').onmessage = event => {{
     const target = document.querySelector('private-component');
