@@ -136,7 +136,7 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
         }
     };
     if let Some(status) = status {
-        if !status.success() {
+        if result.is_ok() && !status.success() {
             return Err("the Rex preview observer failed; the preview was closed".into());
         }
     } else {
@@ -148,8 +148,12 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
 
 fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
-    let mut helper = spawn(url, &anchor.native_window_id.to_string(), state.into())
+    let helper = spawn(url, &anchor.native_window_id.to_string(), state.into())
         .map_err(|_| "could not launch the local WebKit helper")?;
+    serve_actions(helper, || crate::rex::return_preview_focus(anchor).is_ok())
+}
+
+fn serve_actions(mut helper: Child, mut return_focus: impl FnMut() -> bool) -> Result<(), String> {
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
     let mut action = String::new();
     loop {
@@ -157,7 +161,13 @@ fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String>
         match actions.read_line(&mut action) {
             Ok(0) => break,
             Ok(_) if action == "focus\n" => {
-                let _ = crate::rex::return_preview_focus(anchor);
+                if !return_focus() {
+                    // Don't raise another window or silently redisplay the panel
+                    // when the original terminal no longer accepts focus.
+                    let _ = helper.kill();
+                    let _ = helper.wait();
+                    return Err("could not return focus to the original Rex terminal; the preview was closed".into());
+                }
             }
             _ => {
                 let _ = helper.kill();
@@ -169,5 +179,31 @@ fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String>
         Ok(())
     } else {
         Err("WebKit preview stopped".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_focus_ends_the_panel_without_retrying() {
+        let helper = Command::new("/bin/sh")
+            .args(["-c", "printf 'focus\\n'; exec /bin/sleep 30"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(helper.id()).unwrap();
+        let mut attempts = 0;
+        let error = serve_actions(helper, || {
+            attempts += 1;
+            false
+        })
+        .unwrap_err();
+        assert!(error.contains("could not return focus"));
+        assert_eq!(attempts, 1);
+        // SAFETY: a null status discards the exit status of this test's known child.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
     }
 }
