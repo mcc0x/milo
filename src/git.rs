@@ -23,7 +23,7 @@ use pending::{DiffStamp, TrackedDiff, tracked_records};
 use run::OutputError;
 
 /// A diff of one file larger than this is not loaded.
-const DIFF_LIMIT: u64 = 8 << 20;
+pub(crate) const DIFF_LIMIT: u64 = 8 << 20;
 pub(crate) const GIT_UNAVAILABLE: &str = "Git could not be run.";
 /// Maximum number of uncommitted paths passed to `git diff` by name.
 /// For more paths, compare the whole tree to the last commit.
@@ -886,8 +886,9 @@ impl Repo {
                 kind = match record {
                     [b'?', b' ', ..] => return Some(Kind::Untracked),
                     [b'u', b' ', ..] => return Some(Kind::Conflict),
-                    [b'1', b' ', b'A', _, b' ', ..] => Kind::Added,
-                    [b'1', b' ', b'D', _, b' ', ..] => Kind::Deleted,
+                    // Worktree-only additions (from `git add -N`) use `.A`.
+                    [b'1', b' ', b'A', _, b' ', ..] | [b'1', b' ', _, b'A', b' ', ..] => Kind::Added,
+                    [b'1', b' ', b'D', _, b' ', ..] | [b'1', b' ', _, b'D', b' ', ..] => Kind::Deleted,
                     [b'1', b' ', _, _, b' ', ..] => Kind::Modified,
                     [] => continue,
                     _ => return None,
@@ -1430,6 +1431,23 @@ mod tests {
         for marker in ["mark-ran", "late-ran"] {
             assert!(!f.root.join(".git").join(marker).exists(), "reading ran the filter for {marker}");
         }
+    }
+
+    #[test]
+    fn media_status_marks_intent_to_add_and_worktree_deletion() {
+        let f = Fixture::new();
+        f.write("old.png", "already tracked\n");
+        f.commit("base");
+        let repo = Repo::open(&f.root).unwrap();
+
+        f.write("new.png", "to be added\n");
+        f.git(&["add", "-N", "--", "new.png"]);
+        assert_eq!(repo.media_kind("new.png", true), Some(Kind::Added));
+        f.git(&["add", "--", "new.png"]);
+        assert_eq!(repo.media_kind("new.png", true), Some(Kind::Added));
+
+        fs::remove_file(f.root.join("old.png")).unwrap();
+        assert_eq!(repo.media_kind("old.png", true), Some(Kind::Deleted));
     }
 
     #[test]

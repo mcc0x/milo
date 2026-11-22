@@ -1214,6 +1214,52 @@ fn canceled_source_reads_keep_their_slots_until_they_return() {
 }
 
 #[test]
+fn large_text_with_media_suffixes_keeps_its_patch_without_loading_fallback_source() {
+    use crate::read::Content;
+
+    let f = Fixture::new();
+    let paths = ["notes.mp4", "notes.png"];
+    let line = "x".repeat(1023) + "\n";
+    let mut contents = String::with_capacity((3 << 20) + 7);
+    contents.push_str("before\n");
+    for _ in 0..3 * 1024 {
+        contents.push_str(&line);
+    }
+    for path in paths {
+        f.write(path, &contents);
+    }
+    f.commit("base");
+
+    contents.replace_range(..6, "edited");
+    for path in paths {
+        f.write(path, &contents);
+        let mut reader = Reader::open(&f.root.join(path)).unwrap();
+        finish_picture_preparation(&mut reader);
+        let rows = drawn(&mut reader, 60, 8).join("\n");
+        assert!(rows.contains("- before") && rows.contains("+ edited"), "{path}: {rows}");
+        let Source::Working(work) = &reader.source else { unreachable!() };
+        assert!(matches!(&work.media, Some(media_load::State::Text { content: Content::TooLarge, .. })));
+        assert_eq!(reader.read_only, Some(ReadOnly::TOO_LARGE));
+    }
+}
+
+#[test]
+fn oversize_media_with_a_text_prefix_is_refused_before_git_reads_it() {
+    let f = Fixture::new();
+    let path = "notes.mp4";
+    f.write(path, "before\n");
+    f.commit("base");
+    f.write(path, &"x".repeat(512));
+    let file = f.root.join(path);
+    // Make the file look like text to the source sample but binary to Git.
+    fs::OpenOptions::new().write(true).open(&file).unwrap().set_len(crate::git::DIFF_LIMIT + 1).unwrap();
+
+    let mut reader = Reader::open(&file).unwrap();
+    finish_picture_preparation(&mut reader);
+    assert!(matches!(&reader.body, Body::Note(note) if *note == "Too large to show."));
+}
+
+#[test]
 fn watched_binary_status_changes_do_not_rebuild_the_preview() {
     use crate::pane::{check_watched_pane, watch_pane};
 

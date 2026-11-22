@@ -11,7 +11,7 @@ use super::working_path::{Entry, LookupError, Root, Stamp};
 use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
-use crate::git::{CommitId, CommitVersion, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
+use crate::git::{CommitId, CommitVersion, DIFF_LIMIT, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
 use crate::read::Content;
 use crate::syntax;
 
@@ -275,6 +275,11 @@ pub(super) struct MediaCheck {
     job: SourceJob<Option<Checked>>,
 }
 
+fn can_read_text_patch(entry: &Result<Entry<'_>, LookupError>) -> bool {
+    // Git limits patch output, not how much of the working file it can read.
+    entry.as_ref().is_ok_and(|entry| entry.is_regular() && !entry.is_dataless() && entry.size() <= DIFF_LIMIT)
+}
+
 impl MediaCheck {
     fn start(work: &WorkingFile, stamp: WorkingStamp, task: CheckTask) -> Option<Self> {
         let root = work.root.try_clone().ok()?;
@@ -288,11 +293,13 @@ impl MediaCheck {
             if stamp != observed {
                 return None;
             }
-            let may_read = entry.is_ok_and(|entry| !entry.is_dataless());
             let path = relative.to_str()?;
             match task {
-                CheckTask::Media { read_worktree } => repo.media_kind(path, read_worktree && may_read).map(Checked::Media),
-                CheckTask::Text { force, read_status } if may_read => {
+                CheckTask::Media { read_worktree } => {
+                    let read_worktree = read_worktree && entry.is_ok_and(|entry| !entry.is_dataless());
+                    repo.media_kind(path, read_worktree).map(Checked::Media)
+                }
+                CheckTask::Text { force, read_status } if can_read_text_patch(&entry) => {
                     if read_status {
                         repo.read();
                     } else if !repo.read_if_changed() && !force {
@@ -380,7 +387,9 @@ impl Reader {
                 return;
             }
             Some(State::Text { content, shown }) => {
-                if stamp.compare && matches!(content, Content::Bytes(_)) {
+                // TooLarge here means the source lane validated a text prefix
+                // but didn't load a fallback body. Git can still supply a patch.
+                if stamp.compare && can_read_text_patch(&entry) {
                     if work.repo.busy() {
                         return;
                     }
