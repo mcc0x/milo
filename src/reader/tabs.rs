@@ -229,7 +229,7 @@ impl Tabs {
     fn commit(&self, tab: usize) -> Option<&str> {
         match &self.tabs[tab].source {
             Source::Committed { short_id, .. } => Some(short_id),
-            Source::Working(_) => None,
+            Source::Working(_) | Source::Handed(_) => None,
         }
     }
 
