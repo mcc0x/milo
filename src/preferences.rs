@@ -73,18 +73,17 @@ impl ProjectMode {
     }
 }
 
-/// Where the native Preview opens relative to its Rex anchor.
+/// Where Rex places the native Preview's anchor relative to the working terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewPlacement {
     Right,
     Left,
     Above,
     Below,
-    Floating,
 }
 
 impl PreviewPlacement {
-    const ALL: [Self; 5] = [Self::Right, Self::Left, Self::Above, Self::Below, Self::Floating];
+    const ALL: [Self; 4] = [Self::Right, Self::Left, Self::Above, Self::Below];
 
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|placement| placement.value() == value)
@@ -96,7 +95,6 @@ impl PreviewPlacement {
             Self::Left => "left",
             Self::Above => "above",
             Self::Below => "below",
-            Self::Floating => "floating",
         }
     }
 
@@ -106,7 +104,6 @@ impl PreviewPlacement {
             Self::Left => "Left",
             Self::Above => "Above",
             Self::Below => "Below",
-            Self::Floating => "Floating",
         }
     }
 
@@ -433,7 +430,10 @@ impl Preferences {
                         _ => return Err(invalid(key)),
                     }
                 }
-                "preview_placement" => self.preview_placement = PreviewPlacement::parse(value).ok_or_else(|| invalid(key))?,
+                "preview_placement" => {
+                    self.preview_placement =
+                        PreviewPlacement::parse(saved_value(key, value)).ok_or_else(|| invalid(key))?;
+                }
                 "history_follow_new" => self.history_follow_new = boolean()?,
                 "usage_large_figures" => self.usage_large_figures = boolean()?,
                 "tab_titles" => self.tab_titles = boolean()?,
@@ -561,20 +561,38 @@ fn update_guarded(
     })
 }
 
+// Preserve the explicit override from an experimental release, even in a
+// worktree that would otherwise inherit a different global placement.
+fn saved_value<'a>(key: &str, value: &'a str) -> &'a str {
+    if key == "preview_placement" && value == "floating" { PreviewPlacement::Right.value() } else { value }
+}
+
 /// A layer's text with each edited key's lines replaced by one new line.
-/// Every other line, comment and unknown key stays as it was.
+/// Retire legacy values in place; every other line, comment and unknown key stays as it was.
 pub(crate) fn edited(old: &str, edits: &[(&str, Option<&str>)]) -> io::Result<String> {
     // Validate the destination without filling in its missing (inherited) settings.
     Preferences::default().apply(old)?;
     let mut text = String::with_capacity(old.len() + 64);
     for line in old.split_inclusive('\n') {
-        let edited = line.split_once('=').is_some_and(|(key, _)| {
-            let key = key.trim();
-            edits.iter().any(|&(changed, value)| value.is_some() && key == changed)
-        });
-        if !edited {
-            text.push_str(line);
+        if let Some((name, tail)) = line.split_once('=') {
+            let key = name.trim();
+            if edits.iter().any(|&(changed, value)| value.is_some() && key == changed) {
+                continue;
+            }
+            if key == "preview_placement" {
+                let value = tail.trim_start();
+                let trimmed = value.trim_end();
+                let saved = saved_value(key, trimmed);
+                if saved != trimmed {
+                    let start = name.len() + 1 + tail.len() - value.len();
+                    text.push_str(&line[..start]);
+                    text.push_str(saved);
+                    text.push_str(&line[start + trimmed.len()..]);
+                    continue;
+                }
+            }
         }
+        text.push_str(line);
     }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -590,20 +608,26 @@ pub(crate) fn edited(old: &str, edits: &[(&str, Option<&str>)]) -> io::Result<St
     Ok(text)
 }
 
-/// What a layer's own text says for `key`, if it sets it. The last line wins, as it does when read.
+/// A layer's explicit choice, normalized as it is when loaded. The last line wins.
 pub(crate) fn layer_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines()
         .rev()
         .filter(|line| !line.trim_start().starts_with('#'))
         .filter_map(|line| line.split_once('='))
         .find(|(name, _)| name.trim() == key)
-        .map(|(_, value)| value.trim())
+        .map(|(_, value)| saved_value(key, value.trim()))
 }
 
-/// Whether a preferences file could hold `key = value`. An unknown key is never valid here.
+/// Whether a new choice can be written. Unknown keys and retired values are not valid here.
 pub(crate) fn valid_choice(key: &str, value: &str) -> bool {
+    if value.contains(['\n', '\r']) {
+        return false;
+    }
+    if key == "preview_placement" {
+        return PreviewPlacement::parse(value.trim()).is_some();
+    }
     let mut prefs = Preferences::default();
-    prefs.value_of(key).is_some() && !value.contains(['\n', '\r']) && prefs.apply(&format!("{key} = {value}")).is_ok()
+    prefs.value_of(key).is_some() && prefs.apply(&format!("{key} = {value}")).is_ok()
 }
 
 fn remove_layer(path: &Path, check: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
@@ -783,14 +807,16 @@ mod tests {
 
     #[test]
     fn preview_placement_values_are_exact_and_invalid_layers_do_not_partially_apply() {
-        use PreviewPlacement::{Above, Below, Floating, Left, Right};
+        use PreviewPlacement::{Above, Below, Left, Right};
 
-        let values = [("right", Right), ("left", Left), ("above", Above), ("below", Below), ("floating", Floating)];
+        let values = [("right", Right), ("left", Left), ("above", Above), ("below", Below)];
         for (spelling, placement) in values {
             assert_eq!(PreviewPlacement::parse(spelling), Some(placement));
             assert_eq!(placement.value(), spelling);
         }
         assert_eq!(PreviewPlacement::parse("Right"), None);
+        assert_eq!(PreviewPlacement::parse("floating"), None);
+        assert!(!valid_choice("preview_placement", "floating"));
         assert_eq!(PreviewPlacement::parse(""), None);
 
         let f = Fixture::folder();
@@ -806,6 +832,41 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("preview_placement"));
         assert_eq!(Preferences::for_pane_in(&f.root, Some(&root)), (before, Some("milo doctor: worktree prefs ignored")));
+    }
+
+    #[test]
+    fn legacy_floating_is_an_explicit_right_and_only_rewritten_when_saving() {
+        use PreviewPlacement::{Below, Right};
+
+        let f = Fixture::folder();
+        let root = f.root.join("checkout");
+        let [global, local] = layers(&f.root, &root);
+        let legacy =
+            "# preview_placement = floating\r\n preview_placement\t =  floating \r\nicons = off\nfuture_key = floating\n";
+        let canonical =
+            "# preview_placement = floating\r\n preview_placement\t =  right \r\nicons = off\nfuture_key = floating\n";
+        fs::write(&global, legacy).unwrap();
+        let (prefs, source) = Preferences::resolve_in(&f.root, None).unwrap();
+        assert_eq!((prefs.preview_placement, prefs.icons, source), (Right, IconMode::Off, Source::Global));
+        assert_eq!(fs::read_to_string(&global).unwrap(), legacy);
+        let global_draft = PreferenceSnapshot::load(&f.root, None).unwrap();
+        global_draft
+            .save(Preferences { changes_only: true, ..global_draft.prefs }, &f.root, None, false)
+            .unwrap();
+        assert_eq!(fs::read_to_string(&global).unwrap(), format!("{canonical}changes_only = true\n"));
+
+        fs::write(&global, "preview_placement = below\n").unwrap();
+        fs::create_dir(local.parent().unwrap()).unwrap();
+        fs::write(&local, legacy).unwrap();
+        let (prefs, source) = Preferences::resolve_in(&f.root, Some(&root)).unwrap();
+        assert_eq!((prefs.preview_placement, prefs.icons, source), (Right, IconMode::Off, Source::Worktree));
+        assert_eq!(Preferences::for_pane_in(&f.root, Some(&root)), (prefs, None));
+        assert_eq!(PreferenceSnapshot::load(&f.root, Some(&root)).unwrap().prefs, prefs);
+        assert_eq!(fs::read_to_string(&local).unwrap(), legacy);
+
+        Preferences::set_changes_only_in(&f.root, &root, true).unwrap();
+        assert_eq!(fs::read_to_string(&local).unwrap(), format!("{canonical}changes_only = true\n"));
+        assert_eq!(Preferences::resolve_in(&f.root, None).unwrap().0.preview_placement, Below);
     }
 
     #[test]

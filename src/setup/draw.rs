@@ -797,17 +797,12 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 prefs.tab_titles,
                 "Name unnamed tabs for their Git project, worktree and agent.",
             ),
-            Row::PreviewPlacement => {
-                let placement = prefs.preview_placement;
-                let label = placement.label();
-                Cell::choice(
-                    "Preview placement",
-                    "Preview",
-                    label,
-                    "Choose where Preview opens relative to the working terminal.",
-                )
-                .with_short_value(if placement == super::PreviewPlacement::Floating { "Float" } else { label })
-            }
+            Row::PreviewPlacement => Cell::choice(
+                "Preview placement",
+                "Preview",
+                prefs.preview_placement.label(),
+                "Choose where Preview opens relative to the working terminal.",
+            ),
             Row::ClaudeLimits => {
                 if self.claude.editable() {
                     Cell::toggle(

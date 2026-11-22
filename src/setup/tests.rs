@@ -335,7 +335,7 @@ fn preview_placement_cycles_and_uses_the_terminal_preference_draft_and_scopes() 
     let row = Row::PreviewPlacement;
     let label = "Preview placement";
     let mut pane = open();
-    for expected in ["Right", "Left", "Above", "Below", "Floating", "Right"] {
+    for expected in ["Right", "Left", "Above", "Below", "Right"] {
         let rows = frame(&mut pane, 80, 24);
         assert!(rows.iter().any(|row| row.contains(label) && row.contains(expected)), "{rows:?}");
         assert_eq!(pane.key(click_label(&rows, label)), After::Stay);
@@ -345,7 +345,7 @@ fn preview_placement_cycles_and_uses_the_terminal_preference_draft_and_scopes() 
             assert!(text.contains("relative to the working terminal."), "{rows:?}");
         }
         if expected == "Below" {
-            assert!(frame(&mut pane, 18, 1)[0].contains("Float"));
+            assert!(frame(&mut pane, 18, 1)[0].contains("Right"));
         }
     }
     assert_eq!(pane.prefs.preview_placement, Left);

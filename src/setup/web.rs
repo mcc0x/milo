@@ -1426,7 +1426,7 @@ mod tests {
         let before = set(&mut editor, "layout.width", "0.35");
         placement(&before, "right");
         let version = editor.version();
-        for invalid in ["true", "null", "\"center\"", "\"Floating\"", "\"right\\n\""] {
+        for invalid in ["true", "null", "\"center\"", "\"floating\"", "\"Floating\"", "\"right\\n\""] {
             let request = format!(r#""action":"set","field":"workflow.preview_placement","value":{invalid}"#);
             assert_eq!(action(&mut editor, &request).unwrap_err(), BAD_ACTION);
             assert_eq!(editor.state(), before);
@@ -1453,7 +1453,7 @@ mod tests {
 
     #[test]
     fn preview_placement_round_trips_at_both_scopes_and_rejects_stale_saves() {
-        use PreviewPlacement::{Above, Floating};
+        use PreviewPlacement::{Above, Below};
 
         let f = Fixture::folder();
         let store = fixture_store(&f);
@@ -1480,9 +1480,9 @@ mod tests {
 
         let mut stale = outside(store.clone(), Some(&root));
         set(&mut stale, "workflow.preview_placement", "\"left\"");
-        set(&mut editor, "workflow.preview_placement", "\"floating\"");
+        set(&mut editor, "workflow.preview_placement", "\"below\"");
         action(&mut editor, save_worktree).unwrap();
-        assert_eq!(place(&outside(store.clone(), Some(&root))), Floating);
+        assert_eq!(place(&outside(store.clone(), Some(&root))), Below);
         assert_eq!(place(&outside(store.clone(), Some(&f.root.join("other")))), Above);
         let stale_state = stale.state();
         for request in [save_global, save_worktree, inherit] {
@@ -1490,7 +1490,7 @@ mod tests {
             assert_eq!(stale.state(), stale_state);
         }
         assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
-        assert_eq!(fs::read_to_string(&local).unwrap(), format!("{local_before}preview_placement = floating\n"));
+        assert_eq!(fs::read_to_string(&local).unwrap(), format!("{local_before}preview_placement = below\n"));
 
         action(&mut editor, inherit).unwrap();
         assert_eq!((place(&editor), editor.setup.prefs_scope()), (Above, Source::Global));

@@ -65,7 +65,7 @@ Usage: milo
        milo setup
        milo web [--port PORT] [--no-open]
        milo web --host HOST [--project DIR] [--port PORT] [--no-open]
-       milo preview URL [--placement right|left|above|below|floating]
+       milo preview URL [--placement right|left|above|below]
        milo settings export GROUPS | import FILE [--apply] | undo
        milo doctor
        milo setup --repair | --remove
@@ -90,8 +90,8 @@ milo web opens local Settings in your browser. Use --no-open to print the link
   without opening it.
 milo web --host HOST opens the Settings of another Rex host here, through a Rex
   forward that ends with it.
-milo preview opens a local dev site beside the main terminal in this Rex tab
-  on macOS. --placement applies to this launch only.
+milo preview opens a local dev site in a tiled split beside the main terminal in
+  this Rex tab on macOS. --placement applies to this launch only.
 milo doctor explains local preferences, integration health and usage sources.
 milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose.
   It is off until you turn it on.
@@ -908,15 +908,20 @@ mod tests {
         let url = "http://localhost:3000";
         let second = Some(OsStr::new(url));
         assert_eq!(command(first, second, &[]), Ok(Command::Preview { url, placement: None }));
-        for name in ["left", "right", "above", "below", "floating"] {
+        for name in ["left", "right", "above", "below"] {
             let args = [OsString::from("--placement"), OsString::from(name)];
             let placement = preferences::PreviewPlacement::parse(name);
             assert!(placement.is_some());
             assert_eq!(command(first, second, &args), Ok(Command::Preview { url, placement }));
         }
-        for rest in [vec!["--placement"], vec!["--placement", "auto"], vec!["--placement", "left", "extra"]] {
-            let args: Vec<_> = rest.into_iter().map(OsString::from).collect();
-            assert!(command(first, second, &args).is_err());
+        for rest in [
+            &["--placement"][..],
+            &["--placement", "auto"],
+            &["--placement", "floating"],
+            &["--placement", "left", "extra"],
+        ] {
+            let args: Vec<_> = rest.iter().map(|&arg| OsString::from(arg)).collect();
+            assert_eq!(command(first, second, &args).unwrap_err(), preview::EXPECTED);
         }
     }
 

@@ -798,7 +798,7 @@ mod tests {
         let report = report_for(&store, None).unwrap();
         assert!(report.contains("\n  Preview placement: Below\n"), "{report}");
         let report = report_for(&store, Some(root)).unwrap();
-        assert!(report.contains("\n  Preview placement: Floating\n"), "{report}");
+        assert!(report.contains("\n  Preview placement: Right\n"), "{report}");
     }
 
     #[test]

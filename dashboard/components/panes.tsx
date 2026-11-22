@@ -7,7 +7,7 @@ import type { SessionState } from './session-state';
 
 const tracking = [['follow', 'Follow shell'], ['pin', 'Pin project']] as const;
 const outline = [[false, 'All files'], [true, 'Changes only']] as const;
-const placements = [['right', 'Right'], ['left', 'Left'], ['above', 'Above'], ['below', 'Below'], ['floating', 'Floating']] as const;
+const placements = [['right', 'Right'], ['left', 'Left'], ['above', 'Above'], ['below', 'Below']] as const;
 const icons = [['nerd', 'Nerd Font'], ['plain', 'Plain'], ['off', 'Off']] as const;
 const marks = [[false, 'Pulse'], [true, 'Static']] as const;
 const gitMarks = [[false, 'Style only', 'main.rs'], [true, 'Text', 'M main.rs']] as const;
@@ -36,7 +36,7 @@ export default function Panes() {
       </SettingSection>
       <SettingSection id="pane-preview" title={<><PaneGlyph kind="preview"/>Preview</>}>
         <ChoiceSetting field="workflow.preview_placement" label="Preview placement"
-          detail="Where new previews open relative to the working terminal."
+          detail="Where new Preview tiles open relative to the working terminal."
           value={draftValue<SessionState['workflow']['preview_placement']>('workflow.preview_placement')} choices={placements}
           disabled={disabled} onChange={value => edit('workflow.preview_placement', value)} />
       </SettingSection>

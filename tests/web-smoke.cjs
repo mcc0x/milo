@@ -21,8 +21,8 @@ const number = (page, name) => page.getByRole('spinbutton', {name, exact: true})
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
 const reopenNote = page => page.getByRole('region', {name: 'Project session'}).getByText('Reopen panes to apply.', {exact: true});
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
-const placement = (page, name, checked) => page.getByRole('group', {name: 'Preview placement', exact: true})
-  .getByRole('radio', {name, exact: true, checked});
+const placementGroup = page => page.getByRole('group', {name: 'Preview placement', exact: true});
+const placement = (page, name, checked) => placementGroup(page).getByRole('radio', {name, exact: true, checked});
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
@@ -148,6 +148,7 @@ async function savePreviewPlacement(page, env) {
   const choices = dialog(page, 'Save changes');
   await section(page, 'Panes').click();
   assert(await placement(page, 'Right').isChecked(), 'Preview defaults to the right');
+  assert.equal(await placementGroup(page).getByRole('radio').count(), 4, 'Preview offers only the four tile placements');
 
   await placement(page, 'Right').press('ArrowRight');
   await status(page, dirty).waitFor({state: 'attached'});
@@ -170,7 +171,7 @@ async function savePreviewPlacement(page, env) {
   const global = await readFile(preferences, 'utf8');
   assert.match(global, /^preview_placement = above$/m);
 
-  await placement(page, 'Floating').click();
+  await placement(page, 'Below').click();
   await button(page, 'Save').click();
   await button(choices, 'Save for this worktree').click();
   await status(page, clean).waitFor({state: 'attached'});
@@ -180,7 +181,7 @@ async function savePreviewPlacement(page, env) {
 
 async function inheritPreviewPlacement(page) {
   await section(page, 'Panes').click();
-  assert(await placement(page, 'Floating').isChecked(), 'worktree placement persisted across a server restart');
+  assert(await placement(page, 'Below').isChecked(), 'worktree placement persisted across a server restart');
   const panes = page.getByRole('region', {name: 'Pane preferences', exact: true});
   await panes.locator('summary').filter({hasText: 'Worktree override'}).click();
   await button(panes, 'Remove override…').click();
@@ -648,7 +649,7 @@ async function confirmFromMobileFooter(browser, url, exited) {
   assert(dock && dock.x >= 0 && dock.x + dock.width <= 260, 'navigation and draft controls fit at narrow widths');
   await integrationDetailsFitNarrowPanel(page);
   await section(page, 'Panes').click();
-  await placement(page, 'Floating').waitFor();
+  await placement(page, 'Below').waitFor();
   const overflow = await page.locator('#settings-panel').evaluate(panel => panel.scrollWidth - panel.clientWidth);
   assert.equal(overflow, 0, 'Preview placement choices wrap in a narrow touch panel');
   await section(page, 'Layout').click();

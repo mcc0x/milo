@@ -110,7 +110,7 @@ export interface SessionState {
     changes_only: boolean;
     history_follow_new: boolean;
     tab_titles: boolean;
-    preview_placement: 'right' | 'left' | 'above' | 'below' | 'floating';
+    preview_placement: 'right' | 'left' | 'above' | 'below';
   };
   account: {claude_limits: boolean; claude_status: string};
   menubar: {installed: boolean | null};

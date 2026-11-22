@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn placement_uses_the_working_checkout_and_never_persists_the_override() {
-        use PreviewPlacement::{Above, Floating, Left, Right};
+        use PreviewPlacement::{Above, Below, Left, Right};
 
         let config = Fixture::folder();
         let working = Fixture::new();
@@ -243,7 +243,7 @@ mod tests {
         let local = layer_file(&config.root, Some(&working_root));
         let caller_local = layer_file(&config.root, Some(&caller_root));
         std::fs::create_dir(local.parent().unwrap()).unwrap();
-        let layers = [(global, "left"), (local, "above"), (caller_local, "right")];
+        let layers = [(global, "left"), (local, "above"), (caller_local, "floating")];
         for (path, value) in &layers {
             std::fs::write(path, format!("preview_placement = {value}\n")).unwrap();
         }
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(resolve_placement(&working_cwd, None, dir), Above);
         assert_eq!(resolve_placement(&caller.root, None, dir), Right);
         assert_eq!(resolve_placement(&config.root, None, dir), Left);
-        assert_eq!(resolve_placement(&working_cwd, Some(Floating), || panic!("override reads settings")), Floating);
+        assert_eq!(resolve_placement(&working_cwd, Some(Below), || panic!("override reads settings")), Below);
         for (path, value) in &layers {
             assert_eq!(std::fs::read_to_string(path).unwrap(), format!("preview_placement = {value}\n"));
         }

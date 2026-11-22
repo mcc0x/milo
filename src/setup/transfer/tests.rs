@@ -127,12 +127,14 @@ fn workflow_bundles_carry_preview_placement_without_changing_version_or_inherita
     let appearance = a.with(|place| export(place, &[Group::Appearance], Scopes::Global)).unwrap();
     assert!(!appearance.contains("preview_placement"), "{appearance}");
 
-    fs::write(local, "preview_placement = floating\n").unwrap();
+    let legacy = "preview_placement = floating\n";
+    fs::write(&local, legacy).unwrap();
     let bundle = a.with(|place| export(place, workflow, Scopes::All)).unwrap();
+    assert_eq!(fs::read_to_string(local).unwrap(), legacy, "export does not rewrite the saved layer");
     assert!(bundle.starts_with("milo-settings 1\n"));
     let (global, project) = bundle.split_once("[project]").unwrap();
     assert!(global.contains("preview_placement = above\n"));
-    assert!(project.contains("preview_placement = floating\n"));
+    assert!(project.contains("preview_placement = right\n"));
 
     let mut b = Host::new();
     b.worktree = Some(second.root.clone());
@@ -140,23 +142,25 @@ fn workflow_bundles_carry_preview_placement_without_changing_version_or_inherita
     let preview = b.with(|place| plan(place, &bundle, &[])).unwrap();
     let report = preview.report("bundle.txt");
     assert!(report.contains("Preview placement: right → above"), "{report}");
-    assert!(report.contains("Preview placement: inherited → floating"), "{report}");
+    assert!(report.contains("Preview placement: inherited → right"), "{report}");
     assert_eq!(b.with(|place| apply(place, preview)).unwrap(), 2);
     assert_eq!(b.read("preferences.conf").as_deref(), Some("icons = off\npreview_placement = above\n"));
-    assert_eq!(b.worktree_layer(&second.root), "preview_placement = floating\n");
+    assert_eq!(b.worktree_layer(&second.root), "preview_placement = right\n");
 
     let old = "milo-settings 1\n[global]\nfollow_activity = false\n";
     let preview = b.with(|place| plan(place, old, &[])).unwrap();
     assert_eq!(b.with(|place| apply(place, preview)).unwrap(), 1);
-    let invalid = "milo-settings 1\n[global]\npreview_placement = center\n";
-    let preview = b.with(|place| plan(place, invalid, &[])).unwrap();
-    assert_eq!(preview.changes(), 0);
-    assert!(preview.report("bundle.txt").contains("Preview placement (a choice this Milo does not know)"));
+    for invalid in ["center", "floating"] {
+        let bundle = format!("milo-settings 1\n[global]\npreview_placement = {invalid}\n");
+        let preview = b.with(|place| plan(place, &bundle, &[])).unwrap();
+        assert_eq!(preview.changes(), 0);
+        assert!(preview.report("bundle.txt").contains("Preview placement (a choice this Milo does not know)"));
+    }
     assert_eq!(
         b.read("preferences.conf").as_deref(),
         Some("icons = off\npreview_placement = above\nfollow_activity = false\n")
     );
-    assert_eq!(b.worktree_layer(&second.root), "preview_placement = floating\n");
+    assert_eq!(b.worktree_layer(&second.root), "preview_placement = right\n");
 }
 
 #[test]
