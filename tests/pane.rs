@@ -1134,6 +1134,27 @@ fn help_and_version_write_to_stdout_and_argument_errors_write_to_stderr() {
 }
 
 #[test]
+fn a_pane_started_without_a_terminal_says_what_works_without_one() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "text\n").unwrap();
+    const NEEDS: &str = "milo: cannot use this terminal: standard output is not a terminal; \
+                         a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one";
+    for args in [&["outline"][..], &["history"], &["usage"], &["view", "page.txt"], &["."]] {
+        let output = project.command(env!("CARGO_BIN_EXE_milo")).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("{NEEDS}\n"), "{args:?}");
+    }
+    // Inside Rex there is a way to open the pane from a shell that has no terminal.
+    let output = project.command(env!("CARGO_BIN_EXE_milo")).env("REX_SESSION", "test").arg("outline").output().unwrap();
+    let in_rex = format!("{NEEDS}, and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab\n");
+    assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex));
+    // A mistake in the command is still reported as that mistake.
+    let output = project.command(env!("CARGO_BIN_EXE_milo")).args(["outline", "missing"]).output().unwrap();
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "milo: missing is not a directory\n");
+}
+
+#[test]
 fn doctor_and_removal_do_not_install_anything_on_a_fresh_account() {
     let project = Project::new();
     let settings = project.0.join(".claude/settings.json");

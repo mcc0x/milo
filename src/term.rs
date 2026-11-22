@@ -102,6 +102,9 @@ impl Session {
         if !stdout.is_terminal() {
             return Err(io::Error::other("standard output is not a terminal"));
         }
+        if !io::stdin().is_terminal() {
+            return Err(io::Error::other("standard input is not a terminal"));
+        }
         let output = terminal_output(stdout.as_raw_fd())?;
         let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
         Self::enter(keyboard, output, listen()?)
