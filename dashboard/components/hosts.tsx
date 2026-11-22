@@ -8,7 +8,7 @@ import './hosts.css';
 const openCommand = 'milo web --host LABEL';
 const groups: readonly (readonly [TransferGroup, string, string])[] = [
   ['appearance', 'Appearance', 'Icons and change marks'],
-  ['workflow', 'Workflow', 'Project following and outline filters'],
+  ['workflow', 'Workflow', 'Project following, outline filters and preview placement'],
   ['usage', 'Usage display', 'Which tools show, and figure size'],
   ['layout', 'Layout', 'Panes, side, order and proportions'],
 ];
