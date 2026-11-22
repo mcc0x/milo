@@ -173,6 +173,10 @@ A second test there, on a server of its own, is for the floating reader. It
 opens a file from the outline, edits and saves it through keys Rex sends, sees
 the outline leave that reader alone while it has unsaved changes, then has Rex
 close the reader on an unsaved draft and gets the draft back at the next edit.
+A third hands `milo review --float` a patch from a process with no terminal,
+as an agent's shell would. It sees only the handed-over edits marked beside a
+person's uncommitted lines in the same file, a path outside the project
+refused, and a reason in place of the diff once the agent's line is rewritten.
 
 ### Changing alert mirroring
 
@@ -215,6 +219,18 @@ No test may reach a real Discord. The helper looks for Discord's socket in one f
 A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
 
 An account is different: its figure exists only on a provider's servers, so nothing on disk says it is in use. It needs an entry in `UsageAccount`, which starts hidden, and an adapter in `src/usage/accounts.rs` that names the documented endpoint, the `MILO_…` settings it reads, how often it may be asked, and how to read the reply into a `Figure` with its own `Kind` and `Unit`. Never give an account a limit window: a balance, a spend or a count of credits must not become a percentage or reach the menu bar badge. Never read a key another tool saved, and never test against the real provider. Unit tests serve fixtures from a loopback port through `Sources::test`. That stand-in and the plain-HTTP address it uses are compiled only under `cfg(test)`: an installed binary has no setting, variable or file that sends a key anywhere but the provider's HTTPS host, and `tests/pane.rs` checks the built binary for that. Do not add one.
+
+### Changing the patch review
+
+`milo review` shows a *handed-over* patch: a unified diff a coding agent wrote of its own edits. [Reviewing an agent's edits](docs/panes.md#reviewing-an-agents-edits) says what a person sees. Keep three things true.
+
+It never guesses. `src/handoff/` works only from the patch and the file's text now, and `src/review.rs` asks Git for nothing but the project's top folder. Do not add a fallback to Git's diff, status or a list of changed paths: those say what is uncommitted, not who wrote it. A file the patch does not fit shows its reason and no diff.
+
+It claims no more than it checked. Milo checks that a file still holds the patch's lines, not who wrote them, so the screen says `patch from NAME` and the help says the rest. Do not word it as the agent's edits being verified. A new harness goes in the table in `docs/panes.md` only with the version and what was observed in a throwaway repository that had someone else's uncommitted work in the same file.
+
+The patch is untrusted and the review writes nothing. Paths go through `safe` in `patch.rs` before any file is looked for, and files are read through `src/reader/working_path.rs` with no link followed. Keep the work limit in `fit.rs`. Do not copy the patch into the state folder, run a program for it, or install anything into an agent's settings.
+
+`cargo test --bin milo handoff:: review::` runs the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server.
 
 ### Adding a language to the reader
 
@@ -302,6 +318,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
 | `src/git/pending.rs` | Counts lines in pending changes and reuses tracked-file counts across unrelated edits. |
 | `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden. |
+| `src/handoff.rs` | Works out what a handed-over patch changed in a file as it is now, or why that cannot be told. |
+| `src/handoff/fit.rs` | Finds a patch's lines in the file and takes them back out in memory, within a fixed amount of work. |
+| `src/handoff/patch.rs` | Reads the files and hunks of a unified diff and refuses names that could leave the project. |
 | `src/help.rs` | Draws and scrolls the in-pane help page. |
 | `src/history.rs` | Keeps commits, opened file lists, and selection state. |
 | `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
@@ -338,10 +357,12 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
 | `src/reader/edit.rs` | Edits a draft: cursor, keys, questions, formatting, and drawing. |
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
+| `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
+| `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, and its floating form for a program with no terminal. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
 | `src/rex/server.rs` | Asks a Rex server for its version, host ID and connected apps, and starts, forwards and ends another host's settings editor. |
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
@@ -445,7 +466,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
-| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
+| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, opens a floating review of a handed-over patch, and checks that presence shows nothing there. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |

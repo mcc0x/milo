@@ -107,6 +107,68 @@ Press `n` or `N` to jump to the next or previous change. The Reader briefly show
 
 Press `c` to fold long unchanged stretches, leaving a little context around each change. Click a folded row to read just that stretch, or use `Tab` and `Enter`. Press `c` again to see the full file. [See the same diff in both views.](img/pane-reader-comparison.webp)
 
+## Reviewing an agent's edits
+
+`milo review PATCH` shows what a coding agent says it changed, and nothing else. `PATCH` is a unified diff, as `git diff` or `diff -u` writes one, that the agent or its harness wrote from a record of its own edits. The agent *hands it over*; Milo does not work it out.
+
+Each file the patch names is shown as it is now, whole, with only the patch's lines marked as added or removed. Your own uncommitted work in the same file, another agent's edits, and anything staged or not yet known to Git read as plain unchanged lines. A file the patch does not name is never shown. Nothing is compared with a commit, so the review does not depend on what Git calls changed.
+
+```sh
+milo review /tmp/edits.patch --from "Claude Code"           # in your terminal
+milo review /tmp/edits.patch --from "Claude Code" --float   # from an agent's shell inside Rex
+```
+
+`--from NAME` is shown in the heading as `patch from NAME`, with the file's place among the patch's files. `--float` is for a program with no terminal of its own: it opens the review in a floating pane over the Rex tab the program runs in, prints how many files are shown and a `Not shown:` line with the reason for each that is not, and exits. Without `--float` the review opens in the terminal you run it in.
+
+| Key | Action |
+| --- | --- |
+| `]` / `[` | Next or previous file of the patch |
+| `r` | Read the files again |
+| `n` / `N`, `c`, scrolling | As in the reader |
+| `q` or `Esc` | Close |
+
+The review is read-only: `e` says so, and no file is written, in the project or outside it. The patch is read once when the review opens and is not copied or kept. Milo starts no program for it and asks Git nothing but where the project's top folder is, which the patch's paths are relative to.
+
+### What Milo checks, and what it cannot
+
+A patch is a claim. Milo cannot check who wrote a line, and `--from` is a label, not proof. What it does check is that the claim still fits the file: every hunk's lines, as the patch says it left them, must be in the file now, either where the patch says or in exactly one other place. A patch made one edit at a time can name a file several times; those edits are undone last to first, so a line the agent wrote and later rewrote shows once, from its first state to its last.
+
+When a file does not fit, Milo shows the reason in place of the file and no diff at all. It never falls back to the project's uncommitted changes.
+
+| Shown in place of the file | When |
+| --- | --- |
+| This file no longer holds the lines the patch left… | Someone changed or removed the patch's lines since, or the patch was not made from this file. |
+| The patch's lines are in this file more than once… | The lines around an edit changed, and what is left of it matches several places. |
+| The patch edits this file, but it is gone. / The patch removes this file, but it is here. | The file's existence contradicts the patch. |
+| The patch names a path that is not a file inside the project. | An absolute path, one with `..`, one inside `.git`, or a name Git quoted. |
+| This file is reached through a link… / This is a link… | Milo does not follow a link to show a patch. |
+| The patch says this file is not text. / This file is not text. | A binary file, or one that is not UTF-8. |
+| The patch for this file cannot be read. | A hunk is cut short or is not a unified diff. |
+| Too large to show. / Placing this patch in the file would take too long. | A file over 2 MB, or a patch that matches almost everywhere. |
+
+An empty patch, or text that names no file, opens nothing and says why. That is the right outcome when an agent has no record of its edits.
+
+Where the lines next to an edit have changed since, Milo gives up the unchanged lines at the ends of a hunk one at a time and looks for the rest. At least one unchanged line must stay with the edit, and what is left must then be in the file exactly once. An added line whose neighbours have all changed is not looked for on its own: the same text somewhere else in the file would not be the patch's.
+
+### Limits
+
+- The review shows the files as they were when it opened or when you last pressed `r`. It does not follow later edits.
+- A patch is at most 2 MB of text and names at most 200 files; a larger one is refused whole. Renames are shown under the new name, without the old one. A hunk with more lines than its header counts makes its file unreadable, which a hand-written patch can run into.
+- An agent can hand over a patch that leaves out some of its edits, or includes someone else's. Milo shows what it was given.
+- Edits an agent makes through a shell command, a formatter or a code generator are in the patch only if the agent or its harness recorded them.
+
+### Where the patch comes from
+
+Nothing is installed or configured for this, and no agent settings are changed. The [agent skill](../skills/milo/SKILL.md#show-the-user-your-own-edits) tells an agent how to produce the patch and when to say it cannot. These were checked on 22 November 2026 in throwaway repositories with uncommitted work by a person in the same file:
+
+| Harness | Source of the patch | What it covers |
+| --- | --- | --- |
+| OMP 19.0.1 | The harness's own record of which lines each agent wrote: `commit.draft("self")`, then `diff()`. Nothing is committed. | Edits made with its edit and write tools, per agent and subagent. A person's lines and another agent's lines in the same file were left out. Files written by a shell command are listed for review and are not in the patch. |
+| Claude Code 2.1.311 | The agent follows the skill: it copies a file aside before each edit and appends `diff -u` after it. | Edits the agent recorded. It depends on the agent following the instructions from its first edit. |
+| Codex CLI 0.171.0 | The same instructions. | The same. In its default sandbox Codex cannot reach Rex, so `--float` fails with `Rex did not open the review.` and the agent gives you the command to run. |
+
+Claude Code and Codex can also run a program after each edit, which could record edits without relying on the agent. Milo does not install or ship such a program: it would change your agent's configuration, and what those programs receive for an edit differs by harness and version.
+
 ## Editing files
 
 The reader only reads until you ask it to edit. Press `e`, or open the file with `milo view FILE --edit`, and the file's text becomes a draft with a cursor. It works the same in the reader Outline opens in its own pane, in the floating reader in Rex and in `milo view`. The last row lists the main keys, `Ctrl-G` opens help, and [keys and marks](keys.md#editing-in-the-reader) has the whole list.
