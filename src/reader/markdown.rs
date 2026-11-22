@@ -217,6 +217,7 @@ impl Document {
             source = line.number.saturating_sub(1) as usize;
             let len = line.text.floor_char_boundary((MAX_BYTES - bytes).min(line.text.len()));
             let raw = &line.text[..len];
+            let raw = if source == 0 { raw.strip_prefix('\u{feff}').unwrap_or(raw) } else { raw };
             bytes += len;
             trimmed |= len != line.text.len();
 
@@ -776,7 +777,7 @@ mod tests {
     #[test]
     fn renders_blocks_and_inline_styles_without_targets() {
         let mut input = lines(&[
-            "# Heading ###",
+            "\u{feff}# Heading ###",
             "A *soft* and **bold** `[literal]` [label](https://invalid/(nest) \"a title)\") ![alt](/private).",
             "- First",
             "  continuation",

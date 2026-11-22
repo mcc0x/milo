@@ -1486,3 +1486,25 @@ fn text_with_mp4_suffix_keeps_its_working_diff() {
     let lines = drawn(&mut reader, 60, 8).join("\n");
     assert!(lines.contains("before") && lines.contains("after"), "{lines}");
 }
+
+#[test]
+fn editing_rendered_markdown_keeps_the_inactive_source_viewport() {
+    let f = Fixture::new();
+    let notes: String = (0..48).map(|i| format!("## Marker {i:02} with enough text to require horizontal panning\n")).collect();
+    f.write("notes.md", &notes);
+    let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
+    reader.key(Key::Char('m'));
+    drawn(&mut reader, 32, 8);
+    reader.key(Key::End);
+    reader.key(Key::Right);
+    let source = drawn(&mut reader, 32, 8);
+    assert!(source.iter().any(|line| line.contains("‹")), "{source:?}");
+    reader.key(Key::Char('m'));
+    let preview = drawn(&mut reader, 32, 8);
+    assert!(preview.iter().any(|line| line.contains("Marker 00")));
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    reader.key(Key::Esc);
+    reader.key(Key::Char('m'));
+    assert_eq!(drawn(&mut reader, 32, 8), source);
+}

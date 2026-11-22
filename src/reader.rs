@@ -480,8 +480,12 @@ impl Pane for Reader {
                 key("b    ", "page up"),
                 key("g G  ", "top/bottom"),
             ];
-            if self.read_only.is_none() {
+            if let Some(ReadOnly(why)) = self.read_only {
+                rows.extend([note("Read-only:"), note(why)]);
+            } else {
                 rows.push(key("e    ", "edit source"));
+                let name = self.path.rsplit('/').next().unwrap_or_default();
+                rows.extend(edit::format_help(name, self.tools.as_deref()));
             }
             rows.extend([key("q Esc", "close"), note("Links are not opened.")]);
             return Page::new(rows);
@@ -825,15 +829,16 @@ impl Reader {
             work.notified = false;
         }
         self.refresh(true);
-        self.opening = false;
-        self.clear_change();
-        self.pan = 0;
-        self.set_source_top(self.source_row(line));
         if !self.markdown_source
             && let Body::Text(text) = &mut self.body
             && let Some(preview) = &mut text.preview
         {
             preview.go_to_line(line);
+        } else {
+            self.opening = false;
+            self.clear_change();
+            self.pan = 0;
+            self.set_source_top(self.source_row(line));
         }
         self.change_notice = said.map(|text| (JumpNotice::Said { lead: "", text }, Instant::now() + CHANGE_NOTICE));
     }
