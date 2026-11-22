@@ -36,7 +36,7 @@ To check from that same working shell, the following read-only commands print on
 
 On Rex `0.1.0-preview.21`, a disposable server with a Mac-identifying Unix app peer attached left the working block from **`rex window new` unowned**. Creating the same shell through `session.new_window` on the attached app connection assigned it to that peer without an explicit claim. From inside those two PTYs, Milo’s production identification code refused the first and returned the exact block, window and app peer for the second. This checks the server contract, not a GUI keystroke. If a fresh Mac-created terminal still refuses, report the Rex version, owner classification and Milo error; do not force ownership or change privacy settings to bypass the check.
 
-The preview anchor is separate from its working shell. In a disposable server, the CLI-created split remained unowned after its label was published until the app peer claimed it. Milo never claims the tile on the client’s behalf. If you see the waiting notice in a fresh Mac-created tab, report that separately from a misplaced WebKit view: it is not a placement pass.
+The preview anchor is separate from its working shell. In a disposable server, the CLI-created split remained unowned after publication until the app peer claimed it. Milo never claims it for the app. If the new tile remains unowned, the observer reports that at its 28-second startup check and stops. A waiting notice or refusal is not a placement pass.
 
 ## Placement
 
@@ -58,11 +58,15 @@ Before splitting, Milo matches the terminal owner to the local Rex app PID and p
 
 The Rex observer follows the published tile in the original session and tab. It sends normalized bounds when the divider moves. The helper maps those fractions into the pinned window using Rex’s [appearance preferences](https://www.superlogical.com/rex/docs/reference/mac-settings): sidebar position, width and collapsed state, tab bar location, toolbar behavior, pane headers, density and terminal padding. Header, gap and toolbar dimensions are estimates. The panel’s toolbar says **Approximate**. Unconfirmed ownership, an inactive tab, zoom, a higher visible Rex layer or an unsupported window configuration suppresses the overlay.
 
-**What a pin cannot tell Milo:** Rex reports session attachments, not which session a native window currently displays. Milo requires the owning app connection to be attached to the original session alone. This does not rule out another connection or host being presented by the same Mac process. A palette drawn inside an existing window may not change window metadata, and hover-revealed chrome can differ from its saved preference. Test with a disposable project; if placement drifts or the panel covers the wrong surface, close the preview. Do not change privacy settings.
+Milo checks Rex ownership once a second while observing. A silent observer cannot keep a visible panel authorized indefinitely: its last authorization expires after three seconds. A confirmed loss of the pinned Quartz window ends the helper; temporary occlusion, an offscreen window, or unavailable window metadata does not transfer the pin.
+
+**What a pin cannot tell Milo:** Rex reports attachments, not the session currently displayed by a native window. Milo checks the app connections on the original server for another session attached to the same local Mac process; it never queries other hosts. Switching hosts in the same native window can still be invisible to Milo. A palette drawn within an existing window may not change its metadata either. If the overlay covers the wrong surface, close it. No privacy permission resolves this ambiguity.
 
 ## Selecting an element for an agent
 
 Use **Select** in the preview and click the element. Review the structural path in Milo’s controls, then choose **Copy** or **Cancel**. Copying does not paste into a terminal, contact an agent or run a command. Paste it yourself if you want to share it. The picker returns a bounded path derived from tag kinds and sibling positions, not DOM content, attributes, input values, cookies, source files or screenshots. Navigation invalidates an outstanding selection.
+
+Resizing cancels an outstanding pick or copy confirmation. If the tile cannot fit distinct review and copy controls, enlarge it to enable selection.
 
 Milo’s picker is first-party code under this repository’s MIT license. Nothing is downloaded at runtime. It uses WebKit’s isolated content world in the explicitly opened loopback origin's main frame. The preview uses a nonpersistent WebKit data store, restricts navigation to the initial origin and does not open external windows. This is for your own dev server, **not a network sandbox for hostile applications**.
 
@@ -76,6 +80,8 @@ The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b
 * In a disposable AppKit panel, the production WebKit view loaded a real loopback server, accepted native keyboard/form input and hot-reloaded after a source change without a full navigation. The native smoke test exercises back/reload and select/review/cancel/copy. This tests the browser, not its registration over Rex.
 * The packaged dashboard was exercised at desktop and narrow widths; its placement setting survived save and restart. Linux rejected the command without opening a browser.
 * The human-test fixture loaded and navigated in the actual Milo `WKWebView` and reported its new viewport after a native resize from 510 to 350 points wide. This was a disposable nonactivating host, **not** visual acceptance over Rex.app.
+* Two disposable macOS processes placed a nonactivating panel above a background fixture window using the host’s AppKit window number. A separate Quartz PID and z-order check confirmed their relative order. An exact Quartz ID lookup found an offscreen window and returned no match for the terminated peer’s window. A closed-but-retained native window can remain in the inventory; closing a Rex anchor also ends its observer.
+* Native keyboard acceptance is still open: the separate nonactivating smoke panel loaded its loopback page and connected its hot-reload WebSocket, but did not become key in this launch context. The key-equivalent fixture and the Rex focus RPC are not substitutes for typing into a real Rex-hosted preview and returning to the original shell.
 
 ### Component measurements, not an end-to-end benchmark
 
@@ -83,7 +89,7 @@ Apple Silicon, release-compiled helper component, local Bun dev page. Time to in
 
 In the approximate-placement build’s WebKit component, a Bun dev server became interactive in 341 ms in one run. Editing a source module triggered hot reload and preserved the draft field. Host RSS was 103.2 MiB; five idle seconds consumed 0.0052 CPU seconds. This excludes separate WebKit workers, the Rex observer and the native window sampler.
 
-In a separate nonactivating fixture, the sampler pinned a real macOS window by ID. Resizing and moving it changed the estimated right pane from 242 × 398 to 302 × 458 points. A second fixture window suppressed the result; closing the original did not reassign its pin. Twenty samples took 0.0094 process CPU seconds over 5.11 seconds. The measurement included window enumeration and the current Rex appearance preferences, but considered only the fixture’s windows for placement. It does not measure occlusion over Rex.
+In a separate nonactivating fixture, the sampler pinned a real macOS window by ID. Resizing and moving it changed the estimated right pane from 242 × 374 to 302 × 434 points. A second fixture window suppressed the result; closing the original did not reassign its pin. Twenty samples took 0.0170 process CPU seconds over 5.13 seconds. The measurement included window enumeration and the current Rex appearance preferences, but considered only the fixture’s windows for placement. It does not measure occlusion over Rex.
 
 ### Reproducing the checks
 

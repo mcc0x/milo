@@ -90,7 +90,7 @@ pub(crate) fn pin_window(owner_pid: u32) -> Result<std::num::NonZeroU32, String>
         .and_then(Child::wait_with_output)
         .map_err(|e| format!("could not run the preview window check: {e}"))?;
     if !check.status.success() {
-        return Err("Preview needs one visible, frontmost local Rex window on one display, outside full screen. Close overlapping Rex windows or palettes and retry; no pane was opened.".into());
+        return Err("Preview could not pin one unobstructed local Rex window. Start in a frontmost, non-full-screen Mac-created tab on one display, with no Rex palette open. No pane was opened; no privacy permission is needed.".into());
     }
     std::str::from_utf8(&check.stdout)
         .ok()
