@@ -156,9 +156,6 @@ impl Repo {
         {
             return Some(false);
         }
-        let args = ["diff", against, "--no-renames", "--raw", "--numstat", "-z", "--"];
-        let mut scoped = Vec::with_capacity(args.len() + changed.len());
-        scoped.extend(args);
         let mut rows = Vec::with_capacity(changed.len());
         for &at in changed {
             let path = &self.status.tracked_uncommitted[at];
@@ -171,10 +168,11 @@ impl Repo {
             else {
                 return Some(false);
             };
-            scoped.push(path);
             rows.push(row);
         }
-        let files = parse_files(&self.git(&scoped)?).files;
+        let paths = changed.iter().map(|&i| self.status.tracked_uncommitted[i].as_str());
+        let raw = self.require(super::run::diff_counts(&self.root, self.guard(), against, "--no-renames", paths))?;
+        let files = parse_files(&raw).files;
         if files.len() != rows.len()
             || !files.iter().zip(&rows).all(|(file, &row)| {
                 file.kind == Kind::Modified && file.path == known.files[row].path
@@ -195,15 +193,9 @@ impl Repo {
 
     fn diff_tracked(&self, stamps: &[DiffStamp], against: &str, named: bool) -> Option<Vec<PendingFile>> {
         let paths = &self.status.tracked_uncommitted;
-        let args = ["diff", against, "-M", "--raw", "--numstat", "-z", "--"];
-        let raw = if named {
-            let mut scoped = Vec::with_capacity(args.len() + paths.len());
-            scoped.extend(args);
-            scoped.extend(paths.iter().map(String::as_str));
-            self.git(&scoped)?
-        } else {
-            self.git(&args)?
-        };
+        let scoped = if named { paths.as_slice() } else { &[] };
+        let paths_to_count = scoped.iter().map(String::as_str);
+        let raw = self.require(super::run::diff_counts(&self.root, self.guard(), against, "-M", paths_to_count))?;
         let stamps: HashMap<&str, _> = paths.iter().zip(stamps).map(|(p, s)| (p.as_str(), s.file())).collect();
         let mut files = parse_files(&raw).files;
         if named {
@@ -411,6 +403,32 @@ mod tests {
         assert!(after.iter().any(|file| file.path == "old.txt" && file.kind == Kind::Deleted));
         assert!(after.iter().any(|file| file.path == "new.txt" && file.kind == Kind::Added));
         assert_eq!(warm.moved_from("new.txt"), None);
+    }
+
+    #[test]
+    fn recounting_one_file_includes_its_former_children_but_not_matching_siblings() {
+        let f = Fixture::new();
+        let path = "src/[a]*?";
+        let child = format!("{path}/old");
+        let content = "a recognizable line\n".repeat(20);
+        f.write(&child, &content);
+        f.write("src/abc", "unrelated\n");
+        f.commit("base");
+        f.push();
+        fs::remove_dir_all(f.root.join(path)).unwrap();
+        f.write(path, &content);
+        f.write("src/abc", "also unpushed\n");
+        f.commit("replace directory with its file");
+        f.write(path, &(content + "one more line\n"));
+
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let pending = repo.pending().unwrap();
+        let mut local = pending.iter().filter(|f| !f.unpushed);
+        let file = local.next().unwrap();
+        assert_eq!((file.path.as_str(), file.kind, file.from.as_deref()), (path, Kind::Renamed, Some(child.as_str())));
+        assert_eq!((file.add, file.del), (1, 0));
+        assert!(local.next().is_none());
     }
 
     #[test]

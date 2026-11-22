@@ -108,6 +108,30 @@ fn exact_pathspec(path: &str) -> String {
     spec
 }
 
+/// Count lines for the named paths, or the whole tree when there are none.
+pub(super) fn diff_counts<'a>(
+    root: &Path,
+    guard: &[String],
+    against: &str,
+    renames: &str,
+    mut paths: impl ExactSizeIterator<Item = &'a str>,
+) -> Option<Vec<u8>> {
+    let mut cmd = command(root, guard, &["diff", against, renames, "--raw", "--numstat", "-z", "--"]);
+    if paths.len() == 1 {
+        // Git's tree-to-index walk with one literal path early in a large index
+        // can cost more than walking the entire tree. Two globs select the same
+        // entries: the exact name and, if it was a directory on either side, its
+        // children. Keep both for rename detection across a file/directory swap.
+        let mut spec = exact_pathspec(paths.next()?);
+        cmd.env_remove("GIT_LITERAL_PATHSPECS").arg(&spec);
+        spec.push_str("/**");
+        cmd.arg(spec);
+    } else {
+        cmd.args(paths);
+    }
+    checked_output(cmd, OUTPUT_LIMIT, None).ok()
+}
+
 pub(super) enum CommitDiff<'a> {
     Files(BorrowedFd<'a>),
     Paths,

@@ -1,6 +1,6 @@
 """Count real Git operations in Outline and History (no timing benchmark).
 
-    python3 tests/backend_refresh.py /tmp/milo-astra-backend-base
+    python3 tests/backend_refresh.py target/release/milo
 
 Fixtures: sparse = 12 tracked/2 dirty; large = 6,000 tracked/1,000 dirty.
 Use --fixture sparse-checkout for a 6,000-path repo with a sparse index
@@ -162,7 +162,10 @@ def command(args):
         if "--verify" in opts:
             return "resolve-upstream" if "@{upstream}" in opts[-1] else "resolve-ref"
     if name == "diff" and "--numstat" in opts:
-        paths = len(opts) - opts.index("--") - 1 if "--" in opts else 0
+        specs = opts[opts.index("--") + 1:] if "--" in opts else []
+        paths = len(specs)
+        if paths == 2 and specs[0].startswith(":(glob)") and specs[1] == specs[0] + "/**":
+            paths = 1  # the exact file and its former descendants
         if "--no-renames" in opts:
             return f"diff-recount[{paths}]"
         if "-M" in opts:
@@ -291,6 +294,8 @@ class Profile:
                 (repo / "ahead.txt").write_text("unpushed file\n")
                 self.git(repo, "add", "ahead.txt")
                 self.git(repo, "commit", "-qm", "probe ahead commit")
+            else:
+                self.git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
         if sparse_checkout:
             self.git(repo, "sparse-checkout", "set", "--cone", "--sparse-index", "src")
         for i in range(1, dirty):
