@@ -214,6 +214,28 @@ fn byte_at(text: &str, column: usize) -> usize {
     text.len()
 }
 
+/// Where the part of a line that is read to draw it up to `column` ends: at
+/// the second character to start there or further on, so that the first is
+/// whole and keeps what is attached to it.
+fn read_end(text: &str, column: usize) -> usize {
+    // Most lines are no longer than this, and are read whole without being measured.
+    if text.len() <= column {
+        return text.len();
+    }
+    let (mut col, mut reached) = (0, false);
+    for (byte, c) in text.char_indices() {
+        let width = shown_width(c, col);
+        if width > 0 {
+            if reached {
+                return byte;
+            }
+            reached = col >= column;
+        }
+        col += width;
+    }
+    text.len()
+}
+
 /// A tab if the file indents with tabs, or as many spaces as its smallest indent.
 fn indent_of(buffer: &Buffer) -> &'static str {
     const SPACES: &str = "        ";
@@ -799,13 +821,16 @@ impl Editor {
         self.top = self.top.min(self.buffer.len() - 1);
         let shown = (self.buffer.len() - self.top).min(rows);
         let mut spans = std::mem::take(&mut self.spans);
+        let mut painter =
+            LinePainter { x: self.text_x, width: self.columns, pan: self.pan, lang: self.lang, spans: &mut spans };
+        let reach = painter.reach();
         for i in 0..shown {
             let row = self.top + i;
             let state = self.state_at(row);
             let number = u32::try_from(row + 1).unwrap_or(u32::MAX);
-            let line = Line::new(LineKind::Same, number, self.buffer.row(row));
-            let mut painter =
-                LinePainter { x: self.text_x, width: self.columns, pan: self.pan, lang: self.lang, spans: &mut spans };
+            // A line can be megabytes long; only what can be drawn of it is made ready to draw.
+            let text = self.buffer.row(row);
+            let line = Line::new(LineKind::Same, number, &text[..read_end(text, reach)]);
             painter.draw_line(s, i + 1, &line, &state);
         }
         self.spans = spans;
@@ -1026,5 +1051,37 @@ mod tests {
         editor.key(Key::Char('*'), Instant::now());
         assert!(matches!(editor.state_at(22), State::Comment(..)));
         assert_eq!(editor.open.known, 23);
+    }
+
+    #[test]
+    fn a_line_drawn_from_the_part_that_is_read_looks_as_the_whole_line_does() {
+        const PIECES: [&str; 14] = [
+            "\t", "a", " ", "let x = \"s\"; ", "界", "e\u{301}", "\u{200b}", "\x07", "r#\"raw\"# ", "// c ", "call(",
+            "🟢", "\"open ", "'c'",
+        ];
+        let mut seed = 0x2545_f491_usize;
+        let mut next = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let langs = [None, crate::syntax::for_file("a.rs"), crate::syntax::for_file("a.py")];
+        for case in 0..3000 {
+            let text: String = (0..next(400)).map(|_| PIECES[next(PIECES.len())]).collect();
+            let (width, pan, lang) = (1 + next(30), next(120), langs[next(langs.len())]);
+            let frames = [false, true].map(|part| {
+                let mut spans = Vec::new();
+                let mut painter = LinePainter { x: 5, width, pan, lang, spans: &mut spans };
+                let end = if part { read_end(&text, painter.reach()) } else { text.len() };
+                let mut screen = Screen::sized(5 + width + 1, 2);
+                painter.draw_line(&mut screen, 1, &Line::new(LineKind::Same, 7, &text[..end]), &State::Code);
+                (end, screen.emitted())
+            });
+            assert_eq!(frames[0].1, frames[1].1, "case {case}: {width} wide at {pan}, {text:?}");
+            // And no more is read than the columns asked for and one character past them.
+            let read = column_of(&text, frames[1].0);
+            assert!(frames[1].0 == text.len() || read <= pan + width + 260 + 2 * TAB, "case {case}");
+        }
     }
 }
