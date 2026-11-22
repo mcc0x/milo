@@ -13,7 +13,7 @@ Only **Connect with Milo** needs the relay. The settings dashboard remains local
 
 ## Run locally
 
-Use Bun 1.4.5 or later. Start the local relay as below. Launch the development Milo dashboard with `MILO_RELAY_ORIGIN=http://127.0.0.1:6120 milo web`; a normally launched client uses the official HTTPS endpoint.
+Use Bun 1.4.5 or later. Start the local relay as below. Launch the dashboard of a development build of Milo with `MILO_RELAY_ORIGIN=http://127.0.0.1:6120 cargo run -- web`. Only a development build reads that variable: a release build uses the official HTTPS endpoint whatever it says.
 
 ```sh
 cd hosted

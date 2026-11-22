@@ -24,10 +24,16 @@ pub(super) enum Origin {
 
 impl Origin {
     pub(super) fn configured() -> Option<Self> {
-        match std::env::var("MILO_RELAY_ORIGIN") {
-            Ok(origin) => Self::parse(&origin),
-            Err(std::env::VarError::NotPresent) => Some(Self::Production),
-            Err(std::env::VarError::NotUnicode(_)) => None,
+        Self::chosen(std::env::var("MILO_RELAY_ORIGIN"), cfg!(debug_assertions))
+    }
+
+    /// The relay `named` in the environment, which only a development build follows: a release
+    /// build has no setting that changes where a credential or an alert is sent.
+    fn chosen(named: Result<String, std::env::VarError>, development: bool) -> Option<Self> {
+        match named {
+            Ok(origin) if development => Self::parse(&origin),
+            Err(std::env::VarError::NotUnicode(_)) if development => None,
+            _ => Some(Self::Production),
         }
     }
 
@@ -494,6 +500,20 @@ pub(super) mod tests {
             finalize.reply(&origin, 200, claim),
             Ok(Connected::Claimed(claim)) if claim.provider == Destination::Discord && claim.chat.is_empty()
         ));
+    }
+
+    #[test]
+    fn only_a_development_build_follows_the_relay_named_in_the_environment() {
+        use std::env::VarError;
+
+        let local = || Ok("http://127.0.0.1:6120".to_owned());
+        assert!(matches!(Origin::chosen(local(), true), Some(Origin::Local)));
+        assert!(matches!(Origin::chosen(Err(VarError::NotPresent), true), Some(Origin::Production)));
+        assert!(Origin::chosen(Ok("http://127.0.0.1:6121".into()), true).is_none());
+        // A release build sends a pairing, a capability and every alert to the production relay only.
+        for named in [local(), Ok("http://127.0.0.1:6121".into()), Err(VarError::NotPresent)] {
+            assert!(matches!(Origin::chosen(named, false), Some(Origin::Production)));
+        }
     }
 
     #[test]
