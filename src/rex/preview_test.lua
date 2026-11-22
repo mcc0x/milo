@@ -34,6 +34,7 @@ local function call(f)
     rex = f.rex,
     print = function(s) writes[#writes + 1] = s .. "\n" end,
     io = { stdout = { write = function(_, s, n) writes[#writes + 1] = s .. n end, flush = function() end } },
+    os = { time = function() return f.now or 100 end },
   }, { __index = _G })
   f.rex.on = function(event, run)
     assert(not callbacks[event], event)
@@ -464,6 +465,20 @@ same_process.second_viewer = second_viewer(gui, { another_session })
 assert(watch_same_process("attachment_poll") == shown .. "hide\n")
 same_process.second_viewer.session_ids = {}
 assert(watch_same_process("attachment_poll") == shown .. shown)
+
+local delayed = fixture("watch", preview)
+local delayed_view = delayed.rex.session.view
+local delayed_reads = 0
+delayed.rex.session.view = function(args)
+  delayed_reads = delayed_reads + 1
+  return delayed_view(args)
+end
+local watch_delayed = call(delayed)
+assert(watch_delayed() == shown and delayed_reads == 1)
+delayed.now = 104
+assert(watch_delayed("attachment_poll") == shown .. "renew\n" and delayed_reads == 2)
+delayed.now, delayed.view.active_window_id = 108, inactive
+assert(watch_delayed("attachment_poll") == shown .. "renew\nhide\n" and delayed_reads == 3)
 
 local staged = fixture("watch", preview)
 staged.anchor.label = "milo:preview:starting"

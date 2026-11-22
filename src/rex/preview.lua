@@ -432,6 +432,7 @@ end
 
 local host, cli_pid = local_host()
 local last, verified, published, claimed, last_revision, owner_allowed
+local last_poll
 local function write(record)
   io.stdout:write(record, "\n")
   io.stdout:flush()
@@ -516,14 +517,19 @@ end
 local function poll_owner()
   -- Scoped events keep cached visibility current but don't cover other
   -- attachments by this app. Check its connections before renewing.
-  -- A recovery needs a new layout before any show.
-  local previous = owner_allowed
+  -- After a stalled tick, refresh the layout even if an overdue timer
+  -- happens to run before the queued layout events.
+  local previous, previous_state = owner_allowed, last
   owner_allowed = owner_permitted()
-  if previous == nil or (owner_allowed and not previous) then
+  local now = os.time()
+  local delayed = last_poll and (now < last_poll or now - last_poll >= 3)
+  last_poll = now
+  if previous == nil or (owner_allowed and (not previous or delayed)) then
     refresh(true)
   elseif previous and not owner_allowed then
     emit()
-  elseif owner_allowed and last ~= "hide" then
+  end
+  if owner_allowed and last ~= "hide" and last == previous_state then
     write("renew")
   end
   rex.after(1, poll_owner)
