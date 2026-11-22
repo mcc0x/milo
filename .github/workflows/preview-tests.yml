@@ -1,0 +1,41 @@
+name: Preview fixtures
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/preview-tests.yml'
+      - 'src/rex/preview*'
+      - 'src/preview.rs'
+      - 'src/preview/**'
+      - 'macos/Preview/**'
+      - 'tests/preview_geometry.m'
+
+permissions:
+  contents: read
+
+jobs:
+  observer:
+    name: Preview layout and observer fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - run: lua5.1 preview_test.lua preview.lua
+        working-directory: src/rex
+
+  geometry:
+    name: Preview geometry and terminal recovery
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
+            -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework WebKit \
+            -o "$RUNNER_TEMP/preview-geometry"
+          "$RUNNER_TEMP/preview-geometry"
