@@ -916,6 +916,18 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
 fn preview_layout_and_observer() {
     use std::io::{BufRead as _, BufReader};
 
+    fn watch_records(log: &str) -> impl Iterator<Item = &str> {
+        log.split_inclusive('\n').map_while(|line| line.strip_suffix('\n'))
+    }
+
+    struct PausedWatcher(u32);
+    impl Drop for PausedWatcher {
+        fn drop(&mut self) {
+            // SAFETY: This is the lab's own watcher, which we just stopped.
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGCONT) };
+        }
+    }
+
     let mut lab = Lab::start();
     // The request runner must be a real PTY descendant, just as Milo is.
     // It keeps its own PID while invoking Rex and supplies only test inputs.
@@ -1256,17 +1268,38 @@ fn preview_layout_and_observer() {
         }
         let watch = start_watch(block, child);
         let records = || fs::read_to_string(watch.with_extension("watch.log")).unwrap_or_default();
-        let states = std::cell::Cell::new(0);
-        let expect = |state: &str| {
-            let index = states.get();
-            let deadline = Instant::now() + PATIENCE;
-            while records().lines().nth(index).is_none() && Instant::now() < deadline {
+        let cursor = std::cell::Cell::new(0);
+        let visible = std::cell::Cell::new(false);
+        let next_record = |deadline| {
+            let index = cursor.get();
+            loop {
+                let log = records();
+                if let Some(line) = watch_records(&log).nth(index) {
+                    cursor.set(index + 1);
+                    break line.to_owned();
+                }
+                assert!(Instant::now() < deadline, "{placement}: missing record {index}: {log}");
                 std::thread::sleep(Duration::from_millis(50));
             }
-            assert_eq!(records().lines().nth(index), Some(state), "{placement}: {}", records());
-            states.set(index + 1);
         };
-        let watch_pid = || fs::read_to_string(watch.with_extension("watch.pid")).unwrap().trim().parse::<u32>().unwrap();
+        let expect = |state: &str| {
+            let deadline = Instant::now() + PATIENCE;
+            loop {
+                let line = next_record(deadline);
+                if line == "renew" {
+                    assert!(visible.get() && Instant::now() < deadline, "{placement}: unexpected or excessive renewals");
+                    continue;
+                }
+                assert_eq!(line, state, "{placement}: {}", records());
+                visible.set(state.starts_with("show "));
+                break;
+            }
+        };
+        let watch_pid = || {
+            let pid = || fs::read_to_string(watch.with_extension("watch.pid")).ok()?.trim().parse::<u32>().ok();
+            assert!(soon(|| pid().is_some()), "{placement}: no watcher PID");
+            pid().unwrap()
+        };
         let mut show = show_for(block);
         expect("hide");
         if let Some((mut other, input, output)) = transferred.take() {
@@ -1317,9 +1350,38 @@ fn preview_layout_and_observer() {
             let extra = format!(r#","main":"{main}"{owner}"#);
             assert_eq!(request("focus", block, block, &extra).trim(), "ok");
             check_focus(&main);
-            // Outlive the CLI connection/request timeout without layout events.
-            std::thread::sleep(Duration::from_millis(3100));
-            assert!(alive(watch_pid()));
+            // Observe regular renewals with unchanged geometry beyond the CLI timeout.
+            let deadline = Instant::now() + PATIENCE;
+            let log = records();
+            for line in watch_records(&log).skip(cursor.get()) {
+                assert_eq!(line, "renew");
+                cursor.set(cursor.get() + 1);
+            }
+            for _ in 0..4 {
+                assert_eq!(next_record(deadline), "renew");
+            }
+
+            // Stop just the lab's watcher and leave its output open. The
+            // native fixture separately checks expiry on a silent pipe.
+            let watcher = watch_pid();
+            // SAFETY: This PID belongs to the watcher started in our disposable Rex lab.
+            assert_eq!(unsafe { libc::kill(watcher as libc::pid_t, libc::SIGSTOP) }, 0);
+            let paused = PausedWatcher(watcher);
+            assert!(soon(|| {
+                let output = lab.command("/bin/ps").args(["-o", "stat=", "-p", &watcher.to_string()]).output().unwrap();
+                String::from_utf8_lossy(&output.stdout).trim_start().starts_with('T')
+            }));
+            let silent = records();
+            for line in watch_records(&silent).skip(cursor.get()) {
+                assert_eq!(line, "renew");
+                cursor.set(cursor.get() + 1);
+            }
+            std::thread::sleep(Duration::from_millis(3250));
+            assert_eq!(records(), silent);
+            assert!(alive(watcher));
+            drop(paused);
+            assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
+            check_focus(&main);
         }
         if placement == "above" {
             lab.rex(&["zoom", "-s", &session, block, "--on"]);
@@ -1365,8 +1427,12 @@ fn preview_layout_and_observer() {
             close(block);
             // Closing the owning PTY can end the subprocess before Rex
             // delivers its final hide. EOF is sufficient for the native pane.
-            if let Some(final_state) = records().lines().nth(states.get()) {
+            assert!(soon(|| !alive(watcher)));
+            let log = records();
+            let mut tail = watch_records(&log).skip(cursor.get()).skip_while(|line| *line == "renew");
+            if let Some(final_state) = tail.next() {
                 assert_eq!(final_state, "hide");
+                assert!(tail.next().is_none(), "{placement}: records after close: {log}");
             }
         }
         assert!(soon(|| !alive(watcher)), "{placement}: watcher didn't end");
@@ -1440,11 +1506,14 @@ fn preview_layout_and_observer() {
     viewer_session("session.own_block", &session);
     let owned_watch = start_watch(&anchor_block, anchor_pid);
     let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
-    let shown = format!("hide\n{}\n", show_for(&anchor_block));
-    assert!(soon(|| records() == shown), "{}", records());
+    let show = show_for(&anchor_block);
+    assert!(soon(|| watch_records(&records()).filter(|line| *line != "renew").eq(["hide", &show])), "{}", records());
     close(&main);
-    let closed = format!("{shown}hide\n");
-    assert!(soon(|| records() == closed), "{}", records());
+    assert!(soon(|| {
+        let log = records();
+        watch_records(&log).filter(|line| *line != "renew").eq(["hide", &show, "hide"])
+            && watch_records(&log).last() == Some("hide")
+    }), "{}", records());
     assert!(soon(|| fs::read_to_string(owned_watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
     close(&anchor_block);
 }

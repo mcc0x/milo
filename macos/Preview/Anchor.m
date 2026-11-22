@@ -11,10 +11,12 @@
 #import <stdio.h>
 #import <string.h>
 #import <math.h>
+#import <time.h>
 #import <unistd.h>
 
 static const NSTimeInterval SampleInterval = 0.25;
 static const NSTimeInterval SampleLifetime = 0.60;
+static const NSTimeInterval LeaseLifetime = 3.0;
 enum { FractionScale = 1000000 };
 
 typedef struct {
@@ -60,13 +62,28 @@ static BOOL WindowAlpha(NSDictionary *window, double *alpha) {
     return MetadataNumber(window, kCGWindowAlpha, alpha) && *alpha >= 0 && *alpha <= 1;
 }
 
-static pid_t PinnedOwner(NSArray *windows, CGWindowID pinned) {
+typedef NS_ENUM(NSUInteger, PinLookup) { PinUnavailable, PinMissing, PinFound };
+
+static PinLookup PinnedOwner(NSArray *windows, CGWindowID pinned, pid_t *pid) {
+    if (!windows) return PinUnavailable;
+    if (!windows.count) return PinMissing;
     id window = windows.firstObject;
     int64_t number, owner;
     if (windows.count != 1 || ![window isKindOfClass:NSDictionary.class] ||
         !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number) || number != pinned ||
-        !WindowInteger(window, kCGWindowOwnerPID, 2, INT_MAX, &owner)) return 0;
-    return (pid_t)owner;
+        !WindowInteger(window, kCGWindowOwnerPID, 2, INT_MAX, &owner)) return PinUnavailable;
+    *pid = (pid_t)owner;
+    return PinFound;
+}
+
+static PinLookup LookupPin(CGWindowID pinned, pid_t *pid) {
+    // Quartz accepts raw CGWindowID values in this array, not CFNumber objects.
+    const void *identifier = (const void *)(uintptr_t)pinned;
+    CFArrayRef ids = CFArrayCreate(NULL, &identifier, 1, NULL);
+    if (!ids) return PinUnavailable;
+    NSArray *windows = CFBridgingRelease(CGWindowListCreateDescriptionFromArray(ids));
+    CFRelease(ids);
+    return PinnedOwner(windows, pinned, pid);
 }
 
 static CGRect WindowBounds(NSDictionary *window) {
@@ -79,9 +96,9 @@ static CGRect WindowBounds(NSDictionary *window) {
 // Quartz supplies onscreen metadata in front-to-back order. A pinned window is
 // never replaced by another window, even if that window is the only Rex window.
 static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned, pid_t helperPID,
-    CGWindowID panel, const CGRect *normalized) {
+    const CGRect *orderedPanel, const CGRect *normalized) {
     Geometry none = {0}, geometry = {0};
-    NSUInteger match = NSNotFound;
+    NSUInteger match = NSNotFound, panel = NSNotFound;
     int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey);
     for (NSUInteger i = 0; i < windows.count; ++i) {
         NSDictionary *window = windows[i];
@@ -91,6 +108,18 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
             !WindowInteger(window, kCGWindowLayer, INT_MIN, INT_MAX, &layer) ||
             !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number)) return none;
         if (pinned && number == pinned && (owner != rexPID || layer != normal)) return none;
+        if (orderedPanel && owner == helperPID && layer == normal) {
+            double alpha;
+            if (!WindowAlpha(window, &alpha)) return none;
+            if (alpha != 0) {
+                CGRect bounds = WindowBounds(window);
+                // Some Quartz metadata rounds bounds outward to whole points.
+                if (panel != NSNotFound || (alpha != 1) ||
+                    (!CGRectEqualToRect(bounds, *orderedPanel) &&
+                     !CGRectEqualToRect(bounds, CGRectIntegral(*orderedPanel)))) return none;
+                panel = i;
+            }
+        }
         if (owner != rexPID || layer != normal) continue;
         double alpha;
         if (!WindowAlpha(window, &alpha)) return none;
@@ -101,14 +130,12 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         geometry = (Geometry){bounds, bounds, (CGWindowID)number};
         match = i;
     }
-    if (match == NSNotFound ||
+    if (match == NSNotFound || (orderedPanel && (panel == NSNotFound || panel >= match)) ||
         (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))) return none;
 
     for (NSUInteger i = 0; i < match; ++i) {
+        if (i == panel) continue;
         NSDictionary *window = windows[i];
-        int64_t number, owner;
-        if (panel && WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number) && number == panel &&
-            WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &owner) && owner == helperPID) continue;
         double alpha;
         if (!WindowAlpha(window, &alpha)) return none;
         if (alpha == 0) continue;
@@ -169,6 +196,46 @@ static BOOL ReadShow(const char *line, size_t length, pid_t *pid, CGRect *normal
 }
 
 typedef struct {
+    CGRect tile;
+    NSTimeInterval checked;
+} VisibilityLease;
+
+static NSTimeInterval LeaseNow(void) {
+    // Unlike uptime, this clock also counts time spent asleep.
+    return (NSTimeInterval)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / NSEC_PER_SEC;
+}
+
+static BOOL LeaseFresh(const VisibilityLease *lease, NSTimeInterval now) {
+    return lease->checked > 0 && now >= lease->checked && now - lease->checked < LeaseLifetime;
+}
+
+typedef enum {
+    VisibilityUnchanged, VisibilityChanged, VisibilityInvalid, VisibilityWrongOwner, VisibilityUnclaimed,
+} VisibilityUpdate;
+
+static VisibilityUpdate UpdateVisibility(VisibilityLease *lease, NSTimeInterval now, pid_t expected,
+    const char *line, size_t length) {
+    if (length == 4 && !memcmp(line, "hide", 4)) {
+        lease->checked = 0;
+        return VisibilityChanged;
+    }
+    if (length == 9 && !memcmp(line, "unclaimed", 9)) return VisibilityUnclaimed;
+    CGRect tile;
+    if (length == 5 && !memcmp(line, "renew", 5)) {
+        // A renewal may recover an expired show, but only another show can undo a hide.
+        if (!lease->checked) return VisibilityUnchanged;
+        tile = lease->tile;
+    } else {
+        pid_t pid;
+        if (!ReadShow(line, length, &pid, &tile)) return VisibilityInvalid;
+        if (pid != expected) return VisibilityWrongOwner;
+    }
+    BOOL unchanged = LeaseFresh(lease, now) && CGRectEqualToRect(tile, lease->tile);
+    *lease = (VisibilityLease){tile, now};
+    return unchanged ? VisibilityUnchanged : VisibilityChanged;
+}
+
+typedef struct {
     NSRect frame, visibleFrame;
     CGFloat scale;
     CGDirectDisplayID id;
@@ -220,7 +287,7 @@ static BOOL ScreenFrame(Geometry geometry, NSRect *pane, CGDirectDisplayID *disp
 CGWindowID milo_preview_pin_window(pid_t pid) {
     NSRunningApplication *rex = RexApplication(pid);
     if (!FrontmostRex(rex)) return kCGNullWindowID;
-    Geometry sampled = SampleGeometry(VisibleWindows(), pid, kCGNullWindowID, getpid(), kCGNullWindowID, NULL);
+    Geometry sampled = SampleGeometry(VisibleWindows(), pid, kCGNullWindowID, getpid(), NULL, NULL);
     // There is no tile yet. Check just that this window and its current chrome can support placement.
     NSRect pane;
     CGDirectDisplayID display;
@@ -272,13 +339,16 @@ static void WriteDiagnostic(int fd, const char *reason) {
     dispatch_queue_t _sampleQueue;
     dispatch_source_t _stateSource, _parentSource;
     NSMutableArray<dispatch_source_t> *_signalSources;
-    CGRect _normalized;
+    VisibilityLease _lease;
     Geometry _candidate;
     NSRect _candidateFrame;
+    CGRect _orderedPanelFrame;
     CGDirectDisplayID _candidateDisplay;
     NSTimeInterval _lastSample;
+    NSTimeInterval _nextPinCheck;
     NSUInteger _generation;
-    BOOL _samplePending, _requested, _finished, _sessionInactive, _screensAsleep;
+    BOOL _samplePending, _finished, _sessionInactive, _screensAsleep;
+    BOOL _panelProven;
     char _line[64];
     size_t _lineLength;
     int _status;
@@ -286,6 +356,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
     stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty;
 - (int)run;
+- (void)tick;
 @end
 
 @implementation MiloPreviewAnchor
@@ -308,6 +379,8 @@ static void WriteDiagnostic(int fd, const char *reason) {
 - (void)conceal {
     _candidate = (Geometry){0};
     _lastSample = 0;
+    _panelProven = NO;
+    _panel.ignoresMouseEvents = YES;
     if (_panel.visible) [_panel orderOut:nil];
 }
 
@@ -332,34 +405,24 @@ static void WriteDiagnostic(int fd, const char *reason) {
 }
 
 - (BOOL)canSample {
-    return _requested && !_sessionInactive && !_screensAsleep && FrontmostRex(_rex);
+    return _lease.checked > 0 && !_sessionInactive && !_screensAsleep && FrontmostRex(_rex) &&
+        LeaseFresh(&_lease, LeaseNow());
 }
 
 - (BOOL)acceptsPanelInput {
-    return _panel.visible && _panel.onActiveSpace && [self canSample] &&
+    return _panel.visible && _panelProven && _panel.onActiveSpace && [self canSample] &&
         SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
 }
 
 - (void)handleLine {
-    if (_lineLength == 4 && !memcmp(_line, "hide", 4)) {
-        _requested = NO;
-        [self invalidate];
-        return;
-    }
-    pid_t pid;
-    CGRect normalized;
-    if (!ReadShow(_line, _lineLength, &pid, &normalized)) {
-        [self finish:"invalid Rex visibility message"];
-        return;
-    }
-    if (pid != _rex.processIdentifier) {
-        [self finish:"the Rex client changed; reopen the preview in the current Rex client"];
-        return;
-    }
-    if (!_requested || !CGRectEqualToRect(normalized, _normalized)) {
-        _requested = YES;
-        _normalized = normalized;
-        [self invalidate];
+    switch (UpdateVisibility(&_lease, LeaseNow(), _rex.processIdentifier, _line, _lineLength)) {
+        case VisibilityUnchanged: break;
+        case VisibilityChanged: [self invalidate]; break;
+        case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
+        case VisibilityWrongOwner: [self finish:"the Rex client changed; reopen the preview in the current Rex client"]; break;
+        case VisibilityUnclaimed:
+            [self finish:"the Mac viewer did not claim this preview tile. Close it and retry from a Mac-created working terminal; no permissions are needed."];
+            break;
     }
 }
 
@@ -393,9 +456,12 @@ static void WriteDiagnostic(int fd, const char *reason) {
     if (!WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1)) [self finish:"could not return focus to the Rex terminal"];
 }
 
-- (void)applySample:(Geometry)geometry generation:(NSUInteger)generation started:(NSTimeInterval)started {
+- (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
+    generation:(NSUInteger)generation started:(NSTimeInterval)started {
     _samplePending = NO;
-    if (_finished || generation != _generation) return;
+    if (_finished) return;
+    if (lostPin) { [self finish:NULL]; return; }
+    if (generation != _generation) return;
     NSRect frame;
     CGDirectDisplayID display;
     if (![self canSample] || !geometry.windowID ||
@@ -440,44 +506,83 @@ static void WriteDiagnostic(int fd, const char *reason) {
         // WebKit startup can outlast a sample. Wait for another one before showing.
         return;
     }
-    if (!_panel.visible) {
-        [_panel setFrame:frame display:NO];
-        if (generation != _generation || ![self canSample] ||
-            !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
+    if (_panel.visible) {
+        if (!checkedPanel || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {
             [self invalidate];
             return;
         }
-        // Relative ordering at the normal level, without activating the helper.
-        [_panel orderWindow:NSWindowAbove relativeTo:(NSInteger)_pinned];
-        if (_panel.visible && (!NSEqualRects(_panel.frame, frame) ||
-            !SampleFresh(NSProcessInfo.processInfo.systemUptime, started))) [self invalidate];
+        if (!_panelProven) {
+            _panelProven = YES;
+            _panel.ignoresMouseEvents = NO;
+        }
+        return;
     }
+
+    [_panel setFrame:frame display:NO];
+    CGRect primary = CGDisplayBounds(CGMainDisplayID());
+    NSPoint center = NSMakePoint(NSMidX(frame), NSMidY(frame));
+    // This point was unobstructed in the Quartz sample; get its window number
+    // separately from AppKit rather than reusing the Quartz identifier.
+    if (!ValidRect(primary) || primary.origin.x != 0 || primary.origin.y != 0 ||
+        !CGRectContainsPoint(geometry.pane, CGPointMake(center.x, primary.size.height - center.y))) {
+        [self invalidate];
+        return;
+    }
+    NSInteger relativeWindow = [NSWindow windowNumberAtPoint:center belowWindowWithWindowNumber:0];
+    if (relativeWindow <= 0 || generation != _generation || ![self canSample] ||
+        !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
+        [self invalidate];
+        return;
+    }
+    _orderedPanelFrame = CGRectMake(NSMinX(frame), primary.size.height - NSMaxY(frame),
+        NSWidth(frame), NSHeight(frame));
+    _panelProven = NO;
+    _panel.ignoresMouseEvents = YES;
+    [_panel orderWindow:NSWindowAbove relativeTo:relativeWindow];
+    if (!_panel.visible || generation != _generation || ![self canSample] ||
+        !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
+        [self invalidate];
+        return;
+    }
+    // Verify the panel in a new Quartz sample before accepting any clicks.
+    [self tick];
 }
 
 - (void)tick {
     if (_finished) return;
     if (getppid() != _parent) { [self finish:NULL]; return; }
     if (_rex.terminated) { [self finish:NULL]; return; }
-    if (![self canSample]) {
-        if (_candidate.windowID || _samplePending) [self invalidate];
-        return;
-    }
+    BOOL canSample = [self canSample];
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (!canSample && (_candidate.windowID || _panel.visible)) [self invalidate];
     if ((_lastSample && !SampleFresh(now, _lastSample)) || (_panel.visible && !_panel.onActiveSpace)) [self conceal];
     if (_samplePending) return;
+    BOOL checkPin = !_sessionInactive && !_screensAsleep && now >= _nextPinCheck;
+    if (!canSample && !checkPin) return;
+    if (checkPin) _nextPinCheck = now + 1.0;
     _samplePending = YES;
     NSUInteger generation = _generation;
-    const CGRect normalized = _normalized;
+    const CGRect normalized = _lease.tile;
     pid_t pid = _rex.processIdentifier;
     CGWindowID pinned = _pinned;
-    NSInteger panelNumber = _panel.windowNumber;
-    CGWindowID panel = panelNumber > 0 && panelNumber <= UINT32_MAX ? (CGWindowID)panelNumber : kCGNullWindowID;
+    BOOL checkedPanel = _panel.visible;
+    const CGRect orderedPanel = _orderedPanelFrame;
     __weak MiloPreviewAnchor *weakSelf = self;
     dispatch_async(_sampleQueue, ^{
         @autoreleasepool {
-            Geometry geometry = SampleGeometry(VisibleWindows(), pid, pinned, getpid(), panel, &normalized);
+            Geometry geometry = {0};
+            if (canSample) {
+                geometry = SampleGeometry(VisibleWindows(), pid, pinned, getpid(),
+                    checkedPanel ? &orderedPanel : NULL, &normalized);
+            }
+            BOOL lostPin = NO;
+            if (!geometry.windowID && checkPin) {
+                pid_t owner;
+                PinLookup lookup = LookupPin(pinned, &owner);
+                lostPin = lookup == PinMissing || (lookup == PinFound && owner != pid);
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf applySample:geometry generation:generation started:now];
+                [weakSelf applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:now];
             });
         }
     });
@@ -543,8 +648,12 @@ static void WriteDiagnostic(int fd, const char *reason) {
         [_signalSources addObject:source];
         dispatch_resume(source);
     }
-    NSEventMask guardedInput = NSEventMaskKeyDown | NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown |
-        NSEventMaskOtherMouseDown | NSEventMaskScrollWheel;
+    NSEventMask guardedInput = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged |
+        NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown |
+        NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp | NSEventMaskOtherMouseUp |
+        NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged |
+        NSEventMaskScrollWheel | NSEventMaskGesture | NSEventMaskMagnify | NSEventMaskSwipe | NSEventMaskRotate |
+        NSEventMaskPressure;
     _keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:guardedInput handler:^NSEvent *(NSEvent *event) {
         MiloPreviewAnchor *anchor = weakSelf;
         if (!anchor || !anchor->_panel || event.window != anchor->_panel) return event;
@@ -604,10 +713,12 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
             fprintf(stderr, "milo preview: no controlling Rex terminal\n");
             return 1;
         }
-        NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, pinned_window));
-        NSRunningApplication *rex = RexApplication(PinnedOwner(windows, pinned_window));
+        pid_t owner;
+        PinLookup lookup = LookupPin(pinned_window, &owner);
+        NSRunningApplication *rex = lookup == PinFound ? RexApplication(owner) : nil;
         if (!rex) {
-            WriteDiagnostic(tty, "the pinned Rex window is no longer available; reopen the preview");
+            WriteDiagnostic(tty, lookup == PinUnavailable ? "could not verify the pinned Rex window; reopen the preview"
+                : "the pinned Rex window is no longer available; reopen the preview");
             close(tty);
             return 1;
         }

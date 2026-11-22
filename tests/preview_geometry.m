@@ -63,7 +63,24 @@ static NSDictionary *Replacing(NSDictionary *metadata, CFStringRef key, id value
 }
 
 static CGWindowID WindowID(NSArray *windows, CGWindowID pinned, const CGRect *normalized) {
-    return SampleGeometry(windows, 100, pinned, 300, 4, normalized).windowID;
+    return SampleGeometry(windows, 100, pinned, 300, NULL, normalized).windowID;
+}
+
+static void PinLookupResults(void) {
+    CGRect frame = CGRectMake(20, 40, 1000, 800);
+    NSDictionary *rex = Metadata(100, UINT32_MAX, frame);
+    pid_t owner = 0;
+    // An unavailable connection, malformed response, and a missing window
+    // have different consequences for a running but concealed anchor.
+    assert(PinnedOwner(nil, UINT32_MAX, &owner) == PinUnavailable && owner == 0);
+    assert(PinnedOwner(@[], UINT32_MAX, &owner) == PinMissing && owner == 0);
+    assert(PinnedOwner(@[rex], 1, &owner) == PinUnavailable && owner == 0);
+    assert(PinnedOwner(@[rex, rex], UINT32_MAX, &owner) == PinUnavailable && owner == 0);
+    assert(PinnedOwner(@[Replacing(rex, kCGWindowOwnerPID, @"100")], UINT32_MAX, &owner) == PinUnavailable && owner == 0);
+    // A pinned resource need not currently be onscreen to count as live.
+    NSDictionary *offscreen = Replacing(rex, kCGWindowIsOnscreen, @NO);
+    assert(PinnedOwner(@[offscreen], UINT32_MAX, &owner) == PinFound && owner == 100);
+    assert(PinnedOwner(@[Metadata(200, UINT32_MAX, frame)], UINT32_MAX, &owner) == PinFound && owner == 200);
 }
 
 static void WindowPinning(void) {
@@ -73,16 +90,9 @@ static void WindowPinning(void) {
     NSDictionary *rex = Metadata(100, 1, window);
     NSDictionary *otherRex = Metadata(100, 2, CGRectMake(0, 0, 10, 10));
     NSDictionary *occluding = Metadata(200, 3, overlap);
-    NSDictionary *panel = Metadata(300, 4, overlap);
     NSDictionary *harmless = Metadata(200, 5, CGRectMake(22, 180, 100, 100));
-    NSDictionary *ownPopup = Metadata(300, 6, overlap);
     NSDictionary *wrongPID = Metadata(200, 1, window);
     NSDictionary *floating = Replacing(occluding, kCGWindowLayer, @(CGWindowLevelForKey(kCGNormalWindowLevelKey) + 25));
-
-    assert(PinnedOwner(@[rex], 1) == 100);
-    assert(!PinnedOwner(@[otherRex], 1));
-    assert(!PinnedOwner(@[rex, otherRex], 1));
-    assert(!PinnedOwner(@[Replacing(rex, kCGWindowOwnerPID, @"100")], 1));
 
     assert(WindowID(@[rex], 0, NULL) == 1);
     assert(!WindowID(@[harmless, rex], 0, NULL)); // Preflight has no pane, so checks the window.
@@ -93,11 +103,8 @@ static void WindowPinning(void) {
     assert(!WindowID(@[Replacing(rex, kCGWindowLayer, @25)], 1, &right));
     assert(!WindowID(@[Replacing(rex, kCGWindowAlpha, @0)], 1, &right));
     assert(WindowID(@[Replacing(otherRex, kCGWindowAlpha, @0), rex], 1, &right) == 1);
-    assert(WindowID(@[panel, harmless, rex, occluding], 1, &right) == 1);
     assert(!WindowID(@[occluding, rex], 1, &right));
     assert(!WindowID(@[floating, rex], 1, &right));
-    assert(!WindowID(@[ownPopup, rex], 1, &right));
-    assert(!WindowID(@[Replacing(occluding, kCGWindowNumber, @4), rex], 1, &right));
     assert(WindowID(@[Replacing(occluding, kCGWindowAlpha, @0), rex], 1, &right) == 1);
     assert(!WindowID(@[Replacing(occluding, kCGWindowAlpha, nil), rex], 1, &right));
     assert(!WindowID(@[Replacing(harmless, kCGWindowBounds, nil), rex], 1, &right));
@@ -105,15 +112,43 @@ static void WindowPinning(void) {
     assert(!WindowID(@[rex, Replacing(harmless, kCGWindowOwnerPID, @100.5)], 1, &right));
 }
 
+static void PanelOrdering(void) {
+    CGRect window = CGRectMake(20, 40, 1000, 800);
+    CGRect right = CGRectMake(0.5, 0, 0.5, 1);
+    NSDictionary *rex = Metadata(100, 1, window);
+    Geometry geometry = SampleGeometry(@[rex], 100, 1, 300, NULL, &right);
+    assert(geometry.windowID == 1);
+    CGRect expected = CGRectInset(geometry.pane, 0.5, 0.5);
+    NSDictionary *panel = Metadata(300, 44, expected);
+    NSDictionary *rounded = Metadata(300, 91, CGRectIntegral(expected));
+    NSDictionary *harmless = Metadata(200, 5, CGRectMake(22, 180, 100, 100));
+    NSDictionary *popup = Metadata(300, 6, CGRectMake(700, 180, 100, 100));
+    NSDictionary *spoof = Metadata(200, 44, expected);
+    NSDictionary *occluder = Metadata(200, 7, expected);
+    NSDictionary *floating = Replacing(panel, kCGWindowLayer, @(CGWindowLevelForKey(kCGNormalWindowLevelKey) + 25));
+
+    assert(!SampleGeometry(@[panel, rex], 100, 1, 300, NULL, &right).windowID); // Not yet ordered.
+    assert(SampleGeometry(@[panel, harmless, rex, occluder], 100, 1, 300, &expected, &right).windowID == 1);
+    assert(SampleGeometry(@[rounded, rex], 100, 1, 300, &expected, &right).windowID == 1);
+    assert(!SampleGeometry(@[rex, panel], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[rex], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[spoof, rex], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[popup, rex], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[panel, rex, popup], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[panel, occluder, rex], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[floating, rex], 100, 1, 300, &expected, &right).windowID);
+    assert(!SampleGeometry(@[Replacing(panel, kCGWindowAlpha, @0), rex], 100, 1, 300, &expected, &right).windowID);
+}
+
 static void RemapPinnedWindow(void) {
     CGRect right = CGRectMake(0.5, 0, 0.5, 1);
     CGRect window = CGRectMake(20, 40, 1000, 800);
-    Geometry initial = SampleGeometry(@[Metadata(100, 1, window)], 100, 1, 300, 4, &right);
+    Geometry initial = SampleGeometry(@[Metadata(100, 1, window)], 100, 1, 300, NULL, &right);
     assert(initial.windowID == 1 && CGRectEqualToRect(initial.window, window));
     assert(CGRectEqualToRect(initial.pane, CGRectMake(547, 152, 451, 670)));
 
     CGRect moved = CGRectMake(-1200, 220, 800, 600);
-    Geometry current = SampleGeometry(@[Metadata(100, 1, moved)], 100, 1, 300, 4, &right);
+    Geometry current = SampleGeometry(@[Metadata(100, 1, moved)], 100, 1, 300, NULL, &right);
     assert(current.windowID == initial.windowID && CGRectEqualToRect(current.window, moved));
     assert(!SameGeometry(initial, current) && CGRectEqualToRect(current.pane, CGRectMake(-773, 332, 351, 470)));
     PreviewScreen screens[] = {
@@ -152,12 +187,50 @@ static void WatcherProtocol(void) {
     assert(SampleFresh(1.5, 1) && !SampleFresh(1.75, 1) && !SampleFresh(1, 1.01));
 }
 
+static VisibilityUpdate PipeRecord(const int pipeFD[2], VisibilityLease *lease, NSTimeInterval now, const char *record) {
+    size_t length = strlen(record);
+    char line[64];
+    assert(length && length <= sizeof(line) && record[length - 1] == '\n');
+    assert(WriteAll(pipeFD[1], record, length));
+    assert(read(pipeFD[0], line, sizeof(line)) == (ssize_t)length);
+    return UpdateVisibility(lease, now, 123, line, length - 1);
+}
+
+static void WatcherLease(void) {
+    int pipeFD[2];
+    assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
+    VisibilityLease lease = {0};
+    const char show[] = "show 123 tile 500000 250000 500000 750000\n";
+    assert(PipeRecord(pipeFD, &lease, 9, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 9));
+    assert(PipeRecord(pipeFD, &lease, 10, show) == VisibilityChanged && LeaseFresh(&lease, 10));
+    assert(PipeRecord(pipeFD, &lease, 11, "renew\n") == VisibilityUnchanged);
+    assert(LeaseFresh(&lease, 13.99) && !LeaseFresh(&lease, 10));
+
+    // No EOF or hide arrives, and a successful current Quartz sample cannot extend the lease.
+    char byte;
+    assert(read(pipeFD[0], &byte, 1) < 0 && errno == EAGAIN);
+    assert(SampleFresh(14, 13.875) && !LeaseFresh(&lease, 14));
+    assert(PipeRecord(pipeFD, &lease, 15, "renew\n") == VisibilityChanged && LeaseFresh(&lease, 15));
+    assert(CGRectEqualToRect(lease.tile, CGRectMake(0.5, 0.25, 0.5, 0.75)));
+    assert(PipeRecord(pipeFD, &lease, 16, "hide\n") == VisibilityChanged);
+    assert(PipeRecord(pipeFD, &lease, 17, "renew\n") == VisibilityUnchanged && !LeaseFresh(&lease, 17));
+    assert(PipeRecord(pipeFD, &lease, 18, "show 124 tile 0 0 1 1\n") == VisibilityWrongOwner && !LeaseFresh(&lease, 18));
+    assert(PipeRecord(pipeFD, &lease, 19, show) == VisibilityChanged && LeaseFresh(&lease, 19));
+    assert(PipeRecord(pipeFD, &lease, 20, "renew 123\n") == VisibilityInvalid);
+    assert(PipeRecord(pipeFD, &lease, 21, "unclaimed\n") == VisibilityUnclaimed);
+    close(pipeFD[1]);
+    close(pipeFD[0]);
+}
+
 int main(void) {
     @autoreleasepool {
         ScreenPlacement();
+        PinLookupResults();
         WindowPinning();
+        PanelOrdering();
         RemapPinnedWindow();
         WatcherProtocol();
+        WatcherLease();
         puts("preview geometry tests passed");
     }
     return 0;

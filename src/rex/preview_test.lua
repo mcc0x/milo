@@ -16,6 +16,10 @@ local show = "show 40 tile 625000 0 375000 1000000"
 local shown = "hide\n" .. show .. "\n"
 local server = "unix:///tmp/rex%20preview.sock"
 local function peer(pid) return { kind = "peer", transport = "unix", uid = uid, pid = pid } end
+local function second_viewer(pid, sessions, platform, state)
+  return { client_id = other_app, info = { kind = "app", platform = platform or "macos" },
+    connection_state = state or "connected", principal = peer(pid), session_ids = sessions }
+end
 local function terminal(block, label)
   return { block_id = block, label = label, creator_name = term, host_id = host, owner = app }
 end
@@ -41,9 +45,11 @@ local function call(f)
       after = fn
     elseif delay == 1 then
       callbacks.attachment_poll = fn
-    else
-      assert(delay == 8)
+    elseif delay == 8 then
       callbacks.deadline = fn
+    else
+      assert(delay == 28)
+      callbacks.claim_deadline = fn
     end
   end
   f.rex.stop = function(code) f.stopped = code end
@@ -104,10 +110,10 @@ local function fixture(mode, block)
     call = function(method, a)
       if method == "server.whoami" then return { principal = f.cli } end
       if method == "server.status" then return f.status end
-      if method == "client.inspect" then
-        assert(a.client_id == app and a.session_id == nil)
+      if method == "client.list" then
+        assert(a.session_id == nil and #a.kinds == 1 and a.kinds[1] == "app")
         f.inspections = (f.inspections or 0) + 1
-        return { client = f.gui }
+        return { clients = f.second_viewer and { f.second_viewer, f.gui } or { f.gui } }
       end
       if method == "block.close" then
         scope(a)
@@ -183,6 +189,23 @@ for _, mode in ipairs{ "identify", "open", "focus" } do
   denied(mode, mode == "focus" and preview or main,
     function(f) f.gui.session_ids = { session, another_session } end, "sessions")
 end
+for _, mode in ipairs{ "identify", "open", "focus" } do
+  denied(mode, mode == "focus" and preview or main,
+    function(f) f.second_viewer = second_viewer(gui, { another_session }) end, "sessions")
+end
+for _, companion in ipairs{
+  second_viewer(gui + 1, { another_session }),
+  second_viewer(gui, { another_session }, "ios"),
+  second_viewer(gui, { another_session }, nil, "lost"),
+  second_viewer(gui, nil),
+  second_viewer(gui, {}),
+  second_viewer(gui, { session }),
+} do
+  local f = fixture("open", main)
+  f.second_viewer = companion
+  assert(call(f)() == "ok\n")
+end
+denied("open", main, function(f) f.second_viewer = second_viewer(gui, false) end, "client")
 for _, invalid in ipairs{ false, {}, { another_session }, { session, false }, { current = session } } do
   denied("open", main, function(f) f.gui.session_ids = invalid end, "client")
 end
@@ -416,15 +439,31 @@ multimode.rex.session.view = function(a)
 end
 local poll = call(multimode)
 assert(poll() == shown and reads_for_attachment == 1 and multimode.inspections == 1)
-assert(poll("attachment_poll") == shown and reads_for_attachment == 1 and multimode.inspections == 2)
+local renewed = shown .. "renew\n"
+assert(poll("attachment_poll") == renewed and reads_for_attachment == 1 and multimode.inspections == 2)
+renewed = renewed .. "renew\n"
+assert(poll("attachment_poll") == renewed and reads_for_attachment == 1 and multimode.inspections == 3)
 -- The client can switch sessions without changing a single field in our view.
 multimode.gui.session_ids = { session, another_session }
-local concealed = shown .. "hide\n"
+local concealed = renewed .. "hide\n"
 assert(poll("attachment_poll") == concealed and reads_for_attachment == 1)
 assert(poll("attachment_poll") == concealed and reads_for_attachment == 1 and not multimode.stopped)
 multimode.gui.session_ids = { session }
-assert(poll("attachment_poll") == shown .. shown and reads_for_attachment == 2)
-assert(poll("attachment_poll") == shown .. shown and reads_for_attachment == 2)
+local recovered = renewed .. shown
+assert(poll("attachment_poll") == recovered and reads_for_attachment == 2)
+assert(poll("attachment_poll") == recovered .. "renew\n" and reads_for_attachment == 2)
+multimode.view.active_window_id = inactive
+local hidden_after_recovery = recovered .. "renew\nhide\n"
+assert(poll("active_window_changed") == hidden_after_recovery and reads_for_attachment == 3)
+assert(poll("attachment_poll") == hidden_after_recovery and reads_for_attachment == 3)
+
+local same_process = fixture("watch", preview)
+local watch_same_process = call(same_process)
+assert(watch_same_process() == shown)
+same_process.second_viewer = second_viewer(gui, { another_session })
+assert(watch_same_process("attachment_poll") == shown .. "hide\n")
+same_process.second_viewer.session_ids = {}
+assert(watch_same_process("attachment_poll") == shown .. shown)
 
 local staged = fixture("watch", preview)
 staged.anchor.label = "milo:preview:starting"
@@ -443,6 +482,31 @@ local staged_detached = fixture("watch", preview)
 staged_detached.anchor.label = "milo:preview:starting"
 staged_detached.detached, staged_detached.tiled.blocks = true, { staged_detached.rail, staged_detached.main }
 assert(call(staged_detached)("deadline") == "hide\n" and staged_detached.stopped == 0)
+
+local unclaimed = fixture("watch", preview)
+unclaimed.anchor.owner = nil
+local watch_unclaimed = call(unclaimed)
+assert(watch_unclaimed("deadline") == "hide\n" and not unclaimed.stopped)
+assert(watch_unclaimed("attachment_poll") == "hide\n" and not unclaimed.stopped)
+assert(watch_unclaimed("claim_deadline") == "hide\nunclaimed\n" and unclaimed.stopped == 1)
+
+local claimed_hidden = fixture("watch", preview)
+claimed_hidden.view.active_window_id = inactive
+local watch_claimed = call(claimed_hidden)
+assert(watch_claimed() == "hide\n")
+claimed_hidden.anchor.owner = nil
+assert(watch_claimed("block_owner_changed") == "hide\n")
+assert(watch_claimed("claim_deadline") == "hide\n" and not claimed_hidden.stopped)
+
+local claim_race = fixture("watch", preview)
+claim_race.anchor.owner = nil
+claim_race.rex.session.describe_block = function()
+  claim_race.anchor.owner = app
+  return { block = claim_race.anchor }
+end
+local watch_claim_race = call(claim_race)
+assert(watch_claim_race("claim_deadline") == "hide\n" and not claim_race.stopped)
+assert(watch_claim_race("block_owner_changed") == shown)
 
 for _, side in ipairs{ "main", "anchor" } do
   local initial = fixture("watch", preview)

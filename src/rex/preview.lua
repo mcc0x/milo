@@ -17,7 +17,7 @@ local function valid_pid(pid)
 end
 
 local function peer(principal)
-  return principal and principal.kind == "peer" and principal.transport == "unix"
+  return type(principal) == "table" and principal.kind == "peer" and principal.transport == "unix"
     and principal.uid == a.uid and valid_pid(principal.pid)
 end
 
@@ -54,16 +54,14 @@ local function locate(view, id)
   end
 end
 
-local function local_owner(owner)
-  if not exact(owner, "client:") then return end
-  local inspected = rex.call("client.inspect", { client_id = owner })
-  local client = inspected and inspected.client
-  if not (client and client.client_id == owner and client.connection_state == "connected"
-    and client.info and client.info.kind == "app" and client.info.platform == "macos"
-    and peer(client.principal)) then return end
-  -- API 18 lists this connection's attachments; it does not identify the
-  -- displayed session. Distinguish the requested scope from any others.
-  local ids = client.session_ids
+local function mac_pid(client)
+  if client.connection_state == "connected" and type(client.info) == "table"
+    and client.info.kind == "app" and client.info.platform == "macos" and peer(client.principal) then
+    return client.principal.pid
+  end
+end
+
+local function attachments(ids)
   if type(ids) ~= "table" then return end
   local length, count, here, elsewhere = #ids, 0, false, false
   for index, id in pairs(ids) do
@@ -72,7 +70,39 @@ local function local_owner(owner)
     count = count + 1
     if id == a.session then here = true else elsewhere = true end
   end
-  if count == length and here then return client.principal.pid, elsewhere end
+  if count == length then return here, elsewhere end
+end
+
+local function local_owner(owner)
+  if not exact(owner, "client:") then return end
+  local listed = rex.call("client.list", { kinds = { "app" } })
+  local clients = listed and listed.clients
+  if type(clients) ~= "table" then return end
+
+  -- Rex reports attachments, not which session a process is presenting.
+  -- Read only the local server's app roster, never another session's view.
+  local pid, elsewhere
+  for _, client in ipairs(clients) do
+    if type(client) ~= "table" then return end
+    if client.client_id == owner then
+      if pid then return end
+      pid = mac_pid(client)
+      local here, other = attachments(client.session_ids)
+      if not pid or not here then return end
+      elsewhere = other
+    end
+  end
+  if not pid then return end
+  if elsewhere then return pid, true end
+  for _, client in ipairs(clients) do
+    if client.client_id ~= owner and exact(client.client_id, "client:") and mac_pid(client) == pid
+      and client.session_ids ~= nil then
+      local here, other = attachments(client.session_ids)
+      if here == nil then return end
+      if other then return pid, true end
+    end
+  end
+  return pid, false
 end
 
 local function process(block)
@@ -401,13 +431,16 @@ if a.mode ~= "watch" then
 end
 
 local host, cli_pid = local_host()
-local last, verified, published, last_revision, owner_allowed
+local last, verified, published, claimed, last_revision, owner_allowed
+local function write(record)
+  io.stdout:write(record, "\n")
+  io.stdout:flush()
+end
 local function emit(state)
   state = state or "hide"
   if last ~= state then
     last = state
-    io.stdout:write(state, "\n")
-    io.stdout:flush()
+    write(state)
   end
 end
 
@@ -430,6 +463,7 @@ local function track_anchor(block)
     if not own_anchor(block) then return false end
     verified = true
   end
+  if block.owner ~= nil then claimed = true end
   if block.label == preview_label then published = true end
   return true
 end
@@ -480,14 +514,17 @@ local function refresh(owner_checked)
 end
 
 local function poll_owner()
-  -- Scoped layout events cannot report every change to the app's other
-  -- attachments. Query only that app; reread the layout on recovery.
+  -- Scoped events keep cached visibility current but don't cover other
+  -- attachments by this app. Check its connections before renewing.
+  -- A recovery needs a new layout before any show.
   local previous = owner_allowed
   owner_allowed = owner_permitted()
   if previous == nil or (owner_allowed and not previous) then
     refresh(true)
   elseif previous and not owner_allowed then
     emit()
+  elseif owner_allowed and last ~= "hide" then
+    write("renew")
   end
   rex.after(1, poll_owner)
 end
@@ -529,4 +566,21 @@ rex.after(8, function()
   local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
   if not track_anchor(described and described.block) then return stop(1) end
   if not published then stop() end
+end)
+
+-- Allow for launch and publication, then give the app time to claim the
+-- split. A claimed pane can stay hidden indefinitely; that isn't a failure.
+rex.after(28, function()
+  if not published or claimed then return end
+  local view = current_view()
+  if not view then return end
+  local block, window, layer = locate(view, a.block)
+  if not block or window.window_id ~= a.window or layer.kind ~= "tiled"
+    or block.label ~= preview_label or not track_anchor(block) or claimed then return end
+  local described = rex.session.describe_block{ session_id = a.session, block_id = a.block }
+  block = described and described.block
+  if track_anchor(block) and block.label == preview_label and not claimed then
+    write("unclaimed")
+    stop(1)
+  end
 end)
