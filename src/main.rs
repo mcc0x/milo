@@ -208,6 +208,79 @@ fn command_help(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Every word `command_help` knows, in the order `--help` lists them.
+const COMMANDS: [&str; 14] = [
+    "outline",
+    "history",
+    "usage",
+    "menubar",
+    "setup",
+    "web",
+    "settings",
+    "doctor",
+    "presence",
+    "view",
+    "review",
+    "listen",
+    "alerts",
+    "claude-status",
+];
+const OPTIONS: [&str; 3] = ["--help", "--version", "--skip-onboarding"];
+
+/// How many slips turn `typed` into `word`: a letter added, dropped,
+/// changed, or swapped with the one beside it.
+fn slips(typed: &str, word: &str) -> usize {
+    let (typed, word): (Vec<char>, Vec<char>) = (typed.chars().collect(), word.chars().collect());
+    // Three rows of the usual table: the one being filled and the two above it.
+    let (mut before, mut above) = (vec![0; word.len() + 1], (0..=word.len()).collect::<Vec<_>>());
+    let mut row = before.clone();
+    for i in 1..=typed.len() {
+        row[0] = i;
+        for j in 1..=word.len() {
+            let same = typed[i - 1] == word[j - 1];
+            row[j] = (above[j] + 1).min(row[j - 1] + 1).min(above[j - 1] + usize::from(!same));
+            if i > 1 && j > 1 && typed[i - 1] == word[j - 2] && typed[i - 2] == word[j - 1] {
+                row[j] = row[j].min(before[j - 2] + 1);
+            }
+        }
+        std::mem::swap(&mut before, &mut above);
+        std::mem::swap(&mut above, &mut row);
+    }
+    above[word.len()]
+}
+
+/// The one word of `known` that `typed` is a slip or two from, if exactly
+/// one is nearest. A word of four letters or fewer is allowed one slip.
+fn meant<'a>(typed: &str, known: &[&'a str]) -> Option<&'a str> {
+    let allowed = if typed.chars().count() <= 4 { 1 } else { 2 };
+    let mut near = known.iter().map(|word| (slips(typed, word), *word)).filter(|(slips, _)| *slips <= allowed);
+    let best = near.clone().map(|(slips, _)| slips).min()?;
+    let word = near.find(|(slips, _)| *slips == best)?.1;
+    near.all(|(slips, _)| slips != best).then_some(word)
+}
+
+const SEE_COMMANDS: &str = "see milo --help for commands";
+
+/// Where to go from a word that reads as a command and is not one, or
+/// nothing for a word that does not.
+fn instead_of(word: &OsStr) -> Option<String> {
+    match word.to_str()? {
+        "help" => Some("for the guide: milo --help".to_string()),
+        "version" => Some("for the version: milo --version".to_string()),
+        typed => {
+            meant(typed, &COMMANDS).map(|command| format!("did you mean milo {command}? Otherwise {SEE_COMMANDS}"))
+        }
+    }
+}
+
+/// The guide to name in an error about `name`: the command's own short one where it has one.
+fn guide(name: Option<&str>) -> String {
+    match name.filter(|name| command_help(name).is_some()) {
+        Some(command) => format!("milo {command} --help"),
+        None => "milo --help".to_string(),
+    }
+}
+
 /// Ends the program with a message. A path in it may hold anything, so
 /// control characters are left out.
 fn fail(message: &str) -> ! {
@@ -294,7 +367,7 @@ fn command<'a>(
         });
     }
     if !rest.is_empty() && !matches!(name, Some("view" | "review" | "web" | "alerts" | "presence" | "settings")) {
-        return Err("too many arguments; see milo --help".to_string());
+        return Err(format!("too many arguments; see {}", guide(name)));
     }
     if rest.is_empty()
         && second.is_some_and(|arg| arg == "--help" || arg == "-h")
@@ -406,16 +479,39 @@ fn command<'a>(
         (Some("alerts"), action) => Command::Alerts(action, rest),
         (Some("claude-status"), None) => Command::ClaudeStatus,
         (Some("setup" | "usage" | "claude-status" | "doctor"), Some(_)) => {
-            return Err("unexpected argument; see milo --help".to_string());
+            return Err(format!("unexpected argument; see {}", guide(name)));
         }
         (Some("-h" | "--help"), None) => Command::Help(USAGE),
         (Some("-V" | "--version"), None) => Command::Version,
-        (Some(option), _) if option.starts_with('-') => return Err(format!("no option {option}; see milo --help")),
+        (Some("-h" | "--help"), Some(word)) => match word.to_str().and_then(command_help) {
+            Some(help) => Command::Help(help),
+            None => {
+                let instead = instead_of(word).unwrap_or_else(|| SEE_COMMANDS.to_string());
+                return Err(format!("{} is not a command; {instead}", word.display()));
+            }
+        },
+        (Some("-v"), _) => return Err("no option -v; for the version: milo --version".to_string()),
+        (Some(option), _) if option.starts_with('-') => {
+            return Err(match meant(option, &OPTIONS) {
+                Some(known) => format!("no option {option}; did you mean {known}? See milo --help"),
+                None => format!("no option {option}; see milo --help"),
+            });
+        }
         (_, None) => match first {
             Some(path) => Command::Path(path),
             None => Command::Home,
         },
-        _ => return Err("expected a command or path; see milo --help".to_string()),
+        _ => {
+            let word = first.unwrap_or_default();
+            let known = second.and_then(OsStr::to_str).filter(|name| command_help(name).is_some());
+            return Err(match (word.to_str(), known, instead_of(word)) {
+                (Some("help"), Some(command), _) => {
+                    format!("help is not a command; for that guide: milo {command} --help")
+                }
+                (Some(typed), _, Some(instead)) => format!("{typed} is not a command; {instead}"),
+                _ => "expected a command or path; see milo --help".to_string(),
+            });
+        }
     })
 }
 
@@ -425,7 +521,10 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::MenuBar(action) => print_report(menubar::run(action)),
         Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
-            open_outline(Some(path)).map_err(|why| format!("{why}; see milo --help for commands"))
+            open_outline(Some(path)).map_err(|why| match instead_of(path) {
+                Some(instead) => format!("{why}; {instead}"),
+                None => format!("{why}; {SEE_COMMANDS}"),
+            })
         }),
         Command::ShellOutline(shell) => {
             run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), outline)))
@@ -751,5 +850,78 @@ mod tests {
         };
         assert!(why.contains("not-a-milo-command") && why.contains("milo --help for commands"), "{why}");
         assert_eq!(why.lines().count(), 1);
+    }
+
+    fn refused(words: &[&str]) -> String {
+        let words: Vec<OsString> = words.iter().map(OsString::from).collect();
+        let (first, second) = (words.first().map(OsString::as_os_str), words.get(1).map(OsString::as_os_str));
+        match command(first, second, words.get(2..).unwrap_or(&[])) {
+            Ok(command) => open_pane(command).err().expect("the words opened a pane"),
+            Err(why) => why,
+        }
+    }
+
+    #[test]
+    fn a_mistyped_command_is_answered_with_the_command_it_is_nearest() {
+        const OTHERWISE: &str = "Otherwise see milo --help for commands";
+        for (typed, command) in [
+            ("histroy", "history"),
+            ("outlin", "outline"),
+            ("veiw", "view"),
+            ("revew", "review"),
+            ("docter", "doctor"),
+            ("claude_status", "claude-status"),
+        ] {
+            let expected = format!("{typed} is not a directory; did you mean milo {command}? {OTHERWISE}");
+            assert_eq!(refused(&[typed]), expected);
+            // With an argument it cannot be a path, so it is not called one.
+            let with_argument = format!("{typed} is not a command; did you mean milo {command}? {OTHERWISE}");
+            assert_eq!(refused(&[typed, "."]), with_argument);
+        }
+        // A word far from every command is given no guess, and a short word is allowed one slip.
+        for word in ["src-main", "sett", "branch", "x"] {
+            assert_eq!(refused(&[word]), format!("{word} is not a directory; see milo --help for commands"));
+            assert_eq!(refused(&[word, "."]), "expected a command or path; see milo --help");
+        }
+        // Nor is a word as near to two.
+        assert_eq!(meant("lisen", &["listen", "linen"]), None);
+        assert_eq!(meant("lisen", &["listen", "liner"]), Some("listen"));
+    }
+
+    #[test]
+    fn every_spelling_of_asking_for_help_says_where_the_guide_is() {
+        assert_eq!(refused(&["help"]), "help is not a directory; for the guide: milo --help");
+        assert_eq!(refused(&["help", "view"]), "help is not a command; for that guide: milo view --help");
+        assert_eq!(refused(&["help", "veiw"]), "help is not a command; for the guide: milo --help");
+        assert_eq!(refused(&["version"]), "version is not a directory; for the version: milo --version");
+        assert_eq!(refused(&["-v"]), "no option -v; for the version: milo --version");
+        assert_eq!(refused(&["--hlep"]), "no option --hlep; did you mean --help? See milo --help");
+        assert_eq!(refused(&["--verison"]), "no option --verison; did you mean --version? See milo --help");
+        assert_eq!(refused(&["--json"]), "no option --json; see milo --help");
+        for flag in ["-h", "--help"] {
+            let asked = [OsStr::new(flag), OsStr::new("review")];
+            assert_eq!(command(Some(asked[0]), Some(asked[1]), &[]), Ok(Command::Help(command_help("review").unwrap())));
+            assert_eq!(
+                refused(&[flag, "reveiw"]),
+                "reveiw is not a command; did you mean milo review? Otherwise see milo --help for commands"
+            );
+            assert_eq!(refused(&[flag, "nothing"]), "nothing is not a command; see milo --help for commands");
+        }
+    }
+
+    #[test]
+    fn an_error_about_a_command_names_that_commands_own_guide() {
+        assert_eq!(refused(&["outline", "a", "b"]), "too many arguments; see milo outline --help");
+        assert_eq!(refused(&["usage", "--json"]), "unexpected argument; see milo usage --help");
+        assert_eq!(refused(&["doctor", "--fix"]), "unexpected argument; see milo doctor --help");
+        assert_eq!(refused(&["some", "path", "more"]), "too many arguments; see milo --help");
+        // Every command the guesses can name has a guide of its own to be sent to.
+        assert!(COMMANDS.iter().all(|name| command_help(name).is_some()));
+        let listed = USAGE.lines().skip(2).take_while(|line| !line.is_empty());
+        for line in listed.filter_map(|line| line.trim_start_matches("Usage:").trim_start().strip_prefix("milo ")) {
+            let word = line.split(' ').next().unwrap();
+            let listed = COMMANDS.contains(&word) || word.starts_with(['-', '[']) || word == "PATH";
+            assert!(listed, "{word} is in --help and not among the commands a guess can name");
+        }
     }
 }
