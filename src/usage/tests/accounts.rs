@@ -886,27 +886,26 @@ fn usage_profile_account_schedule() {
     ];
     let all = UsageAccount::ALL.map(|which| (which, Show::Always));
     println!("# 40 simulated minutes, two seconds between looks; four canned loopback providers");
-    println!("# credential_checks and settings_reads are modeled from starts and completed workers, not syscall traces");
     println!(
-        "settings\tphase\tlooks\tmanual\tcredential_checks\tsettings_reads\tsettings_bytes_each\tworker_ticks\tworkers\trequests\tno_job_p50_us\tno_job_p95_us\tlaunch_p50_us\tlaunch_p95_us\tresult_p50_us\tresult_p95_us"
+        "settings\tphase\tlooks\tmanual\tworker_ticks\trequests\tno_job_p50_us\tno_job_p95_us\tlaunch_p50_us\tlaunch_p95_us\tresult_p50_us\tresult_p95_us"
     );
-    for (mode, enabled, file) in [("hidden", false, false), ("environment", true, false), ("private-file", true, true)] {
+    for (mode, enabled, file) in [("hidden", false, false), ("environment", true, false), ("private-file", true, true)]
+    {
         let (f, provider) = (Fixture::folder(), Provider::start());
         for (id, body) in [("deepseek", DEEPSEEK), ("openrouter", OPENROUTER), ("devin", DEVIN), ("copilot", COPILOT)] {
             provider.reply(id, 200, "", body);
         }
-        let settings_bytes = if file {
+        if file {
             let mut text = "# Synthetic usage account settings, no live tokens.\n".to_owned();
             for (key, value) in environment {
                 text.push_str(&format!("{key} = {value}\n"));
             }
             f.write("config/usage-accounts.conf", &text);
             fs::set_permissions(f.root.join("config/usage-accounts.conf"), fs::Permissions::from_mode(0o600)).unwrap();
-            text.len()
-        } else {
-            0
-        };
-        let (keys, chosen) = if enabled && !file { (environment.as_slice(), all.as_slice()) } else if enabled {
+        }
+        let (keys, chosen) = if enabled && !file {
+            (environment.as_slice(), all.as_slice())
+        } else if enabled {
             (&[][..], all.as_slice())
         } else {
             (environment.as_slice(), &[][..])
@@ -947,26 +946,17 @@ fn usage_profile_account_schedule() {
         for (id, due) in [("deepseek", 6), ("openrouter", 9), ("devin", 4), ("copilot", 4)] {
             assert_eq!(provider.asked(id).len(), if enabled { due } else { 0 }, "{id}");
         }
-        let workers = provider.requests();
         let looks = usize::try_from(SECONDS / STEP + 1).unwrap();
-        let checks = looks * chosen.len() + workers;
-        let reads = if file { checks } else { 0 };
         let batches = result.len();
         println!(
-            "{mode}\topen\t{looks}\t3\t{checks}\t{reads}\t{settings_bytes}\t{batches}\t{workers}\t{workers}\t{}\t{}\t{}",
+            "{mode}\topen\t{looks}\t3\t{batches}\t{}\t{}\t{}\t{}",
+            provider.requests(),
             micros(&mut no_job),
             micros(&mut launch),
             micros(&mut result)
         );
         if let Some((inline, complete)) = reopen {
-            let checks = 2 * chosen.len();
-            let reads = if file { checks } else { 0 };
-            let workers = chosen.len();
-            println!(
-                "{mode}\treopen\t1\t0\t{checks}\t{reads}\t{settings_bytes}\t1\t{workers}\t0\t-\t-\t{}\t{}",
-                micros(&mut [inline]),
-                micros(&mut [complete])
-            );
+            println!("{mode}\treopen\t1\t0\t1\t0\t-\t-\t{}\t{}", micros(&mut [inline]), micros(&mut [complete]));
         }
     }
 }
