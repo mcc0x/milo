@@ -386,14 +386,37 @@ async function copySettingsThroughHosts(page, env) {
   await page.getByText('milo web --host LABEL', {exact: true}).waitFor();
   const create = button(page, 'Create bundle');
   assert(await create.isDisabled(), 'nothing is exported until a group is chosen');
+  const layout = page.getByRole('checkbox', {name: /^Layout Panes/});
+  const exported = page.getByRole('textbox', {name: 'Exported settings bundle', exact: true});
+  const copy = button(page, 'Copy bundle');
+  await layout.check();
+  await page.getByRole('radio', {name: 'This worktree', exact: true}).check();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/transfer', route => gate.then(() => route.continue()), {times: 1});
+  const isExport = request => new URL(request.url()).pathname === '/api/transfer' && request.postDataJSON().action === 'export';
+  const received = page.waitForResponse(response => isExport(response.request()));
+  try {
+    const sent = page.waitForRequest(isExport);
+    await create.click();
+    assert.deepEqual((await sent).postDataJSON(), {action: 'export', groups: ['layout'], scope: 'worktree'});
+    await page.getByRole('radio', {name: 'Global defaults', exact: true}).check();
+  } finally {
+    release();
+  }
+  assert.match((await (await received).json()).bundle, /^\[project\]$/m, 'the delayed response contains project settings');
+  await page.locator('#export-create:enabled').waitFor();
+  assert.equal(await exported.count(), 0, 'the old scope’s bundle stays hidden after the request settles');
+  assert.equal(await copy.count(), 0, 'the old scope’s bundle cannot be copied');
+  await layout.uncheck();
   await page.getByRole('checkbox', {name: /^Usage display/}).check();
   await create.click();
-  const exported = page.getByRole('textbox', {name: 'Exported settings bundle', exact: true});
   await exported.waitFor();
   const bundle = await exported.inputValue();
   assert.match(bundle, /^milo-settings 1\n/);
   assert.match(bundle, /^usage_claude = always$/m);
   assert.doesNotMatch(bundle, /tab_titles|deepseek|icons/, 'only the chosen group, and no integration or account');
+  assert.doesNotMatch(bundle, /^\[project\]$/m, 'the replacement export uses the current scope');
 
   const incoming = `${bundle.replace('usage_claude = always', 'usage_claude = hide')}tab_titles = false\nusage_deepseek = always\n`;
   await page.getByRole('textbox', {name: /^Paste a bundle/}).fill(incoming);

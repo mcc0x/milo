@@ -80,16 +80,28 @@ function Export() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const output = useRef<HTMLTextAreaElement>(null);
+  const selection = useRef(0);
   const hasWorktree = Boolean(state.context.worktree);
 
+  function invalidateExport() {
+    selection.current += 1;
+    setBundle('');
+    setError('');
+  }
+
   async function create() {
+    const requested = selection.current;
     setBusy(true);
     setError('');
     try {
       const result = await readTransfer<{bundle: string}>({action: 'export', groups: [...chosen], scope});
+      if (selection.current !== requested) return;
       setBundle(result.bundle);
-      requestAnimationFrame(() => output.current?.focus());
+      requestAnimationFrame(() => {
+        if (selection.current === requested) output.current?.focus();
+      });
     } catch (reason) {
+      if (selection.current !== requested) return;
       setBundle('');
       setError((reason as Error).message);
     } finally {
@@ -109,7 +121,7 @@ function Export() {
         {groups.map(([key, label, detail]) => (
           <label key={key} className="host-choice">
             <input type="checkbox" id={`export-${key}`} checked={chosen.includes(key)} onChange={event => {
-              setBundle('');
+              invalidateExport();
               setChosen(event.currentTarget.checked ? [...chosen, key] : chosen.filter(group => group !== key));
             }}/>
             <span><span className="setting-label">{label}</span><span className="setting-detail">{detail}</span></span>
@@ -122,7 +134,7 @@ function Export() {
           {scopes.map(([key, label]) => (
             <label key={key}>
               <input type="radio" name="export-scope" id={`export-scope-${key}`} checked={scope === key}
-                disabled={key !== 'global' && !hasWorktree} onChange={() => { setBundle(''); setScope(key); }}/>
+                disabled={key !== 'global' && !hasWorktree} onChange={() => { invalidateExport(); setScope(key); }}/>
               <span>{label}</span>
             </label>
           ))}
