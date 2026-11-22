@@ -1,5 +1,6 @@
 //! The local browser edits a versioned draft and applies explicit changes to global integrations.
 
+use std::cell::Cell;
 use std::fmt::{self, Display, Write as _};
 
 use super::claude::ClaudeSnapshot;
@@ -34,6 +35,9 @@ pub(crate) struct Editor {
     directory: Option<String>,
     /// The computer and Rex this editor runs on, asked when it opened and again by a health check.
     host: Option<Host>,
+    /// The Discord presence choice in the state last given to the page: what a person there
+    /// has seen when they ask to change it.
+    presence_shown: Cell<Option<presence::Setting>>,
 }
 
 pub(crate) enum HostedSaveError {
@@ -170,7 +174,8 @@ impl Editor {
         if let Err(why) = setup.reload_prefs() {
             setup.report(Err(why));
         }
-        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory, host: None }
+        let presence_shown = Cell::new(None);
+        Self { setup, claude, doctor: None, version: 1, reopen_panes: None, directory, host: None, presence_shown }
     }
 
     fn load_account(&mut self) {
@@ -334,7 +339,9 @@ impl Editor {
         }
         out.push_str(",\"presence\":");
         // Read now, not when the editor opened: the helper's state changes on its own.
-        match setup.presence.as_ref().and_then(|control| control.status().ok()) {
+        let presence = setup.presence.as_ref().and_then(|control| control.status().ok());
+        self.presence_shown.set(presence.as_ref().map(|status| status.setting));
+        match presence {
             Some(status) => {
                 let setting = status.setting;
                 let own = setting.application.is_some();
@@ -455,7 +462,9 @@ impl Editor {
             Action::Presence(edit) if self.setup.presence.is_some() => {
                 // One global choice, saved at once like the menu app, and no part of a draft.
                 let result = match edit {
-                    Some(change) => self.setup.change_presence(change),
+                    // Whatever was saved elsewhere since the page last had its state, the
+                    // person there has not seen what it would make public.
+                    Some(change) => self.setup.change_shown_presence(change, self.presence_shown.get()),
                     None => self.setup.disable_presence(),
                 };
                 Some(result.map(Cow::Owned))
@@ -1916,5 +1925,39 @@ mod tests {
         let (enabled, details, ..) = presence(&editor.state(), "project");
         assert!(enabled);
         assert_eq!(details, "project");
+    }
+
+    #[test]
+    fn discord_presence_changes_only_from_the_choice_the_page_showed() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let file = store.config.join("discord.conf");
+        let mut editor = outside(store, None);
+        let presence = |state: &str| {
+            let presence = field(Value::parse(state.as_bytes()).unwrap(), "presence");
+            (field(presence, "enabled").boolean().unwrap(), field(presence, "details").string(8).unwrap().into_owned())
+        };
+        // The page asked "Turn on?" beside the words for no names. Meanwhile, as milo presence
+        // details both does, another surface chose both names.
+        assert_eq!(presence(&editor.state()), (false, "generic".to_owned()));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "presence = false\ndetails = both\n").unwrap();
+        let refused = action(&mut editor, r#""action":"presence","value":"on""#).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "presence = false\ndetails = both\n");
+        assert_eq!(presence(&refused), (false, "both".to_owned()));
+        let state = Value::parse(refused.as_bytes()).unwrap();
+        assert!(field(field(state, "message"), "text").string(400).unwrap().contains("changed elsewhere"));
+        // Now the page shows both names, and turning on beside those words is an answer.
+        assert!(presence(&action(&mut editor, r#""action":"presence","value":"on""#).unwrap()).0);
+
+        // The page believes presence is off, so it adds a name without asking. It is on.
+        fs::write(&file, "presence = false\n").unwrap();
+        assert_eq!(presence(&editor.state()), (false, "generic".to_owned()));
+        fs::write(&file, "presence = true\n").unwrap();
+        action(&mut editor, r#""action":"presence","field":"details","value":"both""#).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "presence = true\n");
+        // Turning off never waits for a review.
+        fs::write(&file, "presence = true\ndetails = both\n").unwrap();
+        assert!(!presence(&action(&mut editor, r#""action":"presence","value":"off""#).unwrap()).0);
     }
 }

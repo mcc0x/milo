@@ -246,6 +246,8 @@ A reader can also be ended from outside: its terminal is closed, the process is 
 
 The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before. If you defer or undo the restore and then the reader is closed from outside with new edits, both drafts are kept. After saving or deleting the offered draft, stop and start editing to see the next one. A process that is killed outright, or a machine that loses power, keeps nothing.
 
+A kept draft remembers which text of the file it was written over. If the file holds something else by the time you restore it, because you, an agent or Git changed it meanwhile, the pane says `Draft restored over a changed file`, and the first `Ctrl-S` asks **Changed on disk** instead of writing, so you can compare the draft with what the file holds now before choosing. A draft kept by an earlier release of milo does not say what it was written over, so its first save asks too. [See the notice and the question, beside the save an earlier release made.](img/reader-draft-comparison.webp)
+
 In Rex, a file from another project is never a tab: when the pane has followed the shell to another project, or its reader is gone, the next file opens a new floating reader in place of the old one. While the old one has unsaved changes in any tab, the pane says `The open reader has unsaved edits.` and leaves it alone.
 
 ## Formatting

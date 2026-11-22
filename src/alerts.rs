@@ -661,9 +661,10 @@ impl AlertsEdit<'_> {
         preferences::replace(self.dir, self.file, &settings.render()).map_err(|_| UNSAVED.to_owned())
     }
 
+    /// Saves first: a change that cannot be saved must leave the mirroring process as it was.
     fn save(&self, settings: &Settings) -> Result<(), String> {
-        self.alerts.stop()?;
         self.write_settings(settings)?;
+        self.alerts.stop()?;
         self.alerts.start_if_active(settings)
     }
 

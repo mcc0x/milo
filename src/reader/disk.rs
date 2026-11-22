@@ -64,6 +64,11 @@ pub(super) struct Original {
 }
 
 impl Original {
+    /// The file's text exactly as read.
+    pub(super) fn read(&self) -> &str {
+        self.snapshot.text()
+    }
+
     /// The text to edit, without the byte-order mark a save puts back.
     pub(super) fn text(&self) -> &str {
         let text = self.snapshot.text();
@@ -149,13 +154,22 @@ pub(super) fn load(entry: &Entry<'_>) -> Result<Original, ReadOnly> {
     Ok(Original { snapshot: Snapshot { text, identity: (meta.dev(), meta.ino()) }, marked })
 }
 
-/// Writes the draft, or returns the current snapshot if it does not match the
-/// original or the exact replacement the user confirmed.
+/// What the file must hold for a save to write over it.
+pub(super) enum Basis<'a> {
+    /// What the edit started from.
+    Original,
+    /// The exact version the user agreed to replace.
+    Confirmed(&'a Snapshot),
+    /// Nothing yet: the draft was not written over what the edit started from, so ask first.
+    Unconfirmed,
+}
+
+/// Writes the draft, or returns the current snapshot if the file does not hold what `basis` expects.
 pub(super) fn save(
     entry: Result<&Entry<'_>, LookupError>,
     original: &mut Original,
     draft: impl FnOnce() -> String,
-    confirmed: Option<&Snapshot>,
+    basis: Basis<'_>,
 ) -> Result<Option<Snapshot>, SaveError> {
     let entry = entry.map_err(|error| {
         SaveError::Refused(match error {
@@ -183,7 +197,12 @@ pub(super) fn save(
     let text = String::from_utf8(bytes).map_err(|_| SaveError::Refused("Not saved: the file is no longer text."))?;
     let identity = (meta.dev(), meta.ino());
     let current = Snapshot { identity, text };
-    let replacement = (&current == confirmed.unwrap_or(&original.snapshot)).then(|| original.with_mark(draft()));
+    let expected = match basis {
+        Basis::Original => current == original.snapshot,
+        Basis::Confirmed(confirmed) => &current == confirmed,
+        Basis::Unconfirmed => false,
+    };
+    let replacement = expected.then(|| original.with_mark(draft()));
     // Only present snapshots from stable reads, and do not write over an edit that happened during one.
     let after = file.metadata().map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
     let stamp = |m: &std::fs::Metadata| (m.len(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec());

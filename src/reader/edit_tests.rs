@@ -597,7 +597,10 @@ fn deferring_or_undoing_a_kept_draft_does_not_lose_either_edit_on_external_close
         reader.key(Key::Char('e'));
         reader.key(Key::Char('r'));
         assert_eq!(draft(&reader), "second one\n");
+        // The second draft was written over the file as it was before the first was saved.
         reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "first one\n");
+        reader.key(Key::Char('o'));
         assert_eq!(fs::read_to_string(&file).unwrap(), "second one\n");
         assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
     }
@@ -1214,4 +1217,32 @@ fn a_format_is_undone_in_a_file_with_a_lone_carriage_return() {
     reader.key(Key::Ctrl(b'z'));
     drawn(&mut reader, 60, 5);
     assert_eq!(draft(&reader), "a\rb\n");
+}
+
+#[test]
+fn a_draft_restored_over_a_file_changed_since_asks_before_replacing_that_change() {
+    let f = Fixture::folder();
+    f.write("notes.txt", "one\n");
+    let file = f.root.join("notes.txt");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "first ");
+    drop(reader);
+    // Someone else's work reaches the file before the draft is looked at again.
+    f.write("notes.txt", "one\nadded since\n");
+
+    let mut reader = editing(&f, "notes.txt");
+    reader.key(Key::Char('r'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Draft restored over a changed file · ^Z undoes");
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "one\nadded since\n");
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Changed on disk: c compare · o overwrite · Esc back");
+    // Closed from outside before an answer: the draft still belongs to the file it was written over.
+    drop(reader);
+    f.write("notes.txt", "one\n");
+    let mut reader = editing(&f, "notes.txt");
+    reader.key(Key::Char('r'));
+    assert_eq!(drawn(&mut reader, 60, 5)[4], " Draft restored · ^Z undoes");
+    reader.key(Key::Ctrl(b's'));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "first one\n");
+    assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
 }

@@ -654,3 +654,44 @@ fn a_relay_connection_failure_is_retried_and_counted_but_a_lost_reply_is_not() {
         assert_eq!(request.split_once("\r\n\r\n").unwrap().1, format!("{{\"text\":{}}}", rex::json(text)));
     }
 }
+
+#[cfg(test)]
+#[test]
+fn a_page_from_in_front_of_the_relay_does_not_pause_mirroring() {
+    use super::event::Kind;
+    use super::relay::{
+        Origin,
+        tests::{CAPABILITY, with_replies},
+    };
+    use crate::fixture::Fixture;
+
+    // What a proxy answers while no relay is deployed behind it. The relay itself gives a
+    // well-formed send neither status, so neither says anything about the saved connection.
+    let replies = [(404, "<html>Application not found</html>"), (204, ""), (403, "<html>Forbidden</html>"), (204, "")];
+    let (_, wire) = with_replies(&replies, |origin| {
+        let fixture = Fixture::folder();
+        let mut alerts = Alerts::at(&fixture.root.join("config"), &fixture.root.join("state"));
+        alerts.relay = Some(Origin::Test(origin.to_owned()));
+        alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+        alerts.set_forwarding(Destination::Telegram, true).unwrap();
+        let settings = alerts.settings().unwrap();
+        let status = Status { file: alerts.state_dir().join("alerts.status"), notes: Mutex::default() };
+        let cancelled = AtomicBool::new(false);
+        let target = Target {
+            alerts: &alerts,
+            settings: &settings,
+            status: &status,
+            destination: Destination::Telegram,
+            secret: alerts.target_secret(&settings, Destination::Telegram).unwrap(),
+            hosted_telegram: true,
+            cancelled: &cancelled,
+        };
+        let mut delivery = Delivery::default();
+        for kind in [Kind::Blocked, Kind::Done] {
+            delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new() }, &target);
+            assert!(!delivery.refused, "{}", note(alerts.state_dir()));
+        }
+        assert_eq!((delivery.sent, delivery.unsent), (2, 0));
+    });
+    assert_eq!(wire.len(), 4);
+}

@@ -11,11 +11,17 @@ use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::term;
 
 const PROBE_WAIT: Duration = Duration::from_secs(3);
+/// How long a script or a settings command may take before it is ended. Rex allows each
+/// request three seconds; a script makes several.
+const CALL_WAIT: Duration = Duration::from_secs(15);
+/// How long the thread writing a script may take to report, once the program has ended.
+const PIPE_GRACE: Duration = Duration::from_millis(200);
 
 /// Inspect the server catalog, not the foreground app. Doctor must not start a server.
 pub(crate) fn layout_available() -> Option<bool> {
@@ -77,14 +83,12 @@ pub(crate) fn script(
     if let Some(target) = target {
         command.arg("-b").arg(&target.block);
     }
-    let mut child =
-        command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let written = child.stdin.take().is_some_and(|mut pipe| pipe.write_all(lua.as_bytes()).is_ok());
-    let output = child.wait_with_output().ok()?;
-    if !written || !output.status.success() {
-        return None;
-    }
-    let mut text = String::from_utf8(output.stdout).ok()?;
+    command.args(args);
+    scripted(&mut command, lua, CALL_WAIT)
+}
+
+fn scripted(command: &mut Command, lua: &str, wait: Duration) -> Option<String> {
+    let mut text = String::from_utf8(output_within(command, Some(lua), wait)?).ok()?;
     text.truncate(text.trim_end().len());
     Some(text)
 }
@@ -105,9 +109,23 @@ pub(crate) fn diagnostic_script(target: &Target, lua: &str, caller: &str) -> Opt
 }
 
 fn probe_output(command: &mut Command, wait: Duration) -> Option<Vec<u8>> {
+    output_within(command, None, wait)
+}
+
+/// What a program printed, if it succeeded within `wait` and within a mebibyte, having read
+/// all of `input`. Otherwise it is ended and waited for.
+fn output_within(command: &mut Command, input: Option<&str>, wait: Duration) -> Option<Vec<u8>> {
     const LIMIT: usize = 1 << 20;
     let deadline = Instant::now() + wait;
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    let mut child = command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    // Written from a thread that can be left behind: a program that never reads, or one that
+    // hands the pipe to another, must not hold a pane past the deadline.
+    let written = input.zip(child.stdin.take()).map(|(input, mut pipe)| {
+        let (input, (send, written)) = (input.to_owned(), mpsc::channel());
+        std::thread::spawn(move || send.send(pipe.write_all(input.as_bytes()).is_ok()));
+        written
+    });
     let result = (|| {
         let mut stdout = child.stdout.take()?;
         let mut poll = [libc::pollfd { fd: stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
@@ -138,7 +156,10 @@ fn probe_output(command: &mut Command, wait: Duration) -> Option<Vec<u8>> {
         }
     })();
     match result {
-        Some((status, output)) => status.success().then_some(output),
+        // Its end of the pipe closed with it, so the writer has an answer by now.
+        Some((status, output)) => (status.success()
+            && written.is_none_or(|written| written.recv_timeout(PIPE_GRACE) == Ok(true)))
+        .then_some(output),
         None => {
             let _ = child.kill();
             let _ = child.wait();
@@ -162,7 +183,24 @@ pub fn run(args: &[&OsStr]) -> bool {
     } else {
         command.args(args).stdin(Stdio::null());
     }
-    command.status().is_ok_and(|status| status.success())
+    finished(&mut command, CALL_WAIT)
+}
+
+/// Whether a program succeeded within `wait`. One that has not ended by then is ended.
+fn finished(command: &mut Command, wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    let Ok(mut child) = command.spawn() else { return false };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// Replaces milo without releasing the listener's inherited lock.
@@ -626,14 +664,14 @@ fn unhex(code: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Frame, ShellChange, exact_block, json, layout_catalog, probe_output, reader_command, reader_label,
-        review_command,
+        Frame, ShellChange, exact_block, finished, json, layout_catalog, probe_output, reader_command, reader_label,
+        review_command, scripted,
     };
     use std::ffi::OsStr;
     use std::io::Cursor;
     use std::path::Path;
     use std::process::Command;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn doctor_requires_the_current_milo_action_catalog() {
@@ -659,6 +697,30 @@ mod tests {
             slow.args(["-c", script]);
             assert!(probe_output(&mut slow, Duration::from_millis(50)).is_none());
         }
+    }
+
+    #[test]
+    fn a_rex_that_does_not_answer_is_ended_at_the_deadline() {
+        let stand_in = |script: &str| {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            command
+        };
+        let long = Duration::from_secs(5);
+        assert_eq!(scripted(&mut stand_in("cat"), "return 1\n", long).as_deref(), Some("return 1"));
+        assert!(finished(&mut stand_in("exit 0"), long) && !finished(&mut stand_in("exit 3"), long));
+
+        let began = Instant::now();
+        let short = Duration::from_millis(100);
+        // More than a pipe holds, for one that never reads its script and one that never answers it.
+        let script = "-".repeat(1 << 20);
+        for stalled in ["exec sleep 3", "cat >/dev/null; exec sleep 3"] {
+            assert!(scripted(&mut stand_in(stalled), &script, short).is_none());
+        }
+        assert!(!finished(&mut stand_in("exec sleep 3"), short));
+        // One that prints without end is ended at a mebibyte, well before the deadline.
+        assert!(scripted(&mut stand_in("exec yes"), "", long).is_none());
+        assert!(began.elapsed() < Duration::from_secs(2), "waited {:?}", began.elapsed());
     }
 
     #[test]

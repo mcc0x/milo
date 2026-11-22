@@ -180,8 +180,17 @@ pub(super) struct Editor {
     discarded: bool,
     /// The kept copy offered by the prompt.
     kept: Option<Draft>,
-    /// The kept copy and change that put its text in place, if one did.
-    restored: Option<(u64, Draft)>,
+    /// The kept copy whose text was put in place, if one was.
+    restored: Option<Restored>,
+}
+
+struct Restored {
+    /// The change that put the kept text in place.
+    change: u64,
+    draft: Draft,
+    /// The file held other text than the draft was written over, or it cannot be told: a save
+    /// would replace text that whoever wrote the draft never saw.
+    over_other_text: bool,
 }
 
 /// The display column at which the character at `byte` starts.
@@ -353,7 +362,12 @@ impl Editor {
         if overwrite && expected.is_none() {
             return Err(SaveError::Refused("Not saved: confirm the disk version first."));
         }
-        self.conflict = disk::save(entry, &mut self.original, || self.buffer.text(), expected.as_ref())?;
+        let basis = match &expected {
+            Some(confirmed) => disk::Basis::Confirmed(confirmed),
+            None if self.restored().is_some_and(|restored| restored.over_other_text) => disk::Basis::Unconfirmed,
+            None => disk::Basis::Original,
+        };
+        self.conflict = disk::save(entry, &mut self.original, || self.buffer.text(), basis)?;
         if self.conflict.is_some() { Err(SaveError::Changed) } else { Ok(()) }
     }
 
@@ -362,8 +376,8 @@ impl Editor {
     /// restore, is not an answer to that question.
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
-        if let Some((_, draft)) = self.restored.take_if(|(change, _)| self.buffer.holds(*change)) {
-            draft.forget();
+        if let Some(restored) = self.restored.take_if(|restored| self.buffer.holds(restored.change)) {
+            restored.draft.forget();
         }
         self.say("Saved", now);
     }
@@ -530,6 +544,11 @@ impl Editor {
         step
     }
 
+    /// The kept copy whose text is in the draft now: restored and not undone.
+    fn restored(&self) -> Option<&Restored> {
+        self.restored.as_ref().filter(|restored| self.buffer.holds(restored.change))
+    }
+
     /// Puts a kept draft in place of the text as one change, so that undo shows the file again.
     fn restore(&mut self, now: Instant) -> Step {
         let Some(draft) = self.kept.take() else { return Step::Stay };
@@ -540,9 +559,11 @@ impl Editor {
         let kept = kept.strip_prefix('\u{feff}').unwrap_or(&kept);
         let step = self.replace(Pos::default(), self.buffer.end(), kept);
         // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
-        self.restored = Some((self.buffer.last_change(), draft));
+        let over_other_text = !draft.written_over(self.original.read());
+        self.restored = Some(Restored { change: self.buffer.last_change(), draft, over_other_text });
         self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
-        self.say("Draft restored · ^Z undoes", now);
+        let over = if over_other_text { " over a changed file" } else { "" };
+        self.say(format!("Draft restored{over} · ^Z undoes"), now);
         step
     }
 
@@ -931,9 +952,15 @@ impl Drop for Editor {
         if !self.buffer.dirty() || self.discarded {
             return;
         }
-        let restored = self.restored.as_ref().filter(|(change, _)| self.buffer.holds(*change)).map(|(_, draft)| draft);
+        let restored = self.restored();
+        // A draft restored over other text and kept again still belongs to the text it was written over.
+        let base = match restored {
+            Some(restored) if restored.over_other_text => restored.draft.base().map(str::to_owned),
+            _ => Some(rescue::base(self.original.read())),
+        };
+        let text = self.original.with_mark(self.buffer.text());
         let note = match self.place.drafts() {
-            Some(drafts) => drafts.keep(self.original.with_mark(self.buffer.text()).as_bytes(), restored),
+            Some(drafts) => drafts.keep(text.as_bytes(), base.as_deref(), restored.map(|restored| &restored.draft)),
             None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
         };
         rescue::tell(note);
