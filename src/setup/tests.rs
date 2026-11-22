@@ -324,6 +324,53 @@ fn usage_tool_choices_cycle_in_appearance_and_save_to_the_chosen_scope() {
 }
 
 #[test]
+fn preview_placement_cycles_and_uses_the_terminal_preference_draft_and_scopes() {
+    use PreviewPlacement::{Above, Left, Right};
+
+    let f = Fixture::folder();
+    let store = store(&f);
+    let root = f.root.join("checkout");
+    let no_rex = |_: &[&OsStr]| panic!("preferences do not call Rex");
+    let open = || Setup::new(Some(store.clone()), false, None, Some(root.clone()), no_rex);
+    let row = Row::PreviewPlacement;
+    let label = "Preview placement";
+    let mut pane = open();
+    for expected in ["Right", "Left", "Above", "Below", "Floating", "Right"] {
+        let rows = frame(&mut pane, 80, 24);
+        assert!(rows.iter().any(|row| row.contains(label) && row.contains(expected)), "{rows:?}");
+        assert_eq!(pane.key(click_label(&rows, label)), After::Stay);
+        if expected == "Below" {
+            assert!(frame(&mut pane, 18, 1)[0].contains("Float"));
+        }
+    }
+    assert_eq!(pane.prefs.preview_placement, Left);
+    assert!(pane.prefs_dirty());
+    assert_eq!(pane.key(Key::Char('q')), After::Stay);
+    assert_eq!(choose(&mut pane, Row::Discard), After::Leave);
+    assert!(!store.config.exists());
+
+    let mut pane = open();
+    assert_eq!(pane.prefs.preview_placement, Right);
+    assert_eq!(choose(&mut pane, row), After::Stay);
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveGlobal), After::Stay);
+    assert_eq!((pane.prefs.preview_placement, pane.prefs_scope()), (Left, Source::Global));
+    assert!(pane.message.as_ref().unwrap().0.ends_with("Used when opening a new Preview."));
+
+    assert_eq!(choose(&mut pane, row), After::Stay);
+    pane.key(Key::Char('s'));
+    assert_eq!(choose(&mut pane, Row::SaveWorktree), After::Stay);
+    assert_eq!((open().prefs.preview_placement, pane.prefs_scope()), (Above, Source::Worktree));
+    assert_eq!(choose(&mut pane, Row::UseGlobalPrefs), After::Stay);
+    assert_eq!(pane.key(Key::Enter), After::Stay, "cancel is the default");
+    assert_eq!(open().prefs.preview_placement, Above);
+    assert_eq!(choose(&mut pane, Row::UseGlobalPrefs), After::Stay);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert_eq!((open().prefs.preview_placement, pane.prefs_scope()), (Left, Source::Global));
+    assert!(!pane.prefs_dirty());
+}
+
+#[test]
 fn terminal_save_feedback_names_the_scope_and_reports_the_effect() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), false, None, Some(f.root.join("checkout")), |_| panic!("outside Rex"));
@@ -889,7 +936,7 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
 fn workflow_shows_install_or_separate_open_and_remove_actions() {
     let mut pane = Setup::new(None, false, None, None, |_| panic!("drawing does not call Rex"));
     let rows = frame(&mut pane, 80, 20);
-    assert_eq!(pane.visible.len, 11);
+    assert_eq!(pane.visible.len, 12);
     assert!(!rows.iter().any(|row| row.contains("menu bar app")));
     for (installed, action, label, short) in [
         (false, Row::MenuBar, "Install Milo menu bar app", "Install app"),
@@ -899,7 +946,7 @@ fn workflow_shows_install_or_separate_open_and_remove_actions() {
         pane.menu_installed = Some(installed);
         pane.select_panel(Panel::Workflow, Some(action));
         let rows = frame(&mut pane, 80, 20);
-        assert_eq!(pane.visible.len, if installed { 13 } else { 12 });
+        assert_eq!(pane.visible.len, if installed { 14 } else { 13 });
         assert_eq!(rows.iter().any(|row| row.contains("Install Milo menu bar app")), !installed);
         assert_eq!(rows.iter().any(|row| row.contains("Open or update Milo menu bar app")), installed);
         assert_eq!(rows.iter().any(|row| row.contains("Remove Milo menu bar app…")), installed);

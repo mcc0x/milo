@@ -31,7 +31,7 @@ use crate::help::{self, Page};
 use crate::keys::{ConfirmClick, Key};
 use crate::menubar::{self, Action as MenuAction};
 use crate::pane::{After, External, Pane};
-use crate::preferences::{IconMode, PreferenceSnapshot, Preferences, ProjectMode, Source, UsageTool};
+use crate::preferences::{IconMode, PreferenceSnapshot, Preferences, PreviewPlacement, ProjectMode, Source, UsageTool};
 use crate::presence;
 use crate::screen::{Screen, Style};
 use crate::ui::{self, DEL, FAINT};
@@ -148,6 +148,7 @@ enum Row {
     ChangesOnly,
     HistoryFollow,
     TabTitles,
+    PreviewPlacement,
     ClaudeLimits,
     Alerts,
     AlertsOn,
@@ -199,6 +200,7 @@ const WORKFLOW: &[Row] = &[
     Row::ChangesOnly,
     Row::HistoryFollow,
     Row::TabTitles,
+    Row::PreviewPlacement,
     Row::SavePrefs,
     Row::UseGlobalPrefs,
     Row::ClaudeLimits,
@@ -764,11 +766,18 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
 
     fn preference_feedback(&self, before: Preferences, change: PreferenceChange) -> PreferenceFeedback {
         let titles_changed = before.tab_titles != self.prefs.tab_titles;
-        let reopen = (Preferences { tab_titles: self.prefs.tab_titles, ..before }) != self.prefs;
+        let preview_changed = before.preview_placement != self.prefs.preview_placement;
+        let reopen = (Preferences {
+            tab_titles: self.prefs.tab_titles,
+            preview_placement: self.prefs.preview_placement,
+            ..before
+        }) != self.prefs;
         let effect = if reopen {
             REOPEN_PANES
         } else if titles_changed {
             "Milo uses the title setting when naming Rex tabs."
+        } else if preview_changed {
+            "Used when opening a new Preview."
         } else {
             "Pane behavior is unchanged."
         };
@@ -827,6 +836,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::ChangesOnly => self.prefs.changes_only = !self.prefs.changes_only,
             Row::HistoryFollow => self.prefs.history_follow_new = !self.prefs.history_follow_new,
             Row::TabTitles => self.prefs.tab_titles = !self.prefs.tab_titles,
+            Row::PreviewPlacement => self.prefs.preview_placement = self.prefs.preview_placement.next(),
             _ => unreachable!("only preferences are changed here"),
         }
     }
@@ -1159,6 +1169,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             | Row::FollowActivity
             | Row::ChangesOnly
             | Row::HistoryFollow
+            | Row::PreviewPlacement
             | Row::TabTitles => self.saved_prefs.is_none(),
             Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
             Row::Presence | Row::PresenceDetails | Row::PresenceApp => self.presence_view.is_none(),

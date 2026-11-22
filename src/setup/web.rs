@@ -307,7 +307,8 @@ impl Editor {
             "\"appearance\":{{\"icons\":\"{}\",\"static_marks\":{},\"text_git_marks\":{},\"usage_large_figures\":{},",
             "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\",",
             "\"usage_deepseek\":\"{}\",\"usage_openrouter\":\"{}\",\"usage_devin\":\"{}\",\"usage_copilot\":\"{}\"}},",
-            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{}}},",
+            "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},",
+            "\"tab_titles\":{},\"preview_placement\":\"{}\"}},",
             "\"menubar\":{{\"installed\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
@@ -322,6 +323,7 @@ impl Editor {
             usage_codex, usage_claude, usage_opencode,
             usage_deepseek, usage_openrouter, usage_devin, usage_copilot,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
+            prefs.preview_placement.value(),
             Optional(menubar::installed()),
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
@@ -933,6 +935,7 @@ enum Edit {
     ChangesOnly(bool),
     HistoryFollowNew(bool),
     TabTitles(bool),
+    PreviewPlacement(PreviewPlacement),
     ClaudeLimits(bool),
 }
 
@@ -981,6 +984,7 @@ impl Edit {
             "workflow.changes_only" => Self::ChangesOnly(value.boolean()?),
             "workflow.history_follow_new" => Self::HistoryFollowNew(value.boolean()?),
             "workflow.tab_titles" => Self::TabTitles(value.boolean()?),
+            "workflow.preview_placement" => Self::PreviewPlacement(PreviewPlacement::parse(value.string(8)?.as_ref())?),
             "account.claude_limits" => Self::ClaudeLimits(value.boolean()?),
             field if field.starts_with("appearance.usage_") => {
                 let key = &field["appearance.".len()..];
@@ -1036,6 +1040,7 @@ impl Edit {
             Self::FollowActivity(on) => prefs.follow_activity = on,
             Self::ChangesOnly(on) => prefs.changes_only = on,
             Self::HistoryFollowNew(on) => prefs.history_follow_new = on,
+            Self::PreviewPlacement(placement) => prefs.preview_placement = placement,
             Self::TabTitles(on) => prefs.tab_titles = on,
             Self::ClaudeLimits(on) => setup.show_limits = on,
         }
@@ -1407,6 +1412,90 @@ mod tests {
         action(&mut newer, r#""action":"inherit","group":"preferences""#).unwrap();
         assert_eq!(newer.setup.prefs_scope(), Source::Default);
         assert_eq!(newer.setup.prefs, Preferences::default());
+    }
+
+    #[test]
+    fn preview_placement_is_validated_and_discarded_as_a_versioned_preference() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), None);
+        let placement = |state: &str, value: &str| {
+            let state = Value::parse(state.as_bytes()).unwrap();
+            assert!(field(field(state, "workflow"), "preview_placement").is(value));
+        };
+        let before = set(&mut editor, "layout.width", "0.35");
+        placement(&before, "right");
+        let version = editor.version();
+        for invalid in ["true", "null", "\"center\"", "\"Floating\"", "\"right\\n\""] {
+            let request = format!(r#""action":"set","field":"workflow.preview_placement","value":{invalid}"#);
+            assert_eq!(action(&mut editor, &request).unwrap_err(), BAD_ACTION);
+            assert_eq!(editor.state(), before);
+        }
+
+        let draft = set(&mut editor, "workflow.preview_placement", "\"below\"");
+        placement(&draft, "below");
+        let stale = format!(
+            r#"{{"version":{version},"action":"set","field":"workflow.preview_placement","value":"left"}}"#
+        );
+        assert!(editor.action(stale.as_bytes()).unwrap_err().contains("draft changed"));
+        assert_eq!(editor.state(), draft);
+        assert!(editor.setup.prefs_dirty());
+        assert_eq!(
+            action(&mut editor, r#""action":"save","group":"preferences","scope":"worktree""#).unwrap_err(),
+            UNAVAILABLE
+        );
+
+        let discarded = action(&mut editor, r#""action":"discard","group":"preferences""#).unwrap();
+        placement(&discarded, "right");
+        assert!(editor.setup.layout_dirty() && !editor.setup.prefs_dirty());
+        assert!(!store.config.exists());
+    }
+
+    #[test]
+    fn preview_placement_round_trips_at_both_scopes_and_rejects_stale_saves() {
+        use PreviewPlacement::{Above, Floating};
+
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let root = f.root.join("checkout");
+        let [global, local] = crate::preferences::layers(&store.config, &root);
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        let global_before = "# personal preferences\nicons = off\n";
+        let local_before = "static_marks = true\nunknown_from_newer_version = kept\n";
+        fs::write(&global, global_before).unwrap();
+        fs::write(&local, local_before).unwrap();
+
+        let save_global = r#""action":"save","group":"preferences","scope":"global""#;
+        let save_worktree = r#""action":"save","group":"preferences","scope":"worktree""#;
+        let inherit = r#""action":"inherit","group":"preferences""#;
+        let mut editor = outside(store.clone(), Some(&root));
+        let place = |editor: &Editor| editor.setup.prefs.preview_placement;
+        set(&mut editor, "workflow.preview_placement", "\"above\"");
+        let saved = action(&mut editor, save_global).unwrap();
+        assert_feedback(&saved, "Saved global pane preferences. Used when opening a new Preview.", false);
+        let global_text = format!("{global_before}preview_placement = above\n");
+        assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
+        assert_eq!(fs::read_to_string(&local).unwrap(), local_before);
+        assert_eq!(place(&outside(store.clone(), None)), Above);
+
+        let mut stale = outside(store.clone(), Some(&root));
+        set(&mut stale, "workflow.preview_placement", "\"left\"");
+        set(&mut editor, "workflow.preview_placement", "\"floating\"");
+        action(&mut editor, save_worktree).unwrap();
+        assert_eq!(place(&outside(store.clone(), Some(&root))), Floating);
+        assert_eq!(place(&outside(store.clone(), Some(&f.root.join("other")))), Above);
+        let stale_state = stale.state();
+        for request in [save_global, save_worktree, inherit] {
+            assert_eq!(action(&mut stale, request).unwrap_err(), PREFS_CHANGED);
+            assert_eq!(stale.state(), stale_state);
+        }
+        assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
+        assert_eq!(fs::read_to_string(&local).unwrap(), format!("{local_before}preview_placement = floating\n"));
+
+        action(&mut editor, inherit).unwrap();
+        assert_eq!((place(&editor), editor.setup.prefs_scope()), (Above, Source::Global));
+        assert!(!local.exists());
+        assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
     }
 
     #[test]

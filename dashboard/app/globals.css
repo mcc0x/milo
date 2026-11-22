@@ -213,6 +213,7 @@ h1, h2, h3, p, figure { margin: 0; }
 .choice-strip input:focus-visible + span { outline: 2px solid var(--blue); }
 .choice-strip:disabled { opacity: .6; }
 @media (forced-colors: active) { .choice-strip input:checked + span { outline: 2px solid Highlight; } }
+#pane-preview + .group-controls .choice-strip { flex-wrap: wrap; }
 .pane-picker { margin: 0; padding: .35rem 0; border: 0; min-width: 0; }
 .pane-list { display: grid; gap: .1rem; margin: 0; padding: 0; list-style: none; }
 .pane-line { display: flex; align-items: center; justify-content: space-between; gap: .4rem; }

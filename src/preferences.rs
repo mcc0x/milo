@@ -73,6 +73,48 @@ impl ProjectMode {
     }
 }
 
+/// Where the native Preview opens relative to its Rex anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewPlacement {
+    Right,
+    Left,
+    Above,
+    Below,
+    Floating,
+}
+
+impl PreviewPlacement {
+    const ALL: [Self; 5] = [Self::Right, Self::Left, Self::Above, Self::Below, Self::Floating];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|placement| placement.value() == value)
+    }
+
+    pub const fn value(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Left => "left",
+            Self::Above => "above",
+            Self::Below => "below",
+            Self::Floating => "floating",
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Right => "Right",
+            Self::Left => "Left",
+            Self::Above => "Above",
+            Self::Below => "Below",
+            Self::Floating => "Floating",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Default,
@@ -244,6 +286,7 @@ pub struct Preferences {
     pub follow_activity: bool,
     pub changes_only: bool,
     pub project_mode: ProjectMode,
+    pub preview_placement: PreviewPlacement,
     pub history_follow_new: bool,
     pub usage_large_figures: bool,
     pub usage_tools: UsageTools,
@@ -261,6 +304,7 @@ impl Default for Preferences {
             follow_activity: true,
             changes_only: false,
             project_mode: ProjectMode::Follow,
+            preview_placement: PreviewPlacement::Right,
             history_follow_new: false,
             usage_large_figures: false,
             usage_tools: UsageTools::default(),
@@ -389,6 +433,7 @@ impl Preferences {
                         _ => return Err(invalid(key)),
                     }
                 }
+                "preview_placement" => self.preview_placement = PreviewPlacement::parse(value).ok_or_else(|| invalid(key))?,
                 "history_follow_new" => self.history_follow_new = boolean()?,
                 "usage_large_figures" => self.usage_large_figures = boolean()?,
                 "tab_titles" => self.tab_titles = boolean()?,
@@ -429,6 +474,10 @@ impl Preferences {
                         ProjectMode::Pin => "pin",
                     }),
                 ),
+                (
+                    "preview_placement",
+                    (before.preview_placement != self.preview_placement).then(|| self.preview_placement.value()),
+                ),
                 ("history_follow_new", boolean(before.history_follow_new, self.history_follow_new)),
                 ("usage_large_figures", boolean(before.usage_large_figures, self.usage_large_figures)),
                 tool(UsageTool::Codex),
@@ -456,6 +505,7 @@ impl Preferences {
                 ProjectMode::Follow => "follow",
                 ProjectMode::Pin => "pin",
             },
+            "preview_placement" => self.preview_placement.value(),
             "history_follow_new" => bool_value(self.history_follow_new),
             "usage_large_figures" => bool_value(self.usage_large_figures),
             "tab_titles" => bool_value(self.tab_titles),
@@ -730,6 +780,33 @@ fn decode_folds(text: &str) -> BTreeMap<String, bool> {
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+
+    #[test]
+    fn preview_placement_values_are_exact_and_invalid_layers_do_not_partially_apply() {
+        use PreviewPlacement::{Above, Below, Floating, Left, Right};
+
+        let values = [("right", Right), ("left", Left), ("above", Above), ("below", Below), ("floating", Floating)];
+        for (spelling, placement) in values {
+            assert_eq!(PreviewPlacement::parse(spelling), Some(placement));
+            assert_eq!(placement.value(), spelling);
+        }
+        assert_eq!(PreviewPlacement::parse("Right"), None);
+        assert_eq!(PreviewPlacement::parse(""), None);
+
+        let f = Fixture::folder();
+        let root = f.root.join("checkout");
+        let [global, local] = layers(&f.root, &root);
+        fs::write(&global, "icons = off\n").unwrap();
+        let (before, source) = Preferences::resolve_in(&f.root, Some(&root)).unwrap();
+        assert_eq!((before.preview_placement, source), (Right, Source::Global));
+
+        fs::create_dir(local.parent().unwrap()).unwrap();
+        fs::write(&local, "icons = plain\npreview_placement = center\n").unwrap();
+        let error = Preferences::resolve_in(&f.root, Some(&root)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("preview_placement"));
+        assert_eq!(Preferences::for_pane_in(&f.root, Some(&root)), (before, Some("milo doctor: worktree prefs ignored")));
+    }
 
     #[test]
     fn usage_tool_choices_save_only_what_changed_and_files_without_them_stay_automatic() {

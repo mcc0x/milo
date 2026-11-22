@@ -21,6 +21,8 @@ const number = (page, name) => page.getByRole('spinbutton', {name, exact: true})
 const status = (page, text) => page.getByRole('status').filter({hasText: text});
 const reopenNote = page => page.getByRole('region', {name: 'Project session'}).getByText('Reopen panes to apply.', {exact: true});
 const section = (page, name) => page.getByRole('navigation').getByRole('button', {name: new RegExp(`^${name}`)});
+const placement = (page, name, checked) => page.getByRole('group', {name: 'Preview placement', exact: true})
+  .getByRole('radio', {name, exact: true, checked});
 const usageTools = ['Codex', 'Claude Code', 'OpenCode'];
 const usageChoice = (page, name) => page.getByRole('combobox', {name, exact: true});
 const usageAccounts = ['DeepSeek balance', 'OpenRouter spend', 'Devin ACUs', 'Copilot AI credits'];
@@ -138,6 +140,54 @@ async function chooseUsageTools(page, binary, cwd, env) {
   assert.equal(await reopenNote(page).count(), 0, 'title-only saves do not ask to reopen panes');
   await section(page, 'Layout').click();
   console.log('Usage tools: three choices saved globally and read back by doctor');
+}
+
+async function savePreviewPlacement(page, env) {
+  const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
+  const before = await readFile(preferences, 'utf8');
+  const choices = dialog(page, 'Save changes');
+  await section(page, 'Panes').click();
+  assert(await placement(page, 'Right').isChecked(), 'Preview defaults to the right');
+
+  await placement(page, 'Right').press('ArrowRight');
+  await status(page, dirty).waitFor({state: 'attached'});
+  assert(await placement(page, 'Left').isChecked(), 'arrow keys select the next placement');
+  await placement(page, 'Below').click();
+  await button(page, 'Save').click();
+  await button(choices, 'Cancel').click();
+  await choices.waitFor({state: 'hidden'});
+  assert(await placement(page, 'Below').isChecked(), 'cancel retains the placement draft');
+  assert.equal(await readFile(preferences, 'utf8'), before, 'a placement draft writes nothing');
+  await button(page, 'Discard').click();
+  await button(dialog(page, 'Discard all unsaved changes?'), 'Discard changes').click();
+  await placement(page, 'Right', true).waitFor();
+
+  await placement(page, 'Above').click();
+  await button(page, 'Save').click();
+  await button(choices, 'Save as global default').click();
+  await status(page, 'Saved global pane preferences. Used when opening a new Preview.').waitFor();
+  assert.equal(await reopenNote(page).count(), 0, 'placement saves do not ask to reopen panes');
+  const global = await readFile(preferences, 'utf8');
+  assert.match(global, /^preview_placement = above$/m);
+
+  await placement(page, 'Floating').click();
+  await button(page, 'Save').click();
+  await button(choices, 'Save for this worktree').click();
+  await status(page, clean).waitFor({state: 'attached'});
+  assert.equal(await readFile(preferences, 'utf8'), global, 'a worktree save leaves the global placement alone');
+  await section(page, 'Layout').click();
+}
+
+async function inheritPreviewPlacement(page) {
+  await section(page, 'Panes').click();
+  assert(await placement(page, 'Floating').isChecked(), 'worktree placement persisted across a server restart');
+  const panes = page.getByRole('region', {name: 'Pane preferences', exact: true});
+  await panes.locator('summary').filter({hasText: 'Worktree override'}).click();
+  await button(panes, 'Remove override…').click();
+  await button(dialog(page, 'Remove worktree override?'), 'Remove override').click();
+  await placement(page, 'Above', true).waitFor();
+  await section(page, 'Layout').click();
+  console.log('Preview placement: default, keyboard selection, cancel and discard, scoped saves, restart, and inheritance');
 }
 
 async function manageMenuApp(page, url, env) {
@@ -597,6 +647,11 @@ async function confirmFromMobileFooter(browser, url, exited) {
   const dock = await page.locator('.control-dock').boundingBox();
   assert(dock && dock.x >= 0 && dock.x + dock.width <= 260, 'navigation and draft controls fit at narrow widths');
   await integrationDetailsFitNarrowPanel(page);
+  await section(page, 'Panes').click();
+  await placement(page, 'Floating').waitFor();
+  const overflow = await page.locator('#settings-panel').evaluate(panel => panel.scrollWidth - panel.clientWidth);
+  assert.equal(overflow, 0, 'Preview placement choices wrap in a narrow touch panel');
+  await section(page, 'Layout').click();
   await page.setViewportSize(viewport);
   const done = button(page.getByRole('region', {name: 'Project session'}), 'Done');
   const box = await done.boundingBox();
@@ -1193,6 +1248,7 @@ async function main() {
       await saveNumbers(page, cwd);
       await chooseUsageTools(page, binary, cwd, env);
       await manageMenuApp(page, url, env);
+      await savePreviewPlacement(page, env);
       await turnPresenceOnAndOff(page, binary, cwd, env, discord);
       await movePaneDuringPendingEdit(page);
       await discardFocusedNumber(page);
@@ -1205,6 +1261,7 @@ async function main() {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }
       await usageToolsPersisted(page);
+      await inheritPreviewPlacement(page);
       await copySettingsThroughHosts(page, env, cwd);
       await rejectStaleDone(desktop, page, url);
       await confirmFromMobileFooter(browser, url, exited);

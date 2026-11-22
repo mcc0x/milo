@@ -3,9 +3,11 @@
 import { ChoiceSetting, GroupCard, SettingSection, SwitchSetting } from './controls';
 import { useSession } from './session';
 import PaneGlyph from './pane-glyph';
+import type { SessionState } from './session-state';
 
 const tracking = [['follow', 'Follow shell'], ['pin', 'Pin project']] as const;
 const outline = [[false, 'All files'], [true, 'Changes only']] as const;
+const placements = [['right', 'Right'], ['left', 'Left'], ['above', 'Above'], ['below', 'Below'], ['floating', 'Floating']] as const;
 const icons = [['nerd', 'Nerd Font'], ['plain', 'Plain'], ['off', 'Off']] as const;
 const marks = [[false, 'Pulse'], [true, 'Static']] as const;
 const gitMarks = [[false, 'Style only', 'main.rs'], [true, 'Text', 'M main.rs']] as const;
@@ -31,6 +33,12 @@ export default function Panes() {
         <SwitchSetting field="workflow.history_follow_new" label="Follow new commits" detail="Only while History is at the top."
           checked={draftValue<boolean>('workflow.history_follow_new')}
           disabled={disabled} onChange={checked => edit('workflow.history_follow_new', checked)} />
+      </SettingSection>
+      <SettingSection id="pane-preview" title={<><PaneGlyph kind="preview"/>Preview</>}>
+        <ChoiceSetting field="workflow.preview_placement" label="Preview placement"
+          detail="Where new previews open relative to the working terminal."
+          value={draftValue<SessionState['workflow']['preview_placement']>('workflow.preview_placement')} choices={placements}
+          disabled={disabled} onChange={value => edit('workflow.preview_placement', value)} />
       </SettingSection>
       <SettingSection id="pane-appearance" title={<><PaneGlyph kind="appearance"/>Shared appearance</>}>
         <ChoiceSetting field="appearance.icons" label="Icons" value={draftValue<'nerd' | 'plain' | 'off'>('appearance.icons')}
