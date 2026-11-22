@@ -83,8 +83,9 @@ local function fixture(mode, block)
   f.tiled = { kind = "tiled", blocks = { f.rail, f.main, f.anchor } }
   f.leaf = { block_id = preview, rect = { 0.625, 0, 0.375, 1 } }
   f.main_leaf = { block_id = main, rect = { 0.25, 0, 0.375, 1 } }
-  f.branch = { before = f.main_leaf, after = f.leaf }
+  f.branch = { direction = "horizontal", before = f.main_leaf, after = f.leaf }
   f.tiled.layout = { rect = { 0, 0, 1, 1 }, split = {
+    direction = "horizontal",
     before = { block_id = sidebar, rect = { 0, 0, 0.25, 1 } },
     after = { rect = { 0.25, 0, 0.75, 1 }, split = f.branch },
   } }
@@ -98,6 +99,9 @@ local function fixture(mode, block)
     f.placed = { api = api, args = a }
     if a.layout then
       f.anchor.label = a.layout.block.label
+      f.branch.direction = a.direction
+      f.branch.before, f.branch.after = f.main_leaf, f.leaf
+      if a.side == "before" then f.branch.before, f.branch.after = f.leaf, f.main_leaf end
       if f.after_create then f.after_create() end
     end
     return { block_ids = { preview } }
@@ -162,6 +166,16 @@ local function fixture(mode, block)
     },
   }
   return f
+end
+
+local function move_preview_beside_rail(f)
+  local root = f.tiled.layout.split
+  local rail = root.before
+  rail.rect = { 0, 0, 0.125, 1 }
+  f.leaf.rect = { 0.125, 0, 0.125, 1 }
+  f.main_leaf.rect = { 0.25, 0, 0.75, 1 }
+  root.before = { rect = { 0, 0, 0.25, 1 }, split = { direction = "horizontal", before = rail, after = f.leaf } }
+  root.after = f.main_leaf
 end
 
 for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", "before" },
@@ -234,6 +248,15 @@ end, "changed")
 local raced = fixture("open", main)
 raced.after_create = function() raced.view.active_window_id = inactive end
 assert(call(raced)() == "changed\n" and raced.placed and raced.canceled and not raced.published)
+for _, change in ipairs{
+  move_preview_beside_rail,
+  function(f) f.branch.before, f.branch.after = f.branch.after, f.branch.before end,
+  function(f) f.branch.direction = "vertical" end,
+} do
+  local rearranged = fixture("open", main)
+  rearranged.after_create = function() change(rearranged) end
+  assert(call(rearranged)() == "changed\n" and rearranged.placed and rearranged.canceled and not rearranged.published)
+end
 local floated = fixture("open", main)
 floated.after_create = function() float_anchor(floated) end
 assert(call(floated)() == "changed\n" and floated.placed and floated.canceled and not floated.published)
@@ -305,6 +328,13 @@ denied("focus", preview, function(f) f.rex.args.owner_pid = gui + 1 end, "focus"
 denied("focus", preview, function(f) f.parents[cli][1] = 99 end, "focus")
 denied("focus", preview, function(f) f.anchor.label = "different label" end, "focus")
 denied("focus", preview, float_anchor, "focus")
+
+local moved = fixture("watch", preview)
+local watch_moved = call(moved)
+assert(watch_moved() == shown)
+move_preview_beside_rail(moved)
+assert(watch_moved("session_view_changed") == shown .. "show 40 tile 125000 0 125000 1000000\n")
+assert(not moved.stopped)
 
 local f = fixture("watch", preview)
 local observe = call(f)

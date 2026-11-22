@@ -285,6 +285,17 @@ local directions = {
   above = { "vertical", "before" }, below = { "vertical", "after" },
 }
 
+local function is_leaf(node, id)
+  return type(node) == "table" and node.split == nil and node.block_id == id
+end
+
+local function has_split(node, direction, before, after)
+  if type(node) ~= "table" or type(node.split) ~= "table" then return false end
+  local split = node.split
+  return (split.direction == direction and is_leaf(split.before, before) and is_leaf(split.after, after))
+    or has_split(split.before, direction, before, after) or has_split(split.after, direction, before, after)
+end
+
 local function working_pair(host, main, window, layer)
   return window and window.window_id == a.window and layer.kind == "tiled"
     and local_terminal(main, host) and main.owner == a.owner
@@ -298,7 +309,9 @@ local function cancel_staged(host, id)
   end
 end
 
-local function publish(host, id)
+local function publish(host, id, direction, side)
+  local before, after = id, a.main
+  if side == "after" then before, after = after, before end
   local result = "changed"
   local view = current_view()
   if view and view.active_window_id == a.window then
@@ -307,7 +320,8 @@ local function publish(host, id)
     local block, place, layer = locate(view, id)
     if working_pair(host, main, window, tiled) and origin == window and caller_layer.kind == "tiled"
       and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
-      and place == window and layer.kind == "tiled" and local_terminal(block, host) and block.label == staging_label then
+      and place == window and layer == tiled and local_terminal(block, host) and block.label == staging_label
+      and has_split(tiled.layout, direction, before, after) then
       local pid, multiple_sessions = local_owner(a.owner)
       if pid == a.owner_pid then
         if multiple_sessions then
@@ -358,7 +372,7 @@ local function open(host, view, caller, window, layer, owner_pid, multiple_sessi
   local made = rex.session.new_split{ session_id = a.session, anchor_id = main.block_id,
     direction = direction[1], side = direction[2], focus = false, layout = layout }
   local id = made and made.block_ids and #made.block_ids == 1 and made.block_ids[1]
-  return exact(id, "block:") and publish(host, id) or "placement"
+  return exact(id, "block:") and publish(host, id, direction[1], direction[2]) or "placement"
 end
 
 local function focus(host, view, caller, window, cli_pid)
