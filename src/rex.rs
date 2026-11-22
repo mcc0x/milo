@@ -259,20 +259,35 @@ pub fn inside() -> bool {
 /// Opens a floating reader in the caller's tab and returns its block ID.
 /// The old reader stays in place if the replacement cannot be created.
 pub fn open(root: &Path, file: &str, commit: Option<&str>, previous: Option<&str>) -> Result<String, &'static str> {
+    const FAILED: &str = "Rex did not open the file.";
     let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
-    let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
+    let exe = std::env::current_exe().map_err(|_| FAILED)?;
     let (_, name) = file.rsplit_once('/').unwrap_or(("", file));
     let path = if commit.is_some() { file.into() } else { root.join(file) };
-    let command = reader_command(&exe, &path, commit);
+    float(&target, root, name, &reader_command(&exe, &path, commit), previous).ok_or(FAILED)
+}
+
+/// Opens a floating review of the patch in `patch` in the caller's tab.
+/// `from` is shown as the name of whoever handed the patch over.
+pub fn open_review(root: &Path, patch: &Path, from: Option<&str>) -> Result<(), &'static str> {
+    const FAILED: &str = "Rex did not open the review.";
+    let target = Target::current()
+        .ok_or("--float needs a Rex pane; elsewhere, run milo review PATCH in a terminal")?;
+    let exe = std::env::current_exe().map_err(|_| FAILED)?;
+    float(&target, root, "Patch review", &review_command(&exe, patch, from), None).map(drop).ok_or(FAILED)
+}
+
+/// Runs `command`, a JSON list of words, in a new floating pane over the
+/// tab of `target`, and returns the pane's block ID.
+fn float(target: &Target, root: &Path, label: &str, command: &str, previous: Option<&str>) -> Option<String> {
     let previous = previous.map(json).unwrap_or_else(|| "null".into());
     let args = format!(
         r#"{{"label":{},"cwd":{},"command":{command},"previous":{previous}}}"#,
-        reader_label(name),
+        reader_label(label),
         json(&root.to_string_lossy()),
     );
-    script(Some(&target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
+    script(Some(target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
         .filter(|reply| exact_block(OsStr::new(reply)).is_some())
-        .ok_or("Rex did not open the file.")
 }
 
 /// Quote a Rex label without changing the path passed to the reader.
@@ -297,6 +312,11 @@ fn reader_label(name: &str) -> String {
 fn reader_command(exe: &Path, file: &Path, commit: Option<&str>) -> String {
     let args = commit.map_or_else(String::new, |hash| format!(r#","--commit",{}"#, json(hash)));
     format!("[{},\"view\",{}{args}]", json(&exe.to_string_lossy()), json(&file.to_string_lossy()))
+}
+
+fn review_command(exe: &Path, patch: &Path, from: Option<&str>) -> String {
+    let args = from.map_or_else(String::new, |name| format!(r#","--from",{}"#, json(name)));
+    format!("[{},\"review\",{}{args}]", json(&exe.to_string_lossy()), json(&patch.to_string_lossy()))
 }
 
 /// A local Rex script watches the selected shell without periodic CLI calls.
@@ -594,7 +614,10 @@ fn unhex(code: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, ShellChange, exact_block, json, layout_catalog, probe_output, reader_command, reader_label};
+    use super::{
+        Frame, ShellChange, exact_block, json, layout_catalog, probe_output, reader_command, reader_label,
+        review_command,
+    };
     use std::ffi::OsStr;
     use std::io::Cursor;
     use std::path::Path;
@@ -710,5 +733,13 @@ mod tests {
     fn a_floating_reader_passes_the_path_and_commit_as_separate_words() {
         let command = reader_command(Path::new("/bin/milo"), Path::new("-odd \"name\t\n"), Some("a123456"));
         assert_eq!(command, r#"["/bin/milo","view","-odd \"name\u0009\u000a","--commit","a123456"]"#);
+    }
+
+    #[test]
+    fn a_floating_review_passes_the_patch_and_name_as_separate_words() {
+        let command = review_command(Path::new("/bin/milo"), Path::new("/tmp/--float \"x\".patch"), Some("--float"));
+        assert_eq!(command, r#"["/bin/milo","review","/tmp/--float \"x\".patch","--from","--float"]"#);
+        let unnamed = review_command(Path::new("/bin/milo"), Path::new("/tmp/a.patch"), None);
+        assert_eq!(unnamed, r#"["/bin/milo","review","/tmp/a.patch"]"#);
     }
 }

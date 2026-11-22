@@ -20,6 +20,7 @@ pub(crate) struct ReadOnly(pub(crate) &'static str);
 
 impl ReadOnly {
     pub(super) const COMMIT: Self = Self("this is a commit");
+    pub(super) const HANDED: Self = Self("this shows a patch");
     pub(super) const LINK: Self = Self("this is a link");
     pub(super) const LINKED: Self = Self("reached through a link");
     pub(super) const MOVED: Self = Self("the project moved");
