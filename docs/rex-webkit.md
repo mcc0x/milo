@@ -28,7 +28,7 @@ The cached executable is `$(getconf DARWIN_USER_CACHE_DIR)/net.usemilo.preview/M
 
 **What Accessibility reads:** to find the marker, the helper compares the first 32 visible characters of candidate terminal text areas in the focused Rex window. It does not request the whole terminal value, persist those prefixes or send them to the dev page, agent or clipboard.
 
-**Overlay limits:** Rex and the panel are separate processes, so changes are not atomic. A tab, palette or moving divider can change between two observations. The helper hides when it detects uncertainty and waits for stable bounds before showing again. Rex UI drawn inside the pane without a corresponding accessibility element cannot be reliably detected with this method. Palette safety, native full-screen Spaces and focus while the panel is key remain GUI acceptance gates, not guarantees.
+**Overlay limits:** Rex and the panel are separate processes, so changes are not atomic. A tab, palette or moving divider can change between two observations. The helper hides when it detects uncertainty and waits for stable bounds before showing again. Rex UI drawn inside the pane without a corresponding accessibility element cannot be reliably detected with this method. Native full-screen placement is declined; palette safety and focus while the panel is key remain GUI acceptance gates, not guarantees.
 
 If the client does not expose the visible terminal text range or cannot distinguish a palette from the terminal, the robust upstream interface would be a client event keyed by block ID with the owning window, pane-body rectangle, focus and occlusion state. Server-side split ratios alone cannot provide that proof.
 

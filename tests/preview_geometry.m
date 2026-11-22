@@ -4,6 +4,7 @@
 // /tmp/preview-geometry
 #import "../macos/Preview/Anchor.m"
 #import <assert.h>
+#import <util.h>
 
 static void ScreenPlacement(void) {
     CGRect primary = CGRectMake(0, 0, 1440, 900);
@@ -26,6 +27,8 @@ static void ScreenPlacement(void) {
     assert(!PlaceOnScreen(crosses, primary, screens, 3, &overlay, &display));
     Geometry menuBar = {CGRectMake(100, 0, 700, 500), CGRectMake(100, 12, 400, 400), 1};
     assert(!PlaceOnScreen(menuBar, primary, screens, 3, &overlay, &display));
+    Geometry fullScreen = {primary, CGRectMake(100, 50, 400, 400), 1};
+    assert(!PlaceOnScreen(fullScreen, primary, screens, 3, &overlay, &display));
     screens[1].mirrored = YES;
     assert(!PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
     screens[1].mirrored = NO;
@@ -78,6 +81,12 @@ static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect rect) {
     };
 }
 
+static NSDictionary *WithLayer(NSDictionary *metadata, NSNumber *layer) {
+    NSMutableDictionary *copy = [metadata mutableCopy];
+    copy[(__bridge NSString *)kCGWindowLayer] = layer;
+    return copy;
+}
+
 static void WindowOrdering(void) {
     CGRect window = CGRectMake(20, 40, 1000, 800), pane = CGRectMake(700, 100, 240, 600);
     CGRect offPane = CGRectMake(0, 0, 400, 400);
@@ -87,12 +96,53 @@ static void WindowOrdering(void) {
     NSDictionary *ownPanel = Metadata(300, 4, pane);
     NSDictionary *harmless = Metadata(200, 5, offPane);
     NSDictionary *ambiguous = Metadata(100, 6, window);
-    assert(MatchingVisibleWindow(@[ownPanel, harmless, rex, otherRexWindow], 100, 300, 4, window, pane) == 1);
-    assert(MatchingVisibleWindow(@[frontApp, rex], 100, 300, 3, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[otherRexWindow, rex], 100, 300, 4, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[rex, ambiguous], 100, 300, 4, window, pane) == kCGNullWindowID);
-    assert(MatchingVisibleWindow(@[rex, frontApp], 100, 300, 4, window, pane) == 1);
-    assert(MatchingVisibleWindow(@[Metadata(200, 1, window)], 100, 300, 4, window, pane) == kCGNullWindowID);
+    assert(MatchingVisibleWindow(@[ownPanel, harmless, rex, otherRexWindow], 100, 300, window, pane) == 1);
+    assert(MatchingVisibleWindow(@[frontApp, rex], 100, 300, window, pane) == kCGNullWindowID);
+    assert(MatchingVisibleWindow(@[otherRexWindow, rex], 100, 300, window, pane) == kCGNullWindowID);
+    assert(MatchingVisibleWindow(@[rex, ambiguous], 100, 300, window, pane) == kCGNullWindowID);
+    assert(MatchingVisibleWindow(@[rex, frontApp], 100, 300, window, pane) == 1);
+    assert(MatchingVisibleWindow(@[Metadata(200, 1, window)], 100, 300, window, pane) == kCGNullWindowID);
+
+    int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey);
+    NSDictionary *system = WithLayer(Metadata(200, 7, CGRectMake(0, 0, 1440, 900)), @(normal + 20));
+    NSDictionary *rexPopup = WithLayer(Metadata(100, 8, pane), @(normal + 25));
+    NSDictionary *ownPopup = Metadata(300, 9, pane);
+    assert(MatchingVisibleWindow(@[system, rexPopup, ownPanel, ownPopup, rex], 100, 300, window, pane) == 1);
+    assert(MatchingVisibleWindow(@[WithLayer(frontApp, @(normal - 1)), rex], 100, 300, window, pane) == kCGNullWindowID);
+    assert(MatchingVisibleWindow(@[WithLayer(harmless, nil), rex], 100, 300, window, pane) == kCGNullWindowID);
+    assert(MatchingVisibleWindow(@[WithLayer(rex, @(normal + 25))], 100, 300, window, pane) == kCGNullWindowID);
+}
+
+static void TerminalEcho(void) {
+    int master, slave;
+    char path[PATH_MAX];
+    assert(openpty(&master, &slave, path, NULL, NULL) == 0);
+    int writer = open(path, O_WRONLY | O_NOCTTY);
+    assert(writer >= 0);
+    struct termios original, saved, current;
+    assert(tcgetattr(slave, &original) == 0);
+    original.c_lflag |= ECHO | ECHONL;
+    assert(tcsetattr(slave, TCSANOW, &original) == 0);
+    assert(QuietTTY(writer, &saved));
+    assert(tcgetattr(slave, &current) == 0);
+    assert(current.c_lflag == (original.c_lflag & ~(ECHO | ECHONL)));
+    assert(RestoreTTY(writer, &saved));
+    assert(tcgetattr(slave, &current) == 0 && current.c_lflag == original.c_lflag);
+    close(writer);
+    close(slave);
+    close(master);
+}
+
+static void StartupDeadline(void) {
+    NSTimeInterval since = 0;
+    for (int seconds = 10; seconds < 16; ++seconds) {
+        assert(!LayoutDeadlineElapsed(seconds, &since, YES));
+        assert(since == 10);
+    }
+    assert(LayoutDeadlineElapsed(16, &since, YES));
+    assert(!LayoutDeadlineElapsed(17, &since, NO) && since == 0);
+    assert(!LayoutDeadlineElapsed(30, &since, YES) && since == 30);
+    assert(LayoutDeadlineElapsed(36, &since, YES));
 }
 
 int main(void) {
@@ -100,6 +150,8 @@ int main(void) {
         ScreenPlacement();
         AXPaneOverlap();
         WindowOrdering();
+        TerminalEcho();
+        StartupDeadline();
         puts("preview geometry tests passed");
     }
     return 0;
