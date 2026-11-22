@@ -33,7 +33,6 @@ pub fn menu_stream() -> io::Result<()> {
     let config = config.as_deref();
     let indicator_file = config.map(Indicator::file);
     let (tools, chosen) = global_choices(config).unwrap_or_default();
-    let mut indicator = Indicator::default();
     let mut usage = Usage::for_home(home, when::now(), tools).with_databases(
         omp::database(home),
         opencode::database(home),
@@ -41,9 +40,6 @@ pub fn menu_stream() -> io::Result<()> {
     );
     usage.accounts = accounts::Accounts::open(chosen);
     snapshots(io::stdin(), io::stdout().lock(), |line, request| {
-        if let Some(saved) = indicator_file.as_deref().and_then(|file| Indicator::load(file).ok()) {
-            indicator = saved;
-        }
         if request == Refresh::Indicator {
             // A display choice must not force provider lookups or postpone their next refresh.
             usage.menu_snapshot(line, indicator);

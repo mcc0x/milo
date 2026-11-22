@@ -12,10 +12,13 @@ const indicators: readonly (readonly [MenuIndicator, string])[] = [
 
 export default function MenuBar() {
   const { state, queue, connected, paused, running, closing, command, confirm } = useSession();
-  const installed = state.menubar.installed;
+  const { installed, indicator: savedIndicator } = state.menubar;
   const operation = queue.find(item => item.action === "menubar");
   const changingIndicator = operation?.field === "indicator";
-  const indicator = changingIndicator ? operation.value : state.menubar.indicator;
+  const indicator = savedIndicator !== null && changingIndicator ? operation.value : savedIndicator;
+  const indicatorDetail = savedIndicator === null
+    ? "Couldn’t read the saved indicator. The app uses Agent quota until you save a choice."
+    : "Saved immediately for this Milo profile. The app updates on its next refresh.";
   const pending = !operation ? "" : changingIndicator ? "Saving menu bar indicator…" :
     operation.value === "uninstall" ? "Removing menu app…" :
       installed ? "Opening or updating menu app…" : "Installing menu app…";
@@ -57,8 +60,7 @@ export default function MenuBar() {
         </div>
         {installed && primaryAction}
       </div>
-      <SettingRow label="Menu bar indicator" detail="Saved immediately for this Milo profile. The app updates on its next refresh."
-        detailId="menubar-indicator-detail">
+      <SettingRow label="Menu bar indicator" detail={indicatorDetail} detailId="menubar-indicator-detail">
         <fieldset className="choice-strip" aria-describedby="menubar-indicator-detail" aria-disabled={unavailable || undefined}>
           <legend className="sr-only">Menu bar indicator</legend>
           {indicators.map(([key, label]) => (

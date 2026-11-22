@@ -2070,7 +2070,11 @@ fn menu_indicator_cli_updates_a_running_stream_for_only_its_own_profile() {
     let project = Project::new();
     let command = || {
         let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-        command.env_remove("CODEX_HOME").env_remove("OPENCODE_DB").env_remove("PI_CODING_AGENT_DIR");
+        command
+            .env_remove("CODEX_HOME")
+            .env_remove("OPENCODE_DB")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env("XDG_DATA_HOME", project.0.join("data"));
         command
     };
     let mut stream =
@@ -2082,11 +2086,19 @@ fn menu_indicator_cli_updates_a_running_stream_for_only_its_own_profile() {
         assert!(line.contains(&format!(r#""indicator":"{expected}""#)), "{line}");
     };
     expect_indicator("quota");
+    let file = project.0.join("config/milo/menubar.conf");
     for indicator in ["cpu", "memory", "quota"] {
         let saved = command().args(["menubar", "indicator", indicator]).output().unwrap();
         assert!(saved.status.success(), "{saved:?}");
         requests.write_all(&[0]).unwrap();
         expect_indicator(indicator);
+        if indicator == "cpu" {
+            let invalid = "indicator = invalid\n";
+            fs::write(&file, invalid).unwrap();
+            requests.write_all(&[0]).unwrap();
+            expect_indicator("quota");
+            assert_eq!(fs::read_to_string(&file).unwrap(), invalid, "the stream does not repair a read error");
+        }
         if indicator == "memory" {
             let other = command()
                 .env("XDG_CONFIG_HOME", project.0.join("other-profile"))
@@ -2095,6 +2107,12 @@ fn menu_indicator_cli_updates_a_running_stream_for_only_its_own_profile() {
                 .unwrap();
             assert!(other.status.success(), "{other:?}");
             assert!(String::from_utf8(other.stdout).unwrap().contains(r#""indicator":"quota""#));
+            fs::remove_file(&file).unwrap();
+            fs::create_dir(&file).unwrap();
+            requests.write_all(&[0]).unwrap();
+            expect_indicator("quota");
+            assert!(file.is_dir(), "the stream leaves an unreadable setting alone");
+            fs::remove_dir(&file).unwrap();
         }
     }
     for args in [&["indicator"][..], &["indicator", "auto"], &["indicator", "cpu", "extra"], &["install", "cpu"]] {

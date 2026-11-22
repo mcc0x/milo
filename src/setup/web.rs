@@ -301,8 +301,7 @@ impl Editor {
         let indicator = setup
             .store
             .as_ref()
-            .and_then(|store| Indicator::load(&Indicator::file(&store.config)).ok())
-            .unwrap_or_default();
+            .and_then(|store| Indicator::load(&Indicator::file(&store.config)).ok());
         let mut out = String::with_capacity(1600);
         write!(out, concat!(
             "{{\"version\":{},\"milo_version\":\"", env!("CARGO_PKG_VERSION"), "\",",
@@ -313,7 +312,7 @@ impl Editor {
             "\"usage_codex\":\"{}\",\"usage_claude\":\"{}\",\"usage_opencode\":\"{}\",",
             "\"usage_deepseek\":\"{}\",\"usage_openrouter\":\"{}\",\"usage_devin\":\"{}\",\"usage_copilot\":\"{}\"}},",
             "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},\"tab_titles\":{}}},",
-            "\"menubar\":{{\"installed\":{},\"indicator\":\"{}\"}},",
+            "\"menubar\":{{\"installed\":{},\"indicator\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
             "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"auto_arrange\":{}}},",
@@ -327,7 +326,7 @@ impl Editor {
             usage_codex, usage_claude, usage_opencode,
             usage_deepseek, usage_openrouter, usage_devin, usage_copilot,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
-            Optional(menubar::installed()), indicator.value(),
+            Optional(menubar::installed()), Optional(indicator.map(|choice| Quoted(choice.value()))),
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
             Optional(self.doctor.as_ref()),
@@ -491,7 +490,7 @@ impl Editor {
                 return menubar::run(action).map(|text| Some(Ok(text.into())));
             }
             Action::MenubarIndicator(indicator) if menubar::installed().is_some() => {
-                // This global choice is independent of the layout and preferences drafts.
+                // An explicit choice can repair a malformed file without saving any draft.
                 Some(Ok(indicator.save(&self.setup.store()?.config)?.into()))
             }
             Action::Alerts(change) => {
@@ -1298,6 +1297,34 @@ mod tests {
         let state = Value::parse(reopened.as_bytes()).unwrap();
         assert!(field(field(state, "menubar"), "indicator").is("cpu"));
         assert!(field(field(state, "workflow"), "project_mode").is("follow"));
+    }
+
+    #[test]
+    fn menu_indicator_read_errors_are_unknown_until_an_explicit_repair() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), None);
+        let file = Indicator::file(&store.config);
+        let malformed = b"indicator = invalid\n";
+        Indicator::Cpu.save(&store.config).unwrap();
+        for invalid in [b"\xff".as_slice(), malformed] {
+            fs::write(&file, invalid).unwrap();
+            let state = editor.state();
+            let state = Value::parse(state.as_bytes()).unwrap();
+            assert!(field(field(state, "menubar"), "indicator").null());
+            assert_eq!(fs::read(&file).unwrap(), invalid);
+        }
+
+        let request = r#""action":"menubar","field":"indicator","value":"quota""#;
+        if menubar::installed().is_some() {
+            let saved = action(&mut editor, request).unwrap();
+            let state = Value::parse(saved.as_bytes()).unwrap();
+            assert!(field(field(state, "menubar"), "indicator").is("quota"));
+            assert_eq!(fs::read_to_string(&file).unwrap(), "indicator = quota\n");
+        } else {
+            assert_eq!(action(&mut editor, request).unwrap_err(), UNAVAILABLE);
+            assert_eq!(fs::read(&file).unwrap(), malformed.as_slice());
+        }
     }
 
     #[test]

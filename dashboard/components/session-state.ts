@@ -113,7 +113,7 @@ export interface SessionState {
     tab_titles: boolean;
   };
   account: {claude_limits: boolean; claude_status: string};
-  menubar: {installed: boolean | null; indicator: MenuIndicator};
+  menubar: {installed: boolean | null; indicator: MenuIndicator | null};
   groups: Record<GroupKey, GroupState>;
   capabilities: {capture: boolean; try: boolean; undo: boolean; auto_arrange: boolean};
   dirty: boolean;

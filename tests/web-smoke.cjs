@@ -208,7 +208,7 @@ async function manageMenuApp(page, url, env) {
     assert(await radio('Agent quota').isChecked());
     // Choosing an indicator is a real save on macOS; the installer below is only simulated.
     if (menubar.installed !== null) {
-      for (const [label, value] of [['CPU', 'cpu'], ['Memory', 'memory']]) {
+      for (const [label, value] of [['Memory', 'memory'], ['CPU', 'cpu']]) {
         let complete;
         gate = new Promise(resolve => { complete = resolve; });
         const choice = radio(label);
@@ -253,6 +253,24 @@ async function manageMenuApp(page, url, env) {
   await button(dialog(page, 'Discard all unsaved changes?'), 'Discard changes').click();
   await status(page, clean).waitFor({state: 'attached'});
   console.log('Menu app: installed, opened or updated twice, kept on cancel, and removed; draft preserved');
+  if (menubar.installed !== null) {
+    const indicatorFile = join(env.XDG_CONFIG_HOME, 'milo', 'menubar.conf');
+    const malformed = 'indicator = invalid\n';
+    await writeFile(indicatorFile, malformed);
+    await page.reload();
+    await menuTab.click();
+    await menu.getByText(/Couldn’t read the saved indicator\. The app uses Agent quota/).waitFor();
+    assert.equal((await readState()).menubar.indicator, null, 'API cannot verify a malformed choice');
+    assert.equal(await menu.getByRole('radio', {checked: true}).count(), 0, 'fallback is not a saved selection');
+    assert.equal(await readFile(indicatorFile, 'utf8'), malformed, 'reading does not repair the indicator');
+    const quota = menu.getByRole('radio', {name: 'Agent quota', exact: true});
+    await quota.click();
+    await status(page, 'Menu bar indicator saved. The app updates on its next refresh.').waitFor();
+    assert(await quota.isChecked(), 'the explicitly saved repair is selected');
+    assert.equal((await readState()).menubar.indicator, 'quota');
+    assert.equal(await readFile(indicatorFile, 'utf8'), 'indicator = quota\n');
+    assert.equal(await readFile(preferences, 'utf8'), previous, 'repair does not write pane preferences');
+  }
   await section(page, 'Layout').click();
 }
 
