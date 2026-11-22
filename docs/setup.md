@@ -4,7 +4,7 @@
 
 ## Install
 
-The v0.1.5 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
+The [v0.1.6 prebuilt release](releases/v0.1.6.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -13,11 +13,13 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.5/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh &&
   sh milo-install.sh
 ```
 
 The installer checks the binary against a pinned SHA-256 checksum before placing it in `~/.local/bin`. Set `MILO_BIN_DIR` to choose a different directory. The prebuilt installer does not need a compiler, Cargo or Git.
+
+To upgrade, run `brew upgrade mcc0x/milo/milo` for a Homebrew install, or download and run the new version’s installer for a script install. If you installed the Rex integration, run `milo setup --repair` after upgrading so Rex loads the current actions and listener.
 
 To build from source instead, install Git and Rust 1.91 or later, then run:
 
@@ -108,8 +110,6 @@ While the page is open, it periodically keeps the local session alive only if it
 The dashboard ships inside `milo`: using it needs no Node runtime, account, or internet connection. For UI development, use Node 26 and Bun: `cd dashboard && bun install --frozen-lockfile && bun run dev`. Open the private URL printed in the terminal. Next.js Fast Refresh updates the interface against a real local Milo session. `MILO_BIN` selects the backend executable (default `milo` on PATH); `MILO_PROJECT` selects the project to edit; `PORT` selects the development port (default `6110`). Stop the development server with `Ctrl-C`.
 
 ## Several Rex hosts
-
-**Availability:** This section describes current source builds. The v0.1.5 release does not include remote settings (`milo web --host`) or settings transfer (`milo settings export`, `import`, and `undo`).
 
 Each Rex host has its own Milo: its own binary, settings, state and integrations. Nothing is shared or synchronised on its own. Three things make several hosts feel like one setup: Milo says which host you are looking at, you can open another host’s settings from the computer you are using, and you can copy the settings you choose from one host to another. With a single host nothing changes.
 

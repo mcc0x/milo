@@ -21,7 +21,7 @@ Source: https://github.com/mcc0x/milo/blob/main/README.md
 
 ## Install
 
-The v0.1.5 release is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
+The [v0.1.6 release](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.6.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -30,11 +30,11 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.5/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh &&
   sh milo-install.sh
 ```
 
-The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. See [setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) for source installation and uninstall instructions.
+The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. See [setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) for source installation and uninstall instructions.
 
 Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
@@ -42,7 +42,7 @@ Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
 Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone. With **Title Rex tabs** enabled, tabs you have not named show their project, worktree and agent.
 
-Prefer a browser? Run `milo web` in your project. It opens the [local settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) built into the CLI. It shares settings with `milo setup`; no account or separate install is needed.
+Prefer a browser? Run `milo web` in your project. It opens the [local settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) built into the CLI. It shares settings with `milo setup`; no account or separate install is needed. With several Rex hosts, open another host’s editor with `milo web --host HOST` or [copy selected settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#several-rex-hosts) without copying credentials or integrations.
 
 <p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-settings.webp" width="760" alt="Milo’s browser editor with Outline, History and Usage in order, a left rail at 20% width, and a two-row Usage pane"></p>
 
@@ -52,7 +52,7 @@ Prefer a browser? Run `milo web` in your project. It opens the [local settings e
   <img src="https://github.com/mcc0x/milo/blob/main/docs/img/outline.png" width="570" alt="Project files with colours and line counts for changes to commit or push">
 </p>
 
-See changed files in the project tree as you work. Bold colours mark changes to commit; regular colours mark changes to push. Press `Enter` on a file to read it.
+See changed files in the project tree as you work. Bold colours mark changes to commit; regular colours mark changes to push. Press `/` to find a file by name or path, and `Enter` to read it.
 
 ## History
 
@@ -88,7 +88,7 @@ Optionally show **In a Rex session** on your Discord profile, under Milo's name 
   <img src="https://github.com/mcc0x/milo/blob/main/docs/img/reader.png" width="675" alt="A TypeScript file with coloured code and green and red lines showing edits">
 </p>
 
-Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks. The reader colours [about thirty languages](https://github.com/mcc0x/milo/blob/main/docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
+Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks, or `c` to fold unchanged stretches. In Rex, files opened from the same Outline or History pane share one floating reader as [tabs](https://github.com/mcc0x/milo/blob/main/docs/panes.md#tabs-in-the-floating-reader). The reader colours [about thirty languages](https://github.com/mcc0x/milo/blob/main/docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](https://github.com/mcc0x/milo/blob/main/docs/panes.md#editing-files).
 
@@ -101,11 +101,11 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
-| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader (source builds; not in v0.1.5) |
+| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) |
-| `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward (source builds; not in v0.1.5) |
-| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host), preview the import, and take it back (source builds; not in v0.1.5) |
+| `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
+| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
@@ -129,7 +129,7 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/setup.md
 
 ## Install
 
-The v0.1.5 prebuilt release is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
+The [v0.1.6 prebuilt release](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.6.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -138,11 +138,13 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.5/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh &&
   sh milo-install.sh
 ```
 
 The installer checks the binary against a pinned SHA-256 checksum before placing it in `~/.local/bin`. Set `MILO_BIN_DIR` to choose a different directory. The prebuilt installer does not need a compiler, Cargo or Git.
+
+To upgrade, run `brew upgrade mcc0x/milo/milo` for a Homebrew install, or download and run the new version’s installer for a script install. If you installed the Rex integration, run `milo setup --repair` after upgrading so Rex loads the current actions and listener.
 
 To build from source instead, install Git and Rust 1.91 or later, then run:
 
@@ -233,8 +235,6 @@ While the page is open, it periodically keeps the local session alive only if it
 The dashboard ships inside `milo`: using it needs no Node runtime, account, or internet connection. For UI development, use Node 26 and Bun: `cd dashboard && bun install --frozen-lockfile && bun run dev`. Open the private URL printed in the terminal. Next.js Fast Refresh updates the interface against a real local Milo session. `MILO_BIN` selects the backend executable (default `milo` on PATH); `MILO_PROJECT` selects the project to edit; `PORT` selects the development port (default `6110`). Stop the development server with `Ctrl-C`.
 
 ## Several Rex hosts
-
-**Availability:** This section describes current source builds. The v0.1.5 release does not include remote settings (`milo web --host`) or settings transfer (`milo settings export`, `import`, and `undo`).
 
 Each Rex host has its own Milo: its own binary, settings, state and integrations. Nothing is shared or synchronised on its own. Three things make several hosts feel like one setup: Milo says which host you are looking at, you can open another host’s settings from the computer you are using, and you can copy the settings you choose from one host to another. With a single host nothing changes.
 
@@ -469,7 +469,7 @@ If shell tracking itself stops, the notice changes to **Shell tracking unavailab
 
 In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer. In a two-row pane, expanding a commit uses the second row for its first file or an empty-commit note. Collapse it to see the subject again.
 
-The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
+The outline and history update on their own. While Git checks the project, the panes keep showing the last result and responding to keys. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md) for colours and symbols.
 
 In a plain folder, Outline lists the top level and the folders you expand. A partial-listing warning means Milo reached the 50,000-entry limit or couldn't read every entry. In both plain folders and Git worktrees, Outline warns and omits names that aren't valid UTF-8 rather than showing a name that could open a different file.
 
@@ -576,7 +576,7 @@ Press `c` to fold long unchanged stretches, leaving a little context around each
 
 ## Reviewing an agent's edits
 
-`milo review PATCH` shows what a coding agent says it changed, and nothing else. `PATCH` is a unified diff, as `git diff` or `diff -u` writes one, that the agent or its harness wrote from a record of its own edits. The agent *hands it over*; Milo does not work it out.
+`milo review PATCH` shows what a coding agent says it changed, and nothing else. `PATCH` is a unified diff made from a record of the agent’s own edits, not a diff of the whole worktree. The agent *hands it over*; Milo does not work it out.
 
 Each file the patch names is shown as it is now, whole, with only the patch's lines marked as added or removed. Your own uncommitted work in the same file, another agent's edits, and anything staged or not yet known to Git read as plain unchanged lines. A file the patch does not name is never shown. Nothing is compared with a commit, so the review does not depend on what Git calls changed.
 
@@ -893,18 +893,18 @@ With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to inst
 
 If you have the older `Milo Usage.app`, run the install command again. It migrates the app to `Milo.app`; you don’t need to uninstall first.
 
-You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). On current source builds, **Open or update** reopens the installed app or applies the CLI’s bundled update. Removal is a separate, confirmed action. It keeps the Milo CLI, your settings, and any unsaved Settings draft.
+You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). **Open or update** reopens the installed app or applies the CLI’s bundled update. Removal is a separate, confirmed action. It keeps the Milo CLI, your settings, and any unsaved Settings draft.
 
-The Apple Silicon Homebrew and release binaries include the app starting with v0.1.4. If you prefer to build it from source:
+The Apple Silicon Homebrew and release binaries include the app. If you prefer to build it from source:
 
 ```sh
 sh macos/build-menu.sh
 ./target/local-menu/milo menubar install
 ```
 
-For a source build, use `./target/local-menu/milo` for subsequent menu commands. On `main`, both build modes omit personal paths. Run `milo menubar install` from the shell whose provider and configuration paths you want the menu to use; run it again if they change. These paths live in a private file beside the installed app, not in the signed bundle. The app has its own reader and does not require Rex.
+For a source build, use `./target/local-menu/milo` for subsequent menu commands. Both packaged and local builds omit personal paths. Run `milo menubar install` from the shell whose provider and configuration paths you want the menu to use; run it again if they change. These paths live in a private file beside the installed app, not in the signed bundle. The app has its own reader and does not require Rex.
 
-If the CLI that installed the app has changed or moved, **Browser settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor. The published v0.1.4 release predates install-time profile capture and uses default provider paths.
+If the CLI that installed the app has changed or moved, **Browser settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor.
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 
@@ -1169,10 +1169,11 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 - Run `command -v milo` and `milo --version` in the environment where the pane
   will run. A version confirms the binary is available, not that Rex is set up.
-- In this checkout, `milo doctor` explains effective preferences, integration
-  health and usage sources without changing anything. For an older installed
-  binary, check `milo --help`; `rex actions` (without `-C` or `REX_CLIENT`)
-  lists server actions such as `milo_layout`.
+- Run `milo doctor` to see effective preferences, integration health and
+  usage sources without changing anything. `rex actions` (without `-C` or
+  `REX_CLIENT`) lists server actions such as `milo_layout`.
+- Review, remote settings and settings transfer are available in v0.1.6.
+  If using an older install, check the command’s `--help` before relying on it.
 - Open `milo setup` for interactive configuration. Trying a layout is not
   permission to save it. Distinguish the global default from the override for
   this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
@@ -1202,9 +1203,9 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
-| `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. Source builds; check `milo review --help` on an installed binary. |
+| `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
-| `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
+| `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Copies chosen pane settings to another host as a file. `import` only previews until `--apply`. Never carries tokens, destinations, accounts or integrations. |
 | `milo presence [status]` | Says whether the optional Discord presence is on and what Discord shows now. |

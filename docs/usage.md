@@ -10,18 +10,18 @@ With a menu-enabled CLI on macOS 13 or later, run `milo menubar install` to inst
 
 If you have the older `Milo Usage.app`, run the install command again. It migrates the app to `Milo.app`; you don’t need to uninstall first.
 
-You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). On current source builds, **Open or update** reopens the installed app or applies the CLI’s bundled update. Removal is a separate, confirmed action. It keeps the Milo CLI, your settings, and any unsaved Settings draft.
+You can also manage the menu app from Home (`milo`), under **Workflow** in terminal Settings (`milo setup`), or in the **Menu Bar** tab in web Settings (`milo web`). **Open or update** reopens the installed app or applies the CLI’s bundled update. Removal is a separate, confirmed action. It keeps the Milo CLI, your settings, and any unsaved Settings draft.
 
-The Apple Silicon Homebrew and release binaries include the app starting with v0.1.4. If you prefer to build it from source:
+The Apple Silicon Homebrew and release binaries include the app. If you prefer to build it from source:
 
 ```sh
 sh macos/build-menu.sh
 ./target/local-menu/milo menubar install
 ```
 
-For a source build, use `./target/local-menu/milo` for subsequent menu commands. On `main`, both build modes omit personal paths. Run `milo menubar install` from the shell whose provider and configuration paths you want the menu to use; run it again if they change. These paths live in a private file beside the installed app, not in the signed bundle. The app has its own reader and does not require Rex.
+For a source build, use `./target/local-menu/milo` for subsequent menu commands. Both packaged and local builds omit personal paths. Run `milo menubar install` from the shell whose provider and configuration paths you want the menu to use; run it again if they change. These paths live in a private file beside the installed app, not in the signed bundle. The app has its own reader and does not require Rex.
 
-If the CLI that installed the app has changed or moved, **Browser settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor. The published v0.1.4 release predates install-time profile capture and uses default provider paths.
+If the CLI that installed the app has changed or moved, **Browser settings…** opens the bundled editor instead. Run `milo menubar install` from the new CLI to restore menu management from that editor.
 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 

@@ -9,10 +9,11 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 - Run `command -v milo` and `milo --version` in the environment where the pane
   will run. A version confirms the binary is available, not that Rex is set up.
-- In this checkout, `milo doctor` explains effective preferences, integration
-  health and usage sources without changing anything. For an older installed
-  binary, check `milo --help`; `rex actions` (without `-C` or `REX_CLIENT`)
-  lists server actions such as `milo_layout`.
+- Run `milo doctor` to see effective preferences, integration health and
+  usage sources without changing anything. `rex actions` (without `-C` or
+  `REX_CLIENT`) lists server actions such as `milo_layout`.
+- Review, remote settings and settings transfer are available in v0.1.6.
+  If using an older install, check the command’s `--help` before relying on it.
 - Open `milo setup` for interactive configuration. Trying a layout is not
   permission to save it. Distinguish the global default from the override for
   this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
@@ -42,9 +43,9 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
-| `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. Source builds; check `milo review --help` on an installed binary. |
+| `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
-| `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
+| `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Copies chosen pane settings to another host as a file. `import` only previews until `--apply`. Never carries tokens, destinations, accounts or integrations. |
 | `milo presence [status]` | Says whether the optional Discord presence is on and what Discord shows now. |

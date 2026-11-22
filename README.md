@@ -13,7 +13,7 @@
 
 ## Install
 
-The v0.1.5 release is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
+The [v0.1.6 release](docs/releases/v0.1.6.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -22,11 +22,11 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.5/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh &&
   sh milo-install.sh
 ```
 
-The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
+The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
 
 Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
@@ -34,7 +34,7 @@ Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
 Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone. With **Title Rex tabs** enabled, tabs you have not named show their project, worktree and agent.
 
-Prefer a browser? Run `milo web` in your project. It opens the [local settings editor](docs/setup.md#browser-editor) built into the CLI. It shares settings with `milo setup`; no account or separate install is needed.
+Prefer a browser? Run `milo web` in your project. It opens the [local settings editor](docs/setup.md#browser-editor) built into the CLI. It shares settings with `milo setup`; no account or separate install is needed. With several Rex hosts, open another host’s editor with `milo web --host HOST` or [copy selected settings](docs/setup.md#several-rex-hosts) without copying credentials or integrations.
 
 <p align="center"><img src="docs/img/web-settings.webp" width="760" alt="Milo’s browser editor with Outline, History and Usage in order, a left rail at 20% width, and a two-row Usage pane"></p>
 
@@ -44,7 +44,7 @@ Prefer a browser? Run `milo web` in your project. It opens the [local settings e
   <img src="docs/img/outline.png" width="570" alt="Project files with colours and line counts for changes to commit or push">
 </p>
 
-See changed files in the project tree as you work. Bold colours mark changes to commit; regular colours mark changes to push. Press `Enter` on a file to read it.
+See changed files in the project tree as you work. Bold colours mark changes to commit; regular colours mark changes to push. Press `/` to find a file by name or path, and `Enter` to read it.
 
 ## History
 
@@ -80,7 +80,7 @@ Optionally show **In a Rex session** on your Discord profile, under Milo's name 
   <img src="docs/img/reader.png" width="675" alt="A TypeScript file with coloured code and green and red lines showing edits">
 </p>
 
-Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks. The reader colours [about thirty languages](docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
+Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks, or `c` to fold unchanged stretches. In Rex, files opened from the same Outline or History pane share one floating reader as [tabs](docs/panes.md#tabs-in-the-floating-reader). The reader colours [about thirty languages](docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
 
@@ -93,11 +93,11 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
-| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader (source builds; not in v0.1.5) |
+| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
-| `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings) through a loopback Rex forward (source builds; not in v0.1.5) |
-| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](docs/setup.md#copy-settings-to-another-host), preview the import, and take it back (source builds; not in v0.1.5) |
+| `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
+| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |

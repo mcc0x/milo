@@ -24,7 +24,7 @@ If shell tracking itself stops, the notice changes to **Shell tracking unavailab
 
 In narrow History, the wrapped subject uses only the room below a clicked row, so the row stays under the pointer. In a two-row pane, expanding a commit uses the second row for its first file or an empty-commit note. Collapse it to see the subject again.
 
-The outline and history update on their own. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
+The outline and history update on their own. While Git checks the project, the panes keep showing the last result and responding to keys. macOS uses file-change notifications. Where the pane needs to watch but notifications are missing, including on Linux, milo checks about every two seconds. See [keys and marks](keys.md) for colours and symbols.
 
 In a plain folder, Outline lists the top level and the folders you expand. A partial-listing warning means Milo reached the 50,000-entry limit or couldn't read every entry. In both plain folders and Git worktrees, Outline warns and omits names that aren't valid UTF-8 rather than showing a name that could open a different file.
 
@@ -131,7 +131,7 @@ Press `c` to fold long unchanged stretches, leaving a little context around each
 
 ## Reviewing an agent's edits
 
-`milo review PATCH` shows what a coding agent says it changed, and nothing else. `PATCH` is a unified diff, as `git diff` or `diff -u` writes one, that the agent or its harness wrote from a record of its own edits. The agent *hands it over*; Milo does not work it out.
+`milo review PATCH` shows what a coding agent says it changed, and nothing else. `PATCH` is a unified diff made from a record of the agent’s own edits, not a diff of the whole worktree. The agent *hands it over*; Milo does not work it out.
 
 Each file the patch names is shown as it is now, whole, with only the patch's lines marked as added or removed. Your own uncommitted work in the same file, another agent's edits, and anything staged or not yet known to Git read as plain unchanged lines. A file the patch does not name is never shown. Nothing is compared with a commit, so the review does not depend on what Git calls changed.
 

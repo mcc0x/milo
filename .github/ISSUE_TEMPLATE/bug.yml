@@ -7,7 +7,7 @@ body:
       value: |
         Before you post, remove anything private: tokens, account names, email addresses, paths and repository contents you would not publish. Crop or blur screenshots the same way.
 
-        If milo ran something or showed something it should not, do not file it here. Report it privately to the maintainer.
+        If milo ran something or showed something it should not, do not file it here. Follow the [private reporting instructions](https://github.com/mcc0x/milo/security/policy).
   - type: textarea
     id: steps
     attributes:
@@ -15,7 +15,7 @@ body:
       description: The command, pane or screen, and the steps that lead to the problem. If it depends on a repository's state, the smallest sequence of git commands that reproduces it is worth more than a description.
       placeholder: |
         1. git init demo && cd demo
-        2. milo changes
+        2. milo outline
         3. Press …
     validations:
       required: true
@@ -36,10 +36,10 @@ body:
     attributes:
       label: Version and system
       description: The output of `milo --version`, your operating system and terminal, and the Rex version if Rex is involved.
-      placeholder: milo 0.1.5, macOS 26.1, Ghostty, Rex preview.21
+      placeholder: milo 0.1.6, macOS 26.1, Ghostty, Rex preview.21
   - type: textarea
     id: evidence
     attributes:
       label: Screenshots or output
       description: Optional. Drag images in, or paste terminal output or the `milo doctor` report. Give each image alt text that says what it shows.
-      placeholder: "![Changes pane listing a deleted file twice](…)"
+      placeholder: "![Outline listing a deleted file twice](…)"
