@@ -22,6 +22,8 @@ swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" 
 "$root/check-badge"
 swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" "$@" "$repo/tests/menu-alerts.swift" -o "$root/check-alerts"
 "$root/check-alerts"
+swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" "$repo/macos/MenuBar/SystemResources.swift" "$repo/tests/menu-resources.swift" -o "$root/check-resources"
+"$root/check-resources"
 export HOME="$root/home"
 apps=$HOME/Applications
 dest="$apps/Milo.app"
