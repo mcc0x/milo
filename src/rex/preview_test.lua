@@ -49,6 +49,7 @@ local function fixture(mode, block)
     anchor = terminal(preview, "milo:preview"),
     other = terminal(other, "second project"),
     referenced = main,
+    shell_command = "-zsh",
     proc = {},
   }
   f.proc[main] = { child = { name = "zsh", path = "/bin/zsh", argv0 = "-zsh", user_id = uid, pid = 12, cwd = "/work/project" } }

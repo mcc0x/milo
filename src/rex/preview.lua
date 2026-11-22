@@ -79,8 +79,20 @@ local function processes(info)
 end
 
 local function own_anchor(block)
-  for _, child in ipairs(processes(process(block))) do
+  local info = process(block)
+  for _, child in ipairs(processes(info)) do
     if child.pid == a.pid and child.user_id == a.uid then return true end
+  end
+  -- Rex's macOS launch can report only its root-owned login process even
+  -- after exec has entered Milo. Verify the known anchor PID underneath it.
+  local login = info and info.child
+  if login and login.path == "/usr/bin/login" and login.user_id == 0 and type(a.pid) == "number"
+    and a.pid >= 2 and a.pid <= 2147483647 and a.pid % 1 == 0 then
+    local got = rex.exec({ "/bin/ps", "-o", "ppid=,uid=", "-p", tostring(a.pid) }, { clear_env = true, timeout = 1 })
+    if got and got.ok then
+      local ppid, uid = got.stdout:match("^%s*(%d+)%s+(%d+)%s*$")
+      return tonumber(ppid) == login.pid and tonumber(uid) == a.uid
+    end
   end
   return false
 end
@@ -280,14 +292,13 @@ local function stop()
 end
 
 if not host then
-  io.stderr:write("preview Rex transport could not be verified\n")
   emit()
   return
 end
 
 local function refresh()
   local view = current_view()
-  if not view then io.stderr:write("preview Rex view is unavailable\n"); return stop() end
+  if not view then return stop() end
   local block, window, layer, index = locate(view, a.block)
   if not block then
     local listed = rex.session.list_blocks(session)
@@ -297,12 +308,9 @@ local function refresh()
     end
     return stop()
   end
-  if not local_terminal(block, host) then io.stderr:write("preview Rex terminal does not match its local host\n"); return stop() end
+  if not local_terminal(block, host) then return stop() end
   if not anchor_verified then
-    if block.label ~= "milo:preview" or not own_anchor(block) then
-      io.stderr:write("preview Rex terminal does not contain the anchor process\n")
-      return stop()
-    end
+    if block.label ~= "milo:preview" or not own_anchor(block) then return stop() end
     anchor_verified = true
   end
   if not visible(view, window, layer, index) then return emit() end

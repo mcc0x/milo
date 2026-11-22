@@ -908,15 +908,216 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
     assert!(discord.accept().is_err());
 }
 
-/// Print the installed server's actual flavors and exercise placement separately
-/// from rendering. Finding a new flavor calls for a client test, not a failing lab.
+/// Runs the production layout and observer Lua on a real disposable Rex server.
+/// The simulated peer owns blocks with actual Rex calls; it does not draw a GUI.
+#[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs an installed Rex; starts a disposable server"]
-fn preview_block_capabilities() {
-    let lab = Lab::start();
-    let [session, _] = lab.new_session("preview", "project", &lab.root);
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview.lua");
-    print!("{}", lab.rex(&["do", "-s", &session, script]));
+#[ignore = "needs Rex and Python 3; starts a disposable server and simulated viewer"]
+fn preview_layout_and_observer() {
+    use std::io::{BufRead as _, BufReader};
+    use std::sync::mpsc::channel;
+
+    let mut lab = Lab::start();
+    let root = lab.root.to_str().unwrap();
+    let viewer = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_viewer.py");
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua");
+    let url = "http://localhost:4321/lab/a%2Fb&$HOME";
+    let pid_file = lab.root.join("preview-arguments");
+    let keep_alive = "while :; do /bin/sleep 10; done\n";
+    for role in ["outline", "usage"] {
+        fs::write(lab.root.join(role), keep_alive).unwrap();
+    }
+    fs::write(
+        lab.root.join("preview-anchor"),
+        format!("printf '%s\\n' \"$$\" \"$1\" \"$2\" > preview-arguments\n{keep_alive}"),
+    )
+    .unwrap();
+    let created = lab.rex(&["new", "layout", "-c", root, "--shell=none", "--json", "--", "/bin/sh", "-i"]);
+    let session = id(&created, "session_id");
+    let tab = id(&created, "window_id");
+    let main = id(&created, "block_ids");
+    let second_tab = lab.new_tab(&session, &lab.root);
+    let second_shell = lab.view().tab(&second_tab).panes[0].block.clone();
+    let split = |role: &str, arguments: &[&str]| {
+        let mut command = vec!["split", "-s", &session, "-b", &main, "-c", root, "--focus=false", "--shell=none", "--json"];
+        let label = format!("milo:{role}");
+        command.extend(["--label", &label, "--", "/bin/bash", role]);
+        command.extend_from_slice(arguments);
+        id(&lab.rex(&command), "block_ids")
+    };
+    let rail = split("outline", &["--shell", &main]);
+    let stale = split("outline", &["--shell", &second_shell]);
+    let usage = split("usage", &[]);
+    let another_shell = id(
+        &lab.rex(&[
+            "split", "-s", &session, "-b", &main, "-c", root, "--focus=false", "--shell=none", "--json", "--",
+            "/bin/sh", "-i",
+        ]),
+        "block_ids",
+    );
+
+    let denied = lab
+        .command(&lab.milo)
+        .env("REX_SESSION", &session)
+        .env("REX_BLOCK", &main)
+        .args(["preview", url, "--placement", "right"])
+        .output()
+        .unwrap();
+    assert!(!denied.status.success() && String::from_utf8_lossy(&denied.stderr).contains("isn't owned"), "{denied:?}");
+
+    let mut peer = lab
+        .command("python3")
+        .arg(viewer)
+        .arg(lab.root.join("s.sock"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let viewer_pid = peer.id();
+    let mut peer_in = peer.stdin.take().unwrap();
+    let mut peer_out = BufReader::new(peer.stdout.take().unwrap());
+    lab.app = Some(peer);
+    let mut client = String::new();
+    peer_out.read_line(&mut client).unwrap();
+    assert!(client.starts_with("client:"), "{client}");
+    let mut viewer_call = |method, args: &str| {
+        writeln!(peer_in, r#"["{method}",{args}]"#).unwrap();
+        let mut reply = String::new();
+        peer_out.read_line(&mut reply).unwrap();
+        assert!(reply.contains(r#""type":"response""#), "{method}: {reply}");
+    };
+    viewer_call("session.attach", &format!(r#"{{"session_id":"{session}"}}"#));
+    let mut claim = || viewer_call("session.own_block", &format!(r#"{{"session_id":"{session}"}}"#));
+    claim();
+
+    let socket = lab.socket();
+    // SAFETY: geteuid reads this account's own effective user ID.
+    let uid = unsafe { libc::geteuid() };
+    let args = |mode: &str, block: &str, pid: u32, extra: &str| {
+        format!(r#"{{"mode":"{mode}","server":"{socket}","uid":{uid},"pid":{pid},"session":"{session}","block":"{block}"{extra}}}"#)
+    };
+    let identify = |caller: &str| {
+        let payload = args("identify", caller, std::process::id(), r#","exe":"/bin/bash""#);
+        lab.rex(&["do", "-s", &session, "-b", caller, script, "--args", &payload])
+    };
+    let open = |caller: &str, placement: &str, expected: &str, cwd: &str| {
+        let extra = format!(r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}""#);
+        let payload = args("open", caller, std::process::id(), &extra);
+        lab.rex(&["do", "-s", &session, "-b", caller, script, "--args", &payload])
+    };
+    let launch = |caller: &str, placement: &str| {
+        let plan = identify(caller);
+        assert_eq!(id(&plan, "main"), main);
+        open(caller, placement, &main, &id(&plan, "cwd"))
+    };
+    let close = |block: &str| lab.rex(&["block", "close", "-s", &session, block]);
+    assert_eq!(identify(&stale).trim(), "stale");
+    assert_eq!(identify(&usage).trim(), "shell");
+    assert_eq!(open(&rail, "right", &main, "/wrong/directory").trim(), "changed");
+    for block in [&stale, &usage, &another_shell] {
+        close(block);
+    }
+
+    let scope = |request: &str| lab.rex(&["do", "-s", &session, "-e", request]);
+    let check_focus = || {
+        let check = format!(
+            "local s=assert(rex.session.view{{}}); assert(s.active_window_id=='{tab}'); \
+             for _,w in ipairs(s.windows) do if w.window_id=='{tab}' then assert(w.focused_block_id=='{main}') end end"
+        );
+        scope(&check);
+    };
+    for (placement, direction, side, caller) in [
+        ("right", "horizontal", "after", &main),
+        ("left", "horizontal", "before", &rail),
+        ("above", "vertical", "before", &rail),
+        ("below", "vertical", "after", &rail),
+        ("floating", "", "", &rail),
+    ] {
+        assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
+        check_focus();
+        assert!(soon(|| lab.read("preview-arguments").ends_with(&format!("\n{url}\n{main}\n"))));
+        let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
+        fs::remove_file(&pid_file).unwrap();
+        let found = scope(&format!(
+            "local view=assert(rex.session.view{{}}); for _,w in ipairs(view.windows) do if w.window_id=='{tab}' then \
+             for _,l in ipairs(w.layers) do for _,b in ipairs(l.blocks) do if b.label=='milo:preview' then \
+             local function adjacent(node) local sp=node.split; if not sp then return false end; \
+             return (sp.direction=='{direction}' and sp['{side}'].block_id==b.block_id \
+             and (sp.before.block_id=='{main}' or sp.after.block_id=='{main}')) \
+             or adjacent(sp.before) or adjacent(sp.after) end; \
+             if '{placement}'=='floating' then assert(l.kind=='floating' and l.layout.block_id==b.block_id) \
+             else assert(l.kind=='tiled' and adjacent(l.layout)) end; print(b.block_id); print(l.layer_id); return end end end \
+             end end; error('no preview')"
+        ));
+        let mut found = found.lines();
+        let block = found.next().unwrap();
+        let layer = found.next().unwrap();
+        claim();
+
+        let payload = args("watch", block, child, "");
+        let mut watch = lab
+            .command(lab.root.join("bin/rex"))
+            .args(["--timeout", "3s", "do", "-s", &session, "-b", block, script, "--args", &payload, "--fail-fast"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(watch.stdout.take().unwrap());
+        let (send, receive) = channel();
+        std::thread::spawn(move || {
+            for line in out.lines() {
+                if send.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let expect = |state: &str| {
+            let actual = receive.recv_timeout(PATIENCE).unwrap_or_else(|err| panic!("{placement}: expected {state}: {err}"));
+            assert_eq!(actual, state, "{placement}");
+        };
+        let kind = if placement == "floating" { "float" } else { "tile" };
+        let show = format!("show {viewer_pid} {kind}");
+        expect("hide");
+        expect(&show);
+        if placement == "floating" {
+            scope(&format!("assert(rex.session.resize_layer{{layer_id='{layer}', bounds={{0.25,0.2,0.55,0.55}}}})"));
+            scope(&format!(
+                "local s=assert(rex.session.view{{}}); for _,w in ipairs(s.windows) do for _,l in ipairs(w.layers) do \
+                 if l.layer_id=='{layer}' then assert(l.bounds[1]==0.25 and l.bounds[3]==0.55); return end end end; error('no layer')"
+            ));
+            scope(&format!("assert(rex.session.set_layer_state{{layer_id='{layer}', state='minimized'}})"));
+            expect("hide");
+            scope(&format!("assert(rex.session.set_layer_state{{layer_id='{layer}', state='normal', focus=true}})"));
+            expect(&show);
+            let extra = format!(r#","main":"{main}""#);
+            let focus = args("focus", block, child, &extra);
+            assert_eq!(lab.rex(&["do", "-s", &session, "-b", block, script, "--args", &focus]).trim(), "ok");
+            check_focus();
+            // Outlive the CLI connection/request timeout without polling the server.
+            std::thread::sleep(Duration::from_millis(3100));
+            assert!(watch.try_wait().unwrap().is_none());
+        } else {
+            let (before, after) = if side == "before" { (block, main.as_str()) } else { (main.as_str(), block) };
+            scope(&format!(
+                "assert(rex.session.resize_pane{{direction='{direction}', before_block_id='{before}', \
+                 after_block_id='{after}', ratio=0.4}})"
+            ));
+            lab.rex(&["zoom", "-s", &session, &main, "--on"]);
+            expect("hide");
+            lab.rex(&["zoom", "-s", &session, &main, "--off"]);
+            expect(&show);
+        }
+        lab.rex(&["focus", "-s", &session, &second_tab]);
+        expect("hide");
+        lab.rex(&["focus", "-s", &session, &tab]);
+        expect(&show);
+        if placement == "floating" {
+            scope(&format!("assert(rex.session.close_layer{{layer_id='{layer}'}})"));
+        } else {
+            close(block);
+        }
+        expect("hide");
+        assert!(watch.wait().unwrap().success(), "{placement}: watcher didn't end after close");
+    }
 }
 
 /// The floating reader the outline opens in Rex, edited through Rex's own keys.
