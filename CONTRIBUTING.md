@@ -179,6 +179,8 @@ as an agent's shell would. It sees only the handed-over edits marked beside a
 person's uncommitted lines in the same file, a path outside the project
 refused, and a reason in place of the diff once the agent's line is rewritten.
 
+For a native web preview, first check [what the installed Rex server and Mac client can render](docs/rex-webkit.md). The disposable split probe there tests placement, not browser support.
+
 ### Changing alert mirroring
 
 `src/alerts.rs` and the files under `src/alerts/` mirror Rex alerts to Telegram or Discord. An *alert* is an event Rex itself draws attention to; `event.rs` lists them and is the only place that decides. Hear Rex only through `rex events`, as `src/rex.rs` starts it: never read a terminal's screen, a system notification or Rex's socket for an alert.
