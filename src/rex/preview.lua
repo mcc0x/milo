@@ -310,8 +310,8 @@ local function cancel_staged(host, id)
 end
 
 local function publish(host, id, direction, side)
-  local before, after = id, a.main
-  if side == "after" then before, after = after, before end
+  local before = side == "after" and a.main or id
+  local after = side == "after" and id or a.main
   local result = "changed"
   local view = current_view()
   if view and view.active_window_id == a.window then
