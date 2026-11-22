@@ -511,9 +511,11 @@ export async function createService({
     binding.sending = true;
     sendActive++;
     try {
+      // Not ended by a stop: Telegram may already hold the message, and its answer is the only
+      // way to say so. The call's own eight seconds end inside the time a stop waits for requests.
       const response = await tg("sendMessage", {
         chat_id: binding.chat, text, parse_mode: "HTML", link_preview_options: { is_disabled: true },
-      }, undefined, signal);
+      });
       if (response.status === 200) return plain(null, 204);
       if (response.status === 429 && response.confirmedError) {
         const retry = response.retryAfter ?? 1;

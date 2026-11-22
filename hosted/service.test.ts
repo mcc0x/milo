@@ -796,3 +796,27 @@ test("local preview returns only destination metadata and allows the reviewed cl
   expect((await removeBinding(service, { Authorization: `Bearer ${claim.credential}` })).status).toBe(204);
   expect((await api(service, "claim", proof)).status).toBe(404);
 });
+
+test("a send already with Telegram when the relay is told to stop is answered by Telegram, not cut short", async () => {
+  const stopping = new AbortController();
+  const reached = Promise.withResolvers<void>();
+  const answer = Promise.withResolvers<Response>();
+  const fixture = telegramFixture();
+  // As the platform's fetch does, give up when the request's signal says so.
+  const fetch: ProviderFetch = (url, init) => {
+    const body = JSON.parse(init.body as string);
+    if (!url.endsWith("/sendMessage") || !body.parse_mode) return fixture.fetch(url, init);
+    reached.resolve();
+    return new Promise((resolve, reject) => {
+      init.signal!.addEventListener("abort", () => reject(init.signal!.reason));
+      answer.promise.then(resolve);
+    });
+  };
+  const service = await createService({ telegram, fetch, signal: stopping.signal });
+  const auth = await claimTelegram(service, fixture);
+  const sent = api(service, "send", { text: "in flight" }, auth);
+  await reached.promise;
+  stopping.abort();
+  answer.resolve(Response.json({ ok: true, result: {} }));
+  expect((await sent).status).toBe(204);
+});
