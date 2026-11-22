@@ -145,22 +145,40 @@ impl Reader {
     }
 
     pub(super) fn replace_body(&mut self, body: Body) {
-        if self.review.is_compact() {
-            let anchor = self.line_number_at(self.review.full_top.unwrap_or_else(|| self.source_top()));
-            let next = match (&self.body, &body) {
-                (Body::Text(old), Body::Text(new)) if old.folds == new.folds => None,
-                (_, Body::Text(new)) => Some(new.folds.clone()),
-                _ => Some(Folds::default()),
+        let anchor = if self.review.is_compact() {
+            let top = self.review.full_top.unwrap_or_else(|| self.source_top());
+            let same_anchor = match (&self.body, &body) {
+                // A refresh can publish the same patch. Keep its exact row, including
+                // deleted lines that a working-file line number cannot represent.
+                (Body::Text(old), Body::Text(new)) if old.folds == new.folds => {
+                    old.lines.get(top).zip(new.lines.get(top)).is_some_and(|(old, new)| {
+                        old.kind == new.kind && old.number == new.number && old.text == new.text
+                    })
+                }
+                (_, Body::Text(new)) => {
+                    self.review.compact = Some(new.folds.clone());
+                    false
+                }
+                _ => {
+                    self.review.compact = Some(Folds::default());
+                    false
+                }
             };
-            if let Some(next) = next {
-                self.review.compact = Some(next);
-            }
-            self.body = body;
-            self.set_source_top(self.source_row(anchor));
+            (!same_anchor).then(|| self.line_number_at(top))
         } else {
-            self.body = body;
+            None
+        };
+        self.body = body;
+        if let Some(anchor) = anchor {
+            self.set_source_top(self.source_row(anchor));
         }
         self.clear_change();
+        if !matches!(self.body, Body::Note(_))
+            && let Some(line) = self.pending_editor_line.take()
+            && matches!(self.body, Body::Text(_))
+        {
+            self.show_editor_line(line);
+        }
     }
 
     pub(super) fn toggle_changes(&mut self) -> After {

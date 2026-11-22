@@ -23,7 +23,7 @@ use pending::{DiffStamp, TrackedDiff, tracked_records};
 use run::OutputError;
 
 /// A diff of one file larger than this is not loaded.
-const DIFF_LIMIT: u64 = 8 << 20;
+pub(crate) const DIFF_LIMIT: u64 = 8 << 20;
 pub(crate) const GIT_UNAVAILABLE: &str = "Git could not be run.";
 /// Maximum number of uncommitted paths passed to `git diff` by name.
 /// For more paths, compare the whole tree to the last commit.
@@ -867,6 +867,57 @@ impl Repo {
         self.status.unmerged.iter().any(|p| p == path)
     }
 
+    /// One binary preview's status, never a patch, text conversion or rename scan.
+    /// Refused source files get index-only status so Git will not materialize or
+    /// hash a worktree file the preview was unable to read within its limits.
+    pub(crate) fn media_kind(&self, path: &str, read_worktree: bool) -> Option<Kind> {
+        const LIMIT: u64 = 1 << 16;
+        if read_worktree {
+            let config = run::config(&self.root)?;
+            let raw = run::limited_output(
+                &self.root,
+                &config.guard,
+                &["status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all", "--", path],
+                LIMIT,
+            )
+            .ok()?;
+            let mut kind = Kind::None;
+            for record in raw.split(|&b| b == 0) {
+                kind = match record {
+                    [b'?', b' ', ..] => return Some(Kind::Untracked),
+                    [b'u', b' ', ..] => return Some(Kind::Conflict),
+                    // Worktree-only additions (from `git add -N`) use `.A`.
+                    [b'1', b' ', b'A', _, b' ', ..] | [b'1', b' ', _, b'A', b' ', ..] => Kind::Added,
+                    [b'1', b' ', b'D', _, b' ', ..] | [b'1', b' ', _, b'D', b' ', ..] => Kind::Deleted,
+                    [b'1', b' ', _, _, b' ', ..] => Kind::Modified,
+                    [] => continue,
+                    _ => return None,
+                };
+            }
+            return Some(kind);
+        }
+        let get = |args: &[&str]| run::limited_output(&self.root, &[], args, LIMIT).ok();
+        let indexed = get(&["ls-files", "--stage", "-z", "--", path])?;
+        if indexed.is_empty() {
+            let untracked = get(&["ls-files", "--others", "--exclude-standard", "-z", "--", path])?;
+            return Some(if untracked.is_empty() { Kind::None } else { Kind::Untracked });
+        }
+        let index = indexed.split(|&b| b == b'\t').next()?;
+        let index = index.strip_suffix(b" 0");
+        let Some(index) = index else { return Some(Kind::Conflict) };
+        let Some(head) = self.resolve("HEAD")? else { return Some(Kind::Added) };
+        let tree = get(&["ls-tree", "-z", &head, "--", path])?;
+        if tree.is_empty() {
+            return Some(Kind::Added);
+        }
+        let mut fields = tree.split(|&b| b == b' ' || b == b'\t');
+        let mut indexed = index.split(|&b| b == b' ');
+        let same_mode = fields.next()? == indexed.next()?;
+        let _object_type = fields.next()?;
+        let same_object = fields.next()? == indexed.next()?;
+        Some(if same_mode && same_object { Kind::None } else { Kind::Modified })
+    }
+
     /// Rename similarity depends on the current worktree contents, not just its index.
     pub fn moved_from(&self, path: &str) -> Option<String> {
         let raw = self.git(&["diff", self.against()?, "-M", "--name-status", "-z", "--"])?;
@@ -1380,6 +1431,23 @@ mod tests {
         for marker in ["mark-ran", "late-ran"] {
             assert!(!f.root.join(".git").join(marker).exists(), "reading ran the filter for {marker}");
         }
+    }
+
+    #[test]
+    fn media_status_marks_intent_to_add_and_worktree_deletion() {
+        let f = Fixture::new();
+        f.write("old.png", "already tracked\n");
+        f.commit("base");
+        let repo = Repo::open(&f.root).unwrap();
+
+        f.write("new.png", "to be added\n");
+        f.git(&["add", "-N", "--", "new.png"]);
+        assert_eq!(repo.media_kind("new.png", true), Some(Kind::Added));
+        f.git(&["add", "--", "new.png"]);
+        assert_eq!(repo.media_kind("new.png", true), Some(Kind::Added));
+
+        fs::remove_file(f.root.join("old.png")).unwrap();
+        assert_eq!(repo.media_kind("old.png", true), Some(Kind::Deleted));
     }
 
     #[test]

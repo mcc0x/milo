@@ -166,6 +166,10 @@ impl Reader {
             self.editor = Some(editor);
             return;
         }
+        self.tick_media();
+        if let Body::Video(video) = &mut self.body {
+            video.tick();
+        }
         if self.change_notice.is_some_and(|(_, until)| now >= until) {
             self.change_notice = None;
         }
@@ -212,6 +216,13 @@ impl Reader {
     }
 
     fn draw_body(&mut self, s: &mut Screen) {
+        if !self.markdown_source
+            && let Body::Text(text) = &mut self.body
+            && let Some(preview) = &mut text.preview
+        {
+            preview.draw(s, self.rows);
+            return;
+        }
         if std::mem::take(&mut self.opening) {
             self.reveal_first_change();
         }
@@ -219,16 +230,8 @@ impl Reader {
         let focused = self.focused_fold();
         let note = match &self.body {
             Body::Note(note) => Some(*note),
-            Body::Picture(picture) => match s.pictures() {
-                Some(true) if s.w > 2 => {
-                    let room = s.w - 2;
-                    let (cols, rows) = picture.fit(s.cell_size(), room, self.rows);
-                    s.show_picture(picture, 1 + (room - cols) / 2, 1 + (self.rows - rows) / 2, cols, rows);
-                    None
-                }
-                Some(false) => Some("This terminal cannot show pictures."),
-                _ => None,
-            },
+            Body::Picture(picture) => super::media::picture(s, self.rows, picture),
+            Body::Video(video) => super::media::movie(s, self.rows, video),
             Body::Text(text) => {
                 let folds = self.review.folds();
                 let total = folds.row_count(text.lines.len());
@@ -316,6 +319,27 @@ impl Reader {
     }
 
     fn draw_hint(&self, s: &mut Screen) {
+        if let Body::Video(video) = &self.body {
+            if video.error().is_some() {
+                crate::help::draw_hint(s, "q close", &[], "? help");
+                return;
+            }
+            let action = if video.is_playing() { "Space pause" } else { "Space play" };
+            crate::help::draw_hint(s, action, &["←→ seek 5s", "q close"], "? help");
+            return;
+        }
+        if self.markdown().is_some() {
+            let action = if self.markdown_source { "m preview" } else { "m source" };
+            let changes = self.markdown_source && self.can_fold();
+            let middle: &[_] = match (self.read_only.is_none(), changes) {
+                (true, true) => &["e edit", "n N changes", "c fold", "q close"],
+                (false, true) => &["n N changes", "c fold", "q close"],
+                (true, false) => &["e edit", "↑↓ scroll", "q close"],
+                (false, false) => &["↑↓ scroll", "q close"],
+            };
+            crate::help::draw_hint(s, action, middle, "? help");
+            return;
+        }
         if let Source::Handed(handed) = &self.source
             && handed.total > 1
         {
@@ -397,6 +421,15 @@ impl Reader {
                 }
             } else if "patch".len() <= room {
                 right -= s.put_right(right, 0, "patch", FAINT);
+            }
+        } else if let Body::Video(video) = &self.body && video.error().is_none() {
+            let mut buffer = [0; 64];
+            let status = super::media::status(video, &mut buffer);
+            let room = right.saturating_sub(NAME_ROOM);
+            let state = if video.is_playing() { "Playing" } else { "Paused" };
+            let label = if str_width(status) <= room { status } else { state };
+            if str_width(label) <= room {
+                right -= s.put_right(right, 0, label, FAINT);
             }
         } else if let Body::Picture(picture) = &self.body {
             let size = format!("{}×{}", picture.width, picture.height);

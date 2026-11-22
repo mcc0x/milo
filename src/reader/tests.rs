@@ -13,6 +13,16 @@ fn drawn(reader: &mut Reader, w: usize, h: usize) -> Vec<String> {
     screen.text()
 }
 
+fn finish_picture_preparation(reader: &mut Reader) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut screen = Screen::sized(1, 1);
+    while let Some(delay) = reader.next_frame() {
+        assert!(Instant::now() < deadline, "image preview did not finish");
+        std::thread::sleep(delay);
+        reader.draw(&mut screen);
+    }
+}
+
 #[test]
 fn reader_hints_say_close_and_keep_help_last() {
     let f = Fixture::folder();
@@ -62,7 +72,30 @@ fn text_with_a_picture_extension_still_shows_its_edits() {
     f.write("notes.png", "new notes\n");
     let file = f.root.join("notes.png");
     let mut working = Reader::open(&file).unwrap();
+    assert!(working.next_frame().is_some());
+    finish_picture_preparation(&mut working);
     assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
+
+    // Status-only updates and draw ticks use the already classified source.
+    use std::os::unix::fs::FileExt as _;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    static SLOTS: AtomicUsize = AtomicUsize::new(0);
+    let (entered, at_read) = mpsc::channel();
+    media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
+        entered.send(()).unwrap();
+        file.read_at(bytes, offset)
+    }));
+    f.git(&["add", "--", "notes.png"]);
+    working.filesystem_changed();
+    assert!(working.check());
+    finish_picture_preparation(&mut working);
+    assert_eq!(at_read.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
+    f.write("notes.png", "changed again\n");
+    assert!(working.check());
+    finish_picture_preparation(&mut working);
+    at_read.try_recv().unwrap();
 
     let mut repo = Repo::open(&f.root).unwrap();
     repo.read();
@@ -122,6 +155,7 @@ fn an_empty_picture_file_is_empty_not_a_broken_picture() {
     let f = Fixture::folder();
     f.write("empty.png", "");
     let mut reader = Reader::open(&f.root.join("empty.png")).unwrap();
+    finish_picture_preparation(&mut reader);
     assert_eq!(drawn(&mut reader, 40, 3)[1], "  Empty.");
 }
 
@@ -596,6 +630,7 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     let mut text = Reader::open(&f.root.join("sub/file.txt")).unwrap();
     let mut picture = Reader::open(&f.root.join("sub/logo.png")).unwrap();
     assert!(drawn(&mut text, 60, 6)[1].ends_with("original text"));
+    finish_picture_preparation(&mut picture);
     assert!(drawn(&mut picture, 60, 6)[0].ends_with("16×8"));
     let (mut watcher, mut pace) = watch_pane(&mut text, false);
     assert_eq!(watcher.scope().roots.as_slice(), std::slice::from_ref(&f.root));
@@ -617,6 +652,7 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     assert!(watcher.scope().roots.is_empty() && !watcher.scope().complete);
     assert!(picture.check());
     assert_eq!(drawn(&mut text, 60, 6)[1], " 1   moved project edit");
+    finish_picture_preparation(&mut picture);
     assert!(drawn(&mut picture, 60, 6)[0].ends_with("32×16"));
 
     // Still poll the original, and reinstall path-based coverage if it comes back.
@@ -1076,11 +1112,12 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     let dir = Fixture::folder();
     fs::write(dir.root.join("logo.png"), Picture::sample_png(64, 32)).unwrap();
     let mut reader = Reader::open(&dir.root.join("logo.png")).unwrap();
+    finish_picture_preparation(&mut reader);
     let mut screen = Screen::sized(40, 10);
 
-    // Until the terminal has said, nothing is claimed either way.
+    // The terminal receives no bitmap before advertising Kitty support.
     reader.draw(&mut screen);
-    assert!(screen.picture_at().is_none() && screen.text()[2].is_empty());
+    assert!(screen.picture_at().is_none());
     assert!(screen.text()[0].ends_with("64×32"));
 
     // 64 by 32 pixels in cells of 8 by 16 is 8 columns by 2 rows.
@@ -1092,7 +1129,221 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     plain.answered();
     reader.draw(&mut plain);
     assert!(plain.picture_at().is_none());
-    assert_eq!(plain.text()[2], "  This terminal cannot show pictures.");
+    if cfg!(target_os = "macos") {
+        assert_eq!(plain.text()[4], format!("{}{}", " ".repeat(4), "▀".repeat(32)));
+        assert_eq!(plain.text()[5], plain.text()[4]);
+    } else {
+        assert!(plain.text()[2].contains("Kitty"));
+    }
+}
+
+#[test]
+fn a_parked_image_releases_loading_and_decoded_media_until_reopened() {
+    let dir = Fixture::new();
+    let file = dir.root.join("logo.png");
+    fs::write(&file, Picture::sample_png(64, 32)).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    assert!(reader.next_frame().is_some());
+
+    reader.park_media();
+    assert!(matches!(&reader.body, Body::Note(_)));
+    assert_eq!(reader.next_frame(), None);
+
+    dir.write(".git/index.lock", "");
+    assert!(!reader.git_busy());
+    assert!(reader.check());
+    assert!(reader.next_frame().is_some());
+    finish_picture_preparation(&mut reader);
+    assert!(matches!(&reader.body, Body::Picture(picture) if picture.width == 64));
+
+    reader.park_media();
+    assert!(matches!(&reader.body, Body::Note(_)));
+    assert_eq!(reader.next_frame(), None);
+}
+
+#[test]
+fn canceled_source_reads_keep_their_slots_until_they_return() {
+    use std::os::unix::fs::FileExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    static SLOTS: AtomicUsize = AtomicUsize::new(0);
+    let f = Fixture::folder();
+    let open = |path, width| {
+        let file = f.root.join(path);
+        fs::write(&file, Picture::sample_png(width, 16)).unwrap();
+        let (entered, at_read) = mpsc::channel();
+        let (release, ready) = mpsc::channel();
+        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
+            entered.send(()).unwrap();
+            // Simulate an in-progress read that cannot observe cancellation
+            // until I/O returns. Time out only to keep a broken test from hanging.
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            file.read_at(bytes, offset)
+        }));
+        (Reader::open(&file).unwrap(), at_read, release)
+    };
+
+    let (mut first, at_first, release_first) = open("first.png", 64);
+    at_first.recv_timeout(Duration::from_secs(3)).unwrap();
+    first.park_media();
+    assert_eq!(first.next_frame(), None);
+
+    let (second, at_second, release_second) = open("second.png", 48);
+    at_second.recv_timeout(Duration::from_secs(3)).unwrap();
+    drop(second);
+
+    let (mut last, at_last, release_last) = open("latest.png", 32);
+    last.tick_media();
+    assert_eq!(at_last.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout));
+    assert_eq!(SLOTS.load(Ordering::Relaxed), 2);
+    assert!(matches!(&last.body, Body::Note(note) if *note == media_load::PENDING));
+
+    release_first.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while at_last.recv_timeout(Duration::from_millis(10)) == Err(mpsc::RecvTimeoutError::Timeout) {
+        assert!(Instant::now() < deadline, "a released source slot was not reused");
+        last.tick_media();
+    }
+    release_last.send(()).unwrap();
+    finish_picture_preparation(&mut last);
+    assert!(matches!(&last.body, Body::Picture(picture) if picture.width == 32));
+    first.tick_media();
+    assert!(matches!(&first.body, Body::Note(_)), "a parked reader displayed a late result");
+    release_second.send(()).unwrap();
+}
+
+#[test]
+fn large_text_with_media_suffixes_keeps_its_patch_without_loading_fallback_source() {
+    use crate::read::Content;
+
+    let f = Fixture::new();
+    let paths = ["notes.mp4", "notes.png"];
+    let line = "x".repeat(1023) + "\n";
+    let mut contents = String::with_capacity((3 << 20) + 7);
+    contents.push_str("before\n");
+    for _ in 0..3 * 1024 {
+        contents.push_str(&line);
+    }
+    for path in paths {
+        f.write(path, &contents);
+    }
+    f.commit("base");
+
+    contents.replace_range(..6, "edited");
+    for path in paths {
+        f.write(path, &contents);
+        let mut reader = Reader::open(&f.root.join(path)).unwrap();
+        finish_picture_preparation(&mut reader);
+        let rows = drawn(&mut reader, 60, 8).join("\n");
+        assert!(rows.contains("- before") && rows.contains("+ edited"), "{path}: {rows}");
+        let Source::Working(work) = &reader.source else { unreachable!() };
+        assert!(matches!(&work.media, Some(media_load::State::Text { content: Content::TooLarge, .. })));
+        assert_eq!(reader.read_only, Some(ReadOnly::TOO_LARGE));
+    }
+}
+
+#[test]
+fn oversize_media_with_a_text_prefix_is_refused_before_git_reads_it() {
+    let f = Fixture::new();
+    let path = "notes.mp4";
+    f.write(path, "before\n");
+    f.commit("base");
+    f.write(path, &"x".repeat(512));
+    let file = f.root.join(path);
+    // Make the file look like text to the source sample but binary to Git.
+    fs::OpenOptions::new().write(true).open(&file).unwrap().set_len(crate::git::DIFF_LIMIT + 1).unwrap();
+
+    let mut reader = Reader::open(&file).unwrap();
+    finish_picture_preparation(&mut reader);
+    assert!(matches!(&reader.body, Body::Note(note) if *note == "Too large to show."));
+}
+
+#[test]
+fn watched_binary_status_changes_do_not_rebuild_the_preview() {
+    use crate::pane::{check_watched_pane, watch_pane};
+
+    let f = Fixture::new();
+    f.write("keep.txt", "base\n");
+    f.commit("base");
+    let path = "logo.png";
+    let file = f.root.join(path);
+    fs::write(&file, Picture::sample_png(16, 8)).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::Untracked);
+    let picture_id = |reader: &Reader| match &reader.body {
+        Body::Picture(picture) => picture.id,
+        _ => panic!("binary status replaced the picture"),
+    };
+    let id = picture_id(&reader);
+    let stamp = working_path::Stamp::at(&file);
+    let (mut watcher, mut pace) = watch_pane(&mut reader, false);
+    f.git(&["add", "--", path]);
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    assert_eq!(picture_id(&reader), id);
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::Added);
+    f.git(&["commit", "-qm", "add logo"]);
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::None);
+    assert!(working_path::Stamp::at(&file) == stamp);
+    assert_eq!(picture_id(&reader), id);
+
+    f.git(&["checkout", "-qb", "theirs"]);
+    fs::write(&file, Picture::sample_png(24, 8)).unwrap();
+    f.commit("their logo");
+    f.git(&["checkout", "-q", "main"]);
+    fs::write(&file, Picture::sample_png(32, 8)).unwrap();
+    f.commit("our logo");
+    fs::write(&file, Picture::sample_png(40, 8)).unwrap();
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::Modified);
+    let id = picture_id(&reader);
+    let stamp = working_path::Stamp::at(&file);
+    // Merge only the index; leave the working image and its preview alone.
+    f.git(&["read-tree", "-i", "-m", "main^", "main", "theirs"]);
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    finish_picture_preparation(&mut reader);
+    assert!(working_path::Stamp::at(&file) == stamp);
+    assert_eq!(reader.kind, Kind::Conflict);
+    assert_eq!(picture_id(&reader), id);
+}
+
+#[test]
+fn a_movie_gets_worktree_status_without_starting_playback() {
+    let f = Fixture::new();
+    let file = f.root.join("clip.mp4");
+    f.write("clip.mp4", "previous version\n");
+    f.commit("original");
+    fs::write(&file, include_bytes!("../../tests/rex_lab/river-motion.mp4")).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reader.kind == Kind::None {
+        assert!(Instant::now() < deadline, "movie status did not finish");
+        // Advance acquisition and status but do not start FFmpeg/FFprobe.
+        reader.tick_media();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(reader.kind, Kind::Modified);
+}
+
+#[test]
+fn a_replaced_image_cannot_publish_its_old_preview() {
+    let dir = Fixture::folder();
+    let file = dir.root.join("logo.png");
+    let replacement = dir.root.join("replacement.png");
+    fs::write(&file, Picture::sample_png(64, 32)).unwrap();
+    fs::write(&replacement, Picture::sample_png(32, 16)).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    assert!(reader.next_frame().is_some());
+    fs::rename(replacement, file).unwrap();
+
+    // No filesystem check: completion itself must validate the captured stamp.
+    finish_picture_preparation(&mut reader);
+    assert!(matches!(&reader.body, Body::Picture(picture) if picture.width == 32));
 }
 
 #[test]
@@ -1159,6 +1410,7 @@ fn an_unreadable_picture_explains_why_it_cannot_be_shown() {
         return;
     }
     let mut reader = Reader::open(&file).unwrap();
+    finish_picture_preparation(&mut reader);
     assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file cannot be read.");
 }
 
@@ -1352,7 +1604,14 @@ fn markdown_markup_stylesheets_and_more_code_are_coloured_in_working_and_committ
         assert_eq!(emphasised, ["1", "2"], "{path}: {out:?}");
     };
     for (path, _, keyword) in files {
-        check(&mut Reader::open(&f.root.join(path)).unwrap(), path, keyword);
+        let mut reader = Reader::open(&f.root.join(path)).unwrap();
+        if path == "README.md" {
+            let preview = drawn(&mut reader, 60, 10).join("\n");
+            assert!(preview.contains("Notes") && !preview.contains("# Notes"), "{preview}");
+            assert!(!preview.contains("step 1"), "deleted text leaked into preview: {preview}");
+            reader.key(Key::Char('m'));
+        }
+        check(&mut reader, path, keyword);
     }
 
     f.commit("after");
@@ -1407,4 +1666,159 @@ fn a_wide_edit_clipped_at_the_right_edge_does_not_highlight_empty_cells() {
         let emphasised: Vec<_> = runs(&out).iter().filter(|run| reversed(run.0)).map(|run| run.1).collect();
         assert_eq!(emphasised, expected, "{out:?}");
     }
+}
+
+#[test]
+fn text_with_mp4_suffix_keeps_its_working_diff() {
+    let f = Fixture::new();
+    f.write("notes.mp4", "before\n");
+    f.commit("text");
+    f.write("notes.mp4", "after\n");
+    let mut reader = Reader::open(&f.root.join("notes.mp4")).unwrap();
+    finish_picture_preparation(&mut reader);
+    let lines = drawn(&mut reader, 60, 8).join("\n");
+    assert!(lines.contains("before") && lines.contains("after"), "{lines}");
+}
+
+#[test]
+fn editing_rendered_markdown_keeps_the_inactive_source_viewport() {
+    let f = Fixture::new();
+    let notes: String = (0..48).map(|i| format!("## Marker {i:02} with enough text to require horizontal panning\n")).collect();
+    f.write("notes.md", &notes);
+    let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
+    reader.key(Key::Char('m'));
+    drawn(&mut reader, 32, 8);
+    reader.key(Key::End);
+    reader.key(Key::Right);
+    let source = drawn(&mut reader, 32, 8);
+    assert!(source.iter().any(|line| line.contains("‹")), "{source:?}");
+    reader.key(Key::Char('m'));
+    let preview = drawn(&mut reader, 32, 8);
+    assert!(preview.iter().any(|line| line.contains("Marker 00")));
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    reader.key(Key::Esc);
+    reader.key(Key::Char('m'));
+    assert_eq!(drawn(&mut reader, 32, 8), source);
+}
+
+#[test]
+fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
+    use std::os::unix::fs::FileExt as _;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
+    let f = Fixture::new();
+    let notes = (0..90).map(|i| format!("note {i:02}\n")).collect::<String>();
+    f.write("notes.png", &notes);
+    f.commit("notes");
+    let mut reader = Reader::open(&f.root.join("notes.png")).unwrap();
+    let loaded = |reader: &mut Reader| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = drawn(reader, 60, 8);
+            if !rows.iter().any(|row| row.contains(media_load::PENDING)) {
+                return rows;
+            }
+            assert!(Instant::now() < deadline, "text preview did not finish: {rows:?}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    };
+    let pause_reload = || {
+        static SLOTS: AtomicUsize = AtomicUsize::new(0);
+        let (resume, blocked) = mpsc::channel::<()>();
+        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
+            let _ = blocked.recv();
+            file.read_at(bytes, offset)
+        }));
+        resume
+    };
+    let pending = |reader: &mut Reader, resume: mpsc::Sender<()>| {
+        let rows = drawn(reader, 60, 8);
+        resume.send(()).unwrap();
+        assert!(rows.iter().any(|row| row.contains(media_load::PENDING)), "{rows:?}");
+    };
+
+    let rows = loaded(&mut reader);
+    assert!(rows[1].contains("note 00"), "{rows:?}");
+    for _ in 0..20 {
+        reader.key(Key::Down);
+    }
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    assert!(drawn(&mut reader, 60, 8)[1].contains("note 20"));
+    assert_eq!(reader.key(Key::WheelDown), After::Stay);
+    assert!(drawn(&mut reader, 60, 8)[1].contains("note 23"));
+    reader.key(Key::Esc);
+    assert!(drawn(&mut reader, 60, 8)[1].contains("note 23"));
+
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    f.write("notes.png", &notes.replace("note 23\n", "outside note 23\n"));
+    let resume = pause_reload();
+    reader.key(Key::Esc);
+    pending(&mut reader, resume);
+    let rows = loaded(&mut reader);
+    assert!(rows[1].contains("+ outside note 23"), "{rows:?}");
+
+    let mut top = "outside note 23".to_owned();
+    for (ch, close_with_save) in [('!', true), ('?', false)] {
+        reader.key(Key::Char('e'));
+        assert!(reader.editing());
+        reader.key(Key::Char(ch));
+        top.insert(0, ch);
+        assert!(drawn(&mut reader, 60, 8)[1].contains(&top), "{top}");
+        let resume = pause_reload();
+        if close_with_save {
+            reader.key(Key::Esc);
+            reader.key(Key::Char('s'));
+        } else {
+            reader.key(Key::Ctrl(b's'));
+            assert!(reader.editing());
+            reader.key(Key::Esc);
+        }
+        assert!(!reader.editing());
+        pending(&mut reader, resume);
+        let rows = loaded(&mut reader);
+        assert!(rows[1].contains(&format!("+ {top}")), "{rows:?}");
+    }
+}
+
+#[test]
+fn editing_a_markdown_preview_keeps_a_deleted_row_at_the_top_of_the_folded_source() {
+    let f = Fixture::new();
+    let notes = (1..=60).map(|i| format!("## Section {i:02}\n")).collect::<String>();
+    f.write("notes.md", &notes);
+    f.commit("notes");
+    let edited = notes.strip_prefix("## Section 01\n").unwrap().replace("Section 30", "Edited section 30");
+    f.write("notes.md", &edited);
+    let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
+
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    let full = drawn(&mut reader, 60, 8);
+    assert!(full[1].contains("- ## Section 01"), "{full:?}");
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let compact = drawn(&mut reader, 60, 8);
+    assert!(compact[1].contains("- ## Section 01"), "{compact:?}");
+    assert!(compact.iter().any(|row| row.contains("unchanged lines")), "{compact:?}");
+
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    let preview = drawn(&mut reader, 60, 8);
+    assert!(preview.iter().any(|row| row.contains("Section 02")), "{preview:?}");
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    reader.key(Key::Esc);
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    assert_eq!(drawn(&mut reader, 60, 8), compact);
+
+    // A notification can rebuild the same patch without changing its row identity.
+    reader.filesystem_changed();
+    reader.check();
+    assert_eq!(drawn(&mut reader, 60, 8), compact);
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    reader.key(Key::Esc);
+    assert_eq!(drawn(&mut reader, 60, 8), compact);
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    assert_eq!(drawn(&mut reader, 60, 8), full);
 }

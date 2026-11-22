@@ -34,6 +34,9 @@ impl Outline {
     pub(super) fn outline_key(&mut self, key: Key, now: Instant) -> After {
         if let Key::Focus(here) = key {
             if !here {
+                if let Some(reader) = &mut self.reading {
+                    reader.cover();
+                }
                 self.clicked = None;
                 if let Some(search) = &mut self.search {
                     search.clear_click();

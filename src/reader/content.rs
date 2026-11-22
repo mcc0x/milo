@@ -2,14 +2,16 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use super::disk::ReadOnly;
+use super::media_load::{self, Format, Load, Outcome, SourceJob, State};
+use super::video::Bookmark;
 use super::working_path::{Entry, LookupError, Root, Stamp};
 use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
-use crate::git::{CommitId, CommitVersion, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
-use crate::picture::{self, Picture};
+use crate::git::{CommitId, CommitVersion, DIFF_LIMIT, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
 use crate::read::Content;
 use crate::syntax;
 
@@ -58,7 +60,7 @@ impl Location {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkingStamp {
     entry: Result<Stamp, LookupError>,
     compare: bool,
@@ -155,7 +157,8 @@ pub(super) struct WorkingTarget {
 
 impl WorkingTarget {
     pub(super) fn resolve(file: &Path) -> Option<Self> {
-        let Location { repo, relative } = Location::find(file, Repo::open_to_read)?;
+        let open = if Format::at(&file.to_string_lossy(), file).is_some() { Repo::open } else { Repo::open_to_read };
+        let Location { repo, relative } = Location::find(file, open)?;
         let root = Root::open(&repo.root).ok()?;
         Some(Self { repo, root, relative })
     }
@@ -184,6 +187,9 @@ impl WorkingTarget {
             attributes,
             notified: false,
             stamp: None,
+            media: None,
+            media_check: None,
+            media_recheck: false,
         }));
         let mut reader = Reader::new(path, source, icons, note);
         reader.refresh(true);
@@ -254,6 +260,64 @@ impl CommittedTarget {
     }
 }
 
+enum CheckTask {
+    Text { force: bool, read_status: bool },
+    Media { read_worktree: bool },
+}
+
+enum Checked {
+    Text { repo: Box<Repo>, patch: Option<FileDiff> },
+    Media(Kind),
+}
+
+pub(super) struct MediaCheck {
+    stamp: WorkingStamp,
+    job: SourceJob<Option<Checked>>,
+}
+
+fn can_read_text_patch(entry: &Result<Entry<'_>, LookupError>) -> bool {
+    // Git limits patch output, not how much of the working file it can read.
+    entry.as_ref().is_ok_and(|entry| entry.is_regular() && !entry.is_dataless() && entry.size() <= DIFF_LIMIT)
+}
+
+impl MediaCheck {
+    fn start(work: &WorkingFile, stamp: WorkingStamp, task: CheckTask) -> Option<Self> {
+        let root = work.root.try_clone().ok()?;
+        let relative = work.relative.clone();
+        let mut repo = Box::new(work.repo.clone());
+        let job = SourceJob::start(move |stop| {
+            if stop.load(Ordering::Relaxed) || repo.busy() {
+                return None;
+            }
+            let (entry, observed) = WorkingStamp::at(&repo, &root, &relative);
+            if stamp != observed {
+                return None;
+            }
+            let path = relative.to_str()?;
+            match task {
+                CheckTask::Media { read_worktree } => {
+                    let read_worktree = read_worktree && entry.is_ok_and(|entry| !entry.is_dataless());
+                    repo.media_kind(path, read_worktree).map(Checked::Media)
+                }
+                CheckTask::Text { force, read_status } if can_read_text_patch(&entry) => {
+                    if read_status {
+                        repo.read();
+                    } else if !repo.read_if_changed() && !force {
+                        return None;
+                    }
+                    if stop.load(Ordering::Relaxed) || repo.busy() || WorkingStamp::at(&repo, &root, &relative).1 != stamp {
+                        return None;
+                    }
+                    let patch = repo.ok().then(|| file_diff(&mut repo, path)).flatten();
+                    Some(Checked::Text { repo, patch })
+                }
+                CheckTask::Text { .. } => None,
+            }
+        });
+        Some(Self { stamp, job })
+    }
+}
+
 impl Reader {
     /// Opens a working file, which Git may remember even if its directory is gone.
     pub fn open(file: &Path) -> Option<Self> {
@@ -282,8 +346,67 @@ impl Reader {
 
     fn refresh_body(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
-        let WorkingFile { repo, root, relative, attributes, stamp: last, .. } = work.as_mut();
-        let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
+        let (mut entry, mut stamp) = WorkingStamp::at(&work.repo, &work.root, &work.relative);
+        let same = work.stamp == Some(stamp);
+        let format = Format::at(&self.path, &work.relative);
+        let bookmark = match (&work.media, same) {
+            (Some(State::Parked(bookmark)), true) => *bookmark,
+            _ => None,
+        };
+        if !same || matches!(work.media, Some(State::Parked(_))) {
+            work.media_check = None;
+            work.media_recheck = false;
+            let replaced_media = work.media.take().is_some();
+            if replaced_media {
+                // Release the old player and its snapshot before admitting another.
+                self.body = Body::Note("Git did not answer.");
+                work.stamp = None;
+                self.kind = Kind::None;
+            }
+            if let Some(format) = format
+                && matches!(&entry, Ok(entry) if entry.is_regular())
+            {
+                let Ok(entry) = entry else { unreachable!() };
+                let (state, note) = start_preview(format, entry, stamp, bookmark);
+                work.stamp = Some(stamp);
+                work.media = Some(state);
+                self.kind = Kind::None;
+                self.replace_body(Body::Note(note));
+                return;
+            }
+            if replaced_media && stamp.compare && work.repo.busy() {
+                self.replace_body(Body::Note("Waiting for Git."));
+                return;
+            }
+        }
+        match &mut work.media {
+            Some(State::Loading(_) | State::Parked(_)) => return,
+            Some(State::Ready { status_reads }) => {
+                let read_worktree = *status_reads;
+                self.check_media_status(stamp, CheckTask::Media { read_worktree });
+                return;
+            }
+            Some(State::Text { content, shown }) => {
+                // TooLarge here means the source lane validated a text prefix
+                // but didn't load a fallback body. Git can still supply a patch.
+                if stamp.compare && can_read_text_patch(&entry) {
+                    if work.repo.busy() {
+                        return;
+                    }
+                    let force = work.attributes.changed() || force;
+                    let read_status = !*shown;
+                    self.check_media_status(stamp, CheckTask::Text { force, read_status });
+                } else if !*shown {
+                    *shown = true;
+                    let body = body_from_working_content(content, LineKind::Same, syntax::for_file(&self.path));
+                    self.replace_body(body);
+                }
+                return;
+            }
+            None => {}
+        }
+        let (repo, root, relative, attributes, last) =
+            (&mut work.repo, &work.root, &work.relative, &mut work.attributes, &mut work.stamp);
         let attrs_changed = stamp.compare && attributes.changed();
         // A changed entry needs fresh status. Otherwise poll status once and
         // also refresh the patch when rules changed without changing porcelain.
@@ -304,6 +427,18 @@ impl Reader {
             // longer refers to the repository and entry we inspected.
             let (after, observed) = WorkingStamp::at(repo, root, relative);
             if observed != stamp {
+                if let Some(format) = format
+                    && matches!(&after, Ok(entry) if entry.is_regular())
+                {
+                    // Never let the synchronous source fallback read a new candidate.
+                    let Ok(entry) = after else { unreachable!() };
+                    let (state, note) = start_preview(format, entry, observed, None);
+                    *last = Some(observed);
+                    work.media = Some(state);
+                    self.kind = Kind::None;
+                    self.replace_body(Body::Note(note));
+                    return;
+                }
                 entry = after;
                 stamp = WorkingStamp { compare: false, ..observed };
                 Some(unchanged())
@@ -337,15 +472,126 @@ impl Reader {
             self.replace_body(Body::Note(note));
             return;
         };
-        let picture = picture::is_picture(&self.path);
-        let kept = picture && last.as_ref() == Some(&stamp) && matches!(self.body, Body::Picture(_));
+        let picture_suffix = crate::picture::is_picture(&self.path);
         self.kind = patch.kind;
         *last = Some(stamp);
-        if kept {
+        let mut body = working_body(&entry, patch, picture_suffix, syntax::for_file(&self.path));
+        if let Body::Text(text) = &mut body
+            && entry.as_ref().is_ok_and(Entry::is_regular)
+            && relative.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+        {
+            let previous = match &mut self.body {
+                Body::Text(old) => old.preview.take(),
+                _ => None,
+            };
+            text.preview = Some(if let Some(mut preview) = previous {
+                preview.replace(&text.lines);
+                preview
+            } else {
+                Box::new(super::markdown::Preview::new(&text.lines))
+            });
+        }
+        self.replace_body(body);
+    }
+
+    fn check_media_status(&mut self, stamp: WorkingStamp, task: CheckTask) {
+        let Source::Working(work) = &mut self.source else { return };
+        if !stamp.compare || work.repo.busy() {
             return;
         }
-        let body = working_body(relative, &entry, patch, picture, syntax::for_file(&self.path));
-        self.replace_body(body);
+        if work.media_check.is_some() {
+            work.media_recheck = true;
+        } else {
+            work.media_check = MediaCheck::start(work, stamp, task);
+        }
+    }
+
+    /// Only the current inspected source may be decoded or published.
+    pub(super) fn tick_media(&mut self) {
+        let Source::Working(work) = &mut self.source else { return };
+        if let Some(State::Loading(load)) = &mut work.media
+            && let Some(result) = load.poll(|stamp| WorkingStamp::at(&work.repo, &work.root, &work.relative).1 == stamp)
+        {
+            match result {
+                Outcome::Stale => {
+                    work.stamp = None;
+                    self.refresh(false);
+                }
+                Outcome::Text(content) => {
+                    work.media = Some(State::Text { content, shown: false });
+                    self.refresh(false);
+                }
+                Outcome::Media { body, status_reads } => {
+                    work.media = Some(State::Ready { status_reads });
+                    self.replace_body(body);
+                    self.refresh(false);
+                }
+            }
+            return;
+        }
+        let Some(check) = &mut work.media_check else { return };
+        let Some(result) = check.job.poll() else { return };
+        let stamp = check.stamp;
+        work.media_check = None;
+        if WorkingStamp::at(&work.repo, &work.root, &work.relative).1 != stamp {
+            self.refresh(false);
+            return;
+        }
+        let recheck = std::mem::take(&mut work.media_recheck);
+        match result.flatten() {
+            Some(Checked::Media(kind)) => self.kind = kind,
+            Some(Checked::Text { repo, patch }) => {
+                work.repo = *repo;
+                let Some(State::Text { content, shown }) = &mut work.media else { return };
+                let lang = syntax::for_file(&self.path);
+                let next = match patch {
+                    Some(patch) => {
+                        *shown = true;
+                        self.kind = patch.kind;
+                        body_from_patch(patch, crate::picture::is_picture(&self.path), lang)
+                            .unwrap_or_else(|kind| body_from_working_content(content, kind, lang))
+                    }
+                    None if work.repo.ok() => Body::Note("Too large to show."),
+                    None if !*shown => Body::Note("Git did not answer."),
+                    None => return,
+                };
+                self.replace_body(next);
+                self.read_only = self.edit_refusal();
+                self.top = self.top.min(self.last_top());
+            }
+            None => {}
+        }
+        if recheck {
+            self.refresh(true);
+        }
+    }
+
+    /// Keeps the working source, but gives up media jobs and snapshots when hidden.
+    pub(super) fn park_media(&mut self) {
+        let Source::Working(work) = &mut self.source else { return };
+        work.media_check = None;
+        work.media_recheck = false;
+        let bookmark = match (&work.media, &self.body) {
+            (Some(State::Loading(load)), _) => load.bookmark,
+            (Some(State::Ready { .. }), Body::Video(video)) => Some(video.bookmark()),
+            (Some(State::Ready { .. }), Body::Picture(_)) => None,
+            _ => return,
+        };
+        // Only that same source stamp can use the player's bookmark.
+        work.media = Some(State::Parked(bookmark));
+        self.body = Body::Note(media_load::PENDING);
+    }
+}
+
+fn start_preview(
+    format: Format,
+    entry: Entry<'_>,
+    stamp: WorkingStamp,
+    bookmark: Option<Bookmark>,
+) -> (State, &'static str) {
+    match entry.source() {
+        Ok(target) => (State::Loading(Load::start(format, target, stamp, bookmark)), media_load::PENDING),
+        Err(_) => (State::Ready { status_reads: false }, media_load::FAILED),
     }
 }
 
@@ -354,54 +600,37 @@ fn working_content(entry: &Result<Entry<'_>, LookupError>, limit: u64) -> Conten
 }
 
 fn working_body(
-    path: &Path,
     entry: &Result<Entry<'_>, LookupError>,
     patch: FileDiff,
-    picture: bool,
+    picture_suffix: bool,
     lang: Option<&'static syntax::Lang>,
 ) -> Body {
-    if !picture {
-        if patch.binary {
-            return Body::Note(NOT_TEXT);
-        }
-        if !patch.lines.is_empty() {
-            return Body::Text(Text::new(patch.lines, lang));
-        }
+    body_from_patch(patch, picture_suffix, lang)
+        .unwrap_or_else(|kind| body_from_working_content(&working_content(entry, LIMIT), kind, lang))
+}
+
+fn body_from_patch(patch: FileDiff, picture_suffix: bool, lang: Option<&'static syntax::Lang>) -> Result<Body, LineKind> {
+    if !picture_suffix && patch.binary {
+        return Ok(Body::Note(NOT_TEXT));
     }
-    let line_kind = if patch.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
-    let lines = match working_content(entry, if picture { picture::FILE_LIMIT } else { LIMIT }) {
-        Content::Gone | Content::Link(_) if !patch.lines.is_empty() => Ok(patch.lines),
+    if !patch.lines.is_empty() {
+        return Ok(Body::Text(Text::new(patch.lines, lang)));
+    }
+    Err(if patch.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same })
+}
+
+fn body_from_working_content(content: &Content, kind: LineKind, lang: Option<&'static syntax::Lang>) -> Body {
+    let lines = match content {
         Content::Gone => Err("This file is gone."),
         Content::Unreadable => Err("This file cannot be read."),
         Content::NotFile => Err(NOT_FILE),
         Content::TooLarge => Err("Too large to show."),
         Content::Link(target) => {
-            return Body::Text(Text::new(vec![Line::new(line_kind, 1, &target.to_string_lossy())], None));
+            return Body::Text(Text::new(vec![Line::new(kind, 1, &target.to_string_lossy())], None));
         }
-        Content::Bytes(mut bytes) => {
-            if picture && could_be_picture(&bytes) {
-                bytes = match Picture::decode(bytes, path) {
-                    Ok(picture) => return Body::Picture(picture),
-                    Err(bytes) if text(&bytes).is_some() => bytes,
-                    Err(_) => return Body::Note("This file cannot be shown as a picture."),
-                };
-            }
-            if !patch.lines.is_empty() {
-                Ok(patch.lines)
-            } else if bytes.len() as u64 > LIMIT {
-                Err("Too large to show.")
-            } else {
-                byte_lines(&bytes, line_kind)
-            }
-        }
+        Content::Bytes(bytes) => byte_lines(bytes, kind),
     };
     Body::from_lines(lines, lang)
-}
-
-/// SVG and PDF may also be valid UTF-8; let the converter decide for those.
-fn could_be_picture(bytes: &[u8]) -> bool {
-    let prefix = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes).trim_ascii_start();
-    prefix.starts_with(b"<") || prefix.starts_with(b"%PDF-") || text(bytes).is_none()
 }
 
 pub(super) fn text(bytes: &[u8]) -> Option<&str> {
