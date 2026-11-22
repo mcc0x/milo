@@ -86,6 +86,7 @@ const BAD_APPLICATION: &str = "An application ID is the 17 to 19 digit number Di
 const BAD_DETAILS: &str = "Details are one of: generic, session, project, both.";
 const UNREADABLE: &str = "Could not read Milo's Discord presence setting, so presence will not start and the file was left alone. milo doctor names the file.";
 const UNSAVED: &str = "Could not save Milo's Discord presence setting.";
+const REVIEW: &str = "Discord presence was changed elsewhere, so nothing was changed here. Look at what it shows now.";
 const SYNTAX: &str = "expected milo presence [status] | enable [APPLICATION_ID | --official] [--details DETAILS] [--yes] | details DETAILS [--yes] | application official|APPLICATION_ID | disable";
 pub const HELP: &str = "\
 Usage: milo presence [status]
@@ -383,14 +384,26 @@ impl Control {
 
     /// Saves one change and, while presence is on, starts a helper that
     /// follows it in place of the one running. Returns what to tell the person.
-    pub(crate) fn apply(&self, change: Change) -> Result<String, &'static str> {
-        let saved = self.setting().map_err(|_| UNREADABLE)?;
-        let setting = match change {
-            Change::Enable => Setting { enabled: true, ..saved },
-            Change::Details(details) => Setting { details, ..saved },
-            Change::Application(own) => Setting { application: own_application(own), ..saved },
-        };
-        self.save(setting).map_err(|_| UNSAVED)?;
+    ///
+    /// `reviewed` is the choice the surface had shown when the person asked for the change.
+    /// If another surface has saved a different one since, nothing changes: what they were
+    /// told would become public is no longer what would.
+    pub(crate) fn apply(&self, change: Change, reviewed: Setting) -> Result<String, &'static str> {
+        let path = self.file();
+        let (saved, setting) = preferences::locked(&path, |dir| {
+            let Ok(saved) = self.setting() else { return Ok(Err(UNREADABLE)) };
+            if saved != reviewed {
+                return Ok(Err(REVIEW));
+            }
+            let setting = match change {
+                Change::Enable => Setting { enabled: true, ..saved },
+                Change::Details(details) => Setting { details, ..saved },
+                Change::Application(own) => Setting { application: own_application(own), ..saved },
+            };
+            preferences::replace(dir, &path, &setting.text())?;
+            Ok(Ok((saved, setting)))
+        })
+        .map_err(|_| UNSAVED)??;
         let now: Cow<'static, str> = if !setting.enabled {
             "Presence is off, so nothing is shown.".into()
         } else if setting == saved && change != Change::Enable {
@@ -595,21 +608,23 @@ pub fn command(request: Request) -> Result<String, String> {
                 confirm(wanted, "Turn on Discord presence?", "Discord presence was left as it was")?;
             }
             // Nothing is on until every part of the choice is saved, so that no helper starts on half of it.
+            let mut reviewed = saved;
             if let Some(application) = application {
-                control.save(Setting { application, ..saved }).map_err(|_| UNSAVED)?;
+                reviewed.application = application;
+                control.save(reviewed).map_err(|_| UNSAVED)?;
             }
             if let Some(details) = details {
-                let saved = control.setting().map_err(|_| UNREADABLE)?;
-                control.save(Setting { details, ..saved }).map_err(|_| UNSAVED)?;
+                reviewed.details = details;
+                control.save(reviewed).map_err(|_| UNSAVED)?;
             }
-            control.apply(Change::Enable).map_err(str::to_owned)
+            control.apply(Change::Enable, reviewed).map_err(str::to_owned)
         }
         Request::Details { details, confirmed } => {
             let saved = saved()?;
             if !confirmed && saved.enabled && details.shows_more_than(saved.details) {
                 confirm(Setting { details, ..saved }, "Show this on Discord?", "The details were left as they were")?;
             }
-            let said = control.apply(Change::Details(details)).map_err(str::to_owned)?;
+            let said = control.apply(Change::Details(details), saved).map_err(str::to_owned)?;
             // Off, the choice is only saved. Say what turning presence on will then make public.
             Ok(if saved.enabled {
                 said
@@ -617,7 +632,7 @@ pub fn command(request: Request) -> Result<String, String> {
                 format!("{said} If you turn it on: {}", public(details, saved.application.is_some()))
             })
         }
-        Request::Application(own) => control.apply(Change::Application(own)).map_err(str::to_owned),
+        Request::Application(own) => control.apply(Change::Application(own), saved()?).map_err(str::to_owned),
         Request::Disable => control.disable().map_err(str::to_owned),
     }
 }
@@ -651,6 +666,13 @@ mod tests {
         std::fs::read_to_string(f.root.join("config").join(FILE)).unwrap()
     }
 
+    impl Control {
+        /// Applies a change as a surface that has just shown what is saved.
+        fn change(&self, change: Change) -> Result<String, &'static str> {
+            self.apply(change, self.setting().unwrap())
+        }
+    }
+
     #[test]
     fn presence_is_off_until_enabled_and_then_uses_milos_application_with_no_names() {
         let f = Fixture::folder();
@@ -660,7 +682,7 @@ mod tests {
         assert_eq!(status.setting.application_id(), 1_573_574_411_418_599_586);
         assert!(!f.root.join("config").exists(), "reading the choice writes nothing");
 
-        assert!(control.apply(Change::Enable).unwrap().starts_with("Discord presence is on."));
+        assert!(control.change(Change::Enable).unwrap().starts_with("Discord presence is on."));
         assert_eq!(saved(&f), "presence = true\n");
         let on = control.status().unwrap();
         assert_eq!(on.setting, Setting { enabled: true, application: None, details: Details::Generic });
@@ -676,29 +698,29 @@ mod tests {
         let f = Fixture::folder();
         let control = control(&f);
         // Choosing while presence is off turns nothing on.
-        control.apply(Change::Application(Some(OWN))).unwrap();
-        let said = control.apply(Change::Details(Details::Both)).unwrap();
+        control.change(Change::Application(Some(OWN))).unwrap();
+        let said = control.change(Change::Details(Details::Both)).unwrap();
         assert_eq!(
             said,
             "Discord presence shows the session name and the project's folder name. Presence is off, so nothing is shown."
         );
         assert_eq!(saved(&f), "presence = false\napplication_id = 1234567890123456789\ndetails = both\n");
 
-        control.apply(Change::Enable).unwrap();
+        control.change(Change::Enable).unwrap();
         control.disable().unwrap();
-        control.apply(Change::Enable).unwrap();
+        control.change(Change::Enable).unwrap();
         let kept = Setting { enabled: true, application: Some(OWN), details: Details::Both };
         assert_eq!(control.setting().unwrap(), kept);
         assert_eq!(kept.application_id(), OWN);
 
         // Going back to Milo's application and to no names removes them from the file.
         assert!(
-            control.apply(Change::Application(None)).unwrap().starts_with("Discord presence uses Milo's application.")
+            control.change(Change::Application(None)).unwrap().starts_with("Discord presence uses Milo's application.")
         );
-        control.apply(Change::Details(Details::Generic)).unwrap();
+        control.change(Change::Details(Details::Generic)).unwrap();
         assert_eq!(saved(&f), "presence = true\n");
         // Milo's own ID is Milo's application however it was given.
-        control.apply(Change::Application(Some(OFFICIAL_APPLICATION))).unwrap();
+        control.change(Change::Application(Some(OFFICIAL_APPLICATION))).unwrap();
         assert_eq!(control.setting().unwrap().application, None);
     }
 
@@ -717,7 +739,7 @@ mod tests {
             assert_eq!(setting, Setting { enabled, application: Some(OWN), details: Details::Generic });
             assert_eq!(setting.public(), public(Details::Generic, true));
             // Saving it again without a change writes the same file.
-            control.apply(Change::Details(Details::Generic)).unwrap();
+            control.change(Change::Details(Details::Generic)).unwrap();
             assert_eq!(saved(&f), text);
         }
     }
@@ -737,7 +759,7 @@ mod tests {
             std::fs::write(&file, text).unwrap();
             assert!(control.setting().is_err(), "{text:?}");
             for change in [Change::Enable, Change::Details(Details::Both), Change::Application(None)] {
-                assert_eq!(control.apply(change), Err(UNREADABLE));
+                assert_eq!(control.apply(change, Setting::default()), Err(UNREADABLE));
             }
             // Turning it off still stops a helper, and says the choice itself could not be saved.
             assert_eq!(control.disable(), Err(UNREADABLE));

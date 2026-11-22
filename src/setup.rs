@@ -952,8 +952,22 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
     }
 
     /// Saves one change to Discord presence at once: it is one global choice, not part of a draft.
+    /// The change is to the choice this screen last showed.
     fn change_presence(&mut self, change: presence::Change) -> Result<String, &'static str> {
-        let result = self.presence.as_ref().ok_or(PRESENCE_UNAVAILABLE)?.apply(change);
+        let shown = self.presence_view.as_ref().map(|status| status.setting);
+        self.change_shown_presence(change, shown)
+    }
+
+    /// Saves one change to the Discord presence choice a surface had `shown` when it was asked for.
+    fn change_shown_presence(
+        &mut self,
+        change: presence::Change,
+        shown: Option<presence::Setting>,
+    ) -> Result<String, &'static str> {
+        let result = match (&self.presence, shown) {
+            (Some(control), Some(shown)) => control.apply(change, shown),
+            _ => Err(PRESENCE_UNAVAILABLE),
+        };
         self.reload_presence();
         result
     }
