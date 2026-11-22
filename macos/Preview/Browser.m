@@ -3,6 +3,11 @@
 #import <WebKit/WebKit.h>
 #include <math.h>
 
+static NSEventModifierFlags PreviewShortcutModifiers(NSEvent *event) {
+    return event.modifierFlags &
+        (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl | NSEventModifierFlagShift);
+}
+
 // Returns the serialized web origin, not any user- or page-controlled URL path.
 static NSString *PreviewOrigin(NSURL *url, BOOL initial) {
     if (!url) return nil;
@@ -154,8 +159,7 @@ static NSString *const PreviewPickerScript =
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
     // The accessory helper has no Edit menu. Handle only the focused page's
     // standard editing commands through AppKit's normal responder actions.
-    NSEventModifierFlags modifiers = event.modifierFlags &
-        (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl | NSEventModifierFlagShift);
+    NSEventModifierFlags modifiers = PreviewShortcutModifiers(event);
     if (self.window.isKeyWindow && self.window.firstResponder == self) {
         NSString *key = event.charactersIgnoringModifiers.lowercaseString;
         if ([key isEqualToString:@"z"]) {
@@ -215,13 +219,33 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     NSURL *_pickURL;
 }
 - (instancetype)initWithURL:(NSURL *)url origin:(NSString *)origin returnFocus:(void (^)(void))returnFocus;
+- (void)returnToTerminal:(id)sender;
 @end
+
+static SEL PreviewShortcutAction(NSEvent *event) {
+    if (event.type == NSEventTypeKeyDown &&
+        PreviewShortcutModifiers(event) == (NSEventModifierFlagCommand | NSEventModifierFlagShift) &&
+        [event.charactersIgnoringModifiers isEqualToString:@"\r"]) return @selector(returnToTerminal:);
+    return NULL;
+}
 
 @implementation MiloPreviewBrowser
 
 - (BOOL)isFlipped { return YES; }
 
 - (BOOL)isOpaque { return YES; }
+
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    // Reserve the escape back to Rex before WKWebView can dispatch it to the page.
+    if (self.window.isKeyWindow && event.window == self.window) {
+        SEL action = PreviewShortcutAction(event);
+        if (action) {
+            if (!event.isARepeat) [NSApp sendAction:action to:self from:_terminal];
+            return YES;
+        }
+    }
+    return [super performKeyEquivalent:event];
+}
 
 - (void)drawRect:(NSRect)dirtyRect {
     [NSColor.windowBackgroundColor setFill];
@@ -273,6 +297,8 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     _reload.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     _select = [self buttonWithSymbol:@"scope" title:@"Select an element" action:@selector(armPick:)];
     _terminal = [self buttonWithSymbol:@"terminal" title:@"Return to terminal" action:@selector(returnToTerminal:)];
+    _terminal.toolTip = @"Return to terminal (⇧⌘↩)";
+    [_terminal setAccessibilityHelp:@"Keyboard shortcut: Command-Shift-Return."];
 
     _address = [NSTextField labelWithString:origin];
     _address.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];

@@ -18,6 +18,8 @@ milo preview http://localhost:3000 --placement left
 
 The choices are `left`, `right`, `above`, `below` and `floating`. Floating requests a Rex floating layer **in the same tab**; it does not fall back to a split. An ambiguous main terminal or viewer is not a placement hint: Milo should refuse rather than attach to a different window.
 
+Click **Return to terminal** or press **Command-Shift-Return** while editing the page to return to the working terminal. **Command-W** in the focused preview closes it. The helper hides when Rex is not the frontmost application.
+
 ## Window ownership and permissions
 
 Milo does not patch Rex or install a plugin. On macOS the Cargo build compiles a separate system-framework helper, embeds it in `milo` and installs that exact helper in the private macOS user cache on demand. The terminal CLI does not link AppKit or WebKit. No separate package, JavaScript runtime or browser extension is required.

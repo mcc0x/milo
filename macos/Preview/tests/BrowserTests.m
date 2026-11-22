@@ -62,10 +62,26 @@ static void Click(NSView *view, CGFloat x, CGFloat y) {
     [window sendEvent:mouse(NSEventTypeLeftMouseUp)];
 }
 
+static NSEvent *KeyEvent(NSWindow *window, NSString *key, unsigned short code, NSEventModifierFlags flags) {
+    return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags
+                           timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:window.windowNumber context:nil
+                          characters:key charactersIgnoringModifiers:key isARepeat:NO keyCode:code];
+}
+
 static void Key(NSWindow *window, NSString *key, unsigned short code, NSEventModifierFlags flags) {
-    [window sendEvent:[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags
-                                           timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:window.windowNumber context:nil
-                                          characters:key charactersIgnoringModifiers:key isARepeat:NO keyCode:code]];
+    [window sendEvent:KeyEvent(window, key, code, flags)];
+}
+
+static void CheckShortcuts(void) {
+    NSEventModifierFlags shortcut = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, shortcut)) == @selector(returnToTerminal:));
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, 0)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, NSEventModifierFlagCommand)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, NSEventModifierFlagShift)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, shortcut | NSEventModifierFlagOption)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, shortcut | NSEventModifierFlagControl)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"\x03", 76, shortcut)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"T", 17, shortcut)) == NULL);
 }
 
 static NSPasteboard *TestBoard;
@@ -106,8 +122,8 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     OriginalNamedPasteboard = (NSPasteboard *(*)(id, SEL, NSPasteboardName))
         method_setImplementation(namedMethod, (IMP)TestNamedPasteboard);
 
-    __block BOOL returned = NO;
-    NSView *content = MiloPreviewContent(url, ^{ returned = YES; });
+    __block NSUInteger returns = 0;
+    NSView *content = MiloPreviewContent(url, ^{ ++returns; });
     CHECK(content != nil);
     NSPanel *window = [[SmokePanel alloc] initWithContentRect:NSMakeRect(60, 60, 430, 410)
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -225,7 +241,13 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     CHECK([Evaluate(web, @"document.title") isEqual:@"Milo fixture"]);
     CHECK(![NSFileManager.defaultManager fileExistsAtPath:escapedRequest]);
     [terminal performClick:nil];
-    CHECK(returned);
+    CHECK(returns == 1);
+    Click(web, 80, 23);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"document.activeElement.id") isEqual:@"typed"]; }));
+    CHECK(window.firstResponder == web);
+    Key(window, @"\r", 36, NSEventModifierFlagCommand | NSEventModifierFlagShift);
+    CHECK(WaitFor(^BOOL{ return returns == 2; }));
+    CHECK([Evaluate(web, @"document.activeElement.id") isEqual:@"typed"]);
     [window orderOut:nil];
     window.contentView = nil;
     [window close];
@@ -237,6 +259,11 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
+        CheckShortcuts();
+        if (argc == 2 && [@(argv[1]) isEqualToString:@"--keys-only"]) {
+            puts("Native NSEvent accelerator selection passed (no window or focus required).");
+            return 0;
+        }
         CHECK(argc == 4);
         CheckPolicies();
         [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory];

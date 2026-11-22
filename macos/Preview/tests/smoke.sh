@@ -1,6 +1,11 @@
 #!/bin/sh
 # Run on a Mac with a graphical session; opens a disposable test window.
+# Pass --keys-only to check NSEvent shortcut selection without opening a window.
 set -eu
+case "${1-}:$#" in
+    :0|--keys-only:1) ;;
+    *) echo 'Usage: sh smoke.sh [--keys-only]' >&2; exit 2 ;;
+esac
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
 work=$(mktemp -d "${TMPDIR:-/tmp}/milo-webkit-smoke.XXXXXXXX")
 cleanup() {
@@ -14,6 +19,10 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 xcrun clang -fobjc-arc -mmacosx-version-min=13.0 -framework AppKit -framework WebKit \
     "$here/BrowserTests.m" -o "$work/test-browser"
+if [ "${1-}" = --keys-only ]; then
+    "$work/test-browser" --keys-only
+    exit
+fi
 printf ready >"$work/hmr"
 python3 - "$work" <<'PY' &
 import base64
