@@ -72,8 +72,30 @@ fn text_with_a_picture_extension_still_shows_its_edits() {
     f.write("notes.png", "new notes\n");
     let file = f.root.join("notes.png");
     let mut working = Reader::open(&file).unwrap();
-    assert_eq!(working.next_frame(), None);
+    assert!(working.next_frame().is_some());
+    finish_picture_preparation(&mut working);
     assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
+
+    // Status-only updates and draw ticks use the already classified source.
+    use std::os::unix::fs::FileExt as _;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    static SLOTS: AtomicUsize = AtomicUsize::new(0);
+    let (entered, at_read) = mpsc::channel();
+    media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
+        entered.send(()).unwrap();
+        file.read_at(bytes, offset)
+    }));
+    f.git(&["add", "--", "notes.png"]);
+    working.filesystem_changed();
+    assert!(working.check());
+    finish_picture_preparation(&mut working);
+    assert_eq!(at_read.try_recv(), Err(mpsc::TryRecvError::Empty));
+    assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
+    f.write("notes.png", "changed again\n");
+    assert!(working.check());
+    finish_picture_preparation(&mut working);
+    at_read.try_recv().unwrap();
 
     let mut repo = Repo::open(&f.root).unwrap();
     repo.read();
@@ -133,6 +155,7 @@ fn an_empty_picture_file_is_empty_not_a_broken_picture() {
     let f = Fixture::folder();
     f.write("empty.png", "");
     let mut reader = Reader::open(&f.root.join("empty.png")).unwrap();
+    finish_picture_preparation(&mut reader);
     assert_eq!(drawn(&mut reader, 40, 3)[1], "  Empty.");
 }
 
@@ -1139,6 +1162,129 @@ fn a_parked_image_releases_loading_and_decoded_media_until_reopened() {
 }
 
 #[test]
+fn canceled_source_reads_keep_their_slots_until_they_return() {
+    use std::os::unix::fs::FileExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    static SLOTS: AtomicUsize = AtomicUsize::new(0);
+    let f = Fixture::folder();
+    let open = |path, width| {
+        let file = f.root.join(path);
+        fs::write(&file, Picture::sample_png(width, 16)).unwrap();
+        let (entered, at_read) = mpsc::channel();
+        let (release, ready) = mpsc::channel();
+        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
+            entered.send(()).unwrap();
+            // Simulate an in-progress read that cannot observe cancellation
+            // until I/O returns. Time out only to keep a broken test from hanging.
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            file.read_at(bytes, offset)
+        }));
+        (Reader::open(&file).unwrap(), at_read, release)
+    };
+
+    let (mut first, at_first, release_first) = open("first.png", 64);
+    at_first.recv_timeout(Duration::from_secs(3)).unwrap();
+    first.park_media();
+    assert_eq!(first.next_frame(), None);
+
+    let (second, at_second, release_second) = open("second.png", 48);
+    at_second.recv_timeout(Duration::from_secs(3)).unwrap();
+    drop(second);
+
+    let (mut last, at_last, release_last) = open("latest.png", 32);
+    last.tick_media();
+    assert_eq!(at_last.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout));
+    assert_eq!(SLOTS.load(Ordering::Relaxed), 2);
+    assert!(matches!(&last.body, Body::Note(note) if *note == media_load::PENDING));
+
+    release_first.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while at_last.recv_timeout(Duration::from_millis(10)) == Err(mpsc::RecvTimeoutError::Timeout) {
+        assert!(Instant::now() < deadline, "a released source slot was not reused");
+        last.tick_media();
+    }
+    release_last.send(()).unwrap();
+    finish_picture_preparation(&mut last);
+    assert!(matches!(&last.body, Body::Picture(picture) if picture.width == 32));
+    first.tick_media();
+    assert!(matches!(&first.body, Body::Note(_)), "a parked reader displayed a late result");
+    release_second.send(()).unwrap();
+}
+
+#[test]
+fn watched_binary_status_changes_do_not_rebuild_the_preview() {
+    use crate::pane::{check_watched_pane, watch_pane};
+
+    let f = Fixture::new();
+    f.write("keep.txt", "base\n");
+    f.commit("base");
+    let path = "logo.png";
+    let file = f.root.join(path);
+    fs::write(&file, Picture::sample_png(16, 8)).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::Untracked);
+    let picture_id = |reader: &Reader| match &reader.body {
+        Body::Picture(picture) => picture.id,
+        _ => panic!("binary status replaced the picture"),
+    };
+    let id = picture_id(&reader);
+    let stamp = working_path::Stamp::at(&file);
+    let (mut watcher, mut pace) = watch_pane(&mut reader, false);
+    f.git(&["add", "--", path]);
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    assert_eq!(picture_id(&reader), id);
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::Added);
+    f.git(&["commit", "-qm", "add logo"]);
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::None);
+    assert!(working_path::Stamp::at(&file) == stamp);
+    assert_eq!(picture_id(&reader), id);
+
+    f.git(&["checkout", "-qb", "theirs"]);
+    fs::write(&file, Picture::sample_png(24, 8)).unwrap();
+    f.commit("their logo");
+    f.git(&["checkout", "-q", "main"]);
+    fs::write(&file, Picture::sample_png(32, 8)).unwrap();
+    f.commit("our logo");
+    fs::write(&file, Picture::sample_png(40, 8)).unwrap();
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    finish_picture_preparation(&mut reader);
+    assert_eq!(reader.kind, Kind::Modified);
+    let id = picture_id(&reader);
+    let stamp = working_path::Stamp::at(&file);
+    // Merge only the index; leave the working image and its preview alone.
+    f.git(&["read-tree", "-i", "-m", "main^", "main", "theirs"]);
+    assert!(check_watched_pane(&mut reader, &mut watcher, &mut pace, false));
+    finish_picture_preparation(&mut reader);
+    assert!(working_path::Stamp::at(&file) == stamp);
+    assert_eq!(reader.kind, Kind::Conflict);
+    assert_eq!(picture_id(&reader), id);
+}
+
+#[test]
+fn a_movie_gets_worktree_status_without_starting_playback() {
+    let f = Fixture::new();
+    let file = f.root.join("clip.mp4");
+    f.write("clip.mp4", "previous version\n");
+    f.commit("original");
+    fs::write(&file, include_bytes!("../../tests/rex_lab/river-motion.mp4")).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reader.kind == Kind::None {
+        assert!(Instant::now() < deadline, "movie status did not finish");
+        // Advance acquisition and status but do not start FFmpeg/FFprobe.
+        reader.tick_media();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(reader.kind, Kind::Modified);
+}
+
+#[test]
 fn a_replaced_image_cannot_publish_its_old_preview() {
     let dir = Fixture::folder();
     let file = dir.root.join("logo.png");
@@ -1218,6 +1364,7 @@ fn an_unreadable_picture_explains_why_it_cannot_be_shown() {
         return;
     }
     let mut reader = Reader::open(&file).unwrap();
+    finish_picture_preparation(&mut reader);
     assert_eq!(drawn(&mut reader, 60, 6)[2].trim_start(), "This file cannot be read.");
 }
 
@@ -1482,7 +1629,7 @@ fn text_with_mp4_suffix_keeps_its_working_diff() {
     f.commit("text");
     f.write("notes.mp4", "after\n");
     let mut reader = Reader::open(&f.root.join("notes.mp4")).unwrap();
-    assert_eq!(reader.next_frame(), None);
+    finish_picture_preparation(&mut reader);
     let lines = drawn(&mut reader, 60, 8).join("\n");
     assert!(lines.contains("before") && lines.contains("after"), "{lines}");
 }

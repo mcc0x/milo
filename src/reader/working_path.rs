@@ -28,6 +28,10 @@ impl Root {
         self.identity == other.identity
     }
 
+    pub(super) fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self { dir: self.dir.try_clone()?, identity: self.identity })
+    }
+
     /// Git still needs a pathname. Check that it names the directory we are holding.
     pub(super) fn at_path(&self, path: &Path) -> Result<bool, LookupError> {
         match fs::symlink_metadata(path) {
@@ -119,6 +123,13 @@ pub(super) struct Stamp {
 }
 
 impl Stamp {
+    fn of_stat(stat: &libc::stat) -> Self {
+        Self {
+            identity: (stat.st_dev.into(), stat.st_ino.into()),
+            changed: (stat.st_ctime.into(), stat.st_ctime_nsec.into()),
+        }
+    }
+
     pub(super) fn at(path: &Path) -> Option<Self> {
         Self::regular(fs::symlink_metadata(path).ok()?)
     }
@@ -144,10 +155,7 @@ pub(super) struct Entry<'a> {
 
 impl Entry<'_> {
     pub(super) fn stamp(&self) -> Stamp {
-        Stamp {
-            identity: (self.stat.st_dev.into(), self.stat.st_ino.into()),
-            changed: (self.stat.st_ctime.into(), self.stat.st_ctime_nsec.into()),
-        }
+        Stamp::of_stat(&self.stat)
     }
 
     pub(super) fn is_special(&self) -> bool {
@@ -156,6 +164,10 @@ impl Entry<'_> {
 
     pub(super) fn is_regular(&self) -> bool {
         self.stat.st_mode & libc::S_IFMT == libc::S_IFREG
+    }
+
+    pub(super) fn is_dataless(&self) -> bool {
+        dataless(&self.stat)
     }
 
     pub(super) fn is_link(&self) -> bool {
@@ -171,6 +183,17 @@ impl Entry<'_> {
     /// Opens the file to read only, the same way.
     pub(super) fn open_read(&self) -> io::Result<File> {
         open_at(self.parent.as_ref().unwrap_or(self.root), &self.name, 0)
+    }
+
+    /// Transfers a guarded pathname to the source lane without opening its data.
+    pub(super) fn source(self) -> io::Result<ReadTarget> {
+        let stamp = self.stamp();
+        let size = self.size();
+        let dir = match self.parent {
+            Some(parent) => parent,
+            None => self.root.try_clone()?,
+        };
+        Ok(ReadTarget { dir, name: self.name, stamp, size })
     }
 
     /// Whether the user may write to the file, asked without opening it: opening
@@ -198,6 +221,48 @@ impl Entry<'_> {
             },
             _ => Content::NotFile,
         }
+    }
+}
+
+pub(super) struct ReadTarget {
+    dir: File,
+    name: CString,
+    stamp: Stamp,
+    pub(super) size: u64,
+}
+
+impl ReadTarget {
+    /// Refuse data-less placeholders before an open can request materialization.
+    pub(super) fn open(&self) -> Result<File, &'static str> {
+        const UNREADABLE: &str = "This file cannot be read.";
+        let stat = stat_at(&self.dir, &self.name).map_err(|_| UNREADABLE)?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG || Stamp::of_stat(&stat) != self.stamp {
+            return Err(UNREADABLE);
+        }
+        if dataless(&stat) {
+            return Err("Download this file before opening its preview.");
+        }
+        let file = open_at(&self.dir, &self.name, 0).map_err(|_| UNREADABLE)?;
+        if !self.matches(&file) {
+            return Err(UNREADABLE);
+        }
+        Ok(file)
+    }
+
+    pub(super) fn matches(&self, file: &File) -> bool {
+        Stamp::of_file(file) == Some(self.stamp)
+    }
+}
+
+fn dataless(_stat: &libc::stat) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // SF_DATALESS from Darwin sys/stat.h; libc does not expose it.
+        _stat.st_flags & 0x4000_0000 != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 

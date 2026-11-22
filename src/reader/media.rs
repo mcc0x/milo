@@ -99,6 +99,9 @@ pub(super) fn input(video: &mut Video, key: Key) -> Option<After> {
 pub(super) fn status<'a>(video: &Video, buffer: &'a mut [u8; 64]) -> &'a str {
     use std::io::Write as _;
 
+    if video.duration().is_zero() {
+        return "Reading video…";
+    }
     let (at, end) = (video.position().as_secs(), video.duration().as_secs());
     let state = if video.is_playing() { "Playing" } else { "Paused" };
     let size = buffer.len();

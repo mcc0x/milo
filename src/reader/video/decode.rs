@@ -135,16 +135,34 @@ impl Task {
 }
 
 fn timestamp(time: Duration) -> String {
-    // FFmpeg's seek argument has microsecond precision. Do not seek just before a
-    // displayed frame timestamp when the bookmark is between two microseconds.
-    let micros = time.as_nanos().div_ceil(1_000);
+    let micros = seek_micros(time);
     format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
+}
+
+fn seek_micros(time: Duration) -> u128 {
+    // Do not seek just before a displayed frame timestamp between two microseconds.
+    time.as_nanos().div_ceil(1_000)
 }
 
 fn playback_frames(left: Duration) -> u32 {
     // Count sample times strictly before the end, including the initial frame at zero.
     let frames = (left.as_nanos() * u128::from(FPS)).div_ceil(1_000_000_000);
     u32::try_from(frames).unwrap_or(MAX_FRAMES).min(MAX_FRAMES)
+}
+
+pub(super) fn last_seek_time(duration: Duration) -> Duration {
+    let index = playback_frames(duration).saturating_sub(1);
+    let last = frame_time(index);
+    // FFprobe rounds the duration to microseconds. Don't round a grid point up
+    // to a seek exactly at the advertised EOF.
+    if seek_micros(last) * 1_000 >= duration.as_nanos() { frame_time(index.saturating_sub(1)) } else { last }
+}
+
+fn playback_ended_early(left: Duration, count: u32) -> bool {
+    // FFmpeg's FPS filter repeats low-rate pictures up to the decoded EOF timestamp.
+    // Count the interval covered by the final output sample and allow two more samples
+    // for differences in probe, seek and resampling precision.
+    left > frame_time(count + 2)
 }
 
 fn limit_child(cpu: libc::rlim_t) -> io::Result<()> {
@@ -173,7 +191,8 @@ fn limit_child(cpu: libc::rlim_t) -> io::Result<()> {
 
 pub(super) enum Output {
     Duration(Duration),
-    Frames,
+    Still,
+    Playback { early: bool },
 }
 
 #[derive(Default)]
@@ -207,7 +226,14 @@ impl Job {
                 .name("milo-video".into())
                 .spawn(move || match task {
                     Task::Probe => probe(stdout).map(Output::Duration),
-                    Task::Frames { playing, .. } => frames(stdout, &exchange, playing).map(|()| Output::Frames),
+                    Task::Frames { left, playing, .. } => {
+                        let count = frames(stdout, &exchange, playing)?;
+                        if playing {
+                            Ok(Output::Playback { early: playback_ended_early(left, count) })
+                        } else {
+                            Ok(Output::Still)
+                        }
+                    }
                 })
                 .map_err(|_| START)?,
         );
@@ -304,16 +330,17 @@ fn duration(value: &str) -> Option<Duration> {
     Duration::try_from_secs_f64(value).ok().filter(|time| !time.is_zero())
 }
 
-fn frames(stdout: ChildStdout, exchange: &Exchange, playing: bool) -> Result<(), &'static str> {
+fn frames(stdout: ChildStdout, exchange: &Exchange, playing: bool) -> Result<u32, &'static str> {
     let mut reader = BufReader::new(stdout);
     let mut frame = VideoFrame::default();
     let mut start = None;
-    for index in 0..MAX_FRAMES {
+    let limit = if playing { MAX_FRAMES } else { 1 };
+    for index in 0..limit {
         if exchange.stop.load(Ordering::Relaxed) {
-            break;
+            return Ok(index);
         }
         if !read_frame(&mut reader, &mut frame).map_err(|_| DECODE)? {
-            return if index == 0 { Err("MP4 has no decodable local video frames.") } else { Ok(()) };
+            return if index == 0 { Err("MP4 has no decodable local video frames.") } else { Ok(index) };
         }
         let deadline = *start.get_or_insert_with(Instant::now) + frame_time(index);
         while !exchange.stop.load(Ordering::Relaxed) {
@@ -321,16 +348,13 @@ fn frames(stdout: ChildStdout, exchange: &Exchange, playing: bool) -> Result<(),
             thread::park_timeout(remaining);
         }
         if exchange.stop.load(Ordering::Relaxed) {
-            break;
+            return Ok(index);
         }
         let mut inbox = exchange.inbox.lock().expect("video exchange is not poisoned");
         let superseded = inbox.latest.replace((index, frame));
         frame = superseded.map(|(_, frame)| frame).or_else(|| inbox.spare.take()).unwrap_or_default();
-        if !playing {
-            break;
-        }
     }
-    Ok(())
+    Ok(limit)
 }
 
 fn read_frame(reader: &mut impl io::Read, frame: &mut VideoFrame) -> io::Result<bool> {
@@ -390,6 +414,26 @@ mod tests {
         assert_eq!(playback_frames(frame_time(1)), 1);
         assert_eq!(playback_frames(frame_time(1) + Duration::from_nanos(1)), 2);
         assert_eq!(playback_frames(Duration::from_secs(3600)), MAX_FRAMES);
+    }
+
+    #[test]
+    fn last_seek_uses_the_final_sample_on_the_playback_grid() {
+        assert_eq!(last_seek_time(Duration::from_millis(13_020)), Duration::from_secs(13));
+        assert_eq!(last_seek_time(Duration::from_secs(13)), frame_time(155));
+        assert_eq!(last_seek_time(Duration::from_micros(166_667)), frame_time(1));
+        assert_eq!(last_seek_time(Duration::from_millis(20)), Duration::ZERO);
+    }
+
+    #[test]
+    fn playback_eof_distinguishes_partial_streams_from_near_end_rounding() {
+        let eight_seconds = Duration::from_secs(8);
+        assert!(playback_ended_early(eight_seconds, 49));
+        assert!(!playback_ended_early(eight_seconds, 94));
+        assert!(!playback_ended_early(eight_seconds, 96));
+
+        // A job started by a seek only expects playback from the new position.
+        assert!(!playback_ended_early(Duration::from_secs(3), 36));
+        assert!(!playback_ended_early(frame_time(1), 1));
     }
 
     #[test]

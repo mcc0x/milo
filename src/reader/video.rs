@@ -1,5 +1,6 @@
 //! Muted, on-demand MP4 playback from an anonymous snapshot of an already-open file.
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, Write as _};
@@ -11,11 +12,14 @@ use std::time::{Duration, Instant};
 use crate::fs_ops::Temp;
 
 mod decode;
-use decode::{Job, Output, Task, Tools, frame_time};
+use decode::{Job, Output, Task, Tools, frame_time, last_seek_time};
 
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 const PREPARE_LIMIT: Duration = Duration::from_secs(5);
 const STALL: Duration = Duration::from_secs(5);
+
+/// A privately owned, bounded copy of a verified standalone MP4.
+pub(super) struct Snapshot(File);
 
 #[derive(Default)]
 pub(super) struct VideoFrame {
@@ -35,16 +39,14 @@ pub(super) struct Video {
     progress: Instant,
     pending: bool,
     playing: bool,
-    error: Option<&'static str>,
+    error: Option<Cow<'static, str>>,
 }
 
 impl Video {
-    pub(super) fn open_cancellable(file: File, cancel: &AtomicBool) -> Result<Self, &'static str> {
-        let deadline = Instant::now() + PREPARE_LIMIT;
-        check_preparation(cancel, deadline)?;
+    pub(super) fn from_snapshot(snapshot: Snapshot) -> Result<Self, &'static str> {
         let tools = Tools::installed().ok_or("MP4 preview requires system FFmpeg and FFprobe (8.0 or later).")?;
         Ok(Self {
-            source: Some(snapshot(file, cancel, deadline)?),
+            source: Some(snapshot.0),
             tools,
             job: None,
             frame: None,
@@ -77,7 +79,7 @@ impl Video {
         self.playing
     }
     pub(super) fn error(&self) -> Option<&str> {
-        self.error
+        self.error.as_deref()
     }
     pub(super) fn needs_tick(&self) -> bool {
         self.error.is_none() && (self.playing || self.pending)
@@ -111,16 +113,12 @@ impl Video {
         let delta = Duration::from_secs(delta_seconds.unsigned_abs());
         let target =
             if delta_seconds < 0 { self.position.saturating_sub(delta) } else { self.position.saturating_add(delta) };
-        let target = target.min(self.last_seek_time());
+        let target = target.min(last_seek_time(self.duration));
         if target != self.position {
             self.job = None;
             self.position = target;
             self.pending = true;
         }
-    }
-
-    fn last_seek_time(&self) -> Duration {
-        self.duration.saturating_sub(frame_time(1))
     }
 
     fn restart_at_eof(&mut self) {
@@ -135,7 +133,7 @@ impl Video {
             Task::Probe
         } else {
             // A parked EOF bookmark stays at EOF, but its still image comes from inside the clip.
-            let from = if self.position == self.duration { self.last_seek_time() } else { self.position };
+            let from = if self.position == self.duration { last_seek_time(self.duration) } else { self.position };
             Task::Frames { from, left: self.duration - from, playing: self.playing }
         };
         let source = self.source.as_mut().expect("a player without errors holds its snapshot");
@@ -187,7 +185,15 @@ impl Video {
                 self.start_job(Instant::now());
                 true
             }
-            Some(Output::Frames) => {
+            Some(Output::Still) => {
+                self.pause();
+                true
+            }
+            Some(Output::Playback { early }) => {
+                if early {
+                    let at = self.position.as_secs();
+                    return self.fail(format!("MP4 playback ended early at {}:{:02}.", at / 60, at % 60));
+                }
                 self.position = self.duration;
                 self.pause();
                 true
@@ -199,10 +205,10 @@ impl Video {
         }
     }
 
-    fn fail(&mut self, message: &'static str) -> bool {
+    fn fail(&mut self, message: impl Into<Cow<'static, str>>) -> bool {
         self.pause();
         self.source = None;
-        self.error = Some(message);
+        self.error = Some(message.into());
         true
     }
 }
@@ -217,12 +223,13 @@ fn check_preparation(cancel: &AtomicBool, deadline: Instant) -> Result<(), &'sta
     }
 }
 
-fn snapshot(mut source: File, cancel: &AtomicBool, deadline: Instant) -> Result<File, &'static str> {
+pub(super) fn snapshot(source: &mut File, cancel: &AtomicBool) -> Result<Snapshot, &'static str> {
     const READ: &str = "Could not read the MP4 file.";
     const COPY: &str = "Could not create a private MP4 preview snapshot.";
     const LARGE: &str = "MP4 preview is limited to 128 MiB.";
     const FORMAT: &str = "MP4 preview requires a standalone MP4 file.";
     const PREFIX: usize = 4096;
+    let deadline = Instant::now() + PREPARE_LIMIT;
 
     check_preparation(cancel, deadline)?;
     let meta = source.metadata().map_err(|_| READ)?;
@@ -258,7 +265,7 @@ fn snapshot(mut source: File, cancel: &AtomicBool, deadline: Instant) -> Result<
         match source.read(&mut chunk[..len]) {
             Ok(0) => {
                 check_preparation(cancel, deadline)?;
-                return Ok(copy);
+                return Ok(Snapshot(copy));
             }
             Ok(n) if n as u64 > remaining => return Err(LARGE),
             Ok(n) => {
@@ -333,11 +340,11 @@ mod tests {
         let mut original = b"\0\0\0\x10ftypisom\0\0\0\0original".to_vec();
         original.extend((0..=255).cycle().take(150_000));
         fs::write(&path, &original).unwrap();
-        let opened = File::open(&path).unwrap();
+        let mut opened = File::open(&path).unwrap();
         fs::rename(&path, fixture.root.join("moved.mp4")).unwrap();
         fs::write(&path, b"replacement").unwrap();
 
-        let mut copy = snapshot(opened, &AtomicBool::new(false), Instant::now() + PREPARE_LIMIT).unwrap();
+        let Snapshot(mut copy) = snapshot(&mut opened, &AtomicBool::new(false)).unwrap();
         assert_eq!(copy.metadata().unwrap().nlink(), 0);
         copy.rewind().unwrap();
         let mut bytes = Vec::new();
@@ -348,12 +355,9 @@ mod tests {
     #[test]
     fn rejects_a_file_larger_than_the_snapshot_limit() {
         let fixture = Fixture::folder();
-        let file = File::create(fixture.root.join("oversized.mp4")).unwrap();
+        let mut file = File::create(fixture.root.join("oversized.mp4")).unwrap();
         file.set_len(MAX_BYTES + 1).unwrap();
-        assert_eq!(
-            snapshot(file, &AtomicBool::new(false), Instant::now() + PREPARE_LIMIT).unwrap_err(),
-            "MP4 preview is limited to 128 MiB."
-        );
+        assert_eq!(snapshot(&mut file, &AtomicBool::new(false)).err(), Some("MP4 preview is limited to 128 MiB."));
     }
 
     #[test]
@@ -362,11 +366,11 @@ mod tests {
         let path = fixture.root.join("clip.mp4");
         fs::write(&path, b"\0\0\0\x10ftypisom\0\0\0\0").unwrap();
         assert_eq!(
-            snapshot(File::open(&path).unwrap(), &AtomicBool::new(true), Instant::now() + PREPARE_LIMIT).unwrap_err(),
-            "MP4 preview preparation was canceled."
+            snapshot(&mut File::open(&path).unwrap(), &AtomicBool::new(true)).err(),
+            Some("MP4 preview preparation was canceled.")
         );
         assert_eq!(
-            snapshot(File::open(&path).unwrap(), &AtomicBool::new(false), Instant::now()).unwrap_err(),
+            check_preparation(&AtomicBool::new(false), Instant::now()).unwrap_err(),
             "MP4 preview preparation timed out."
         );
     }
