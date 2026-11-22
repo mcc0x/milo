@@ -100,12 +100,12 @@ impl Style {
         if self.0 & STRIKE != 0 {
             out.extend_from_slice(b";9");
         }
-        let _ = match (self.0 & FG).checked_sub(1) {
-            None => Ok(()),
-            Some(c @ 0..8) => write!(out, ";{}", 30 + c),
-            Some(c @ 8..16) => write!(out, ";{}", 82 + c),
-            Some(c) => write!(out, ";38;5;{c}"),
-        };
+        match (self.0 & FG).checked_sub(1) {
+            None => {}
+            Some(c @ 0..8) => push_number(out, b";", 30 + c as usize),
+            Some(c @ 8..16) => push_number(out, b";", 82 + c as usize),
+            Some(c) => push_number(out, b";38;5;", c as usize),
+        }
         // A wash is mixed from the terminal's own background. Where that is
         // not known the bar falls back on the theme's grey, and the other
         // washes on nothing: the lines they mark are marked in the margin too.
@@ -120,6 +120,22 @@ impl Style {
         }
         out.push(b'm');
     }
+}
+
+/// Appends `lead` and then a decimal number, as `write!` would but without its formatting.
+fn push_number(out: &mut Vec<u8>, lead: &[u8], mut number: usize) {
+    let mut digits = [0; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + u8::try_from(number % 10).expect("remainder is a decimal digit");
+        number /= 10;
+        if number == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(lead);
+    out.extend_from_slice(&digits[at..]);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -622,11 +638,17 @@ impl Screen {
         let palette_changed = washes != prev_washes;
         let same_arena = self.marks_flushed;
         let prev_marks = if same_arena { &self.marks } else { &self.prev_marks };
+        // Equal cells are equal on the terminal unless they name glyphs kept in different places.
+        let comparable = !palette_changed && (same_arena || self.marks.ranges.is_empty());
         let mut active = None;
         let mut utf8 = [0u8; 4];
         for y in 0..self.h {
             let cur = &self.cur[y * self.w..(y + 1) * self.w];
             let prev = &mut self.prev[y * self.w..(y + 1) * self.w];
+            // Most rows of most frames are as they were.
+            if comparable && cur == &*prev {
+                continue;
+            }
             let mut next_col = usize::MAX;
             for (x, (&cell, old)) in cur.iter().zip(prev).enumerate() {
                 let same = cell.st == old.st
@@ -646,16 +668,20 @@ impl Screen {
                     continue;
                 }
                 if x != next_col {
-                    let _ = write!(self.out, "\x1b[{};{}H", y + 1, x + 1);
+                    push_number(&mut self.out, b"\x1b[", y + 1);
+                    push_number(&mut self.out, b";", x + 1);
+                    self.out.push(b'H');
                 }
                 if active != Some(cell.st) {
                     cell.st.sgr(&mut self.out, washes);
                     active = Some(cell.st);
                 }
-                if let Some(text) = self.marks.get(cell.glyph) {
-                    self.out.extend_from_slice(text.as_bytes());
-                } else {
-                    self.out.extend_from_slice(cell.glyph.scalar().encode_utf8(&mut utf8).as_bytes());
+                match u8::try_from(cell.glyph.0) {
+                    Ok(byte) if byte.is_ascii() => self.out.push(byte),
+                    _ => match self.marks.get(cell.glyph) {
+                        Some(text) => self.out.extend_from_slice(text.as_bytes()),
+                        None => self.out.extend_from_slice(cell.glyph.scalar().encode_utf8(&mut utf8).as_bytes()),
+                    },
                 }
                 let wide = cur.get(x + 1).is_some_and(|cell| cell.glyph == CONT);
                 next_col = x + 1 + usize::from(wide);
@@ -827,6 +853,25 @@ mod tests {
         screen.underline(0, 2..8);
         assert!(frame(&mut screen).contains("\x1b[1;2H\x1b[0;4;7;31m界"));
         assert!(frame(&mut screen).is_empty());
+    }
+
+    #[test]
+    fn colours_and_positions_are_written_as_decimal_numbers() {
+        let mut screen = Screen::sized(120, 12);
+        frame(&mut screen);
+        for colour in 0..=255 {
+            let (x, y) = (usize::from(colour) % 119, usize::from(colour) % 12);
+            screen.clear();
+            screen.put(x, y, 1, "x", Style::fg(colour));
+            let code = match colour {
+                0..8 => (30 + colour).to_string(),
+                8..16 => (82 + colour).to_string(),
+                _ => format!("38;5;{colour}"),
+            };
+            let wanted = format!("\x1b[{};{}H\x1b[0;{code}mx", y + 1, x + 1);
+            let sent = frame(&mut screen);
+            assert!(sent.contains(&wanted), "{sent:?}");
+        }
     }
 
     #[test]

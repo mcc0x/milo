@@ -225,7 +225,7 @@ Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for lang
 3. Add a test with a few idiomatic lines and the classes you expect.
 4. Add its row to the language table in `docs/panes.md`.
 
-The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long.
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long. For the same reason a comment or a string is looked for only at a byte that can begin one: the first byte of each mark in the tables, and those `Dialect::openers` lists for a dialect, which a new opener in `delimiters.rs` must be added to.
 
 ### Adding a formatter
 
@@ -243,7 +243,7 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 
 `src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
-`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft:
+`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft, above lines far wider than the pane and in a file that is one line:
 
 ```sh
 cargo test --release --locked --test reader_bench -- --ignored --nocapture
@@ -263,6 +263,16 @@ cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocap
 ```
 
 `tests/web_bench.rs` starts `milo web --no-open` in a throwaway home, outside Rex and beside a stand-in for Rex that answers at once or after a pause. It times the link, the first authenticated state, and that state when a stand-in for a browser asks 100 milliseconds after the link. `tests/history_bench.rs` opens a five-file commit and a six-thousand-file one in a generated repository, and times the frame that lists the files, the frame after Down sent with Enter, and Down alone; in a second repository of commits with two-megabyte subjects it times the first frame and Down. Both take `MILO_BENCH_BASE`. `src/usage/tests/idle.rs` is inside the crate, because only there can it run the pane's timer twenty times without waiting twenty intervals: it counts the `sqlite3` processes an idle pane starts for a small and a large pair of generated databases, and the looks until a new row shows. Compare its figures between two checkouts.
+
+`tests/menu-bench.sh` times the macOS menu app with made-up frames, on a Mac with a menu bar to draw in:
+
+```sh
+sh tests/menu-bench.sh
+```
+
+It builds a separate app under `target/menu-bench/` from the menu app's own sources and `tests/menu-bench.swift`, and runs it once. That app shows its own menu bar item and popover for about a minute. It starts no reader, reads no usage, and neither stops nor replaces an installed Milo. Each row gives the time the main thread was held and, for frames, the CPU the whole process spent per frame, which also counts what SwiftUI draws afterwards. The rows cover a frame equal to the last, one that changes the badge, and one that changes only the popover, each before the popover was first opened, with it closed and with it open. The popover opens without its animation, so opening it is timed whole. Runs differ by more than a build does: a whole run can take two or three times the CPU of the next, so run each build several times turn about, and compare a frame's CPU with the `idle` row of the same run. The last line is a check, and the run fails without it: a row whose reset passes must be redrawn with no new frame to say so, in an open panel and in one opened afterwards. `tests/menu-bench/` holds such a report for the revision in its name.
+
+`sh tests/menu-bench.sh --check` runs that check alone, in about ten seconds. The copy holds its popover open itself, so a click elsewhere cannot end a row or the check early.
 
 ## Commit messages
 
@@ -436,6 +446,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
 | `tests/menu-badge.swift` | Checks which provider and window the menu bar badge shows. |
+| `tests/menu-bench.sh` | Builds a throwaway copy of the menu app and times frames and opening the popover in it. |
+| `tests/menu-bench.swift` | Feeds that copy made-up frames and reports the times. |
+| `tests/menu-bench/baseline-d7be344.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/menu-handoff.swift` | Checks that the menu app hands the browser its private link through an owner-only file. |
 | `tests/menubar.sh` | Verifies the built menu app's signature, runs those three checks, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |

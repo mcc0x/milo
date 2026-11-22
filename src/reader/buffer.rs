@@ -61,8 +61,13 @@ struct Change {
     cursor: Pos,
 }
 
+/// The lines a change taken back or made again replaced, and where it left the cursor.
 pub(super) struct Replay {
     pub(super) first_row: usize,
+    /// The last line that was replaced.
+    pub(super) old_last_row: usize,
+    /// The last line of what replaced them.
+    pub(super) last_row: usize,
     pub(super) cursor: Pos,
 }
 
@@ -217,7 +222,7 @@ impl Buffer {
     }
 
     /// Replays a replacement using only rows spanned by the edited byte range.
-    fn rewrite(&mut self, from: Pos, len: usize, text: &str) {
+    fn rewrite(&mut self, from: Pos, len: usize, text: &str, cursor: Pos) -> Replay {
         let mut to = Pos { col: from.col + len, ..from };
         while to.row + 1 < self.rows.len() {
             let bytes = self.rows[to.row].byte_len();
@@ -227,8 +232,9 @@ impl Buffer {
             to.col -= bytes;
             to.row += 1;
         }
-        self.splice(from, to, text);
+        let end = self.splice(from, to, text);
         self.size = self.size + text.len() - len;
+        Replay { first_row: from.row, old_last_row: to.row, last_row: end.row, cursor }
     }
 
     /// Replaces the text between two places and returns where the new text ends.
@@ -277,8 +283,7 @@ impl Buffer {
     /// Takes back the last change and returns its first row and previous cursor.
     pub(super) fn undo(&mut self) -> Option<Replay> {
         let change = self.undo.pop()?;
-        self.rewrite(change.from, change.inserted.len(), &change.removed);
-        let replay = Replay { first_row: change.from.row, cursor: change.cursor };
+        let replay = self.rewrite(change.from, change.inserted.len(), &change.removed, change.cursor);
         self.redo.push(change);
         self.typing = false;
         Some(replay)
@@ -287,8 +292,7 @@ impl Buffer {
     /// Makes the last undone change again and returns its first row and resulting cursor.
     pub(super) fn redo(&mut self) -> Option<Replay> {
         let change = self.redo.pop()?;
-        self.rewrite(change.from, change.removed.len(), &change.inserted);
-        let replay = Replay { first_row: change.from.row, cursor: change.end };
+        let replay = self.rewrite(change.from, change.removed.len(), &change.inserted, change.end);
         self.undo.push(change);
         self.typing = false;
         Some(replay)

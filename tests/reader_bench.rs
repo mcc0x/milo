@@ -1,6 +1,7 @@
 //! Times the reader of a release build on generated files: long lines, syntax
 //! that spans lines, diffs just under the size Milo will load, and edits near
-//! the end of a large draft.
+//! the end of a large draft, above lines far wider than the pane and in a
+//! file that is one line.
 //!
 //! Each run starts `milo view` in a real terminal, answers its questions as a
 //! terminal would, and times what a person waits for: the first frame that
@@ -141,6 +142,38 @@ const SCENARIOS: &[Scenario] = &[
             setup(b'\x1b'),
         ],
     },
+    // Every line below the one edited is far wider than the pane.
+    Scenario {
+        name: "edit-long-lines",
+        file: "long.rs",
+        at_commit: false,
+        keys: &[
+            setup(b'e'),
+            there_and_back("type", b'x', b'\x1a', 24),
+            there_and_back("split-line", b'\r', b'\x1a', 24),
+            setup(b'x'),
+            there_and_back("undo", b'\x1a', b'\x19', 24),
+            setup(b'\x1a'),
+            there_and_back("redo", b'\x19', b'\x1a', 24),
+            setup(b'\x1b'),
+        ],
+    },
+    // The whole file is the line edited, as a script made small for a browser is.
+    Scenario {
+        name: "edit-one-line",
+        file: "one.js",
+        at_commit: false,
+        keys: &[
+            setup(b'e'),
+            there_and_back("type", b'x', b'\x1a', 24),
+            there_and_back("split-line", b'\r', b'\x1a', 24),
+            setup(b'x'),
+            there_and_back("undo", b'\x1a', b'\x19', 24),
+            setup(b'\x1a'),
+            there_and_back("redo", b'\x19', b'\x1a', 24),
+            setup(b'\x1b'),
+        ],
+    },
 ];
 
 /// A throwaway home and repository holding the generated files.
@@ -163,6 +196,7 @@ impl Project {
             ("blocks.rs", rust_blocks()),
             ("blocks.py", python_blocks()),
             ("blocks.lua", lua_blocks()),
+            ("one.js", one_line()),
         ] {
             assert!(text.len() < 2 << 20, "{name} is {} bytes", text.len());
             project.write(name, &text);
@@ -250,6 +284,16 @@ fn long_lines() -> String {
         }
         text.push('\n');
     }
+    text
+}
+
+/// One line just under the two mebibytes the reader will show, and the line break that ends it.
+fn one_line() -> String {
+    let mut text = format!("/* {MARK} one line */");
+    for unit in 0..23_000 {
+        write!(text, "function f{unit}(a,b){{return a+b*{unit}||\"s{unit}\"}};var v{unit}=[1,2,{{k:null}}];").unwrap();
+    }
+    text.push('\n');
     text
 }
 
