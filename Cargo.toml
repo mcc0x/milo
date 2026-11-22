@@ -1,6 +1,6 @@
 [package]
 name = "milo"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.91"
 description = "Terminal panes for browsing Git files and commits, reading code, and checking coding agent usage."
