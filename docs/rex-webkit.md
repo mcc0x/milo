@@ -8,6 +8,32 @@ milo preview http://localhost:3000
 
 Rex owns the terminal anchor, divider and layer. A small Milo helper owns a borderless AppKit panel containing a real `WKWebView`. The page is not rendered into a bitmap, embedded in the settings dashboard or opened in the default browser. The command never searches for servers, picks a port, changes Rex settings or navigates an existing browser tab. Linux, SSH and remote sessions are not supported.
 
+### Launching from Rex for Mac
+
+1. In **Rex.app on the Mac**, select the local host and use [New Tab (⌘T)](https://www.superlogical.com/rex/docs/reference/mac-actions#action-client-tab-new). Use a new disposable tab for testing. This is a **Mac client action**, not `rex window new` in a shell.
+2. In the new tab’s **main working terminal**, `cd` to the project. Start the dev server if needed. Run `milo preview http://localhost:3000` there. When testing a PR build, use its absolute binary path in place of `milo`; no installation is needed.
+3. If Milo says the terminal **isn’t owned** by a local Mac client, stop before troubleshooting Accessibility. A connected Mac, an active tab, or a Mac-owned sidebar does **not** establish ownership of the working block. An attached phone need not be disconnected.
+
+To check from that same working shell, the following read-only commands print only the owner classification (requires `jq`):
+
+```sh
+(
+  rex --autostart=false block inspect -s "$REX_SESSION" "$REX_BLOCK" --json &&
+  rex --autostart=false api call -s "$REX_SESSION" session.list_clients '{}'
+) | jq -ser --argjson uid "$(id -u)" '
+  if length != 2 then error("incomplete Rex response") else
+    .[0].block.owner as $owner |
+    if $owner == null then "working block: no owner"
+    elif any(.[1].clients[]; .client_id == $owner and .connection_state == "connected"
+      and .info.kind == "app" and .info.platform == "macos" and .principal.kind == "peer"
+      and .principal.transport == "unix" and .principal.uid == $uid and (.principal.pid // 0) > 0)
+    then "working block: local Mac app owner"
+    else "working block: no matching local Mac app owner" end
+  end'
+```
+
+On Rex `0.1.0-preview.21`, a disposable server with a Mac-identifying Unix app peer attached left the working block from **`rex window new` unowned**. Creating the same shell through `session.new_window` on the attached app connection assigned it to that peer without an explicit claim. From inside those two PTYs, Milo’s production identification code refused the first and returned the exact block, window and app peer for the second. This checks the server contract, not a GUI keystroke. If a fresh Mac-created terminal still refuses, report the Rex version, owner classification and Milo error; do not force ownership or change privacy settings to bypass the check.
+
 ## Placement
 
 The default is **Right** of the main working terminal, not right of the sidebar. Choose **Preview placement** in `milo setup` → Workflow or `milo web` → Panes → Preview. These edit the same preference in the existing settings scopes. To try another placement once, without saving anything:
