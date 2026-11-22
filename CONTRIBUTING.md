@@ -243,7 +243,7 @@ The tests use stand-ins written by `format::tests::stand_in`, so they pass on a 
 
 `src/usage/tests/accounts.rs` does the same for accounts against a loopback server: a missing key, a settings file others can read, a refused key, a rate limit, an unreachable provider, an old answer and a reply in an unknown shape.
 
-`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft and above lines far wider than the pane:
+`tests/reader_bench.rs` times the reader of a release build on generated files: long lines, comments and strings that span lines, and diffs just under the size Milo loads. It measures the first frame and the frame after each key through a real terminal, including typing, splitting a line, undo and redo near the end of a large draft, above lines far wider than the pane and in a file that is one line:
 
 ```sh
 cargo test --release --locked --test reader_bench -- --ignored --nocapture

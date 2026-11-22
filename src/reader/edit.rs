@@ -826,7 +826,9 @@ impl Editor {
         let reach = painter.reach();
         for i in 0..shown {
             let row = self.top + i;
-            let state = self.state_at(row);
+            // An empty line has nothing to colour. The last line of a file that ends with a
+            // line break is one, and what it starts in is found by reading all of the line above.
+            let state = if self.buffer.row(row).is_empty() { State::Code } else { self.state_at(row) };
             let number = u32::try_from(row + 1).unwrap_or(u32::MAX);
             // A line can be megabytes long; only what can be drawn of it is made ready to draw.
             let text = self.buffer.row(row);
@@ -1051,6 +1053,23 @@ mod tests {
         editor.key(Key::Char('*'), Instant::now());
         assert!(matches!(editor.state_at(22), State::Comment(..)));
         assert_eq!(editor.open.known, 23);
+    }
+
+    #[test]
+    fn an_empty_line_is_drawn_without_reading_the_line_above_it_for_what_it_starts_in() {
+        let f = Fixture::folder();
+        f.write("one.rs", "let a = 1;\n");
+        f.write("open.rs", "/* open\n\nstill a comment\n");
+        let mut screen = Screen::sized(40, 6);
+        let mut editor = Reader::open(&f.root.join("one.rs")).unwrap().open_editor().unwrap();
+        editor.draw_body(&mut screen, 4);
+        assert_eq!(editor.open.known, 1);
+
+        // A line below an empty one is still coloured by what is open above them both.
+        let mut editor = Reader::open(&f.root.join("open.rs")).unwrap().open_editor().unwrap();
+        editor.draw_body(&mut screen, 4);
+        let out = String::from_utf8(screen.emitted()).unwrap();
+        assert!(out.contains("\x1b[0;3;2mstill a comment"), "{out:?}");
     }
 
     #[test]
