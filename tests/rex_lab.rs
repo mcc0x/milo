@@ -915,7 +915,6 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
 #[ignore = "needs Rex and Python 3; starts a disposable server and simulated viewer"]
 fn preview_layout_and_observer() {
     use std::io::{BufRead as _, BufReader};
-    use std::sync::mpsc::channel;
 
     let mut lab = Lab::start();
     // The request runner must be a real PTY descendant, just as Milo is.
@@ -927,13 +926,29 @@ fn preview_layout_and_observer() {
     let pid_file = lab.root.join("preview-arguments");
     let nested = lab.root.join("nested-worktree");
     fs::create_dir(&nested).unwrap();
+    let open_script = lab.root.join("preview-open.lua");
+    fs::write(
+        &open_script,
+        format!(
+            "if rex.args.switch_to then\n\
+                 local split = rex.session.new_split\n\
+                 rex.session.new_split = function(args)\n\
+                     assert(rex.session.focus_window{{window_id=rex.args.switch_to}})\n\
+                     return split(args)\n\
+                 end\n\
+             end\n\
+             dofile('{script}')\n"
+        ),
+    )
+    .unwrap();
+    let open_script = open_script.display();
     fs::write(
         lab.root.join("preview-request"),
         format!(
             "read -r target < \"$1\"\n\
              payload=$(cat \"$1.json\")\n\
              payload=${{payload/PID_TOKEN/$$}}\n\
-             '{root}/bin/rex' do -s \"$REX_SESSION\" -b \"$target\" '{script}' --args \"$payload\" > \"$1.reply\"\n\
+             '{root}/bin/rex' do -s \"$REX_SESSION\" -b \"$target\" '{open_script}' --args \"$payload\" > \"$1.reply\"\n\
              mv \"$1.reply\" \"$1.done\"\n"
         ),
     )
@@ -948,7 +963,10 @@ fn preview_layout_and_observer() {
     }
     fs::write(
         nested.join("preview-anchor"),
-        format!("printf '%s\\n' \"$$\" \"$1\" \"$2\" \"$3\" \"$4\" > '{root}/preview-arguments'\nwhile :; do /bin/sleep 10; done\n"),
+        format!(
+            "ROOT='{root}'\nREX='{root}/bin/rex'\nSCRIPT='{script}'\n{}",
+            include_str!("rex_lab/preview_anchor.sh")
+        ),
     )
     .unwrap();
     let created = lab.rex(&["new", "layout", "-c", root, "--shell=none", "--json", "--", "/bin/sh", "-i"]);
@@ -1000,7 +1018,7 @@ fn preview_layout_and_observer() {
     peer_out.read_line(&mut client).unwrap();
     assert!(client.starts_with("client:"), "{client}");
     let client = client.trim();
-    let owner = format!(r#","owner":"{client}","owner_pid":{viewer_pid}"#);
+    let owner = format!(r#","window":"{tab}","owner":"{client}","owner_pid":{viewer_pid}"#);
     let mut viewer_call = |method, args: &str| {
         writeln!(peer_in, r#"["{method}",{args}]"#).unwrap();
         let mut reply = String::new();
@@ -1062,6 +1080,7 @@ fn preview_layout_and_observer() {
         let cwd = id(&plan, "cwd");
         assert_eq!(Path::new(&cwd), nested.canonicalize().unwrap());
         assert_eq!(id(&plan, "owner"), client);
+        assert_eq!(id(&plan, "window"), tab);
         open(caller, caller, placement, &main, &cwd)
     };
     let close = |block: &str| lab.rex(&["block", "close", "-s", &session, block]);
@@ -1089,6 +1108,38 @@ fn preview_layout_and_observer() {
     }
 
     let scope = |request: &str| lab.rex(&["do", "-s", &session, "-e", request]);
+    let move_block = |block: &str, beside: &str| {
+        scope(&format!(
+            "assert(rex.session.move_block{{block_id='{block}',anchor_block_id='{beside}',direction='horizontal',side='after'}})"
+        ))
+    };
+    let plan = identify(&main, &main);
+    let planned_cwd = id(&plan, "cwd");
+    move_block(&main, &second_shell);
+    lab.rex(&["focus", "-s", &session, &second_tab]);
+    assert_eq!(open(&main, &main, "right", &main, &planned_cwd).trim(), "changed");
+    move_block(&main, &rail);
+    lab.rex(&["focus", "-s", &session, &tab]);
+    lab.rex(&["focus", "-s", &session, &main]);
+    let raced = format!(
+        r#","exe":"/bin/bash","url":"{url}","placement":"right","main":"{main}","cwd":"{planned_cwd}","switch_to":"{second_tab}"{owner}"#,
+    );
+    assert_eq!(request("open", &main, &main, &raced).trim(), "changed");
+    assert!(lab.view().tabs.values().all(|tab| !tab.labels().iter().any(|label| label.starts_with("milo:preview"))));
+    let _ = fs::remove_file(&pid_file);
+    lab.rex(&["focus", "-s", &session, &tab]);
+
+    let start_watch = |block: &str, child: u32| {
+        let extra = format!(r#","main":"{main}"{owner}"#);
+        let payload = args("watch", block, &child.to_string(), &extra);
+        let file = request_file(&lab, block);
+        let cmd = file.with_extension("watch.json");
+        let staged = file.with_extension("watch.tmp");
+        fs::write(&staged, payload).unwrap();
+        fs::rename(staged, cmd).unwrap();
+        file
+    };
+    let alive = |pid: u32| lab.command("/bin/ps").args(["-p", &pid.to_string(), "-o", "pid="]).output().unwrap().status.success();
     let check_focus = || {
         let check = format!(
             "local s=assert(rex.session.view{{}}); assert(s.active_window_id=='{tab}'); \
@@ -1105,7 +1156,7 @@ fn preview_layout_and_observer() {
     ] {
         assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
         check_focus();
-        let literal = format!("\n{url}\n{main}\n{client}\n{viewer_pid}\n");
+        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n");
         assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
@@ -1152,40 +1203,47 @@ fn preview_layout_and_observer() {
             transferred = Some((other, input, output));
         }
 
-        let payload = args("watch", block, &child.to_string(), &owner);
-        let mut watch = lab
-            .command(lab.root.join("bin/rex"))
-            .args(["--timeout", "3s", "do", "-s", &session, "-b", block, script, "--args", &payload, "--fail-fast"])
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let out = BufReader::new(watch.stdout.take().unwrap());
-        let (send, receive) = channel();
-        std::thread::spawn(move || {
-            for line in out.lines() {
-                if send.send(line.unwrap()).is_err() {
-                    break;
-                }
-            }
-        });
+        if placement == "left" {
+            let extra = format!(r#","main":"{main}"{owner}"#);
+            let payload = args("watch", block, &child.to_string(), &extra);
+            let output = lab.rex_output(&["do", "-s", &session, "-b", block, script, "--args", &payload]).unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.stdout, b"hide\n");
+            let focus = args("focus", block, &child.to_string(), &extra);
+            assert_eq!(lab.rex(&["do", "-s", &session, "-b", block, script, "--args", &focus]).trim(), "focus");
+        }
+        let watch = start_watch(block, child);
+        let records = || fs::read_to_string(watch.with_extension("watch.log")).unwrap_or_default();
+        let states = std::cell::Cell::new(0);
         let expect = |state: &str| {
-            let actual = receive.recv_timeout(PATIENCE).unwrap_or_else(|err| panic!("{placement}: expected {state}: {err}"));
-            assert_eq!(actual, state, "{placement}");
+            let index = states.get();
+            let deadline = Instant::now() + PATIENCE;
+            while records().lines().nth(index).is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(records().lines().nth(index), Some(state), "{placement}: {}", records());
+            states.set(index + 1);
         };
+        let watch_pid = || fs::read_to_string(watch.with_extension("watch.pid")).unwrap().trim().parse::<u32>().unwrap();
         let kind = if placement == "floating" { "float" } else { "tile" };
         let show = format!("show {viewer_pid} {kind}");
         expect("hide");
         if let Some((mut other, input, output)) = transferred.take() {
             lab.rex(&["focus", "-s", &session, &tab]);
-            assert!(matches!(
-                receive.recv_timeout(Duration::from_millis(250)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ), "preview appeared for a foreign owner before its first show");
+            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(records(), "hide\n", "preview appeared for a foreign owner before its first show");
             claim();
             drop((input, output));
             assert!(other.wait().unwrap().success());
         }
         expect(&show);
+        if placement == "right" {
+            scope(&format!("assert(rex.session.detach_block{{block_id='{main}'}})"));
+            expect("hide");
+            move_block(&main, &rail);
+            lab.rex(&["focus", "-s", &session, &main]);
+            expect(&show);
+        }
         if placement == "floating" {
             scope(&format!("assert(rex.session.resize_layer{{layer_id='{layer}', bounds={{0.25,0.2,0.55,0.55}}}})"));
             scope(&format!(
@@ -1197,12 +1255,11 @@ fn preview_layout_and_observer() {
             scope(&format!("assert(rex.session.set_layer_state{{layer_id='{layer}', state='normal', focus=true}})"));
             expect(&show);
             let extra = format!(r#","main":"{main}"{owner}"#);
-            let focus = args("focus", block, &child.to_string(), &extra);
-            assert_eq!(lab.rex(&["do", "-s", &session, "-b", block, script, "--args", &focus]).trim(), "ok");
+            assert_eq!(request("focus", block, block, &extra).trim(), "ok");
             check_focus();
             // Outlive the CLI connection/request timeout without polling the server.
             std::thread::sleep(Duration::from_millis(3100));
-            assert!(watch.try_wait().unwrap().is_none());
+            assert!(alive(watch_pid()));
         } else {
             let (before, after) = if side == "before" { (block, main.as_str()) } else { (main.as_str(), block) };
             scope(&format!(
@@ -1218,13 +1275,27 @@ fn preview_layout_and_observer() {
         expect("hide");
         lab.rex(&["focus", "-s", &session, &tab]);
         expect(&show);
-        if placement == "floating" {
-            scope(&format!("assert(rex.session.close_layer{{layer_id='{layer}'}})"));
-        } else {
+        let watcher = watch_pid();
+        if placement == "left" {
+            move_block(block, &second_shell);
+            lab.rex(&["focus", "-s", &session, &second_tab]);
+            expect("hide");
+            assert!(soon(|| fs::read_to_string(watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
             close(block);
+            lab.rex(&["focus", "-s", &session, &main]);
+        } else {
+            if placement == "floating" {
+                scope(&format!("assert(rex.session.close_layer{{layer_id='{layer}'}})"));
+            } else {
+                close(block);
+            }
+            // Closing the owning PTY can end the subprocess before Rex
+            // delivers its final hide. EOF is sufficient for the native pane.
+            if let Some(final_state) = records().lines().nth(states.get()) {
+                assert_eq!(final_state, "hide");
+            }
         }
-        expect("hide");
-        assert!(watch.wait().unwrap().success(), "{placement}: watcher didn't end after close");
+        assert!(soon(|| !alive(watcher)), "{placement}: watcher didn't end");
     }
 
     // The real Rust anchor reaches its startup error without asking for or
@@ -1256,12 +1327,52 @@ fn preview_layout_and_observer() {
     lab.rex(&["send-key", "-s", &session, "-b", &failure_block, "enter"]);
     assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
 
+    // Run both real children against the simulated viewer. A Python peer
+    // cannot prove Rex GUI geometry, even on a machine with AX access.
+    fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{root}/preview-postspawn-pid'\nexec '{child}' \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(launch_startup("right").trim(), "ok");
+    claim();
+    let postspawn = lab.view().tab(&tab).pane("milo:preview").block.clone();
+    let error_started = Instant::now();
+    let capture = || lab.rex(&["capture", "-s", &session, "-b", &postspawn, "--trim"]);
+    assert!(soon(|| capture().contains("Press Enter to dismiss")), "{}", capture());
+    let error = capture();
+    assert!(error.contains("WebKit preview stopped") && !error.contains(url), "{error}");
+    let pid = lab.read("preview-postspawn-pid").trim().parse::<u32>().unwrap();
+    assert!(alive(pid), "the diagnostic pane ended before the user could read it");
+    let children = lab.command("/usr/bin/pgrep").args(["-P", &pid.to_string()]).output().unwrap();
+    assert!(children.stdout.is_empty() && children.status.code() == Some(1), "{children:?}");
+    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
+    assert!(error_started.elapsed() <= Duration::from_secs(17));
+
     // A successful anchor can also exit in less than Rex's quick-exit time
     // (for example when closed during startup) without leaving a dead pane.
-    fs::write(&launcher, format!("#!/bin/sh\nprintf done > '{root}/preview-quick-exit'\nexit 0\n")).unwrap();
+    fs::write(&launcher, format!("#!/bin/sh\n/bin/sleep 0.1\nprintf done > '{root}/preview-quick-exit'\nexit 0\n"))
+        .unwrap();
     assert_eq!(launch_startup("right").trim(), "ok");
     assert!(soon(|| lab.read("preview-quick-exit") == "done"));
     assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
+
+    assert_eq!(launch(&main, "right").trim(), "ok");
+    assert!(soon(|| lab.read("preview-arguments").contains("localhost:4321")));
+    let anchor_pid = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
+    let anchor_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
+    claim();
+    let owned_watch = start_watch(&anchor_block, anchor_pid);
+    let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
+    let shown = format!("hide\nshow {viewer_pid} tile\n");
+    assert!(soon(|| records() == shown), "{}", records());
+    close(&main);
+    let closed = format!("{shown}hide\n");
+    assert!(soon(|| records() == closed), "{}", records());
+    assert!(soon(|| fs::read_to_string(owned_watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
+    close(&anchor_block);
 }
 
 /// The floating reader the outline opens in Rex, edited through Rex's own keys.

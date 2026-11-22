@@ -330,7 +330,7 @@ enum Command<'a> {
     Setup,
     Web(web::Start<'a>),
     Preview { url: &'a str, placement: Option<preferences::PreviewPlacement> },
-    PreviewAnchor { url: &'a str, main: &'a str, owner: &'a str, owner_pid: u32 },
+    PreviewAnchor { url: &'a str, anchor: preview::Anchor<'a> },
     SkipOnboarding,
     Doctor,
     Repair,
@@ -434,16 +434,17 @@ fn command<'a>(
             Command::Preview { url, placement }
         }
         (Some("preview-anchor"), _) => {
-            let [main, owner, owner_pid] = rest else { return Err("missing preview terminal or viewer".into()) };
+            let [main, window, owner, owner_pid] = rest else { return Err("missing preview terminal or viewer".into()) };
             let url = preview::url(option.ok_or(preview::EXPECTED)?)?;
             let main = rex::exact_id(main, "block:").ok_or("invalid preview terminal")?;
+            let window = rex::exact_id(window, "window:").ok_or("invalid preview tab")?;
             let owner = rex::exact_id(owner, "client:").ok_or("invalid preview viewer")?;
             let owner_pid = owner_pid
                 .to_str()
                 .and_then(|pid| pid.parse::<u32>().ok())
                 .filter(|pid| (2..=2_147_483_647).contains(pid))
                 .ok_or("invalid preview viewer PID")?;
-            Command::PreviewAnchor { url, main, owner, owner_pid }
+            Command::PreviewAnchor { url, anchor: preview::Anchor { main, window, owner, owner_pid } }
         }
         (Some("web"), first_flag) => {
             const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";
@@ -601,7 +602,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),
         Command::Web(start) => web::run(start),
         Command::Preview { url, placement } => preview::open(url, placement),
-        Command::PreviewAnchor { url, main, owner, owner_pid } => preview::anchor(url, main, owner, owner_pid),
+        Command::PreviewAnchor { url, anchor } => preview::anchor(url, anchor),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),

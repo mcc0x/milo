@@ -7,6 +7,7 @@ use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use super::Anchor;
 use crate::fs_ops;
 
 const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Milo Preview"));
@@ -95,8 +96,8 @@ pub(crate) fn require_access() -> Result<(), String> {
 
 /// The helper and observer run only for this terminal. In particular, failure
 /// to start WebKit must not leave the observer waiting for more session events.
-pub(crate) fn anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
-    let result = run_anchor(url, main, owner, owner_pid);
+pub(crate) fn anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
+    let result = run_anchor(url, anchor);
     if let Err(error) = &result {
         let input = io::stdin();
         if input.is_terminal() && io::stderr().is_terminal() {
@@ -112,11 +113,11 @@ pub(crate) fn anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Resu
     result
 }
 
-fn run_anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
+fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
     use std::time::{Duration, Instant};
 
-    let mut watcher = crate::rex::preview_watch(owner, owner_pid)?;
-    let result = run(url, main, owner, owner_pid, &mut watcher);
+    let mut watcher = crate::rex::preview_watch(anchor)?;
+    let result = run(url, anchor, &mut watcher);
     // EOF can reach the helper before Rex's exit status is waitable. Give it
     // a short grace period, but report nothing from the Rex process itself.
     let deadline = Instant::now() + Duration::from_millis(80);
@@ -137,7 +138,7 @@ fn run_anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Result<(), 
     result
 }
 
-fn run(url: &str, main: &str, owner: &str, owner_pid: u32, watcher: &mut Child) -> Result<(), String> {
+fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
     let mut helper = spawn(url, state.into()).map_err(|_| "could not launch the local WebKit helper")?;
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
@@ -147,7 +148,7 @@ fn run(url: &str, main: &str, owner: &str, owner_pid: u32, watcher: &mut Child) 
         match actions.read_line(&mut action) {
             Ok(0) => break,
             Ok(_) if action == "focus\n" => {
-                let _ = crate::rex::return_preview_focus(main, owner, owner_pid);
+                let _ = crate::rex::return_preview_focus(anchor);
             }
             _ => {
                 let _ = helper.kill();

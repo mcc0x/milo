@@ -5,6 +5,14 @@ use crate::preferences::PreviewPlacement;
 #[cfg(target_os = "macos")]
 mod mac;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Anchor<'a> {
+    pub main: &'a str,
+    pub window: &'a str,
+    pub owner: &'a str,
+    pub owner_pid: u32,
+}
+
 pub(crate) const EXPECTED: &str = "expected milo preview URL [--placement right|left|above|below|floating]";
 pub(crate) const HELP: &str = "Usage: milo preview URL [--placement right|left|above|below|floating]\n\nOpen an already-running local dev site in this Rex tab on macOS. Example: milo preview http://localhost:3000. Milo adds a terminal anchor beside the main working terminal, not the sidebar. The default is right; change Preview placement in Settings or use --placement once. Floating uses a Rex floating pane.\n\nUse an HTTP or HTTPS URL on localhost, 127.0.0.1 or [::1], without credentials, a query or a fragment. Milo does not look for servers. The WebKit overlay requires Accessibility permission to locate its pane and hides when its bounds are uncertain. A remote session is not supported.\n\nPick an element to review its structural location, then choose Copy to put it on the clipboard. Nothing is sent to an agent. With the page focused, press Command-Shift-Return to return to the working terminal or Command-W to close the preview. You can also close the anchor pane in Rex, even when the page is hidden.";
 
@@ -68,7 +76,7 @@ pub(crate) fn open(_: &str, _: Option<PreviewPlacement>) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn anchor(url: &str, _: &str, _: &str, _: u32) -> Result<(), String> {
+pub(crate) fn anchor(url: &str, _: Anchor<'_>) -> Result<(), String> {
     open(url, None)
 }
 

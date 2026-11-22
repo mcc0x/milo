@@ -7,6 +7,7 @@ use std::process::{Child, Command, Stdio};
 
 use crate::json::Value;
 use crate::preferences::{Preferences, PreviewPlacement};
+use crate::preview::Anchor;
 
 use super::{CALL_WAIT, Target, exact_block, exact_id, json, program, scripted};
 
@@ -92,7 +93,7 @@ fn problem(reply: &str) -> &'static str {
         "remote" => "preview is not available for a remote Rex terminal",
         "focus" => "Rex couldn't return focus to the working terminal",
         "placement" => "Rex couldn't place a preview in the working terminal's tab",
-        "changed" => "the working terminal or its directory changed; run preview again",
+        "changed" => "the Rex tab, viewer, or working directory changed; run preview again",
         _ => "the local Rex server returned an unexpected preview response",
     }
 }
@@ -134,6 +135,28 @@ fn socket_path(server: &str) -> Option<PathBuf> {
     (path.is_absolute() && path.file_name().is_some()).then_some(path)
 }
 
+fn resolve_placement(
+    working_cwd: &Path,
+    override_placement: Option<PreviewPlacement>,
+    config_dir: impl FnOnce() -> Option<PathBuf>,
+) -> PreviewPlacement {
+    override_placement.unwrap_or_else(|| {
+        let Some(dir) = config_dir() else { return Preferences::default().preview_placement };
+        let root = crate::git::worktree(working_cwd);
+        Preferences::for_pane_in(&dir, root.as_deref()).0.preview_placement
+    })
+}
+
+fn anchor_args(anchor: Anchor<'_>) -> String {
+    format!(
+        r#","main":{},"window":{},"owner":{},"owner_pid":{}"#,
+        json(anchor.main),
+        json(anchor.window),
+        json(anchor.owner),
+        anchor.owner_pid,
+    )
+}
+
 pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacement>) -> Result<(), String> {
     let url = crate::preview::url(url)?;
     let connection = Connection::local()?;
@@ -143,13 +166,17 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .filter(|path| Path::new(path).is_absolute())
         .ok_or("Milo needs an absolute UTF-8 executable path")?;
     let reply = connection.request("identify", &format!(r#","exe":{}"#, json(exe)))?;
-    let [main, cwd, owner, owner_pid] = Value::parse(reply.as_bytes())
+    let [main, window, cwd, owner, owner_pid] = Value::parse(reply.as_bytes())
         .ok_or_else(|| problem(&reply).to_owned())?
-        .fields(["main", "cwd", "owner", "owner_pid"]);
+        .fields(["main", "window", "cwd", "owner", "owner_pid"]);
     let main = main
         .and_then(|value| value.string(42))
         .filter(|id| exact_block(OsStr::new(id.as_ref())).is_some())
         .ok_or("Rex did not identify the working terminal")?;
+    let window = window
+        .and_then(|value| value.string(43))
+        .filter(|id| exact_id(OsStr::new(id.as_ref()), "window:").is_some())
+        .ok_or("Rex did not identify the working terminal's tab")?;
     let cwd = cwd
         .and_then(|value| value.string(4096))
         .filter(|cwd| !cwd.contains('\0') && Path::new(cwd.as_ref()).is_absolute())
@@ -160,32 +187,28 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
         .ok_or("Rex did not identify the working terminal's viewer")?;
     let owner_pid = owner_pid
         .and_then(Value::unsigned)
+        .and_then(|pid| u32::try_from(pid).ok())
         .filter(|pid| (2..=2_147_483_647).contains(pid))
         .ok_or("Rex did not identify the working terminal's viewer PID")?;
     crate::preview::require_access()?;
-    let placement = override_placement.unwrap_or_else(|| {
-        let root = crate::git::worktree(Path::new(cwd.as_ref()));
-        Preferences::for_pane(root.as_deref()).0.preview_placement
-    });
+    let placement = resolve_placement(Path::new(cwd.as_ref()), override_placement, crate::paths::config_dir);
+    let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid });
     let extra = format!(
-        r#","exe":{},"url":{},"placement":{},"main":{},"cwd":{},"owner":{},"owner_pid":{owner_pid}"#,
+        r#","exe":{},"url":{},"placement":{},"cwd":{}{anchor}"#,
         json(exe),
         json(url),
         json(placement.value()),
-        json(&main),
         json(&cwd),
-        json(&owner),
     );
     // Arguments go through stdin. The URL is never in Rex CLI argv or an error.
     connection.call("open", &extra)
 }
 
-pub(crate) fn preview_watch(owner: &str, owner_pid: u32) -> Result<Child, String> {
+pub(crate) fn preview_watch(anchor: Anchor<'_>) -> Result<Child, String> {
     let connection = Connection::local()?;
-    let extra = format!(r#","owner":{},"owner_pid":{owner_pid}"#, json(owner));
     connection
         .command()
-        .args(["--args", &connection.args("watch", &extra)])
+        .args(["--args", &connection.args("watch", &anchor_args(anchor))])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -193,17 +216,46 @@ pub(crate) fn preview_watch(owner: &str, owner_pid: u32) -> Result<Child, String
         .map_err(|_| "couldn't start the local Rex preview observer".into())
 }
 
-pub(crate) fn return_preview_focus(main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
-    let connection = Connection::local()?;
-    let extra = format!(r#","main":{},"owner":{},"owner_pid":{owner_pid}"#, json(main), json(owner));
-    connection.call("focus", &extra)
+pub(crate) fn return_preview_focus(anchor: Anchor<'_>) -> Result<(), String> {
+    Connection::local()?.call("focus", &anchor_args(anchor))
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::socket_path;
+    use super::{resolve_placement, socket_path};
+    use crate::fixture::Fixture;
+    use crate::preferences::{PreviewPlacement, layer_file};
+
+    #[test]
+    fn placement_uses_the_working_checkout_and_never_persists_the_override() {
+        use PreviewPlacement::{Above, Floating, Left, Right};
+
+        let config = Fixture::folder();
+        let working = Fixture::new();
+        let caller = Fixture::new();
+        let working_cwd = working.root.join("nested");
+        std::fs::create_dir(&working_cwd).unwrap();
+        let working_root = crate::git::worktree(&working_cwd).unwrap();
+        let caller_root = crate::git::worktree(&caller.root).unwrap();
+        let global = layer_file(&config.root, None);
+        let local = layer_file(&config.root, Some(&working_root));
+        let caller_local = layer_file(&config.root, Some(&caller_root));
+        std::fs::create_dir(local.parent().unwrap()).unwrap();
+        let layers = [(global, "left"), (local, "above"), (caller_local, "right")];
+        for (path, value) in &layers {
+            std::fs::write(path, format!("preview_placement = {value}\n")).unwrap();
+        }
+        let dir = || Some(config.root.clone());
+        assert_eq!(resolve_placement(&working_cwd, None, dir), Above);
+        assert_eq!(resolve_placement(&caller.root, None, dir), Right);
+        assert_eq!(resolve_placement(&config.root, None, dir), Left);
+        assert_eq!(resolve_placement(&working_cwd, Some(Floating), || panic!("override reads settings")), Floating);
+        for (path, value) in &layers {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), format!("preview_placement = {value}\n"));
+        }
+    }
 
     #[test]
     fn preview_requires_an_explicit_absolute_unix_socket() {

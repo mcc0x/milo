@@ -28,7 +28,9 @@ local function call(f)
     callbacks[event] = run
   end
   local after
-  f.rex.after = function(delay, fn) assert(delay == 0); after = fn end
+  f.rex.after = function(delay, fn)
+    if delay == 0 then after = fn else assert(delay == 8); callbacks.deadline = fn end
+  end
   f.rex.stop = function(code) f.stopped = code end
   setfenv(assert(loadfile(script)), env)()
   if after then after() end
@@ -65,16 +67,31 @@ local function fixture(mode, block)
     scope(a)
     assert(not f.placed)
     f.placed = { api = api, args = a }
+    if a.layout then
+      f.anchor.label = a.layout.block.label
+      if api == "floating" then
+        f.tiled.blocks = { f.rail, f.main }
+        f.window.layers[2] = { kind = "floating", blocks = { f.anchor } }
+      end
+      if f.after_create then f.after_create() end
+    end
     return { block_ids = { preview } }
   end
   f.rex = {
     session_id = session,
     block_id = block,
     args = { mode = mode, server = server, uid = uid, pid = helper, session = session, block = block,
-      exe = exe, url = url, placement = "right", main = main, cwd = "/work/project", owner = app, owner_pid = gui },
+      exe = exe, url = url, placement = "right", main = main, window = window, cwd = "/work/project",
+      owner = app, owner_pid = gui },
     call = function(method, a)
       if method == "server.whoami" then return { principal = f.cli } end
       if method == "server.status" then return f.status end
+      if method == "block.close" then
+        scope(a)
+        assert(a.block_id == preview and a.keep_last == true)
+        f.canceled = true
+        return {}
+      end
       assert(method == term .. ".process", method)
       scope(a)
       return f.proc[a.block_id]
@@ -93,7 +110,24 @@ local function fixture(mode, block)
     session = {
       view = function(a) scope(a); return f.view end,
       list_clients = function(a) scope(a); return { clients = { f.gui } } end,
-      list_blocks = function(a) scope(a); return { blocks = f.detached and { f.anchor } or {} } end,
+      list_blocks = function(a)
+        scope(a)
+        local blocks = {}
+        if f.detached then blocks[#blocks + 1] = { block_id = preview, placement = "detached" } end
+        if f.main_detached then blocks[#blocks + 1] = { block_id = main, placement = "detached" } end
+        return { blocks = blocks }
+      end,
+      describe_block = function(a)
+        scope(a)
+        assert(a.block_id == preview)
+        return { block = f.anchor }
+      end,
+      set_block_label = function(a)
+        scope(a)
+        assert(a.block_id == preview and f.anchor.label == "milo:preview:starting")
+        f.anchor.label, f.published = a.label, true
+        return {}
+      end,
       new_split = function(a) return placed("split", a) end,
       new_layer = function(a) return placed("floating", a) end,
       focus_block = function(a) return placed("focus", a) end,
@@ -108,13 +142,14 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   f.rex.args.placement = p[1]
   assert(call(f)() == "ok\n")
   local a = f.placed.args
-  assert(a.focus == false and a.layout.block.label == "milo:preview")
+  assert(a.focus == false and a.layout.block.label == "milo:preview:starting")
+  assert(f.published and f.anchor.label == "milo:preview")
   local launch = a.layout.block.options
   assert(launch.shell == "none" and launch.cwd == "/work/project")
   assert(launch.exit.on_completion == true and launch.exit.quick_exit_threshold_ms == 0)
-  assert(#launch.command == 6 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
-    and launch.command[3] == url and launch.command[4] == main
-    and launch.command[5] == app and launch.command[6] == tostring(gui))
+  assert(#launch.command == 7 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
+    and launch.command[3] == url and launch.command[4] == main and launch.command[5] == window
+    and launch.command[6] == app and launch.command[7] == tostring(gui))
   if p[1] == "floating" then
     assert(f.placed.api == "floating" and a.window_id == window and #a.bounds == 4 and not a.anchor_id)
   else
@@ -130,6 +165,20 @@ end
 denied("open", sidebar, function(f) f.referenced = other end, "stale")
 denied("open", sidebar, function(f) f.referenced = "block:0" end, "stale")
 denied("open", sidebar, function(f) f.view.active_window_id = inactive end, "tab")
+denied("open", main, function(f)
+  f.tiled.blocks = { f.rail }
+  f.inactive.layers[1].blocks = { f.other, f.main }
+  f.view.active_window_id = inactive
+end, "changed")
+local raced = fixture("open", main)
+raced.after_create = function() raced.view.active_window_id = inactive end
+assert(call(raced)() == "changed\n" and raced.placed and raced.canceled and not raced.published)
+local renamed = fixture("open", main)
+renamed.after_create = function()
+  renamed.view.active_window_id = inactive
+  renamed.anchor.label = "renamed by user"
+end
+assert(call(renamed)() == "changed\n" and renamed.placed and not renamed.canceled and not renamed.published)
 denied("identify", main, function(f) f.window.zoomed_block_id = main end, "zoom")
 denied("open", main, function(f)
   f.tiled.blocks = { f.rail }
@@ -189,6 +238,8 @@ denied("focus", preview, function(f) f.window.zoomed_block_id = preview end, "fo
 denied("focus", preview, function(f) f.proc[preview].child.pid = helper + 1 end, "focus")
 denied("focus", preview, function(f) f.rex.args.owner = other_app end, "focus")
 denied("focus", preview, function(f) f.rex.args.owner_pid = gui + 1 end, "focus")
+denied("focus", preview, function(f) f.parents[cli][1] = 99 end, "focus")
+denied("focus", preview, function(f) f.anchor.label = "different label" end, "focus")
 
 local f = fixture("watch", preview)
 local observe = call(f)
@@ -284,3 +335,34 @@ assert(events("active_window_changed") == "hide\nshow 40 tile\nhide\nshow 40 til
 events("block_owner_changed")
 events("client_connection_changed")
 assert(reads == 5)
+
+local staged = fixture("watch", preview)
+staged.anchor.label = "milo:preview:starting"
+local gate = call(staged)
+assert(gate() == "hide\n")
+staged.anchor.label = "milo:preview"
+assert(gate("session_view_changed") == "hide\nshow 40 tile\n")
+assert(gate("deadline") == "hide\nshow 40 tile\n" and not staged.stopped)
+local unpublished = fixture("watch", preview)
+unpublished.anchor.label = "milo:preview:starting"
+assert(call(unpublished)("deadline") == "hide\n" and unpublished.stopped == 0)
+local forged = fixture("watch", preview)
+forged.parents[cli][1] = 99
+assert(call(forged)() == "hide\n" and forged.stopped == 1)
+local mislabeled = fixture("watch", preview)
+mislabeled.anchor.label = "different label"
+assert(call(mislabeled)() == "hide\n" and mislabeled.stopped == 1)
+local detached_main = fixture("watch", preview)
+local pairing = call(detached_main)
+detached_main.tiled.blocks, detached_main.main_detached = { detached_main.rail, detached_main.anchor }, true
+assert(pairing("session_view_changed") == "hide\nshow 40 tile\nhide\n" and not detached_main.stopped)
+detached_main.tiled.blocks, detached_main.main_detached = { detached_main.rail, detached_main.main, detached_main.anchor }, false
+assert(pairing("session_view_changed") == "hide\nshow 40 tile\nhide\nshow 40 tile\n")
+assert(pairing("block_closed", { block_id = main }) == "hide\nshow 40 tile\nhide\nshow 40 tile\nhide\n"
+  and detached_main.stopped == 0)
+local moved = fixture("watch", preview)
+local watch_move = call(moved)
+moved.tiled.blocks = { moved.rail, moved.main }
+moved.inactive.layers[1].blocks = { moved.other, moved.anchor }
+moved.view.active_window_id = inactive
+assert(watch_move("active_window_changed") == "hide\nshow 40 tile\nhide\n" and moved.stopped == 0)
