@@ -994,7 +994,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert!(!pane.rows().contains(&Row::MenuBar), "opening uses the same verified installer");
 
     pane.menu_installed = Some(true);
-
+    pane.select_panel(Panel::Workflow, Some(Row::RemoveMenuBar));
     let rows = frame(&mut pane, 80, 20);
     let remove = click_label(&rows, "Remove Milo menu bar app…");
     assert_eq!(pane.key(remove), After::Stay);
