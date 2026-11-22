@@ -166,6 +166,7 @@ impl Reader {
             self.editor = Some(editor);
             return;
         }
+        self.tick_media();
         if let Body::Video(video) = &mut self.body {
             video.tick();
         }

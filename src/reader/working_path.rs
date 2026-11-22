@@ -112,7 +112,7 @@ impl LookupError {
 }
 
 /// Includes file identity and change time: saving by replacement can preserve length and mtime.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Stamp {
     identity: (i128, i128),
     changed: (i128, i128),
@@ -120,7 +120,14 @@ pub(super) struct Stamp {
 
 impl Stamp {
     pub(super) fn at(path: &Path) -> Option<Self> {
-        let stat = fs::symlink_metadata(path).ok()?;
+        Self::regular(fs::symlink_metadata(path).ok()?)
+    }
+
+    pub(super) fn of_file(file: &File) -> Option<Self> {
+        Self::regular(file.metadata().ok()?)
+    }
+
+    fn regular(stat: fs::Metadata) -> Option<Self> {
         stat.is_file().then(|| Self {
             identity: (stat.dev().into(), stat.ino().into()),
             changed: (stat.ctime().into(), stat.ctime_nsec().into()),

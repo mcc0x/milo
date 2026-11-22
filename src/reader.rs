@@ -12,6 +12,7 @@ mod inbox;
 mod handed;
 mod markdown;
 mod media;
+mod media_load;
 mod rescue;
 mod tabs;
 #[cfg(test)]
@@ -133,7 +134,7 @@ struct WorkingFile {
     attributes: content::Attributes,
     notified: bool,
     stamp: Option<content::WorkingStamp>,
-    movie: bool,
+    media: Option<media_load::State>,
 }
 
 /// A file selected in a pane that can open the reader.
@@ -587,7 +588,8 @@ impl Pane for Reader {
 
     fn git_busy(&self) -> bool {
         let Source::Working(work) = &self.source else { return false };
-        self.editor.is_none() && work.repo.busy() && work.root.at_path(&work.repo.root) == Ok(true)
+        // A rich preview uses its own inspected file, not Git's index or patch.
+        self.editor.is_none() && work.media.is_none() && work.repo.busy() && work.root.at_path(&work.repo.root) == Ok(true)
     }
 
     fn filesystem_changed(&mut self) {
@@ -620,8 +622,10 @@ impl Pane for Reader {
             Some(editor) => editor.next_frame(now),
             None => {
                 let message = self.change_notice.map(|(_, until)| until.saturating_duration_since(now));
-                let movie = matches!(&self.body, Body::Video(v) if v.needs_tick()).then_some(Duration::from_millis(30));
-                movie.into_iter().chain(message).min()
+                let loading =
+                    matches!(&self.source, Source::Working(work) if matches!(&work.media, Some(media_load::State::Loading(_))));
+                let playing = matches!(&self.body, Body::Video(video) if video.needs_tick());
+                (loading || playing).then_some(Duration::from_millis(30)).into_iter().chain(message).min()
             }
         }
     }

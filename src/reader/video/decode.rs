@@ -71,7 +71,7 @@ impl Task {
         // fd: uses the anonymous, seekable file on descriptor 0; no filename or URL comes from the MP4.
         command.args([
             "-f", "mov", "-protocol_whitelist", "fd", "-format_whitelist", "mov", "-enable_drefs", "0",
-            "-use_absolute_path", "0", "-ignore_chapters", "1", "-max_streams", "16", "-nofind_stream_info",
+            "-use_absolute_path", "0", "-ignore_chapters", "1", "-max_streams", "16",
         ]);
         // FFprobe initializes decoders across streams even when only queried for video metadata.
         // Limit that initialization to common MP4 codecs; the playback process only allows video.
@@ -80,6 +80,11 @@ impl Task {
         match self {
             Self::Probe => {
                 command.args([
+                    // MPEG-4 Part 2 dimensions can live in the first packets, not in the MP4 header.
+                    "-probesize",
+                    "512000",
+                    "-analyzeduration",
+                    "500000",
                     "-select_streams",
                     "V:0",
                     "-show_entries",
@@ -90,23 +95,35 @@ impl Task {
                 ]);
             }
             Self::Frames { from, left, playing } => {
-                // Keep keyframe preroll for the FPS filter: near EOF it can repeat the last
-                // available picture instead of an accurate seek discarding every picture.
-                command.args(["-hwaccel", "none", "-noaccurate_seek", "-ss"]).arg(timestamp(from))
+                // Keep keyframe preroll, but let the FPS filter drop it against the requested
+                // position, not the preceding keyframe. Round frame timestamps up so a
+                // frame after the seek point cannot replace the actual picture at that point.
+                command.args(["-nofind_stream_info", "-hwaccel", "none", "-noaccurate_seek", "-ss"]).arg(timestamp(from))
                     .args(["-an", "-sn", "-dn", "-i", "fd:", "-map", "0:V:0"])
                     .args(["-an", "-sn", "-dn", "-vf"])
-                    .arg(format!("fps=fps={FPS}:start_time=0:eof_action=pass,scale={MAX_WIDTH}:{MAX_HEIGHT}:force_original_aspect_ratio=decrease:reset_sar=1"))
-                    .args(["-fps_mode", "passthrough", "-frames:v"]).arg(if playing { MAX_FRAMES } else { 1 }.to_string());
-                if playing {
-                    command.arg("-t").arg(timestamp(left));
-                }
+                    .arg(format!("fps=fps={FPS}:start_time=0:round=up,scale={MAX_WIDTH}:{MAX_HEIGHT}:force_original_aspect_ratio=decrease:reset_sar=1"))
+                    .args(["-fps_mode", "passthrough", "-frames:v"]).arg(if playing { playback_frames(left) } else { 1 }.to_string());
                 // PPM gives us the small, square-pixel image dimensions, including autorotation.
                 command.args(["-threads", "1", "-c:v", "ppm", "-pix_fmt", "rgb24", "-f", "image2pipe", "pipe:1"]);
             }
         }
+        let cpu = self.cpu_seconds();
         // SAFETY: The hook only invokes async-signal-safe setrlimit calls in the child before exec.
-        unsafe { command.pre_exec(limit_child) };
+        unsafe { command.pre_exec(move || limit_child(cpu)) };
         Ok(command)
+    }
+
+    fn cpu_seconds(self) -> libc::rlim_t {
+        const STARTUP: libc::rlim_t = 5;
+        match self {
+            Self::Frames { left, playing: true, .. } => {
+                let seconds = (left.as_secs() + u64::from(left.subsec_nanos() != 0)).min(u64::from(MAX_SECONDS));
+                // CPU time excludes pipe backpressure. Allow headroom for playback slower
+                // than real time; the Reader separately stops jobs that stop making progress.
+                STARTUP + 2 * seconds as libc::rlim_t
+            }
+            _ => STARTUP,
+        }
     }
 
     fn error(self) -> &'static str {
@@ -118,11 +135,20 @@ impl Task {
 }
 
 fn timestamp(time: Duration) -> String {
-    format!("{}.{:06}", time.as_secs(), time.subsec_micros())
+    // FFmpeg's seek argument has microsecond precision. Do not seek just before a
+    // displayed frame timestamp when the bookmark is between two microseconds.
+    let micros = time.as_nanos().div_ceil(1_000);
+    format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
 }
 
-fn limit_child() -> io::Result<()> {
-    let cpu = libc::rlimit { rlim_cur: 120, rlim_max: 120 };
+fn playback_frames(left: Duration) -> u32 {
+    // Count sample times strictly before the end, including the initial frame at zero.
+    let frames = (left.as_nanos() * u128::from(FPS)).div_ceil(1_000_000_000);
+    u32::try_from(frames).unwrap_or(MAX_FRAMES).min(MAX_FRAMES)
+}
+
+fn limit_child(cpu: libc::rlim_t) -> io::Result<()> {
+    let cpu = libc::rlimit { rlim_cur: cpu, rlim_max: cpu };
     // SAFETY: setrlimit reads this initialized limit and applies it to the calling child only.
     if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &cpu) } != 0 {
         return Err(io::Error::last_os_error());
@@ -345,6 +371,26 @@ fn read_frame(reader: &mut impl io::Read, frame: &mut VideoFrame) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_limits_distinguish_stills_and_probes_from_long_playback() {
+        let playback = |left, playing| Task::Frames { from: Duration::ZERO, left, playing }.cpu_seconds();
+        let hour = Duration::from_secs(3600);
+        assert_eq!(Task::Probe.cpu_seconds(), 5);
+        assert_eq!(playback(hour, false), 5);
+        assert_eq!(playback(Duration::from_millis(1500), true), 9);
+        assert_eq!(playback(hour, true), 7205);
+    }
+
+    #[test]
+    fn seek_timestamp_and_frame_count_handle_subframe_boundaries() {
+        assert_eq!(timestamp(frame_time(1)), "0.083334");
+        assert_eq!(timestamp(Duration::from_nanos(999_999_999)), "1.000000");
+        assert_eq!(playback_frames(Duration::from_nanos(1)), 1);
+        assert_eq!(playback_frames(frame_time(1)), 1);
+        assert_eq!(playback_frames(frame_time(1) + Duration::from_nanos(1)), 2);
+        assert_eq!(playback_frames(Duration::from_secs(3600)), MAX_FRAMES);
+    }
 
     #[test]
     fn accepts_bounded_video_probe_even_without_a_format_duration() {

@@ -6,18 +6,15 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{
-    LONGEST_SIDE, PNG_LIMIT, Prepared, Raster, Refusal, le32, png_has_image_data, png_size, source_size,
-    write_png_pixels,
+    DecodeControl, LONGEST_SIDE, PNG_LIMIT, Prepared, Raster, Refusal, check_png_image_data, le32, png_size,
+    source_size, write_png_pixels,
 };
 use crate::fs_ops;
-use crate::read::{self, Content};
-use crate::term;
 
-const DEADLINE: Duration = Duration::from_secs(5);
+const IO_CHUNK: usize = 64 << 10;
 /// The terminal can't use every pixel in the Kitty PNG as a colored cell.
 const RASTER_SIDE: u32 = 512;
 const BMP_LIMIT: u64 = 4 * RASTER_SIDE as u64 * RASTER_SIDE as u64 + 4096;
@@ -36,20 +33,29 @@ impl Output {
     }
 }
 
-pub(super) fn decode(bytes: &[u8], format: &str, original: Option<(u32, u32)>) -> Result<Prepared, Refusal> {
+pub(super) fn decode(
+    bytes: &[u8],
+    format: &str,
+    original: Option<(u32, u32)>,
+    control: &DecodeControl<'_>,
+) -> Result<Prepared, Refusal> {
     use Refusal::{TooLarge, Unreadable};
-    let deadline = Instant::now() + DEADLINE;
+    control.check()?;
     let scratch = Scratch::new().ok_or(Unreadable)?;
     let input = scratch.0.join("in").with_extension(format);
-    if format == "png" {
-        let mut file = BufWriter::new(File::create(&input).map_err(|_| Unreadable)?);
-        write_png_pixels(bytes, &mut file).and_then(|()| file.flush()).map_err(|_| Unreadable)?;
-    } else {
-        fs::write(&input, bytes).map_err(|_| Unreadable)?;
-    }
+    let mut file = BufWriter::new(File::create(&input).map_err(|_| Unreadable)?);
+    let mut write = |data: &[u8]| write_input(&mut file, data, control);
+    let written = if format == "png" { write_png_pixels(bytes, control, write) } else { write(bytes) };
+    let written = written.and_then(|()| {
+        control.check()?;
+        file.flush().map_err(|_| Unreadable)
+    });
+    // Don't let BufWriter retry a pending write after cancellation or error.
+    drop(file.into_parts());
+    written?;
 
     // Probe before any full decode, and make sure magic and ImageIO agree.
-    let size = probe(&scratch, &input, format, deadline).ok_or(Unreadable)?;
+    let size = probe(&scratch, &input, format, control)?;
     if !source_size(size) {
         return Err(TooLarge);
     }
@@ -60,33 +66,66 @@ pub(super) fn decode(bytes: &[u8], format: &str, original: Option<(u32, u32)>) -
         }
         (None, &input, size)
     } else {
-        convert(&scratch, &input, &png_path, Output::Png, size.0.max(size.1), deadline).ok_or(Unreadable)?;
-        let Content::Bytes(png) = read::file(&png_path, PNG_LIMIT) else { return Err(Unreadable) };
-        let size =
-            png_size(&png).filter(|&(w, h)| w.max(h) <= LONGEST_SIDE && png_has_image_data(&png)).ok_or(Unreadable)?;
+        convert(&scratch, &input, &png_path, Output::Png, size.0.max(size.1), control)?;
+        let png = read_output(&png_path, PNG_LIMIT, control)?;
+        let size = png_size(&png).filter(|&(w, h)| w.max(h) <= LONGEST_SIDE).ok_or(Unreadable)?;
+        if !check_png_image_data(&png, || control.check().map(|_| ()))? {
+            return Err(Unreadable);
+        }
         (Some(png), &png_path, size)
     };
     let bmp_path = scratch.0.join("out.bmp");
-    convert(&scratch, source, &bmp_path, Output::Bmp, width.max(height), deadline).ok_or(Unreadable)?;
-    let Content::Bytes(bmp) = read::file(&bmp_path, BMP_LIMIT) else { return Err(Unreadable) };
+    convert(&scratch, source, &bmp_path, Output::Bmp, width.max(height), control)?;
+    let bmp = read_output(&bmp_path, BMP_LIMIT, control)?;
     Ok(Prepared { png, width, height, raster: bitmap(&bmp).ok_or(Unreadable)? })
 }
 
-fn probe(scratch: &Scratch, source: &Path, format: &str, deadline: Instant) -> Option<(u32, u32)> {
+fn write_input(out: &mut impl io::Write, data: &[u8], control: &DecodeControl<'_>) -> Result<(), Refusal> {
+    for chunk in data.chunks(IO_CHUNK) {
+        control.check()?;
+        out.write_all(chunk).map_err(|_| Refusal::Unreadable)?;
+    }
+    Ok(())
+}
+
+fn read_output(path: &Path, limit: u64, control: &DecodeControl<'_>) -> Result<Vec<u8>, Refusal> {
+    use Refusal::Unreadable;
+    control.check()?;
+    let file = fs_ops::open_read(path).map_err(|_| Unreadable)?;
+    let metadata = file.metadata().map_err(|_| Unreadable)?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(Unreadable);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| Unreadable)?);
+    let mut file = file.take(limit + 1);
+    loop {
+        control.check()?;
+        let read = (&mut file).take(IO_CHUNK as u64).read_to_end(&mut bytes).map_err(|_| Unreadable)?;
+        if bytes.len() as u64 > limit {
+            return Err(Unreadable);
+        }
+        if read < IO_CHUNK {
+            return Ok(bytes);
+        }
+    }
+}
+
+fn probe(scratch: &Scratch, source: &Path, format: &str, control: &DecodeControl<'_>) -> Result<(u32, u32), Refusal> {
+    use Refusal::Unreadable;
     let mut command = scratch.command();
     command.args(["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight"]).arg(source);
-    let mut stdout = finish(command, Stdio::piped(), deadline)?.stdout?;
+    let mut stdout = finish(command, Stdio::piped(), control)?.stdout.ok_or(Unreadable)?;
     // The child has exited. Read at most what is already in the pipe, even if
     // an inherited writer is still open. Normal output is a path and 3 lines.
     let mut len: libc::c_int = 0;
     // SAFETY: The pipe is live; FIONREAD writes one c_int to len.
     if unsafe { libc::ioctl(stdout.as_raw_fd(), libc::FIONREAD, &raw mut len) } != 0 {
-        return None;
+        return Err(Unreadable);
     }
     let mut buffer = [0; 2048];
-    let properties = buffer.get_mut(..usize::try_from(len).ok()?)?;
-    stdout.read_exact(properties).ok()?;
-    dimensions(properties, format)
+    let properties = buffer.get_mut(..usize::try_from(len).map_err(|_| Unreadable)?).ok_or(Unreadable)?;
+    stdout.read_exact(properties).map_err(|_| Unreadable)?;
+    dimensions(properties, format).ok_or(Unreadable)
 }
 
 fn dimensions(properties: &[u8], format: &str) -> Option<(u32, u32)> {
@@ -107,8 +146,8 @@ fn convert(
     output: &Path,
     kind: Output,
     longest: u32,
-    deadline: Instant,
-) -> Option<()> {
+    control: &DecodeControl<'_>,
+) -> Result<(), Refusal> {
     let (format, max_side, limit) = kind.properties();
     let mut command = scratch.command();
     if longest > max_side {
@@ -119,7 +158,7 @@ fn convert(
     // SAFETY: In the post-fork child, this only calls setrlimit and reads
     // errno on failure. It applies the limit before sips can write.
     unsafe { command.pre_exec(move || limit_output_size(limit)) };
-    finish(command, Stdio::null(), deadline).map(|_| ())
+    finish(command, Stdio::null(), control).map(drop)
 }
 
 fn limit_output_size(bytes: u64) -> io::Result<()> {
@@ -159,26 +198,36 @@ impl Drop for Scratch {
     }
 }
 
-fn finish(mut command: Command, stdout: Stdio, deadline: Instant) -> Option<Child> {
-    if Instant::now() >= deadline || term::TERMINATED.load(Ordering::Relaxed) {
-        return None;
-    }
-    let mut child = command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null()).spawn().ok()?;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || term::TERMINATED.load(Ordering::Relaxed) {
-            break;
-        }
+fn finish(mut command: Command, stdout: Stdio, control: &DecodeControl<'_>) -> Result<Child, Refusal> {
+    use Refusal::Unreadable;
+    control.check()?;
+    let mut child =
+        command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null()).spawn().map_err(|_| Unreadable)?;
+    wait(&mut child, control)?;
+    Ok(child)
+}
+
+fn wait(child: &mut Child, control: &DecodeControl<'_>) -> Result<(), Refusal> {
+    use Refusal::Unreadable;
+    let error = loop {
+        let remaining = match control.check() {
+            Ok(remaining) => remaining,
+            Err(reason) => break reason,
+        };
         match child.try_wait() {
-            Ok(Some(status)) => return status.success().then_some(child),
-            Ok(None) if fs_ops::over_memory_budget(&child) => break,
-            Ok(None) => std::thread::sleep(remaining.min(Duration::from_millis(5))),
-            Err(_) => break,
+            Ok(Some(status)) => {
+                control.check()?;
+                return if status.success() { Ok(()) } else { Err(Unreadable) };
+            }
+            Ok(None) if !fs_ops::over_memory_budget(child) => {
+                std::thread::sleep(remaining.min(Duration::from_millis(5)));
+            }
+            _ => break Unreadable,
         }
-    }
+    };
     let _ = child.kill();
     let _ = child.wait();
-    None
+    Err(error)
 }
 
 /// sips writes 24-bit BGR or 32-bit BGRA bitfields, usually with top-down rows.
@@ -238,6 +287,18 @@ fn bitmap(bytes: &[u8]) -> Option<Raster> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn cancelling_the_wait_kills_and_reaps_a_running_child() {
+        let cancel = AtomicBool::new(false);
+        let control = DecodeControl::new(&cancel);
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(wait(&mut child, &control), Err(Refusal::Cancelled)));
+        assert_eq!(child.try_wait().unwrap().and_then(|status| status.signal()), Some(libc::SIGKILL));
+    }
 
     #[test]
     fn properties_require_the_expected_raster_format_and_usable_dimensions() {

@@ -12,12 +12,12 @@ pub(super) fn picture(s: &mut Screen, rows: usize, picture: &Picture) -> Option<
     if room == 0 || rows == 0 {
         return None;
     }
-    let size = picture.fit(s.cell_size(), room, rows);
-    let origin = (1 + (room - size.0) / 2, 1 + (rows - size.1) / 2);
     if s.pictures() == Some(true) {
+        let size = picture.fit(s.cell_size(), room, rows);
+        let origin = (1 + (room - size.0) / 2, 1 + (rows - size.1) / 2);
         s.show_picture(picture, origin.0, origin.1, size.0, size.1);
     } else if let Some(rgb) = picture.raster() {
-        cells(s, origin, size, rgb);
+        fitted_cells(s, rows, rgb);
     } else if s.pictures() == Some(false) {
         return Some("This picture needs Kitty graphics on this platform.");
     }
@@ -33,14 +33,21 @@ pub(super) fn movie<'a>(s: &mut Screen, rows: usize, video: &'a Video) -> Option
     if room == 0 || rows == 0 {
         return None;
     }
-    let (cw, ch) = s.cell_size();
-    let wide = frame.width * usize::from(ch);
-    let tall = frame.height * usize::from(cw);
-    let cols = room.min((rows * wide / tall).max(1));
-    let height = rows.min((room * tall / wide).max(1));
-    let origin = (1 + (room - cols) / 2, 1 + (rows - height) / 2);
-    cells(s, origin, (cols, height), (&frame.rgb, frame.width, frame.height));
+    fitted_cells(s, rows, (&frame.rgb, frame.width, frame.height));
     None
+}
+
+fn fitted_cells(s: &mut Screen, rows: usize, rgb: (&[u8], usize, usize)) {
+    let room = s.w.saturating_sub(2);
+    let (cw, ch) = s.cell_size();
+    let wide = rgb.1 * usize::from(ch);
+    let tall = rgb.2 * usize::from(cw);
+    // A cell carries two samples, not a full bitmap tile. Use the available
+    // samples for small icons rather than reducing a 16×16 icon to 2×1 cells.
+    let cols = room.min(rgb.1).min((rows * wide / tall).max(1));
+    let height = rows.min((cols * tall).div_ceil(wide).max(1));
+    let origin = (1 + (room - cols) / 2, 1 + (rows - height) / 2);
+    cells(s, origin, (cols, height), rgb);
 }
 
 /// One upper-half block carries two independently colored samples. The screen's ordinary

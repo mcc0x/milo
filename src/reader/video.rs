@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fs_ops::Temp;
@@ -13,6 +14,7 @@ mod decode;
 use decode::{Job, Output, Task, Tools, frame_time};
 
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
+const PREPARE_LIMIT: Duration = Duration::from_secs(5);
 const STALL: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
@@ -37,10 +39,12 @@ pub(super) struct Video {
 }
 
 impl Video {
-    pub(super) fn open(file: File) -> Result<Self, &'static str> {
+    pub(super) fn open_cancellable(file: File, cancel: &AtomicBool) -> Result<Self, &'static str> {
+        let deadline = Instant::now() + PREPARE_LIMIT;
+        check_preparation(cancel, deadline)?;
         let tools = Tools::installed().ok_or("MP4 preview requires system FFmpeg and FFprobe (8.0 or later).")?;
         Ok(Self {
-            source: Some(snapshot(file)?),
+            source: Some(snapshot(file, cancel, deadline)?),
             tools,
             job: None,
             frame: None,
@@ -59,6 +63,12 @@ impl Video {
     }
     pub(super) fn position(&self) -> Duration {
         self.position
+    }
+    /// Restore a parked tab's bookmark even while the stream duration is still unknown.
+    pub(super) fn resume_at(&mut self, position: Duration) {
+        self.pause();
+        self.position = if self.duration.is_zero() { position } else { position.min(self.duration) };
+        self.pending = true;
     }
     pub(super) fn duration(&self) -> Duration {
         self.duration
@@ -88,10 +98,7 @@ impl Video {
         } else {
             if !self.duration.is_zero() {
                 self.job = None;
-                if self.position == self.duration {
-                    self.position = Duration::ZERO;
-                    self.pending = true;
-                }
+                self.restart_at_eof();
             }
             self.playing = true;
         }
@@ -104,11 +111,42 @@ impl Video {
         let delta = Duration::from_secs(delta_seconds.unsigned_abs());
         let target =
             if delta_seconds < 0 { self.position.saturating_sub(delta) } else { self.position.saturating_add(delta) };
-        let target = target.min(self.duration.saturating_sub(frame_time(1)));
+        let target = target.min(self.last_seek_time());
         if target != self.position {
             self.job = None;
             self.position = target;
             self.pending = true;
+        }
+    }
+
+    fn last_seek_time(&self) -> Duration {
+        self.duration.saturating_sub(frame_time(1))
+    }
+
+    fn restart_at_eof(&mut self) {
+        if self.position == self.duration {
+            self.position = Duration::ZERO;
+            self.pending = true;
+        }
+    }
+
+    fn start_job(&mut self, now: Instant) -> bool {
+        let task = if self.duration.is_zero() {
+            Task::Probe
+        } else {
+            // A parked EOF bookmark stays at EOF, but its still image comes from inside the clip.
+            let from = if self.position == self.duration { self.last_seek_time() } else { self.position };
+            Task::Frames { from, left: self.duration - from, playing: self.playing }
+        };
+        let source = self.source.as_mut().expect("a player without errors holds its snapshot");
+        match Job::start(self.tools, source, task) {
+            Ok(job) => {
+                self.job = Some(job);
+                self.origin = self.position;
+                self.progress = now;
+                false
+            }
+            Err(error) => self.fail(error),
         }
     }
 
@@ -119,21 +157,7 @@ impl Video {
         }
         let now = Instant::now();
         let Some(job) = self.job.as_mut() else {
-            let task = if self.duration.is_zero() {
-                Task::Probe
-            } else {
-                Task::Frames { from: self.position, left: self.duration - self.position, playing: self.playing }
-            };
-            let source = self.source.as_mut().expect("a player without errors holds its snapshot");
-            return match Job::start(self.tools, source, task) {
-                Ok(job) => {
-                    self.job = Some(job);
-                    self.origin = self.position;
-                    self.progress = now;
-                    false
-                }
-                Err(error) => self.fail(error),
-            };
+            return self.start_job(now);
         };
         // Poll completion before draining frames so a finished job cannot leave a final frame unread.
         let finished = match job.finish() {
@@ -156,6 +180,11 @@ impl Video {
             Some(Output::Duration(duration)) => {
                 self.job = None;
                 self.duration = duration;
+                self.position = self.position.min(duration);
+                if self.playing {
+                    self.restart_at_eof();
+                }
+                self.start_job(Instant::now());
                 true
             }
             Some(Output::Frames) => {
@@ -178,12 +207,24 @@ impl Video {
     }
 }
 
-fn snapshot(mut source: File) -> Result<File, &'static str> {
+fn check_preparation(cancel: &AtomicBool, deadline: Instant) -> Result<(), &'static str> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("MP4 preview preparation was canceled.")
+    } else if Instant::now() >= deadline {
+        Err("MP4 preview preparation timed out.")
+    } else {
+        Ok(())
+    }
+}
+
+fn snapshot(mut source: File, cancel: &AtomicBool, deadline: Instant) -> Result<File, &'static str> {
     const READ: &str = "Could not read the MP4 file.";
     const COPY: &str = "Could not create a private MP4 preview snapshot.";
     const LARGE: &str = "MP4 preview is limited to 128 MiB.";
     const FORMAT: &str = "MP4 preview requires a standalone MP4 file.";
+    const PREFIX: usize = 4096;
 
+    check_preparation(cancel, deadline)?;
     let meta = source.metadata().map_err(|_| READ)?;
     if !meta.is_file() {
         return Err(FORMAT);
@@ -192,26 +233,43 @@ fn snapshot(mut source: File) -> Result<File, &'static str> {
         return Err(LARGE);
     }
     source.rewind().map_err(|_| READ)?;
-    let mut prefix = [0; 4096];
+    let mut chunk = [0; 64 * 1024];
     let mut used = 0;
-    while used < prefix.len() {
-        match source.read(&mut prefix[used..]) {
+    while used < PREFIX {
+        check_preparation(cancel, deadline)?;
+        match source.read(&mut chunk[used..PREFIX]) {
             Ok(0) => break,
             Ok(n) => used += n,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return Err(READ),
         }
     }
-    if !is_mp4(&prefix[..used]) {
+    if !is_mp4(&chunk[..used]) {
         return Err(FORMAT);
     }
+    check_preparation(cancel, deadline)?;
     let mut copy = anonymous_file().map_err(|_| COPY)?;
-    copy.write_all(&prefix[..used]).map_err(|_| COPY)?;
-    let remaining = MAX_BYTES - used as u64;
-    if io::copy(&mut source.take(remaining + 1), &mut copy).map_err(|_| COPY)? > remaining {
-        return Err(LARGE);
+    copy.write_all(&chunk[..used]).map_err(|_| COPY)?;
+    let mut remaining = MAX_BYTES - used as u64;
+    loop {
+        check_preparation(cancel, deadline)?;
+        // Read one extra byte at the limit to catch growth since the metadata check.
+        let len = usize::try_from(remaining + 1).unwrap_or(usize::MAX).min(chunk.len());
+        match source.read(&mut chunk[..len]) {
+            Ok(0) => {
+                check_preparation(cancel, deadline)?;
+                return Ok(copy);
+            }
+            Ok(n) if n as u64 > remaining => return Err(LARGE),
+            Ok(n) => {
+                check_preparation(cancel, deadline)?;
+                copy.write_all(&chunk[..n]).map_err(|_| COPY)?;
+                remaining -= n as u64;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(READ),
+        }
     }
-    Ok(copy)
 }
 
 fn is_mp4(bytes: &[u8]) -> bool {
@@ -272,13 +330,14 @@ mod tests {
     fn copies_the_open_file_without_reopening_its_path() {
         let fixture = Fixture::folder();
         let path = fixture.root.join("clip.mp4");
-        let original = b"\0\0\0\x10ftypisom\0\0\0\0original";
-        fs::write(&path, original).unwrap();
+        let mut original = b"\0\0\0\x10ftypisom\0\0\0\0original".to_vec();
+        original.extend((0..=255).cycle().take(150_000));
+        fs::write(&path, &original).unwrap();
         let opened = File::open(&path).unwrap();
         fs::rename(&path, fixture.root.join("moved.mp4")).unwrap();
         fs::write(&path, b"replacement").unwrap();
 
-        let mut copy = snapshot(opened).unwrap();
+        let mut copy = snapshot(opened, &AtomicBool::new(false), Instant::now() + PREPARE_LIMIT).unwrap();
         assert_eq!(copy.metadata().unwrap().nlink(), 0);
         copy.rewind().unwrap();
         let mut bytes = Vec::new();
@@ -291,7 +350,25 @@ mod tests {
         let fixture = Fixture::folder();
         let file = File::create(fixture.root.join("oversized.mp4")).unwrap();
         file.set_len(MAX_BYTES + 1).unwrap();
-        assert_eq!(snapshot(file).unwrap_err(), "MP4 preview is limited to 128 MiB.");
+        assert_eq!(
+            snapshot(file, &AtomicBool::new(false), Instant::now() + PREPARE_LIMIT).unwrap_err(),
+            "MP4 preview is limited to 128 MiB."
+        );
+    }
+
+    #[test]
+    fn aborts_a_canceled_or_expired_snapshot() {
+        let fixture = Fixture::folder();
+        let path = fixture.root.join("clip.mp4");
+        fs::write(&path, b"\0\0\0\x10ftypisom\0\0\0\0").unwrap();
+        assert_eq!(
+            snapshot(File::open(&path).unwrap(), &AtomicBool::new(true), Instant::now() + PREPARE_LIMIT).unwrap_err(),
+            "MP4 preview preparation was canceled."
+        );
+        assert_eq!(
+            snapshot(File::open(&path).unwrap(), &AtomicBool::new(false), Instant::now()).unwrap_err(),
+            "MP4 preview preparation timed out."
+        );
     }
 
     #[test]

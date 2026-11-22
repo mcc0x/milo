@@ -1,16 +1,15 @@
 //! Locates and loads the working file or the version stored by Git.
 
 use std::fs;
-use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 
 use super::disk::ReadOnly;
+use super::media_load::{self, Load, State};
 use super::working_path::{Entry, LookupError, Root, Stamp};
 use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
 use crate::git::{CommitId, CommitVersion, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
-use crate::picture::{self, Picture};
 use crate::read::Content;
 use crate::syntax;
 
@@ -59,7 +58,7 @@ impl Location {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkingStamp {
     entry: Result<Stamp, LookupError>,
     compare: bool,
@@ -185,7 +184,7 @@ impl WorkingTarget {
             attributes,
             notified: false,
             stamp: None,
-            movie: false,
+            media: None,
         }));
         let mut reader = Reader::new(path, source, icons, note);
         reader.refresh(true);
@@ -284,44 +283,37 @@ impl Reader {
 
     fn refresh_body(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
-        let WorkingFile { repo, root, relative, attributes, stamp: last, movie, .. } = work.as_mut();
+        let WorkingFile { repo, root, relative, attributes, stamp: last, media, .. } = work.as_mut();
         let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
-        let picture = picture::is_picture(&self.path);
-        if picture && entry.as_ref().is_ok_and(|file| file.is_regular() && file.size() > picture::FILE_LIMIT) {
-            self.kind = Kind::None;
+        let same = *last == Some(stamp);
+        let position = match (&*media, same) {
+            (Some(State::Parked(position)), true) => *position,
+            (Some(_), true) => return,
+            _ => None,
+        };
+        let was_media = media.take().is_some();
+        if was_media {
+            // An old player must release its snapshot before another preview starts.
+            self.body = Body::Note("Git did not answer.");
+            *last = None;
+        }
+        if (was_media || !same)
+            && let Ok(entry) = &entry
+            && let Some(input) = media_load::Input::inspect(&self.path, relative, entry)
+        {
+            let (state, note) = match Load::start(input, stamp, position) {
+                Ok(load) => (State::Loading(load), media_load::PENDING),
+                Err(_) => (State::Ready, media_load::FAILED),
+            };
+            *media = Some(state);
             *last = Some(stamp);
-            self.replace_body(Body::Note("Image preview is limited to 64 MiB."));
+            self.kind = Kind::None;
+            self.replace_body(Body::Note(note));
             return;
         }
-        // A movie has no line diff. Pin it through the inspected directory rather than
-        // giving the decoder a working-tree pathname or asking Git to read a large blob.
-        if relative.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-            && let Ok(file) = &entry
-            && file.is_regular()
-        {
-            if last.as_ref() != Some(&stamp) {
-                let input = file.open_read();
-                // A suffix alone must not steal a plain text file's source, diff or editor.
-                *movie = !input.as_ref().is_ok_and(|input| {
-                    let mut prefix = [0; 512];
-                    input.read_at(&mut prefix, 0).is_ok_and(|n| {
-                        !prefix[..n].contains(&0)
-                            && std::str::from_utf8(&prefix[..n]).err().is_none_or(|e| n == prefix.len() && e.error_len().is_none())
-                    })
-                });
-                if *movie {
-                    let video = input.map_err(|_| "This file cannot be read.").and_then(super::video::Video::open);
-                    *last = Some(stamp);
-                    self.kind = Kind::None;
-                    self.replace_body(match video {
-                        Ok(video) => Body::Video(Box::new(video)),
-                        Err(note) => Body::Note(note),
-                    });
-                    return;
-                }
-            } else if *movie {
-                return;
-            }
+        if was_media && stamp.compare && repo.busy() {
+            self.replace_body(Body::Note("Waiting for Git."));
+            return;
         }
         let attrs_changed = stamp.compare && attributes.changed();
         // A changed entry needs fresh status. Otherwise poll status once and
@@ -376,13 +368,10 @@ impl Reader {
             self.replace_body(Body::Note(note));
             return;
         };
-        let kept = picture && last.as_ref() == Some(&stamp) && matches!(self.body, Body::Picture(_));
+        let picture_suffix = crate::picture::is_picture(&self.path);
         self.kind = patch.kind;
         *last = Some(stamp);
-        if kept {
-            return;
-        }
-        let mut body = working_body(&entry, patch, picture, syntax::for_file(&self.path));
+        let mut body = working_body(&entry, patch, picture_suffix, syntax::for_file(&self.path));
         if let Body::Text(text) = &mut body
             && entry.as_ref().is_ok_and(Entry::is_regular)
             && relative.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
@@ -400,6 +389,41 @@ impl Reader {
         }
         self.replace_body(body);
     }
+
+    /// Reaps a completed preview and publishes it only if the inspected source still matches.
+    pub(super) fn tick_media(&mut self) {
+        let Source::Working(work) = &mut self.source else { return };
+        if !matches!(&work.media, Some(State::Loading(load)) if load.ready()) {
+            return;
+        }
+        let Some(State::Loading(load)) = work.media.replace(State::Ready) else { unreachable!() };
+        let (stamp, body) = load.finish().unwrap_or_else(|| {
+            (work.stamp.expect("a media job starts with a file stamp"), Body::Note(media_load::FAILED))
+        });
+        let (_, observed) = WorkingStamp::at(&work.repo, &work.root, &work.relative);
+        if stamp == observed {
+            self.replace_body(body);
+            self.read_only = self.edit_refusal();
+        } else {
+            drop(body);
+            self.refresh(false);
+        }
+    }
+
+    /// Keeps the working source, but gives up all media resources when another tab is shown.
+    pub(super) fn park_media(&mut self) {
+        let Source::Working(work) = &mut self.source else { return };
+        let position = match (&work.media, &self.body) {
+            (Some(State::Loading(load)), _) => load.position,
+            (Some(State::Ready), Body::Video(video)) => Some(video.position()),
+            (Some(State::Ready), Body::Picture(_)) => None,
+            _ => return,
+        };
+        // The stamp remains the one this player or worker opened, not the file
+        // currently at the path. Only that same source can use the position.
+        work.media = Some(State::Parked(position));
+        self.body = Body::Note(media_load::PENDING);
+    }
 }
 
 fn working_content(entry: &Result<Entry<'_>, LookupError>, limit: u64) -> Content {
@@ -409,20 +433,17 @@ fn working_content(entry: &Result<Entry<'_>, LookupError>, limit: u64) -> Conten
 fn working_body(
     entry: &Result<Entry<'_>, LookupError>,
     patch: FileDiff,
-    picture: bool,
+    picture_suffix: bool,
     lang: Option<&'static syntax::Lang>,
 ) -> Body {
-    if !picture {
-        if patch.binary {
-            return Body::Note(NOT_TEXT);
-        }
-        if !patch.lines.is_empty() {
-            return Body::Text(Text::new(patch.lines, lang));
-        }
+    if !picture_suffix && patch.binary {
+        return Body::Note(NOT_TEXT);
+    }
+    if !patch.lines.is_empty() {
+        return Body::Text(Text::new(patch.lines, lang));
     }
     let line_kind = if patch.kind == Kind::Untracked { LineKind::Add } else { LineKind::Same };
-    let lines = match working_content(entry, if picture { picture::FILE_LIMIT } else { LIMIT }) {
-        Content::Gone | Content::Link(_) if !patch.lines.is_empty() => Ok(patch.lines),
+    let lines = match working_content(entry, LIMIT) {
         Content::Gone => Err("This file is gone."),
         Content::Unreadable => Err("This file cannot be read."),
         Content::NotFile => Err(NOT_FILE),
@@ -430,30 +451,9 @@ fn working_body(
         Content::Link(target) => {
             return Body::Text(Text::new(vec![Line::new(line_kind, 1, &target.to_string_lossy())], None));
         }
-        Content::Bytes(mut bytes) => {
-            if picture && could_be_picture(&bytes) {
-                bytes = match Picture::decode(bytes) {
-                    Ok(picture) => return Body::Picture(picture),
-                    Err(error) if text(&error.bytes).is_some() => error.bytes,
-                    Err(error) => return Body::Note(error.note),
-                };
-            }
-            if !patch.lines.is_empty() {
-                Ok(patch.lines)
-            } else if bytes.len() as u64 > LIMIT {
-                Err("Too large to show.")
-            } else {
-                byte_lines(&bytes, line_kind)
-            }
-        }
+        Content::Bytes(bytes) => byte_lines(&bytes, line_kind),
     };
     Body::from_lines(lines, lang)
-}
-
-/// SVG and PDF may also be valid UTF-8; let the converter decide for those.
-fn could_be_picture(bytes: &[u8]) -> bool {
-    let prefix = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes).trim_ascii_start();
-    prefix.starts_with(b"<") || prefix.starts_with(b"%PDF-") || text(bytes).is_none()
 }
 
 pub(super) fn text(bytes: &[u8]) -> Option<&str> {

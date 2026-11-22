@@ -13,6 +13,16 @@ fn drawn(reader: &mut Reader, w: usize, h: usize) -> Vec<String> {
     screen.text()
 }
 
+fn finish_picture_preparation(reader: &mut Reader) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut screen = Screen::sized(1, 1);
+    while let Some(delay) = reader.next_frame() {
+        assert!(Instant::now() < deadline, "image preview did not finish");
+        std::thread::sleep(delay);
+        reader.draw(&mut screen);
+    }
+}
+
 #[test]
 fn reader_hints_say_close_and_keep_help_last() {
     let f = Fixture::folder();
@@ -62,6 +72,7 @@ fn text_with_a_picture_extension_still_shows_its_edits() {
     f.write("notes.png", "new notes\n");
     let file = f.root.join("notes.png");
     let mut working = Reader::open(&file).unwrap();
+    assert_eq!(working.next_frame(), None);
     assert_eq!(&drawn(&mut working, 60, 6)[1..3], ["   - initial notes", " 1 + new notes"]);
 
     let mut repo = Repo::open(&f.root).unwrap();
@@ -596,6 +607,7 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     let mut text = Reader::open(&f.root.join("sub/file.txt")).unwrap();
     let mut picture = Reader::open(&f.root.join("sub/logo.png")).unwrap();
     assert!(drawn(&mut text, 60, 6)[1].ends_with("original text"));
+    finish_picture_preparation(&mut picture);
     assert!(drawn(&mut picture, 60, 6)[0].ends_with("16×8"));
     let (mut watcher, mut pace) = watch_pane(&mut text, false);
     assert_eq!(watcher.scope().roots.as_slice(), std::slice::from_ref(&f.root));
@@ -617,6 +629,7 @@ fn moved_project_readers_keep_reading_the_original_text_and_picture() {
     assert!(watcher.scope().roots.is_empty() && !watcher.scope().complete);
     assert!(picture.check());
     assert_eq!(drawn(&mut text, 60, 6)[1], " 1   moved project edit");
+    finish_picture_preparation(&mut picture);
     assert!(drawn(&mut picture, 60, 6)[0].ends_with("32×16"));
 
     // Still poll the original, and reinstall path-based coverage if it comes back.
@@ -1076,11 +1089,12 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     let dir = Fixture::folder();
     fs::write(dir.root.join("logo.png"), Picture::sample_png(64, 32)).unwrap();
     let mut reader = Reader::open(&dir.root.join("logo.png")).unwrap();
+    finish_picture_preparation(&mut reader);
     let mut screen = Screen::sized(40, 10);
 
     // The terminal receives no bitmap before advertising Kitty support.
     reader.draw(&mut screen);
-    assert!(screen.picture_at().is_none() && screen.text()[2].is_empty());
+    assert!(screen.picture_at().is_none());
     assert!(screen.text()[0].ends_with("64×32"));
 
     // 64 by 32 pixels in cells of 8 by 16 is 8 columns by 2 rows.
@@ -1093,11 +1107,51 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     reader.draw(&mut plain);
     assert!(plain.picture_at().is_none());
     if cfg!(target_os = "macos") {
-        assert_eq!(plain.text()[4], format!("{}{}", " ".repeat(16), "▀".repeat(8)));
+        assert_eq!(plain.text()[4], format!("{}{}", " ".repeat(4), "▀".repeat(32)));
         assert_eq!(plain.text()[5], plain.text()[4]);
     } else {
         assert!(plain.text()[2].contains("Kitty"));
     }
+}
+
+#[test]
+fn a_parked_image_releases_loading_and_decoded_media_until_reopened() {
+    let dir = Fixture::new();
+    let file = dir.root.join("logo.png");
+    fs::write(&file, Picture::sample_png(64, 32)).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    assert!(reader.next_frame().is_some());
+
+    reader.park_media();
+    assert!(matches!(&reader.body, Body::Note(_)));
+    assert_eq!(reader.next_frame(), None);
+
+    dir.write(".git/index.lock", "");
+    assert!(!reader.git_busy());
+    assert!(reader.check());
+    assert!(reader.next_frame().is_some());
+    finish_picture_preparation(&mut reader);
+    assert!(matches!(&reader.body, Body::Picture(picture) if picture.width == 64));
+
+    reader.park_media();
+    assert!(matches!(&reader.body, Body::Note(_)));
+    assert_eq!(reader.next_frame(), None);
+}
+
+#[test]
+fn a_replaced_image_cannot_publish_its_old_preview() {
+    let dir = Fixture::folder();
+    let file = dir.root.join("logo.png");
+    let replacement = dir.root.join("replacement.png");
+    fs::write(&file, Picture::sample_png(64, 32)).unwrap();
+    fs::write(&replacement, Picture::sample_png(32, 16)).unwrap();
+    let mut reader = Reader::open(&file).unwrap();
+    assert!(reader.next_frame().is_some());
+    fs::rename(replacement, file).unwrap();
+
+    // No filesystem check: completion itself must validate the captured stamp.
+    finish_picture_preparation(&mut reader);
+    assert!(matches!(&reader.body, Body::Picture(picture) if picture.width == 32));
 }
 
 #[test]
@@ -1428,6 +1482,7 @@ fn text_with_mp4_suffix_keeps_its_working_diff() {
     f.commit("text");
     f.write("notes.mp4", "after\n");
     let mut reader = Reader::open(&f.root.join("notes.mp4")).unwrap();
+    assert_eq!(reader.next_frame(), None);
     let lines = drawn(&mut reader, 60, 8).join("\n");
     assert!(lines.contains("before") && lines.contains("after"), "{lines}");
 }

@@ -1042,7 +1042,7 @@ mod rich_reader;
 
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs installed Rex and FFmpeg 7.1 or newer; starts a disposable server"]
+#[ignore = "needs installed Rex and FFmpeg 8.0 or newer; starts a disposable server"]
 fn outline_reader_previews_images_video_and_markdown_in_one_floating_reader() {
     rich_reader::verify();
 }

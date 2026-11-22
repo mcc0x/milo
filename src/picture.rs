@@ -4,8 +4,8 @@
 //! User input is capped at 64 MiB, 40 million pixels and 16,384 pixels per
 //! side. Kitty gets a static PNG no larger than 1600 pixels per side or
 //! 16 MiB; the retained RGB raster is at most 512 pixels per side. On macOS
-//! the decoder subprocesses share a five-second deadline. On other platforms
-//! only already-sized PNGs can be shown, and only with Kitty graphics.
+//! the decoder and its preparation share a five-second deadline. On other
+//! platforms only already-sized PNGs can be shown, and only with Kitty graphics.
 //! Declared dimensions are checked before launching the decoder. While it
 //! runs, a sampled 384 MiB RSS watchdog can stop it; this is not a hard or
 //! aggregate memory cap.
@@ -14,10 +14,13 @@
 //! are excluded because their containers can refer to external media.
 //! Legacy icon containers are also excluded rather than handing embedded
 //! format variants (including linked BMP color profiles) to the decoder.
+//! GIF and classic TIFF previews accept only one image, and animated WebP
+//! files are excluded from the still-image preview.
 
 use std::borrow::Cow;
 use std::io::Write as _;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 mod headers;
 
@@ -76,12 +79,13 @@ struct Prepared {
 
 #[derive(Debug)]
 pub struct DecodeError {
-    pub bytes: Vec<u8>,
     pub note: &'static str,
 }
 
+#[derive(Debug)]
 enum Refusal {
     TooLarge,
+    Cancelled,
     #[cfg(not(target_os = "macos"))]
     UnsupportedPlatform,
     UnsupportedFormat,
@@ -92,6 +96,7 @@ impl Refusal {
     fn note(self) -> &'static str {
         match self {
             Self::TooLarge => "This image exceeds the preview size limit.",
+            Self::Cancelled => "This image preview was cancelled.",
             #[cfg(not(target_os = "macos"))]
             Self::UnsupportedPlatform => "Decoding this image requires macOS.",
             Self::UnsupportedFormat => "This image format is not previewed.",
@@ -100,31 +105,61 @@ impl Refusal {
     }
 }
 
-impl Picture {
-    /// Prepares a picture, returning the original bytes if it cannot be shown.
-    /// Any converter sees only a private copy, never a project path.
-    pub fn decode(bytes: Vec<u8>) -> Result<Self, DecodeError> {
-        match Self::prepare(&bytes) {
-            Ok(prepared) => Ok(Self {
-                png: file_png(prepared.png.unwrap_or(bytes)),
-                width: prepared.width,
-                height: prepared.height,
-                id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-                #[cfg(target_os = "macos")]
-                raster: Some(prepared.raster),
-            }),
-            Err(reason) => Err(DecodeError { bytes, note: reason.note() }),
-        }
+/// One budget for parsing, preparing private copies, and decoding.
+struct DecodeControl<'a> {
+    cancel: &'a AtomicBool,
+    deadline: Instant,
+}
+
+impl<'a> DecodeControl<'a> {
+    fn new(cancel: &'a AtomicBool) -> Self {
+        Self { cancel, deadline: Instant::now() + Duration::from_secs(5) }
     }
 
-    fn prepare(bytes: &[u8]) -> Result<Prepared, Refusal> {
+    fn check(&self) -> Result<Duration, Refusal> {
+        if self.cancel.load(Ordering::Relaxed) || crate::term::TERMINATED.load(Ordering::Relaxed) {
+            return Err(Refusal::Cancelled);
+        }
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(Refusal::Unreadable)
+    }
+}
+
+impl Picture {
+    #[cfg(test)]
+    fn decode(bytes: Vec<u8>) -> Result<Self, DecodeError> {
+        Self::decode_cancellable(bytes, &AtomicBool::new(false))
+    }
+
+    /// Prepares a picture, returning a preview note if it cannot be shown.
+    /// Any converter sees only a private copy, never a project path.
+    pub fn decode_cancellable(bytes: Vec<u8>, cancel: &AtomicBool) -> Result<Self, DecodeError> {
+        let control = DecodeControl::new(cancel);
+        Self::prepare(&bytes, &control)
+            .and_then(|prepared| {
+                Ok(Self {
+                    png: file_png(prepared.png.unwrap_or(bytes), &control)?,
+                    width: prepared.width,
+                    height: prepared.height,
+                    id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                    #[cfg(target_os = "macos")]
+                    raster: Some(prepared.raster),
+                })
+            })
+            .map_err(|reason| DecodeError { note: reason.note() })
+    }
+
+    fn prepare(bytes: &[u8], control: &DecodeControl<'_>) -> Result<Prepared, Refusal> {
         use Refusal::{TooLarge, Unreadable};
+        control.check()?;
         let file_size = bytes.len() as u64;
         if file_size > FILE_LIMIT {
             return Err(TooLarge);
         }
         let format = raster_format(bytes)?;
-        let size = headers::size(bytes, format)?;
+        let size = headers::size(bytes, format, control)?;
         if size.0 == 0 || size.1 == 0 {
             return Err(Unreadable);
         }
@@ -132,7 +167,7 @@ impl Picture {
             return Err(TooLarge);
         }
         let original = if format == "png" {
-            if !png_has_image_data(bytes) {
+            if !check_png_image_data(bytes, || control.check().map(|_| ()))? {
                 return Err(Unreadable);
             }
             (size.0.max(size.1) <= LONGEST_SIDE && file_size <= PNG_LIMIT).then_some(size)
@@ -141,7 +176,7 @@ impl Picture {
         };
         #[cfg(target_os = "macos")]
         {
-            sips::decode(bytes, format, original)
+            sips::decode(bytes, format, original, control)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -231,13 +266,6 @@ impl Picture {
     }
 }
 
-fn file_png(mut png: Vec<u8>) -> Cow<'static, [u8]> {
-    // Keep only the static rendering chunks. In particular, don't send
-    // unneeded compressed metadata or animation frames to the terminal.
-    keep_png_pixels(&mut png);
-    png.into()
-}
-
 fn source_size((width, height): (u32, u32)) -> bool {
     width != 0 && height != 0 && width.max(height) <= SOURCE_SIDE && u64::from(width) * u64::from(height) <= SOURCE_PIXELS
 }
@@ -284,38 +312,51 @@ fn png_size(png: &[u8]) -> Option<(u32, u32)> {
 
 /// Checks that a file reaches IEND with image data, without decoding its pixels.
 fn png_has_image_data(png: &[u8]) -> bool {
-    let Some(mut chunks) = png.get(33..) else { return false }; // signature + IHDR
+    check_png_image_data(png, || Ok(())).unwrap_or(false)
+}
+
+fn check_png_image_data(png: &[u8], check: impl Fn() -> Result<(), Refusal>) -> Result<bool, Refusal> {
+    let Some(mut chunks) = png.get(33..) else { return Ok(false) }; // signature + IHDR
     let mut has_data = false;
     while let Some(([a, b, c, d, kind @ ..], body)) = chunks.split_first_chunk::<8>() {
+        check()?;
         let len = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
-        let Some(rest) = body.get(len..).and_then(|tail| tail.get(4..)) else { return false }; // CRC
+        let Some(rest) = body.get(len..).and_then(|tail| tail.get(4..)) else { return Ok(false) }; // CRC
         match kind {
             b"IDAT" => has_data |= len != 0,
-            b"IEND" => return has_data && len == 0,
+            b"IEND" => return Ok(has_data && len == 0),
             _ => {}
         }
         chunks = rest;
     }
-    false
+    Ok(false)
 }
 
-/// The caller has already checked each chunk's length through IEND.
-fn keep_png_pixels(png: &mut Vec<u8>) {
+/// Keep only the static rendering chunks for Kitty. The caller has checked
+/// each chunk's length through IEND.
+fn file_png(mut png: Vec<u8>, control: &DecodeControl<'_>) -> Result<Cow<'static, [u8]>, Refusal> {
+    const COPY_CHUNK: usize = 64 << 10;
     let (mut read, mut write) = (33, 33); // signature + IHDR
     loop {
+        control.check()?;
         let length = u32::from_be_bytes(png[read..read + 4].try_into().expect("checked PNG chunk")) as usize;
         let kind = &png[read + 4..read + 8];
         let end = kind == b"IEND";
         let next = read + 12 + length;
         if rendering_chunk(kind) {
             if read != write {
-                png.copy_within(read..next, write);
+                // Copy toward the front, so this cannot overwrite unread bytes.
+                for offset in (0..next - read).step_by(COPY_CHUNK) {
+                    control.check()?;
+                    let start = read + offset;
+                    png.copy_within(start..(start + COPY_CHUNK).min(next), write + offset);
+                }
             }
             write += next - read;
         }
         if end {
             png.truncate(write);
-            return;
+            return Ok(png.into());
         }
         read = next;
     }
@@ -325,20 +366,24 @@ fn rendering_chunk(kind: &[u8]) -> bool {
     matches!(kind, b"PLTE" | b"IDAT" | b"IEND" | b"tRNS" | b"gAMA" | b"cHRM" | b"sRGB")
 }
 
-/// Make the untrusted PNG copy without metadata or extra frames. Unlike the
-/// Kitty payload, this can't consume the original bytes on a decode failure.
+/// Make a private PNG copy without metadata or extra frames.
 #[cfg(target_os = "macos")]
-fn write_png_pixels(png: &[u8], mut out: impl std::io::Write) -> std::io::Result<()> {
+fn write_png_pixels(
+    png: &[u8],
+    control: &DecodeControl<'_>,
+    mut write: impl FnMut(&[u8]) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
     let (mut chunk, mut start) = (33, 0);
     loop {
+        control.check()?;
         let length = u32::from_be_bytes(png[chunk..chunk + 4].try_into().expect("checked PNG chunk")) as usize;
         let kind = &png[chunk + 4..chunk + 8];
         let next = chunk + 12 + length;
         if kind == b"IEND" {
-            return out.write_all(&png[start..next]);
+            return write(&png[start..next]);
         }
         if !rendering_chunk(kind) {
-            out.write_all(&png[start..chunk])?;
+            write(&png[start..chunk])?;
             start = next;
         }
         chunk = next;
@@ -442,14 +487,22 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_png_returns_its_original_bytes_instead_of_a_picture() {
+    fn a_truncated_png_is_not_decoded() {
         let png = Picture::sample_png(8, 8);
         for end in [24, png.len() - 13, png.len() - 1] {
             let bytes = png[..end].to_vec();
             assert!(Picture::png(bytes.clone().into()).is_none());
-            assert_eq!(Picture::decode(bytes.clone()).err().map(|error| error.bytes), Some(bytes));
+            assert_eq!(Picture::decode(bytes).err().unwrap().note, "This image could not be decoded.");
         }
         assert!(Picture::decode(png).is_ok());
+    }
+
+    #[test]
+    fn a_cancelled_picture_reports_cancellation() {
+        let png = Picture::sample_png(8, 8);
+        let cancel = AtomicBool::new(true);
+        let error = Picture::decode_cancellable(png, &cancel).err().unwrap();
+        assert_eq!(error.note, "This image preview was cancelled.");
     }
 
     #[cfg(target_os = "macos")]
@@ -505,13 +558,14 @@ mod tests {
 
     #[test]
     fn the_kitty_payload_skips_unneeded_metadata_and_still_has_its_image_data() {
-        let mut png = Picture::sample_png(1, 1);
+        let mut png = Picture::sample_png(1024, 1024);
         let clean = png.clone();
         // An ancillary chunk and trailing bytes are not part of the preview.
         png.splice(33..33, *b"\0\0\0\x01zTXtX\0\0\0\0");
         png.extend_from_slice(b"trailing bytes");
         assert!(png_has_image_data(&png));
-        assert_eq!(&*file_png(png), clean);
+        let cancel = AtomicBool::new(false);
+        assert_eq!(&*file_png(png, &DecodeControl::new(&cancel)).unwrap(), clean);
     }
 
     #[test]
@@ -519,8 +573,7 @@ mod tests {
         let svg = b"<svg xmlns='http://www.w3.org/2000/svg'><image href='file:///etc/passwd'/></svg>";
         let pdf = b"%PDF-1.0\n";
         for content in [svg.as_slice(), pdf.as_slice()] {
-            let error = Picture::decode(content.to_vec()).err().unwrap();
-            assert_eq!(error.bytes.as_slice(), content);
+            assert!(Picture::decode(content.to_vec()).is_err());
         }
     }
 
@@ -546,9 +599,8 @@ mod tests {
             (b"%PDF-1.0\n".to_vec(), "This image format is not previewed."),
             (b"\x89PNG\r\n\x1a\n".to_vec(), "This image could not be decoded."),
         ] {
-            let error = Picture::decode(bytes.clone()).err().unwrap();
+            let error = Picture::decode(bytes).err().unwrap();
             assert_eq!(error.note, note);
-            assert_eq!(error.bytes, bytes);
         }
     }
 
