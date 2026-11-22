@@ -82,7 +82,9 @@ impl Connection {
 fn problem(reply: &str) -> &'static str {
     match reply {
         "transport" => "couldn't prove Rex is connected directly through the terminal's local socket",
-        "tab" => "the terminal is not in the active Rex tab",
+        "tab" => "open the terminal's Rex tab and run preview there",
+        "zoom" => "unzoom the Rex tab before opening a preview",
+        "floating_caller" => "run preview from the tiled working terminal or Milo sidebar, not a floating pane",
         "caller" => "the running Milo process is not in the specified Rex terminal",
         "client" => "the terminal isn't owned by a connected Rex app on this Mac",
         "shell" => "couldn't identify one interactive local working terminal in this Rex tab",

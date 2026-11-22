@@ -1,6 +1,7 @@
 use std::ffi::{CStr, OsStr};
 use std::fs::{self, DirBuilder};
-use std::io::{self, BufRead as _, Read as _, Write as _};
+use std::io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -95,6 +96,23 @@ pub(crate) fn require_access() -> Result<(), String> {
 /// The helper and observer run only for this terminal. In particular, failure
 /// to start WebKit must not leave the observer waiting for more session events.
 pub(crate) fn anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
+    let result = run_anchor(url, main, owner, owner_pid);
+    if let Err(error) = &result {
+        let input = io::stdin();
+        if input.is_terminal() && io::stderr().is_terminal() {
+            // Native restores the terminal before it exits. Keep the
+            // diagnostic visible without keeping WebKit or Rex running.
+            eprintln!("milo preview: {error}\n\nPress Enter to dismiss (closes automatically in 15 seconds).");
+            let mut fds = [libc::pollfd { fd: input.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            let _ = crate::term::wait_ready(&mut fds, 15_000);
+            // The error has already been reported to this disposable pane.
+            std::process::exit(1);
+        }
+    }
+    result
+}
+
+fn run_anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Result<(), String> {
     use std::time::{Duration, Instant};
 
     let mut watcher = crate::rex::preview_watch(owner, owner_pid)?;
@@ -121,7 +139,7 @@ pub(crate) fn anchor(url: &str, main: &str, owner: &str, owner_pid: u32) -> Resu
 
 fn run(url: &str, main: &str, owner: &str, owner_pid: u32, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
-    let mut helper = spawn(url, state.into()).map_err(|e| format!("could not launch the local WebKit helper: {e}"))?;
+    let mut helper = spawn(url, state.into()).map_err(|_| "could not launch the local WebKit helper")?;
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
     let mut action = String::new();
     loop {
@@ -137,5 +155,9 @@ fn run(url: &str, main: &str, owner: &str, owner_pid: u32, watcher: &mut Child) 
             }
         }
     }
-    if helper.wait().map_err(|e| e.to_string())?.success() { Ok(()) } else { Err("WebKit preview stopped".into()) }
+    if helper.wait().map_err(|_| "could not wait for the WebKit helper")?.success() {
+        Ok(())
+    } else {
+        Err("WebKit preview stopped".into())
+    }
 }

@@ -246,7 +246,8 @@ local directions = {
 }
 
 local function open(host, view, caller, window, layer, owner_pid)
-  if layer.kind ~= "tiled" or window.zoomed_block_id then return "tab" end
+  if window.zoomed_block_id then return "zoom" end
+  if layer.kind ~= "tiled" then return "floating_caller" end
   local main, cwd = working_terminal(view, caller, window, layer, host)
   if not main then return cwd end
   if main.owner ~= caller.owner then return "client" end
@@ -258,6 +259,9 @@ local function open(host, view, caller, window, layer, owner_pid)
   local layout = { block = { flavor = terminal .. ".shell", label = "milo:preview", options = {
     command = { a.exe, "preview-anchor", a.url, main.block_id, a.owner, tostring(a.owner_pid) },
     shell = "none", cwd = cwd,
+    -- Rex also keeps quick successful exits. Milo displays failures itself
+    -- for a bounded time; Rex should close the anchor whenever Milo exits.
+    exit = { on_completion = true, quick_exit_threshold_ms = 0 },
   } } }
   local made, direction
   if a.placement == "floating" then

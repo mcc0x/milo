@@ -111,6 +111,7 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   assert(a.focus == false and a.layout.block.label == "milo:preview")
   local launch = a.layout.block.options
   assert(launch.shell == "none" and launch.cwd == "/work/project")
+  assert(launch.exit.on_completion == true and launch.exit.quick_exit_threshold_ms == 0)
   assert(#launch.command == 6 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
     and launch.command[3] == url and launch.command[4] == main
     and launch.command[5] == app and launch.command[6] == tostring(gui))
@@ -129,6 +130,11 @@ end
 denied("open", sidebar, function(f) f.referenced = other end, "stale")
 denied("open", sidebar, function(f) f.referenced = "block:0" end, "stale")
 denied("open", sidebar, function(f) f.view.active_window_id = inactive end, "tab")
+denied("identify", main, function(f) f.window.zoomed_block_id = main end, "zoom")
+denied("open", main, function(f)
+  f.tiled.blocks = { f.rail }
+  f.window.layers[2] = { kind = "floating", blocks = { f.main } }
+end, "floating_caller")
 denied("open", sidebar, function(f) f.main.host_id = host .. "remote" end, "remote")
 denied("open", main, function(f) f.proc[main].foreground = { name = "ssh" } end, "remote")
 denied("open", main, function(f)

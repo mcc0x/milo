@@ -1072,6 +1072,15 @@ fn preview_layout_and_observer() {
     assert_eq!(open(&main, &another_shell, "right", &another_shell, root).trim(), "caller");
     assert_eq!(open(&another_shell, &main, "right", &main, root).trim(), "caller");
     assert_eq!(open(&rail, &rail, "right", &main, "/wrong/directory").trim(), "changed");
+    lab.rex(&["zoom", "-s", &session, &main, "--on"]);
+    assert_eq!(identify(&main, &main).trim(), "zoom");
+    lab.rex(&["zoom", "-s", &session, &main, "--off"]);
+    lab.rex(&["focus", "-s", &session, &second_tab]);
+    assert_eq!(identify(&main, &main).trim(), "tab");
+    lab.rex(&["focus", "-s", &session, &tab]);
+    let floated = format!(r#"{{"session_id":"{session}","block_id":"{another_shell}","bounds":[0.1,0.1,0.6,0.6]}}"#);
+    lab.rex(&["api", "call", "session.float_block", &floated]);
+    assert_eq!(identify(&another_shell, &another_shell).trim(), "floating_caller");
     send(&main, &format!("(cd '{}' && exec /bin/sh -i)", nested.display()));
     send(&main, &format!("pwd > '{root}/nested-cwd'"));
     assert!(soon(|| lab.read("nested-cwd").trim().ends_with("/nested-worktree")));
@@ -1217,6 +1226,42 @@ fn preview_layout_and_observer() {
         expect("hide");
         assert!(watch.wait().unwrap().success(), "{placement}: watcher didn't end after close");
     }
+
+    // The real Rust anchor reaches its startup error without asking for or
+    // exercising GUI access. Use the production Lua launch and exit policy.
+    let launcher = lab.root.join("preview-startup");
+    let child = lab.milo.display();
+    fs::write(&launcher, format!("#!/bin/sh\nSSH_CONNECTION=lab exec '{child}' \"$@\"\n")).unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    let plan = identify(&main, &main);
+    let cwd = id(&plan, "cwd");
+    let launch_startup = |placement: &str| {
+        let exe = launcher.display();
+        request(
+            "open",
+            &main,
+            &main,
+            &format!(
+                r#","exe":"{exe}","url":"{url}","placement":"{placement}","main":"{main}","cwd":"{cwd}"{owner}"#,
+            ),
+        )
+    };
+    assert_eq!(launch_startup("right").trim(), "ok");
+    let failure_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
+    let capture = || lab.rex(&["capture", "-s", &session, "-b", &failure_block, "--trim"]);
+    assert!(soon(|| capture().contains("Press Enter to dismiss")), "{}", capture());
+    std::thread::sleep(Duration::from_millis(350));
+    let error = capture();
+    assert!(error.contains("SSH session") && !error.contains(url), "{error}");
+    lab.rex(&["send-key", "-s", &session, "-b", &failure_block, "enter"]);
+    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
+
+    // A successful anchor can also exit in less than Rex's quick-exit time
+    // (for example when closed during startup) without leaving a dead pane.
+    fs::write(&launcher, format!("#!/bin/sh\nprintf done > '{root}/preview-quick-exit'\nexit 0\n")).unwrap();
+    assert_eq!(launch_startup("right").trim(), "ok");
+    assert!(soon(|| lab.read("preview-quick-exit") == "done"));
+    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
 }
 
 /// The floating reader the outline opens in Rex, edited through Rex's own keys.
