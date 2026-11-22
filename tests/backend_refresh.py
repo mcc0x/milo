@@ -164,7 +164,8 @@ def command(args):
     if name == "diff" and "--numstat" in opts:
         specs = opts[opts.index("--") + 1:] if "--" in opts else []
         paths = len(specs)
-        if paths == 2 and specs[0].startswith(":(glob)") and specs[1] == specs[0] + "/**":
+        if (paths == 2 and specs[0].startswith(":(literal)")
+                and specs[1] == ":(glob)" + specs[0].removeprefix(":(literal)") + "/**"):
             paths = 1  # the exact file and its former descendants
         if "--no-renames" in opts:
             return f"diff-recount[{paths}]"

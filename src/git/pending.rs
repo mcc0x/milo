@@ -432,6 +432,27 @@ mod tests {
     }
 
     #[test]
+    fn a_single_path_recount_does_not_report_an_unpushed_backslash_twin_as_dirty() {
+        let f = Fixture::new();
+        f.write("ab", "original\n");
+        f.write(r"a\b", "original twin\n");
+        f.commit("base");
+        f.push();
+        f.write(r"a\b", "committed twin\n");
+        f.commit("unpushed twin");
+        f.write("ab", "original\nworktree edit\n");
+
+        let mut repo = Repo::open(&f.root).unwrap();
+        repo.read();
+        let pending = repo.pending().unwrap();
+        let mut local = pending.iter().filter(|file| !file.unpushed);
+        let changed = local.next().unwrap();
+        assert_eq!((changed.path.as_str(), changed.add, changed.del), ("ab", 1, 0));
+        assert!(local.next().is_none());
+        assert!(pending.iter().any(|file| file.path == r"a\b" && file.unpushed));
+    }
+
+    #[test]
     fn index_update_after_status_does_not_reuse_stale_counts() {
         let f = Fixture::new();
         f.write("page.txt", "base\n");

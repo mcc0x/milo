@@ -119,13 +119,16 @@ pub(super) fn diff_counts<'a>(
     let mut cmd = command(root, guard, &["diff", against, renames, "--raw", "--numstat", "-z", "--"]);
     if paths.len() == 1 {
         // Git's tree-to-index walk with one literal path early in a large index
-        // can cost more than walking the entire tree. Two globs select the same
-        // entries: the exact name and, if it was a directory on either side, its
-        // children. Keep both for rename detection across a file/directory swap.
-        let mut spec = exact_pathspec(paths.next()?);
-        cmd.env_remove("GIT_LITERAL_PATHSPECS").arg(&spec);
-        spec.push_str("/**");
-        cmd.arg(spec);
+        // can cost more than walking the entire tree. Add a redundant descendant
+        // glob to change that walk without broadening the literal selection.
+        let path = paths.next()?;
+        if path.contains(['*', '?', '[', '\\']) {
+            // Git also matches glob patterns as raw strings: escaping these
+            // characters could include a different directory named with backslashes.
+            cmd.arg(path);
+        } else {
+            cmd.env_remove("GIT_LITERAL_PATHSPECS").arg(format!(":(literal){path}")).arg(format!(":(glob){path}/**"));
+        }
     } else {
         cmd.args(paths);
     }
