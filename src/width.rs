@@ -57,11 +57,13 @@ pub fn byte_at_col(text: &str, col: usize) -> usize {
     if col == 0 {
         return 0;
     }
-    let mut start = 0;
-    for (byte, ch) in text.char_indices() {
+    // Printable ASCII takes a column a byte, so a run of it that starts the text is not measured.
+    let plain = text.bytes().take(col).take_while(|byte| matches!(byte, b' '..=b'~')).count();
+    let mut start = plain;
+    for (byte, ch) in text[plain..].char_indices() {
         let width = char_width(ch);
         if width > 0 && start >= col {
-            return byte;
+            return plain + byte;
         }
         start += width;
     }
@@ -145,5 +147,27 @@ mod tests {
         assert_eq!(byte_at_col("a\u{200b}\u{0301}b", 1), "a\u{200b}\u{0301}".len());
         assert_eq!(byte_at_col("a\u{0301}b", 2), "a\u{0301}b".len());
         assert_eq!(byte_at_col("ab", 20), 2);
+    }
+
+    #[test]
+    fn a_run_of_plain_text_is_stepped_over_to_where_measuring_it_would_stop() {
+        let measured = |text: &str, col: usize| {
+            let mut start = 0;
+            let at = text.char_indices().find(|&(_, ch)| {
+                let found = char_width(ch) > 0 && start >= col;
+                start += char_width(ch);
+                found
+            });
+            if col == 0 { 0 } else { at.map_or(text.len(), |(byte, _)| byte) }
+        };
+        let texts = [
+            "", "a", "plain text only", "tab\tbell\x07 in it", "ab界cd", "plain e\u{301}x", "~ {|} \u{7f}y",
+            "abc\u{200b}\u{301}def", "日本語 then plain", "é plain after", "ends wide 界", "marked e\u{301}",
+        ];
+        for text in texts {
+            for col in 0..=str_width(text) + 2 {
+                assert_eq!(byte_at_col(text, col), measured(text, col), "{text:?} at {col}");
+            }
+        }
     }
 }

@@ -72,7 +72,10 @@ impl LinePainter<'_> {
         let used = s.put(self.x, y, self.width, &text[skip..], text_style);
         if used > 0 {
             if let Some(lang) = lang {
-                lang.scan(text, &mut state.clone(), self.spans);
+                // What is past the right edge is read only where something shown runs into it.
+                let rest = &text[skip..];
+                let shown = if rest.len() <= self.width { text.len() } else { skip + byte_at_col(rest, used) };
+                lang.scan_shown(text, shown, state, self.spans);
                 self.draw_code(s, y, skip, text, used);
             }
             self.draw_edit(s, y, skip, text, &line.changed, used);

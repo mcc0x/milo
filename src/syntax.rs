@@ -222,17 +222,28 @@ fn scalar_start(b: &[u8], i: usize) -> bool {
 impl Lang {
     /// Replace `out` with ordered, non-empty byte spans for this line.
     /// Use the same `state` on consecutive lines to keep open comments and strings.
+    #[cfg(test)]
     pub fn scan(&self, text: &str, state: &mut State, out: &mut Vec<Span>) {
         out.clear();
-        self.walk::<true>(text, state, &mut |span| out.push(span));
+        self.walk::<true>(text, usize::MAX, state, &mut |span| out.push(span));
+    }
+
+    /// Replace `out` with the spans of what a view shows of this line: its
+    /// bytes before `shown`. `text` runs on past them so that each span ends
+    /// and is classed as in the whole line; spans that start later may be
+    /// left out. Nothing is carried on to the next line.
+    pub fn scan_shown(&self, text: &str, shown: usize, state: &State, out: &mut Vec<Span>) {
+        out.clear();
+        self.walk::<true>(text, shown, &mut state.clone(), &mut |span| out.push(span));
     }
 
     /// Carry open delimiters forward without classifying tokens or keeping spans.
     pub fn advance(&self, text: &str, state: &mut State) {
-        self.walk::<false>(text, state, &mut |_| {});
+        self.walk::<false>(text, usize::MAX, state, &mut |_| {});
     }
 
-    fn walk<const DRAW: bool>(&self, text: &str, state: &mut State, emit: &mut impl FnMut(Span)) {
+    /// Reads code as far as byte `until`, and whatever starts before it to its end.
+    fn walk<const DRAW: bool>(&self, text: &str, until: usize, state: &mut State, emit: &mut impl FnMut(Span)) {
         let b = text.as_bytes();
         let Some(mut i) = self.resume(b, state, emit) else { return };
         match self.grammar {
@@ -248,7 +259,8 @@ impl Lang {
             i = self.line_start(b, indent, emit);
         }
         let openers = self.openers();
-        while i < b.len() {
+        let until = until.min(b.len());
+        while i < until {
             let c = b[i];
             if c.is_ascii_whitespace() {
                 i += 1;
@@ -280,7 +292,7 @@ impl Lang {
     /// Scans part of a line for another walker. The fixed callback type keeps
     /// the two walkers from being compiled once for every caller of each other.
     fn walk_within<const DRAW: bool>(&self, text: &str, state: &mut State, emit: &mut dyn FnMut(Span)) {
-        self.walk::<DRAW>(text, state, &mut |span| emit(span));
+        self.walk::<DRAW>(text, usize::MAX, state, &mut |span| emit(span));
     }
 
     /// Finish any open comment or string, or return `None` if it stays open.
@@ -753,6 +765,34 @@ mod tests {
                     let string = lang.quote::<true>(b, i, &mut State::Code, &mut |_| {}).is_some();
                     let listed = !b[i].is_ascii() || openers >> b[i] & 1 == 1;
                     assert!(listed || !(comment || string), "{names:?}: {text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spans_of_what_is_shown_are_those_of_the_whole_line_that_start_in_it() {
+        const PIECES: [&str; 16] = [
+            "let x = ", "\"text\" ", "r#\"raw \"# ", "// note ", "/* c */ ", "call(", "Type ", "0x2a ", "'c' ", "é ",
+            "界", "name: ", "`t ${x}` ", "# ", "<<EOT ", "[[long]] ",
+        ];
+        let mut seed = 0x9e37_79b9_usize;
+        let mut next = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let (mut whole, mut part) = (Vec::new(), Vec::new());
+        for (names, lang) in FILE_LANGS.iter().chain(NAMED_LANGS) {
+            for _ in 0..200 {
+                let text: String = (0..next(12)).map(|_| PIECES[next(PIECES.len())]).collect();
+                let shown = next(text.len() + 2);
+                for open in [State::Code, State::Comment(0, 1), State::Quote(0)] {
+                    lang.scan(&text, &mut open.clone(), &mut whole);
+                    lang.scan_shown(&text, shown, &open, &mut part);
+                    assert_eq!(part, whole[..part.len()], "{names:?}: {text:?} to {shown}");
+                    assert!(whole[part.len()..].iter().all(|span| span.0 >= shown), "{names:?}: {text:?} to {shown}");
                 }
             }
         }
