@@ -272,6 +272,8 @@ sh tests/menu-bench.sh
 
 It builds a separate app under `target/menu-bench/` from the menu app's own sources and `tests/menu-bench.swift`, and runs it once. That app shows its own menu bar item and popover for about a minute. It starts no reader, reads no usage, and neither stops nor replaces an installed Milo. Each row gives the time the main thread was held and, for frames, the CPU the whole process spent per frame, which also counts what SwiftUI draws afterwards. The rows cover a frame equal to the last, one that changes the badge, and one that changes only the popover, each before the popover was first opened, with it closed and with it open. The popover opens without its animation, so opening it is timed whole. Runs differ by more than a build does: a whole run can take two or three times the CPU of the next, so run each build several times turn about, and compare a frame's CPU with the `idle` row of the same run. The last line is a check, and the run fails without it: a row whose reset passes must be redrawn with no new frame to say so, in an open panel and in one opened afterwards. `tests/menu-bench/` holds such a report for the revision in its name.
 
+`sh tests/menu-bench.sh --check` runs that check alone, in about ten seconds. The copy holds its popover open itself, so a click elsewhere cannot end a row or the check early.
+
 ## Commit messages
 
 One line in the imperative that says what the commit does for someone using or reading milo ("Leave closed folders closed when work lands inside them"), then a short list of the notable changes if there are several. No ticket prefixes are needed.

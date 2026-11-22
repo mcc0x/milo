@@ -7,7 +7,8 @@ private extension AppDelegate {
     var popoverShown: Bool { panelOnScreen }
     var panel: NSView? { popover.contentViewController?.view }
     // Under a sleeping display the closing animation never ends, and the popover does not open again.
-    func showPopover() { popover.animates = false; show() }
+    // A popover that closes at a click or another app's activation would end a row or a check early.
+    func showPopover() { popover.animates = false; popover.behavior = .applicationDefined; show() }
     func closePopover() { popover.close() }
 }
 
@@ -157,6 +158,7 @@ private enum MenuBench {
         if !open { delegate.showPopover() }
         await pause(600)
         let after = picture(delegate)
+        if !delegate.popoverShown { print("# the popover was closed from outside during this check") }
         delegate.closePopover()
         await pause(350)
         return before != nil && after != nil && before != after
@@ -183,7 +185,8 @@ private struct MenuBenchApp {
         let app = NSApplication.shared; app.setActivationPolicy(.accessory)
         let delegate = AppDelegate(); app.delegate = delegate
         Task { @MainActor in
-            await MenuBench.run(delegate)
+            // The menu bar item needs a moment before a popover can open from it.
+            if CommandLine.arguments.contains("--check") { try? await Task.sleep(nanoseconds: 1_000_000_000) } else { await MenuBench.run(delegate) }
             exit(await MenuBench.followsClock(delegate) ? 0 : 1)
         }
         withExtendedLifetime(delegate) { app.run() }
