@@ -908,6 +908,17 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
     assert!(discord.accept().is_err());
 }
 
+/// Print the installed server's actual flavors and exercise placement separately
+/// from rendering. Finding a new flavor calls for a client test, not a failing lab.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn preview_block_capabilities() {
+    let lab = Lab::start();
+    let [session, _] = lab.new_session("preview", "project", &lab.root);
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview.lua");
+    print!("{}", lab.rex(&["do", "-s", &session, script]));
+}
+
 /// The floating reader the outline opens in Rex, edited through Rex's own keys.
 #[test]
 #[ignore = "needs an installed Rex; starts a disposable server"]
