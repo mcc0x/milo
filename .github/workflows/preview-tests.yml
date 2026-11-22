@@ -45,3 +45,5 @@ jobs:
           "$RUNNER_TEMP/preview-chrome"
       - name: Verify the preview's native keyboard shortcut without a desktop
         run: sh macos/Preview/tests/smoke.sh --keys-only
+      - name: Check picker controls and resize invalidation without a key window
+        run: sh macos/Preview/tests/smoke.sh --layout-only

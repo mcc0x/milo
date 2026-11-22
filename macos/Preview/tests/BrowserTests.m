@@ -117,17 +117,22 @@ static void SetViewport(NSView *content, CGFloat width, CGFloat height) {
     CHECK(NSEqualSizes(content.bounds.size, size));
 }
 
-static void CheckControls(NSView *content, NSArray<NSButton *> *controls) {
+static void CheckControlFrames(NSView *content, NSArray<NSButton *> *controls) {
     [content layoutSubtreeIfNeeded];
     for (NSUInteger i = 0; i < controls.count; ++i) {
         NSButton *button = controls[i];
         CHECK(!button.isHidden && !NSIsEmptyRect(button.frame) && NSContainsRect(content.bounds, button.frame));
-        if (button.isEnabled) {
-            NSPoint center = NSMakePoint(NSMidX(button.frame), NSMidY(button.frame));
-            NSView *hit = [content hitTest:[content convertPoint:center toView:content.superview]];
-            CHECK(hit == button || [hit isDescendantOf:button]);
-        }
         for (NSUInteger j = 0; j < i; ++j) CHECK(!NSIntersectsRect(button.frame, controls[j].frame));
+    }
+}
+
+static void CheckControls(NSView *content, NSArray<NSButton *> *controls) {
+    CheckControlFrames(content, controls);
+    for (NSButton *button in controls) {
+        if (!button.isEnabled) continue;
+        NSPoint center = NSMakePoint(NSMidX(button.frame), NSMidY(button.frame));
+        NSView *hit = [content hitTest:[content convertPoint:center toView:content.superview]];
+        CHECK(hit == button || [hit isDescendantOf:button]);
     }
 }
 
@@ -207,6 +212,77 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
 - (BOOL)canBecomeKeyWindow { return YES; }
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
+
+@interface LayoutSmokeBrowser : MiloPreviewBrowser
+- (void)checkLayout;
+@end
+
+@implementation LayoutSmokeBrowser
+// This fixture exercises native geometry and invalidation, not page loading
+// or consent gestures. The full smoke uses a real committed document for those.
+- (void)compileRules {}
+
+- (void)prepareReview {
+    _pickState = PickReview;
+    _pickURL = _initialURL;
+    _path.string = @"html:nth-child(1) > body:nth-child(2) > div:nth-child(2)";
+    [self updateChrome:@"Review element path"];
+}
+
+- (void)checkLayout {
+    CHECK(self.window && !self.window.isVisible && !self.window.isKeyWindow);
+    _pageCommitted = YES;
+    [self updateChrome:@""];
+    CheckControlFrames(self, @[_back, _reload, _select, _terminal]);
+    CHECK(_select.isEnabled);
+
+    [self prepareReview];
+    CheckControlFrames(self, @[_back, _reload, _select, _terminal, _cancel, _copy]);
+    SetViewport(self, 144, 240);
+    CHECK(_pickState == PickIdle && !_pickURL && _path.string.length == 0);
+    CHECK(_copy.isHidden && !_copy.isEnabled && _cancel.isHidden && _review.isHidden);
+    CheckControlFrames(self, @[_back, _reload, _select, _terminal]);
+    CHECK(_select.isEnabled);
+
+    [self prepareReview];
+    CheckControlFrames(self, @[_back, _reload, _select, _terminal, _cancel, _copy]);
+    CHECK(_copy.isEnabled && !_review.isHidden && NSContainsRect(self.bounds, _review.frame));
+    CHECK(!NSIntersectsRect(_review.frame, _cancel.frame) && !NSIntersectsRect(_review.frame, _copy.frame));
+    CHECK(NSMaxY(_cancel.frame) <= NSMinY(_copy.frame));
+    SetViewport(self, 144, 150);
+    CHECK(_pickState == PickIdle && !_pickURL && _path.string.length == 0);
+    CHECK(!_select.isEnabled && _copy.isHidden && !_copy.isEnabled && _cancel.isHidden && _review.isHidden);
+    CheckControlFrames(self, @[_back, _reload, _select, _terminal]);
+
+    SetViewport(self, 144, 240);
+    [self prepareReview];
+    _pickState = PickCopying;
+    [self updateChrome:@"Review element path"];
+    NSUInteger generation = _pickID;
+    SetViewport(self, 110, 240);
+    CHECK(!_select.isEnabled && _pickID != generation && _pickState == PickIdle);
+    CheckControlFrames(self, @[_back, _reload, _terminal]);
+    CHECK(_select.isHidden && _copy.isHidden && _cancel.isHidden);
+    SetViewport(self, 144, 240);
+    CHECK(_select.isEnabled && _copy.isHidden && _review.isHidden && _path.string.length == 0);
+    CheckControlFrames(self, @[_back, _reload, _select, _terminal]);
+    CHECK(!self.window.isVisible && !self.window.isKeyWindow);
+}
+@end
+
+static void DoLayoutSmoke(void) {
+    [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyProhibited];
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 430, 410)
+                                                 styleMask:NSWindowStyleMaskBorderless
+                                                   backing:NSBackingStoreBuffered defer:YES];
+    window.releasedWhenClosed = NO;
+    LayoutSmokeBrowser *content = [[LayoutSmokeBrowser alloc]
+        initWithURL:[NSURL URLWithString:@"http://127.0.0.1/"] origin:@"http://127.0.0.1" returnFocus:^{}];
+    window.contentView = content;
+    [content checkLayout];
+    window.contentView = nil;
+    [window close];
+}
 
 static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     // Do not read, clear or write the user's pasteboard. Only this test process
@@ -371,6 +447,11 @@ int main(int argc, char **argv) {
         CheckShortcuts();
         if (argc == 2 && [@(argv[1]) isEqualToString:@"--keys-only"]) {
             puts("Native NSEvent accelerator selection passed (no window or focus required).");
+            return 0;
+        }
+        if (argc == 2 && [@(argv[1]) isEqualToString:@"--layout-only"]) {
+            DoLayoutSmoke();
+            puts("Native picker layout and resize invalidation passed (no visible or key window, fixture server, or clipboard).");
             return 0;
         }
         CHECK(argc == 4);
