@@ -115,6 +115,51 @@ private final class Model: ObservableObject {
     private var input: FileHandle?
     private let reader = DispatchQueue(label: "net.usemilo.usage.frames", qos: .utility)
     let alerts = UsageAlerts()
+    let monitor = ResourceMonitor()
+    @Published private(set) var indicator: MenuIndicator = .quota
+    @Published private(set) var savingIndicator = false
+    private var sleeping = false
+
+    private func applyIndicator(_ choice: MenuIndicator) {
+        guard choice != indicator else { return }
+        indicator = choice
+        monitor.setEnabled(!sleeping && choice != .quota)
+    }
+
+    func selectIndicator(_ choice: MenuIndicator) {
+        guard choice != indicator, !savingIndicator else { return }
+        guard let process = bundledProcess(["menubar", "indicator", choice.rawValue]) else { indicatorError(); return }
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        savingIndicator = true
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.savingIndicator = false
+                guard process.terminationStatus == 0 else { self.indicatorError(); return }
+                // Let the stream publish the saved choice in order, after any frame already in flight.
+                // NUL reuses cached quota data; a display change must not request a provider refresh.
+                if let input = self.input, (try? input.write(contentsOf: Data([0]))) != nil { return }
+                // A disconnected quota reader need not prevent a local indicator change.
+                self.applyIndicator(choice)
+                self.changed?()
+            }
+        }
+        do { try process.run() } catch { savingIndicator = false; indicatorError() }
+    }
+
+    private func indicatorError() {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t save the menu bar indicator"
+        alert.informativeText = "Check that Milo can write its global settings, then try again."
+        alert.runModal()
+    }
+
+    func setSleeping(_ value: Bool) {
+        sleeping = value
+        monitor.setEnabled(!value && indicator != .quota)
+    }
 
     private var settings: Process?
     private var settingsURL: URL?
@@ -203,6 +248,7 @@ private final class Model: ObservableObject {
     }
 
     func quit() {
+        monitor.setEnabled(false)
         handoffs.removeAll()
         if !independentSettings { stopSettings() }
         stop()
@@ -251,6 +297,7 @@ private final class Model: ObservableObject {
     func receive(_ frame: UsageSnapshot) {
         // The reader repeats a settled frame about every 30 seconds. Publishing an equal one
         // would have SwiftUI work the whole panel out again, on screen or not.
+        applyIndicator(MenuIndicator(rawValue: frame.indicator ?? "") ?? .quota)
         if snapshot != frame { snapshot = frame }
         if failure != nil { failure = nil }
         changed?()
@@ -260,7 +307,7 @@ private final class Model: ObservableObject {
         // The panel's rows read the time too, so one on screen is redrawn at every tick.
         if panelShown { objectWillChange.send() }
         badgeUpdatedAt = now
-        let reading = badgeReading(snapshot, mode: mode, now: now)
+        let reading = indicator == .quota ? badgeReading(snapshot, mode: mode, now: now) : nil
         if badge != reading { badge = reading }
     }
     func refresh() {
@@ -298,6 +345,8 @@ private struct Content: View {
     @ObservedObject var alerts: UsageAlerts
     var body: some View {
         UsagePanel(snapshot: model.snapshot, error: model.failure, badge: model.badge, now: model.badgeUpdatedAt, badgeMode: $model.mode,
+                   indicator: Binding(get: { model.indicator }, set: model.selectIndicator),
+                   savingIndicator: model.savingIndicator, monitor: model.monitor,
                    alertThreshold: Binding(get: { alerts.threshold }, set: { alerts.select($0) }), alertIssue: alerts.issue,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
                    loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
@@ -323,15 +372,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         let host = NSHostingController(rootView: Content(model: model, alerts: model.alerts)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
         model.changed = { [weak self] in self?.updateBadge() }
+        model.monitor.changed = { [weak self] in self?.drawIndicator() }
         updateBadge(); model.start()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
         if CommandLine.arguments.contains("--show") { show() }
         if CommandLine.arguments.contains("--settings") { model.openSettings() }
     }
+    @objc private func willSleep() { model.setSleeping(true) }
     @objc private func woke() {
         // A badge that was fresh before sleep must be rechecked before showing it again.
         model.snapshot = nil
         model.alerts.clearBaseline()
+        model.setSleeping(false)
         updateBadge()
         model.refresh()
     }
@@ -341,16 +394,34 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return host.view.window?.isVisible == true
     }
     private func updateBadge(opening: Bool = false) {
-        guard let button = status?.button else { return }
+        guard status?.button != nil else { return }
         // The reader emits even unchanged frames, at most 30 seconds apart when settled.
         // Use those ticks for the countdown and share the chosen window with the popover.
         let now = Date.now
         model.updateBadge(at: now, panelShown: opening || panelOnScreen)
-        let label = model.badge?.label(at: now) ?? "Milo"
-        let title = model.badge.map { " \($0.window.remaining)%" } ?? ""
+        drawIndicator()
+    }
+
+    private func drawIndicator() {
+        guard let button = status?.button else { return }
+        let label: String, title: String, width: CGFloat
+        switch model.indicator {
+        case .quota:
+            label = model.badge?.label(at: model.badgeUpdatedAt) ?? "Milo"
+            title = model.badge.map { " \($0.window.remaining)%" } ?? ""
+            width = model.badge == nil ? NSStatusItem.variableLength : 67
+        case .cpu, .memory:
+            let cpu = model.indicator == .cpu
+            let reading = model.monitor.reading
+            let percent = cpu ? reading.cpuPercent : reading.memory?.percent
+            let value = percent.map { "\($0)%" } ?? "—"
+            title = cpu ? " CPU \(value)" : " MEM \(value)"
+            label = "\(cpu ? "CPU busy across all cores" : "Physical memory used"): \(percent == nil ? "not available yet" : value)"
+            width = 98
+        }
         if button.title != title {
             button.title = title
-            status.length = model.badge == nil ? NSStatusItem.variableLength : 67
+            status.length = width
         }
         if button.toolTip != label {
             button.toolTip = label; button.setAccessibilityLabel(label)

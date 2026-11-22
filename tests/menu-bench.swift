@@ -10,6 +10,7 @@ private extension AppDelegate {
     // A popover that closes at a click or another app's activation would end a row or a check early.
     func showPopover() { popover.animates = false; popover.behavior = .applicationDefined; show() }
     func closePopover() { popover.close() }
+    var statusTitle: String? { status.button?.title }
 }
 
 @MainActor
@@ -164,6 +165,28 @@ private enum MenuBench {
         return before != nil && after != nil && before != after
     }
 
+    static func checkIndicators(_ delegate: AppDelegate) {
+        var saved = frame()
+        delegate.model.mode = "codex"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle == " 41%")
+        saved.indicator = "cpu"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle == " CPU —", "First sample cannot be a percentage")
+        precondition(delegate.model.badge == nil, "A quota row must not claim the system badge")
+        saved.indicator = "memory"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle?.hasPrefix(" MEM ") == true)
+        delegate.model.setSleeping(true)
+        precondition(delegate.model.monitor.reading == SystemReading())
+        delegate.model.setSleeping(false)
+        precondition(delegate.model.monitor.reading.cpuPercent == nil)
+        saved.indicator = "quota"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle == " 41%" && delegate.model.monitor.reading == SystemReading())
+        delegate.model.mode = "auto"
+    }
+
     /// A row also changes when its reset passes, with no new frame to say so: the panel has to
     /// show that whether it was on screen at the time or is opened afterwards.
     static func followsClock(_ delegate: AppDelegate) async -> Bool {
@@ -187,6 +210,7 @@ private struct MenuBenchApp {
         Task { @MainActor in
             // The menu bar item needs a moment before a popover can open from it.
             if CommandLine.arguments.contains("--check") { try? await Task.sleep(nanoseconds: 1_000_000_000) } else { await MenuBench.run(delegate) }
+            MenuBench.checkIndicators(delegate)
             exit(await MenuBench.followsClock(delegate) ? 0 : 1)
         }
         withExtendedLifetime(delegate) { app.run() }

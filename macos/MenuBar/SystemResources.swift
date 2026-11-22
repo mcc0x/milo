@@ -44,9 +44,10 @@ struct SystemSampler {
     }
 
     private static let physicalMemory = ProcessInfo.processInfo.physicalMemory
-    // The fields we need are in revision 1, which ends just before swapped_count.
-    private static let vmWordCount = MemoryLayout<vm_statistics64_data_t>.offset(of: \.swapped_count)
-        .map { $0 / MemoryLayout<integer_t>.size }
+    // Request through the last revision-1 field. Older SDKs stop here;
+    // kernels with newer counters still accept this layout.
+    private static let vmWordCount = MemoryLayout<vm_statistics64_data_t>.offset(of: \.total_uncompressed_pages_in_compressor)
+        .map { ($0 + MemoryLayout<UInt64>.size) / MemoryLayout<integer_t>.size }
     private var previousCPU: (ticks: CPUTicks, at: ContinuousClock.Instant)?
 
     mutating func reset() {
