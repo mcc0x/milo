@@ -23,6 +23,7 @@ const JSON: &str = "application/json; charset=utf-8";
 pub(super) enum Route {
     Static(Asset),
     State,
+    MenuIndicator,
     Action,
     Close,
     TelegramChats,
@@ -119,6 +120,7 @@ fn request(head: &[u8], access: &Access<'_>) -> Result<(Route, usize), Rejection
     }
     let route = match (method, path) {
         ("GET", "/api/state") => Route::State,
+        ("GET", "/api/menu-indicator") => Route::MenuIndicator,
         ("POST", "/api/action") => Route::Action,
         ("POST", "/api/close") => Route::Close,
         ("POST", "/api/telegram-chats") => Route::TelegramChats,

@@ -14,11 +14,15 @@ const indicators: readonly (readonly [MenuIndicator, string])[] = [
 export default function MenuBar() {
   const { state, queue, connected, paused, running, closing, command, confirm, refreshMenuIndicator } = useSession();
   useEffect(() => {
-    const controller = new AbortController();
-    const refresh = () => { void refreshMenuIndicator(controller.signal); };
+    let controller: AbortController | undefined;
+    const refresh = () => {
+      controller?.abort();
+      controller = new AbortController();
+      void refreshMenuIndicator(controller.signal);
+    };
     refresh();
     window.addEventListener("focus", refresh);
-    return () => { controller.abort(); window.removeEventListener("focus", refresh); };
+    return () => { controller?.abort(); window.removeEventListener("focus", refresh); };
   }, [refreshMenuIndicator]);
   const { installed, indicator: savedIndicator } = state.menubar;
   const operation = queue.find(item => item.action === "menubar");

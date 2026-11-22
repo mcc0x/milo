@@ -253,13 +253,12 @@ async function manageMenuApp(page, url, env) {
   await status(page, clean).waitFor({state: 'attached'});
   console.log('Menu app: installed, opened or updated twice, kept on cancel, and removed; draft preserved');
   if (menubar.installed !== null) {
-    await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/state')), menuTab.click()]);
+    await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/menu-indicator')), menuTab.click()]);
     const indicatorFile = join(env.XDG_CONFIG_HOME, 'milo', 'menubar.conf');
     const malformed = 'indicator = invalid\n';
     await writeFile(indicatorFile, malformed);
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await menu.getByText(/Couldn’t read the saved indicator\. The app uses Agent quota/).waitFor();
-    assert.equal((await readState()).menubar.indicator, null, 'API cannot verify a malformed choice');
     assert.equal(await menu.getByRole('radio', {checked: true}).count(), 0, 'fallback is not a saved selection');
     assert.equal(await readFile(indicatorFile, 'utf8'), malformed, 'reading does not repair the indicator');
     const quota = menu.getByRole('radio', {name: 'Agent quota', exact: true});

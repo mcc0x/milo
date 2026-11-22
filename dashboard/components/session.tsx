@@ -340,13 +340,12 @@ function createEditor(): Editor {
     const idle = () => active && connected && !running && !paused && !closing && !ended && !queue.length;
     if (!before || !idle()) return;
     try {
-      const response = await sessionFetch('/api/state', 'GET', undefined, signal);
+      const response = await sessionFetch('/api/menu-indicator', 'GET', undefined, signal);
       if (!response.ok) return;
-      const latest = await response.json() as SessionState;
-      // A native or terminal save doesn't change the browser draft or its version.
-      if (!signal.aborted && state === before && idle() && latest.version === before.version &&
-          latest.menubar.indicator !== before.menubar.indicator) {
-        state = {...before, menubar: {...before.menubar, indicator: latest.menubar.indicator}};
+      const indicator = await response.json() as SessionState['menubar']['indicator'];
+      // Only update the saved choice, never a draft or a later in-flight action.
+      if (!signal.aborted && state === before && idle() && indicator !== before.menubar.indicator) {
+        state = {...before, menubar: {...before.menubar, indicator}};
         publish();
       }
     } catch { /* A background read never interrupts the draft. */ }

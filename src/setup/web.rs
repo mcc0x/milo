@@ -268,6 +268,11 @@ impl Editor {
         Ok(())
     }
 
+    pub(crate) fn menu_indicator(&self) -> impl Display {
+        let choice = self.setup.store.as_ref().and_then(|store| Indicator::load(&Indicator::file(&store.config)).ok());
+        Optional(choice.map(|choice| Quoted(choice.value())))
+    }
+
     pub(crate) fn state(&self) -> String {
         let setup = &self.setup;
         let layout = &setup.layout;
@@ -298,10 +303,6 @@ impl Editor {
         let [usage_codex, usage_claude, usage_opencode] = UsageTool::ALL.map(|tool| prefs.usage_tools[tool].value());
         let [usage_deepseek, usage_openrouter, usage_devin, usage_copilot] =
             UsageAccount::ALL.map(|account| prefs.usage_accounts[account].value());
-        let indicator = setup
-            .store
-            .as_ref()
-            .and_then(|store| Indicator::load(&Indicator::file(&store.config)).ok());
         let mut out = String::with_capacity(1600);
         write!(out, concat!(
             "{{\"version\":{},\"milo_version\":\"", env!("CARGO_PKG_VERSION"), "\",",
@@ -326,7 +327,7 @@ impl Editor {
             usage_codex, usage_claude, usage_opencode,
             usage_deepseek, usage_openrouter, usage_devin, usage_copilot,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
-            Optional(menubar::installed()), Optional(indicator.map(|choice| Quoted(choice.value()))),
+            Optional(menubar::installed()), self.menu_indicator(),
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
             Optional(self.doctor.as_ref()),
