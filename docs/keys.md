@@ -60,6 +60,8 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 
 The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
 
+A [review of an agent's patch](panes.md#reviewing-an-agents-edits), opened by `milo review PATCH`, adds `]` and `[` for the next or previous file of the patch and `r` to read the files again. It is always read-only.
+
 ### Editing in the reader
 
 Press `e` in the reader, or start with `milo view FILE --edit`. The heading says `editing`, then `unsaved` once the draft differs from the file. Nothing is written until you save. See [editing files](panes.md#editing-files) for what can be edited and how a save is kept safe.

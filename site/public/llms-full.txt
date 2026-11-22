@@ -101,6 +101,7 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo history [PATH]` | Recent commits |
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
+| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader (source builds; not in v0.1.5) |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) |
 | `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward (source builds; not in v0.1.5) |
@@ -571,6 +572,68 @@ Press `n` or `N` to jump to the next or previous change. The Reader briefly show
 
 Press `c` to fold long unchanged stretches, leaving a little context around each change. Click a folded row to read just that stretch, or use `Tab` and `Enter`. Press `c` again to see the full file. [See the same diff in both views.](https://github.com/mcc0x/milo/blob/main/docs/img/pane-reader-comparison.webp)
 
+## Reviewing an agent's edits
+
+`milo review PATCH` shows what a coding agent says it changed, and nothing else. `PATCH` is a unified diff, as `git diff` or `diff -u` writes one, that the agent or its harness wrote from a record of its own edits. The agent *hands it over*; Milo does not work it out.
+
+Each file the patch names is shown as it is now, whole, with only the patch's lines marked as added or removed. Your own uncommitted work in the same file, another agent's edits, and anything staged or not yet known to Git read as plain unchanged lines. A file the patch does not name is never shown. Nothing is compared with a commit, so the review does not depend on what Git calls changed.
+
+```sh
+milo review /tmp/edits.patch --from "Claude Code"           # in your terminal
+milo review /tmp/edits.patch --from "Claude Code" --float   # from an agent's shell inside Rex
+```
+
+`--from NAME` is shown in the heading as `patch from NAME`, with the file's place among the patch's files. `--float` is for a program with no terminal of its own: it opens the review in a floating pane over the Rex tab the program runs in, prints how many files are shown and a `Not shown:` line with the reason for each that is not, and exits. Without `--float` the review opens in the terminal you run it in.
+
+| Key | Action |
+| --- | --- |
+| `]` / `[` | Next or previous file of the patch |
+| `r` | Read the files again |
+| `n` / `N`, `c`, scrolling | As in the reader |
+| `q` or `Esc` | Close |
+
+The review is read-only: `e` says so, and no file is written, in the project or outside it. The patch is read once when the review opens and is not copied or kept. Milo starts no program for it and asks Git nothing but where the project's top folder is, which the patch's paths are relative to.
+
+### What Milo checks, and what it cannot
+
+A patch is a claim. Milo cannot check who wrote a line, and `--from` is a label, not proof. What it does check is that the claim still fits the file: every hunk's lines, as the patch says it left them, must be in the file now, either where the patch says or in exactly one other place. A patch made one edit at a time can name a file several times; those edits are undone last to first, so a line the agent wrote and later rewrote shows once, from its first state to its last.
+
+When a file does not fit, Milo shows the reason in place of the file and no diff at all. It never falls back to the project's uncommitted changes.
+
+| Shown in place of the file | When |
+| --- | --- |
+| This file no longer holds the lines the patch left… | Someone changed or removed the patch's lines since, or the patch was not made from this file. |
+| The patch's lines are in this file more than once… | The lines around an edit changed, and what is left of it matches several places. |
+| The patch edits this file, but it is gone. / The patch removes this file, but it is here. | The file's existence contradicts the patch. |
+| The patch names a path that is not a file inside the project. | An absolute path, one with `..`, one inside `.git`, or a name Git quoted. |
+| This file is reached through a link… / This is a link… | Milo does not follow a link to show a patch. |
+| The patch says this file is not text. / This file is not text. | A binary file, or one that is not UTF-8. |
+| The patch for this file cannot be read. | A hunk is cut short or is not a unified diff. |
+| Too large to show. / Placing this patch in the file would take too long. | A file over 2 MB, or a patch that matches almost everywhere. |
+
+An empty patch, or text that names no file, opens nothing and says why. That is the right outcome when an agent has no record of its edits.
+
+Where the lines next to an edit have changed since, Milo gives up the unchanged lines at the ends of a hunk one at a time and looks for the rest. At least one unchanged line must stay with the edit, and what is left must then be in the file exactly once. An added line whose neighbours have all changed is not looked for on its own: the same text somewhere else in the file would not be the patch's.
+
+### Limits
+
+- The review shows the files as they were when it opened or when you last pressed `r`. It does not follow later edits.
+- A patch is at most 2 MB of text and names at most 200 files; a larger one is refused whole. Renames are shown under the new name, without the old one. A hunk with more lines than its header counts makes its file unreadable, which a hand-written patch can run into.
+- An agent can hand over a patch that leaves out some of its edits, or includes someone else's. Milo shows what it was given.
+- Edits an agent makes through a shell command, a formatter or a code generator are in the patch only if the agent or its harness recorded them.
+
+### Where the patch comes from
+
+Nothing is installed or configured for this, and no agent settings are changed. The [agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md#show-the-user-your-own-edits) tells an agent how to produce the patch and when to say it cannot. These were checked on 22 November 2026 in throwaway repositories with uncommitted work by a person in the same file:
+
+| Harness | Source of the patch | What it covers |
+| --- | --- | --- |
+| OMP 19.0.1 | The harness's own record of which lines each agent wrote: `commit.draft("self")`, then `diff()`. Nothing is committed. | Edits made with its edit and write tools, per agent and subagent. A person's lines and another agent's lines in the same file were left out. Files written by a shell command are listed for review and are not in the patch. |
+| Claude Code 2.1.311 | The agent follows the skill: it copies a file aside before each edit and appends `diff -u` after it. | Edits the agent recorded. It depends on the agent following the instructions from its first edit. |
+| Codex CLI 0.171.0 | The same instructions. | The same. In its default sandbox Codex cannot reach Rex, so `--float` fails with `Rex did not open the review.` and the agent gives you the command to run. |
+
+Claude Code and Codex can also run a program after each edit, which could record edits without relying on the agent. Milo does not install or ship such a program: it would change your agent's configuration, and what those programs receive for an edit differs by harness and version.
+
 ## Editing files
 
 The reader only reads until you ask it to edit. Press `e`, or open the file with `milo view FILE --edit`, and the file's text becomes a draft with a cursor. It works the same in the reader Outline opens in its own pane, in the floating reader in Rex and in `milo view`. The last row lists the main keys, `Ctrl-G` opens help, and [keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md#editing-in-the-reader) has the whole list.
@@ -736,6 +799,8 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `q` or `Esc` | Close |
 
 The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.
+
+A [review of an agent's patch](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits), opened by `milo review PATCH`, adds `]` and `[` for the next or previous file of the patch and `r` to read the files again. It is always read-only.
 
 ### Editing in the reader
 
@@ -1087,7 +1152,7 @@ Source: https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md
 
 ---
 name: milo
-description: Use milo in a user's terminal to show a Git file tree, recent commits, usage, or a file from the working tree or a commit, and to guide Rex setup.
+description: Use milo in a user's terminal to show a Git file tree, recent commits, usage, a file from the working tree or a commit, or only the edits you made yourself, and to guide Rex setup.
 ---
 
 # milo
@@ -1129,6 +1194,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
+| `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. Source builds; check `milo review --help` on an installed binary. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
@@ -1166,6 +1232,62 @@ there are unsaved changes. Use `milo view "$file" --edit` only when the user
 asked to edit that file. Do not type into the user's editor or answer its
 questions for them; to change a file yourself, use your own tools.
 
+## Show the user your own edits
+
+When the user asks to see what you changed ("use Milo and show me the edits"),
+hand Milo a patch of the edits you made and nothing else. Milo shows each file
+as it is now with only those lines marked, so the user's own uncommitted work
+and other agents' edits in the same file read as unchanged. Do this only when
+asked.
+
+The patch must come from a record of your own edits, never from the project's
+state:
+
+- **A harness that records which lines you wrote.** In OMP, run
+  `d = await commit.draft("self")` and write the text of `await d.diff()` to a
+  file. Nothing is committed. Files it lists under Review, such as ones a
+  shell command wrote, are not in that patch; say so.
+- **Any other harness.** Record each edit as you make it, from your first edit
+  of the task. Immediately before you edit `FILE`, copy it aside; immediately
+  after, append the difference to the patch:
+
+  ```sh
+  record=$(mktemp -d)                 # once per task, outside the project
+  cp "$file" "$record/before"         # before your edit; skip for a file you create
+  # ... make your edit with your own tool ...
+  diff -u --label "a/$file" --label "b/$file" "$record/before" "$file" >>"$record/edits.patch"
+  # for a file you created:
+  diff -u --label /dev/null --label "b/$file" /dev/null "$file" >>"$record/edits.patch"
+  ```
+
+  Use the path relative to the repository root in the labels. `diff` exits
+  with 1 when it found a difference; that is not a failure.
+
+**Never** build the patch from `git diff`, `git status`, `git stash` or a list
+of files you touched, and never rebuild it afterwards from memory. Those hold
+everyone's uncommitted work, not yours. If you did not record an edit when you
+made it, say that you cannot show only your own edits. You may offer
+`milo outline`, named as every uncommitted change in the project, not as
+yours.
+
+Then, from the repository root:
+
+```sh
+milo review "$record/edits.patch" --from "Claude Code" --float
+```
+
+`--float` opens a floating reader over the Rex tab you run in and needs
+`REX_SESSION` and `REX_BLOCK` in your environment. It prints how many files
+it shows and one `Not shown:` line with the reason for each file it cannot
+show; pass those on to the user as they are. Without Rex, or if `--float`
+fails, give the user `milo review PATCH` to run in their terminal. Keep the
+patch outside the project and leave it in place while the review is open.
+
+`--from` is a label, not proof. Milo checks that each file still holds the
+lines your patch says it left there, not who wrote them. A file whose lines
+were changed since shows a reason and no diff. Do not regenerate the patch
+from the current files to make it fit.
+
 ## Do not
 
 - Do not edit the user's Rex or Claude Code configuration directly. Use
@@ -1175,6 +1297,8 @@ questions for them; to change a file yourself, use your own tools.
 - Do not run full-screen panes in your own non-interactive shell. They need
   an interactive terminal. If you cannot target the user's terminal, give
   the user the command to run instead.
+- Do not present `git diff`, `milo outline` or `milo view FILE` as "your
+  edits". They show all uncommitted or unpushed work in the project.
 
 ---
 
@@ -1356,6 +1480,10 @@ opens a file from the outline, edits it through keys Rex sends, opens a second
 file and sees it become a tab of the same reader beside the draft, switches and
 closes tabs, and sees another session's outline get a reader of its own. Then it
 has Rex close the reader on two unsaved drafts and gets one back at the next edit.
+A third hands `milo review --float` a patch from a process with no terminal,
+as an agent's shell would. It sees only the handed-over edits marked beside a
+person's uncommitted lines in the same file, a path outside the project
+refused, and a reason in place of the diff once the agent's line is rewritten.
 
 ### Changing alert mirroring
 
@@ -1398,6 +1526,18 @@ No test may reach a real Discord. The helper looks for Discord's socket in one f
 A tool also needs a rule for when it is found on this machine, apart from whether it has a figure, and an entry in `UsageTool` in `src/preferences.rs` so that it can be always shown or hidden. Decide it from files the tool saved, never by running the tool. A tool that is absent or hidden must take no room in the pane, in its help or in `milo doctor`, and a hidden one must not be looked for. `src/usage/tests/tools.rs` checks this at every size class.
 
 An account is different: its figure exists only on a provider's servers, so nothing on disk says it is in use. It needs an entry in `UsageAccount`, which starts hidden, and an adapter in `src/usage/accounts.rs` that names the documented endpoint, the `MILO_…` settings it reads, how often it may be asked, and how to read the reply into a `Figure` with its own `Kind` and `Unit`. Never give an account a limit window: a balance, a spend or a count of credits must not become a percentage or reach the menu bar badge. Never read a key another tool saved, and never test against the real provider. Unit tests serve fixtures from a loopback port through `Sources::test`. That stand-in and the plain-HTTP address it uses are compiled only under `cfg(test)`: an installed binary has no setting, variable or file that sends a key anywhere but the provider's HTTPS host, and `tests/pane.rs` checks the built binary for that. Do not add one.
+
+### Changing the patch review
+
+`milo review` shows a *handed-over* patch: a unified diff a coding agent wrote of its own edits. [Reviewing an agent's edits](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) says what a person sees. Keep three things true.
+
+It never guesses. `src/handoff/` works only from the patch and the file's text now, and `src/review.rs` asks Git for nothing but the project's top folder. Do not add a fallback to Git's diff, status or a list of changed paths: those say what is uncommitted, not who wrote it. A file the patch does not fit shows its reason and no diff.
+
+It claims no more than it checked. Milo checks that a file still holds the patch's lines, not who wrote them, so the screen says `patch from NAME` and the help says the rest. Do not word it as the agent's edits being verified. A new harness goes in the table in `docs/panes.md` only with the version and what was observed in a throwaway repository that had someone else's uncommitted work in the same file.
+
+The patch is untrusted and the review writes nothing. Paths go through `safe` in `patch.rs` before any file is looked for, and files are read through `src/reader/working_path.rs` with no link followed. Keep the work limit in `fit.rs`. Do not copy the patch into the state folder, run a program for it, or install anything into an agent's settings.
+
+`cargo test --bin milo handoff:: review::` runs the unit tests and the pane tests, which mix a person's, the agent's and another agent's uncommitted edits in one file. With Rex installed, `cargo test --test rex_lab -- --ignored a_floating_review` opens the floating review on a disposable Rex server.
 
 ### Adding a language to the reader
 
@@ -1495,6 +1635,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/git/parse.rs` | Reads Git status, diff, and log output. |
 | `src/git/pending.rs` | Counts lines in pending changes and reuses tracked-file counts across unrelated edits. |
 | `src/git/run.rs` | Runs bounded, read-only Git commands with unsafe settings overridden. |
+| `src/handoff.rs` | Works out what a handed-over patch changed in a file as it is now, or why that cannot be told. |
+| `src/handoff/fit.rs` | Finds a patch's lines in the file and takes them back out in memory, within a fixed amount of work. |
+| `src/handoff/patch.rs` | Reads the files and hunks of a unified diff and refuses names that could leave the project. |
 | `src/help.rs` | Draws and scrolls the in-pane help page. |
 | `src/history.rs` | Keeps commits, opened file lists, and selection state. |
 | `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
@@ -1532,11 +1675,13 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/edit.rs` | Edits a draft: cursor, keys, questions, formatting, and drawing. |
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
 | `src/reader/inbox.rs` | Carries a request to open one more file to a reader already running in a Rex block, through a pipe in the state folder. |
+| `src/reader/handed.rs` | Loads a file with only a handed-over patch's edits marked, through no link and never to edit. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
 | `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
+| `src/review.rs` | Runs `milo review`: a read-only reader over each file of a handed-over patch, and its floating form for a program with no terminal. |
 | `src/rex.rs` | Calls Rex for setup, floating readers, the listener, and the presence helper's watch. |
 | `src/rex/server.rs` | Asks a Rex server for its version, host ID and connected apps, and starts, forwards and ends another host's settings editor. |
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
@@ -1644,7 +1789,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
-| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, opens and edits files in the tabs of its floating reader, and checks that presence shows nothing there. |
+| `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, and opens a floating review of an agent-supplied patch. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
@@ -1662,6 +1807,8 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/internals.md
 Milo only reads a project, with one exception: the reader writes a file when you save an edit of it. It keeps the user's Git settings, such as global ignore rules, but overrides settings that could run a program. That includes hooks, content filters, external diff and text converters, file-system monitors and on-demand fetching. It caps Git's time and output. Git reports a change to the commit recorded for a submodule; milo does not inspect uncommitted or untracked files inside it.
 
 The reader can show where a file link points without reading its target. It refuses a path through a folder link that leaves the project and does not read devices or pipes as files. Text from the project cannot send terminal controls.
+
+`milo review` shows a patch that a program handed over. The patch's text is untrusted: its paths are refused unless they can only mean a file below the project folder and outside `.git`, each file is opened from the held project folder through no link, and its lines are found in the file in memory within a fixed amount of work. No program runs and nothing is written. See [reviewing an agent's edits](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits).
 
 ## Writing
 

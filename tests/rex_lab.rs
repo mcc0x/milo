@@ -1035,3 +1035,84 @@ fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_ed
     assert!(soon(|| fs::read_to_string(dir.join("b.txt")).unwrap() == "lost? second\n"));
     assert!(soon(|| kept() == ["also typed first\n"]), "{:?}", kept());
 }
+
+/// A program with no terminal hands a patch of its own edits to `milo review --float`.
+#[test]
+#[ignore = "needs an installed Rex; starts a disposable server"]
+fn a_floating_review_marks_only_the_handed_over_edits_and_says_when_it_cannot() {
+    let mut lab = Lab::start();
+    lab.start_app();
+    let dir = lab.root.join("review");
+    fs::create_dir_all(&dir).unwrap();
+    lab.git(&dir, &["init", "-q", "-b", "main"]);
+    fs::write(dir.join("app.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+    lab.git(&dir, &["add", "-A"]);
+    lab.git(&dir, &["commit", "-q", "-m", "base"]);
+    // Uncommitted work by a person and by the agent, in the same file.
+    let now = "one, by a person\ntwo\nthree\nfour, by the agent\nfive\nsix, by a person\n";
+    fs::write(dir.join("app.txt"), now).unwrap();
+    fs::write(dir.join("new.txt"), "by the agent\n").unwrap();
+    let patch = lab.root.join("edits.patch");
+    let handed = "--- a/app.txt\n+++ b/app.txt\n@@ -1,6 +1,6 @@\n one\n two\n three\n-four\n+four, by the agent\n five\n six\n\
+                  --- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+by the agent\n\
+                  --- a/../home/.zshrc\n+++ b/../home/.zshrc\n@@ -0,0 +1 @@\n+outside\n";
+    fs::write(&patch, handed).unwrap();
+
+    let [session, tab] = lab.new_session("review", "agent", &dir);
+    let pane = |label: &str| {
+        let view = lab.view();
+        view.tab(&tab).panes.iter().find(|pane| pane.label == label).map(|pane| pane.block.clone())
+    };
+    let shell = lab.view().tab(&tab).panes[0].block.clone();
+    // What an agent's shell in that tab would run: no terminal, only the pane's Rex variables.
+    let output = lab
+        .command(&lab.milo)
+        .current_dir(&dir)
+        .env("REX_SESSION", &session)
+        .env("REX_BLOCK", &shell)
+        .args(["review", patch.to_str().unwrap(), "--from", "the agent", "--float"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(said.contains("in 2 of 3 files"), "{said}");
+    assert!(said.contains("Not shown: ../home/.zshrc: The patch names a path that is not a file inside"), "{said}");
+
+    assert!(soon(|| pane("Patch review").is_some()), "no floating review in {:?}", lab.view());
+    let review = pane("Patch review").unwrap();
+    let screen = || lab.rex(&["capture", "-s", &session, "-b", &review, "--trim"]);
+    let shows = |text: &str| assert!(soon(|| screen().contains(text)), "expected {text:?} on:\n{}", screen());
+    let keys = |keys: &[&str]| {
+        lab.rex(&[["send-key", "-s", session.as_str(), "-b", review.as_str()].as_slice(), keys].concat());
+    };
+    shows("patch from the agent");
+    shows("4 + four, by the agent");
+    let frame = screen();
+    assert!(frame.contains("- four\n") || frame.contains("- four "), "{frame}");
+    // The person's lines are there, and not as changes.
+    for theirs in ["1   one, by a person", "6   six, by a person"] {
+        assert!(frame.contains(theirs), "{frame}");
+    }
+
+    keys(&["]"]);
+    shows("1 + by the agent");
+    keys(&["]"]);
+    shows("not a file inside the project");
+    assert!(!screen().contains("zselect"), "a file outside the project was read:\n{}", screen());
+
+    // Once a person rewrites the agent's line, the file shows no diff rather than a guess.
+    keys(&["]"]);
+    shows("4 + four, by the agent");
+    fs::write(dir.join("app.txt"), now.replace("four, by the agent", "four, rewritten")).unwrap();
+    keys(&["r"]);
+    shows("no longer holds the lines the patch left");
+    assert!(!screen().contains("rewritten"), "{}", screen());
+
+    // Reading is all it does: `e` is refused, and the project is as it was left.
+    keys(&["e"]);
+    shows("Read-only: this shows a patch");
+    keys(&["q"]);
+    assert!(soon(|| pane("Patch review").is_none()), "{:?}", lab.view());
+    assert_eq!(fs::read_to_string(dir.join("app.txt")).unwrap(), now.replace("four, by the agent", "four, rewritten"));
+    assert!(!lab.root.join("home/.local/state/milo").exists(), "the review kept something in Milo's state folder");
+}

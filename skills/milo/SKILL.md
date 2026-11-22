@@ -1,6 +1,6 @@
 ---
 name: milo
-description: Use milo in a user's terminal to show a Git file tree, recent commits, usage, or a file from the working tree or a commit, and to guide Rex setup.
+description: Use milo in a user's terminal to show a Git file tree, recent commits, usage, a file from the working tree or a commit, or only the edits you made yourself, and to guide Rex setup.
 ---
 
 # milo
@@ -42,6 +42,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
+| `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. Source builds; check `milo review --help` on an installed binary. |
 | `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. Check `milo web --help` for availability on older installs. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
@@ -79,6 +80,62 @@ there are unsaved changes. Use `milo view "$file" --edit` only when the user
 asked to edit that file. Do not type into the user's editor or answer its
 questions for them; to change a file yourself, use your own tools.
 
+## Show the user your own edits
+
+When the user asks to see what you changed ("use Milo and show me the edits"),
+hand Milo a patch of the edits you made and nothing else. Milo shows each file
+as it is now with only those lines marked, so the user's own uncommitted work
+and other agents' edits in the same file read as unchanged. Do this only when
+asked.
+
+The patch must come from a record of your own edits, never from the project's
+state:
+
+- **A harness that records which lines you wrote.** In OMP, run
+  `d = await commit.draft("self")` and write the text of `await d.diff()` to a
+  file. Nothing is committed. Files it lists under Review, such as ones a
+  shell command wrote, are not in that patch; say so.
+- **Any other harness.** Record each edit as you make it, from your first edit
+  of the task. Immediately before you edit `FILE`, copy it aside; immediately
+  after, append the difference to the patch:
+
+  ```sh
+  record=$(mktemp -d)                 # once per task, outside the project
+  cp "$file" "$record/before"         # before your edit; skip for a file you create
+  # ... make your edit with your own tool ...
+  diff -u --label "a/$file" --label "b/$file" "$record/before" "$file" >>"$record/edits.patch"
+  # for a file you created:
+  diff -u --label /dev/null --label "b/$file" /dev/null "$file" >>"$record/edits.patch"
+  ```
+
+  Use the path relative to the repository root in the labels. `diff` exits
+  with 1 when it found a difference; that is not a failure.
+
+**Never** build the patch from `git diff`, `git status`, `git stash` or a list
+of files you touched, and never rebuild it afterwards from memory. Those hold
+everyone's uncommitted work, not yours. If you did not record an edit when you
+made it, say that you cannot show only your own edits. You may offer
+`milo outline`, named as every uncommitted change in the project, not as
+yours.
+
+Then, from the repository root:
+
+```sh
+milo review "$record/edits.patch" --from "Claude Code" --float
+```
+
+`--float` opens a floating reader over the Rex tab you run in and needs
+`REX_SESSION` and `REX_BLOCK` in your environment. It prints how many files
+it shows and one `Not shown:` line with the reason for each file it cannot
+show; pass those on to the user as they are. Without Rex, or if `--float`
+fails, give the user `milo review PATCH` to run in their terminal. Keep the
+patch outside the project and leave it in place while the review is open.
+
+`--from` is a label, not proof. Milo checks that each file still holds the
+lines your patch says it left there, not who wrote them. A file whose lines
+were changed since shows a reason and no diff. Do not regenerate the patch
+from the current files to make it fit.
+
 ## Do not
 
 - Do not edit the user's Rex or Claude Code configuration directly. Use
@@ -88,3 +145,5 @@ questions for them; to change a file yourself, use your own tools.
 - Do not run full-screen panes in your own non-interactive shell. They need
   an interactive terminal. If you cannot target the user's terminal, give
   the user the command to run instead.
+- Do not present `git diff`, `milo outline` or `milo view FILE` as "your
+  edits". They show all uncommitted or unpushed work in the project.

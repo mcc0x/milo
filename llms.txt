@@ -10,12 +10,12 @@ milo writes to the project it displays only when you save a file you edited in i
 - [README](README.md): Installation, a picture of each pane and the main commands.
 - [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.5/install.sh): Downloads the v0.1.5 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
 - [Source installer](install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
-- [Agent skill](skills/milo/SKILL.md): How to check milo and open a reader in the user's terminal, including at a Git commit.
+- [Agent skill](skills/milo/SKILL.md): How to check milo, open a reader in the user's terminal, including at a Git commit, and show the user only the edits the agent itself made.
 - [Setup and removal](docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, several Rex hosts (which host and Rex version this is, `milo web --host`, `milo settings export`, `import` and `undo`), opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
 - [Keys and marks](docs/keys.md): Keyboard shortcuts and what the panes show.
 - [Usage limits](docs/usage.md): Where the figures come from and what they mean.
 - [Discord presence](docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the opt-in session and project names, Milo's Discord application or your own, `milo presence`, and its limits.
-- [Using the panes](docs/panes.md): Pane sizes, history, the file reader and its languages, editing a file, and the formatters milo can run.
+- [Using the panes](docs/panes.md): Pane sizes, history, the file reader and its languages, reviewing only the edits a coding agent hands over as a patch (`milo review`), editing a file, and the formatters milo can run.
 
 ## Developing milo
 
