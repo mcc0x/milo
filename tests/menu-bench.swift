@@ -3,17 +3,11 @@
 // usage, starts the bundled reader or touches the installed app.
 import QuartzCore
 
-// What the reader's callback does with each decoded frame.
-private extension Model {
-    func receive(_ frame: UsageSnapshot) {
-        snapshot = frame; failure = nil; changed?()
-        alerts.observe(frame)
-    }
-}
-
 private extension AppDelegate {
-    var popoverShown: Bool { popover.isShown }
-    func showPopover() { show() }
+    var popoverShown: Bool { panelOnScreen }
+    var panel: NSView? { popover.contentViewController?.view }
+    // Under a sleeping display the closing animation never ends, and the popover does not open again.
+    func showPopover() { popover.animates = false; show() }
     func closePopover() { popover.close() }
 }
 
@@ -26,10 +20,10 @@ private enum MenuBench {
     }
 
     // `lowest` is the reading the badge shows; `other` only appears in the popover.
-    private static func frame(lowest: Int = 12, other: Int = 64) -> UsageSnapshot {
+    private static func frame(lowest: Int = 12, other: Int = 64, otherResetIn: Int = 2 * 3_600) -> UsageSnapshot {
         UsageSnapshot(version: 1, providers: [
             UsageProvider(id: "codex", name: "Codex", windows: [
-                window("5h", other, resetIn: 2 * 3_600), window("week", 41, resetIn: 3 * 86_400),
+                window("5h", other, resetIn: otherResetIn), window("week", 41, resetIn: 3 * 86_400),
             ], detail: nil),
             UsageProvider(id: "claude", name: "Claude Code", windows: [
                 window("5h", 57, resetIn: 3 * 3_600), window("week", lowest, resetIn: 4 * 86_400),
@@ -82,8 +76,8 @@ private enum MenuBench {
 
     private static func frames(_ delegate: AppDelegate, _ state: String) async {
         let model = delegate.model
-        let shown = { delegate.popoverShown ? "" : "popover closed" }
-        let note = state == "open" ? shown : { "" }
+        // A click elsewhere closes the popover: say so when a row was not timed as named.
+        let note = { delegate.popoverShown == (state == "open") ? "" : delegate.popoverShown ? "popover open" : "popover closed" }
         let same = frame(), badge = frame(lowest: 11), display = frame(other: 63)
         model.receive(same)
         await paced("idle/\(state)", note: note) { _ in }
@@ -141,17 +135,56 @@ private enum MenuBench {
         delegate.closePopover()
         if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
     }
+
+    private static func picture(_ delegate: AppDelegate) -> Data? {
+        guard let view = delegate.panel, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: image)
+        return image.tiffRepresentation
+    }
+
+    /// Whether the panel looks different after three seconds of one repeated frame.
+    private static func redrawn(_ delegate: AppDelegate, resetIn: Int, open: Bool) async -> Bool {
+        let repeated = frame(otherResetIn: Int(Date.now.timeIntervalSince1970) - start + resetIn)
+        delegate.model.receive(repeated)
+        delegate.showPopover()
+        await pause(600)
+        let before = picture(delegate)
+        if !open { delegate.closePopover() }
+        for _ in 0..<6 {
+            await pause(500)
+            delegate.model.receive(repeated)
+        }
+        if !open { delegate.showPopover() }
+        await pause(600)
+        let after = picture(delegate)
+        delegate.closePopover()
+        await pause(350)
+        return before != nil && after != nil && before != after
+    }
+
+    /// A row also changes when its reset passes, with no new frame to say so: the panel has to
+    /// show that whether it was on screen at the time or is opened afterwards.
+    static func followsClock(_ delegate: AppDelegate) async -> Bool {
+        let steady = await redrawn(delegate, resetIn: 3_600, open: false)
+        let open = await redrawn(delegate, resetIn: 2, open: true)
+        let reopened = await redrawn(delegate, resetIn: 2, open: false)
+        print("# a reset passing redraws the panel: open \(open), reopened \(reopened); the same picture otherwise: \(!steady)")
+        return open && reopened && !steady
+    }
 }
 
 @main
 private struct MenuBenchApp {
     @MainActor static func main() {
         setvbuf(stdout, nil, _IOLBF, 0)
+        // An app with nothing on screen is slowed down to save power, which would time the scheduler.
+        let awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Timing the menu app")
+        defer { ProcessInfo.processInfo.endActivity(awake) }
         let app = NSApplication.shared; app.setActivationPolicy(.accessory)
         let delegate = AppDelegate(); app.delegate = delegate
         Task { @MainActor in
             await MenuBench.run(delegate)
-            exit(0)
+            exit(await MenuBench.followsClock(delegate) ? 0 : 1)
         }
         withExtendedLifetime(delegate) { app.run() }
     }

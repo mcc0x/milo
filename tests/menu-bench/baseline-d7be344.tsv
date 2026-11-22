@@ -1,23 +1,24 @@
-# revision: d7be344ed187fb6ed273f5eb819612d189d9df64
-# median of three runs of sh tests/menu-bench.sh; microseconds
-# Apple M5 Pro; Darwin 27.2.0 arm64; Apple Swift version 6.4.2
+# revision: d7be344ed187fb6ed273f5eb819612d189d9df64, its App.swift built with this harness
+# median of three runs of sh tests/menu-bench.sh, taken turn about with later builds; microseconds
+# Apple M5 Pro; Darwin 27.2.0 arm64; Apple Swift version 6.4.2; screen locked and display asleep
+# runs fall into a fast and a slow group about 2.5 times apart: compare a row with the idle row of its run
 scenario	n	main_median_us	main_p95_us	cpu_us_per_iter
-decode-frame	20000	8.8	11.2	-
+decode-frame	20000	9.0	9.8	-
 compare-frame	20000	0.1	0.1	-
 badge-reading	20000	0.3	0.4	-
 alerts-observe	20000	0.8	0.8	-
-idle/never-opened	400	0.0	0.0	49.4
-unchanged/never-opened	400	9.6	15.7	49.2
-badge-changed/never-opened	400	82.7	134.2	1508.9
-display-changed/never-opened	400	8.0	14.5	44.0
-open-popover/first	1	69057.9	69057.9	-
-open-popover/again	11	3018.4	10555.9	-
-open-popover/login-status	50	1832.2	4623.1	-
-idle/closed	400	0.0	0.0	81.4
-unchanged/closed	400	39.4	64.7	972.7
-badge-changed/closed	400	91.2	125.5	2107.7
-display-changed/closed	400	43.2	63.3	1596.2
-idle/open	400	0.0	0.0	82.3
-unchanged/open	400	40.8	63.6	1076.6
-badge-changed/open	400	92.3	130.8	2371.2
-display-changed/open	400	44.5	62.5	1731.1
+idle/never-opened	400	0.0	0.0	40.2
+unchanged/never-opened	400	9.5	16.6	50.4
+badge-changed/never-opened	400	85.6	135.6	1526.4
+display-changed/never-opened	400	9.3	16.5	48.1
+open-popover/first	1	73493.2	73493.2	-
+open-popover/again	11	11258.4	11857.8	-
+open-popover/login-status	50	2953.5	3351.0	-
+idle/closed	400	0.0	0.0	44.5
+unchanged/closed	400	14.2	31.3	329.1
+badge-changed/closed	400	80.2	117.2	2012.4
+display-changed/closed	400	16.1	31.2	521.2
+idle/open	400	0.0	0.0	39.9
+unchanged/open	400	39.5	62.5	1013.1
+badge-changed/open	400	86.8	128.1	2327.5
+display-changed/open	400	44.7	64.8	1668.5

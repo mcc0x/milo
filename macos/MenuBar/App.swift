@@ -233,8 +233,7 @@ private final class Model: ObservableObject {
                         pending.removeSubrange(...newline)
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.child === process else { return }
-                            self.snapshot = frame; self.failure = nil; self.changed?()
-                            self.alerts.observe(frame)
+                            self.receive(frame)
                         }
                     }
                     guard pending.count <= 65536 else { throw FeedError.invalid }
@@ -249,7 +248,17 @@ private final class Model: ObservableObject {
 
     private enum FeedError: Error { case invalid }
     private func failed(_ message: String) { snapshot = nil; failure = message; changed?() }
-    func updateBadge(at now: Date) {
+    func receive(_ frame: UsageSnapshot) {
+        // The reader repeats a settled frame about every 30 seconds. Publishing an equal one
+        // would have SwiftUI work the whole panel out again, on screen or not.
+        if snapshot != frame { snapshot = frame }
+        if failure != nil { failure = nil }
+        changed?()
+        alerts.observe(frame)
+    }
+    func updateBadge(at now: Date, panelShown: Bool) {
+        // The panel's rows read the time too, so one on screen is redrawn at every tick.
+        if panelShown { objectWillChange.send() }
         badgeUpdatedAt = now
         let reading = badgeReading(snapshot, mode: mode, now: now)
         if badge != reading { badge = reading }
@@ -326,12 +335,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         updateBadge()
         model.refresh()
     }
-    private func updateBadge() {
+    // The popover can go on reporting itself shown after its window has left the screen.
+    private var panelOnScreen: Bool {
+        guard let host = popover.contentViewController, host.isViewLoaded else { return false }
+        return host.view.window?.isVisible == true
+    }
+    private func updateBadge(opening: Bool = false) {
         guard let button = status?.button else { return }
         // The reader emits even unchanged frames, at most 30 seconds apart when settled.
         // Use those ticks for the countdown and share the chosen window with the popover.
         let now = Date.now
-        model.updateBadge(at: now)
+        model.updateBadge(at: now, panelShown: opening || panelOnScreen)
         let label = model.badge?.label(at: now) ?? "Milo"
         let title = model.badge.map { " \($0.window.remaining)%" } ?? ""
         if button.title != title {
@@ -347,7 +361,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = status?.button else { return }
         model.refreshLoginStatus()
         model.alerts.refreshPermission()
-        updateBadge(); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        updateBadge(opening: true); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return false }
