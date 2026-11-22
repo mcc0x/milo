@@ -534,7 +534,7 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
         Err(e) => {
             // An invalid command path has the same error with or without a terminal.
             open()?;
-            return Err(format!("cannot use this terminal: {e}"));
+            return Err(format!("cannot use this terminal: {e}{}", without_a_terminal()));
         }
     };
     let result = run_entered(start, open, &mut terminal);
@@ -546,6 +546,23 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
         terminal.finish(format!("milo: {safe}\n").as_bytes());
     }
     result
+}
+
+/// What to do instead, for a pane started where there is no terminal to
+/// draw in or read keys from: a pipe, a file, or a coding agent's shell.
+fn without_a_terminal() -> &'static str {
+    use std::io::IsTerminal as _;
+    const PRINTS: &str =
+        "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one";
+    const IN_REX: &str = "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one, \
+                          and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab";
+    if io::stdout().is_terminal() && io::stdin().is_terminal() {
+        ""
+    } else if crate::rex::inside() {
+        IN_REX
+    } else {
+        PRINTS
+    }
 }
 
 enum Exit {

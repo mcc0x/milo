@@ -514,6 +514,8 @@ A reader with one file looks as it always has. With a second file, a row of name
 | Click a name | Show that tab |
 | Click `×` | Close the shown tab |
 
+Where every tab is shown and room is left, the right end of the strip names those keys: `^N ^P tabs · ^W close`, or `^N ^P tabs` alone. `?` lists them first.
+
 Each tab keeps its own place in the file, and while it is being edited its cursor, draft and undo history, however long another tab is shown. A tab that was only being read shows the file as it is now when you come back to it. Closing the last tab closes the reader.
 
 In a narrow pane the strip keeps the shown tab and as many neighbours as fit whole. `‹` and `›` at its edges stand for the tabs beyond, with a `*` when one of those has unsaved edits; click an edge to move that way. A pane under four rows tall shows the file without the strip; the keys still work. [See the strip at 34 columns.](https://github.com/mcc0x/milo/blob/main/docs/img/reader-tabs-narrow.webp)
@@ -591,6 +593,8 @@ milo review /tmp/edits.patch --from "Claude Code" --float   # from an agent's sh
 | `r` | Read the files again |
 | `n` / `N`, `c`, scrolling | As in the reader |
 | `q` or `Esc` | Close |
+
+With more than one file, the last row begins with `[ ] files`. In a pane too narrow for the place in the heading, that hint carries it instead, as `[ ] file 2 of 3` or `[ ] 2/3`, and gives up the other keys first.
 
 The review is read-only: `e` says so, and no file is written, in the project or outside it. The patch is read once when the review opens and is not copied or kept. Milo starts no program for it and asks Git nothing but where the project's top folder is, which the patch's paths are relative to.
 
@@ -743,6 +747,8 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/keys.md
 # Keys and marks
 
 Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses. While you are [editing a file](https://github.com/mcc0x/milo/blob/main/docs/keys.md#editing-in-the-reader), the keys you type are text: help is `Ctrl-G`, and `Ctrl-C` asks before it gives up unsaved changes.
+
+A help page longer than the pane continues in a second column, and a third, once the pane is 57 columns wide or more, so a full-width pane usually shows it whole. In the shell, `milo COMMAND --help` or `milo --help COMMAND` explains one command in a few lines, and `milo --help` lists every command and key.
 
 ## Moving around
 

@@ -1392,20 +1392,20 @@ impl<R: Fn(&[&OsStr]) -> bool> Pane for Setup<R> {
         use help::{heading, key};
         let mut rows = vec![
             heading("Setup keys"),
-            key("↑↓    ", "move (k j)"),
-            key("Enter ", "choose or change"),
-            key("Click ", "choose or change"),
-            key("1 2 3 4", "switch sections"),
-            key("Tab   ", "next section"),
+            key("↑↓   ", "move (k j)"),
+            key("Enter", "choose or change"),
+            key("Click", "choose or change"),
+            key("1-4  ", "switch sections"),
+            key("Tab  ", "next section"),
         ];
         if self.inside {
-            rows.extend([key("a     ", "try in this tab"), key("u     ", "undo trial")]);
+            rows.extend([key("a    ", "try in this tab"), key("u    ", "undo trial")]);
         }
         rows.extend([
-            key("s     ", "choose where to save"),
-            key("r     ", "refresh preview/report"),
-            key("Esc   ", "back or leave settings"),
-            key("q     ", "leave settings"),
+            key("s    ", "save, asks where"),
+            key("r    ", "refresh this view"),
+            key("Esc  ", "back or leave"),
+            key("q    ", "leave settings"),
         ]);
         Page::new(rows)
     }

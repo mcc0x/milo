@@ -35,6 +35,8 @@ const NAME_LEAST: usize = 4;
 const EDGE: usize = 2;
 const UNSAVED: &str = "*";
 const CLOSE: &str = "×";
+/// The keys of the strip, said at its right edge where every tab is shown and room is left.
+const KEYS: [&str; 2] = ["^N ^P tabs · ^W close", "^N ^P tabs"];
 
 /// The last part of a path written with `/`.
 fn file_name(path: &str) -> &str {
@@ -291,6 +293,13 @@ impl Tabs {
             s.put(end + 1, 0, 1, "›", FAINT);
             hits.push((end..s.w, Hit::Show(tabs.end)));
         }
+        if tabs == (0..self.tabs.len()) {
+            // A tab ends in a blank column; one more keeps the keys clear of it, and one of the edge.
+            let room = s.w.saturating_sub(x + 2);
+            if let Some(keys) = KEYS.iter().find(|keys| str_width(keys) <= room) {
+                s.put_right(s.w - 1, 0, keys, FAINT);
+            }
+        }
         self.hits = hits;
     }
 
@@ -365,13 +374,14 @@ impl Pane for Tabs {
 
         let mut page = self.reader().help();
         if self.tabs.len() > 1 {
-            page.extend([
-                HelpRow::new(),
+            // First on the page: these keys are what a reader with one file does not have.
+            page.lead([
                 heading("Tabs"),
                 key("^N ^P", "next/previous tab"),
                 key("^W   ", "close this tab"),
                 note("Click a tab, or its ×."),
                 note("* marks unsaved edits."),
+                HelpRow::new(),
             ]);
         }
         page
@@ -487,7 +497,17 @@ mod tests {
         tabs.reader_mut().state = Some(state(f));
     }
 
+    /// The frame, with the strip's reminder of its keys left off: one test below is about that.
     fn drawn(tabs: &mut Tabs, w: usize, h: usize) -> Vec<String> {
+        let mut rows = with_keys(tabs, w, h);
+        if let Some(keys) = KEYS.iter().find(|keys| rows[0].ends_with(*keys)) {
+            let strip = rows[0][..rows[0].len() - keys.len()].trim_end().len();
+            rows[0].truncate(strip);
+        }
+        rows
+    }
+
+    fn with_keys(tabs: &mut Tabs, w: usize, h: usize) -> Vec<String> {
         let mut screen = Screen::sized(w, h);
         tabs.draw(&mut screen);
         screen.text()
@@ -658,6 +678,28 @@ mod tests {
         ask(&mut tabs, &f, "src/mod.rs");
         ask(&mut tabs, &f, "tests/mod.rs");
         assert_eq!(drawn(&mut tabs, 80, 6)[0], " alpha.txt  *beta.txt  gamma.txt  src/mod.rs  tests/mod.rs ×");
+    }
+
+    #[test]
+    fn the_strip_names_its_keys_where_every_tab_is_shown_and_room_is_left() {
+        let f = Fixture::folder();
+        for name in ["alpha.txt", "beta.txt", "gamma.txt"] {
+            f.write(name, "text\n");
+        }
+        let mut tabs = opened(&f, &["alpha.txt", "beta.txt", "gamma.txt"]);
+        let strip = " alpha.txt ×  beta.txt  gamma.txt";
+        assert_eq!(with_keys(&mut tabs, 60, 6)[0], format!("{strip}     ^N ^P tabs · ^W close"));
+        // Two columns stay between the last tab and the keys.
+        assert_eq!(with_keys(&mut tabs, 57, 6)[0], format!("{strip}  ^N ^P tabs · ^W close"));
+        assert_eq!(with_keys(&mut tabs, 56, 6)[0], format!("{strip}            ^N ^P tabs"));
+        assert_eq!(with_keys(&mut tabs, 46, 6)[0], format!("{strip}  ^N ^P tabs"));
+        assert_eq!(with_keys(&mut tabs, 45, 6)[0], strip);
+        // Where tabs are counted out at an edge, the names keep the room.
+        assert_eq!(with_keys(&mut tabs, 17, 6)[0], " alpha.txt ×    ›");
+        // A click on the keys is a click on nothing.
+        assert_eq!(tabs.key(Key::Click(50, 0)), After::Ignored);
+        // The help page says them first, where a short pane shows them without scrolling.
+        assert!(tabs.help().text().starts_with("Tabs\n  ^N ^P  next/previous tab\n  ^W     close this tab\n"));
     }
 
     #[test]

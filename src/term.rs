@@ -96,11 +96,27 @@ pub struct Session {
     answers_due: Option<Instant>,
 }
 
+/// How many columns the terminal that standard output is has, or nothing
+/// where it is a pipe or a file.
+pub fn output_columns() -> Option<usize> {
+    let stdout = io::stdout();
+    if !stdout.is_terminal() {
+        return None;
+    }
+    let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: TIOCGWINSZ writes into the live `winsize` record.
+    let result = unsafe { libc::ioctl(stdout.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut ws) };
+    (result == 0 && ws.ws_col > 0).then(|| usize::from(ws.ws_col))
+}
+
 impl Session {
     pub fn open() -> io::Result<Self> {
         let stdout = io::stdout();
         if !stdout.is_terminal() {
             return Err(io::Error::other("standard output is not a terminal"));
+        }
+        if !io::stdin().is_terminal() {
+            return Err(io::Error::other("standard input is not a terminal"));
         }
         let output = terminal_output(stdout.as_raw_fd())?;
         let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);

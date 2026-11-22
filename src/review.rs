@@ -225,6 +225,35 @@ diff --git a/staged.txt b/staged.txt
     }
 
     #[test]
+    fn a_narrow_review_still_says_which_file_it_shows_and_how_to_reach_the_others() {
+        let (f, patch) = mixed_project();
+        let mut review = Review::open(&f.root, &patch, Some("omp")).unwrap();
+        let last = |review: &mut Review, w: usize| drawn(review, w, 8).pop().unwrap();
+        // With the place in the heading, the hint names the keys alone.
+        let rows = drawn(&mut review, 80, 8);
+        assert!(rows[0].ends_with("1 of 3 · patch from omp"), "{rows:?}");
+        assert_eq!(rows[7], " [ ] files · ↑↓ scroll · q close · c changes only · n N changes · ? help");
+        // A heading with no room for the place leaves it to the hint, which gives up other keys first.
+        let rows = drawn(&mut review, 28, 8);
+        assert!(rows[0].ends_with("patch from omp") && !rows[0].contains(" of "), "{rows:?}");
+        assert_eq!(rows[7], " [ ] file 1 of 3 · ? help");
+        assert_eq!(last(&mut review, 20), " [ ] 1/3 · ? help");
+        review.key(Key::Char(']'));
+        assert_eq!(last(&mut review, 28), " [ ] file 2 of 3 · ? help");
+        // A file with no diff to move through keeps the same place and keys.
+        let now = std::fs::read_to_string(f.root.join("staged.txt")).unwrap();
+        f.write("staged.txt", &now.replace("three, by the agent", "three, rewritten"));
+        review.key(Key::Char(']'));
+        assert_eq!(last(&mut review, 28), " [ ] file 3 of 3 · ? help");
+        assert_eq!(last(&mut review, 70), " [ ] files · q close · ? help");
+        // A patch of one file has nowhere else to go.
+        let single = f.root.parent().unwrap().join("single.patch");
+        std::fs::write(&single, "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+made by the agent\n").unwrap();
+        let mut review = Review::open(&f.root, &single, Some("omp")).unwrap();
+        assert_eq!(last(&mut review, 28), " q close · ? help");
+    }
+
+    #[test]
     fn a_file_whose_handed_over_lines_were_rewritten_says_so_and_shows_no_diff() {
         let (f, patch) = mixed_project();
         let now = std::fs::read_to_string(f.root.join("app.txt")).unwrap();

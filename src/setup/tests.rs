@@ -1593,3 +1593,12 @@ fn discord_presence_takes_an_application_of_your_own_and_goes_back_to_milos() {
     assert_eq!(pane.key(Key::Esc), After::Stay);
     assert!(pane.panel == Panel::Workflow && pane.selected_row() == Some(Row::PresenceOpen));
 }
+
+#[test]
+fn every_setup_help_row_fits_a_28_column_pane() {
+    let f = Fixture::folder();
+    for inside in [false, true] {
+        let pane = Setup::new(Some(store(&f)), inside, None, None, |_| panic!("help does not call Rex"));
+        pane.help().assert_rows_fit(26);
+    }
+}
