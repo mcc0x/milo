@@ -1419,33 +1419,70 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
 
 #[test]
 fn repeat_clicks_do_not_cross_the_onboarding_handoff() {
+    fn spot(tty: &Terminal, label: &str) -> (u16, u16) {
+        let screen = tty.screen();
+        screen
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let start = line.find(label)?;
+                Some((u16::try_from(line[..start].chars().count() + 1).unwrap(), u16::try_from(row + 1).unwrap()))
+            })
+            .unwrap_or_else(|| panic!("missing {label:?} on {screen:#?}"))
+    }
+
     let milo = env!("CARGO_BIN_EXE_milo");
-    for (cols, rows, skip_footer, skip_row) in [(40, 16, 27, 10), (28, 12, 17, 8)] {
+    for (cols, rows) in [(40, 16), (28, 12)] {
         let project = Project::new();
         let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
         tty.until("q skip");
-        tty.click(skip_footer, rows, "");
+        let (skip_col, footer) = spot(&tty, "q skip");
+        tty.click(skip_col, footer, "");
         tty.until("Uninstall");
-        // "q skip" gives way to "q quit" at the same position.
-        tty.click(skip_footer, rows, "?");
+        tty.shows("q quit");
+        // The same cell must be able to quit Home if the repeat is not suppressed.
+        let (quit_col, quit_row) = spot(&tty, "q quit");
+        assert_eq!(quit_row, footer);
+        assert!((quit_col..quit_col + 6).contains(&skip_col));
+        tty.click(skip_col, footer, "?");
         tty.until("Milo home");
         tty.master.write_all(b"qq").unwrap();
         assert!(tty.wait_for_exit().success());
 
         let project = Project::new();
         let mut tty = Terminal::sized(project.command(milo).arg("setup"), cols, rows);
-        tty.until("Continue");
-        tty.click(4, skip_row, "");
-        tty.until("Workflow");
-        // The same cell is now a save action; activating it would block key 2.
-        tty.bytes.clear();
-        tty.click(4, skip_row, "2");
-        tty.until("Pulse");
-        // Appearance has its save action three rows lower, below the usage tools.
-        tty.click(5, skip_row + 3, "");
-        tty.until("Save preferences for");
+        tty.until("q skip");
+        let (skip_col, skip_row) = spot(&tty, "Skip setup");
+        tty.click(skip_col, skip_row, "");
+        tty.shows("Outside Rex");
+        // The repeat must neither open the scope picker nor change the draft.
+        tty.click(skip_col, skip_row, "2");
+        tty.shows("Choose Nerd Font");
+        assert!(!tty.screen()[0].contains("Unsaved changes"));
+
+        // Verify that a separate click can still use Appearance's save action at its drawn position.
+        let save = if cols == 28 { "Save prefs" } else { "Save pane preferences for" };
+        if !tty.screen().iter().any(|row| row.contains(save)) {
+            tty.master.write_all(b"\x1b[F").unwrap(); // End
+            tty.shows(save);
+        }
+        let (save_col, save_row) = spot(&tty, save);
+        tty.click(save_col, save_row, "");
+        tty.shows("Save preferences for");
         tty.master.write_all(b"qq").unwrap();
         assert!(tty.wait_for_exit().success());
+
+        // Without the onboarding barrier, the same click either opens the scope
+        // picker or dirties a Workflow preference, depending on the geometry.
+        let mut probe = Terminal::sized(project.command(milo).arg("setup"), cols, rows);
+        probe.shows("Outside Rex");
+        probe.click(skip_col, skip_row, "2");
+        let until = Instant::now() + TEST_WAIT;
+        while !probe.screen().iter().any(|row| row.contains("Save preferences for") || row.contains("Unsaved changes")) {
+            assert!(probe.read(until), "the onboarding click must overlap an actionable setting: {:#?}", probe.screen());
+        }
+        probe.master.write_all(b"\x03").unwrap();
+        assert!(probe.wait_for_exit().success());
     }
 }
 
