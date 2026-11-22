@@ -16,14 +16,28 @@ pub(crate) const HELP: &str = "Usage: milo preview URL [--placement right|left|a
 pub(crate) fn url(text: &str) -> Result<&str, &'static str> {
     const INVALID: &str =
         "use an HTTP(S) URL on localhost, 127.0.0.1 or [::1], without credentials, a query or a fragment";
-    if text.len() > 4096 || text.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '\\' | '?' | '#')) {
+    if text.len() > 4096 {
         return Err(INVALID);
     }
     let (scheme, rest) = text.split_once("://").ok_or(INVALID)?;
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return Err(INVALID);
     }
-    let authority = rest.split('/').next().unwrap_or_default();
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    // Require an already encoded RFC 3986 path. Do not let NSURL rewrite the
+    // requested resource differently on different SDK versions.
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            if !(bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+                && bytes.next().is_some_and(|b| b.is_ascii_hexdigit()))
+            {
+                return Err("use a percent-encoded URL path with valid %HH escapes");
+            }
+        } else if !(byte.is_ascii_alphanumeric() || b"/-._~!$&'()*+,;=:@".contains(&byte)) {
+            return Err(INVALID);
+        }
+    }
     let port = ["localhost", "127.0.0.1", "[::1]"]
         .into_iter()
         .find_map(|host| {
@@ -67,7 +81,7 @@ mod tests {
 
     #[test]
     fn explicit_loopback_authorities_only() {
-        for good in ["http://localhost:3000", "HTTPS://LOCALHOST/dev", "http://127.0.0.1", "http://[::1]:8080/path"] {
+        for good in ["http://localhost:3000", "HTTPS://LOCALHOST/dev", "http://127.0.0.1", "http://[::1]:8080/a%2Fb"] {
             assert_eq!(url(good), Ok(good));
         }
         for bad in [
@@ -82,6 +96,9 @@ mod tests {
             "http://localhost/#secret",
             "http://localhost/?token=value",
             "http://localhost/a\nb",
+            "http://localhost/a%2",
+            "http://localhost/raw[part]",
+            "http://localhost/café",
         ] {
             assert!(url(bad).is_err());
         }
