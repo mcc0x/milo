@@ -741,15 +741,17 @@ Open a working file from Outline with `Enter` or a double-click. The preview is 
 | Working file | macOS | Linux |
 | --- | --- | --- |
 | PNG | Kitty bitmap where available; colored terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
-| JPEG, WebP | Same as PNG, using the system image decoder | No conversion |
+| JPEG, static WebP | Same as PNG, using the system image decoder | No conversion |
 | MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` |
 | `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same |
 
 **Pictures.** The image keeps its proportions and fits between the filename and the key hints. Input is limited to 64 MiB. The macOS decoder checks the format and dimensions, caps source images at 40 million pixels and 16,384 pixels per side, and has a five-second deadline. The Kitty bitmap is at most 1,600 pixels per side and 16 MiB; the cell raster is at most 512 pixels per side. Text named like a picture can still be read as text. Active documents such as SVG and PDF aren't rasterized.
 
-GIF, BMP (without linked profiles) and TIFF are also recognized on macOS. HEIC/HEIF, PSD, ICO/ICNS, SVG and PDF are no longer passed to a general-purpose converter. Untrusted documents and containers can reference more than the selected image.
+Single-image GIF, BMP without linked profiles, and single-page TIFF without nested image directories are also recognized on macOS. Animated GIF/WebP, multi-page TIFF, HEIC/HEIF, PSD, ICO/ICNS, SVG and PDF aren't passed to a general-purpose converter.
 
 **Video.** Opens paused. `Space` plays or pauses; `←` / `→` seek five seconds in either direction. Leaving the tab or opening help pauses playback. The Reader never opens an audio device. It streams scaled frames (up to 320 × 240 at 12 fps) as colored terminal cells. Only standalone MP4 with a local H.264, HEVC or MPEG-4 Part 2 video track is accepted, up to 128 MiB and one hour. The track header must fit 8,192 pixels per side; decoding is limited to 9.5 million pixels per frame. External tracks aren't followed. Milo looks for an already-installed decoder, never installs one, and gives a reason when it can't play a file.
+
+Leaving an image or movie tab releases its prepared pixels and private movie snapshot. Returning loads the selected working file again. An unchanged movie remembers its paused position; a replaced movie starts from the beginning.
 
 Limits on bytes, pixels and output apply before or during decoding. The macOS helper watchdog also stops a decoder observed above 384 MiB resident memory; this is sampled, not a hard ceiling on instantaneous process memory.
 
@@ -761,11 +763,11 @@ Median of five release-build starts on an Apple M5 Pro, macOS 27.2.1, FFmpeg 9.0
 
 | Fixture | Input bytes | First frame (ms) | Milo RSS (KiB) |
 | --- | ---: | ---: | ---: |
-| 1920 × 1080 PNG | 215,387 | 124.1 | 8,928 |
-| 1920 × 1080 JPEG | 75,347 | 138.2 | 8,896 |
-| 1920 × 1080 WebP | 46,604 | 120.0 | 8,832 |
-| 1920 × 1080 H.264 MP4, 8 seconds | 5,557,338 | 145.5 | 7,744 |
-| Markdown, 2,048 list items | 114,703 | 24.0 | 8,992 |
+| 1920 × 1080 PNG | 215,387 | 142.3 | 8,960 |
+| 1920 × 1080 JPEG | 75,347 | 142.2 | 8,944 |
+| 1920 × 1080 WebP | 46,604 | 139.3 | 8,880 |
+| 1920 × 1080 H.264 MP4, 8 seconds | 5,557,338 | 142.0 | 7,824 |
+| Markdown, 2,048 list items | 114,703 | 19.7 | 8,960 |
 
 Reproduce with `python3 tests/rich_reader_bench.py target/release/milo`. Fixture generation uses local `ffmpeg` and `cwebp`; the reader doesn't need `cwebp`.
 
