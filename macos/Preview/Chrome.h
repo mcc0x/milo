@@ -71,24 +71,16 @@ static BOOL MiloDecodeRexChrome(NSDictionary *prefs, MiloRexChrome *result) {
 
     if ([@"vertical" isEqual:tabs]) {
         id side = prefs[@"Workspace.sidebarPosition"] ?: @"left";
-        BOOL left = [@"left" isEqual:side], collapsed;
+        BOOL left = [@"left" isEqual:side];
+        CGFloat width;
         if ((!left && ![@"right" isEqual:side]) ||
-            !MiloChromeBoolean(prefs[@"Workspace.sidebarCollapsed"], NO, &collapsed)) return NO;
-        BOOL preservesWidth;
-        BOOL eitherState = !MiloChromeBoolean(prefs[@"Workspace.preservesWindowWidthOnSidebarToggle"], YES,
-                                              &preservesWidth) || preservesWidth;
-        if (eitherState || !collapsed) {
-            CGFloat width;
-            if (!MiloChromeNumber(prefs[@"Workspace.sidebarWidth"], 240, 167, 480, &width)) return NO;
-            MiloChromeInset *inset = left ? &chrome.left : &chrome.right;
-            // With a fixed window width, CGWindow bounds cannot distinguish
-            // an expansion from a collapse. Bound both possible workspace
-            // edges, not just the edge reported by the cached collapse flag.
-            *inset = (MiloChromeInset){eitherState ? 0 : width - 4, width + surround + 4};
-        }
-        // A shown left sidebar holds the vertical toolbar's title row. With
-        // a right or collapsed sidebar, leave room for window controls above panes.
-        chrome.top.high += left && !collapsed && !eitherState ? 6 : 30;
+            !MiloChromeNumber(prefs[@"Workspace.sidebarWidth"], 240, 167, 480, &width)) return NO;
+        MiloChromeInset *inset = left ? &chrome.left : &chrome.right;
+        // Saved preferences do not say whether this window's sidebar transition
+        // finished. Keep only tile space common to expanded and collapsed layouts,
+        // even when toggling normally changes the outer window width.
+        *inset = (MiloChromeInset){0, width + surround + 4};
+        chrome.top.high += 30;
     } else if ([@"horizontal" isEqual:tabs]) {
         id edge = prefs[@"Workspace.tabBarEdge"] ?: @"top";
         BOOL above = [@"top" isEqual:edge];
@@ -112,9 +104,8 @@ static BOOL MiloLoadRexChrome(MiloRexChrome *chrome) {
     // change, so synchronization has nothing to write back to Rex.
     if (!CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)) return NO;
     NSArray *keys = @[@"Workspace.tabStyle", @"Workspace.tabBarEdge", @"Workspace.sidebarPosition",
-                      @"Workspace.sidebarWidth", @"Workspace.sidebarCollapsed", @"Workspace.toolbarBehavior",
+                      @"Workspace.sidebarWidth", @"Workspace.toolbarBehavior",
                       @"Workspace.paneHeaderVisibility", @"Workspace.showsPaneHeaders", @"Workspace.paneDensity",
-                      @"Workspace.preservesWindowWidthOnSidebarToggle",
                       @"Workspace.terminalPaddingX", @"Workspace.terminalPaddingY", @"Workspace.interfaceStyle"];
     NSDictionary *prefs = CFBridgingRelease(CFPreferencesCopyMultiple((__bridge CFArrayRef)keys, domain,
                                                      kCFPreferencesCurrentUser, kCFPreferencesAnyHost));

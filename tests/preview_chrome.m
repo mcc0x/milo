@@ -25,7 +25,7 @@ static void WorkspaceLayouts(void) {
                                @"Workspace.paneDensity": @"compact", @"Workspace.interfaceStyle": @"modern",
                                @"Workspace.preservesWindowWidthOnSidebarToggle": @NO};
     CGRect left = Body(vertical, Full);
-    assert(CGRectEqualToRect(left, CGRectMake(-75, -50, 759, 738)));
+    assert(CGRectEqualToRect(left, CGRectMake(-75, -26, 759, 714)));
     NSMutableDictionary *right = [vertical mutableCopy];
     right[@"Workspace.sidebarPosition"] = @"right";
     CGRect flipped = Body(right, Full);
@@ -35,8 +35,7 @@ static void WorkspaceLayouts(void) {
 
     right[@"Workspace.sidebarCollapsed"] = @YES;
     CGRect collapsed = Body(right, Full);
-    assert(CGRectGetMinX(collapsed) == CGRectGetMinX(flipped));
-    assert(CGRectGetMaxX(collapsed) == CGRectGetMaxX(left));
+    assert(CGRectEqualToRect(collapsed, flipped));
 
     CGRect leftSplit = Body(vertical, CGRectMake(0, 0, 0.45, 1));
     CGRect rightSplit = Body(vertical, CGRectMake(0.45, 0, 0.55, 1));
@@ -61,11 +60,20 @@ static void SidebarWithoutResize(void) {
             CGRect tile = tiles[i];
             prefs[preserve] = @NO;
             prefs[collapse] = @NO;
-            CGRect expanded = Body(prefs, tile);
+            CGRect shared = Body(prefs, tile);
             prefs[collapse] = @YES;
-            CGRect collapsed = Body(prefs, tile);
-            CGRect shared = CGRectIntersection(expanded, collapsed);
-            assert(!CGRectIsEmpty(shared));
+            assert(CGRectEqualToRect(Body(prefs, tile), shared));
+            // Check against physical workspaces with both states rather than
+            // treating a second call into the estimator as an independent oracle.
+            for (int open = 0; open <= 1; ++open) {
+                CGFloat width = open * 205;
+                CGRect workspace = CGRectMake(Window.origin.x + ([side isEqualToString:@"left"] ? width : 0),
+                                              Window.origin.y, Window.size.width - width, Window.size.height);
+                CGRect nominal = CGRectMake(workspace.origin.x + tile.origin.x * workspace.size.width,
+                                            workspace.origin.y + tile.origin.y * workspace.size.height,
+                                            tile.size.width * workspace.size.width, tile.size.height * workspace.size.height);
+                assert(CGRectContainsRect(nominal, shared));
+            }
             prefs[preserve] = @YES;
             assert(CGRectEqualToRect(Body(prefs, tile), shared));
             prefs[collapse] = @NO;
@@ -109,7 +117,6 @@ static void RejectInvalidInputs(void) {
     assert(!MiloDecodeRexChrome(@{@"Workspace.terminalPaddingY": @(NAN)}, &chrome));
     assert(!MiloDecodeRexChrome(@{@"Workspace.terminalPaddingY": @49}, &chrome));
     assert(!MiloDecodeRexChrome(@{@"Workspace.tabStyle": @"vertical", @"Workspace.sidebarWidth": @90}, &chrome));
-    assert(!MiloDecodeRexChrome(@{@"Workspace.tabStyle": @"vertical", @"Workspace.sidebarCollapsed": @1}, &chrome));
     assert(MiloDecodeRexChrome(@{}, &chrome));
     CGRect result = CGRectZero;
     assert(!MiloPaneInRexChrome(CGRectInfinite, Full, &chrome, &result));
