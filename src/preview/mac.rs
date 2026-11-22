@@ -103,10 +103,15 @@ pub(crate) fn anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
         if input.is_terminal() && io::stderr().is_terminal() {
             // Native restores the terminal before it exits. Keep the
             // diagnostic visible without keeping WebKit or Rex running.
-            eprintln!("milo preview: {error}\n\nPress Enter to dismiss (closes automatically in 15 seconds).");
-            let mut fds = [libc::pollfd { fd: input.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-            let _ = crate::term::wait_ready(&mut fds, 15_000);
-            // The error has already been reported to this disposable pane.
+            // Do not let a saturated or flow-stopped PTY keep the parent alive.
+            // Use a separate file description so the shell's flags are unchanged.
+            if let Ok(mut tty) = crate::term::terminal_output(io::stderr().as_raw_fd())
+                && writeln!(tty, "milo preview: {error}\n\nPress Enter to dismiss (closes automatically in 15 seconds).").is_ok()
+            {
+                let mut fds = [libc::pollfd { fd: input.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+                let _ = crate::term::wait_ready(&mut fds, 15_000);
+            }
+            // Never retry on blocking stderr in the CLI's top-level error path.
             std::process::exit(1);
         }
     }

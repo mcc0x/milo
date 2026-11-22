@@ -324,7 +324,7 @@ impl Drop for Session {
 }
 
 /// Open a separate description so non-blocking writes don't change the shell's stdout flags.
-fn terminal_output(fd: RawFd) -> io::Result<File> {
+pub(crate) fn terminal_output(fd: RawFd) -> io::Result<File> {
     let mut path = [0; 4096];
     #[cfg(target_os = "macos")]
     {

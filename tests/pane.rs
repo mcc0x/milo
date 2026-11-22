@@ -948,6 +948,38 @@ fn wall_reader(project: &Project, cols: u16, rows: u16) -> Terminal {
     terminal
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn preview_error_exits_when_its_terminal_cannot_display_the_notice() {
+    let project = Project::new();
+    let mut command = project.command("/bin/sh");
+    command.args(["-c", "while [ ! -f go ]; do sleep .05; done; exec \"$@\"", "anchor", env!("CARGO_BIN_EXE_milo"),
+        "preview-anchor", "http://localhost:3000", "block:11111111-1111-4111-8111-111111111111",
+        "window:22222222-2222-4222-8222-222222222222", "client:33333333-3333-4333-8333-333333333333", "100"]);
+    let mut terminal = Terminal::run(&mut command);
+    let fd = terminal.slave.as_raw_fd();
+    // SAFETY: This is an open private PTY. The child waits on the go file
+    // while the test fills its output queue, and inherits blocking stderr.
+    assert_eq!(unsafe { libc::tcflow(fd, libc::TCOOFF) }, 0);
+    // SAFETY: Read and temporarily change file status flags on the open slave.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert_ne!(flags, -1);
+    // SAFETY: The descriptor remains live.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+    let blocked = (0..1024).any(|_| terminal.slave.write(&[0; 1024]).is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock));
+    assert!(blocked, "private terminal output never saturated");
+    // SAFETY: Restore the original flags before launching the preview process.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+    fs::write(project.0.join("project/go"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while terminal.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "error reporting blocked on a stopped terminal");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(terminal.child.wait().unwrap().code(), Some(1));
+    assert!(terminal.restored());
+}
+
 #[test]
 fn sigterm_restores_the_terminal_even_when_its_output_queue_is_full() {
     let project = Project::new();
