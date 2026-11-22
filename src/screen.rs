@@ -28,8 +28,8 @@ pub enum Wash {
 
 /// Packed cell style: bits 0–8 hold the text colour (0 = default, n+1 =
 /// palette colour n); bits 9–13 hold bold, italic, strike, faint and reverse
-/// in that order; bits 14–15 hold the wash (0 = none), bit 16 underlines.
-/// Palette colours 0–15 follow the terminal theme; 16–255 are fixed.
+/// in that order; bits 14–15 hold the wash, bit 16 underlines, bits 17–25
+/// hold a palette background (same encoding as the foreground).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style(u32);
 
@@ -48,6 +48,11 @@ impl Style {
 
     pub const fn fg(c: u8) -> Style {
         Style(c as u32 + 1)
+    }
+
+    /// Two fixed palette colors, one for each half of a terminal image cell.
+    pub fn pixels(upper: u8, lower: u8) -> Style {
+        Style(Self::fg(upper).0 | ((u32::from(lower) + 1) << 17))
     }
 
     pub const fn bold(self) -> Style {
@@ -105,6 +110,9 @@ impl Style {
             Some(c @ 0..8) => push_number(out, b";", 30 + c as usize),
             Some(c @ 8..16) => push_number(out, b";", 82 + c as usize),
             Some(c) => push_number(out, b";38;5;", c as usize),
+        }
+        if let Some(c) = (self.0 >> 17).checked_sub(1) {
+            push_number(out, b";48;5;", c as usize);
         }
         // A wash is mixed from the terminal's own background. Where that is
         // not known the bar falls back on the theme's grey, and the other

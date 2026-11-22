@@ -31,6 +31,26 @@ pub(crate) fn open_at(dir: &File, name: &CStr, flags: libc::c_int, mode: libc::c
     }
 }
 
+/// Darwin can't apply a practical address-space limit before exec. Sample a decoder's
+/// resident set in addition to its input and output limits. Linux video uses RLIMIT_AS.
+pub(crate) fn over_memory_budget(child: &std::process::Child) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+        let size = i32::try_from(size_of::<libc::proc_taskinfo>()).expect("task info fits in a Mach message");
+        let Ok(pid) = i32::try_from(child.id()) else { return true };
+        // SAFETY: PROC_PIDTASKINFO fills exactly the supplied proc_taskinfo on success.
+        let count = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), size) };
+        if count == size {
+            // SAFETY: The return count confirms that every byte of info was written.
+            return unsafe { info.assume_init() }.pti_resident_size > 384 << 20;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = child;
+    false
+}
+
 /// A private sibling file keeps readers from seeing a half-written replacement.
 pub struct Temp(PathBuf);
 

@@ -1,6 +1,7 @@
 //! Locates and loads the working file or the version stored by Git.
 
 use std::fs;
+use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 
 use super::disk::ReadOnly;
@@ -184,6 +185,7 @@ impl WorkingTarget {
             attributes,
             notified: false,
             stamp: None,
+            movie: false,
         }));
         let mut reader = Reader::new(path, source, icons, note);
         reader.refresh(true);
@@ -282,8 +284,45 @@ impl Reader {
 
     fn refresh_body(&mut self, force: bool) {
         let Source::Working(work) = &mut self.source else { return };
-        let WorkingFile { repo, root, relative, attributes, stamp: last, .. } = work.as_mut();
+        let WorkingFile { repo, root, relative, attributes, stamp: last, movie, .. } = work.as_mut();
         let (mut entry, mut stamp) = WorkingStamp::at(repo, root, relative);
+        let picture = picture::is_picture(&self.path);
+        if picture && entry.as_ref().is_ok_and(|file| file.is_regular() && file.size() > picture::FILE_LIMIT) {
+            self.kind = Kind::None;
+            *last = Some(stamp);
+            self.replace_body(Body::Note("Image preview is limited to 64 MiB."));
+            return;
+        }
+        // A movie has no line diff. Pin it through the inspected directory rather than
+        // giving the decoder a working-tree pathname or asking Git to read a large blob.
+        if relative.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+            && let Ok(file) = &entry
+            && file.is_regular()
+        {
+            if last.as_ref() != Some(&stamp) {
+                let input = file.open_read();
+                // A suffix alone must not steal a plain text file's source, diff or editor.
+                *movie = !input.as_ref().is_ok_and(|input| {
+                    let mut prefix = [0; 512];
+                    input.read_at(&mut prefix, 0).is_ok_and(|n| {
+                        !prefix[..n].contains(&0)
+                            && std::str::from_utf8(&prefix[..n]).err().is_none_or(|e| n == prefix.len() && e.error_len().is_none())
+                    })
+                });
+                if *movie {
+                    let video = input.map_err(|_| "This file cannot be read.").and_then(super::video::Video::open);
+                    *last = Some(stamp);
+                    self.kind = Kind::None;
+                    self.replace_body(match video {
+                        Ok(video) => Body::Video(Box::new(video)),
+                        Err(note) => Body::Note(note),
+                    });
+                    return;
+                }
+            } else if *movie {
+                return;
+            }
+        }
         let attrs_changed = stamp.compare && attributes.changed();
         // A changed entry needs fresh status. Otherwise poll status once and
         // also refresh the patch when rules changed without changing porcelain.
@@ -337,14 +376,28 @@ impl Reader {
             self.replace_body(Body::Note(note));
             return;
         };
-        let picture = picture::is_picture(&self.path);
         let kept = picture && last.as_ref() == Some(&stamp) && matches!(self.body, Body::Picture(_));
         self.kind = patch.kind;
         *last = Some(stamp);
         if kept {
             return;
         }
-        let body = working_body(relative, &entry, patch, picture, syntax::for_file(&self.path));
+        let mut body = working_body(&entry, patch, picture, syntax::for_file(&self.path));
+        if let Body::Text(text) = &mut body
+            && entry.as_ref().is_ok_and(Entry::is_regular)
+            && relative.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+        {
+            let previous = match &mut self.body {
+                Body::Text(old) => old.preview.take(),
+                _ => None,
+            };
+            text.preview = Some(if let Some(mut preview) = previous {
+                preview.replace(&text.lines);
+                preview
+            } else {
+                Box::new(super::markdown::Preview::new(&text.lines))
+            });
+        }
         self.replace_body(body);
     }
 }
@@ -354,7 +407,6 @@ fn working_content(entry: &Result<Entry<'_>, LookupError>, limit: u64) -> Conten
 }
 
 fn working_body(
-    path: &Path,
     entry: &Result<Entry<'_>, LookupError>,
     patch: FileDiff,
     picture: bool,
@@ -380,10 +432,10 @@ fn working_body(
         }
         Content::Bytes(mut bytes) => {
             if picture && could_be_picture(&bytes) {
-                bytes = match Picture::decode(bytes, path) {
+                bytes = match Picture::decode(bytes) {
                     Ok(picture) => return Body::Picture(picture),
-                    Err(bytes) if text(&bytes).is_some() => bytes,
-                    Err(_) => return Body::Note("This file cannot be shown as a picture."),
+                    Err(error) if text(&error.bytes).is_some() => error.bytes,
+                    Err(error) => return Body::Note(error.note),
                 };
             }
             if !patch.lines.is_empty() {

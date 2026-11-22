@@ -140,6 +140,8 @@ Reader (also opened by milo view):
   n N           next/previous block of changed lines
   c             show only the changed lines, or the full file
   Tab Enter     choose the next run of hidden lines, show it
+  m             rendered Markdown / source and changes
+  Space, ←→     in an MP4: play/pause, seek back/forward five seconds
   e             edit a working text file
   q or Esc      close
 

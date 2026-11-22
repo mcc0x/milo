@@ -1078,7 +1078,7 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     let mut reader = Reader::open(&dir.root.join("logo.png")).unwrap();
     let mut screen = Screen::sized(40, 10);
 
-    // Until the terminal has said, nothing is claimed either way.
+    // The terminal receives no bitmap before advertising Kitty support.
     reader.draw(&mut screen);
     assert!(screen.picture_at().is_none() && screen.text()[2].is_empty());
     assert!(screen.text()[0].ends_with("64×32"));
@@ -1092,7 +1092,12 @@ fn a_picture_is_shown_in_the_middle_at_its_own_size_where_the_terminal_can() {
     plain.answered();
     reader.draw(&mut plain);
     assert!(plain.picture_at().is_none());
-    assert_eq!(plain.text()[2], "  This terminal cannot show pictures.");
+    if cfg!(target_os = "macos") {
+        assert_eq!(plain.text()[4], format!("{}{}", " ".repeat(16), "▀".repeat(8)));
+        assert_eq!(plain.text()[5], plain.text()[4]);
+    } else {
+        assert!(plain.text()[2].contains("Kitty"));
+    }
 }
 
 #[test]
@@ -1352,7 +1357,14 @@ fn markdown_markup_stylesheets_and_more_code_are_coloured_in_working_and_committ
         assert_eq!(emphasised, ["1", "2"], "{path}: {out:?}");
     };
     for (path, _, keyword) in files {
-        check(&mut Reader::open(&f.root.join(path)).unwrap(), path, keyword);
+        let mut reader = Reader::open(&f.root.join(path)).unwrap();
+        if path == "README.md" {
+            let preview = drawn(&mut reader, 60, 10).join("\n");
+            assert!(preview.contains("Notes") && !preview.contains("# Notes"), "{preview}");
+            assert!(!preview.contains("step 1"), "deleted text leaked into preview: {preview}");
+            reader.key(Key::Char('m'));
+        }
+        check(&mut reader, path, keyword);
     }
 
     f.commit("after");
@@ -1407,4 +1419,15 @@ fn a_wide_edit_clipped_at_the_right_edge_does_not_highlight_empty_cells() {
         let emphasised: Vec<_> = runs(&out).iter().filter(|run| reversed(run.0)).map(|run| run.1).collect();
         assert_eq!(emphasised, expected, "{out:?}");
     }
+}
+
+#[test]
+fn text_with_mp4_suffix_keeps_its_working_diff() {
+    let f = Fixture::new();
+    f.write("notes.mp4", "before\n");
+    f.commit("text");
+    f.write("notes.mp4", "after\n");
+    let mut reader = Reader::open(&f.root.join("notes.mp4")).unwrap();
+    let lines = drawn(&mut reader, 60, 8).join("\n");
+    assert!(lines.contains("before") && lines.contains("after"), "{lines}");
 }

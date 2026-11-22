@@ -37,6 +37,8 @@ pub enum External {
 pub trait Pane {
     fn draw(&mut self, screen: &mut Screen);
     fn help(&self) -> Page;
+    /// The help page is about to cover the pane; stop user-controlled playback.
+    fn cover(&mut self) {}
     /// A noninteractive warning, shown only when the pane has a spare row.
     fn notice(&self) -> Option<&'static str> {
         None
@@ -314,6 +316,7 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
         }
         (Key::Char('?'), None) if !editing => {
             if Page::fits(screen) {
+                pane.cover();
                 *help = Some(pane.help());
             }
             After::Stay

@@ -155,6 +155,9 @@ impl Tabs {
     }
 
     fn activate(&mut self, tab: usize) {
+        if self.shown != tab && let Some(previous) = self.tabs.get_mut(self.shown) {
+            previous.pause_video();
+        }
         self.shown = tab;
         self.closing = false;
         self.rescope.set(true);
@@ -406,6 +409,10 @@ impl Pane for Tabs {
             ]);
         }
         page
+    }
+
+    fn cover(&mut self) {
+        self.reader_mut().cover();
     }
 
     fn notice(&self) -> Option<&'static str> {

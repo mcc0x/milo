@@ -1,40 +1,42 @@
-//! Turns a picture file into something a terminal can show.
+//! Prepares checked PNG data for Kitty and, on macOS, a small RGB raster for
+//! terminals that can only show pictures as colored cells.
 //!
-//! Terminals that show pictures take PNG, so every picture becomes one,
-//! no larger than a pane could use. The converting is left to `sips`, the
-//! image tool that comes with macOS; elsewhere only PNG files can be shown.
+//! User input is capped at 64 MiB, 40 million pixels and 16,384 pixels per
+//! side. Kitty gets a static PNG no larger than 1600 pixels per side or
+//! 16 MiB; the retained RGB raster is at most 512 pixels per side. On macOS
+//! the decoder subprocesses share a five-second deadline. On other platforms
+//! only already-sized PNGs can be shown, and only with Kitty graphics.
+//! Declared dimensions are checked before launching the decoder. While it
+//! runs, a sampled 384 MiB RSS watchdog can stop it; this is not a hard or
+//! aggregate memory cap.
+//!
+//! SVG and PDF are not handed to a document renderer, and HEIC/HEIF and PSD
+//! are excluded because their containers can refer to external media.
+//! Legacy icon containers are also excluded rather than handing embedded
+//! format variants (including linked BMP color profiles) to the decoder.
 
 use std::borrow::Cow;
-#[cfg(target_os = "macos")]
-use std::io::Read as _;
 use std::io::Write as _;
-#[cfg(target_os = "macos")]
-use std::os::fd::AsRawFd as _;
-use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
-#[cfg(target_os = "macos")]
-use std::time::Instant;
+
+mod headers;
 
 #[cfg(target_os = "macos")]
-use crate::fs_ops::{self, Temp};
-#[cfg(target_os = "macos")]
-use crate::read::{self, Content};
-#[cfg(target_os = "macos")]
-use crate::term;
+mod sips;
 
 /// Picture files larger than this are not opened.
 pub const FILE_LIMIT: u64 = 64 << 20;
-/// The longest side kept, in pixels: more than any pane has to show it with.
+/// The longest side kept, in pixels, for Kitty.
 const LONGEST_SIDE: u32 = 1600;
-/// How long a conversion may take before it is given up on.
-const DEADLINE: Duration = Duration::from_secs(5);
+/// The largest PNG passed on to Kitty.
+const PNG_LIMIT: u64 = 16 << 20;
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const SOURCE_SIDE: u32 = 16_384;
+const SOURCE_PIXELS: u64 = 40_000_000;
 /// Bytes of encoded picture sent to the terminal at a time, as it asks.
 const CHUNK: usize = 4096;
 
-/// File endings shown as pictures, in lower case.
+/// File endings treated as possible pictures, not as permission to decode them.
 const ENDINGS: [&str; 15] =
     ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "ico", "icns", "svg", "pdf", "psd"];
 
@@ -53,28 +55,112 @@ pub struct Picture {
     pub width: u32,
     pub height: u32,
     pub id: u32,
+    #[cfg(target_os = "macos")]
+    raster: Option<Raster>,
+}
+
+#[cfg(target_os = "macos")]
+struct Raster {
+    rgb: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+struct Prepared {
+    png: Option<Vec<u8>>,
+    width: u32,
+    height: u32,
+    #[cfg(target_os = "macos")]
+    raster: Raster,
+}
+
+#[derive(Debug)]
+pub struct DecodeError {
+    pub bytes: Vec<u8>,
+    pub note: &'static str,
+}
+
+enum Refusal {
+    TooLarge,
+    #[cfg(not(target_os = "macos"))]
+    UnsupportedPlatform,
+    UnsupportedFormat,
+    Unreadable,
+}
+
+impl Refusal {
+    fn note(self) -> &'static str {
+        match self {
+            Self::TooLarge => "This image exceeds the preview size limit.",
+            #[cfg(not(target_os = "macos"))]
+            Self::UnsupportedPlatform => "Decoding this image requires macOS.",
+            Self::UnsupportedFormat => "This image format is not previewed.",
+            Self::Unreadable => "This image could not be decoded.",
+        }
+    }
 }
 
 impl Picture {
     /// Prepares a picture, returning the original bytes if it cannot be shown.
-    pub fn decode(bytes: Vec<u8>, path: &Path) -> Result<Self, Vec<u8>> {
-        Self::decode_with(bytes, path, DEADLINE)
+    /// Any converter sees only a private copy, never a project path.
+    pub fn decode(bytes: Vec<u8>) -> Result<Self, DecodeError> {
+        match Self::prepare(&bytes) {
+            Ok(prepared) => Ok(Self {
+                png: file_png(prepared.png.unwrap_or(bytes)),
+                width: prepared.width,
+                height: prepared.height,
+                id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                #[cfg(target_os = "macos")]
+                raster: Some(prepared.raster),
+            }),
+            Err(reason) => Err(DecodeError { bytes, note: reason.note() }),
+        }
     }
 
-    fn decode_with(bytes: Vec<u8>, path: &Path, deadline: Duration) -> Result<Self, Vec<u8>> {
-        let size = png_size(&bytes);
-        if let Some((width, height)) = size {
-            if !png_has_image_data(&bytes) {
-                return Err(bytes);
-            }
-            if width.max(height) <= LONGEST_SIDE {
-                return Ok(Self::with_size(bytes.into(), width, height));
-            }
+    fn prepare(bytes: &[u8]) -> Result<Prepared, Refusal> {
+        use Refusal::{TooLarge, Unreadable};
+        let file_size = bytes.len() as u64;
+        if file_size > FILE_LIMIT {
+            return Err(TooLarge);
         }
-        convert(&bytes, path, size, deadline)
-            .and_then(|png| Self::png(png.into()))
-            .filter(|picture| picture.width.max(picture.height) <= LONGEST_SIDE)
-            .ok_or(bytes)
+        let format = raster_format(bytes)?;
+        let size = headers::size(bytes, format)?;
+        if size.0 == 0 || size.1 == 0 {
+            return Err(Unreadable);
+        }
+        if !source_size(size) {
+            return Err(TooLarge);
+        }
+        let original = if format == "png" {
+            if !png_has_image_data(bytes) {
+                return Err(Unreadable);
+            }
+            (size.0.max(size.1) <= LONGEST_SIDE && file_size <= PNG_LIMIT).then_some(size)
+        } else {
+            None
+        };
+        #[cfg(target_os = "macos")]
+        {
+            sips::decode(bytes, format, original)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (width, height) = original.ok_or(Refusal::UnsupportedPlatform)?;
+            Ok(Prepared { png: None, width, height })
+        }
+    }
+
+    /// Top-down, tightly packed RGB24 and its own width and height. Generated
+    /// and embedded Kitty pictures, and platforms without a decoder, have none.
+    pub fn raster(&self) -> Option<(&[u8], usize, usize)> {
+        #[cfg(target_os = "macos")]
+        {
+            self.raster.as_ref().map(|raster| (raster.rgb.as_slice(), raster.width, raster.height))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
     }
 
     /// Opens a PNG built into milo without copying its bytes.
@@ -92,7 +178,14 @@ impl Picture {
     }
 
     fn with_size(png: Cow<'static, [u8]>, width: u32, height: u32) -> Self {
-        Self { png, width, height, id: NEXT_ID.fetch_add(1, Ordering::Relaxed) }
+        Self {
+            png,
+            width,
+            height,
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            #[cfg(target_os = "macos")]
+            raster: None,
+        }
     }
 
     /// The columns and rows the picture takes in a space of `cols` by `rows`
@@ -138,9 +231,51 @@ impl Picture {
     }
 }
 
+fn file_png(mut png: Vec<u8>) -> Cow<'static, [u8]> {
+    // Keep only the static rendering chunks. In particular, don't send
+    // unneeded compressed metadata or animation frames to the terminal.
+    keep_png_pixels(&mut png);
+    png.into()
+}
+
+fn source_size((width, height): (u32, u32)) -> bool {
+    width != 0 && height != 0 && width.max(height) <= SOURCE_SIDE && u64::from(width) * u64::from(height) <= SOURCE_PIXELS
+}
+
+/// Identify raster containers by their magic; the string is a fixed sips
+/// extension, never borrowed from the project. BMP V5 can link a color profile.
+fn raster_format(bytes: &[u8]) -> Result<&'static str, Refusal> {
+    let format = match bytes {
+        _ if bytes.starts_with(PNG_SIGNATURE) => "png",
+        [0xff, 0xd8, 0xff, _, ..] => "jpeg",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', _, _, _, _, ..] => "webp",
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', _, _, _, _, ..] => "gif",
+        [b'B', b'M', ..] => {
+            let header = le32(bytes, 14).ok_or(Refusal::Unreadable)?;
+            match header {
+                12 | 40 | 52 | 56 | 64 | 108 => "bmp",
+                124 if le32(bytes, 14 + 56).ok_or(Refusal::Unreadable)? != 0x4c49_4e4b => "bmp", // PROFILE_LINKED
+                _ => return Err(Refusal::UnsupportedFormat),
+            }
+        }
+        [b'I', b'I', 42, 0, _, _, _, _, ..] | [b'M', b'M', 0, 42, _, _, _, _, ..] => "tiff",
+        [b'%', b'P', b'D', b'F', b'-', ..]
+        | [b'8', b'B', b'P', b'S', ..]
+        | [_, _, _, _, b'f', b't', b'y', b'p', ..]
+        | [b'i', b'c', b'n', b's', ..]
+        | [0, 0, 1, 0, ..] => return Err(Refusal::UnsupportedFormat),
+        _ => return Err(Refusal::Unreadable),
+    };
+    Ok(format)
+}
+
+fn le32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
 /// The width and height a PNG declares in its header.
 fn png_size(png: &[u8]) -> Option<(u32, u32)> {
-    let header = png.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
+    let header = png.strip_prefix(PNG_SIGNATURE)?;
     let field = |at: usize| Some(u32::from_be_bytes(header.get(at..at + 4)?.try_into().ok()?));
     // The first chunk is the header: its length and name, then the two sizes.
     let (width, height) = (field(8)?, field(12)?);
@@ -164,137 +299,50 @@ fn png_has_image_data(png: &[u8]) -> bool {
     false
 }
 
-/// Find the JPEG frame header without decoding or scanning the image data.
-#[cfg(target_os = "macos")]
-fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
-    let be16 = |a, b| u16::from_be_bytes([a, b]);
-    let mut rest = jpeg.strip_prefix(b"\xff\xd8")?;
+/// The caller has already checked each chunk's length through IEND.
+fn keep_png_pixels(png: &mut Vec<u8>) {
+    let (mut read, mut write) = (33, 33); // signature + IHDR
     loop {
-        let mut marker = rest.strip_prefix(b"\xff")?;
-        while let Some(tail) = marker.strip_prefix(b"\xff") {
-            marker = tail;
+        let length = u32::from_be_bytes(png[read..read + 4].try_into().expect("checked PNG chunk")) as usize;
+        let kind = &png[read + 4..read + 8];
+        let end = kind == b"IEND";
+        let next = read + 12 + length;
+        if rendering_chunk(kind) {
+            if read != write {
+                png.copy_within(read..next, write);
+            }
+            write += next - read;
         }
-        let (&kind, [a, b, data @ ..]) = marker.split_first()? else { return None };
-        if matches!(kind, 0xd9 | 0xda) {
-            return None;
+        if end {
+            png.truncate(write);
+            return;
         }
-        let length = usize::from(be16(*a, *b)).checked_sub(2)?;
-        let field = data.get(..length)?;
-        // Start of frame, excluding the Huffman and arithmetic tables and JPG extension.
-        if matches!(kind, 0xc0..=0xcf) && !matches!(kind, 0xc4 | 0xc8 | 0xcc) {
-            let [_, h1, h2, w1, w2, ..] = *field else { return None };
-            let (w, h) = (u32::from(be16(w1, w2)), u32::from(be16(h1, h2)));
-            return (w != 0 && h != 0).then_some((w, h));
-        }
-        rest = &data[length..];
+        read = next;
     }
 }
 
-/// Convert a private copy: the original path may no longer name the file we opened.
+fn rendering_chunk(kind: &[u8]) -> bool {
+    matches!(kind, b"PLTE" | b"IDAT" | b"IEND" | b"tRNS" | b"gAMA" | b"cHRM" | b"sRGB")
+}
+
+/// Make the untrusted PNG copy without metadata or extra frames. Unlike the
+/// Kitty payload, this can't consume the original bytes on a decode failure.
 #[cfg(target_os = "macos")]
-fn convert(bytes: &[u8], path: &Path, size: Option<(u32, u32)>, deadline: Duration) -> Option<Vec<u8>> {
-    let size = size.or_else(|| jpeg_size(bytes));
-    let dir = std::env::temp_dir();
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let prefix = format!("milo-{}-{id}", std::process::id());
-    let source = dir.join(format!("{prefix}-in")).with_extension(path.extension().unwrap_or_default());
-    let (input, mut file) = Temp::create(source).ok()?;
-    file.write_all(bytes).ok()?;
-    drop(file);
-    let (output, _) = Temp::create(dir.join(format!("{prefix}-out.png"))).ok()?;
-    let deadline = Instant::now() + deadline;
-
-    let resize = size.map(|(w, h)| w.max(h) > LONGEST_SIDE).or_else(|| probe_resize(input.path(), deadline));
-    let sips = |source: &Path, resize: bool| {
-        let mut command = Command::new("/usr/bin/sips");
-        if resize {
-            command.args(["-Z", &LONGEST_SIDE.to_string()]);
-        }
-        command.args(["-s", "format", "png"]).arg(source).arg("--out").arg(output.path());
-        finish(command, Stdio::null(), deadline).is_some()
-    };
-    // `-Z` can enlarge small pictures. If even sips cannot tell us the
-    // dimensions, keep the plain conversion and check its PNG before resizing.
-    if !sips(input.path(), resize.unwrap_or(false)) {
-        return None;
-    }
-    if resize.is_none() {
-        let mut header = [0; 24];
-        fs_ops::open_read(output.path()).ok()?.read_exact(&mut header).ok()?;
-        let (w, h) = png_size(&header)?;
-        if w.max(h) > LONGEST_SIDE && !sips(output.path(), true) {
-            return None;
-        }
-    }
-    match read::file(output.path(), FILE_LIMIT) {
-        Content::Bytes(png) => Some(png),
-        _ => None,
-    }
-}
-
-/// Ask sips for dimensions without encoding a full-size PNG.
-#[cfg(target_os = "macos")]
-fn probe_resize(source: &Path, deadline: Instant) -> Option<bool> {
-    let mut command = Command::new("/usr/bin/sips");
-    command.args(["-g", "pixelWidth", "-g", "pixelHeight"]).arg(source);
-    let mut stdout = finish(command, Stdio::piped(), deadline)?.stdout?;
-    // The child has exited. Read only what's already in the pipe, even if
-    // another process inherited a writer. Normal output is a path and two lines.
-    let mut len: libc::c_int = 0;
-    // SAFETY: The pipe is live; FIONREAD writes one c_int to len.
-    if unsafe { libc::ioctl(stdout.as_raw_fd(), libc::FIONREAD, &raw mut len) } != 0 {
-        return None;
-    }
-    let mut properties = [0; 2048];
-    let properties = properties.get_mut(..usize::try_from(len).ok()?)?;
-    stdout.read_exact(properties).ok()?;
-    resize_from_properties(properties)
-}
-
-#[cfg(target_os = "macos")]
-fn resize_from_properties(properties: &[u8]) -> Option<bool> {
-    // Ignore the source path, which may itself contain newlines or non-UTF-8 bytes.
-    let mut lines = properties.trim_ascii_end().rsplit(|&byte| byte == b'\n');
-    let dimension = |line: &[u8], key: &[u8]| {
-        let value = line.trim_ascii_start().strip_prefix(key)?.trim_ascii();
-        // SVG and PDF dimensions can be fractional; some formats return <nil>.
-        let pixels = std::str::from_utf8(value).ok()?.parse::<f64>().ok()?;
-        (pixels.is_finite() && pixels > 0.0).then_some(pixels)
-    };
-    let height = dimension(lines.next()?, b"pixelHeight:")?;
-    let width = dimension(lines.next()?, b"pixelWidth:")?;
-    Some(width.max(height) > f64::from(LONGEST_SIDE))
-}
-
-/// Without a converter at hand, only what is already a PNG can be shown.
-#[cfg(not(target_os = "macos"))]
-fn convert(_: &[u8], _: &Path, _: Option<(u32, u32)>, _: Duration) -> Option<Vec<u8>> {
-    None
-}
-
-/// Runs a command to its end, keeping its stdout handle on success. One that takes
-/// too long, or outlives a request to quit, is stopped: a file made to
-/// stall a converter must not stall milo.
-#[cfg(target_os = "macos")]
-fn finish(mut command: Command, stdout: Stdio, deadline: Instant) -> Option<Child> {
-    if Instant::now() >= deadline || term::TERMINATED.load(Ordering::Relaxed) {
-        return None;
-    }
-    let mut child = command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null()).spawn().ok()?;
+fn write_png_pixels(png: &[u8], mut out: impl std::io::Write) -> std::io::Result<()> {
+    let (mut chunk, mut start) = (33, 0);
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || term::TERMINATED.load(Ordering::Relaxed) {
-            break;
+        let length = u32::from_be_bytes(png[chunk..chunk + 4].try_into().expect("checked PNG chunk")) as usize;
+        let kind = &png[chunk + 4..chunk + 8];
+        let next = chunk + 12 + length;
+        if kind == b"IEND" {
+            return out.write_all(&png[start..next]);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success().then_some(child),
-            Ok(None) => std::thread::sleep(remaining.min(Duration::from_millis(5))),
-            Err(_) => break,
+        if !rendering_chunk(kind) {
+            out.write_all(&png[start..chunk])?;
+            start = next;
         }
+        chunk = next;
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    None
 }
 
 /// Standard base64, with padding.
@@ -355,7 +403,7 @@ impl Picture {
     }
 
     pub fn sample(width: u32, height: u32) -> Self {
-        Self { png: Self::sample_png(width, height).into(), width, height, id: 1 }
+        Self { id: 1, ..Self::with_size(Self::sample_png(width, height).into(), width, height) }
     }
 }
 
@@ -396,19 +444,18 @@ mod tests {
     #[test]
     fn a_truncated_png_returns_its_original_bytes_instead_of_a_picture() {
         let png = Picture::sample_png(8, 8);
-        let path = Path::new("partial.png");
         for end in [24, png.len() - 13, png.len() - 1] {
             let bytes = png[..end].to_vec();
             assert!(Picture::png(bytes.clone().into()).is_none());
-            assert_eq!(Picture::decode(bytes.clone(), path).err(), Some(bytes));
+            assert_eq!(Picture::decode(bytes.clone()).err().map(|error| error.bytes), Some(bytes));
         }
-        assert!(Picture::decode(png, path).is_ok());
+        assert!(Picture::decode(png).is_ok());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn converting_small_pictures_keeps_their_size() {
-        // A single grey pixel with one Huffman code in each table.
+    fn native_raster_decodes_png_jpeg_webp_and_gif_without_enlarging_them() {
+        // Single-pixel JPEG, with one Huffman code in each table.
         let mut jpeg = b"\xff\xd8\xff\xdb\0\x43\0".to_vec();
         jpeg.extend([1; 64]);
         jpeg.extend_from_slice(b"\xff\xc0\0\x0b\x08\0\x01\0\x01\x01\x01\x11\0");
@@ -418,21 +465,21 @@ mod tests {
         }
         jpeg.extend_from_slice(b"\xff\xda\0\x08\x01\x01\0\0\x3f\0\x3f\xff\xd9");
         let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
-        for (data, name) in [(jpeg, "pixel.jpg"), (gif.to_vec(), "pixel.gif")] {
-            let p = Picture::decode_with(data, Path::new(name), Duration::from_secs(120)).unwrap();
-            assert_eq!((p.width, p.height), (1, 1), "{name}");
+        let webp = b"RIFF\x22\0\0\0WEBPVP8 \x16\0\0\0\x30\x01\0\x9d\x01\x2a\x01\0\x01\0\x0e\xc0\xfe\x25\xa4\0\x03\x70\0\0\0\0";
+        let png = Picture::sample_png(2, 3);
+        for (data, name, size, shade) in [
+            (png, "pixel.png", (2, 3), 0),
+            (jpeg, "pixel.jpg", (1, 1), 128),
+            (webp.to_vec(), "pixel.webp", (1, 1), 130),
+            (gif.to_vec(), "pixel.gif", (1, 1), 0),
+        ] {
+            let picture = Picture::decode(data).unwrap();
+            assert_eq!((picture.width, picture.height), size, "{name}");
+            let (rgb, w, h) = picture.raster().unwrap();
+            assert_eq!((w, h), (size.0 as usize, size.1 as usize), "{name}");
+            assert_eq!(rgb.len(), w * h * 3, "{name}");
+            assert!(rgb.iter().all(|value| value.abs_diff(shade) <= 2), "{name}: {rgb:?}");
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn sips_properties_handle_fractional_and_unknown_dimensions() {
-        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 20.500\n  pixelHeight: 1600.000\n"), Some(false));
-        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 20.500\n  pixelHeight: 1600.125\n"), Some(true));
-        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 5000\n  pixelHeight: <nil>\n"), None);
-        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: inf\n  pixelHeight: 1\n"), None);
-        assert_eq!(resize_from_properties(b"/file\n  pixelWidth: 5000\n  pixelHeight: 0\n"), None);
-        assert_eq!(resize_from_properties(b"/file\n  pixelHeight: 20\n"), None);
     }
 
     #[cfg(target_os = "macos")]
@@ -448,16 +495,69 @@ mod tests {
             bmp[at..at + 4].copy_from_slice(&value.to_le_bytes());
         }
         bmp[26..30].copy_from_slice(&[1, 0, 24, 0]); // one plane, 24 bits per pixel
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("milo-test-{}-{id}.bmp", std::process::id()));
-        let (source, mut file) = Temp::create(path).unwrap();
-        file.write_all(&bmp).unwrap();
-        drop(file);
-        let deadline = Duration::from_secs(120);
-        assert_eq!(probe_resize(source.path(), Instant::now() + deadline), Some(true));
-        assert_eq!(probe_resize(source.path(), Instant::now()), None);
-        let picture = Picture::decode_with(bmp, source.path(), deadline).unwrap();
+        let picture = Picture::decode(bmp).unwrap();
         assert_eq!((picture.width, picture.height), (LONGEST_SIDE, height / 2));
+        let (rgb, w, h) = picture.raster().unwrap();
+        assert_eq!(w, 512);
+        assert!(h.abs_diff(w * height as usize / width as usize) <= 1);
+        assert_eq!(rgb.len(), w * h * 3);
+    }
+
+    #[test]
+    fn the_kitty_payload_skips_unneeded_metadata_and_still_has_its_image_data() {
+        let mut png = Picture::sample_png(1, 1);
+        let clean = png.clone();
+        // An ancillary chunk and trailing bytes are not part of the preview.
+        png.splice(33..33, *b"\0\0\0\x01zTXtX\0\0\0\0");
+        png.extend_from_slice(b"trailing bytes");
+        assert!(png_has_image_data(&png));
+        assert_eq!(&*file_png(png), clean);
+    }
+
+    #[test]
+    fn vector_documents_are_not_decoded_as_rasters() {
+        let svg = b"<svg xmlns='http://www.w3.org/2000/svg'><image href='file:///etc/passwd'/></svg>";
+        let pdf = b"%PDF-1.0\n";
+        for content in [svg.as_slice(), pdf.as_slice()] {
+            let error = Picture::decode(content.to_vec()).err().unwrap();
+            assert_eq!(error.bytes.as_slice(), content);
+        }
+    }
+
+    #[test]
+    fn clear_refusals_distinguish_oversize_unsupported_and_unreadable() {
+        let mut oversize = Picture::sample_png(1, 1);
+        oversize[16..20].copy_from_slice(&(SOURCE_SIDE + 1).to_be_bytes());
+        let mut linked_bmp = vec![0_u8; 138];
+        linked_bmp[..2].copy_from_slice(b"BM");
+        linked_bmp[14..18].copy_from_slice(&124_u32.to_le_bytes());
+        linked_bmp[70..74].copy_from_slice(&0x4c49_4e4b_u32.to_le_bytes());
+        for (bytes, note) in [
+            (oversize, "This image exceeds the preview size limit."),
+            (
+                b"\xff\xd8\xff\xc0\0\x0b\x08\x40\x01\0\x01\x01\x01\x11\0".to_vec(),
+                "This image exceeds the preview size limit.",
+            ),
+            (
+                b"RIFF\x16\0\0\0WEBPVP8 \x0a\0\0\0\0\0\0\x9d\x01\x2a\0\x20\0\x20".to_vec(),
+                "This image exceeds the preview size limit.",
+            ),
+            (linked_bmp, "This image format is not previewed."),
+            (b"%PDF-1.0\n".to_vec(), "This image format is not previewed."),
+            (b"\x89PNG\r\n\x1a\n".to_vec(), "This image could not be decoded."),
+        ] {
+            let error = Picture::decode(bytes.clone()).err().unwrap();
+            assert_eq!(error.note, note);
+            assert_eq!(error.bytes, bytes);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn without_a_system_decoder_static_png_is_still_available_for_kitty() {
+        let picture = Picture::decode(Picture::sample_png(2, 3)).unwrap();
+        assert_eq!((picture.width, picture.height), (2, 3));
+        assert!(picture.raster().is_none());
     }
 
     #[test]
@@ -479,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_picture_is_sent_in_pieces_and_only_the_last_says_so() {
-        let picture = Picture { png: vec![7; CHUNK].into(), width: 1, height: 1, id: 9 };
+        let picture = Picture { id: 9, ..Picture::with_size(vec![7; CHUNK].into(), 1, 1) };
         let mut out = Vec::new();
         picture.transmit(&mut out);
         let text = String::from_utf8(out).unwrap();
