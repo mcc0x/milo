@@ -1655,3 +1655,124 @@ fn editing_rendered_markdown_keeps_the_inactive_source_viewport() {
     reader.key(Key::Char('m'));
     assert_eq!(drawn(&mut reader, 32, 8), source);
 }
+
+#[test]
+fn returning_to_suffix_text_keeps_the_draft_top_after_the_diff_loads() {
+    use std::os::unix::fs::FileExt as _;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
+    let f = Fixture::new();
+    let notes = (0..90).map(|i| format!("note {i:02}\n")).collect::<String>();
+    f.write("notes.png", &notes);
+    f.commit("notes");
+    let mut reader = Reader::open(&f.root.join("notes.png")).unwrap();
+    let loaded = |reader: &mut Reader| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let rows = drawn(reader, 60, 8);
+            if !rows[1].contains(media_load::PENDING) {
+                return rows;
+            }
+            assert!(Instant::now() < deadline, "text preview did not finish: {rows:?}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    };
+    let pause_reload = || {
+        static SLOTS: AtomicUsize = AtomicUsize::new(0);
+        let (resume, blocked) = mpsc::channel::<()>();
+        media_load::intercept_next_read(&SLOTS, Box::new(move |file, bytes, offset| {
+            let _ = blocked.recv();
+            file.read_at(bytes, offset)
+        }));
+        resume
+    };
+    let pending = |reader: &mut Reader, resume: mpsc::Sender<()>| {
+        let rows = drawn(reader, 60, 8);
+        resume.send(()).unwrap();
+        assert!(rows[1].contains(media_load::PENDING), "{rows:?}");
+    };
+
+    let rows = loaded(&mut reader);
+    assert!(rows[1].contains("note 00"), "{rows:?}");
+    for _ in 0..20 {
+        reader.key(Key::Down);
+    }
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    assert!(drawn(&mut reader, 60, 8)[1].contains("note 20"));
+    assert_eq!(reader.key(Key::WheelDown), After::Stay);
+    assert!(drawn(&mut reader, 60, 8)[1].contains("note 23"));
+    reader.key(Key::Esc);
+    assert!(drawn(&mut reader, 60, 8)[1].contains("note 23"));
+
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    f.write("notes.png", &notes.replace("note 23\n", "outside note 23\n"));
+    let resume = pause_reload();
+    reader.key(Key::Esc);
+    pending(&mut reader, resume);
+    let rows = loaded(&mut reader);
+    assert!(rows[1].contains("+ outside note 23"), "{rows:?}");
+
+    let mut top = "outside note 23".to_owned();
+    for (ch, close_with_save) in [('!', true), ('?', false)] {
+        reader.key(Key::Char('e'));
+        assert!(reader.editing());
+        reader.key(Key::Char(ch));
+        top.insert(0, ch);
+        assert!(drawn(&mut reader, 60, 8)[1].contains(&top), "{top}");
+        let resume = pause_reload();
+        if close_with_save {
+            reader.key(Key::Esc);
+            reader.key(Key::Char('s'));
+        } else {
+            reader.key(Key::Ctrl(b's'));
+            assert!(reader.editing());
+            reader.key(Key::Esc);
+        }
+        assert!(!reader.editing());
+        pending(&mut reader, resume);
+        let rows = loaded(&mut reader);
+        assert!(rows[1].contains(&format!("+ {top}")), "{rows:?}");
+    }
+}
+
+#[test]
+fn editing_a_markdown_preview_keeps_a_deleted_row_at_the_top_of_the_folded_source() {
+    let f = Fixture::new();
+    let notes = (1..=60).map(|i| format!("## Section {i:02}\n")).collect::<String>();
+    f.write("notes.md", &notes);
+    f.commit("notes");
+    let edited = notes.strip_prefix("## Section 01\n").unwrap().replace("Section 30", "Edited section 30");
+    f.write("notes.md", &edited);
+    let mut reader = Reader::open(&f.root.join("notes.md")).unwrap();
+
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    let full = drawn(&mut reader, 60, 8);
+    assert!(full[1].contains("- ## Section 01"), "{full:?}");
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let compact = drawn(&mut reader, 60, 8);
+    assert!(compact[1].contains("- ## Section 01"), "{compact:?}");
+    assert!(compact.iter().any(|row| row.contains("unchanged lines")), "{compact:?}");
+
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    let preview = drawn(&mut reader, 60, 8);
+    assert!(preview.iter().any(|row| row.contains("Section 02")), "{preview:?}");
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    reader.key(Key::Esc);
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    assert_eq!(drawn(&mut reader, 60, 8), compact);
+
+    // A notification can rebuild the same patch without changing its row identity.
+    reader.filesystem_changed();
+    reader.check();
+    assert_eq!(drawn(&mut reader, 60, 8), compact);
+    reader.key(Key::Char('e'));
+    assert!(reader.editing());
+    reader.key(Key::Esc);
+    assert_eq!(drawn(&mut reader, 60, 8), compact);
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    assert_eq!(drawn(&mut reader, 60, 8), full);
+}

@@ -80,6 +80,8 @@ pub struct Reader {
     read_only: Option<ReadOnly>,
     /// The draft, while the file is being edited.
     editor: Option<Box<Editor>>,
+    /// The draft's top line, while the freshly inspected source is still loading.
+    pending_editor_line: Option<usize>,
     /// Milo's state folder, where a draft is kept if the reader is closed from outside.
     state: Option<PathBuf>,
     /// The folders searched for a formatter, as `PATH` lists them.
@@ -359,6 +361,7 @@ impl Reader {
             pan_limit: 0,
             read_only: None,
             editor: None,
+            pending_editor_line: None,
             state: rescue::state_dir(),
             tools: std::env::var_os("PATH"),
         }
@@ -802,7 +805,7 @@ impl Reader {
 
     /// Writes the draft over the file it was read from, if that file is still where it was.
     fn save(&mut self, close: bool, overwrite: bool, now: Instant) {
-        let (Source::Working(work), Some(editor)) = (&self.source, &mut self.editor) else { return };
+        let (Source::Working(work), Some(editor)) = (&mut self.source, &mut self.editor) else { return };
         let saved = {
             let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
             match stamp.reachable() {
@@ -813,6 +816,8 @@ impl Reader {
         match saved {
             Ok(()) => {
                 editor.saved(now);
+                // Even a save indistinguishable by its stamp needs a fresh source.
+                work.stamp = None;
                 if close {
                     self.close_editor(Some("Saved"));
                 }
@@ -822,18 +827,29 @@ impl Reader {
         }
     }
 
-    /// Goes back to reading at the line the draft was showing, with a fresh diff.
+    /// Goes back to reading at the line the draft was showing.
     fn close_editor(&mut self, said: Option<&'static str>) {
         let Some(editor) = self.editor.take() else { return };
         let line = editor.top();
         drop(editor);
-        // A save into the same file can leave it looking, to the reader's
-        // cheap check, like the file it had already read.
-        if let Source::Working(work) = &mut self.source {
-            work.stamp = None;
-            work.notified = false;
+        self.pending_editor_line = None;
+        let force = match &mut self.source {
+            Source::Working(work) => std::mem::take(&mut work.notified),
+            _ => false,
+        };
+        self.refresh(force);
+        if self.markdown_source || self.markdown().is_none() {
+            self.opening = false;
         }
-        self.refresh(true);
+        if matches!(self.body, Body::Note(media_load::PENDING)) {
+            self.pending_editor_line = Some(line);
+        } else if line != self.top_line() {
+            self.show_editor_line(line);
+        }
+        self.change_notice = said.map(|text| (JumpNotice::Said { lead: "", text }, Instant::now() + CHANGE_NOTICE));
+    }
+
+    fn show_editor_line(&mut self, line: usize) {
         if !self.markdown_source
             && let Body::Text(text) = &mut self.body
             && let Some(preview) = &mut text.preview
@@ -841,10 +857,8 @@ impl Reader {
             preview.go_to_line(line);
         } else {
             self.opening = false;
-            self.clear_change();
             self.pan = 0;
             self.set_source_top(self.source_row(line));
         }
-        self.change_notice = said.map(|text| (JumpNotice::Said { lead: "", text }, Instant::now() + CHANGE_NOTICE));
     }
 }
