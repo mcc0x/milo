@@ -525,6 +525,7 @@ fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
 fn history(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
     Box::new(
         History::new(repo, rex::inside())
+            .refreshing_away()
             .with_follow_new(prefs.history_follow_new)
             .with_appearance(prefs.icons.effective(), prefs.text_git_marks),
     )

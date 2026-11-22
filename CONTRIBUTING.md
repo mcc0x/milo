@@ -340,6 +340,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/history/draw.rs` | Draws history headings, dots, commit rows, and file previews. |
 | `src/history/input.rs` | Handles history keys and mouse clicks. |
 | `src/history/listing.rs` | Reads one commit's files off the pane's loop. |
+| `src/history/refresh.rs` | Refreshes the history's Git state away from the pane loop and takes the answer in whole. |
 | `src/history/tests.rs` | Checks history rows, tracking, and opening files at commits. |
 | `src/home.rs` | Runs Home, the picker `milo` opens, with settings and maintenance in the same terminal session. |
 | `src/home/mascot.rs` | Draws the mascot in coloured cells at four sizes. |

@@ -246,6 +246,7 @@ enum ReadFor {
 }
 
 /// The state a loaded history list was drawn from.
+#[derive(Clone)]
 pub struct HistoryVersion {
     pub branch: String,
     tip: String,
