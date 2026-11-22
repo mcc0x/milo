@@ -27,6 +27,13 @@ Click the menu bar item to see the same local usage windows as the pane. The men
 
 Hover over the percentage to see which provider and limit it represents, how much is left, and when it resets if known. Open the menu to see that same window first. Icon-only mode keeps the usual provider order.
 
+In **More options → Menu bar indicator**, choose **CPU** or **Memory** to put a system reading beside Milo instead. The same choice is in the browser editor’s **Menu Bar** tab, or use `milo menubar indicator cpu`, `memory`, or `quota`. It’s saved for this Milo profile, not per project. In either system mode, click Milo to see both readings under **This Mac**, above your agent limits. Switch back to **Agent quota** (the default) to restore your previous quota display and stop system sampling.
+
+- **CPU** is the percentage of time all logical cores together were busy over the last sample interval. All cores busy is 100%, not 100% per core. The first reading, including after wake, is a dash until Milo has two usable samples.
+- **Memory** is physical RAM used, not memory pressure. The popover shows used / installed GiB. Using the names from `vm_stat`, used pages are **anonymous − purgeable + wired down + occupied by compressor**. This counts the compressor’s actual RAM once, excludes file cache and swap, and need not match Activity Monitor’s “Memory Used” exactly.
+
+The running app reads macOS counters about every five seconds in system modes. Readings stay in memory: no history, network requests, permissions or extra service. A stalled sample or counter reset doesn’t turn into a zero or a spike.
+
 Low-quota notifications are **off by default**. In **More options → Low-quota alerts**, choose 10%, 20%, or 30% remaining and allow notifications when macOS asks. Milo alerts only when a visible provider’s fresh reading moves from above your threshold to at or below it, at most once for that provider and reset time. Starting below the threshold is silent. Stale, elapsed, hidden, and unknown-reset readings do not trigger alerts. Choose **Off** to stop them.
 
 ![Milo’s native menu with example Codex and Claude limits and the Settings button](img/menu-bar.webp)
