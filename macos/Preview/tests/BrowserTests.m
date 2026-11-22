@@ -111,6 +111,95 @@ static BOOL HasStatus(NSView *content, NSString *prefix) {
     return NO;
 }
 
+static void SetViewport(NSView *content, CGFloat width, CGFloat height) {
+    NSSize size = NSMakeSize(width, height);
+    [content.window setContentSize:size];
+    CHECK(NSEqualSizes(content.bounds.size, size));
+}
+
+static void CheckControls(NSView *content, NSArray<NSButton *> *controls) {
+    [content layoutSubtreeIfNeeded];
+    for (NSUInteger i = 0; i < controls.count; ++i) {
+        NSButton *button = controls[i];
+        CHECK(!button.isHidden && !NSIsEmptyRect(button.frame) && NSContainsRect(content.bounds, button.frame));
+        if (button.isEnabled) {
+            NSPoint center = NSMakePoint(NSMidX(button.frame), NSMidY(button.frame));
+            NSView *hit = [content hitTest:[content convertPoint:center toView:content.superview]];
+            CHECK(hit == button || [hit isDescendantOf:button]);
+        }
+        for (NSUInteger j = 0; j < i; ++j) CHECK(!NSIntersectsRect(button.frame, controls[j].frame));
+    }
+}
+
+static NSView *ArmPicker(NSView *content, NSButton *select) {
+    [content layoutSubtreeIfNeeded];
+    CHECK(select.isEnabled);
+    [select performClick:nil];
+    CHECK(WaitFor(^BOOL{ return [content.window.firstResponder isKindOfClass:MiloPickerSurface.class]; }));
+    return (NSView *)content.window.firstResponder;
+}
+
+static void ReviewElement(NSView *content, NSButton *select, NSButton *copy, NSTextView *review, NSString *path) {
+    Click(ArmPicker(content, select), 70, 67);
+    CHECK(WaitFor(^BOOL{ return !copy.isHidden && copy.isEnabled; }));
+    CHECK([review.string isEqualToString:path]);
+}
+
+static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *review,
+                              NSButton *back, NSButton *reload, NSButton *select, NSButton *terminal,
+                              NSButton *cancel, NSButton *copy) {
+    NSString *path = @"html:nth-child(1) > body:nth-child(2) > *:nth-child(2)";
+    NSInteger changeCount = TestBoard.changeCount;
+    ReviewElement(content, select, copy, review, path);
+
+    // Even a resize to a viewport that supports review requires a fresh pick.
+    SetViewport(content, 144, 240);
+    CHECK(copy.isHidden && !copy.isEnabled && cancel.isHidden && review.string.length == 0);
+    CheckControls(content, @[back, reload, select, terminal]);
+    CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"innerWidth") isEqual:@144]; }));
+
+    ArmPicker(content, select);
+    CheckControls(content, @[back, reload, select, terminal, cancel]);
+    SetViewport(content, 144, 150);
+    CHECK(!select.isEnabled && cancel.isHidden && content.window.firstResponder == web);
+    CheckControls(content, @[back, reload, select, terminal]);
+    // A direct action cannot bypass the unavailable Select button.
+    CHECK([NSApp sendAction:select.action to:select.target from:select]);
+    CHECK(cancel.isHidden);
+    SetViewport(content, 144, 240);
+
+    ReviewElement(content, select, copy, review, path);
+    CheckControls(content, @[back, reload, select, terminal, cancel, copy]);
+    CHECK(!review.enclosingScrollView.isHidden);
+    CHECK(NSContainsRect(content.bounds, review.enclosingScrollView.frame));
+    CHECK(!NSIntersectsRect(review.enclosingScrollView.frame, cancel.frame));
+    CHECK(!NSIntersectsRect(review.enclosingScrollView.frame, copy.frame));
+    CHECK(content.window.firstResponder != copy);
+    [cancel performClick:nil];
+    CHECK(copy.isHidden && TestBoard.changeCount == changeCount);
+
+    ReviewElement(content, select, copy, review, path);
+    // Dispatch synchronously instead of running a button animation while the
+    // WebKit callback is pending. Shrink and grow before pumping the event loop.
+    CHECK([NSApp sendAction:copy.action to:copy.target from:copy]);
+    CHECK(!copy.isHidden && !copy.isEnabled);
+    SetViewport(content, 110, 240);
+    CHECK(!select.isEnabled && copy.isHidden && cancel.isHidden && review.string.length == 0);
+    CheckControls(content, @[back, reload, terminal]);
+    CHECK(select.isHidden);
+    SetViewport(content, 144, 240);
+    CHECK(copy.isHidden && cancel.isHidden && review.string.length == 0);
+
+    ReviewElement(content, select, copy, review, path);
+    CHECK(TestBoard.changeCount == changeCount);
+    [copy performClick:nil];
+    CHECK(WaitFor(^BOOL{ return copy.isHidden && [[TestBoard stringForType:NSPasteboardTypeString] isEqual:path]; }));
+    [TestBoard clearContents];
+    CHECK([TestBoard setString:@"smoke sentinel" forType:NSPasteboardTypeString]);
+    SetViewport(content, 430, 410);
+    [content layoutSubtreeIfNeeded];
+}
+
 @interface SmokePanel : NSPanel
 @end
 
@@ -134,8 +223,7 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     NSView *content = MiloPreviewContent(url, ^{ ++returns; });
     CHECK(content != nil);
     NSPanel *window = [[SmokePanel alloc] initWithContentRect:NSMakeRect(60, 60, 430, 410)
-                                                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                                             NSWindowStyleMaskNonactivatingPanel
+                                                   styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                                                      backing:NSBackingStoreBuffered defer:NO];
     window.title = @"Milo WebKit Smoke Test";
     window.releasedWhenClosed = NO;
@@ -193,8 +281,13 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     Click(web, 171, 23);
     CHECK(WaitFor(^BOOL{ return [web.URL.path isEqual:@"/form"] && !web.isLoading; }));
     CHECK([Evaluate(web, @"document.title") isEqual:@"Form passed"]);
+    SetViewport(content, 144, 240);
+    CheckControls(content, @[back, reload, select, terminal]);
+    CHECK(back.isEnabled && reload.isEnabled && terminal.isEnabled);
     [back performClick:nil];
     CHECK(WaitFor(^BOOL{ return [web.URL.path isEqual:@"/start"] && select.enabled && !web.isLoading; }));
+    SetViewport(content, 430, 410);
+    [content layoutSubtreeIfNeeded];
 
     // At native x = clientWidth - 4, reducing the scale to the visual viewport
     // would miss this eight-point target beside the fixture's classic scrollbar.
@@ -207,6 +300,8 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     CHECK(WaitFor(^BOOL{ return !copy.isHidden && copy.enabled; }));
     CHECK([review.string isEqual:@"html:nth-child(1) > body:nth-child(2) > div:nth-child(8)"]);
     [cancel performClick:nil];
+
+    CheckNarrowPicker(content, web, review, back, reload, select, terminal, cancel, copy);
 
     // Native element pick selects the custom element containing planted secrets.
     // Verify no page strings escape, cancel does not copy, and explicit copy does.
@@ -283,6 +378,6 @@ int main(int argc, char **argv) {
         [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory];
         [NSApp finishLaunching];
         DoSmoke([NSURL URLWithString:@(argv[1])], @(argv[2]), @(argv[3]));
-        puts("Native WebKit navigation, form, websocket hot reload, element picker, origin policy and terminal shortcut passed.");
+        puts("Native WebKit navigation, form, websocket hot reload, element picker and resize, origin policy and terminal shortcut passed.");
     }
 }

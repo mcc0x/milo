@@ -189,6 +189,35 @@ typedef NS_ENUM(NSUInteger, PreviewPickState) {
     PickIdle, PickArming, PickArmed, PickReading, PickReview, PickCopying,
 };
 
+enum {
+    PreviewToolbarHeight = 36, PreviewAddressRowHeight = 18, PreviewWideToolbarWidth = 224,
+    PreviewToolbarInset = 5, PreviewToolbarButtonWidth = 27, PreviewToolbarButtonGap = 2,
+    PreviewToolbarButtonStep = PreviewToolbarButtonWidth + PreviewToolbarButtonGap,
+    PreviewToolbarMinWidth = 2 * PreviewToolbarInset + 4 * PreviewToolbarButtonStep - PreviewToolbarButtonGap,
+    PreviewPanelInset = 8, PreviewStatusHeight = 31, PreviewControlGap = 4,
+    PreviewCancelWidth = 65, PreviewCopyWidth = 86, PreviewReviewButtonHeight = 24,
+    PreviewReviewPairWidth = 2 * PreviewPanelInset + PreviewCancelWidth + PreviewControlGap + PreviewCopyWidth,
+    PreviewMinPathHeight = 42, PreviewMaxPathHeight = 72, PreviewMinPageHeight = 24,
+};
+
+static CGFloat PreviewToolbarBottom(NSSize size) {
+    if (size.width < PreviewWideToolbarWidth && size.height >= PreviewToolbarHeight + PreviewAddressRowHeight + 1)
+        return PreviewToolbarHeight + PreviewAddressRowHeight;
+    return MIN(size.height, PreviewToolbarHeight);
+}
+
+static CGFloat PreviewPathHeight(NSSize size) {
+    CGFloat buttons = PreviewReviewButtonHeight;
+    if (size.width < PreviewReviewPairWidth) buttons += PreviewControlGap + PreviewReviewButtonHeight;
+    CGFloat reserved = PreviewToolbarBottom(size) + 1 + PreviewStatusHeight +
+        buttons + 2 * PreviewControlGap + PreviewMinPageHeight;
+    return MIN(PreviewMaxPathHeight, size.height - reserved);
+}
+
+static BOOL PreviewPickerFits(NSSize size) {
+    return size.width >= PreviewToolbarMinWidth && PreviewPathHeight(size) >= PreviewMinPathHeight;
+}
+
 @interface MiloPreviewBrowser : NSView <WKNavigationDelegate, WKUIDelegate> {
     NSURL *_initialURL;
     NSString *_origin;
@@ -302,7 +331,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 
     _address = [NSTextField labelWithString:[@"Approximate · " stringByAppendingString:origin]];
     _address.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    _address.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _address.lineBreakMode = NSLineBreakByTruncatingTail;
     _address.toolTip = [origin stringByAppendingString:@" — approximate Rex pane placement"];
     _address.textColor = NSColor.secondaryLabelColor;
     [self addSubview:_address];
@@ -366,37 +395,89 @@ static SEL PreviewShortcutAction(NSEvent *event) {
     if (_pickState != PickIdle) [self finishPick:@""];
 }
 
-- (void)setFrameSize:(NSSize)size {
-    [super setFrameSize:size];
-    self.needsLayout = YES;
+- (void)updateSelectAvailability {
+    BOOL fits = PreviewPickerFits(self.bounds.size);
+    _select.enabled = fits && _pageCommitted && _pickState == PickIdle;
+    _select.toolTip = fits ? @"Select an element" : @"Enlarge the preview to select an element.";
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    if (!NSEqualSizes(oldSize, self.bounds.size)) {
+        // A pick is tied to the viewport in which it began. Revoke it immediately,
+        // including an in-flight Copy, even if the pane grows again before layout.
+        if (_pickState != PickIdle) {
+            [self finishPick:@""];
+        } else {
+            [self updateSelectAvailability];
+            self.needsLayout = YES;
+        }
+    }
+    [super resizeSubviewsWithOldSize:oldSize];
 }
 
 - (void)layout {
     [super layout];
-    CGFloat width = NSWidth(self.bounds);
-    _back.frame = NSMakeRect(5, 5, 27, 26);
-    _reload.frame = NSMakeRect(34, 5, 27, 26);
-    _select.frame = NSMakeRect(MAX(63, width - 62), 5, 27, 26);
-    _terminal.frame = NSMakeRect(MAX(92, width - 33), 5, 27, 26);
-    _address.frame = NSMakeRect(68, 10, MAX(0, width - 136), 16);
-    _separator.frame = NSMakeRect(0, 36, width, 1);
+    NSSize size = self.bounds.size;
+    CGFloat width = size.width;
+    CGFloat toolbarBottom = PreviewToolbarBottom(size);
+    BOOL compact = width < PreviewWideToolbarWidth;
+    // Give the controls the width first. Below four buttons, retain Terminal,
+    // then Reload, then Back as space permits; Select cannot fit its review.
+    BOOL toolbarFits = size.height >= PreviewToolbarHeight;
+    _terminal.hidden = !toolbarFits || width < PreviewToolbarMinWidth - 3 * PreviewToolbarButtonStep;
+    _reload.hidden = !toolbarFits || width < PreviewToolbarMinWidth - 2 * PreviewToolbarButtonStep;
+    _back.hidden = !toolbarFits || width < PreviewToolbarMinWidth - PreviewToolbarButtonStep;
+    _select.hidden = !toolbarFits || width < PreviewToolbarMinWidth;
+    CGFloat trailing = width - PreviewToolbarInset - PreviewToolbarButtonWidth;
+    _terminal.frame = _terminal.hidden ? NSZeroRect :
+        NSMakeRect(trailing, PreviewToolbarInset, PreviewToolbarButtonWidth, 26);
+    _select.frame = _select.hidden ? NSZeroRect :
+        NSMakeRect(trailing - PreviewToolbarButtonStep, PreviewToolbarInset, PreviewToolbarButtonWidth, 26);
+    _back.frame = _back.hidden ? NSZeroRect :
+        NSMakeRect(PreviewToolbarInset, PreviewToolbarInset, PreviewToolbarButtonWidth, 26);
+    _reload.frame = _reload.hidden ? NSZeroRect :
+        NSMakeRect(PreviewToolbarInset + (_back.hidden ? 0 : PreviewToolbarButtonStep),
+                   PreviewToolbarInset, PreviewToolbarButtonWidth, 26);
+
+    CGFloat addressInset = compact ? PreviewPanelInset : 68;
+    _address.hidden = compact ? toolbarBottom == PreviewToolbarHeight || !toolbarFits || width <= 2 * addressInset :
+        !toolbarFits;
+    _address.frame = _address.hidden ? NSZeroRect :
+        NSMakeRect(addressInset, compact ? PreviewToolbarHeight - 2 : 10, width - 2 * addressInset, 16);
+    _separator.frame = NSMakeRect(0, toolbarBottom, width, MIN(1, size.height - toolbarBottom));
 
     BOOL reviewing = _pickState == PickReview || _pickState == PickCopying;
     BOOL picking = _pickState != PickIdle;
-    CGFloat y = 37;
-    if (_status.stringValue.length) {
-        _status.frame = NSMakeRect(8, y + 8, MAX(0, width - (picking && !reviewing ? 80 : 16)), 16);
-        y += 31;
+    CGFloat y = MIN(size.height, toolbarBottom + 1);
+    _status.hidden = !_status.stringValue.length || size.height - y < PreviewStatusHeight ||
+        width <= 2 * PreviewPanelInset;
+    if (!_status.hidden) {
+        CGFloat reserved = 2 * PreviewPanelInset;
+        if (picking && !reviewing && !compact) reserved += PreviewCancelWidth + PreviewControlGap;
+        _status.frame = NSMakeRect(PreviewPanelInset, y + 8, MAX(0, width - reserved), 16);
+        y = MIN(size.height, y + PreviewStatusHeight);
     }
     if (reviewing) {
-        _review.frame = NSMakeRect(8, y, MAX(0, width - 16), 72);
-        _copy.frame = NSMakeRect(MAX(8, width - 92), y + 76, 86, 24);
-        _cancel.frame = NSMakeRect(MAX(8, width - 160), y + 76, 65, 24);
-        y += 104;
-    } else {
-        _cancel.frame = NSMakeRect(MAX(8, width - 71), y - 27, 65, 24);
+        CGFloat pathHeight = PreviewPathHeight(size);
+        _review.frame = NSMakeRect(PreviewPanelInset, y, width - 2 * PreviewPanelInset, pathHeight);
+        y += pathHeight + PreviewControlGap;
+        CGFloat copyX = width - PreviewPanelInset - PreviewCopyWidth;
+        if (width < PreviewReviewPairWidth) {
+            _cancel.frame = NSMakeRect(width - PreviewPanelInset - PreviewCancelWidth, y,
+                                       PreviewCancelWidth, PreviewReviewButtonHeight);
+            y += PreviewReviewButtonHeight + PreviewControlGap;
+        } else {
+            _cancel.frame = NSMakeRect(copyX - PreviewControlGap - PreviewCancelWidth, y,
+                                       PreviewCancelWidth, PreviewReviewButtonHeight);
+        }
+        _copy.frame = NSMakeRect(copyX, y, PreviewCopyWidth, PreviewReviewButtonHeight);
+        y += PreviewReviewButtonHeight + PreviewControlGap;
+    } else if (picking) {
+        _cancel.frame = NSMakeRect(width - PreviewPanelInset - PreviewCancelWidth, compact ? y : y - 27,
+                                   PreviewCancelWidth, PreviewReviewButtonHeight);
+        if (compact) y += PreviewReviewButtonHeight + PreviewControlGap;
     }
-    NSRect webFrame = NSMakeRect(0, y, width, MAX(0, NSHeight(self.bounds) - y));
+    NSRect webFrame = NSMakeRect(0, y, width, size.height - y);
     _web.frame = webFrame;
     _picker.frame = webFrame;
 }
@@ -434,7 +515,6 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 - (void)updateChrome:(NSString *)status {
     _status.stringValue = status;
     _status.toolTip = status.length ? status : nil;
-    _status.hidden = status.length == 0;
     BOOL reviewing = _pickState == PickReview || _pickState == PickCopying;
     _review.hidden = _copy.hidden = !reviewing;
     _copy.enabled = _pickState == PickReview;
@@ -442,7 +522,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
     _picker.hidden = _pickState != PickArmed && _pickState != PickReading;
     _reload.enabled = _rulesReady;
     _back.enabled = _web.canGoBack;
-    _select.enabled = _pageCommitted && _pickState == PickIdle;
+    [self updateSelectAvailability];
     [self.window invalidateCursorRectsForView:_picker];
     self.needsLayout = YES;
 }
@@ -452,7 +532,8 @@ static SEL PreviewShortcutAction(NSEvent *event) {
     _pickState = PickIdle;
     _pickURL = nil;
     _path.string = @"";
-    if (self.window.firstResponder == _picker) [self.window makeFirstResponder:_web];
+    NSResponder *responder = self.window.firstResponder;
+    if (responder == _picker || responder == _cancel || responder == _copy) [self.window makeFirstResponder:_web];
     [self updateChrome:status];
 }
 
@@ -479,7 +560,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 }
 
 - (BOOL)canPick {
-    return _pageCommitted && self.window.isKeyWindow && self.window.isVisible &&
+    return _pageCommitted && PreviewPickerFits(self.bounds.size) && self.window.isKeyWindow && self.window.isVisible &&
         [PreviewOrigin(_web.URL, NO) isEqualToString:_origin];
 }
 
@@ -506,14 +587,14 @@ static SEL PreviewShortcutAction(NSEvent *event) {
     ++_pickID;
     _pickURL = _web.URL;
     _pickState = PickArming;
-    [self updateChrome:@"Preparing element picker…"];
+    [self updateChrome:@"Preparing picker…"];
     [self runPicker:@"arm" point:NSZeroPoint expected:PickArming completion:^(MiloPreviewBrowser *browser, id result) {
         if (![result isEqual:@YES]) {
             [browser finishPick:@"Element selection is unavailable."];
             return;
         }
         browser->_pickState = PickArmed;
-        [browser updateChrome:@"Click an element to review its path."];
+        [browser updateChrome:@"Click an element."];
         [browser.window makeFirstResponder:browser->_picker];
     }];
 }
@@ -525,7 +606,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
         return;
     }
     _pickState = PickReading;
-    [self updateChrome:@"Reading element path…"];
+    [self updateChrome:@"Reading path…"];
     [self runPicker:@"hit" point:point expected:PickReading completion:^(MiloPreviewBrowser *browser, id result) {
         NSString *path = PreviewPath(result);
         if (!path) {
@@ -533,9 +614,10 @@ static SEL PreviewShortcutAction(NSEvent *event) {
             return;
         }
         browser->_path.string = path;
-        [browser->_path scrollRangeToVisible:NSMakeRange(0, 0)];
         browser->_pickState = PickReview;
-        [browser updateChrome:@"Review the path before copying."];
+        [browser updateChrome:@"Review element path"];
+        [browser layoutSubtreeIfNeeded];
+        [browser->_path scrollRangeToVisible:NSMakeRange(0, 0)];
         // Keep keyboard focus on Cancel, not on the clipboard action.
         [browser.window makeFirstResponder:browser->_cancel];
     }];
@@ -548,7 +630,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
         return;
     }
     _pickState = PickCopying;
-    [self updateChrome:@"Review the path before copying."];
+    [self updateChrome:@"Review element path"];
     [self runPicker:@"copy" point:NSZeroPoint expected:PickCopying completion:^(MiloPreviewBrowser *browser, id result) {
         if (![PreviewPath(result) isEqualToString:browser->_path.string]) {
             [browser finishPick:@"The page changed. Select the element again."];

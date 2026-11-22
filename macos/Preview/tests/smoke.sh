@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run on a Mac with a graphical session; opens a disposable test window.
+# Run on a Mac with a graphical session; resizes a disposable test window.
 # Pass --keys-only to check NSEvent shortcut selection without opening a window.
 set -eu
 case "${1-}:$#" in
@@ -76,6 +76,11 @@ private-component {{ inset:52px auto auto 12px; width:250px; height:30px; }}
 #popup {{ inset:98px auto auto 12px; }} #redirect {{ inset:136px auto auto 12px; }}
 #hmr {{ position:absolute; inset:175px auto auto 12px; }}
 #edge {{ position:absolute; top:52px; right:0; width:8px; height:30px; background:#aaa; }}
+@media (max-width: 260px) {{
+  #typed, private-component {{ box-sizing:border-box; max-width:calc(100% - 16px); }}
+  button {{ inset:33px 4px auto auto; height:18px; }}
+  private-component {{ overflow:hidden; }}
+}}
 </style></head><body><form method="post" action="/form"><input id="typed" name="typed"><button>Submit</button></form>
 <private-component data-credential="FIXTURE-SECRET">FIXTURE-SECRET-TEXT</private-component>
 <a id="popup" href="{other}" target="_blank">Unapproved popup</a>
