@@ -2,7 +2,16 @@
 // xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
 //   -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework WebKit -o /tmp/preview-geometry
 // /tmp/preview-geometry
+#import <ApplicationServices/ApplicationServices.h>
+
+// Interpose only the two synchronous reads under test. The production loops and budget are unchanged.
+static AXError DelayedAttributes(AXUIElementRef, CFArrayRef, AXCopyMultipleAttributeOptions, CFArrayRef *);
+static AXError DelayedHit(AXUIElementRef, float, float, AXUIElementRef *);
+#define AXUIElementCopyMultipleAttributeValues DelayedAttributes
+#define AXUIElementCopyElementAtPosition DelayedHit
 #import "../macos/Preview/Anchor.m"
+#undef AXUIElementCopyMultipleAttributeValues
+#undef AXUIElementCopyElementAtPosition
 #import <assert.h>
 #import <util.h>
 
@@ -145,6 +154,67 @@ static void StartupDeadline(void) {
     assert(LayoutDeadlineElapsed(36, &since, YES));
 }
 
+static struct {
+    NSTimeInterval now, delay;
+    size_t calls;
+} axFixture;
+
+static NSTimeInterval TestClock(void *context) {
+    return *(NSTimeInterval *)context;
+}
+
+static AXError DelayedAttributes(AXUIElementRef element, CFArrayRef keys, AXCopyMultipleAttributeOptions options, CFArrayRef *result) {
+    (void)keys;
+    (void)options;
+    axFixture.now += axFixture.delay;
+    NSString *role = (__bridge NSString *)(axFixture.calls++ ? kAXGroupRole : kAXWindowRole);
+    NSArray *row = @[role, NSNull.null, NSNull.null, NSNull.null, @[(__bridge id)element]];
+    *result = (CFArrayRef)CFBridgingRetain(row);
+    return kAXErrorSuccess;
+}
+
+static AXError DelayedHit(AXUIElementRef element, float x, float y, AXUIElementRef *result) {
+    (void)x;
+    (void)y;
+    ++axFixture.calls;
+    axFixture.now += axFixture.delay;
+    *result = element;
+    CFRetain(element);
+    return kAXErrorSuccess;
+}
+
+static void AcquisitionDeadline(void) {
+    AXUIElementRef element = AXUIElementCreateApplication(getpid());
+    AXBudget budget = {ProofLifetime, TestClock, &axFixture.now};
+    CGRect pane = CGRectMake(0, 0, 20, 20);
+    AXTree tree = {.markerNode = NoNode};
+
+    // Each operation finishes within the per-message cap, but a long tree or hit test must stop.
+    axFixture.delay = 0.045;
+    assert(!WalkAX(&budget, &tree, element, NoNode, 0, @"unused"));
+    assert(axFixture.calls == 7 && tree.count == 7 && BeforeAXDeadline(&budget) && !AXCanIssue(&budget));
+    axFixture.now = 0;
+    axFixture.calls = 0;
+    assert(!HitTestsMatch(&budget, element, element, pane));
+    assert(axFixture.calls == 7 && BeforeAXDeadline(&budget) && !AXCanIssue(&budget));
+
+    // Each call gets the same deadline, including consecutive float background grids.
+    axFixture.now = 0;
+    axFixture.calls = 0;
+    axFixture.delay = 0.020;
+    assert(HitTestsMatch(&budget, element, element, pane));
+    assert(!HitTestsMatch(&budget, element, element, pane));
+    assert(axFixture.calls == 15 && !AXCanIssue(&budget));
+
+    // An in-flight call returning late is never a successful sample, even if AX returns success.
+    axFixture.now = 0;
+    axFixture.calls = 0;
+    axFixture.delay = ProofLifetime + 0.01;
+    assert(!HitTestsMatch(&budget, element, element, pane));
+    assert(axFixture.calls == 1 && !BeforeAXDeadline(&budget));
+    CFRelease(element);
+}
+
 int main(void) {
     @autoreleasepool {
         ScreenPlacement();
@@ -152,6 +222,7 @@ int main(void) {
         WindowOrdering();
         TerminalEcho();
         StartupDeadline();
+        AcquisitionDeadline();
         puts("preview geometry tests passed");
     }
     return 0;

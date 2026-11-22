@@ -19,6 +19,7 @@ static const double LayoutProofInterval = 1.0;
 static const double LayoutProofTimeout = 6.0;
 static const double ProofInterval = 0.15;
 static const double ProofLifetime = 0.35;
+static const float AXMessageTimeout = 0.05f;
 static const NSUInteger MarkerLength = 32;
 static const char AccessibilityUnavailable[] = "macOS Accessibility is unavailable for this launch context. No permission was requested.";
 
@@ -30,6 +31,26 @@ typedef struct {
 
 static BOOL SameGeometry(Geometry a, Geometry b) {
     return a.windowID == b.windowID && CGRectEqualToRect(a.window, b.window) && CGRectEqualToRect(a.pane, b.pane);
+}
+
+typedef struct {
+    NSTimeInterval deadline;
+    NSTimeInterval (*clock)(void *);
+    void *context;
+} AXBudget;
+
+static NSTimeInterval ProofClock(void *context) {
+    (void)context;
+    return NSProcessInfo.processInfo.systemUptime;
+}
+
+static BOOL AXCanIssue(const AXBudget *budget) {
+    // Leave time for an outstanding synchronous AX message to hit its system timeout.
+    return budget->deadline - budget->clock(budget->context) > AXMessageTimeout;
+}
+
+static BOOL BeforeAXDeadline(const AXBudget *budget) {
+    return budget->clock(budget->context) < budget->deadline;
 }
 
 static BOOL ValidRect(CGRect r) {
@@ -49,10 +70,28 @@ static AXUIElementRef Element(id value) {
     return HasType(value, AXUIElementGetTypeID()) ? (__bridge AXUIElementRef)value : NULL;
 }
 
-static id Attribute(AXUIElementRef element, CFStringRef attribute) {
+static id Attribute(const AXBudget *budget, AXUIElementRef element, CFStringRef attribute) {
     CFTypeRef value = NULL;
-    if (!element || AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess) return nil;
-    return CFBridgingRelease(value);
+    if (!element || !AXCanIssue(budget)) return nil;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &value);
+    id result = CFBridgingRelease(value);
+    return status == kAXErrorSuccess && BeforeAXDeadline(budget) ? result : nil;
+}
+
+static NSArray *Attributes(const AXBudget *budget, AXUIElementRef element, NSArray *keys) {
+    if (!AXCanIssue(budget)) return nil;
+    CFArrayRef raw = NULL;
+    AXError status = AXUIElementCopyMultipleAttributeValues(element, (__bridge CFArrayRef)keys, 0, &raw);
+    NSArray *result = CFBridgingRelease(raw);
+    return status == kAXErrorSuccess && BeforeAXDeadline(budget) ? result : nil;
+}
+
+static id ParameterizedAttribute(const AXBudget *budget, AXUIElementRef element, CFStringRef attribute, AXValueRef parameter) {
+    if (!AXCanIssue(budget)) return nil;
+    CFTypeRef raw = NULL;
+    AXError status = AXUIElementCopyParameterizedAttributeValue(element, attribute, parameter, &raw);
+    id result = CFBridgingRelease(raw);
+    return status == kAXErrorSuccess && BeforeAXDeadline(budget) ? result : nil;
 }
 
 static BOOL ReadAXValue(id value, AXValueType type, void *out) {
@@ -61,9 +100,9 @@ static BOOL ReadAXValue(id value, AXValueType type, void *out) {
 
 typedef enum { MarkerUnreadable, MarkerMissing, MarkerText, MarkerMatched } MarkerStatus;
 
-static MarkerStatus ReadMarker(AXUIElementRef element, NSString *marker, CGRect frame) {
+static MarkerStatus ReadMarker(const AXBudget *budget, AXUIElementRef element, NSString *marker, CGRect frame) {
     CFRange visible;
-    if (!ReadAXValue(Attribute(element, kAXVisibleCharacterRangeAttribute), kAXValueCFRangeType, &visible) ||
+    if (!ReadAXValue(Attribute(budget, element, kAXVisibleCharacterRangeAttribute), kAXValueCFRangeType, &visible) ||
         visible.location < 0 || visible.location > LONG_MAX - (CFIndex)MarkerLength || visible.length < 0) return MarkerUnreadable;
     if (visible.length < (CFIndex)MarkerLength) return MarkerMissing;
 
@@ -71,17 +110,12 @@ static MarkerStatus ReadMarker(AXUIElementRef element, NSString *marker, CGRect 
     CFRange prefix = CFRangeMake(visible.location, (CFIndex)MarkerLength);
     AXValueRef parameter = AXValueCreate(kAXValueCFRangeType, &prefix);
     if (!parameter) return MarkerUnreadable;
-    CFTypeRef text = NULL;
-    BOOL readable = AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute,
-        parameter, &text) == kAXErrorSuccess && HasType((__bridge id)text, CFStringGetTypeID());
-    BOOL matches = readable && CFEqual(text, (__bridge CFStringRef)marker);
-    if (text) CFRelease(text);
-    CFTypeRef bounds = NULL;
+    id text = ParameterizedAttribute(budget, element, kAXStringForRangeParameterizedAttribute, parameter);
+    BOOL readable = HasType(text, CFStringGetTypeID());
+    BOOL matches = readable && CFEqual((__bridge CFTypeRef)text, (__bridge CFStringRef)marker);
     CGRect markerFrame;
-    BOOL bounded = matches && AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute,
-        parameter, &bounds) == kAXErrorSuccess && ReadAXValue((__bridge id)bounds, kAXValueCGRectType, &markerFrame) &&
-        ValidRect(markerFrame) && CGRectContainsRect(frame, markerFrame);
-    if (bounds) CFRelease(bounds);
+    BOOL bounded = matches && ReadAXValue(ParameterizedAttribute(budget, element, kAXBoundsForRangeParameterizedAttribute, parameter),
+        kAXValueCGRectType, &markerFrame) && ValidRect(markerFrame) && CGRectContainsRect(frame, markerFrame);
     CFRelease(parameter);
     if (bounded) return MarkerMatched;
     if (matches) return MarkerText;
@@ -141,19 +175,17 @@ static CGRect MeasuredFrame(id positionValue, id sizeValue) {
     return ValidRect(frame) ? frame : CGRectNull;
 }
 
-static CGRect ElementFrame(AXUIElementRef element) {
+static CGRect ElementFrame(const AXBudget *budget, AXUIElementRef element) {
     static NSArray *keys;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         keys = @[(__bridge NSString *)kAXPositionAttribute, (__bridge NSString *)kAXSizeAttribute];
     });
-    CFArrayRef raw = NULL;
-    if (AXUIElementCopyMultipleAttributeValues(element, (__bridge CFArrayRef)keys, 0, &raw) != kAXErrorSuccess) return CGRectNull;
-    NSArray *values = CFBridgingRelease(raw);
+    NSArray *values = Attributes(budget, element, keys);
     return values.count == 2 ? MeasuredFrame(values[0], values[1]) : CGRectNull;
 }
 
-static BOOL WalkAX(AXTree *tree, AXUIElementRef element, int parent, unsigned depth, NSString *marker) {
+static BOOL WalkAX(const AXBudget *budget, AXTree *tree, AXUIElementRef element, int parent, unsigned depth, NSString *marker) {
     if (!element || depth >= MaxAXDepth || tree->count >= MaxAXNodes) return NO;
     static NSArray *keys;
     static dispatch_once_t once;
@@ -164,9 +196,7 @@ static BOOL WalkAX(AXTree *tree, AXUIElementRef element, int parent, unsigned de
             (__bridge NSString *)kAXChildrenAttribute,
         ];
     });
-    CFArrayRef raw = NULL;
-    if (AXUIElementCopyMultipleAttributeValues(element, (__bridge CFArrayRef)keys, 0, &raw) != kAXErrorSuccess) return NO;
-    NSArray *values = CFBridgingRelease(raw);
+    NSArray *values = Attributes(budget, element, keys);
     if (values.count != keys.count) return NO;
     id role = values[0], subrole = values[1];
     if (!HasType(role, CFStringGetTypeID()) || IsPalette(role, subrole) ||
@@ -187,7 +217,7 @@ static BOOL WalkAX(AXTree *tree, AXUIElementRef element, int parent, unsigned de
     }
     if (textArea && !CGRectIsNull(frame)) {
         if (CFEqual(element, tree->focus)) tree->terminalFocused = YES;
-        MarkerStatus status = ReadMarker(element, marker, frame);
+        MarkerStatus status = ReadMarker(budget, element, marker, frame);
         tree->markerMissing |= status == MarkerMissing;
         tree->markerPresent |= status == MarkerText || status == MarkerMatched;
         if (status == MarkerMatched) {
@@ -199,9 +229,9 @@ static BOOL WalkAX(AXTree *tree, AXUIElementRef element, int parent, unsigned de
         }
     }
     for (id child in children) {
-        if (!WalkAX(tree, Element(child), index, depth + 1, marker)) return NO;
+        if (!WalkAX(budget, tree, Element(child), index, depth + 1, marker)) return NO;
     }
-    return YES;
+    return BeforeAXDeadline(budget);
 }
 
 static BOOL IsAncestor(const AXTree *tree, int ancestor, int child) {
@@ -250,18 +280,19 @@ static BOOL ClearAXPane(const AXTree *tree, BOOL floating, CGRect *backgrounds, 
     return YES;
 }
 
-static BOOL HitTestsMatch(AXUIElementRef app, AXUIElementRef pane, CGRect frame) {
+static BOOL HitTestsMatch(const AXBudget *budget, AXUIElementRef app, AXUIElementRef pane, CGRect frame) {
     if (!ValidRect(frame)) return NO;
     CGFloat dx = MIN(1, frame.size.width / 4), dy = MIN(1, frame.size.height / 4);
     const CGFloat xs[] = {CGRectGetMinX(frame) + dx, CGRectGetMidX(frame), CGRectGetMaxX(frame) - dx};
     const CGFloat ys[] = {CGRectGetMinY(frame) + dy, CGRectGetMidY(frame), CGRectGetMaxY(frame) - dy};
     for (unsigned y = 0; y < 3; ++y) {
         for (unsigned x = 0; x < 3; ++x) {
+            if (!AXCanIssue(budget)) return NO;
             AXUIElementRef hit = NULL;
             BOOL matches = AXUIElementCopyElementAtPosition(app, (float)xs[x], (float)ys[y], &hit) == kAXErrorSuccess &&
                 hit && CFEqual(hit, pane);
             if (hit) CFRelease(hit);
-            if (!matches) return NO;
+            if (!matches || !BeforeAXDeadline(budget)) return NO;
         }
     }
     return YES;
@@ -311,51 +342,53 @@ static CGWindowID VisibleWindow(pid_t pid, Geometry geometry) {
     return MatchingVisibleWindow(windows, pid, getpid(), geometry.window, geometry.pane);
 }
 
-static BOOL Nonmodal(AXUIElementRef window) {
+static BOOL Nonmodal(const AXBudget *budget, AXUIElementRef window) {
+    if (!AXCanIssue(budget)) return NO;
     CFTypeRef value = NULL;
     AXError status = AXUIElementCopyAttributeValue(window, kAXModalAttribute, &value);
     BOOL nonmodal = status == kAXErrorSuccess ? value == kCFBooleanFalse :
         status == kAXErrorAttributeUnsupported || status == kAXErrorNoValue;
     if (value) CFRelease(value);
-    return nonmodal;
+    return nonmodal && BeforeAXDeadline(budget);
 }
 
-static BOOL CurrentAXElement(AXUIElementRef app, CFStringRef key, id expected) {
-    id actual = Attribute(app, key);
+static BOOL CurrentAXElement(const AXBudget *budget, AXUIElementRef app, CFStringRef key, id expected) {
+    id actual = Attribute(budget, app, key);
     return Element(actual) && CFEqual((__bridge CFTypeRef)actual, (__bridge CFTypeRef)expected);
 }
 
-static BOOL ValidateProof(AXUIElementRef app, MiloAXProof *proof, pid_t pid,
+static BOOL ValidateProof(const AXBudget *budget, AXUIElementRef app, MiloAXProof *proof, pid_t pid,
     NSString *marker, BOOL full) {
     Geometry g = proof->geometry;
     AXUIElementRef window = Element(proof->window), pane = Element(proof->pane);
-    if (!CurrentAXElement(app, kAXFocusedWindowAttribute, proof->window) ||
-        !CurrentAXElement(app, kAXFocusedUIElementAttribute, proof->focus) ||
-        !Nonmodal(window) || !CGRectEqualToRect(ElementFrame(window), g.window) ||
-        !CGRectEqualToRect(ElementFrame(pane), g.pane) || ReadMarker(pane, marker, g.pane) != MarkerMatched ||
-        !HitTestsMatch(app, pane, g.pane)) return NO;
+    if (!CurrentAXElement(budget, app, kAXFocusedWindowAttribute, proof->window) ||
+        !CurrentAXElement(budget, app, kAXFocusedUIElementAttribute, proof->focus) ||
+        !Nonmodal(budget, window) || !CGRectEqualToRect(ElementFrame(budget, window), g.window) ||
+        !CGRectEqualToRect(ElementFrame(budget, pane), g.pane) || ReadMarker(budget, pane, marker, g.pane) != MarkerMatched ||
+        !HitTestsMatch(budget, app, pane, g.pane)) return NO;
     if (full) {
         for (size_t i = 0; i < proof->backgroundCount; ++i) {
-            if (!HitTestsMatch(app, pane, proof->backgrounds[i])) return NO;
+            if (!HitTestsMatch(budget, app, pane, proof->backgrounds[i])) return NO;
         }
     }
-    return CurrentAXElement(app, kAXFocusedWindowAttribute, proof->window) &&
-        CurrentAXElement(app, kAXFocusedUIElementAttribute, proof->focus) &&
-        VisibleWindow(pid, g) == g.windowID;
+    return CurrentAXElement(budget, app, kAXFocusedWindowAttribute, proof->window) &&
+        CurrentAXElement(budget, app, kAXFocusedUIElementAttribute, proof->focus) &&
+        VisibleWindow(pid, g) == g.windowID && BeforeAXDeadline(budget);
 }
 
 static MiloAXProof *ProveGeometry(AXUIElementRef app, pid_t pid, NSString *marker,
     BOOL floating, NSTimeInterval now, MiloAXProof *cached, BOOL *markerNeedsRedraw) {
     *markerNeedsRedraw = NO;
-    if (!AXIsProcessTrusted()) return nil;
-    if (cached) return ValidateProof(app, cached, pid, marker, NO) ? cached : nil;
-    __attribute__((objc_precise_lifetime)) id focusedWindow = Attribute(app, kAXFocusedWindowAttribute);
-    __attribute__((objc_precise_lifetime)) id focusedElement = Attribute(app, kAXFocusedUIElementAttribute);
-    if (!IsAXString(Attribute(Element(focusedElement), kAXRoleAttribute), kAXTextAreaRole)) return nil;
+    AXBudget budget = {now + ProofLifetime, ProofClock, NULL};
+    if (!AXCanIssue(&budget) || !AXIsProcessTrusted()) return nil;
+    if (cached) return ValidateProof(&budget, app, cached, pid, marker, NO) ? cached : nil;
+    __attribute__((objc_precise_lifetime)) id focusedWindow = Attribute(&budget, app, kAXFocusedWindowAttribute);
+    __attribute__((objc_precise_lifetime)) id focusedElement = Attribute(&budget, app, kAXFocusedUIElementAttribute);
+    if (!IsAXString(Attribute(&budget, Element(focusedElement), kAXRoleAttribute), kAXTextAreaRole)) return nil;
     AXUIElementRef window = Element(focusedWindow);
     AXTree tree = {.markerNode = NoNode, .focus = Element(focusedElement)};
     MiloAXProof *proof = nil;
-    BOOL walked = window && tree.focus && Nonmodal(window) && WalkAX(&tree, window, NoNode, 0, marker);
+    BOOL walked = window && tree.focus && Nonmodal(&budget, window) && WalkAX(&budget, &tree, window, NoNode, 0, marker);
     if (walked && tree.terminalFocused) {
         // Do not disturb a present marker on placement or occlusion failures, or repaint when AX cannot read it.
         *markerNeedsRedraw = tree.markerMissing && !tree.markerPresent;
@@ -371,10 +404,14 @@ static MiloAXProof *ProveGeometry(AXUIElementRef app, pid_t pid, NSString *marke
             proof->focus = focusedElement;
             proof->layoutCheckedAt = now;
             if (!ClearAXPane(&tree, floating, proof->backgrounds, &proof->backgroundCount) ||
-                !ValidateProof(app, proof, pid, marker, YES)) proof = nil;
+                !ValidateProof(&budget, app, proof, pid, marker, YES)) proof = nil;
         }
     }
     if (tree.markerElement) CFRelease(tree.markerElement);
+    if (!BeforeAXDeadline(&budget)) {
+        *markerNeedsRedraw = NO;
+        return nil;
+    }
     return proof;
 }
 
@@ -702,8 +739,11 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     if (!WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1)) [self finish:"could not return focus to the Rex terminal"];
 }
 
-- (void)applyProof:(MiloAXProof *)result generation:(NSUInteger)generation started:(NSTimeInterval)started redraw:(BOOL)redraw {
+- (void)applyProof:(MiloAXProof *)result generation:(NSUInteger)generation started:(NSTimeInterval)started
+    completed:(NSTimeInterval)completed full:(BOOL)full redraw:(BOOL)redraw {
     _probePending = NO;
+    // A stale or unsuccessful full attempt cannot start another walk immediately after it returns.
+    if (full) _lastFullAttempt = completed;
     if (_finished || generation != _generation) return;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     Geometry proof = result ? result->geometry : (Geometry){0};
@@ -720,6 +760,7 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         return;
     }
     _cached = result;
+    if (full) _lastFullAttempt = started;
     if (!SameGeometry(_candidate, proof) || display != _candidateDisplay ||
         !NSEqualRects(frame, _candidateFrame) || now - _lastProof >= ProofLifetime) {
         [self conceal];
@@ -795,10 +836,7 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     if (_probePending) return;
     MiloAXProof *cached = _cached;
     if (cached && now - cached->layoutCheckedAt >= LayoutProofInterval) cached = nil;
-    if (!cached) {
-        if (now - _lastFullAttempt < LayoutProofInterval) return;
-        _lastFullAttempt = now;
-    }
+    if (!cached && now - _lastFullAttempt < LayoutProofInterval) return;
     _probePending = YES;
     NSUInteger generation = _generation;
     pid_t pid = _rex.processIdentifier;
@@ -810,8 +848,9 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         @autoreleasepool {
             BOOL redraw;
             MiloAXProof *result = ProveGeometry((__bridge AXUIElementRef)axApp, pid, marker, floating, now, cached, &redraw);
+            NSTimeInterval completed = ProofClock(NULL);
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf applyProof:result generation:generation started:now redraw:redraw];
+                [weakSelf applyProof:result generation:generation started:now completed:completed full:cached == nil redraw:redraw];
             });
         }
     });
@@ -950,9 +989,12 @@ int milo_preview_run(const char *url, const char *marker, int state_fd) {
             return 1;
         }
         AXUIElementRef allApps = AXUIElementCreateSystemWide();
-        if (allApps) {
-            AXUIElementSetMessagingTimeout(allApps, 0.05f);
-            CFRelease(allApps);
+        AXError timeout = allApps ? AXUIElementSetMessagingTimeout(allApps, AXMessageTimeout) : kAXErrorFailure;
+        if (allApps) CFRelease(allApps);
+        if (timeout != kAXErrorSuccess) {
+            dprintf(tty, "milo preview: could not bound Accessibility geometry requests\n");
+            close(tty);
+            return 1;
         }
         MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location
             marker:[NSString stringWithUTF8String:marker] stateFD:state_fd parent:parent tty:tty];
