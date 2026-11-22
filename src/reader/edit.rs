@@ -95,6 +95,62 @@ struct Formatting {
     announced: bool,
 }
 
+/// What is open at the start of each line, for as many lines as have been asked about.
+struct Open {
+    /// Right for the lines before `known`. Those from `kept` on were right
+    /// before an edit above them, and are again if the line at `kept` still
+    /// starts as it did; the ones between only hold their places.
+    states: Vec<State>,
+    known: usize,
+    kept: usize,
+}
+
+impl Default for Open {
+    fn default() -> Self {
+        Self { states: vec![State::Code], known: 1, kept: 1 }
+    }
+}
+
+impl Open {
+    /// Reads on from the last line already known, and no further than an
+    /// edit reaches: a line can be megabytes long, and so can those below it.
+    fn at(&mut self, row: usize, lang: &Lang, buffer: &Buffer) -> State {
+        while self.known <= row {
+            let mut state = self.states[self.known - 1].clone();
+            lang.advance(buffer.row(self.known - 1), &mut state);
+            if self.known == self.kept {
+                if self.states.get(self.known) == Some(&state) {
+                    self.known = self.states.len();
+                    self.kept = self.known;
+                    continue;
+                }
+                self.states.truncate(self.known);
+            }
+            match self.states.get_mut(self.known) {
+                Some(place) => *place = state,
+                None => self.states.push(state),
+            }
+            self.known += 1;
+            self.kept = self.kept.max(self.known);
+        }
+        self.states[row].clone()
+    }
+
+    /// Notes that lines `first..=last` took the place of lines `first..=old_last`.
+    fn rewrote(&mut self, first: usize, old_last: usize, last: usize) {
+        let kept = if self.kept < self.states.len() { self.kept } else { old_last + 1 };
+        if old_last < kept && kept < self.states.len() {
+            self.states.splice(first + 1..old_last + 1, std::iter::repeat_n(State::Code, last - first));
+            self.kept = kept + last - old_last;
+            self.known = self.known.min(first + 1);
+        } else {
+            self.states.truncate(self.known.min(first + 1));
+            self.known = self.states.len();
+            self.kept = self.known;
+        }
+    }
+}
+
 pub(super) struct Editor {
     buffer: Buffer,
     original: Original,
@@ -112,8 +168,7 @@ pub(super) struct Editor {
     columns: usize,
     text_x: usize,
     lang: Option<&'static Lang>,
-    /// What is open at the start of each line, for as many lines as have been asked about.
-    states: Vec<State>,
+    open: Open,
     spans: Vec<Span>,
     /// What the Tab key inserts.
     indent: &'static str,
@@ -227,7 +282,7 @@ impl Editor {
             columns: 0,
             text_x: 0,
             lang,
-            states: vec![State::Code],
+            open: Open::default(),
             spans: Vec::new(),
             prompt: kept.is_some().then_some(Prompt::Kept),
             conflict: None,
@@ -310,19 +365,20 @@ impl Editor {
         self.buffer.row(self.cursor.row)
     }
 
-    /// Records where an edit left the cursor and forgets the colours below its first line.
-    fn edited(&mut self, first_row: usize, cursor: Pos) -> Step {
+    /// Records an edit that put lines `first_row..=last_row` where lines
+    /// `first_row..=old_last_row` were, and where it left the cursor.
+    fn edited(&mut self, first_row: usize, old_last_row: usize, last_row: usize, cursor: Pos) -> Step {
         self.cursor = cursor;
         self.column = None;
         self.follow = true;
-        self.states.truncate(first_row + 1);
+        self.open.rewrote(first_row, old_last_row, last_row);
         self.sync_mark();
         Step::Stay
     }
 
     fn replace(&mut self, from: Pos, to: Pos, text: &str) -> Step {
         let end = self.buffer.edit(from, to, text, self.cursor);
-        self.edited(from.row, end)
+        self.edited(from.row, to.row, end.row, end)
     }
 
     fn insert(&mut self, text: &str) -> Step {
@@ -401,7 +457,7 @@ impl Editor {
 
     fn undo(&mut self, now: Instant) -> Step {
         match self.buffer.undo() {
-            Some(replay) => self.edited(replay.first_row, replay.cursor),
+            Some(replay) => self.edited(replay.first_row, replay.old_last_row, replay.last_row, replay.cursor),
             None => {
                 self.say("Nothing to undo", now);
                 Step::Stay
@@ -411,7 +467,7 @@ impl Editor {
 
     fn redo(&mut self, now: Instant) -> Step {
         match self.buffer.redo() {
-            Some(replay) => self.edited(replay.first_row, replay.cursor),
+            Some(replay) => self.edited(replay.first_row, replay.old_last_row, replay.last_row, replay.cursor),
             None => {
                 self.say("Nothing to redo", now);
                 Step::Stay
@@ -603,7 +659,7 @@ impl Editor {
             Key::Char(c) if c.is_control() => Step::Ignored,
             Key::Char(c) => {
                 let end = self.buffer.type_char(self.cursor, c);
-                self.edited(self.cursor.row, end)
+                self.edited(self.cursor.row, self.cursor.row, self.cursor.row, end)
             }
             Key::Enter => self.newline(),
             Key::Ctrl(b'i') => self.insert(self.indent),
@@ -686,16 +742,10 @@ impl Editor {
         Page::new(rows)
     }
 
-    /// What is open at the start of `row`, read from the last line already known.
+    /// What is open at the start of `row`.
     fn state_at(&mut self, row: usize) -> State {
         let Some(lang) = self.lang else { return State::Code };
-        while self.states.len() <= row {
-            let known = self.states.len() - 1;
-            let mut state = self.states[known].clone();
-            lang.advance(self.buffer.row(known), &mut state);
-            self.states.push(state);
-        }
-        self.states[row].clone()
+        self.open.at(row, lang, &self.buffer)
     }
 
     /// Moves the view just far enough to show the cursor.
@@ -897,12 +947,84 @@ mod tests {
         assert!(matches!(editor.state_at(row + 1), State::Comment(..)));
 
         editor.undo(now);
-        assert_eq!(editor.states.len(), row + 1);
+        assert_eq!(editor.open.known, row + 1);
         assert_eq!(editor.buffer.row(row + 1), "*\rX");
         assert_eq!(editor.state_at(row + 2), State::Code);
         editor.redo(now);
-        assert_eq!(editor.states.len(), row + 1);
+        assert_eq!(editor.open.known, row + 1);
         assert_eq!(editor.cursor, Pos { row, col: 2 });
         assert!(matches!(editor.state_at(row + 1), State::Comment(..)));
+    }
+
+    /// What every line starts in, read afresh from the top of the draft.
+    fn fresh_states(editor: &Editor) -> Vec<State> {
+        let lang = editor.lang.unwrap();
+        let mut state = State::Code;
+        (0..editor.buffer.len())
+            .map(|row| {
+                let before = state.clone();
+                lang.advance(editor.buffer.row(row), &mut state);
+                before
+            })
+            .collect()
+    }
+
+    #[test]
+    fn colours_below_an_edit_are_those_of_reading_the_whole_draft_again() {
+        const PIECES: [&str; 10] =
+            ["/*", "*/", "let a = 1;", "let s = r#\"", "\"#;", "// note", "\"text", "", "/* /* */", "x */ y"];
+        let f = Fixture::folder();
+        f.write("edit.rs", &PIECES.join("\n").repeat(6));
+        let mut editor = Reader::open(&f.root.join("edit.rs")).unwrap().open_editor().unwrap();
+        let now = Instant::now();
+        let mut seed = 0x4f6c_dd1d_usize;
+        let mut next = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        for step in 0..4000 {
+            let rows = editor.buffer.len();
+            match next(10) {
+                0 => drop(editor.undo(now)),
+                1 => drop(editor.redo(now)),
+                // What a frame asks: some of the lines, not always those just edited.
+                2..=4 => {
+                    let row = next(rows);
+                    assert_eq!(editor.state_at(row), fresh_states(&editor)[row], "step {step}, row {row}");
+                }
+                _ => {
+                    let from = Pos { row: next(rows), col: 0 };
+                    let last = (from.row + next(3)).min(rows - 1);
+                    let to = Pos { row: last, col: next(editor.buffer.row(last).len() + 1) };
+                    let text: Vec<_> = (0..next(4)).map(|_| PIECES[next(PIECES.len())]).collect();
+                    editor.replace(from, to, &text.join("\n"));
+                }
+            }
+            if step % 64 == 0 {
+                let fresh = fresh_states(&editor);
+                let read: Vec<_> = (0..fresh.len()).rev().map(|row| editor.state_at(row)).collect();
+                assert!(read.iter().rev().eq(&fresh), "step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn typing_reads_no_further_than_the_line_whose_start_it_changes() {
+        let f = Fixture::folder();
+        f.write("edit.rs", &"let a = 1;\n".repeat(200));
+        let mut editor = Reader::open(&f.root.join("edit.rs")).unwrap().open_editor().unwrap();
+        editor.state_at(150);
+        editor.cursor = Pos { row: 20, col: 0 };
+        editor.key(Key::Char('x'), Instant::now());
+        assert_eq!(editor.open.known, 21);
+        editor.state_at(21);
+        assert_eq!(editor.open.known, 151);
+        // An opened comment changes what the lines below start in, so they are read again.
+        editor.key(Key::Char('/'), Instant::now());
+        editor.key(Key::Char('*'), Instant::now());
+        assert!(matches!(editor.state_at(22), State::Comment(..)));
+        assert_eq!(editor.open.known, 23);
     }
 }

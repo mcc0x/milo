@@ -1,6 +1,6 @@
 //! Times the reader of a release build on generated files: long lines, syntax
 //! that spans lines, diffs just under the size Milo will load, and edits near
-//! the end of a large draft.
+//! the end of a large draft and above lines far wider than the pane.
 //!
 //! Each run starts `milo view` in a real terminal, answers its questions as a
 //! terminal would, and times what a person waits for: the first frame that
@@ -131,6 +131,22 @@ const SCENARIOS: &[Scenario] = &[
         at_commit: false,
         keys: &[
             setup(b'G'),
+            setup(b'e'),
+            there_and_back("type", b'x', b'\x1a', 24),
+            there_and_back("split-line", b'\r', b'\x1a', 24),
+            setup(b'x'),
+            there_and_back("undo", b'\x1a', b'\x19', 24),
+            setup(b'\x1a'),
+            there_and_back("redo", b'\x19', b'\x1a', 24),
+            setup(b'\x1b'),
+        ],
+    },
+    // Every line below the one edited is far wider than the pane.
+    Scenario {
+        name: "edit-long-lines",
+        file: "long.rs",
+        at_commit: false,
+        keys: &[
             setup(b'e'),
             there_and_back("type", b'x', b'\x1a', 24),
             there_and_back("split-line", b'\r', b'\x1a', 24),
