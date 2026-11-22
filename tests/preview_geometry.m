@@ -2,6 +2,7 @@
 // xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
 //   -framework AppKit -framework CoreGraphics -framework WebKit -o /tmp/preview-geometry
 // /tmp/preview-geometry
+// /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
 #import "../macos/Preview/Chrome.h"
 
@@ -140,6 +141,58 @@ static void PanelOrdering(void) {
     assert(!SampleGeometry(@[Replacing(panel, kCGWindowAlpha, @0), rex], 100, 1, 300, &expected, &right).windowID);
 }
 
+static void PanelStaging(void) {
+    assert([NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory]);
+    NSRect screen = NSScreen.screens.firstObject.visibleFrame;
+    assert(NSWidth(screen) >= 200 && NSHeight(screen) >= 120);
+    NSRect frame = NSIntegralRect(NSMakeRect(NSMidX(screen) - 100, NSMidY(screen) - 60, 200, 120));
+    MiloPreviewPanel *panel = [[MiloPreviewPanel alloc] initWithContentRect:frame
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    panel.floatingPanel = NO;
+    panel.level = NSNormalWindowLevel;
+    panel.collectionBehavior = NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle;
+    panel.hasShadow = NO;
+    panel.animationBehavior = NSWindowAnimationBehaviorNone;
+    [panel prepareStaging];
+    assert(!panel.opaque && panel.backgroundColor.alphaComponent == 0 && panel.alphaValue == 1);
+    assert(panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+    [panel orderWindow:NSWindowAbove relativeTo:0];
+    assert(panel.visible && !panel.keyWindow && panel.contentView.hidden);
+
+    // Observe only this fixture's actual window metadata. Model the foreign
+    // target and both ordering outcomes without involving a real target.
+    CGRect expected = CGRectMake(NSMinX(frame), CGDisplayBounds(CGMainDisplayID()).size.height - NSMaxY(frame),
+        NSWidth(frame), NSHeight(frame));
+    NSArray *owned = nil;
+    pid_t fixturePID = getpid();
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1];
+    do {
+        NSMutableArray *matching = [NSMutableArray array];
+        for (NSDictionary *window in VisibleWindows()) {
+            int64_t pid;
+            if (WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &pid) && pid == fixturePID)
+                [matching addObject:window];
+        }
+        owned = matching;
+        if (owned.count) break;
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    } while (deadline.timeIntervalSinceNow > 0);
+    pid_t targetPID = fixturePID == 100 ? 101 : 100;
+    NSDictionary *target = Metadata(targetPID, UINT32_MAX, expected);
+    assert(!SampleGeometry([@[target] arrayByAddingObjectsFromArray:owned], targetPID, UINT32_MAX,
+        fixturePID, &expected, NULL).windowID);
+    assert(panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+    assert(SampleGeometry([owned arrayByAddingObject:target], targetPID, UINT32_MAX, fixturePID, &expected, NULL).windowID);
+    [panel orderOut:nil];
+
+    // Exercise reveal/revoke with the real panel ordered out, leaving the
+    // fixture invisible and nonactivating throughout its run.
+    panel.placementProven = YES;
+    assert(!panel.contentView.hidden && !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
+    panel.placementProven = NO;
+    assert(panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+}
+
 static void RemapPinnedWindow(void) {
     CGRect right = CGRectMake(0.5, 0, 0.5, 1);
     CGRect window = CGRectMake(20, 40, 1000, 800);
@@ -222,8 +275,44 @@ static void WatcherLease(void) {
     close(pipeFD[0]);
 }
 
-int main(void) {
+static void FocusAcknowledgment(void) {
+    int pipeFD[2];
+    assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
+    VisibilityLease lease = {0};
+    assert(PipeRecord(pipeFD, &lease, 10, "show 123 tile 0 0 1000000 1000000\n") == VisibilityChanged);
+    assert(LeaseAllowsSampling(&lease, 10, 0));
+
+    NSTimeInterval deadline = 10 + FocusReplyLifetime;
+    assert(ReadFocusReply(pipeFD[0], 11, &deadline) == FocusWaiting);
+    assert(PipeRecord(pipeFD, &lease, 23, "renew\n") == VisibilityChanged);
+    assert(LeaseFresh(&lease, 23) && !LeaseAllowsSampling(&lease, 23, deadline));
+    assert(ReadFocusReply(pipeFD[0], 23, &deadline) == FocusWaiting);
+
+    assert(WriteAll(pipeFD[1], "1", 1));
+    assert(ReadFocusReply(pipeFD[0], 24, &deadline) == FocusApproved && deadline == 0);
+    assert(LeaseAllowsSampling(&lease, 24, deadline));
+    assert(!LeaseAllowsSampling(&lease, 26, deadline)); // Approval doesn't extend the visibility lease.
+
+    deadline = 30 + FocusReplyLifetime;
+    assert(WriteAll(pipeFD[1], "!", 1));
+    assert(ReadFocusReply(pipeFD[0], 31, &deadline) == FocusFailed && deadline > 0);
+    assert(WriteAll(pipeFD[1], "1", 1));
+    assert(ReadFocusReply(pipeFD[0], deadline, &deadline) == FocusFailed && deadline > 0);
+    char byte;
+    assert(read(pipeFD[0], &byte, 1) == 1 && byte == '1'); // Late approval isn't consumed.
+    close(pipeFD[1]);
+    assert(ReadFocusReply(pipeFD[0], 32, &deadline) == FocusEnded && deadline > 0);
+    close(pipeFD[0]);
+}
+
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc == 2 && strcmp(argv[1], "--panel-staging") == 0) {
+            PanelStaging();
+            puts("preview panel staging passed");
+            return 0;
+        }
+        assert(argc == 1);
         ScreenPlacement();
         PinLookupResults();
         WindowPinning();
@@ -231,6 +320,7 @@ int main(void) {
         RemapPinnedWindow();
         WatcherProtocol();
         WatcherLease();
+        FocusAcknowledgment();
         puts("preview geometry tests passed");
     }
     return 0;

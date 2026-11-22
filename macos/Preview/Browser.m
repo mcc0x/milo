@@ -221,6 +221,7 @@ static BOOL PreviewPickerFits(NSSize size) {
 @interface MiloPreviewBrowser : NSView <WKNavigationDelegate, WKUIDelegate> {
     NSURL *_initialURL;
     NSString *_origin;
+    BOOL (^_acceptsPanelInput)(void);
     void (^_returnFocus)(void);
     WKWebView *_web;
     WKContentWorld *_pickerWorld;
@@ -247,7 +248,8 @@ static BOOL PreviewPickerFits(NSSize size) {
     NSUInteger _pickID;
     NSURL *_pickURL;
 }
-- (instancetype)initWithURL:(NSURL *)url origin:(NSString *)origin returnFocus:(void (^)(void))returnFocus;
+- (instancetype)initWithURL:(NSURL *)url origin:(NSString *)origin
+          acceptsPanelInput:(BOOL (^)(void))acceptsPanelInput returnFocus:(void (^)(void))returnFocus;
 - (void)returnToTerminal:(id)sender;
 @end
 
@@ -296,10 +298,12 @@ static SEL PreviewShortcutAction(NSEvent *event) {
     return button;
 }
 
-- (instancetype)initWithURL:(NSURL *)url origin:(NSString *)origin returnFocus:(void (^)(void))returnFocus {
+- (instancetype)initWithURL:(NSURL *)url origin:(NSString *)origin
+          acceptsPanelInput:(BOOL (^)(void))acceptsPanelInput returnFocus:(void (^)(void))returnFocus {
     if (!(self = [super initWithFrame:NSZeroRect])) return nil;
     _initialURL = url;
     _origin = origin;
+    _acceptsPanelInput = [acceptsPanelInput copy];
     _returnFocus = [returnFocus copy];
     _pickerWorld = [WKContentWorld worldWithName:@"Milo Element Picker"];
 
@@ -561,7 +565,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 
 - (BOOL)canPick {
     return _pageCommitted && PreviewPickerFits(self.bounds.size) && self.window.isKeyWindow && self.window.isVisible &&
-        [PreviewOrigin(_web.URL, NO) isEqualToString:_origin];
+        [PreviewOrigin(_web.URL, NO) isEqualToString:_origin] && _acceptsPanelInput();
 }
 
 - (void)runPicker:(NSString *)mode point:(NSPoint)point expected:(PreviewPickState)state completion:(void (^)(MiloPreviewBrowser *, id))completion {
@@ -574,7 +578,8 @@ static SEL PreviewShortcutAction(NSEvent *event) {
            completionHandler:^(id result, NSError *error) {
         typeof(self) self = weakSelf;
         if (!self || self->_pickID != identifier || self->_pickState != state) return;
-        if (![self canPick] || ![self->_pickURL isEqual:self->_web.URL]) {
+        // The anchor can revoke panel input while WebKit is resolving the request.
+        if (![self->_pickURL isEqual:self->_web.URL] || ![self canPick]) {
             [self finishPick:@""];
             return;
         }
@@ -583,7 +588,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 }
 
 - (void)armPick:(id)sender {
-    if (![self canPick] || _pickState != PickIdle) return;
+    if (_pickState != PickIdle || ![self canPick]) return;
     ++_pickID;
     _pickURL = _web.URL;
     _pickState = PickArming;
@@ -601,7 +606,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 
 - (void)pickAt:(NSPoint)point {
     if (_pickState != PickArmed) return;
-    if (![self canPick] || ![_pickURL isEqual:_web.URL]) {
+    if (![_pickURL isEqual:_web.URL] || ![self canPick]) {
         [self finishPick:@""];
         return;
     }
@@ -625,7 +630,7 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 
 - (void)copyPick:(id)sender {
     if (_pickState != PickReview) return;
-    if (![self canPick] || ![_pickURL isEqual:_web.URL]) {
+    if (![_pickURL isEqual:_web.URL] || ![self canPick]) {
         [self finishPick:@""];
         return;
     }
@@ -766,7 +771,8 @@ static SEL PreviewShortcutAction(NSEvent *event) {
 
 @end
 
-NSView *MiloPreviewContent(NSURL *url, void (^returnFocus)(void)) {
+NSView *MiloPreviewContent(NSURL *url, BOOL (^acceptsPanelInput)(void), void (^returnFocus)(void)) {
     NSString *origin = PreviewOrigin(url, YES);
-    return origin ? [[MiloPreviewBrowser alloc] initWithURL:url origin:origin returnFocus:returnFocus] : nil;
+    return origin ? [[MiloPreviewBrowser alloc] initWithURL:url origin:origin
+        acceptsPanelInput:acceptsPanelInput returnFocus:returnFocus] : nil;
 }

@@ -96,11 +96,26 @@ static NSPasteboard *TestBoard;
 static NSPasteboard *(*OriginalNamedPasteboard)(id, SEL, NSPasteboardName);
 
 static NSPasteboard *TestGeneralPasteboard(id receiver, SEL selector) {
+    CHECK(TestBoard != nil);
     return TestBoard;
 }
 
 static NSPasteboard *TestNamedPasteboard(id receiver, SEL selector, NSPasteboardName name) {
-    return [name isEqualToString:NSPasteboardNameGeneral] ? TestBoard : OriginalNamedPasteboard(receiver, selector, name);
+    return [name isEqualToString:NSPasteboardNameGeneral] ?
+        TestGeneralPasteboard(receiver, selector) : OriginalNamedPasteboard(receiver, selector, name);
+}
+
+// Intercept both general-pasteboard lookups. Without a disposable board, any
+// access fails the fixture before it can touch the user's clipboard.
+static void WithIsolatedPasteboard(void (^test)(void)) {
+    Method method = class_getClassMethod(NSPasteboard.class, @selector(generalPasteboard));
+    IMP original = method_setImplementation(method, (IMP)TestGeneralPasteboard);
+    Method namedMethod = class_getClassMethod(NSPasteboard.class, @selector(pasteboardWithName:));
+    OriginalNamedPasteboard = (NSPasteboard *(*)(id, SEL, NSPasteboardName))
+        method_setImplementation(namedMethod, (IMP)TestNamedPasteboard);
+    test();
+    method_setImplementation(method, original);
+    method_setImplementation(namedMethod, (IMP)OriginalNamedPasteboard);
 }
 
 static BOOL HasStatus(NSView *content, NSString *prefix) {
@@ -213,8 +228,44 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
+@interface OffscreenSmokeWindow : NSWindow
+@property (nonatomic) BOOL reportsKeyAndVisible;
+@end
+
+@implementation OffscreenSmokeWindow
+- (BOOL)isKeyWindow { return self.reportsKeyAndVisible || [super isKeyWindow]; }
+- (BOOL)isVisible { return self.reportsKeyAndVisible || [super isVisible]; }
+@end
+
+// Keep the browser's real state machine and hold only the WebKit IPC reply so
+// the test can revoke authorization between dispatch and completion.
+@interface PickerReplyWebView : MiloPreviewWebView
+@property (nonatomic, strong) NSURL *fixtureURL;
+@property (nonatomic, copy) NSString *mode;
+@property (nonatomic, copy) void (^reply)(id, NSError *);
+- (void)deliverMode:(NSString *)mode result:(id)result;
+@end
+
+@implementation PickerReplyWebView
+- (NSURL *)URL { return self.fixtureURL; }
+- (void)callAsyncJavaScript:(NSString *)script arguments:(NSDictionary<NSString *, id> *)arguments
+    inFrame:(WKFrameInfo *)frame inContentWorld:(WKContentWorld *)world
+    completionHandler:(void (^)(id, NSError *))completion {
+    CHECK(!self.reply && completion);
+    self.mode = arguments[@"mode"];
+    self.reply = completion;
+}
+- (void)deliverMode:(NSString *)mode result:(id)result {
+    void (^reply)(id, NSError *) = self.reply;
+    CHECK(reply && [self.mode isEqualToString:mode]);
+    self.reply = nil;
+    reply(result, nil);
+}
+@end
+
 @interface LayoutSmokeBrowser : MiloPreviewBrowser
 - (void)checkLayout;
+- (void)checkRevokedCopy:(void (^)(BOOL))setAuthorized;
 @end
 
 @implementation LayoutSmokeBrowser
@@ -268,18 +319,56 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
     CheckControlFrames(self, @[_back, _reload, _select, _terminal]);
     CHECK(!self.window.isVisible && !self.window.isKeyWindow);
 }
+
+- (void)checkRevokedCopy:(void (^)(BOOL))setAuthorized {
+    PickerReplyWebView *web = [[PickerReplyWebView alloc] initWithFrame:_web.frame configuration:_web.configuration];
+    web.fixtureURL = _initialURL;
+    [_web removeObserver:self forKeyPath:@"URL" context:NULL];
+    [_web removeObserver:self forKeyPath:@"canGoBack" context:NULL];
+    _observingWeb = NO;
+    [self replaceSubview:_web with:web];
+    _web = web;
+
+    CHECK(self.window.isVisible && self.window.isKeyWindow && _pageCommitted);
+    [self armPick:nil];
+    CHECK(_pickState == PickIdle && !web.reply);
+
+    NSArray *nodes = @[@[@([PreviewTags() indexOfObject:@"html"]), @1]];
+    setAuthorized(YES);
+    [self armPick:nil];
+    CHECK(_pickState == PickArming);
+    [web deliverMode:@"arm" result:@YES];
+    CHECK(_pickState == PickArmed);
+    [self pickAt:NSMakePoint(0.5, 0.5)];
+    CHECK(_pickState == PickReading);
+    [web deliverMode:@"hit" result:nodes];
+    CHECK(_pickState == PickReview && [_path.string isEqualToString:@"html:nth-child(1)"]);
+    [self copyPick:_copy];
+    CHECK(_pickState == PickCopying && !_copy.isEnabled && web.reply);
+
+    setAuthorized(NO);
+    [web deliverMode:@"copy" result:nodes];
+    CHECK(_pickState == PickIdle && _copy.isHidden && _path.string.length == 0);
+}
 @end
 
 static void DoLayoutSmoke(void) {
     [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyProhibited];
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 430, 410)
-                                                 styleMask:NSWindowStyleMaskBorderless
-                                                   backing:NSBackingStoreBuffered defer:YES];
+    OffscreenSmokeWindow *window = [[OffscreenSmokeWindow alloc] initWithContentRect:NSMakeRect(0, 0, 430, 410)
+                                                                           styleMask:NSWindowStyleMaskBorderless
+                                                                             backing:NSBackingStoreBuffered defer:YES];
     window.releasedWhenClosed = NO;
+    __block BOOL authorized = NO;
     LayoutSmokeBrowser *content = [[LayoutSmokeBrowser alloc]
-        initWithURL:[NSURL URLWithString:@"http://127.0.0.1/"] origin:@"http://127.0.0.1" returnFocus:^{}];
+        initWithURL:[NSURL URLWithString:@"http://127.0.0.1/"] origin:@"http://127.0.0.1"
+        acceptsPanelInput:^BOOL{ return authorized; } returnFocus:^{}];
     window.contentView = content;
     [content checkLayout];
+    window.reportsKeyAndVisible = YES;
+    WithIsolatedPasteboard(^{
+        [content checkRevokedCopy:^(BOOL allowed) { authorized = allowed; }];
+    });
+    window.reportsKeyAndVisible = NO;
     window.contentView = nil;
     [window close];
 }
@@ -289,14 +378,9 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     // resolves generalPasteboard to a newly named, disposable pasteboard.
     TestBoard = NSPasteboard.pasteboardWithUniqueName;
     CHECK([TestBoard setString:@"smoke sentinel" forType:NSPasteboardTypeString]);
-    Method method = class_getClassMethod(NSPasteboard.class, @selector(generalPasteboard));
-    IMP original = method_setImplementation(method, (IMP)TestGeneralPasteboard);
-    Method namedMethod = class_getClassMethod(NSPasteboard.class, @selector(pasteboardWithName:));
-    OriginalNamedPasteboard = (NSPasteboard *(*)(id, SEL, NSPasteboardName))
-        method_setImplementation(namedMethod, (IMP)TestNamedPasteboard);
 
     __block NSUInteger returns = 0;
-    NSView *content = MiloPreviewContent(url, ^{ ++returns; });
+    NSView *content = MiloPreviewContent(url, ^BOOL{ return YES; }, ^{ ++returns; });
     CHECK(content != nil);
     NSPanel *window = [[SmokePanel alloc] initWithContentRect:NSMakeRect(60, 60, 430, 410)
                                                    styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
@@ -436,8 +520,6 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     [window orderOut:nil];
     window.contentView = nil;
     [window close];
-    method_setImplementation(method, original);
-    method_setImplementation(namedMethod, (IMP)OriginalNamedPasteboard);
     [TestBoard releaseGlobally];
     TestBoard = nil;
 }
@@ -451,14 +533,14 @@ int main(int argc, char **argv) {
         }
         if (argc == 2 && [@(argv[1]) isEqualToString:@"--layout-only"]) {
             DoLayoutSmoke();
-            puts("Native picker layout and resize invalidation passed (no visible or key window, fixture server, or clipboard).");
+            puts("Offscreen picker layout, resize invalidation, and async copy authorization passed without clipboard access.");
             return 0;
         }
         CHECK(argc == 4);
         CheckPolicies();
         [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory];
         [NSApp finishLaunching];
-        DoSmoke([NSURL URLWithString:@(argv[1])], @(argv[2]), @(argv[3]));
+        WithIsolatedPasteboard(^{ DoSmoke([NSURL URLWithString:@(argv[1])], @(argv[2]), @(argv[3])); });
         puts("Native WebKit navigation, form, websocket hot reload, element picker and resize, origin policy and terminal shortcut passed.");
     }
 }

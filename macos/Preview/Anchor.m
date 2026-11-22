@@ -9,14 +9,18 @@
 #import <limits.h>
 #import <signal.h>
 #import <stdio.h>
+#import <stdlib.h>
 #import <string.h>
 #import <math.h>
+#import <sys/stat.h>
 #import <time.h>
 #import <unistd.h>
 
 static const NSTimeInterval SampleInterval = 0.25;
 static const NSTimeInterval SampleLifetime = 0.60;
 static const NSTimeInterval LeaseLifetime = 3.0;
+// Rex's synchronous RPC is bounded at 15 seconds (src/rex.rs).
+static const NSTimeInterval FocusReplyLifetime = 16.0;
 enum { FractionScale = 1000000 };
 
 typedef struct {
@@ -205,8 +209,25 @@ static NSTimeInterval LeaseNow(void) {
     return (NSTimeInterval)clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / NSEC_PER_SEC;
 }
 
+typedef NS_ENUM(NSUInteger, FocusReply) { FocusWaiting, FocusApproved, FocusEnded, FocusFailed };
+
+static FocusReply ReadFocusReply(int fd, NSTimeInterval now, NSTimeInterval *deadline) {
+    if (now >= *deadline) return FocusFailed;
+    char byte;
+    ssize_t count = read(fd, &byte, 1);
+    if (!count) return FocusEnded;
+    if (count < 0) return errno == EAGAIN || errno == EINTR ? FocusWaiting : FocusFailed;
+    if (byte != '1') return FocusFailed;
+    *deadline = 0;
+    return FocusApproved;
+}
+
 static BOOL LeaseFresh(const VisibilityLease *lease, NSTimeInterval now) {
     return lease->checked > 0 && now >= lease->checked && now - lease->checked < LeaseLifetime;
+}
+
+static BOOL LeaseAllowsSampling(const VisibilityLease *lease, NSTimeInterval now, NSTimeInterval focusDeadline) {
+    return !focusDeadline && LeaseFresh(lease, now);
 }
 
 typedef enum {
@@ -297,10 +318,29 @@ CGWindowID milo_preview_pin_window(pid_t pid) {
 }
 
 @interface MiloPreviewPanel : NSPanel
+@property (nonatomic) BOOL placementProven;
+- (void)prepareStaging;
 @end
 
 @implementation MiloPreviewPanel
-- (BOOL)canBecomeKeyWindow { return YES; }
+@synthesize placementProven = _placementProven;
+
+- (void)prepareStaging {
+    // Keep window alpha at 1 for Quartz metadata. Only the empty, clear
+    // window is ordered until its bounds and stacking have been verified.
+    self.opaque = NO;
+    self.backgroundColor = NSColor.clearColor;
+    self.placementProven = NO;
+}
+
+- (void)setPlacementProven:(BOOL)proven {
+    _placementProven = proven;
+    if (!proven) self.ignoresMouseEvents = YES;
+    self.contentView.hidden = !proven;
+    if (proven) self.ignoresMouseEvents = NO;
+}
+
+- (BOOL)canBecomeKeyWindow { return self.placementProven; }
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
@@ -320,6 +360,24 @@ static int OpenTTYOutput(const char *path) {
     return open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
 }
 
+static int PrepareFocusInput(int stateFD) {
+    const char *encoded = getenv("MILO_PREVIEW_FOCUS_FD");
+    if (!encoded) return -1;
+    const char *cursor = encoded, *end = encoded + strlen(encoded);
+    uint32_t number;
+    if (!ReadDecimal(&cursor, end, INT_MAX, &number) || cursor != end || number <= STDERR_FILENO ||
+        (int)number == stateFD) return -1;
+    int fd = (int)number;
+    struct stat metadata;
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY || fstat(fd, &metadata) < 0 || !S_ISFIFO(metadata.st_mode)) return -1;
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 static void WriteDiagnostic(int fd, const char *reason) {
     char line[256];
     int length = snprintf(line, sizeof(line), "milo preview: %s\n", reason);
@@ -330,7 +388,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
     NSURL *_url;
     NSRunningApplication *_rex;
     CGWindowID _pinned;
-    int _stateFD, _tty;
+    int _stateFD, _focusFD, _tty;
     pid_t _parent;
     MiloPreviewPanel *_panel;
     NSTimer *_timer;
@@ -346,27 +404,28 @@ static void WriteDiagnostic(int fd, const char *reason) {
     CGDirectDisplayID _candidateDisplay;
     NSTimeInterval _lastSample;
     NSTimeInterval _nextPinCheck;
+    NSTimeInterval _focusDeadline;
     NSUInteger _generation;
     BOOL _samplePending, _finished, _sessionInactive, _screensAsleep;
-    BOOL _panelProven;
     char _line[64];
     size_t _lineLength;
     int _status;
 }
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
-    stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty;
+    stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty;
 - (int)run;
 - (void)tick;
 @end
 
 @implementation MiloPreviewAnchor
 - (instancetype)initWithURL:(NSURL *)url rex:(NSRunningApplication *)rex pinned:(CGWindowID)pinned
-    stateFD:(int)stateFD parent:(pid_t)parent tty:(int)tty {
+    stateFD:(int)stateFD focusFD:(int)focusFD parent:(pid_t)parent tty:(int)tty {
     if ((self = [super init])) {
         _url = url;
         _rex = rex;
         _pinned = pinned;
         _stateFD = stateFD;
+        _focusFD = focusFD;
         _parent = parent;
         _tty = tty;
         _sampleQueue = dispatch_queue_create("milo.preview.window", DISPATCH_QUEUE_SERIAL);
@@ -379,8 +438,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
 - (void)conceal {
     _candidate = (Geometry){0};
     _lastSample = 0;
-    _panelProven = NO;
-    _panel.ignoresMouseEvents = YES;
+    if (_panel.placementProven) _panel.placementProven = NO;
     if (_panel.visible) [_panel orderOut:nil];
 }
 
@@ -405,13 +463,13 @@ static void WriteDiagnostic(int fd, const char *reason) {
 }
 
 - (BOOL)canSample {
-    return _lease.checked > 0 && !_sessionInactive && !_screensAsleep && FrontmostRex(_rex) &&
-        LeaseFresh(&_lease, LeaseNow());
+    return !_sessionInactive && !_screensAsleep && LeaseAllowsSampling(&_lease, LeaseNow(), _focusDeadline) &&
+        FrontmostRex(_rex);
 }
 
 - (BOOL)acceptsPanelInput {
-    return _panel.visible && _panelProven && _panel.onActiveSpace && [self canSample] &&
-        SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
+    return _panel.visible && _panel.placementProven && _panel.onActiveSpace && [self canSample] &&
+        NSEqualRects(_panel.frame, _candidateFrame) && SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
 }
 
 - (void)handleLine {
@@ -451,6 +509,9 @@ static void WriteDiagnostic(int fd, const char *reason) {
 
 - (void)returnToTerminal {
     if (!_panel.keyWindow || ![self acceptsPanelInput]) return;
+    // Keep the sample and click gates closed even if the watcher renews the
+    // visible tile while Rex is still processing the focus request.
+    _focusDeadline = LeaseNow() + FocusReplyLifetime;
     [self invalidate];
     static const char focus[] = "focus\n";
     if (!WriteAll(STDOUT_FILENO, focus, sizeof(focus) - 1)) [self finish:"could not return focus to the Rex terminal"];
@@ -482,7 +543,8 @@ static void WriteDiagnostic(int fd, const char *reason) {
     _lastSample = started;
     if (!_panel) {
         __weak MiloPreviewAnchor *weakSelf = self;
-        NSView *browser = MiloPreviewContent(_url, ^{ [weakSelf returnToTerminal]; });
+        NSView *browser = MiloPreviewContent(_url, ^BOOL{ return [weakSelf acceptsPanelInput]; },
+            ^{ [weakSelf returnToTerminal]; });
         if (!browser) {
             [self finish:"expected an explicit loopback HTTP or HTTPS URL"];
             return;
@@ -503,6 +565,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
         _panel.title = @"Milo Preview (Approximate)";
         _panel.delegate = self;
         _panel.contentView = browser;
+        [_panel prepareStaging];
         // WebKit startup can outlast a sample. Wait for another one before showing.
         return;
     }
@@ -511,10 +574,7 @@ static void WriteDiagnostic(int fd, const char *reason) {
             [self invalidate];
             return;
         }
-        if (!_panelProven) {
-            _panelProven = YES;
-            _panel.ignoresMouseEvents = NO;
-        }
+        if (!_panel.placementProven) _panel.placementProven = YES;
         return;
     }
 
@@ -536,15 +596,14 @@ static void WriteDiagnostic(int fd, const char *reason) {
     }
     _orderedPanelFrame = CGRectMake(NSMinX(frame), primary.size.height - NSMaxY(frame),
         NSWidth(frame), NSHeight(frame));
-    _panelProven = NO;
-    _panel.ignoresMouseEvents = YES;
+    if (_panel.placementProven) _panel.placementProven = NO;
     [_panel orderWindow:NSWindowAbove relativeTo:relativeWindow];
     if (!_panel.visible || generation != _generation || ![self canSample] ||
         !NSEqualRects(_panel.frame, frame) || !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) {
         [self invalidate];
         return;
     }
-    // Verify the panel in a new Quartz sample before accepting any clicks.
+    // Verify the clear, click-through panel before revealing the browser.
     [self tick];
 }
 
@@ -552,6 +611,11 @@ static void WriteDiagnostic(int fd, const char *reason) {
     if (_finished) return;
     if (getppid() != _parent) { [self finish:NULL]; return; }
     if (_rex.terminated) { [self finish:NULL]; return; }
+    if (_focusDeadline) {
+        FocusReply reply = ReadFocusReply(_focusFD, LeaseNow(), &_focusDeadline);
+        if (reply == FocusEnded) { [self finish:NULL]; return; }
+        if (reply == FocusFailed) { [self finish:"could not confirm focus returned to the Rex terminal"]; return; }
+    }
     BOOL canSample = [self canSample];
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     if (!canSample && (_candidate.windowID || _panel.visible)) [self invalidate];
@@ -713,12 +777,19 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
             fprintf(stderr, "milo preview: no controlling Rex terminal\n");
             return 1;
         }
+        int focusFD = PrepareFocusInput(state_fd);
+        if (focusFD < 0) {
+            WriteDiagnostic(tty, "missing Rex focus acknowledgment pipe");
+            close(tty);
+            return 1;
+        }
         pid_t owner;
         PinLookup lookup = LookupPin(pinned_window, &owner);
         NSRunningApplication *rex = lookup == PinFound ? RexApplication(owner) : nil;
         if (!rex) {
             WriteDiagnostic(tty, lookup == PinUnavailable ? "could not verify the pinned Rex window; reopen the preview"
                 : "the pinned Rex window is no longer available; reopen the preview");
+            close(focusFD);
             close(tty);
             return 1;
         }
@@ -728,14 +799,16 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
             fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1) < 0 ||
             ![[NSApplication sharedApplication] setActivationPolicy:NSApplicationActivationPolicyAccessory]) {
             WriteDiagnostic(tty, "could not initialize the nonactivating panel");
+            close(focusFD);
             close(tty);
             return 1;
         }
         static const char waiting[] = "Milo Preview: approximate placement. Waiting for a supported, visible Rex tile.\n";
         WriteAll(tty, waiting, sizeof(waiting) - 1);
         MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location rex:rex pinned:pinned_window
-            stateFD:state_fd parent:parent tty:tty];
+            stateFD:state_fd focusFD:focusFD parent:parent tty:tty];
         int status = [anchor run];
+        close(focusFD);
         close(tty);
         return status;
     }

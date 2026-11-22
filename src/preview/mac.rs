@@ -4,6 +4,7 @@ use std::io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -11,6 +12,30 @@ use super::Anchor;
 use crate::fs_ops;
 
 const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Milo Preview"));
+const FOCUS_FD_ENV: &str = "MILO_PREVIEW_FOCUS_FD";
+
+fn focus_pipe() -> io::Result<(io::PipeReader, io::PipeWriter)> {
+    let (reader, writer) = io::pipe()?;
+    // SAFETY: writer owns this open pipe. A helper that has already closed
+    // must not terminate the launcher when a synchronous Rex reply arrives.
+    if unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETNOSIGPIPE, 1) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((reader, writer))
+}
+
+fn inherit_focus_reader(command: &mut Command, reader: io::PipeReader) {
+    command.env(FOCUS_FD_ENV, reader.as_raw_fd().to_string());
+    let inherit = move || {
+        // SAFETY: the closure owns this open reader.
+        if unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    };
+    // SAFETY: the hook runs only async-signal-safe fcntl and captures errno on failure.
+    unsafe { command.pre_exec(inherit) };
+}
 
 /// Install independently of the checkout, PATH, HOME or shell's temporary directory.
 /// The OS may evict this cache; this location does not establish a privacy identity.
@@ -69,7 +94,7 @@ fn matches_build(path: &Path) -> io::Result<bool> {
 
 /// Keep the lock through spawn: two Milo versions must each launch the helper
 /// they built. Publish a fresh inode rather than modifying a running executable.
-fn spawn(first: &str, second: &str, state: Stdio) -> io::Result<Child> {
+fn spawn(first: &str, second: &str, state: Stdio, focus: Option<io::PipeReader>) -> io::Result<Child> {
     let dir = cache()?;
     let lock = fs_ops::open_dir(&dir)?;
     lock.lock()?;
@@ -82,11 +107,16 @@ fn spawn(first: &str, second: &str, state: Stdio) -> io::Result<Child> {
         staged.replace(&path)?;
     }
     // Only fixed protocol records belong on stdout; do not relay page diagnostics to the shell.
-    Command::new(path).args([first, second]).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    let mut command = Command::new(path);
+    command.args([first, second]).stdin(state).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Some(reader) = focus {
+        inherit_focus_reader(&mut command, reader);
+    }
+    command.spawn()
 }
 
 pub(crate) fn pin_window(owner_pid: u32) -> Result<std::num::NonZeroU32, String> {
-    let check = spawn("--pin-window", &owner_pid.to_string(), Stdio::null())
+    let check = spawn("--pin-window", &owner_pid.to_string(), Stdio::null(), None)
         .and_then(Child::wait_with_output)
         .map_err(|e| format!("could not run the preview window check: {e}"))?;
     if !check.status.success() {
@@ -148,12 +178,13 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
 
 fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
     let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
-    let helper = spawn(url, &anchor.native_window_id.to_string(), state.into())
+    let (reader, reply) = focus_pipe().map_err(|_| "could not open the preview focus acknowledgment pipe")?;
+    let helper = spawn(url, &anchor.native_window_id.to_string(), state.into(), Some(reader))
         .map_err(|_| "could not launch the local WebKit helper")?;
-    serve_actions(helper, || crate::rex::return_preview_focus(anchor).is_ok())
+    serve_actions(helper, reply, || crate::rex::return_preview_focus(anchor).is_ok())
 }
 
-fn serve_actions(mut helper: Child, mut return_focus: impl FnMut() -> bool) -> Result<(), String> {
+fn serve_actions(mut helper: Child, mut reply: io::PipeWriter, mut return_focus: impl FnMut() -> bool) -> Result<(), String> {
     let mut actions = io::BufReader::new(helper.stdout.take().expect("helper stdout is piped"));
     let mut action = String::new();
     loop {
@@ -168,6 +199,11 @@ fn serve_actions(mut helper: Child, mut return_focus: impl FnMut() -> bool) -> R
                     let _ = helper.wait();
                     return Err("could not return focus to the original Rex terminal; the preview was closed".into());
                 }
+                if reply.write_all(b"1").is_err() {
+                    // The helper may have closed while Rex was handling the
+                    // request. EOF makes any surviving helper close as well.
+                    break;
+                }
             }
             _ => {
                 let _ = helper.kill();
@@ -175,6 +211,7 @@ fn serve_actions(mut helper: Child, mut return_focus: impl FnMut() -> bool) -> R
             }
         }
     }
+    drop(reply);
     if helper.wait().map_err(|_| "could not wait for the WebKit helper")?.success() {
         Ok(())
     } else {
@@ -187,6 +224,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slow_focus_acknowledges_only_after_the_rpc_approves() {
+        let (reader, reply) = focus_pipe().unwrap();
+        let monitor = reader.try_clone().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", r#"printf 'focus\n'; test "$(/usr/bin/head -c 1 "/dev/fd/$MILO_PREVIEW_FOCUS_FD")" = 1"#])
+            .stdout(Stdio::piped());
+        inherit_focus_reader(&mut command, reader);
+        let helper = command.spawn().unwrap();
+        drop(command);
+        let mut attempts = 0;
+        serve_actions(helper, reply, || {
+            attempts += 1;
+            let mut fds = [libc::pollfd { fd: monitor.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            // Simulate a Rex RPC that takes long enough for the child to wait on the pipe.
+            assert_eq!(crate::term::wait_ready(&mut fds, 25), 0);
+            true
+        })
+        .unwrap();
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
     fn rejected_focus_ends_the_panel_without_retrying() {
         let helper = Command::new("/bin/sh")
             .args(["-c", "printf 'focus\\n'; exec /bin/sleep 30"])
@@ -194,16 +254,26 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = libc::pid_t::try_from(helper.id()).unwrap();
+        let (mut reader, reply) = focus_pipe().unwrap();
         let mut attempts = 0;
-        let error = serve_actions(helper, || {
+        let error = serve_actions(helper, reply, || {
             attempts += 1;
             false
         })
         .unwrap_err();
         assert!(error.contains("could not return focus"));
         assert_eq!(attempts, 1);
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
         // SAFETY: a null status discards the exit status of this test's known child.
         assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn helper_can_end_during_a_successful_focus_rpc() {
+        let helper = Command::new("/bin/sh").args(["-c", "printf 'focus\\n'"]).stdout(Stdio::piped()).spawn().unwrap();
+        let (reader, reply) = focus_pipe().unwrap();
+        drop(reader);
+        serve_actions(helper, reply, || true).unwrap();
     }
 }
