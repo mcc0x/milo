@@ -624,6 +624,8 @@ impl Samples {
 /// Retains both the backward catch-up and the forward tail across read budgets.
 struct ClaudeFile {
     version: FileVersion,
+    /// Earliest day boundary covered by the retained samples and cursors.
+    cutoff: i64,
     stream: Stream,
     reverse: Option<Reverse>,
     samples: Samples,
@@ -652,13 +654,14 @@ impl ClaudeFile {
             return false;
         }
         let Some((file, version)) = root.open(path) else {
-            *self = Self::new(candidate);
+            *self = Self::new(candidate, cutoff);
             return true;
         };
         if !version.same_file(self.version) || version != self.version && version.len <= self.version.len {
-            *self = Self::new(version);
+            *self = Self::new(version, cutoff);
         }
         self.version = version;
+        self.cutoff = cutoff;
         self.samples.expire(cutoff);
         let loaded = self.read(&file, cutoff, budget);
         self.pending = if self.settled() {
@@ -712,9 +715,10 @@ impl ClaudeFile {
     }
 
     /// Save the original end so subsequent appends are read exactly once.
-    fn new(version: FileVersion) -> Self {
+    fn new(version: FileVersion, cutoff: i64) -> Self {
         Self {
             version,
+            cutoff,
             stream: Stream::resume(version.len),
             reverse: (version.len != 0).then(|| Reverse::new(version.len)),
             samples: Samples::default(),
@@ -810,10 +814,15 @@ impl Claude {
         self.partial = self.files.partial;
         let mut settled = true;
         for SessionFile { path, version, cached } in &mut self.files.entries {
+            // A wider day can include records the backward scan skipped or
+            // the forward scan discarded. Reparse them even if the file is unchanged.
+            if cached.as_ref().is_some_and(|file| cutoff < file.cutoff) {
+                *cached = None;
+            }
             if cached.as_ref().is_some_and(|file| file.version == *version && file.settled()) {
                 continue;
             }
-            let file = cached.get_or_insert_with(|| ClaudeFile::new(*version));
+            let file = cached.get_or_insert_with(|| ClaudeFile::new(*version, cutoff));
             settled &= file.check(&root, path, *version, cutoff, budget);
             self.partial |= !file.settled();
             changed = true;
@@ -840,7 +849,10 @@ impl Claude {
     /// Use the current local day even when the underlying transcripts have not changed.
     fn activity(&self, today: i64, now: i64) -> Activity {
         let mut activity = Activity { partial: self.partial, ..Activity::default() };
-        activity.partial |= self.files.cached().any(|file| file.samples.incomplete_since.is_some_and(|at| at >= today));
+        activity.partial |= self
+            .files
+            .cached()
+            .any(|file| today < file.cutoff || file.samples.incomplete_since.is_some_and(|at| at >= today));
         for sample in self
             .identified
             .iter()
