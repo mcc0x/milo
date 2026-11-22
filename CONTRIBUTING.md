@@ -170,9 +170,10 @@ and for those it opens back to back, four with no pause between them, three
 times over.
 
 A second test there, on a server of its own, is for the floating reader. It
-opens a file from the outline, edits and saves it through keys Rex sends, sees
-the outline leave that reader alone while it has unsaved changes, then has Rex
-close the reader on an unsaved draft and gets the draft back at the next edit.
+opens a file from the outline, edits it through keys Rex sends, opens a second
+file and sees it become a tab of the same reader beside the draft, switches and
+closes tabs, and sees another session's outline get a reader of its own. Then it
+has Rex close the reader on two unsaved drafts and gets one back at the next edit.
 
 ### Changing alert mirroring
 
@@ -338,7 +339,9 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/reader/draw.rs` | Draws files, change marks, and reader headings. |
 | `src/reader/edit.rs` | Edits a draft: cursor, keys, questions, formatting, and drawing. |
 | `src/reader/edit_tests.rs` | Checks editing, saving, conflicts, read-only files, kept drafts, and formatting. |
+| `src/reader/inbox.rs` | Carries a request to open one more file to a reader already running in a Rex block, through a pipe in the state folder. |
 | `src/reader/rescue.rs` | Keeps the draft of a reader ended from outside, and marks a Rex reader that has unsaved edits. |
+| `src/reader/tabs.rs` | Holds the files open in one reader as tabs, draws their strip, and asks about every unsaved draft before a tab or the reader closes. |
 | `src/reader/tests.rs` | Checks reader text, diffs, paths, pictures, and keys. |
 | `src/reader/working_path.rs` | Finds a file from the held project folder without following a final link. |
 | `src/host.rs` | Names the computer Milo runs on and says whether its Rex server and command are ones Milo was checked with. |
@@ -347,6 +350,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/rex_presence.lua` | Tells the presence helper whether any Rex app has a session open and, only for the names chosen, which session is in front. |
 | `src/rex_reader.lua` | Opens a floating reader in Rex and closes the one it replaces only after the new one exists. |
 | `src/rex_reader_test.lua` | Checks that script with a stand-in for Rex. |
+| `src/rex_reader_show.lua` | Brings a floating reader forward for a file it was asked to show in a tab, and names it after that file. |
 | `src/rex_shell.lua` | Reports the directory of the one shell a managed pane follows, and nothing from other terminals. |
 | `src/screen.rs` | Stores styled cells and sends changes and pictures to the terminal. |
 | `src/setup.rs` | Runs the setup screen: its choices, layout trials, scoped saves, and maintenance. |
@@ -445,7 +449,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/reader_bench/baseline-6199085.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
-| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, edits a file in its floating reader, and checks that presence shows nothing there. |
+| `tests/rex_lab.rs` | Follows the Rex layout through tabs, drags, renames, and a restart on a disposable Rex server, opens and edits files in the tabs of its floating reader, and checks that presence shows nothing there. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
