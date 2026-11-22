@@ -464,7 +464,7 @@ local function track_anchor(block)
     if not own_anchor(block) then return false end
     verified = true
   end
-  if block.owner ~= nil then claimed = true end
+  if block.owner == a.owner then claimed = true end
   if block.label == preview_label then published = true end
   return true
 end

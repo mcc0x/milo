@@ -505,6 +505,11 @@ assert(watch_unclaimed("deadline") == "hide\n" and not unclaimed.stopped)
 assert(watch_unclaimed("attachment_poll") == "hide\n" and not unclaimed.stopped)
 assert(watch_unclaimed("claim_deadline") == "hide\nunclaimed\n" and unclaimed.stopped == 1)
 
+local different_owner = fixture("watch", preview)
+different_owner.anchor.owner = other_app
+local watch_foreign = call(different_owner)
+assert(watch_foreign("claim_deadline") == "hide\nunclaimed\n" and different_owner.stopped == 1)
+
 local claimed_hidden = fixture("watch", preview)
 claimed_hidden.view.active_window_id = inactive
 local watch_claimed = call(claimed_hidden)
