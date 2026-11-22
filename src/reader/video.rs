@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::fs_ops::Temp;
 
 mod decode;
-use decode::{Job, Output, Task, Tools, frame_time, last_seek_time};
+use decode::{Job, Output, Task, Tools, last_seek_time};
 
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 const PREPARE_LIMIT: Duration = Duration::from_secs(5);
@@ -28,14 +28,26 @@ pub(super) struct VideoFrame {
     pub(super) rgb: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct Bookmark {
+    position: Duration,
+    // The final sample can be on a different grid from a seek starting at zero.
+    sample: Duration,
+}
+
+impl Bookmark {
+    fn at(position: Duration) -> Self {
+        Self { position, sample: position }
+    }
+}
+
 pub(super) struct Video {
     job: Option<Job>,
     source: Option<File>,
     tools: &'static Tools,
     frame: Option<VideoFrame>,
-    position: Duration,
+    bookmark: Bookmark,
     duration: Duration,
-    origin: Duration,
     progress: Instant,
     pending: bool,
     playing: bool,
@@ -50,9 +62,8 @@ impl Video {
             tools,
             job: None,
             frame: None,
-            position: Duration::ZERO,
+            bookmark: Bookmark::at(Duration::ZERO),
             duration: Duration::ZERO,
-            origin: Duration::ZERO,
             progress: Instant::now(),
             pending: true,
             playing: false,
@@ -64,12 +75,15 @@ impl Video {
         self.frame.as_ref()
     }
     pub(super) fn position(&self) -> Duration {
-        self.position
+        self.bookmark.position
+    }
+    pub(super) fn bookmark(&self) -> Bookmark {
+        self.bookmark
     }
     /// Restore a parked tab's bookmark even while the stream duration is still unknown.
-    pub(super) fn resume_at(&mut self, position: Duration) {
+    pub(super) fn resume_at(&mut self, bookmark: Bookmark) {
         self.pause();
-        self.position = if self.duration.is_zero() { position } else { position.min(self.duration) };
+        self.bookmark = bookmark;
         self.pending = true;
     }
     pub(super) fn duration(&self) -> Duration {
@@ -111,19 +125,19 @@ impl Video {
             return;
         }
         let delta = Duration::from_secs(delta_seconds.unsigned_abs());
-        let target =
-            if delta_seconds < 0 { self.position.saturating_sub(delta) } else { self.position.saturating_add(delta) };
+        let position = self.position();
+        let target = if delta_seconds < 0 { position.saturating_sub(delta) } else { position.saturating_add(delta) };
         let target = target.min(last_seek_time(self.duration));
-        if target != self.position {
+        if target != position {
             self.job = None;
-            self.position = target;
+            self.bookmark = Bookmark::at(target);
             self.pending = true;
         }
     }
 
     fn restart_at_eof(&mut self) {
-        if self.position == self.duration {
-            self.position = Duration::ZERO;
+        if self.position() == self.duration {
+            self.bookmark = Bookmark::at(Duration::ZERO);
             self.pending = true;
         }
     }
@@ -132,15 +146,15 @@ impl Video {
         let task = if self.duration.is_zero() {
             Task::Probe
         } else {
-            // A parked EOF bookmark stays at EOF, but its still image comes from inside the clip.
-            let from = if self.position == self.duration { last_seek_time(self.duration) } else { self.position };
+            // A parked EOF bookmark keeps the EOF clock but seeks to its last sample.
+            // The command rounds seeks up to microseconds; never round one into EOF.
+            let from = self.bookmark.sample.min(self.duration.saturating_sub(Duration::from_micros(1)));
             Task::Frames { from, left: self.duration - from, playing: self.playing }
         };
         let source = self.source.as_mut().expect("a player without errors holds its snapshot");
         match Job::start(self.tools, source, task) {
             Ok(job) => {
                 self.job = Some(job);
-                self.origin = self.position;
                 self.progress = now;
                 false
             }
@@ -162,8 +176,10 @@ impl Video {
             Ok(finished) => finished,
             Err(error) => return self.fail(error),
         };
-        let changed = if let Some(index) = job.take_frame(&mut self.frame) {
-            self.position = (self.origin + frame_time(index)).min(self.duration);
+        let changed = if let Some(sample) = job.take_frame(&mut self.frame) {
+            if self.playing {
+                self.bookmark = Bookmark { position: sample.min(self.duration), sample };
+            }
             self.progress = now;
             self.pending = false;
             true
@@ -178,7 +194,7 @@ impl Video {
             Some(Output::Duration(duration)) => {
                 self.job = None;
                 self.duration = duration;
-                self.position = self.position.min(duration);
+                self.bookmark.position = self.bookmark.position.min(duration);
                 if self.playing {
                     self.restart_at_eof();
                 }
@@ -191,10 +207,10 @@ impl Video {
             }
             Some(Output::Playback { early }) => {
                 if early {
-                    let at = self.position.as_secs();
+                    let at = self.position().as_secs();
                     return self.fail(format!("MP4 playback ended early at {}:{:02}.", at / 60, at % 60));
                 }
-                self.position = self.duration;
+                self.bookmark.position = self.duration;
                 self.pause();
                 true
             }
@@ -330,8 +346,11 @@ fn anonymous_file() -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::{Body, Reader};
     use crate::fixture::Fixture;
     use std::os::unix::fs::MetadataExt as _;
+    use std::process::Command;
+    use std::thread;
 
     #[test]
     fn copies_the_open_file_without_reopening_its_path() {
@@ -382,5 +401,93 @@ mod tests {
         assert!(!is_mp4(b"\0\0\0\x10ftypqt  \0\0\0\0"));
         assert!(!is_mp4(b"\0\0\0\x18ftypisom\0\0\0\0"));
         assert!(!is_mp4(b"\0\0\0\x10moovisom\0\0\0\0"));
+    }
+
+    #[test]
+    #[ignore = "needs system FFmpeg and FFprobe (8.0 or later)"]
+    fn non_grid_eof_bookmark_restores_the_last_sample_across_tabs() {
+        fn poll_until(mut done: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "timed out waiting for the MP4 preview");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn loaded(reader: &mut Reader) -> &mut Video {
+            poll_until(|| {
+                reader.tick_media();
+                matches!(&reader.body, Body::Video(_))
+            });
+            let Body::Video(video) = &mut reader.body else { unreachable!() };
+            video
+        }
+
+        fn settle(video: &mut Video) {
+            poll_until(|| {
+                video.tick();
+                !video.needs_tick()
+            });
+            assert_eq!(video.error(), None);
+        }
+
+        let fixture = Fixture::new();
+        let file = fixture.root.join("clip.mp4");
+        let generator = "color=c=red:size=160x120:rate=25:d=13.04,drawbox=color=blue:t=fill:enable='gte(t,12.96)'";
+        assert!(
+            Command::new("ffmpeg")
+                .args(["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", generator, "-c:v", "libx264"])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let mut reader = Reader::open(&file).unwrap();
+        let video = loaded(&mut reader);
+        settle(video);
+        let eof = Duration::from_millis(13_040);
+        assert_eq!(video.duration(), eof);
+        for _ in 0..3 {
+            video.seek(5);
+        }
+        assert_eq!(video.position(), Duration::from_secs(13));
+        video.toggle();
+        settle(video);
+        assert_eq!(video.position(), eof);
+        let blue = &video.frame().unwrap().rgb;
+        assert!(blue[2] > blue[0], "playback on the clip-wide grid should end on blue");
+
+        video.seek(-5);
+        assert_eq!(video.position(), Duration::from_millis(8_040));
+        video.toggle();
+        settle(video);
+        assert_eq!(video.position(), eof);
+        let final_rgb = video.frame().unwrap().rgb.clone();
+        assert!(final_rgb[0] > final_rgb[2], "playback from 8.04 s should end on red");
+
+        let reopen = |reader: &mut Reader| {
+            reader.park_media();
+            reader.refresh(false);
+        };
+        for _ in 0..3 {
+            reopen(&mut reader);
+        }
+        for _ in 0..3 {
+            let video = loaded(&mut reader);
+            assert_eq!(video.duration(), Duration::ZERO);
+            assert_eq!(video.position(), eof);
+            reopen(&mut reader);
+        }
+        let video = loaded(&mut reader);
+        settle(video);
+        assert_eq!(video.position(), eof);
+        assert!(!video.is_playing());
+        assert_eq!(video.frame().unwrap().rgb, final_rgb);
+
+        video.toggle();
+        assert!(video.is_playing());
+        assert_eq!(video.position(), Duration::ZERO);
+        assert_eq!(video.bookmark().sample, Duration::ZERO);
     }
 }

@@ -7,11 +7,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use super::Body;
 use super::content::{LIMIT, WorkingStamp};
-use super::video::{self, Video};
+use super::video::{self, Bookmark, Video};
 use super::working_path::ReadTarget;
 use crate::picture::{self, Picture};
 use crate::read::Content;
@@ -117,7 +116,7 @@ pub(super) enum State {
     Loading(Load),
     Text { content: Content, shown: bool },
     Ready { status_reads: bool },
-    Parked(Option<Duration>),
+    Parked(Option<Bookmark>),
 }
 
 #[derive(Clone, Copy)]
@@ -253,11 +252,11 @@ enum Stage {
 pub(super) struct Load {
     stage: Stage,
     stamp: WorkingStamp,
-    pub(super) position: Option<Duration>,
+    pub(super) bookmark: Option<Bookmark>,
 }
 
 impl Load {
-    pub(super) fn start(format: Format, target: ReadTarget, stamp: WorkingStamp, position: Option<Duration>) -> Self {
+    pub(super) fn start(format: Format, target: ReadTarget, stamp: WorkingStamp, bookmark: Option<Bookmark>) -> Self {
         #[cfg(test)]
         let (slots, read) = TEST_SOURCE.take().map_or((&SOURCES, None), |(slots, read)| (slots, Some(read)));
         #[cfg(not(test))]
@@ -272,7 +271,7 @@ impl Load {
             )
             .unwrap_or_else(Acquired::Unavailable)
         });
-        Self { stage: Stage::Source(source), stamp, position }
+        Self { stage: Stage::Source(source), stamp, bookmark }
     }
 
     pub(super) fn poll(&mut self, is_current: impl FnOnce(WorkingStamp) -> bool) -> Option<Outcome> {
@@ -288,8 +287,8 @@ impl Load {
                     Acquired::Media(Owned::Video(snapshot)) => {
                         let body = match Video::from_snapshot(snapshot) {
                             Ok(mut video) => {
-                                if let Some(position) = self.position {
-                                    video.resume_at(position);
+                                if let Some(bookmark) = self.bookmark {
+                                    video.resume_at(bookmark);
                                 }
                                 Body::Video(Box::new(video))
                             }

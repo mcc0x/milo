@@ -23,7 +23,7 @@ const START: &str = "Could not start the system FFmpeg tools for MP4 preview.";
 const PROBE: &str = "Could not inspect the standalone MP4 with FFprobe (8.0 or later).";
 const DECODE: &str = "Could not decode local MP4 video with FFmpeg (8.0 or later).";
 
-pub(super) fn frame_time(index: u32) -> Duration {
+fn frame_time(index: u32) -> Duration {
     Duration::from_nanos(u64::from(index) * 1_000_000_000 / u64::from(FPS))
 }
 
@@ -240,11 +240,12 @@ impl Job {
         Ok(job)
     }
 
-    pub(super) fn take_frame(&self, visible: &mut Option<VideoFrame>) -> Option<u32> {
+    pub(super) fn take_frame(&self, visible: &mut Option<VideoFrame>) -> Option<Duration> {
         let mut inbox = self.exchange.inbox.lock().expect("video exchange is not poisoned");
         let (index, frame) = inbox.latest.take()?;
         inbox.spare = visible.replace(frame);
-        Some(index)
+        let Task::Frames { from, .. } = self.task else { unreachable!("a probe cannot emit a frame") };
+        Some(from + frame_time(index))
     }
 
     pub(super) fn finish(&mut self) -> Result<Option<Output>, &'static str> {

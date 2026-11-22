@@ -3,10 +3,10 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use super::disk::ReadOnly;
 use super::media_load::{self, Format, Load, Outcome, SourceJob, State};
+use super::video::Bookmark;
 use super::working_path::{Entry, LookupError, Root, Stamp};
 use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
@@ -349,8 +349,8 @@ impl Reader {
         let (mut entry, mut stamp) = WorkingStamp::at(&work.repo, &work.root, &work.relative);
         let same = work.stamp == Some(stamp);
         let format = Format::at(&self.path, &work.relative);
-        let position = match (&work.media, same) {
-            (Some(State::Parked(position)), true) => *position,
+        let bookmark = match (&work.media, same) {
+            (Some(State::Parked(bookmark)), true) => *bookmark,
             _ => None,
         };
         if !same || matches!(work.media, Some(State::Parked(_))) {
@@ -367,7 +367,7 @@ impl Reader {
                 && matches!(&entry, Ok(entry) if entry.is_regular())
             {
                 let Ok(entry) = entry else { unreachable!() };
-                let (state, note) = start_preview(format, entry, stamp, position);
+                let (state, note) = start_preview(format, entry, stamp, bookmark);
                 work.stamp = Some(stamp);
                 work.media = Some(state);
                 self.kind = Kind::None;
@@ -571,21 +571,26 @@ impl Reader {
         let Source::Working(work) = &mut self.source else { return };
         work.media_check = None;
         work.media_recheck = false;
-        let position = match (&work.media, &self.body) {
-            (Some(State::Loading(load)), _) => load.position,
-            (Some(State::Ready { .. }), Body::Video(video)) => Some(video.position()),
+        let bookmark = match (&work.media, &self.body) {
+            (Some(State::Loading(load)), _) => load.bookmark,
+            (Some(State::Ready { .. }), Body::Video(video)) => Some(video.bookmark()),
             (Some(State::Ready { .. }), Body::Picture(_)) => None,
             _ => return,
         };
-        // Only that same source stamp can use the player's saved position.
-        work.media = Some(State::Parked(position));
+        // Only that same source stamp can use the player's bookmark.
+        work.media = Some(State::Parked(bookmark));
         self.body = Body::Note(media_load::PENDING);
     }
 }
 
-fn start_preview(format: Format, entry: Entry<'_>, stamp: WorkingStamp, position: Option<Duration>) -> (State, &'static str) {
+fn start_preview(
+    format: Format,
+    entry: Entry<'_>,
+    stamp: WorkingStamp,
+    bookmark: Option<Bookmark>,
+) -> (State, &'static str) {
     match entry.source() {
-        Ok(target) => (State::Loading(Load::start(format, target, stamp, position)), media_load::PENDING),
+        Ok(target) => (State::Loading(Load::start(format, target, stamp, bookmark)), media_load::PENDING),
         Err(_) => (State::Ready { status_reads: false }, media_load::FAILED),
     }
 }
