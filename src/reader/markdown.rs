@@ -51,7 +51,11 @@ impl Preview {
 
     /// Places an editor's top line in view once the preview has a viewport.
     pub(super) fn go_to_line(&mut self, line: usize) {
-        self.pending_line = Some(line);
+        if self.layout.width == 0 {
+            self.pending_line = Some(line);
+        } else {
+            self.restore(Anchor { line, offset: 0, limit: false });
+        }
     }
 
     /// The working file line at the top of the rendered view, counted from zero.
@@ -829,6 +833,13 @@ mod tests {
         assert_eq!(preview.source_line(), 2);
 
         preview.go_to_line(0);
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("Before"));
+
+        // Escape and a scroll key can arrive together before the next draw.
+        preview.go_to_line(2);
+        assert!(preview.scroll(-2));
         screen.clear();
         preview.draw(&mut screen, 2);
         assert!(screen.text()[1].starts_with("Before"));
