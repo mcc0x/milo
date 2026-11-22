@@ -514,6 +514,8 @@ A reader with one file looks as it always has. With a second file, a row of name
 | Click a name | Show that tab |
 | Click `×` | Close the shown tab |
 
+Where every tab is shown and room is left, the right end of the strip names those keys: `^N ^P tabs · ^W close`, or `^N ^P tabs` alone. `?` lists them first.
+
 Each tab keeps its own place in the file, and while it is being edited its cursor, draft and undo history, however long another tab is shown. A tab that was only being read shows the file as it is now when you come back to it. Closing the last tab closes the reader.
 
 In a narrow pane the strip keeps the shown tab and as many neighbours as fit whole. `‹` and `›` at its edges stand for the tabs beyond, with a `*` when one of those has unsaved edits; click an edge to move that way. A pane under four rows tall shows the file without the strip; the keys still work. [See the strip at 34 columns.](https://github.com/mcc0x/milo/blob/main/docs/img/reader-tabs-narrow.webp)

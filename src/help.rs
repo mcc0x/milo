@@ -149,9 +149,9 @@ impl Page {
         Self { rows, top: 0, visible: 0, footer: HintHits::default() }
     }
 
-    /// Adds rows under those the page was made with.
-    pub fn extend(&mut self, rows: impl IntoIterator<Item = HelpRow>) {
-        self.rows.extend(rows);
+    /// Puts rows above those the page was made with.
+    pub fn lead(&mut self, rows: impl IntoIterator<Item = HelpRow>) {
+        self.rows.splice(0..0, rows);
     }
 
     #[cfg(test)]
