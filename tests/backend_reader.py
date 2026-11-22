@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Profile release Milo's tab inbox and handed review with synthetic files.
 
-Run: python3 tests/backend_reader.py /path/to/release/milo [--runs 5]
+Run: python3 tests/backend_reader.py target/release/milo [--base PATH] [--runs 5]
 Use --runs 0 for Git operation counts and the controlled responsiveness probe only.
+With --base the two builds take turns on the same generated files, one at a time.
 All samples use a real PTY. RSS checkpoints are Milo-only `ps` readings (KiB);
 peak RSS is wait4's per-process high-water mark. Git counting and the gate use
 an isolated wrapper; measured latencies/RSS use the unwrapped Git executable.
@@ -16,6 +17,7 @@ from contextlib import contextmanager
 import errno
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import pty
@@ -329,7 +331,8 @@ class Samples:
         self.data[f"{key}.{name}"].append(round(value, 3))
 
     def result(self):
-        data = {name: {"n": len(values), "min": min(values), "median": statistics.median(values), "max": max(values)}
+        data = {name: {"n": len(values), "min": min(values), "median": statistics.median(values),
+                       "p95": sorted(values)[math.ceil(len(values) * .95) - 1], "max": max(values)}
                 for name, values in sorted(self.data.items())}
         return {"measurements": data, "git_operations_per_action": self.operations}
 
@@ -454,19 +457,26 @@ def gated(binary, project, probe):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--base", type=Path, help="compare this release build on the same fixture")
     parser.add_argument("--runs", type=int, default=5)
     args = parser.parse_args()
     require(0 <= args.runs <= 20, "--runs must be between 0 and 20")
-    binary = args.binary.resolve(strict=True)
+    builds = {"candidate": args.binary.resolve(strict=True)}
+    if args.base:
+        builds["base"] = args.base.resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="milo-backend-reader-") as temp:
         project = Project(Path(temp).resolve())
-        samples = Samples()
-        for counted in [True, *([False] * args.runs)]:
-            for committed in (False, True):
-                tabs(samples, binary, project, committed, counted)
-            for path in (project.short, project.full):
-                handed(samples, binary, project, path, counted)
-        gates = {probe: gated(binary, project, probe) for probe in ("switch", "quit")}
+        samples = {label: Samples() for label in builds}
+        for run in range(args.runs + 1):
+            counted = run == 0
+            for label in (builds if run % 2 else reversed(builds)):
+                for committed in (False, True):
+                    tabs(samples[label], builds[label], project, committed, counted)
+                for path in (project.short, project.full):
+                    handed(samples[label], builds[label], project, path, counted)
+        results = {label: {**samples[label].result(),
+                           "controlled_gate": {probe: gated(binary, project, probe) for probe in ("switch", "quit")}}
+                   for label, binary in builds.items()}
         fixture = {"tab_count": TABS, "tab_file_bytes": (project.repo / project.tab(0)).stat().st_size,
                    "tab_working_diff_bytes": len(project.working_diff), "tab_commit_diff_bytes": len(project.commit_diff),
                    "patch_current_file_bytes": (project.repo / project.patch_name(0)).stat().st_size,
@@ -474,7 +484,7 @@ def main():
                    "handed_patches": {path.stem: {"bytes": path.stat().st_size,
                                                  "hunks": path.read_bytes().count(b"\n@@ ")}
                                       for path in (project.short, project.full)}}
-        print(json.dumps({"fixture": fixture, **samples.result(), "controlled_gate": gates}, indent=2, sort_keys=True))
+        print(json.dumps({"fixture": fixture, **results}, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
