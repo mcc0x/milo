@@ -252,6 +252,17 @@ impl Document {
             } else if text.is_empty() {
                 doc.begin(source, format);
                 paragraph = None;
+            } else if indent >= 4
+                && !paragraph.is_some_and(|(depth, hanging)| depth == quotes && hanging != 0 && indent >= hanging)
+            {
+                doc.begin(source, Format { indent: 2, literal: true, ..format });
+                doc.write(&raw[4..], CODE);
+                paragraph = None;
+            } else if text.starts_with('|') {
+                // Preserve pipe tables row for row, even when we cannot fit every column.
+                doc.begin(source, Format { literal: true, ..format });
+                doc.inline(text, Style::PLAIN);
+                paragraph = None;
             } else if indent <= 3 && rule(text) {
                 doc.begin(source, format);
                 doc.write("────────", FAINT);
@@ -808,6 +819,18 @@ mod tests {
             let run = doc.runs.partition_point(|run| run.start <= start) - 1;
             assert!(doc.runs[run].style == style, "wrong style for {text}");
         }
+    }
+
+    #[test]
+    fn keeps_table_rows_separate_and_indented_code_literal() {
+        let input = lines(&["| A | B |", "|---|---|", "| 1 | 2 |", "", "    let a = *x*;", "      use_it(a);"]);
+        let mut preview = Preview::new(&input);
+        let mut screen = Screen::sized(40, 9);
+        preview.draw(&mut screen, 8);
+        assert_eq!(
+            &screen.text()[1..7],
+            ["| A | B |", "|---|---|", "| 1 | 2 |", "", "  let a = *x*;", "    use_it(a);"]
+        );
     }
 
     #[test]
