@@ -597,3 +597,22 @@ fn a_connection_no_relay_can_revoke_is_forgotten_only_on_this_machine_and_only_w
     assert!(home.received(1));
     assert!(home.destination.requests()[0].path.starts_with("/api/v10/webhooks/"));
 }
+
+#[test]
+fn a_change_that_cannot_be_saved_leaves_mirroring_running() {
+    let Some(home) = Home::new() else { return };
+    home.save_telegram();
+    home.run(&["alerts", "on"]);
+    assert!(soon(|| home.starts() == 1));
+    // The settings file may be kept read-only, as by a dotfile manager.
+    let settings = home.root.join(".config/milo/alerts.conf");
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o400)).unwrap();
+    let (saved, why) = home.run_with(&["alerts", "events", "blocked"], "");
+    assert!(!saved && why.contains("Could not save"), "{why}");
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let status = home.run(&["alerts"]);
+    assert!(status.contains("Rex alert mirroring: on\n"), "{status}");
+    home.blocked("a", "SYNTHETIC approve?");
+    assert!(home.received(1));
+}
