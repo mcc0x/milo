@@ -302,7 +302,7 @@ struct Delivery {
     /// When each of the last minute's messages was sent or may have been sent.
     sent_at: VecDeque<Instant>,
     sent: u32,
-    /// Alerts dropped since the last message that was sent.
+    /// Alerts known to have been dropped since the last confirmed delivery.
     unsent: u32,
     /// Until when the destination asked not to be sent anything.
     not_before: Option<Instant>,
@@ -378,7 +378,7 @@ impl Delivery {
                     return;
                 }
                 Outcome::Uncertain(_) => {
-                    // The message might count toward Telegram's rate limit.
+                    // Reserve rate-limit capacity without counting a possible delivery as missed.
                     self.sent_at.push_back(Instant::now());
                     self.refusals = 0;
                     let reason = outcome.reason(destination, target.hosted_telegram);
@@ -595,4 +595,62 @@ fn a_relay_outage_retries_only_telegram_and_only_up_to_the_limit() {
     assert!(wire[1].starts_with("POST /api/v10/webhooks/"));
     assert_eq!(wire[2], wire[0]);
     assert!(wire[3..].iter().all(|request| request == &wire[0]));
+}
+
+#[cfg(test)]
+#[test]
+fn a_relay_connection_failure_is_retried_and_counted_but_a_lost_reply_is_not() {
+    use super::event::Kind;
+    use super::relay::{
+        Origin,
+        tests::{CAPABILITY, with_replies},
+    };
+    use crate::fixture::Fixture;
+
+    let fixture = Fixture::folder();
+    let mut alerts = Alerts::at(&fixture.root.join("config"), &fixture.root.join("state"));
+    // Port zero cannot have a listening server and avoids racing for a free port.
+    alerts.relay = Some(Origin::Test("http://127.0.0.1:0".into()));
+    let destination = Destination::Telegram;
+    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+    alerts.set_forwarding(destination, true).unwrap();
+    let settings = alerts.settings().unwrap();
+    let status = Status { file: alerts.state_dir().join("alerts.status"), notes: Mutex::default() };
+    let cancelled = AtomicBool::new(false);
+    let mut delivery = Delivery::default();
+    let deliver = |alerts: &Alerts, delivery: &mut Delivery, kind| {
+        let target = Target {
+            alerts,
+            settings: &settings,
+            status: &status,
+            destination,
+            secret: alerts.target_secret(&settings, destination).unwrap(),
+            hosted_telegram: true,
+            cancelled: &cancelled,
+        };
+        delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new() }, &target);
+    };
+
+    let began = Instant::now();
+    deliver(&alerts, &mut delivery, Kind::Blocked);
+    assert!(began.elapsed() >= Duration::from_secs(4), "expected both retry delays");
+    assert_eq!((delivery.sent, delivery.unsent, delivery.sent_at.len()), (0, 1, 0));
+    assert!(note(alerts.state_dir()).contains("The last alert could not be delivered and was dropped."));
+
+    // The relay receives the next request but closes the connection without a reply.
+    let (_, wire) = with_replies(&[(0, ""), (204, "")], |origin| {
+        alerts.relay = Some(Origin::Test(origin.into()));
+        deliver(&alerts, &mut delivery, Kind::Error);
+        assert_eq!((delivery.sent, delivery.unsent, delivery.sent_at.len()), (0, 1, 1));
+        assert!(note(alerts.state_dir()).contains("The last alert was not retried"));
+
+        deliver(&alerts, &mut delivery, Kind::Done);
+        assert_eq!((delivery.sent, delivery.unsent, delivery.sent_at.len()), (1, 0, 2));
+    });
+    for (request, text) in wire.iter().zip([
+        "Rex: a program reported an error\n(1 earlier alert was not sent.)",
+        "Rex: a program finished\n(1 earlier alert was not sent.)",
+    ]) {
+        assert_eq!(request.split_once("\r\n\r\n").unwrap().1, format!("{{\"text\":{}}}", rex::json(text)));
+    }
 }

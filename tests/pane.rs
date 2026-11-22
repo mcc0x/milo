@@ -3,7 +3,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -645,6 +645,145 @@ fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
     assert!(terminal.restored());
     assert!(project.0.join("hold").exists());
     assert!(!project.0.join("project/.git/index.lock").exists());
+}
+
+fn history_fixture(project: &Project, subject: &str) {
+    project.git(&["init", "-q", "--template="]);
+    fs::write(project.0.join("project/page.txt"), "before\n").unwrap();
+    project.git(&["add", "page.txt"]);
+    project.git(&["commit", "-qm", subject]);
+}
+
+fn hold_history_listing(project: &Project, command: &mut Command) -> File {
+    let fifo = project.0.join("listing-lifetime");
+    assert!(project.command("mkfifo").arg(&fifo).status().unwrap().success());
+    let lifetime = File::options().read(true).custom_flags(libc::O_NONBLOCK).open(fifo).unwrap();
+    let git = Path::new(project.git(&["--exec-path"]).trim()).join("git");
+    command.env("REAL_GIT", git);
+    project.stand_in_git(
+        command,
+        r#"case " $* " in
+  *" diff-tree "*" --numstat "*)
+    [ "$CLOSE_LISTING_STDOUT" = yes ] && exec 1>&-
+    exec 3>"$HOME/listing-lifetime"
+    (while [ -d "$HOME" ]; do sleep 0.02; done) &
+    exec 3>&-
+    echo "$$" > "$HOME/listing-pid"
+    wait
+    exit 1 ;;
+esac
+exec "$REAL_GIT" "$@"
+"#,
+    );
+    lifetime
+}
+
+fn open_held_history_listing(project: &Project, terminal: &mut Terminal, lifetime: &mut File) -> libc::pid_t {
+    terminal.master.write_all(b"\r").unwrap();
+    terminal.shows("Reading files…");
+    let marker = project.0.join("listing-pid");
+    let until = Instant::now() + TEST_WAIT;
+    let pid = loop {
+        if let Some(pid) = fs::read_to_string(&marker).ok().and_then(|s| s.strip_suffix('\n')?.parse().ok()) {
+            break pid;
+        }
+        assert!(Instant::now() < until, "History did not start the held listing");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    fs::remove_file(marker).unwrap();
+    assert!(pid > 1);
+    // Only the Git helper owns the write end by the time this marker appears.
+    assert_eq!(lifetime.read(&mut [0]).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    pid
+}
+
+fn assert_history_listing_stopped(pid: libc::pid_t, lifetime: &mut File) {
+    // SAFETY: Signal zero checks whether this test's Git still exists without sending a signal.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "History did not reap Git");
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match lifetime.read(&mut [0]) {
+            Ok(0) => break,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < until, "History left a Git helper running");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => panic!("unexpected Git helper pipe result: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn history_cancels_and_reaps_a_listing_on_quit_after_git_closes_stdout() {
+    let project = Project::new();
+    history_fixture(&project, "HeldCommit");
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.arg("history").env("CLOSE_LISTING_STDOUT", "yes");
+    let mut lifetime = hold_history_listing(&project, &mut command);
+    let mut terminal = Terminal::run(&mut command);
+    terminal.shows("HeldCommit");
+    let pid = open_held_history_listing(&project, &mut terminal, &mut lifetime);
+
+    let asked = Instant::now();
+    terminal.master.write_all(b"q").unwrap();
+    assert!(terminal.wait_for_exit().success());
+    assert!(asked.elapsed() < Duration::from_secs(10), "waited {:?} for Git", asked.elapsed());
+    assert!(terminal.restored());
+    assert_history_listing_stopped(pid, &mut lifetime);
+}
+
+#[test]
+fn history_cancels_and_reaps_listings_on_repeated_project_switches() {
+    use std::fmt::Write as _;
+
+    let first = Project::new();
+    let second = Project::new();
+    let titles = ["FirstCommit", "SecondCommit"];
+    history_fixture(&first, titles[0]);
+    history_fixture(&second, titles[1]);
+    let feed_path = first.0.join("cwd-feed");
+    assert!(first.command("mkfifo").arg(&feed_path).status().unwrap().success());
+    let rex = first.0.join("rex");
+    fs::write(&rex, "#!/bin/sh\nexec cat \"$HOME/cwd-feed\"\n").unwrap();
+    fs::set_permissions(rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = first.command(env!("CARGO_BIN_EXE_milo"));
+    command
+        .args(["history", "--shell", "block:11111111-1111-1111-1111-111111111111"])
+        .env("REX_SESSION", "test")
+        .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222")
+        .env_remove("CLOSE_LISTING_STDOUT");
+    let mut lifetime = hold_history_listing(&first, &mut command);
+    let mut terminal = Terminal::run(&mut command);
+    terminal.shows(titles[0]);
+    let until = Instant::now() + TEST_WAIT;
+    let mut feed = loop {
+        match File::options().write(true).custom_flags(libc::O_NONBLOCK).open(&feed_path) {
+            Ok(writer) => break writer,
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
+                assert!(Instant::now() < until, "History did not start the shell observer");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("cannot open shell observer feed: {e}"),
+        }
+    };
+
+    for next in [1, 0, 1] {
+        let pid = open_held_history_listing(&first, &mut terminal, &mut lifetime);
+        let root = [&first, &second][next].0.join("project");
+        let mut report = String::from("milo-cwd ");
+        for byte in root.as_os_str().as_encoded_bytes() {
+            write!(report, "{byte:02x}").unwrap();
+        }
+        let asked = Instant::now();
+        writeln!(feed, "{report}").unwrap();
+        terminal.shows(titles[next]);
+        assert!(asked.elapsed() < Duration::from_secs(10), "waited {:?} for Git", asked.elapsed());
+        assert_history_listing_stopped(pid, &mut lifetime);
+    }
+    terminal.master.write_all(b"q").unwrap();
+    assert!(terminal.wait_for_exit().success());
+    assert!(terminal.restored());
 }
 
 #[test]

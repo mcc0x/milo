@@ -9,6 +9,7 @@ pub(crate) mod run;
 
 use std::cell::{Cell, OnceCell};
 use std::ffi::OsStr;
+use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -113,15 +114,21 @@ pub(crate) struct CommitFiles {
 
 impl CommitFiles {
     /// Reads the files touched by this commit, compared with its first parent.
-    pub(crate) fn at(&self, hash: &str) -> Result<DiffFiles, CommitFilesError> {
-        parent_history(&self.root, self.shallow_file.as_deref(), hash)?;
-        let raw = run::commit_diff(&self.root, hash, run::CommitDiff::Files).map_err(|_| CommitFilesError::Git)?;
+    pub(crate) fn at(&self, hash: &str, cancel: BorrowedFd<'_>) -> Result<DiffFiles, CommitFilesError> {
+        parent_history(&self.root, self.shallow_file.as_deref(), hash, Some(cancel))?;
+        let raw =
+            run::commit_diff(&self.root, hash, run::CommitDiff::Files(cancel)).map_err(|_| CommitFilesError::Git)?;
         Ok(parse_files(&raw))
     }
 }
 
 /// Git treats a shallow boundary as a root, even when the commit has a parent.
-fn parent_history(root: &Path, shallow_file: Option<&Path>, hash: &str) -> Result<(), CommitFilesError> {
+fn parent_history(
+    root: &Path,
+    shallow_file: Option<&Path>,
+    hash: &str,
+    cancel: Option<BorrowedFd<'_>>,
+) -> Result<(), CommitFilesError> {
     let Some(file) = shallow_file else { return Ok(()) };
     match read::file(file, DIFF_LIMIT) {
         Content::Gone => return Ok(()),
@@ -136,8 +143,9 @@ fn parent_history(root: &Path, shallow_file: Option<&Path>, hash: &str) -> Resul
     // A shallow marker alone is not enough: a depth-limited clone can
     // mark a genuine root. Read the actual header, not Git's ancestry view.
     let hash = CommitId::parse(hash).ok_or(CommitFilesError::Git)?.0;
-    let raw = run::limited_output(root, &[], &["cat-file", "commit", "--end-of-options", hash], DIFF_LIMIT)
-        .map_err(|_| CommitFilesError::Git)?;
+    let raw =
+        run::limited_output_until(root, &[], &["cat-file", "commit", "--end-of-options", hash], DIFF_LIMIT, cancel)
+            .map_err(|_| CommitFilesError::Git)?;
     let mut headers = raw.split(|&b| b == b'\n');
     if !headers.next().is_some_and(|line| line.starts_with(b"tree ")) {
         return Err(CommitFilesError::Git);
@@ -897,7 +905,7 @@ impl Repo {
     }
 
     fn check_parent_history(&self, hash: &str) -> Result<(), CommitFilesError> {
-        parent_history(&self.root, self.shallow_file.as_deref(), hash)
+        parent_history(&self.root, self.shallow_file.as_deref(), hash, None)
     }
 
     pub(crate) fn commit_files(&self) -> CommitFiles {
@@ -966,6 +974,7 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use std::fs::{self, Permissions};
+    use std::os::fd::AsFd as _;
     use std::os::unix::fs::PermissionsExt;
 
     fn read_repo(f: &Fixture) -> Repo {
@@ -1193,7 +1202,8 @@ mod tests {
         assert_eq!(repo.tracked().unwrap().collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
         assert!(repo.paths_incomplete());
 
-        let diff = repo.commit_files().at(&repo.ends().tip).unwrap();
+        let (cancel, _keep_open) = std::io::pipe().unwrap();
+        let diff = repo.commit_files().at(&repo.ends().tip, cancel.as_fd()).unwrap();
         assert_eq!(diff.unrepresented, 1);
         assert_eq!(diff.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
 
@@ -1479,8 +1489,9 @@ mod tests {
         fs::remove_file(f.root.join(".git/objects").join(&oid[..2]).join(&oid[2..])).unwrap();
         fs::remove_file(f.root.join("unrelated.txt")).unwrap();
 
+        let (cancel, _keep_open) = std::io::pipe().unwrap();
         assert!(
-            matches!(repo.commit_files().at(hash), Err(CommitFilesError::Git)),
+            matches!(repo.commit_files().at(hash, cancel.as_fd()), Err(CommitFilesError::Git)),
             "the commit's line counts should be unavailable"
         );
         let file = repo.changed_file_at(hash, "page.txt").unwrap().unwrap();

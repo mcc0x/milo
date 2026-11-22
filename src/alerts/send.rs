@@ -53,6 +53,7 @@ impl Outcome {
             Self::Uncertain(Some(code)) => format!("{name} delivery could not be confirmed (HTTP {code})"),
             Self::Uncertain(None) => format!("{name} delivery could not be confirmed"),
             Self::Failed(Some(code)) => format!("{name} answered with a server error (HTTP {code})"),
+            Self::Failed(None) if hosted_telegram => "the Telegram relay could not be reached".into(),
             Self::Failed(None) => format!("{name} could not be reached"),
         }
     }
@@ -61,8 +62,10 @@ impl Outcome {
 /// Sends a prepared request and reports the answer. While curl runs, its
 /// process ID is in `running`, for a signal handler to end it.
 pub(super) fn post(request: &Request, running: Option<&AtomicI32>) -> Outcome {
-    let Some((body, code)) = response(request, ANSWER_LIMIT, running) else {
-        return if request.relay { Outcome::Uncertain(None) } else { Outcome::Failed(None) };
+    let (body, code) = match run(request, ANSWER_LIMIT, running) {
+        Ok(response) => response,
+        Err(ResponseError::Unconfirmed) if request.relay => return Outcome::Uncertain(None),
+        Err(_) => return Outcome::Failed(None),
     };
     match code {
         204 if request.relay && body.is_empty() => Outcome::Sent,
@@ -83,12 +86,7 @@ pub(super) fn query(address: &str, body: &str, limit: u64) -> Option<String> {
 }
 
 pub(super) fn response(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
-    let mut answer = run(request, limit, running)?;
-    // The status follows the answer's body on a line of its own.
-    let (body, code) = answer.rsplit_once('\n')?;
-    let code = code.trim().parse().ok()?;
-    answer.truncate(body.len());
-    Some((answer, code))
+    run(request, limit, running).ok()
 }
 
 /// curl's options, in the form of its own settings file.
@@ -153,7 +151,12 @@ fn push_quoted(out: &mut String, value: &str) {
     out.push('"');
 }
 
-fn run(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<String> {
+enum ResponseError {
+    Unreachable,
+    Unconfirmed,
+}
+
+fn run(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Result<(String, u16), ResponseError> {
     let mut command = Command::new(CURL);
     if request.relay {
         // Don't inherit proxy, custom CA, or debug/traffic-logging settings.
@@ -166,7 +169,7 @@ fn run(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<Str
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+        .map_err(|_| ResponseError::Unconfirmed)?;
     if let Some(running) = running {
         running.store(curl.id().try_into().unwrap_or(0), Ordering::Relaxed);
     }
@@ -181,10 +184,22 @@ fn run(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<Str
     if let Some(running) = running {
         running.store(0, Ordering::Relaxed);
     }
-    let status = curl.wait();
-    // An HTTP error is still an answer; curl itself fails only when there is none.
-    (!over_limit && matches!(written, Some(Ok(()))) && matches!(read, Some(Ok(_))) && status.ok()?.success())
-        .then_some(answer)
+    let status = curl.wait().map_err(|_| ResponseError::Unconfirmed)?;
+    if over_limit || !matches!(written, Some(Ok(()))) || !matches!(read, Some(Ok(_))) {
+        return Err(ResponseError::Unconfirmed);
+    }
+    // Only DNS resolution and connection failures prove the request wasn't sent.
+    if !status.success() {
+        return Err(match status.code() {
+            Some(6 | 7) => ResponseError::Unreachable,
+            _ => ResponseError::Unconfirmed,
+        });
+    }
+    // An HTTP error is still an answer. Its status follows the body on a line of its own.
+    let (body, code) = answer.rsplit_once('\n').ok_or(ResponseError::Unconfirmed)?;
+    let code = code.trim().parse().map_err(|_| ResponseError::Unconfirmed)?;
+    answer.truncate(body.len());
+    Ok((answer, code))
 }
 
 /// Telegram gives whole seconds in `parameters.retry_after`; Discord gives

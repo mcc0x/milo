@@ -78,6 +78,8 @@ The frame closes up around what is shown:
 
 For each tool, milo uses the newest report it can read. When there is room, it also shows **tokens today** from Claude Code's local session files under `~/.claude/projects`. This is local activity since midnight, not a limit. It counts new input, output and cache writes, not cache reads. A `+` after the number means the total may be incomplete.
 
+If a clock or time-zone change moves the start of today earlier, Milo checks unchanged transcripts again for the newly included activity.
+
 A report dated more than five minutes ahead of this machine's clock is not used, whichever source it came from. Otherwise one report written while a clock was wrong would outrank every later one. Milo shows the newest of the remaining sources instead. A deferred Codex or Claude Code report becomes eligible as the clock catches up, even if the source file has not changed. For the status-line save, the next report from Claude Code replaces the misdated file.
 
 Milo checks the tails of recent Codex logs, then resumes near the previous end as those logs grow. Ordinary session activity does not clear the last limit report. A new or replaced log, a truncation, or a large burst of new data calls for another bounded tail check.
@@ -149,6 +151,8 @@ The file must be a plain file of yours that no one else can read, or Milo ignore
 
 **What is sent and kept.** One `GET` over HTTPS to the provider's own host, through `/usr/bin/curl`, with the key passed on curl's standard input rather than its command line. Redirects are not followed. Milo normally asks DeepSeek and OpenRouter every 5 minutes, Devin and Copilot every 15, and asks again when the billing day or month their count covers ends. If a provider cannot be reached, Milo can retry after one minute instead of waiting the full interval. `r` asks again, but no sooner than 30 seconds after the last request and never inside a rate limit the provider announced. A refused key is not offered again for 30 minutes unless you press `r`. The figures and times of the last answer are saved under `~/.local/state/milo/accounts/` so that panes and the menu using the same credentials can share an answer; the key is never written there.
 Each provider, key and organization or user has its own saved answer and retry timing. Panes, the menu and `milo doctor` use only the entry for the credentials they read. Changing a key in the private settings file clears the old figure on the next check, even if its refresh was still pending.
+
+While Milo is running, retry waits use elapsed time, so a wall-clock change does not shorten or extend them. Saved retry times still let a pane or menu opened later respect the last request.
 
 **Where it appears.** Limits keep their rows first, then OpenCode, then accounts: one row each at the foot of the pane, or the whole pane when no tool has a place. The menu lists each account with its figure in words.
 

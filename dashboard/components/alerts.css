@@ -56,6 +56,7 @@
 .alerts-manual { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: start; }
 .alerts-manual > span { font-size: 1.1rem; line-height: 1; }
 .alerts-destination-removal { padding-block-start: .45rem; border-block-start: 1px solid var(--line); }
+.alerts-local-forget { overflow-wrap: anywhere; }
 .alerts-forget { color: #8b303b; }
 .alerts-forget:hover:not(:disabled) { background: #fff1f3; }
 .alerts-action-note[data-error="true"] { color: #8b303b; }

@@ -378,7 +378,7 @@ async function usageToolsPersisted(page) {
 }
 
 // One host stands for both ends: what it exports is edited by hand and imported again.
-async function copySettingsThroughHosts(page, env) {
+async function copySettingsThroughHosts(page, env, cwd) {
   const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
   const before = await readFile(preferences, 'utf8');
   await section(page, 'Hosts').click();
@@ -386,29 +386,77 @@ async function copySettingsThroughHosts(page, env) {
   await page.getByText('milo web --host LABEL', {exact: true}).waitFor();
   const create = button(page, 'Create bundle');
   assert(await create.isDisabled(), 'nothing is exported until a group is chosen');
+  const layout = page.getByRole('checkbox', {name: /^Layout Panes/});
+  const exported = page.getByRole('textbox', {name: 'Exported settings bundle', exact: true});
+  const copy = button(page, 'Copy bundle');
+  await layout.check();
+  await page.getByRole('radio', {name: 'This worktree', exact: true}).check();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/transfer', route => gate.then(() => route.continue()), {times: 1});
+  const isExport = request => new URL(request.url()).pathname === '/api/transfer' && request.postDataJSON().action === 'export';
+  const received = page.waitForResponse(response => isExport(response.request()));
+  try {
+    const sent = page.waitForRequest(isExport);
+    await create.click();
+    assert.deepEqual((await sent).postDataJSON(), {action: 'export', groups: ['layout'], scope: 'worktree'});
+    await page.getByRole('radio', {name: 'Global defaults', exact: true}).check();
+  } finally {
+    release();
+  }
+  assert.match((await (await received).json()).bundle, /^\[project\]$/m, 'the delayed response contains project settings');
+  await page.locator('#export-create:enabled').waitFor();
+  assert.equal(await exported.count(), 0, 'the old scope’s bundle stays hidden after the request settles');
+  assert.equal(await copy.count(), 0, 'the old scope’s bundle cannot be copied');
+  await layout.uncheck();
   await page.getByRole('checkbox', {name: /^Usage display/}).check();
   await create.click();
-  const exported = page.getByRole('textbox', {name: 'Exported settings bundle', exact: true});
   await exported.waitFor();
   const bundle = await exported.inputValue();
   assert.match(bundle, /^milo-settings 1\n/);
   assert.match(bundle, /^usage_claude = always$/m);
   assert.doesNotMatch(bundle, /tab_titles|deepseek|icons/, 'only the chosen group, and no integration or account');
+  assert.doesNotMatch(bundle, /^\[project\]$/m, 'the replacement export uses the current scope');
 
-  const incoming = `${bundle.replace('usage_claude = always', 'usage_claude = hide')}tab_titles = false\nusage_deepseek = always\n`;
+  const incoming = `${bundle.replace('usage_claude = always', 'usage_claude = hide')}tab_titles = false\nusage_deepseek = always\n`
+    + '\n[project]\nname = example\nusage_claude = hide\n';
   await page.getByRole('textbox', {name: /^Paste a bundle/}).fill(incoming);
   const importButton = button(page, 'Import 1 setting');
   assert.equal(await importButton.count(), 0, 'nothing can be imported before a preview');
-  await button(page, 'Preview').click();
+  const previewButton = button(page, 'Preview');
+  let finishPreview;
+  const previewGate = new Promise(resolve => { finishPreview = resolve; });
+  await page.route('**/api/transfer', route => previewGate.then(() => route.continue()), {times: 1});
+  try {
+    await previewButton.focus();
+    await page.keyboard.press('Enter');
+    await previewButton.and(page.locator('[aria-disabled="true"]')).waitFor();
+    assert(await previewButton.evaluate(el => el === document.activeElement), 'Preview retains focus while loading');
+  } finally {
+    finishPreview();
+  }
+  await status(page, 'Preview ready. 1 setting would change.').waitFor();
+  assert(await previewButton.evaluate(el => el === document.activeElement), 'Preview remains focused after the response');
+  await page.keyboard.press('Tab');
+  assert(await importButton.evaluate(el => el === document.activeElement), 'one Tab moves from Preview to Import');
   const preview = page.getByRole('group', {name: 'What this import changes', exact: true});
   const row = preview.getByRole('row', {name: /^Claude Code in Usage/});
   await row.waitFor();
   assert.deepEqual(await row.getByRole('cell').allTextContents(), ['always', 'hide']);
   await preview.getByText('Left out: tab_titles (set on each host, never imported)').waitFor();
   await preview.getByText('Left out: usage_deepseek (set on each host, never imported)').waitFor();
+  const map = button(preview, `Apply to ${basename(cwd)}`);
+  await map.press('Enter');
+  await status(page, 'Preview ready. 2 settings would change.').waitFor();
+  assert(await previewButton.evaluate(el => el === document.activeElement), 'mapping does not lose keyboard focus');
+  await button(preview, 'Don’t apply').press('Enter');
+  await status(page, 'Preview ready. 1 setting would change.').waitFor();
+  assert(await previewButton.evaluate(el => el === document.activeElement), 'unmapping does not lose keyboard focus');
   assert.equal(await readFile(preferences, 'utf8'), before, 'a preview saves nothing');
 
-  await importButton.click();
+  await page.keyboard.press('Tab');
+  assert(await importButton.evaluate(el => el === document.activeElement), 'one Tab also reaches Import after unmapping');
+  await page.keyboard.press('Enter');
   await status(page, 'Imported 1 setting. Undo is in Hosts if you change your mind.').waitFor();
   const imported = await readFile(preferences, 'utf8');
   assert.match(imported, /^usage_claude = hide$/m);
@@ -630,6 +678,10 @@ async function checkHostedConnections(page, destination) {
     const action = route.request().postDataJSON();
     if (action.action !== 'alerts') return route.fallback();
     const {field, value} = action;
+    if (field === 'refresh') {
+      assert.equal(value, null);
+      return editorState(route);
+    }
     const alerts = {...state.alerts};
     let message = null;
     if (field === 'forwarding') {
@@ -650,7 +702,7 @@ async function checkHostedConnections(page, destination) {
       scoped.push({field, value});
       alerts.telegram = {saved: false, active: false, chat: '', consent: null, needs_local_forget: false};
       alerts.destination = 'discord';
-      message = {text: 'Removed from this machine only.', error: false};
+      message = {text: 'Removed the locally saved Telegram connection.', error: false};
     } else {
       assert.fail(`unexpected alert action during hosted setup: ${field}`);
     }
@@ -880,19 +932,33 @@ async function checkHostedConnections(page, destination) {
     await page.route(statePath, editorState);
     responses.push({request: {action: 'start', provider: 'telegram'}, response: {status: 409}});
     await connect.click();
-    const forgetLocal = button(telegram, 'Forget on this Mac');
+    const forgetLocal = button(telegram, 'Forget on this host');
     await forgetLocal.waitFor();
     assert.equal(await connect.count(), 0, 'legacy Telegram cannot start another pairing');
     assert.equal(launches.length, launchCount, 'the blocked start does not open a provider page');
     await forgetLocal.click();
-    const forget = dialog(page, 'Forget Telegram on this Mac?');
+    const forget = dialog(page, 'Forget Telegram on this host?');
+    await forget.getByText(/stops its forwarding on this host/).waitFor();
     await forget.getByText(/does not revoke the connection on the relay/).waitFor();
     await forget.getByText(/send \/stop/).waitFor();
     const actionsBeforeCancel = scoped.length;
     await button(forget, 'Keep editing').click();
     assert.equal(scoped.length, actionsBeforeCancel);
-    await forgetLocal.click();
-    await button(forget, 'Forget on this Mac').click();
+    // The same recovery in a forwarded editor must name the affected host.
+    state = {...state, host: {name: 'studio', forwarded: true, rex: null}};
+    await page.reload();
+    await page.getByText('studio · forwarded', {exact: true}).waitFor();
+    await section(page, 'Integrations').click();
+    await button(page, 'Alert forwarding').click();
+    await button(destination, 'Manage destinations').click();
+    await button(manager, 'Telegram').click();
+    await telegram.getByText(/forget the connection on “studio”/).waitFor();
+    await button(telegram, 'Forget on “studio”').click();
+    const forgetForwarded = dialog(page, 'Forget Telegram on “studio”?');
+    await forgetForwarded.getByText(/stops its forwarding on “studio”/).waitFor();
+    await forgetForwarded.getByText(/does not revoke the connection on the relay/).waitFor();
+    assert.doesNotMatch(await forgetForwarded.innerText(), /this Mac|this host/);
+    await button(forgetForwarded, 'Forget on “studio”').click();
     await connect.waitFor();
     assert.deepEqual(scoped.at(-1), {field: 'forget_local', value: 'telegram'});
     await button(telegram, 'Back to destinations').click();
@@ -900,7 +966,7 @@ async function checkHostedConnections(page, destination) {
       'forgetting Telegram locally keeps Discord forwarding');
     await button(manager, 'Discord').click();
     const discord = dialog(page, 'Destinations / Discord');
-    assert.equal(await button(discord, 'Forget on this Mac').count(), 0, 'Discord has no local-only removal action');
+    assert.equal(await button(discord, 'Forget on “studio”').count(), 0, 'Discord has no local-only removal action');
     await button(discord, 'Forget Discord…').waitFor();
     await button(discord, 'Back to destinations').click();
     await button(manager, 'Close destinations').click();
@@ -1139,7 +1205,7 @@ async function main() {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }
       await usageToolsPersisted(page);
-      await copySettingsThroughHosts(page, env);
+      await copySettingsThroughHosts(page, env, cwd);
       await rejectStaleDone(desktop, page, url);
       await confirmFromMobileFooter(browser, url, exited);
     });

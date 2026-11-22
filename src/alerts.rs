@@ -334,8 +334,8 @@ pub(crate) struct Alerts {
 
 const TELEGRAM_LOCAL_FORGET: &str =
     "The saved Telegram connection belongs to a different relay environment and cannot be disconnected here. If the \
-     original relay is gone, use Forget on this Mac in Settings or milo alerts forget telegram --local-only before \
-     reconnecting.";
+     original relay is gone, use the local-only Forget action in Telegram's destination settings or run \
+     milo alerts forget telegram --local-only on the affected host before reconnecting.";
 
 /// A settings and credential transaction. All edits, including a reviewed
 /// change's comparison and commit, use the same configuration directory lock.
@@ -992,9 +992,9 @@ impl AlertsEdit<'_> {
     /// asked anything and the connection is not revoked: the answer says so.
     /// `forget` and `remove` never fall back to this; only the user chooses it.
     fn forget_telegram_locally(&self) -> Result<String, String> {
-        const UNREVOKED: &str = "Removed the saved Telegram connection from this machine only. No relay was asked to \
-                                 revoke it, and nothing proves that it is revoked. To revoke every Milo connection to \
-                                 that chat, send /stop to Milo's bot in Telegram.";
+        const UNREVOKED: &str = "Removed the locally saved Telegram connection. No relay was asked to revoke it, \
+                                 and nothing proves that it is revoked. To revoke every Milo connection to that \
+                                 chat, send /stop to Milo's bot in Telegram.";
         let telegram = Destination::Telegram;
         let mut unrevoked = false;
         let ended = self.disarm_then(telegram, || {

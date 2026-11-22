@@ -46,7 +46,11 @@ struct Carried {
 impl Drop for Carried {
     fn drop(&mut self) {
         if let Some(mut forward) = self.forward.take() {
-            interrupt(&mut forward);
+            interrupt(&mut forward, |pid| {
+                // SAFETY: `interrupt` has checked that this child is still running, and
+                // no other code can reap it before the signal.
+                unsafe { libc::kill(pid, libc::SIGINT) };
+            });
         }
         if let Some(mut watch) = self.watch.take() {
             let _ = watch.kill();
@@ -66,10 +70,14 @@ impl Drop for Carried {
 }
 
 /// Lets `rex forward` close its own block, and ends it if it does not.
-fn interrupt(child: &mut Child) {
+fn interrupt(child: &mut Child, signal: impl FnOnce(libc::pid_t)) {
+    // The monitor may already have reaped the forward. Do not use its PID
+    // unless we can confirm this handle still owns the process.
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
     if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: The child has not been waited for, so its ID still names it.
-        unsafe { libc::kill(pid, libc::SIGINT) };
+        signal(pid);
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -250,8 +258,48 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{FORWARD_TARGET, TcpListener, handoff, io, wait_forward};
+    use super::{FORWARD_TARGET, TcpListener, handoff, interrupt, io, wait_forward};
     use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn interrupt_does_not_signal_a_reaped_forward() {
+        let mut forward = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        assert!(forward.wait().unwrap().success());
+
+        interrupt(&mut forward, |_| panic!("signalled the PID of a reaped forward"));
+    }
+
+    #[test]
+    fn interrupt_does_not_signal_when_the_forward_status_is_unknown() {
+        let mut forward = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = libc::pid_t::try_from(forward.id()).unwrap();
+        // Reap our own child without caching its exit status on the handle.
+        loop {
+            // SAFETY: This is our child's PID, and waitpid accepts a null status pointer.
+            if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } == pid {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        }
+        assert_eq!(forward.try_wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
+        interrupt(&mut forward, |_| panic!("signalled the PID of a forward with unknown status"));
+    }
+
+    #[test]
+    fn interrupt_signals_and_reaps_a_live_forward() {
+        let mut forward = Command::new("/bin/sh").args(["-c", "read -r line"]).stdin(Stdio::piped()).spawn().unwrap();
+        let mut input = forward.stdin.take().unwrap();
+        let pid = libc::pid_t::try_from(forward.id()).unwrap();
+
+        interrupt(&mut forward, |signalled| {
+            assert_eq!(signalled, pid);
+            input.write_all(b"stop\n").unwrap();
+        });
+        assert!(forward.try_wait().unwrap().unwrap().success());
+    }
 
     #[test]
     fn only_the_link_this_computer_asked_for_is_taken_from_the_hosts_terminal() {

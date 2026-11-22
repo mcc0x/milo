@@ -2,8 +2,9 @@
 
 use std::ffi::OsStr;
 use std::io::Read as _;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
@@ -22,7 +23,7 @@ const DEADLINE: Duration = Duration::from_secs(15);
 pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
     let mut launcher = isolated(Command::new("git"));
     launcher.arg("--exec-path");
-    let real = checked_output(launcher, 4096)
+    let real = checked_output(launcher, 4096, None)
         .ok()
         .and_then(|raw| raw.strip_suffix(b"\n").map(|path| Path::new(OsStr::from_bytes(path)).join("git")));
     real.filter(|path| path.is_absolute() && path.is_file()).unwrap_or_else(|| PathBuf::from("git"))
@@ -39,7 +40,17 @@ pub(super) fn output(root: &Path, guard: &[String], args: &[&str]) -> Option<Vec
 }
 
 pub(super) fn limited_output(root: &Path, guard: &[String], args: &[&str], limit: u64) -> Result<Vec<u8>, OutputError> {
-    checked_output(command(root, guard, args), limit)
+    limited_output_until(root, guard, args, limit, None)
+}
+
+pub(super) fn limited_output_until(
+    root: &Path,
+    guard: &[String],
+    args: &[&str],
+    limit: u64,
+    cancel: Option<BorrowedFd<'_>>,
+) -> Result<Vec<u8>, OutputError> {
+    checked_output(command(root, guard, args), limit, cancel)
 }
 
 pub(super) fn working_diff(
@@ -54,7 +65,7 @@ pub(super) fn working_diff(
         .arg("--")
         .env_remove("GIT_LITERAL_PATHSPECS")
         .args(from.into_iter().chain(std::iter::once(path)).map(exact_pathspec));
-    checked_output(cmd, DIFF_LIMIT)
+    checked_output(cmd, DIFF_LIMIT, None)
 }
 
 fn exact_pathspec(path: &str) -> String {
@@ -73,7 +84,7 @@ fn exact_pathspec(path: &str) -> String {
 }
 
 pub(super) enum CommitDiff<'a> {
-    Files,
+    Files(BorrowedFd<'a>),
     Paths,
     File(&'a PendingFile),
 }
@@ -97,18 +108,18 @@ pub(super) fn commit_diff(root: &Path, hash: &str, diff: CommitDiff<'_>) -> Resu
             &format!("{hash}:{}", file.path),
             "--",
         ]);
-        return checked_output(cmd, DIFF_LIMIT);
+        return checked_output(cmd, DIFF_LIMIT, None);
     }
     let mut cmd = command(root, &[], &["diff-tree", "--root", "--diff-merges=first-parent", "--no-commit-id", "-r"]);
-    let limit = match diff {
-        CommitDiff::Files => {
+    let (limit, cancel) = match diff {
+        CommitDiff::Files(cancel) => {
             cmd.args(["-M", "--raw", "--numstat", "-z", "--end-of-options", hash, "--"]);
-            OUTPUT_LIMIT
+            (OUTPUT_LIMIT, Some(cancel))
         }
         CommitDiff::Paths => {
             // Keep both sides of renames visible, without counting lines in unrelated files.
             cmd.args(["-M", "--name-status", "-z", "--end-of-options", hash, "--"]);
-            OUTPUT_LIMIT
+            (OUTPUT_LIMIT, None)
         }
         CommitDiff::File(file) => {
             // A path also matches children. When a file becomes a folder or vice
@@ -119,15 +130,15 @@ pub(super) fn commit_diff(root: &Path, hash: &str, diff: CommitDiff<'_>) -> Resu
                 _ => "--diff-filter=MT",
             };
             cmd.args(WHOLE_FILE).args(["--no-renames", filter, "--end-of-options", hash, "--", &file.path]);
-            DIFF_LIMIT
+            (DIFF_LIMIT, None)
         }
     };
-    checked_output(cmd, limit)
+    checked_output(cmd, limit, cancel)
 }
 
 /// A missing ref or unrelated histories can give no object and exit with code 1.
 pub(super) fn optional_oid(root: &Path, guard: &[String], args: &[&str]) -> Option<Option<String>> {
-    let (status, raw) = capture(command(root, guard, args), 128).ok()?;
+    let (status, raw) = capture(command(root, guard, args), 128, None).ok()?;
     if status.success() {
         let mut oid = String::from_utf8(raw).ok()?;
         let len = oid.strip_suffix('\n')?.len();
@@ -251,31 +262,55 @@ fn command(root: &Path, guard: &[String], args: &[&str]) -> Command {
     c
 }
 
-fn checked_output(command: Command, limit: u64) -> Result<Vec<u8>, OutputError> {
-    let (status, out) = capture(command, limit)?;
+fn checked_output(command: Command, limit: u64, cancel: Option<BorrowedFd<'_>>) -> Result<Vec<u8>, OutputError> {
+    let (status, out) = capture(command, limit, cancel)?;
     if status.success() { Ok(out) } else { Err(OutputError::Failed) }
 }
 
-/// Kills and reaps a command that cannot finish within the time or output limit.
-fn capture(mut command: Command, limit: u64) -> Result<(ExitStatus, Vec<u8>), OutputError> {
+/// Kills and reaps a command on cancellation or when a limit is exceeded.
+fn capture(
+    mut command: Command,
+    limit: u64,
+    cancel: Option<BorrowedFd<'_>>,
+) -> Result<(ExitStatus, Vec<u8>), OutputError> {
     let started = Instant::now();
+    let mut stop = libc::pollfd { fd: cancel.map_or(-1, |fd| fd.as_raw_fd()), events: libc::POLLIN, revents: 0 };
+    if cancel.is_some() {
+        if term::wait_ready(std::slice::from_mut(&mut stop), 0) > 0 {
+            return Err(OutputError::Failed);
+        }
+        // On cancellation, stop any helpers that may be holding stdout open.
+        command.process_group(0);
+    }
     let mut child = command.stdout(Stdio::piped()).spawn().map_err(|_| OutputError::Unavailable)?;
     let pipe = child.stdout.take().expect("git stdout was piped");
-    let result = collect(pipe, limit, started).and_then(|out| wait(&mut child, started).map(|status| (status, out)));
+    let result = collect(pipe, limit, started, stop).and_then(|out| wait(&mut child, started, stop).map(|s| (s, out)));
     if result.is_err() {
-        let _ = child.kill();
+        if cancel.is_some()
+            && let Ok(group) = libc::pid_t::try_from(child.id())
+            && group > 1
+        {
+            // SAFETY: The child leads a new group and has not been reaped, so its ID
+            // still belongs to this command even if it has already exited.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        } else {
+            let _ = child.kill();
+        }
         let _ = child.wait();
     }
     result
 }
 
-fn collect(mut pipe: ChildStdout, limit: u64, started: Instant) -> Result<Vec<u8>, OutputError> {
+fn collect(mut pipe: ChildStdout, limit: u64, started: Instant, stop: libc::pollfd) -> Result<Vec<u8>, OutputError> {
     let mut out = Vec::new();
     let mut chunk = [0u8; 1 << 16];
+    let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }, stop];
     while running(started) {
-        let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
         if term::wait_ready(&mut fds, 200) <= 0 {
             continue;
+        }
+        if fds[1].revents != 0 {
+            break;
         }
         match pipe.read(&mut chunk) {
             Ok(0) => return Ok(out),
@@ -288,13 +323,19 @@ fn collect(mut pipe: ChildStdout, limit: u64, started: Instant) -> Result<Vec<u8
     Err(OutputError::Failed)
 }
 
-fn wait(child: &mut Child, started: Instant) -> Result<ExitStatus, OutputError> {
+fn wait(child: &mut Child, started: Instant, mut stop: libc::pollfd) -> Result<ExitStatus, OutputError> {
     // Closing stdout is not proof that the child has exited.
+    let stop = std::slice::from_mut(&mut stop);
+    if stop[0].fd >= 0 && term::wait_ready(stop, 0) > 0 {
+        return Err(OutputError::Failed);
+    }
     while running(started) {
         if let Some(status) = child.try_wait().map_err(|_| OutputError::Failed)? {
             return Ok(status);
         }
-        std::thread::sleep(Duration::from_millis(1));
+        if term::wait_ready(stop, 1) > 0 {
+            break;
+        }
     }
     Err(OutputError::Failed)
 }

@@ -59,6 +59,72 @@ fn claude_today_includes_earlier_activity_after_five_hours_have_passed() {
 }
 
 #[test]
+fn claude_reparses_unchanged_transcripts_when_the_clock_returns_to_the_previous_day() {
+    let f = Fixture::folder();
+    let midnight = Today::at(NOW, when::local_day(NOW)).since;
+    let before = midnight - 1;
+    let after = midnight + 1;
+    let records = [identified(&assistant(before, 2000, 0, 0), "yesterday"), assistant(after, 4000, 0, 0)].concat();
+    write(&f, CLAUDE, &records, after);
+    write(&f, AGENT, &assistant(before, 1000, 0, 0), before);
+
+    let mut usage = open(&f, after);
+    assert_eq!(activity(&usage).today, 4000);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0);
+
+    usage.fixed_now = Some(before);
+    assert!(usage.check());
+    assert_eq!(activity(&usage).today, 3000);
+    assert!(!activity(&usage).partial);
+
+    usage.fixed_now = Some(after);
+    assert!(usage.check());
+    assert_eq!(usage.bytes_read, 0, "advancing the cutoff needs no reread of unchanged files");
+    assert_eq!(activity(&usage).today, 4000);
+}
+
+#[test]
+fn claude_reparses_unchanged_transcripts_when_the_zone_moves_midnight() {
+    // TZ is process-wide; run this test in its own process.
+    const CHILD: &str = "MILO_TEST_CLAUDE_ZONE";
+    const TEST: &str = "usage::tests::activity::claude_reparses_unchanged_transcripts_when_the_zone_moves_midnight";
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env("TZ", "UTC")
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && printed.contains("1 passed"), "{printed}");
+        return;
+    }
+
+    let f = Fixture::folder();
+    let noon = local_noon();
+    let day = when::local_day(noon);
+    let midnight = noon - 12 * HOUR;
+    let records = [assistant(midnight - HOUR, 1000, 0, 0), assistant(noon, 2000, 0, 0)].concat();
+    write(&f, CLAUDE, &records, noon);
+    let mut usage = open(&f, noon);
+    assert_eq!(activity(&usage).today, 2000);
+
+    unsafe extern "C" {
+        fn tzset();
+    }
+    // SAFETY: This child runs only this test and no other thread reads the environment here.
+    unsafe { std::env::set_var("TZ", "Asia/Tokyo") };
+    // SAFETY: tzset takes no arguments and reads the TZ variable just set.
+    unsafe { tzset() };
+    assert_eq!(when::local_day(noon), day);
+    assert!(usage.check());
+    assert_eq!(usage.today.since, midnight - 9 * HOUR);
+    assert_eq!(activity(&usage).today, 3000);
+    assert!(!activity(&usage).partial);
+}
+
+#[test]
 fn multiple_claude_blocks_for_the_same_message_are_not_counted_twice() {
     let f = Fixture::folder();
     let now = local_noon();
