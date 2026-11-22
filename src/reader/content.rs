@@ -25,7 +25,8 @@ struct Location {
 }
 
 impl Location {
-    fn find(file: &Path) -> Option<Self> {
+    /// Finds the project that holds `file`, opened by `open`.
+    fn find(file: &Path, open: fn(&Path) -> Option<Repo>) -> Option<Self> {
         let file = std::path::absolute(file).ok()?;
         let dir = file.ancestors().skip(1).find(|dir| dir.is_dir())?;
         // Keep the final component even if it is a link. Within a known
@@ -46,12 +47,12 @@ impl Location {
                 }
                 let _ = enclosing_worktree(&lexical, &resolved)?;
             } else if let Some((logical, root)) = enclosing_worktree(dir, &resolved)? {
-                let repo = Repo::open(&root)?;
+                let repo = open(&root)?;
                 let relative = root.strip_prefix(&repo.root).ok()?.join(file.strip_prefix(logical).ok()?);
                 return Some(Self { repo, relative });
             }
         }
-        let repo = Repo::open(&resolved)?;
+        let repo = open(&resolved)?;
         let relative = resolved.join(tail).strip_prefix(&repo.root).ok()?.to_path_buf();
         Some(Self { repo, relative })
     }
@@ -148,7 +149,7 @@ impl Attributes {
 impl Reader {
     /// Opens `file`, which git may remember even if its directory is gone.
     pub fn open(file: &Path) -> Option<Self> {
-        let Location { mut repo, relative } = Location::find(file)?;
+        let Location { mut repo, relative } = Location::find(file, Repo::open_to_read)?;
         let root = Root::open(&repo.root).ok()?;
         if let Some(path) = relative.to_str() {
             repo.only(path);
@@ -200,7 +201,7 @@ impl Reader {
             (repo, tail.to_path_buf())
         } else {
             const NOT_REPO: &str = "This file is not in a git repository.";
-            let location = Location::find(&absolute).ok_or(NOT_REPO)?;
+            let location = Location::find(&absolute, Repo::open).ok_or(NOT_REPO)?;
             if location.repo.git_unavailable() {
                 return Err(GIT_UNAVAILABLE);
             }

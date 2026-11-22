@@ -226,7 +226,7 @@ fn file_dir(path: &Path) -> &Path {
 
 fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
     let dir = project_path(path);
-    Repo::open(dir).ok_or_else(|| {
+    Repo::open_to_read(dir).ok_or_else(|| {
         if dir.is_file() {
             format!("{0} is a file; to read it: milo view {0}", dir.display())
         } else {

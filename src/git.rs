@@ -295,6 +295,8 @@ pub struct Repo {
     empty_tree: OnceCell<String>,
     index_lock: Option<PathBuf>,
     config: run::Config,
+    /// The settings `open_to_read` read, for the first status to use.
+    opened_config: Option<run::Config>,
     read_for: ReadFor,
     /// When set, status is limited to this path.
     file: Option<String>,
@@ -440,7 +442,20 @@ fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
 impl Repo {
     /// Opens the repository containing `dir`, or the directory as a plain folder.
     pub fn open(dir: &Path) -> Option<Self> {
-        let discovered = git_dirs(dir);
+        Self::found(dir, git_dirs(dir))
+    }
+
+    /// Opens as `open` does, for a caller that reads the status next. The Git
+    /// settings that read starts with are read while the repository is found,
+    /// so opening takes one command's time, not two.
+    pub fn open_to_read(dir: &Path) -> Option<Self> {
+        let (config, discovered) = run::config_alongside(dir, || git_dirs(dir));
+        let mut repo = Self::found(dir, discovered)?;
+        repo.opened_config = config.filter(|_| repo.git);
+        Some(repo)
+    }
+
+    fn found(dir: &Path, discovered: Result<Option<GitDirs>, &'static str>) -> Option<Self> {
         let git_unavailable = discovered.is_err();
         let (root, git, git_dir, common_dir) = match discovered.ok().flatten() {
             Some(found) => (found.root, true, found.git, found.common),
@@ -636,7 +651,10 @@ impl Repo {
 
     fn status_raw(&mut self) -> Option<Vec<u8>> {
         // Filters added while the pane is open must be disabled too.
-        self.config = self.require(run::config(&self.root))?;
+        self.config = match self.opened_config.take() {
+            Some(config) => config,
+            None => self.require(run::config(&self.root))?,
+        };
         let path = self.file.as_deref();
         let args = [
             "status",
@@ -1333,6 +1351,34 @@ mod tests {
         assert!(repo.ok());
         for marker in ["filter-ran", "hook-ran", "fsmonitor-ran"] {
             assert!(!f.root.join(".git").join(marker).exists(), "reading ran the driver for {marker}");
+        }
+    }
+
+    #[test]
+    fn a_repository_opened_to_read_disables_filters_set_before_and_after_its_first_status() {
+        let f = Fixture::new();
+        f.write(".gitattributes", "*.txt filter=mark\n*.md filter=late\n");
+        f.write("page.txt", "first\n");
+        f.write("notes.md", "first\n");
+        f.commit("first");
+        f.write("page.txt", "changed\n");
+        f.git(&["config", "filter.mark.clean", "touch .git/mark-ran; cat"]);
+        f.git(&["config", "filter.mark.required", "true"]);
+
+        let mut repo = Repo::open_to_read(&f.root).unwrap();
+        repo.read();
+        assert_eq!(repo.pending().unwrap().len(), 1);
+        assert!(repo.opened_config.is_none(), "only the first status may use the settings read at opening");
+
+        f.git(&["config", "filter.late.clean", "touch .git/late-ran; cat"]);
+        f.git(&["config", "filter.late.required", "true"]);
+        f.write("notes.md", "changed\n");
+        assert!(repo.poll(&[]));
+        repo.read();
+        assert_eq!(repo.pending().unwrap().len(), 2);
+        assert!(repo.ok());
+        for marker in ["mark-ran", "late-ran"] {
+            assert!(!f.root.join(".git").join(marker).exists(), "reading ran the filter for {marker}");
         }
     }
 

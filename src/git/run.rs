@@ -175,6 +175,16 @@ pub(super) fn config(root: &Path) -> Option<Config> {
     Some(Config { guard: filters.into_iter().map(str::to_owned).collect(), has_remote })
 }
 
+/// Reads the settings of the repository holding `dir` on a thread of its own
+/// while `main` runs on this one. `None` leaves them to be read later.
+pub(super) fn config_alongside<T>(dir: &Path, main: impl FnOnce() -> T) -> (Option<Config>, T) {
+    std::thread::scope(|scope| {
+        let reading = std::thread::Builder::new().spawn_scoped(scope, || config(dir)).ok();
+        let answer = main();
+        (reading.and_then(|thread| thread.join().ok().flatten()), answer)
+    })
+}
+
 /// Read the user's Git settings, but always inspect the requested checkout
 /// with milo's own output options, even when launched by Git.
 fn isolated(mut c: Command) -> Command {
