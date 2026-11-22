@@ -126,7 +126,7 @@ static void TerminalEcho(void) {
     int master, slave;
     char path[PATH_MAX];
     assert(openpty(&master, &slave, path, NULL, NULL) == 0);
-    int writer = open(path, O_WRONLY | O_NOCTTY);
+    int writer = OpenTTYOutput(path);
     assert(writer >= 0);
     struct termios original, saved, current;
     assert(tcgetattr(slave, &original) == 0);
@@ -142,6 +142,38 @@ static void TerminalEcho(void) {
     close(master);
 }
 
+static void StalledTerminalTeardown(void) {
+    int master, slave;
+    char path[PATH_MAX];
+    assert(openpty(&master, &slave, path, NULL, NULL) == 0);
+    int writer = OpenTTYOutput(path);
+    assert(writer >= 0 && (fcntl(writer, F_GETFL) & O_NONBLOCK));
+    struct termios saved, current;
+    assert(tcgetattr(slave, &current) == 0);
+    current.c_lflag |= ECHO | ECHONL | ISIG;
+    assert(tcsetattr(slave, TCSANOW, &current) == 0);
+    assert(QuietTTY(writer, &saved));
+
+    // No reader drains the private master. Keep it open and stop slave output.
+    static const char filler[1024] = {0};
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        assert(tcflow(slave, TCOOFF) == 0);
+        BOOL blocked = NO;
+        for (int i = 0; i < 1024 && !blocked; ++i) blocked = !WriteAll(writer, filler, sizeof(filler));
+        assert(blocked);
+        assert(!RestoreMarkerTerminal(writer, YES, &saved));
+        dispatch_semaphore_signal(finished);
+    });
+    assert(dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+    assert(tcgetattr(slave, &current) == 0 && current.c_lflag == saved.c_lflag);
+    assert(current.c_cc[VINTR] == saved.c_cc[VINTR] && current.c_cc[VQUIT] == saved.c_cc[VQUIT]);
+    assert(tcflow(slave, TCOON) == 0);
+    close(writer);
+    close(slave);
+    close(master);
+}
+
 static void StartupDeadline(void) {
     NSTimeInterval since = 0;
     for (int seconds = 10; seconds < 16; ++seconds) {
@@ -152,6 +184,29 @@ static void StartupDeadline(void) {
     assert(!LayoutDeadlineElapsed(17, &since, NO) && since == 0);
     assert(!LayoutDeadlineElapsed(30, &since, YES) && since == 30);
     assert(LayoutDeadlineElapsed(36, &since, YES));
+}
+
+static void MenuBetweenTicks(void) {
+    NSTimeInterval since = 0;
+    BOOL menuOpen = NO;
+    assert(!LayoutDeadlineElapsed(10, &since, CanProbeLayout(YES, YES, menuOpen)));
+    assert(!LayoutDeadlineElapsed(15.9, &since, CanProbeLayout(YES, YES, menuOpen)));
+    UpdateMenuState(kAXMenuOpenedNotification, &menuOpen, &since);
+    assert(menuOpen && since == 0);
+    UpdateMenuState(kAXMenuClosedNotification, &menuOpen, &since);
+    assert(!menuOpen && !LayoutDeadlineElapsed(16.1, &since, CanProbeLayout(YES, YES, menuOpen)));
+    assert(since == 16.1);
+}
+
+static void PanelProofTiming(void) {
+    NSTimeInterval since = 10, started = 15.9;
+    BOOL everShown = NO;
+    assert(ProofFresh(16, started));
+    assert(!ProofFresh(16.3, started)); // The frame lookup or mutation outlasted the proof.
+    assert(!CreditVisiblePanel(16, started, NO, &everShown) && !everShown);
+    assert(!CreditVisiblePanel(16.3, started, YES, &everShown) && !everShown);
+    assert(CreditVisiblePanel(16, started, YES, &everShown));
+    assert(!(!everShown && LayoutDeadlineElapsed(16, &since, YES))); // Credit before the startup timeout.
 }
 
 static BOOL ProbeSizedTerminal(int tty, unsigned short columns, unsigned short rows, BOOL menuOpen) {
@@ -245,7 +300,10 @@ int main(void) {
         AXPaneOverlap();
         WindowOrdering();
         TerminalEcho();
+        StalledTerminalTeardown();
         StartupDeadline();
+        MenuBetweenTicks();
+        PanelProofTiming();
         StartupAfterResizeOrMenu();
         AcquisitionDeadline();
         puts("preview geometry tests passed");

@@ -472,15 +472,26 @@ static BOOL ScreenFrame(Geometry geometry, NSRect *pane, CGDirectDisplayID *disp
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
+// Both callers open their output nonblocking. A stalled PTY does not get to hold
+// the AppKit loop or postpone restoring termios; partial writes advance the span.
 static BOOL WriteAll(int fd, const char *bytes, size_t length) {
     while (length) {
         ssize_t count = write(fd, bytes, length);
-        if (count < 0 && errno == EINTR) continue;
         if (count <= 0) return NO;
         bytes += count;
         length -= (size_t)count;
     }
     return YES;
+}
+
+static int OpenTTYOutput(const char *path) {
+    return open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+}
+
+static void WriteDiagnostic(int fd, const char *reason) {
+    char line[256];
+    int length = snprintf(line, sizeof(line), "milo preview: %s\n", reason);
+    if (length > 0 && (size_t)length < sizeof(line)) WriteAll(fd, line, (size_t)length);
 }
 
 static BOOL QuietTTY(int fd, struct termios *saved) {
@@ -491,9 +502,7 @@ static BOOL QuietTTY(int fd, struct termios *saved) {
 }
 
 static BOOL RestoreTTY(int fd, const struct termios *saved) {
-    int status;
-    do { status = tcsetattr(fd, TCSAFLUSH, saved); } while (status < 0 && errno == EINTR);
-    return status == 0;
+    return tcsetattr(fd, TCSANOW, saved) == 0;
 }
 
 static BOOL MarkerFits(unsigned short columns, unsigned short rows) {
@@ -511,6 +520,35 @@ static BOOL LayoutDeadlineElapsed(NSTimeInterval now, NSTimeInterval *since, BOO
     }
     if (!*since) *since = now;
     return now - *since >= LayoutProofTimeout;
+}
+
+static BOOL ProofFresh(NSTimeInterval now, NSTimeInterval started) {
+    return started > 0 && now >= started && now - started < ProofLifetime;
+}
+
+static BOOL CreditVisiblePanel(NSTimeInterval now, NSTimeInterval started, BOOL visible, BOOL *everShown) {
+    BOOL provedVisible = visible && ProofFresh(now, started);
+    *everShown = *everShown || provedVisible;
+    return provedVisible;
+}
+
+static void UpdateMenuState(CFStringRef notification, BOOL *menuOpen, NSTimeInterval *unprovenSince) {
+    if (CFEqual(notification, kAXMenuOpenedNotification)) {
+        *menuOpen = YES;
+        *unprovenSince = 0;
+    } else if (CFEqual(notification, kAXMenuClosedNotification)) {
+        *menuOpen = NO;
+    }
+}
+
+static BOOL RestoreMarkerTerminal(int fd, BOOL alternateScreen, const struct termios *saved) {
+    // Restore modes even if there is no space for the alternate-screen escape.
+    BOOL restored = !saved || RestoreTTY(fd, saved);
+    if (alternateScreen) {
+        static const char restore[] = "\033[?25h\033[?1049l";
+        restored = WriteAll(fd, restore, sizeof(restore) - 1) && restored;
+    }
+    return restored;
 }
 
 @interface MiloPreviewAnchor : NSObject <NSWindowDelegate> {
@@ -586,18 +624,11 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     if (_finished) return;
     _finished = YES;
     [self invalidate];
-    BOOL restored = YES;
-    if (_alternateScreen) {
-        static const char restore[] = "\033[?25h\033[?1049l";
-        restored = WriteAll(_tty, restore, sizeof(restore) - 1);
-        _alternateScreen = NO;
-    }
-    if (_ttyQuiet) {
-        restored = RestoreTTY(_tty, &_savedTTY) && restored;
-        _ttyQuiet = NO;
-    }
+    BOOL restored = RestoreMarkerTerminal(_tty, _alternateScreen, _ttyQuiet ? &_savedTTY : NULL);
+    _alternateScreen = NO;
+    _ttyQuiet = NO;
     if (reason || !restored) _status = 1;
-    if (reason && restored) dprintf(_tty, "milo preview: %s\n", reason);
+    if (reason && restored) WriteDiagnostic(_tty, reason);
     [NSApp stop:nil];
     // An AppKit run started by a command-line process needs an event to observe -stop:.
     NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0
@@ -653,8 +684,7 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
 }
 
 - (void)receivedAXNotification:(CFStringRef)notification {
-    if (CFEqual(notification, kAXMenuOpenedNotification)) _menuOpen = YES;
-    if (CFEqual(notification, kAXMenuClosedNotification)) _menuOpen = NO;
+    UpdateMenuState(notification, &_menuOpen, &_unprovenSince);
     [self invalidate];
 }
 
@@ -761,7 +791,8 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         [self invalidate];
         return;
     }
-    if (!proof.windowID || now - started >= ProofLifetime || !ScreenFrame(proof, &frame, &display)) {
+    if (!proof.windowID || !ProofFresh(now, started) || !ScreenFrame(proof, &frame, &display) ||
+        !ProofFresh(ProofClock(NULL), started)) {
         _cached = nil;
         [self conceal];
         if (redraw && now - started < ProofLifetime && now - _lastMarkerPaint >= LayoutProofInterval) [self drawMarker];
@@ -810,10 +841,16 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
             return;
         }
         [_panel setFrame:frame display:NO];
+        if (generation != _generation || ![self frontmostRex] || !ProofFresh(ProofClock(NULL), started)) {
+            [self invalidate];
+            if (full) _lastFullAttempt = completed;
+            return;
+        }
         // Relative ordering at the normal level, never orderFrontRegardless or app activation.
         [_panel orderWindow:NSWindowAbove relativeTo:(NSInteger)proof.windowID];
-        if (_panel.visible && !NSEqualRects(_panel.frame, frame)) {
+        if (_panel.visible && (!NSEqualRects(_panel.frame, frame) || !ProofFresh(ProofClock(NULL), started))) {
             [self invalidate];
+            if (full) _lastFullAttempt = completed;
             return;
         }
     }
@@ -829,6 +866,15 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     BOOL inFront = _requested && !_sessionInactive && !_screensAsleep && [self frontmostRex];
     BOOL canProbe = CanProbeLayout(inFront, markerReady, _menuOpen);
+    if (canProbe) {
+        // A panel may have reached the active Space on the last fresh frame before the cutoff.
+        BOOL visible = _panel.visible && _panel.onActiveSpace && (_panel.occlusionState & NSWindowOcclusionStateVisible);
+        now = ProofClock(NULL);
+        if (!CreditVisiblePanel(now, _lastProof, visible, &_everShown)) {
+            if (_panel.visible) [self invalidate];
+            else if (_lastProof && !ProofFresh(now, _lastProof)) [self conceal];
+        }
+    }
     if (!_everShown && LayoutDeadlineElapsed(now, &_unprovenSince, canProbe)) {
         [self finish:"could not verify the Rex pane's Accessibility geometry; close palettes, focus a Rex terminal, and use a window on one display outside full screen"];
         return;
@@ -836,11 +882,6 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     if (!canProbe) {
         if (_candidate.windowID || _cached || _probePending) [self invalidate];
         return;
-    }
-    if (_lastProof && now - _lastProof >= ProofLifetime) [self conceal];
-    if (_panel.visible) {
-        if (_panel.onActiveSpace && (_panel.occlusionState & NSWindowOcclusionStateVisible)) _everShown = YES;
-        else [self invalidate];
     }
     if (_probePending) return;
     MiloAXProof *cached = _cached;
@@ -978,13 +1019,13 @@ int milo_preview_run(const char *url, const char *marker, int state_fd) {
             fprintf(stderr, "milo preview: invalid URL or missing Rex watcher\n");
             return 1;
         }
-        int tty = open("/dev/tty", O_WRONLY | O_CLOEXEC | O_NOCTTY);
+        int tty = OpenTTYOutput("/dev/tty");
         if (tty < 0) {
             fprintf(stderr, "milo preview: no controlling Rex terminal\n");
             return 1;
         }
         if (!AXIsProcessTrusted()) {
-            dprintf(tty, "milo preview: %s\n", AccessibilityUnavailable);
+            WriteDiagnostic(tty, AccessibilityUnavailable);
             close(tty);
             return 1;
         }
@@ -993,7 +1034,7 @@ int milo_preview_run(const char *url, const char *marker, int state_fd) {
         if (outputFlags < 0 || fcntl(STDOUT_FILENO, F_SETFL, outputFlags | O_NONBLOCK) < 0 ||
             fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1) < 0 ||
             ![[NSApplication sharedApplication] setActivationPolicy:NSApplicationActivationPolicyAccessory]) {
-            dprintf(tty, "milo preview: could not initialize the nonactivating panel\n");
+            WriteDiagnostic(tty, "could not initialize the nonactivating panel");
             close(tty);
             return 1;
         }
@@ -1001,7 +1042,7 @@ int milo_preview_run(const char *url, const char *marker, int state_fd) {
         AXError timeout = allApps ? AXUIElementSetMessagingTimeout(allApps, AXMessageTimeout) : kAXErrorFailure;
         if (allApps) CFRelease(allApps);
         if (timeout != kAXErrorSuccess) {
-            dprintf(tty, "milo preview: could not bound Accessibility geometry requests\n");
+            WriteDiagnostic(tty, "could not bound Accessibility geometry requests");
             close(tty);
             return 1;
         }
