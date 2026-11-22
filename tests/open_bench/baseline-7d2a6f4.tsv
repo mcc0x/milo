@@ -1,0 +1,22 @@
+# base revision: 7d2a6f418763c8140f8b1f58af62e481a8a61bd4
+# timed checkout: 30342d8667c8bc32638b555dfbb856c10d6cff96
+# Apple M5 Pro; Darwin 27.2.0 arm64; rustc 1.100.0 (0ef1bc386 2026-11-09) (Homebrew)
+# milo open bench: 40x50 panes, 100x50 reader, 15 runs, microseconds
+# macos aarch64; timed: milo 0.1.5
+# base: milo 0.1.5
+# ordinary: 400 files, 300 commits, 3 unpushed, 5 edited, 3 new
+# large: 50000 files, 2000 commits, 20 unpushed, 200 edited, 500 new
+# history-slowest-key-in-refresh: Down and Up for 1.5s after a file is rewritten
+scenario	measure	samples	median	min	max	base_median	ratio
+ordinary	outline-first-frame	15	66856	48155	141112	78227	0.85
+ordinary	outline-search-open	15	88	67	125	84	1.04
+ordinary	outline-search-key	120	26	14	56	27	0.98
+ordinary	reader-first-frame	15	58040	36286	79997	65535	0.89
+ordinary	history-first-frame	15	61257	45011	94219	72103	0.85
+ordinary	history-slowest-key-in-refresh	15	217	124	626	26157	0.01
+large	outline-first-frame	15	253011	246142	266946	276947	0.91
+large	outline-search-open	15	2095	1964	3646	2151	0.97
+large	outline-search-key	120	600	513	937	600	1.00
+large	reader-first-frame	15	72567	56143	78115	79468	0.91
+large	history-first-frame	15	177659	162447	202626	185908	0.96
+large	history-slowest-key-in-refresh	15	2638	441	11124	135074	0.02

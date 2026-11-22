@@ -271,7 +271,7 @@ sh tests/reader-compare.sh REVISION > report.tsv    # this checkout beside that 
 
 `tests/reader_bench.rs` and `tests/rex_lab.rs` use only what a built Milo offers from outside: its commands, what it draws in a terminal and, in the lab, the requests its browser editor accepts. So they can check a build they were not compiled with: set `MILO_TEST_BINARY` to a Milo built from another branch. Where a check depends on a feature that only some builds have, ask the build rather than the branch. The reader report's `syntax` column, for instance, says whether each build coloured each file as code, so a file in a language one build knows and the other does not is timed as code for the first and as plain text for the second.
 
-Four more timing tests follow the reader's. `tests/bench/report.rs` holds what they share: the variables above, the turn-about order and the report. `tests/web_bench/`, `tests/history_bench/` and `tests/usage_idle/` each hold such a report against the revision in its name.
+Four more timing tests follow the reader's. `tests/bench/report.rs` holds what they share: the variables above, the turn-about order and the report. `tests/web_bench/`, `tests/history_bench/`, `tests/open_bench/` and `tests/usage_idle/` each hold such a report against the revision in its name.
 
 ```sh
 cargo test --release --locked --test web_bench -- --ignored --nocapture
@@ -481,6 +481,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/menu-handoff.swift` | Checks that the menu app hands the browser its private link through an owner-only file. |
 | `tests/menubar.sh` | Verifies the built menu app's signature, runs those three checks, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
 | `tests/open_bench.rs` | Times the first frame of the outline, history and reader on an ordinary and a large project, the outline's search, and History's keys during a refresh. |
+| `tests/open_bench/baseline-7d2a6f4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |
 | `tests/presence.rs` | Runs `milo presence` and its helper against stand-ins for Discord and Rex, frame by frame. |
 | `tests/reader-compare.sh` | Builds another revision and times its reader beside this checkout's. |
