@@ -91,6 +91,21 @@ impl Dialect {
         let end = lua_end(b, from + usize::from(level) + 4, level.into());
         Some((end.unwrap_or(b.len()), end.is_none().then_some(Delimiter::LuaComment(level))))
     }
+
+    /// A bit for each ASCII byte at which `string` or `comment` can find an opener.
+    pub(super) fn openers(self) -> u128 {
+        let bytes: &[u8] = match self {
+            Self::Plain => b"",
+            Self::Rust => b"bcr",
+            Self::Cpp => b"RuUL",
+            Self::Csharp => b"\"",
+            Self::Php | Self::Heredoc => b"<",
+            Self::Javascript => b"`",
+            Self::Lua => b"[-",
+            Self::Swift => b"#",
+        };
+        bytes.iter().fold(0, |bits, &byte| bits | 1 << byte)
+    }
 }
 
 impl Delimiter {

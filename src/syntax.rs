@@ -247,9 +247,14 @@ impl Lang {
         if i <= indent {
             i = self.line_start(b, indent, emit);
         }
+        let openers = self.openers();
         while i < b.len() {
-            if b[i].is_ascii_whitespace() {
+            let c = b[i];
+            if c.is_ascii_whitespace() {
                 i += 1;
+            } else if c.is_ascii() && openers >> c & 1 == 0 {
+                // Most bytes begin neither a comment nor a string, in megabytes of one line too.
+                i = self.code::<DRAW>(text, i, emit);
             } else if let Some(end) = self.comment(b, i, state, emit) {
                 i = end;
             } else if let Some(end) = self.quote::<DRAW>(b, i, state, emit) {
@@ -258,6 +263,18 @@ impl Lang {
                 i = self.code::<DRAW>(text, i, emit);
             }
         }
+    }
+
+    /// A bit for each ASCII byte at which a comment or a string can begin, so
+    /// that neither is looked for at any other. An empty mark begins at them all.
+    fn openers(&self) -> u128 {
+        let comments = self.line_comments.iter().chain(self.block_comments.iter().map(|(open, _)| open));
+        let marks = comments.chain(self.quotes.iter().map(|quote| &quote.open));
+        marks.fold(self.dialect.openers(), |bits, mark| match mark.as_bytes().first() {
+            Some(&first) if first.is_ascii() => bits | 1 << first,
+            Some(_) => bits,
+            None => u128::MAX,
+        })
     }
 
     /// Scans part of a line for another walker. The fixed callback type keeps
@@ -701,6 +718,41 @@ mod tests {
                 valid_spans("é", &out);
                 if lang.grammar == Grammar::Code {
                     assert_eq!(state, State::Code);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn comments_and_strings_begin_only_at_the_bytes_a_language_lists_as_openers() {
+        let langs = || FILE_LANGS.iter().chain(NAMED_LANGS);
+        // Openers whose closers depend on them, then every mark of every language.
+        let mut marks: Vec<String> = [
+            "r#\"x\"#", "br\"x\"", "c\"x\"", "R\"(x)\"", "u8R\"(x)\"", "uR\"(x)\"", "UR\"(x)\"", "LR\"(x)\"",
+            "\"\"\"x\"\"\"", "<<<EOT", "<<<'EOT'", "<<EOT", "<<~'EOT'", "<<-\"EOT\"", "`x`", "[[x]]", "[==[x]==]",
+            "--[[x]]", "--[=[x]=]", "#\"x\"#", "##\"\"\"x",
+        ]
+        .map(String::from)
+        .into();
+        for (_, lang) in langs() {
+            marks.extend(lang.line_comments.iter().map(|mark| (*mark).to_owned()));
+            marks.extend(lang.block_comments.iter().map(|(open, _)| (*open).to_owned()));
+            marks.extend(lang.quotes.iter().map(|quote| format!("{}x{}", quote.open, quote.close)));
+        }
+        // Any byte before a quote or itself, as `b"` and `//` are.
+        for byte in (0..128).map(char::from) {
+            marks.extend([format!("{byte}\"x\""), format!("{byte}'x'"), format!("{byte}{byte}x"), byte.into()]);
+        }
+        for (names, lang) in langs() {
+            let openers = lang.openers();
+            for mark in &marks {
+                for before in ["", " ", "a", "(", "#"] {
+                    let text = format!("{before}{mark} x");
+                    let (b, i) = (text.as_bytes(), before.len());
+                    let comment = lang.comment(b, i, &mut State::Code, &mut |_| {}).is_some();
+                    let string = lang.quote::<true>(b, i, &mut State::Code, &mut |_| {}).is_some();
+                    let listed = !b[i].is_ascii() || openers >> b[i] & 1 == 1;
+                    assert!(listed || !(comment || string), "{names:?}: {text:?}");
                 }
             }
         }

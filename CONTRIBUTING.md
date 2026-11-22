@@ -225,7 +225,7 @@ Code colouring uses `src/syntax.rs` for scanning, `src/syntax/langs.rs` for lang
 3. Add a test with a few idiomatic lines and the classes you expect.
 4. Add its row to the language table in `docs/panes.md`.
 
-The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long.
+The scanner is not a parser and is not meant to become one. It knows comments, strings, numbers and reserved words, and guesses types and calls from how a name is written. If a language needs more than a table can say, it is fine for milo to colour it imperfectly. A search for a closer must not start again from every opener on a line: a line can be megabytes long. For the same reason a comment or a string is looked for only at a byte that can begin one: the first byte of each mark in the tables, and those `Dialect::openers` lists for a dialect, which a new opener in `delimiters.rs` must be added to.
 
 ### Adding a formatter
 
