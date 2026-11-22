@@ -12,6 +12,7 @@
 .host-choice { display: flex; align-items: center; gap: .6rem; min-height: 44px; padding-block: .2rem; cursor: pointer; }
 .host-choice input { flex: none; inline-size: 1.1rem; block-size: 1.1rem; accent-color: var(--blue); }
 .host-bundle { inline-size: 100%; min-block-size: 6rem; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--paper); font: .78rem/1.45 var(--mono); resize: vertical; }
+#import-preview-button[aria-disabled="true"] { cursor: default; opacity: .56; }
 .host-error { margin: 0; color: #79291f; font-size: .82rem; overflow-wrap: anywhere; }
 .host-error:empty { display: none; }
 .host-preview { display: grid; gap: .6rem; padding: .65rem .75rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--paper); }

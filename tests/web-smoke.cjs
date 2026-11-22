@@ -378,7 +378,7 @@ async function usageToolsPersisted(page) {
 }
 
 // One host stands for both ends: what it exports is edited by hand and imported again.
-async function copySettingsThroughHosts(page, env) {
+async function copySettingsThroughHosts(page, env, cwd) {
   const preferences = join(env.XDG_CONFIG_HOME, 'milo', 'preferences.conf');
   const before = await readFile(preferences, 'utf8');
   await section(page, 'Hosts').click();
@@ -418,20 +418,45 @@ async function copySettingsThroughHosts(page, env) {
   assert.doesNotMatch(bundle, /tab_titles|deepseek|icons/, 'only the chosen group, and no integration or account');
   assert.doesNotMatch(bundle, /^\[project\]$/m, 'the replacement export uses the current scope');
 
-  const incoming = `${bundle.replace('usage_claude = always', 'usage_claude = hide')}tab_titles = false\nusage_deepseek = always\n`;
+  const incoming = `${bundle.replace('usage_claude = always', 'usage_claude = hide')}tab_titles = false\nusage_deepseek = always\n`
+    + '\n[project]\nname = example\nusage_claude = hide\n';
   await page.getByRole('textbox', {name: /^Paste a bundle/}).fill(incoming);
   const importButton = button(page, 'Import 1 setting');
   assert.equal(await importButton.count(), 0, 'nothing can be imported before a preview');
-  await button(page, 'Preview').click();
+  const previewButton = button(page, 'Preview');
+  let finishPreview;
+  const previewGate = new Promise(resolve => { finishPreview = resolve; });
+  await page.route('**/api/transfer', route => previewGate.then(() => route.continue()), {times: 1});
+  try {
+    await previewButton.focus();
+    await page.keyboard.press('Enter');
+    await previewButton.and(page.locator('[aria-disabled="true"]')).waitFor();
+    assert(await previewButton.evaluate(el => el === document.activeElement), 'Preview retains focus while loading');
+  } finally {
+    finishPreview();
+  }
+  await status(page, 'Preview ready. 1 setting would change.').waitFor();
+  assert(await previewButton.evaluate(el => el === document.activeElement), 'Preview remains focused after the response');
+  await page.keyboard.press('Tab');
+  assert(await importButton.evaluate(el => el === document.activeElement), 'one Tab moves from Preview to Import');
   const preview = page.getByRole('group', {name: 'What this import changes', exact: true});
   const row = preview.getByRole('row', {name: /^Claude Code in Usage/});
   await row.waitFor();
   assert.deepEqual(await row.getByRole('cell').allTextContents(), ['always', 'hide']);
   await preview.getByText('Left out: tab_titles (set on each host, never imported)').waitFor();
   await preview.getByText('Left out: usage_deepseek (set on each host, never imported)').waitFor();
+  const map = button(preview, `Apply to ${basename(cwd)}`);
+  await map.press('Enter');
+  await status(page, 'Preview ready. 2 settings would change.').waitFor();
+  assert(await previewButton.evaluate(el => el === document.activeElement), 'mapping does not lose keyboard focus');
+  await button(preview, 'Don’t apply').press('Enter');
+  await status(page, 'Preview ready. 1 setting would change.').waitFor();
+  assert(await previewButton.evaluate(el => el === document.activeElement), 'unmapping does not lose keyboard focus');
   assert.equal(await readFile(preferences, 'utf8'), before, 'a preview saves nothing');
 
-  await importButton.click();
+  await page.keyboard.press('Tab');
+  assert(await importButton.evaluate(el => el === document.activeElement), 'one Tab also reaches Import after unmapping');
+  await page.keyboard.press('Enter');
   await status(page, 'Imported 1 setting. Undo is in Hosts if you change your mind.').waitFor();
   const imported = await readFile(preferences, 'utf8');
   assert.match(imported, /^usage_claude = hide$/m);
@@ -1162,7 +1187,7 @@ async function main() {
         assert.equal(await number(page, name).inputValue(), value, `${name} persisted across a server restart`);
       }
       await usageToolsPersisted(page);
-      await copySettingsThroughHosts(page, env);
+      await copySettingsThroughHosts(page, env, cwd);
       await rejectStaleDone(desktop, page, url);
       await confirmFromMobileFooter(browser, url, exited);
     });

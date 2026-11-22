@@ -155,10 +155,11 @@ function Export() {
   );
 }
 
-function Preview({preview, worktree, here, mapHere}: {
+function Preview({preview, worktree, here, busy, mapHere}: {
   preview: TransferPreview;
   worktree: string | null;
   here: string | null;
+  busy: boolean;
   mapHere: (project: string | null) => void;
 }) {
   const worktreeName = worktree?.split('/').filter(Boolean).at(-1);
@@ -175,7 +176,7 @@ function Preview({preview, worktree, here, mapHere}: {
             <p className="setting-detail">
               Not applied: no worktree here starts from the same commit.
               {worktree && section.project !== null ? (
-                <button type="button" className="button text-button" data-map={section.project}
+                <button type="button" className="button text-button" data-map={section.project} disabled={busy}
                   onClick={() => mapHere(section.project)}>Apply to {worktreeName}</button>
               ) : ' Open Settings from the matching worktree to choose it.'}
             </p>
@@ -195,7 +196,7 @@ function Preview({preview, worktree, here, mapHere}: {
                 {section.unchanged === 1 ? '1 setting already matches.' : `${section.unchanged} settings already match.`}</p> : null}
               {section.kind === 'worktree' && section.project !== null && here === section.project ? (
                 <p className="setting-detail">Chosen by you.
-                  <button type="button" className="button text-button" onClick={() => mapHere(null)}>Don’t apply</button></p>
+                  <button type="button" className="button text-button" disabled={busy} onClick={() => mapHere(null)}>Don’t apply</button></p>
               ) : null}
             </>
           )}
@@ -213,8 +214,11 @@ function Import() {
   const [preview, setPreview] = useState<TransferPreview | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const previewButton = useRef<HTMLButtonElement>(null);
+  const changes = preview?.changes ?? 0;
 
   async function look(bundle: string, project: string | null) {
+    if (busy) return;
     setBusy(true);
     setError('');
     try {
@@ -255,18 +259,27 @@ function Import() {
           setError('');
         }}/>
       <div className="button-row">
-        <button type="button" className="button secondary" id="import-preview-button" disabled={!text.trim() || busy}
+        <button ref={previewButton} type="button" className="button secondary" id="import-preview-button"
+          disabled={!text.trim()} aria-disabled={busy || undefined}
           onClick={() => { void look(text, null); }}>Preview</button>
         <button type="button" className="button primary" id="import-apply" hidden={!preview}
-          disabled={busy || running || hasUnsavedChanges || !preview?.changes} onClick={() => { void apply(); }}>
-          {preview?.changes === 1 ? 'Import 1 setting' : `Import ${preview?.changes ?? 0} settings`}
+          disabled={busy || running || hasUnsavedChanges || !changes} onClick={() => { void apply(); }}>
+          {changes === 1 ? 'Import 1 setting' : `Import ${changes} settings`}
         </button>
       </div>
       {preview && hasUnsavedChanges ? <p className="setting-detail">Save or discard your unsaved changes before importing.</p> : null}
-      {preview && !preview.changes ? <p className="setting-detail" id="import-nothing">Nothing to change: this host already has these settings.</p> : null}
+      <p className={preview && !changes ? 'setting-detail' : 'sr-only'} id="import-nothing" role="status">
+        {preview ? changes === 0 ? 'Nothing to change: this host already has these settings.'
+          : changes === 1 ? 'Preview ready. 1 setting would change.' : `Preview ready. ${changes} settings would change.`
+          : ''}
+      </p>
       <p className="host-error" id="import-error" role="alert">{error}</p>
-      {preview ? <Preview preview={preview} worktree={state.context.worktree} here={here}
-        mapHere={project => { void look(text, project); }}/> : null}
+      {preview ? <Preview preview={preview} worktree={state.context.worktree} here={here} busy={busy}
+        mapHere={project => {
+          // The clicked mapping control is replaced by the result.
+          previewButton.current?.focus();
+          void look(text, project);
+        }}/> : null}
     </section>
   );
 }
