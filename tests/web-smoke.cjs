@@ -151,6 +151,7 @@ async function manageMenuApp(page, url, env) {
     return response.json();
   };
   const {menubar} = await readState();
+  assert.equal(menubar.indicator, 'quota', 'a fresh profile uses the quota indicator');
   const menuTab = section(page, 'Menu Bar');
   assert.equal(await menu.count(), 0, 'menu app settings have their own section');
   assert.equal(await menuTab.isVisible(), menubar.installed !== null, 'Menu Bar navigation follows server availability');
@@ -162,16 +163,17 @@ async function manageMenuApp(page, url, env) {
   let gate;
   const intercept = async route => {
     const action = route.request().postDataJSON();
-    if (action.field === 'workflow.project_mode') {
+    if (action.field === 'workflow.project_mode' || action.field === 'indicator') {
+      if (action.field === 'indicator') await gate;
       const response = await route.fetch();
-      assert(response.ok(), 'the real editor kept the preference draft');
+      assert(response.ok(), `the real editor accepted ${action.field}`);
       draft = await response.json();
-      return route.fulfill({response, json: {...draft, menubar: {installed: false}}});
+      return route.fulfill({response, json: {...draft, menubar: {...draft.menubar, installed: false}}});
     }
     if (action.action !== 'menubar') return route.fallback();
     actions.push(action);
     await gate;
-    await route.fulfill({json: {...draft, menubar: {installed: action.value === 'install'}}});
+    await route.fulfill({json: {...draft, menubar: {...draft.menubar, installed: action.value === 'install'}}});
   };
   // Hold menu app replies so the dashboard is exercised without opening apps
   // or touching the logged-in user's services, even with a packaged installer.
@@ -202,6 +204,27 @@ async function manageMenuApp(page, url, env) {
     await pin.click();
     await status(page, dirty).waitFor({state: 'attached'});
     await menuTab.click();
+    const radio = name => menu.getByRole('radio', {name, exact: true});
+    assert(await radio('Agent quota').isChecked());
+    // Choosing an indicator is a real save on macOS; the installer below is only simulated.
+    if (menubar.installed !== null) {
+      for (const [label, value] of [['Memory', 'memory'], ['CPU', 'cpu']]) {
+        let complete;
+        gate = new Promise(resolve => { complete = resolve; });
+        const choice = radio(label);
+        try {
+          await choice.click();
+          await status(menu, 'Saving menu bar indicator…').waitFor();
+          assert(await choice.isChecked(), 'the pending indicator selection is visible');
+          assert(await choice.evaluate(el => el === document.activeElement), 'the picker keeps keyboard focus');
+        } finally {
+          complete();
+        }
+        await status(menu, 'Saving menu bar indicator…').waitFor({state: 'hidden'});
+        assert.equal((await readState()).menubar.indicator, value);
+        await status(page, dirty).waitFor({state: 'attached'});
+      }
+    }
     assert.equal(await remove.count(), 0, 'nothing to remove before installation');
     await perform(() => install.click(), 'Installing menu app…', install, update, remove);
     await remove.waitFor();
@@ -224,11 +247,28 @@ async function manageMenuApp(page, url, env) {
   }
   await section(page, 'Panes').click();
   assert(await pin.isChecked(), 'menu app operations retained the draft');
-  assert.equal(await readFile(preferences, 'utf8'), previous, 'menu app operations did not save the draft');
+  assert.equal(await readFile(preferences, 'utf8'), previous, 'menu bar actions did not save the pane draft');
   await button(page, 'Discard').click();
   await button(dialog(page, 'Discard all unsaved changes?'), 'Discard changes').click();
   await status(page, clean).waitFor({state: 'attached'});
   console.log('Menu app: installed, opened or updated twice, kept on cancel, and removed; draft preserved');
+  if (menubar.installed !== null) {
+    await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/menu-indicator')), menuTab.click()]);
+    const indicatorFile = join(env.XDG_CONFIG_HOME, 'milo', 'menubar.conf');
+    const malformed = 'indicator = invalid\n';
+    await writeFile(indicatorFile, malformed);
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await menu.getByText(/Couldn’t read the saved indicator\. The app uses Agent quota/).waitFor();
+    assert.equal(await menu.getByRole('radio', {checked: true}).count(), 0, 'fallback is not a saved selection');
+    assert.equal(await readFile(indicatorFile, 'utf8'), malformed, 'reading does not repair the indicator');
+    const quota = menu.getByRole('radio', {name: 'Agent quota', exact: true});
+    await quota.click();
+    await status(menu, 'Saving menu bar indicator…').waitFor({state: 'hidden'});
+    assert(await quota.isChecked(), 'the explicitly saved repair is selected');
+    assert.equal((await readState()).menubar.indicator, 'quota');
+    assert.equal(await readFile(indicatorFile, 'utf8'), 'indicator = quota\n');
+    assert.equal(await readFile(preferences, 'utf8'), previous, 'repair does not write pane preferences');
+  }
   await section(page, 'Layout').click();
 }
 

@@ -5,6 +5,8 @@ import SwiftUI
 struct UsageSnapshot: Codable, Equatable {
     let version: Int
     let providers: [UsageProvider]
+    var indicator: String? = nil
+    var indicatorAck: Bool? = nil
 
     func orderedProviders(pinning badge: BadgeReading?) -> some RandomAccessCollection<UsageProvider> {
         pinnedIndices(providers.indices, first: badge?.providerIndex).lazy.map { providers[$0] }
@@ -124,6 +126,9 @@ struct UsagePanel: View {
     let badge: BadgeReading?
     let now: Date
     @Binding var badgeMode: String
+    @Binding var indicator: MenuIndicator
+    let savingIndicator: Bool
+    let monitor: ResourceMonitor
     @Binding var alertThreshold: UsageAlertThreshold
     let alertIssue: String?
     let refresh: () -> Void
@@ -157,6 +162,10 @@ struct UsagePanel: View {
                 }
             }
             .padding(.vertical, 10)
+            if indicator != .quota {
+                ResourceSection(monitor: monitor)
+                Divider().padding(.bottom, 10)
+            }
             usageHeading.padding(.bottom, 8)
             readings
             if let alertIssue {
@@ -227,7 +236,7 @@ struct UsagePanel: View {
                 }
             }
             .padding(.bottom, 14)
-            if badge == nil && badgeMode != "icon" {
+            if badge == nil && indicator == .quota && badgeMode != "icon" {
                 Text("No fresh limit for the menu bar.")
                     .font(.caption).foregroundStyle(.secondary).padding(.bottom, 10)
             }
@@ -303,13 +312,22 @@ struct UsagePanel: View {
             .keyboardShortcut(",", modifiers: .command)
             Spacer()
             Menu {
-                Picker("Menu bar display", selection: $badgeMode) {
-                    Text("Automatic").tag("auto")
-                    Text("Codex").tag("codex")
-                    Text("Claude").tag("claude")
-                    Text("Icon only").tag("icon")
+                Picker("Menu bar indicator", selection: $indicator) {
+                    ForEach(MenuIndicator.allCases, id: \.self) { choice in
+                        Text(choice.title).tag(choice)
+                    }
                 }
                 .pickerStyle(.menu)
+                .disabled(savingIndicator)
+                if indicator == .quota {
+                    Picker("Quota display", selection: $badgeMode) {
+                        Text("Automatic").tag("auto")
+                        Text("Codex").tag("codex")
+                        Text("Claude").tag("claude")
+                        Text("Icon only").tag("icon")
+                    }
+                    .pickerStyle(.menu)
+                }
                 Divider()
                 Picker("Low-quota alerts", selection: $alertThreshold) {
                     ForEach(UsageAlertThreshold.allCases, id: \.self) { threshold in
@@ -338,6 +356,33 @@ struct UsagePanel: View {
             .fixedSize()
         }
         .controlSize(.small)
+    }
+}
+
+private struct ResourceSection: View {
+    @ObservedObject var monitor: ResourceMonitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("This Mac")
+                .font(.system(size: 13, weight: .semibold))
+                .accessibilityAddTraits(.isHeader)
+            row("CPU busy · all cores", monitor.reading.cpuPercent.map { "\($0)%" })
+            row("Memory used", monitor.reading.memory?.amounts)
+        }
+        .padding(.bottom, 12)
+    }
+
+    private func row(_ label: String, _ value: String?) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value ?? "—").fontWeight(.semibold).monospacedDigit()
+        }
+        .font(.system(size: 12))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value ?? "Not available yet")
     }
 }
 

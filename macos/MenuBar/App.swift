@@ -58,26 +58,46 @@ private struct MenuProfile: Codable {
         try FileHandle.standardOutput.write(contentsOf: encoder.encode(Self(paths: paths, installer: installer)))
     }
 
-    static func installed() -> Self? {
-        let apps = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+    enum Installation {
+        case standalone
+        case invalidProfile
+        case installed(MenuProfile)
+
+        var profile: MenuProfile? {
+            if case let .installed(profile) = self { return profile }
+            return nil
+        }
+    }
+
+    static func installed(bundle: URL = Bundle.main.bundleURL,
+                          home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Installation {
+        let apps = home.appendingPathComponent("Applications", isDirectory: true)
+        let expected = apps.appendingPathComponent("Milo.app", isDirectory: true)
+        // Match the install location before checking it. Resolving the leaf symlink could
+        // mistake a standalone app it points to for the installed copy.
+        guard bundle.standardizedFileURL.path == expected.standardizedFileURL.path else { return .standalone }
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: apps.path),
               attributes[.type] as? FileAttributeType == .typeDirectory,
               (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
               ((attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o022) & 0o022 == 0,
-              Bundle.main.bundleURL.resolvingSymlinksInPath().path ==
-                apps.appendingPathComponent("Milo.app", isDirectory: true).resolvingSymlinksInPath().path,
+              (try? FileManager.default.attributesOfItem(atPath: expected.path)[.type]) as? FileAttributeType == .typeDirectory,
               let file = openRegularFile(apps.appendingPathComponent(".milo-menu-profile.plist").path, privateProfile: true)
-        else { return nil }
+        else { return .invalidProfile }
         defer { try? file.close() }
-        guard let data = try? file.readToEnd() else { return nil }
-        return try? PropertyListDecoder().decode(Self.self, from: data)
+        guard let data = try? file.readToEnd(),
+              let profile = try? PropertyListDecoder().decode(Self.self, from: data),
+              validPath(profile.installer.path, absolute: true), profile.installer.digest.count == SHA256.Digest.byteCount,
+              pathKeys.allSatisfy({ key in
+                  guard let path = profile.paths[key] else { return true }
+                  return validPath(path, absolute: workingDirectoryKeys.contains(key))
+              })
+        else { return .invalidProfile }
+        return .installed(profile)
     }
 
     func applyPaths(to environment: inout [String: String]) {
         for key in Self.pathKeys {
-            if let path = paths[key], Self.validPath(path, absolute: Self.workingDirectoryKeys.contains(key)) {
-                environment[key] = path
-            }
+            if let path = paths[key] { environment[key] = path }
         }
     }
 
@@ -102,6 +122,12 @@ private struct MenuProfile: Codable {
 
 @MainActor
 private final class Model: ObservableObject {
+    private let installation: MenuProfile.Installation
+
+    init(installation: MenuProfile.Installation = MenuProfile.installed()) {
+        self.installation = installation
+    }
+
     @Published var snapshot: UsageSnapshot?
     @Published var failure: String?
     @Published private(set) var loginStatus = SMAppService.mainApp.status
@@ -115,15 +141,103 @@ private final class Model: ObservableObject {
     private var input: FileHandle?
     private let reader = DispatchQueue(label: "net.usemilo.usage.frames", qos: .utility)
     let alerts = UsageAlerts()
+    let monitor = ResourceMonitor()
+    @Published private(set) var indicator: MenuIndicator = .quota
+    @Published private(set) var savingIndicator = false
+    private var pendingIndicator: MenuIndicator?
+    private var sleeping = false
+
+    private func applyIndicator(_ choice: MenuIndicator) {
+        guard choice != indicator else { return }
+        indicator = choice
+        monitor.setEnabled(!sleeping && choice != .quota)
+    }
+
+    func selectIndicator(_ choice: MenuIndicator) {
+        guard choice != indicator, !savingIndicator else { return }
+        switch indicatorSaveProcess(choice) {
+        case let .success(process): saveIndicator(choice, using: process)
+        case let .failure(issue): indicatorError(issue)
+        }
+    }
+
+    enum IndicatorSaveIssue: Error {
+        case invalidProfile, writeFailed
+    }
+
+    func indicatorSaveProcess(_ choice: MenuIndicator) -> Result<Process, IndicatorSaveIssue> {
+        if case .invalidProfile = installation { return .failure(.invalidProfile) }
+        guard let process = bundledProcess(["menubar", "indicator", choice.rawValue]) else {
+            return .failure(.writeFailed)
+        }
+        return .success(process)
+    }
+
+    func saveIndicator(_ choice: MenuIndicator, using process: Process) {
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        savingIndicator = true
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard process.terminationStatus == 0 else {
+                    self.savingIndicator = false
+                    self.indicatorError(.writeFailed)
+                    return
+                }
+                self.indicatorSaved(choice)
+            }
+        }
+        do { try process.run() } catch { savingIndicator = false; indicatorError(.writeFailed) }
+    }
+
+    private func indicatorSaved(_ choice: MenuIndicator) {
+        guard let input else {
+            finishIndicatorSave(choice)
+            changed?()
+            return
+        }
+        // Keep the picker locked until the ordered acknowledgment or disconnect.
+        // NUL reuses cached quota data; a display change must not refresh providers.
+        pendingIndicator = choice
+        do { try input.write(contentsOf: Data([0])) } catch { readerDisconnected() }
+    }
+
+    private func finishIndicatorSave(_ choice: MenuIndicator) {
+        pendingIndicator = nil
+        applyIndicator(choice)
+        savingIndicator = false
+    }
+
+    private func indicatorError(_ issue: IndicatorSaveIssue) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t save the menu bar indicator"
+        switch issue {
+        case .invalidProfile:
+            alert.informativeText = """
+                Milo’s install profile at ~/Applications/.milo-menu-profile.plist is missing, invalid or unsafe. \
+                Check that ~/Applications is yours and is not writable by others. \
+                Move an unsafe profile aside, then run `milo menubar install` from the terminal profile you want Milo to use.
+                """
+        case .writeFailed:
+            alert.informativeText = "Check that Milo can write its global settings, then try again."
+        }
+        alert.runModal()
+    }
+
+    func setSleeping(_ value: Bool) {
+        sleeping = value
+        monitor.setEnabled(!value && indicator != .quota)
+    }
 
     private var settings: Process?
     private var settingsURL: URL?
-    private let profile = MenuProfile.installed()
 
     private func bundledProcess(_ arguments: [String]) -> Process? {
         guard let tool = Bundle.main.url(forResource: "milo", withExtension: nil, subdirectory: "Tools") else { return nil }
         var environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
-        profile?.applyPaths(to: &environment)
+        installation.profile?.applyPaths(to: &environment)
         let process = Process()
         process.executableURL = tool; process.arguments = arguments
         process.environment = environment
@@ -145,7 +259,7 @@ private final class Model: ObservableObject {
         guard let process = bundledProcess(["web", "--port", "0", "--no-open"]) else { settingsError(); return }
         independentSettings = false
         // A replaced installer path must not turn Settings into a launcher for another program.
-        if let executable = profile?.installer.executable {
+        if let executable = installation.profile?.installer.executable {
             process.executableURL = executable
             independentSettings = true
         }
@@ -203,6 +317,7 @@ private final class Model: ObservableObject {
     }
 
     func quit() {
+        monitor.setEnabled(false)
         handoffs.removeAll()
         if !independentSettings { stopSettings() }
         stop()
@@ -213,6 +328,10 @@ private final class Model: ObservableObject {
         guard let process = bundledProcess(["usage", "--menu-stream"]) else {
             failed("The bundled Milo reader is missing. Rebuild the menu app."); return
         }
+        startReader(process)
+    }
+
+    func startReader(_ process: Process) {
         let incoming = Pipe(), outgoing = Pipe()
         process.standardInput = incoming; process.standardOutput = outgoing; process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { failed("Couldn’t start the local reader. Click refresh to retry."); return }
@@ -241,16 +360,40 @@ private final class Model: ObservableObject {
             } catch { /* Report below. Never display malformed data as a limit. */ }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.child === process else { return }
-                self.stop(); self.failed("Usage reader disconnected. Click refresh to reconnect.")
+                self.readerDisconnected()
             }
         }
     }
 
     private enum FeedError: Error { case invalid }
-    private func failed(_ message: String) { snapshot = nil; failure = message; changed?() }
-    func receive(_ frame: UsageSnapshot) {
+    private func readerDisconnected() {
+        stop()
+        failed("Usage reader disconnected. Click refresh to reconnect.")
+    }
+
+    private func failed(_ message: String) {
+        snapshot = nil
+        failure = message
+        if let choice = pendingIndicator { finishIndicatorSave(choice) }
+        changed?()
+    }
+    func receive(_ incoming: UsageSnapshot) {
+        var frame = incoming
+        // A damaged installed profile still supports the existing quota reader,
+        // but its fallback HOME cannot opt this installation into system sampling.
+        if case .invalidProfile = installation { frame.indicator = nil }
+        let choice = MenuIndicator(rawValue: frame.indicator ?? "") ?? .quota
+        if pendingIndicator == nil {
+            applyIndicator(choice)
+        } else if frame.indicatorAck == true {
+            // A different selection can win concurrently. The acknowledgment orders the
+            // frame after the NUL; its value need not match the choice we saved.
+            finishIndicatorSave(choice)
+        }
+        frame.indicatorAck = nil
         // The reader repeats a settled frame about every 30 seconds. Publishing an equal one
         // would have SwiftUI work the whole panel out again, on screen or not.
+        frame.indicator = nil
         if snapshot != frame { snapshot = frame }
         if failure != nil { failure = nil }
         changed?()
@@ -260,14 +403,21 @@ private final class Model: ObservableObject {
         // The panel's rows read the time too, so one on screen is redrawn at every tick.
         if panelShown { objectWillChange.send() }
         badgeUpdatedAt = now
-        let reading = badgeReading(snapshot, mode: mode, now: now)
+        let reading = indicator == .quota ? badgeReading(snapshot, mode: mode, now: now) : nil
         if badge != reading { badge = reading }
     }
     func refresh() {
         guard let input else { start(); return }
-        do { try input.write(contentsOf: Data([10])) } catch { stop(); start() }
+        do { try input.write(contentsOf: Data([10])) } catch {
+            stop()
+            if let choice = pendingIndicator {
+                finishIndicatorSave(choice)
+                changed?()
+            }
+            start()
+        }
     }
-    func stop() {
+    private func stop() {
         alerts.clearBaseline()
         try? input?.close(); input = nil
         if let process = child, process.isRunning { process.terminate() }
@@ -298,6 +448,8 @@ private struct Content: View {
     @ObservedObject var alerts: UsageAlerts
     var body: some View {
         UsagePanel(snapshot: model.snapshot, error: model.failure, badge: model.badge, now: model.badgeUpdatedAt, badgeMode: $model.mode,
+                   indicator: Binding(get: { model.indicator }, set: model.selectIndicator),
+                   savingIndicator: model.savingIndicator, monitor: model.monitor,
                    alertThreshold: Binding(get: { alerts.threshold }, set: { alerts.select($0) }), alertIssue: alerts.issue,
                    refresh: model.refresh, openSettings: model.openSettings, quit: { NSApp.terminate(nil) },
                    loginStatus: model.loginStatus, setLoginEnabled: model.setLoginEnabled).fixedSize()
@@ -323,15 +475,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         let host = NSHostingController(rootView: Content(model: model, alerts: model.alerts)); host.sizingOptions = [.preferredContentSize]; popover.contentViewController = host
         model.changed = { [weak self] in self?.updateBadge() }
+        model.monitor.changed = { [weak self] in self?.drawIndicator() }
         updateBadge(); model.start()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
         if CommandLine.arguments.contains("--show") { show() }
         if CommandLine.arguments.contains("--settings") { model.openSettings() }
     }
+    @objc private func willSleep() { model.setSleeping(true) }
     @objc private func woke() {
         // A badge that was fresh before sleep must be rechecked before showing it again.
         model.snapshot = nil
         model.alerts.clearBaseline()
+        model.setSleeping(false)
         updateBadge()
         model.refresh()
     }
@@ -341,16 +497,34 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return host.view.window?.isVisible == true
     }
     private func updateBadge(opening: Bool = false) {
-        guard let button = status?.button else { return }
+        guard status?.button != nil else { return }
         // The reader emits even unchanged frames, at most 30 seconds apart when settled.
         // Use those ticks for the countdown and share the chosen window with the popover.
         let now = Date.now
         model.updateBadge(at: now, panelShown: opening || panelOnScreen)
-        let label = model.badge?.label(at: now) ?? "Milo"
-        let title = model.badge.map { " \($0.window.remaining)%" } ?? ""
+        drawIndicator()
+    }
+
+    private func drawIndicator() {
+        guard let button = status?.button else { return }
+        let label: String, title: String, width: CGFloat
+        switch model.indicator {
+        case .quota:
+            label = model.badge?.label(at: model.badgeUpdatedAt) ?? "Milo"
+            title = model.badge.map { " \($0.window.remaining)%" } ?? ""
+            width = model.badge == nil ? NSStatusItem.variableLength : 67
+        case .cpu, .memory:
+            let cpu = model.indicator == .cpu
+            let reading = model.monitor.reading
+            let percent = cpu ? reading.cpuPercent : reading.memory?.percent
+            let value = percent.map { "\($0)%" } ?? "—"
+            title = cpu ? " CPU \(value)" : " MEM \(value)"
+            label = "\(cpu ? "CPU busy across all cores" : "Physical memory used"): \(percent == nil ? "not available yet" : value)"
+            width = 98
+        }
         if button.title != title {
             button.title = title
-            status.length = model.badge == nil ? NSStatusItem.variableLength : 67
+            status.length = width
         }
         if button.toolTip != label {
             button.toolTip = label; button.setAccessibilityLabel(label)

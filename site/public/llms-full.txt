@@ -109,6 +109,7 @@ To review an agent’s edits without mixing in your own uncommitted work, have i
 | `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
 | `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
+| `milo menubar indicator quota\|cpu\|memory` | Choose the menu bar reading for this profile without installing or opening the app |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
 | `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
@@ -912,6 +913,13 @@ Click the menu bar item to see the same local usage windows as the pane. The men
 
 Hover over the percentage to see which provider and limit it represents, how much is left, and when it resets if known. Open the menu to see that same window first. Icon-only mode keeps the usual provider order.
 
+In **More options → Menu bar indicator**, choose **CPU** or **Memory** to put a system reading beside Milo instead. The same choice is in **Workflow → Menu bar indicator** in `milo setup` and the browser editor’s **Menu Bar** tab. From a shell, use `milo menubar indicator` followed by `quota`, `cpu`, or `memory`. The choice is saved for this Milo profile, not per project, and doesn’t install the app. In either system mode, click Milo to see both readings under **This Mac**, above your agent limits. Switch back to **Agent quota** (the default) to restore your previous quota display and stop system sampling.
+
+- **CPU** is the percentage of time all logical cores together were busy over the last sample interval. All cores busy is 100%, not 100% per core. The first reading, including after wake, is a dash until Milo has two usable samples.
+- **Memory** is physical RAM used, not memory pressure. The popover shows used / installed GiB. Using the names from `vm_stat`, used pages are **anonymous − purgeable + wired down + occupied by compressor**. This counts the compressor’s actual RAM once, excludes file cache and swap, and need not match Activity Monitor’s “Memory Used” exactly.
+
+The running app reads macOS counters about every five seconds in system modes. Readings stay in memory: no history, network requests, permissions or extra service. A stalled sample or counter reset doesn’t turn into a zero or a spike.
+
 Low-quota notifications are **off by default**. In **More options → Low-quota alerts**, choose 10%, 20%, or 30% remaining and allow notifications when macOS asks. Milo alerts only when a visible provider’s fresh reading moves from above your threshold to at or below it, at most once for that provider and reset time. Starting below the threshold is silent. Stale, elapsed, hidden, and unknown-reset readings do not trigger alerts. Choose **Off** to stop them.
 
 ![Milo’s native menu with example Codex and Claude limits and the Settings button](https://github.com/mcc0x/milo/blob/main/docs/img/menu-bar.webp)
@@ -1687,7 +1695,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
 | `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
-| `src/menubar.rs` | Installs or removes the optional macOS menu app from the archive built into a menu-enabled binary. |
+| `src/menubar.rs` | Stores the profile-wide menu indicator and manages the optional macOS app in menu-enabled builds. |
 | `src/menubar.sh` | Verifies, installs, upgrades and removes that app for `menubar.rs`. It is embedded, never downloaded. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
@@ -1816,11 +1824,12 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
 | `tests/menu-badge.swift` | Checks which provider and window the menu bar badge shows. |
+| `tests/menu-resources.swift` | Checks system CPU deltas, discontinuities and physical RAM accounting with synthetic counters. |
 | `tests/menu-bench.sh` | Builds a throwaway copy of the menu app and times frames and opening the popover in it. |
 | `tests/menu-bench.swift` | Feeds that copy made-up frames and reports the times. |
 | `tests/menu-bench/baseline-d7be344.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/menu-handoff.swift` | Checks that the menu app hands the browser its private link through an owner-only file. |
-| `tests/menubar.sh` | Verifies the built menu app's signature, runs those three checks, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
+| `tests/menubar.sh` | Verifies the built menu app’s signature, exercises its Swift fixtures, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
 | `tests/open_bench.rs` | Times the first frame of the outline, history and reader on an ordinary and a large project, the outline's search, and History's keys during a refresh. |
 | `tests/open_bench/baseline-7d2a6f4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |

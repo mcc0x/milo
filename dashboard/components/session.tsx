@@ -56,6 +56,7 @@ interface SessionActions {
   draftValue<T>(field: string): T;
   edit(field: string, value: unknown): boolean;
   command(action: string, payload?: Payload, onApplied?: () => void): void;
+  refreshMenuIndicator(signal: AbortSignal): Promise<void>;
   findTelegramChats(token: string, signal: AbortSignal): Promise<{chats: TelegramChat[]}>;
   hostedConnect(request: HostedConnectRequest, signal: AbortSignal): Promise<{status: number; data: unknown}>;
   saveHostedConnection(request: HostedSaveRequest): Promise<HostedSaveResult>;
@@ -332,6 +333,22 @@ function createEditor(): Editor {
     }
     connected = true;
     return data as T;
+  }
+
+  async function refreshMenuIndicator(signal: AbortSignal) {
+    const before = state;
+    const idle = () => active && connected && !running && !paused && !closing && !ended && !queue.length;
+    if (!before || !idle()) return;
+    try {
+      const response = await sessionFetch('/api/menu-indicator', 'GET', undefined, signal);
+      if (!response.ok) return;
+      const indicator = await response.json() as SessionState['menubar']['indicator'];
+      // Only update the saved choice, never a draft or a later in-flight action.
+      if (!signal.aborted && state === before && idle() && indicator !== before.menubar.indicator) {
+        state = {...before, menubar: {...before.menubar, indicator}};
+        publish();
+      }
+    } catch { /* A background read never interrupts the draft. */ }
   }
 
   function findTelegramChats(botToken: string, signal: AbortSignal) {
@@ -664,7 +681,7 @@ function createEditor(): Editor {
     start, subscribe, getSnapshot: () => snapshot, getServerSnapshot: () => initialSnapshot,
     actions: {
       draftValue, edit, command, findTelegramChats, hostedConnect, saveHostedConnection, readTransfer, writeTransfer, confirm, discard, notify,
-      trackNumericDraft, commitNumericDraft,
+      refreshMenuIndicator, trackNumericDraft, commitNumericDraft,
       applyNumericDraft, applyNumericDrafts, hasNumericDraft: field => numericDrafts.has(field),
       connect, dropEdit, done, requestSave, finishSave, finishConfirmation,
     },

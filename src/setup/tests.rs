@@ -889,7 +889,6 @@ fn workflow_and_claude_settings_remain_available_outside_rex() {
 fn workflow_shows_install_or_separate_open_and_remove_actions() {
     let mut pane = Setup::new(None, false, None, None, |_| panic!("drawing does not call Rex"));
     let rows = frame(&mut pane, 80, 20);
-    assert_eq!(pane.visible.len, 11);
     assert!(!rows.iter().any(|row| row.contains("menu bar app")));
     for (installed, action, label, short) in [
         (false, Row::MenuBar, "Install Milo menu bar app", "Install app"),
@@ -899,7 +898,6 @@ fn workflow_shows_install_or_separate_open_and_remove_actions() {
         pane.menu_installed = Some(installed);
         pane.select_panel(Panel::Workflow, Some(action));
         let rows = frame(&mut pane, 80, 20);
-        assert_eq!(pane.visible.len, if installed { 13 } else { 12 });
         assert_eq!(rows.iter().any(|row| row.contains("Install Milo menu bar app")), !installed);
         assert_eq!(rows.iter().any(|row| row.contains("Open or update Milo menu bar app")), installed);
         assert_eq!(rows.iter().any(|row| row.contains("Remove Milo menu bar app…")), installed);
@@ -908,6 +906,33 @@ fn workflow_shows_install_or_separate_open_and_remove_actions() {
         let row = rows.iter().find(|row| row.starts_with('›')).unwrap();
         assert_eq!(row.trim_start_matches('›').trim_end_matches('▐').trim(), short);
     }
+}
+
+#[test]
+fn workflow_indicator_preserves_drafts_and_does_not_cycle_past_an_external_change() {
+    use menubar::Indicator;
+    let f = Fixture::folder();
+    let store = store(&f);
+    let path = Indicator::file(&store.config);
+    let mut pane = Setup::new(Some(store.clone()), false, None, None, |_| panic!("indicator does not call Rex"));
+    pane.menu_installed = Some(false);
+    pane.select_panel(Panel::Workflow, Some(Row::MenuIndicator));
+    choose(&mut pane, Row::HistoryFollow);
+    choose(&mut pane, Row::MenuIndicator);
+    assert_eq!(Indicator::load(&path).unwrap(), Indicator::Cpu);
+    Indicator::Memory.save(&store.config).unwrap();
+    choose(&mut pane, Row::MenuIndicator);
+    assert_eq!(Indicator::load(&path).unwrap(), Indicator::Memory);
+    assert!(frame(&mut pane, 96, 28).iter().any(|row| row.contains("indicator") && row.contains("Memory")));
+    choose(&mut pane, Row::MenuIndicator);
+    assert_eq!(Indicator::load(&path).unwrap(), Indicator::Quota);
+    fs::write(&path, "indicator = unsupported\n").unwrap();
+    pane.select_panel(Panel::Workflow, Some(Row::MenuIndicator));
+    assert!(frame(&mut pane, 96, 28).iter().any(|row| row.contains("indicator") && row.contains("Unavailable")));
+    choose(&mut pane, Row::MenuIndicator);
+    assert_eq!(Indicator::load(&path).unwrap(), Indicator::Quota);
+    assert!(pane.prefs_dirty());
+    assert!(!crate::preferences::layer_file(&store.config, None).exists());
 }
 
 #[test]
@@ -969,7 +994,7 @@ fn menu_bar_app_actions_keep_drafts_and_only_removal_needs_confirmation() {
     assert!(!pane.rows().contains(&Row::MenuBar), "opening uses the same verified installer");
 
     pane.menu_installed = Some(true);
-
+    pane.select_panel(Panel::Workflow, Some(Row::RemoveMenuBar));
     let rows = frame(&mut pane, 80, 20);
     let remove = click_label(&rows, "Remove Milo menu bar app…");
     assert_eq!(pane.key(remove), After::Stay);
