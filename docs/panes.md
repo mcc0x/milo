@@ -52,8 +52,28 @@ A shallow clone has only part of the project's history. If you expand a commit w
 
 ## Reading files
 
-Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader. Opening another file from that pane replaces only its previous reader, even after following the shell to another project. Any shell you split beside the reader stays open. Outside Rex the reader takes over the pane; `q` brings you back.
+Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader, and the next file you open from that pane becomes a [tab](#tabs-in-the-floating-reader) of the same reader. Any shell you split beside the reader stays open. Outside Rex the reader takes over the pane; `q` brings you back.
 History catches up with repository changes when you return from a file, keeping that file selected if it is still in the timeline.
+
+### Tabs in the floating reader
+
+A reader with one file looks as it always has. With a second file, a row of names appears above it: the shown tab is bold and has a `×`, and a yellow `*` before a name marks unsaved edits. Opening a file that already has a tab shows that tab; the file as of a commit is a tab of its own, named with the commit. Two files of the same name are shown with their folders.
+
+<p align="center"><img src="img/reader-tabs.webp" width="887" alt="A reader with three tabs, table.rs shown with its close mark, and main.rs and notes.md each marked with an asterisk for unsaved edits"></p>
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-N` / `Ctrl-P` | Next or previous tab |
+| `Ctrl-W` | Close this tab. While editing with unsaved changes, asks first |
+| `q` or `Esc`, while reading | Close this tab |
+| Click a name | Show that tab |
+| Click `×` | Close the shown tab |
+
+Each tab keeps its own place in the file, and while it is being edited its cursor, draft and undo history, however long another tab is shown. A tab that was only being read shows the file as it is now when you come back to it. Closing the last tab closes the reader.
+
+In a narrow pane the strip keeps the shown tab and as many neighbours as fit whole. `‹` and `›` at its edges stand for the tabs beyond, with a `*` when one of those has unsaved edits; click an edge to move that way. A pane under four rows tall shows the file without the strip; the keys still work. [See the strip at 34 columns.](img/reader-tabs-narrow.webp)
+
+Tabs belong to one reader, which belongs to the pane that opened it and to that pane's project. Another Rex session, another project's outline and History beside Outline each have a reader of their own. A reader started with `milo view` in a shell takes no tabs. The reader's Rex label is the file it was last asked to show; it does not follow `Ctrl-N` and `Ctrl-P`.
 
 On iPhone, enable [Rex → Settings → Keyboard → Open Keyboard Manually](https://www.superlogical.com/rex/docs/reference/ios-settings#setting-keyboard-open-keyboard-manually) to browse without raising the keyboard. Tap a folder to expand it, tap a file to select it, and double-tap to open it. This setting affects **all** terminal panes on that iPhone, not just Outline. Tap the keyboard button to type in a shell. If the keyboard reopens when you return to a terminal, turn off **Keep Keyboard Open** in the same settings.
 
@@ -158,11 +178,13 @@ A save writes in place, not through a temporary file; that is what keeps the fil
 
 `Esc`, `Ctrl-Q` and `Ctrl-C` stop editing. With unsaved changes they ask `Unsaved edits: s save · d discard · Esc back` first. `q` is a letter while you edit. If the terminal has stopped taking output, `Ctrl-C` ends the reader at once, as it always has; the draft is then kept as described next.
 
-A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again. The project is not written to. If milo has no state folder, because neither that variable nor `HOME` names one, the line says the edits were lost.
+Closing a [tab](#tabs-in-the-floating-reader) that is being edited asks the same question, and the tab closes once you save or discard. `Ctrl-C` in a tab that is only being read would end the whole reader, so while another tab has unsaved changes it shows that tab and asks there instead. [See the question on closing a tab.](img/reader-tabs-close.webp)
+
+A reader can also be ended from outside: its terminal is closed, the process is asked to stop, or Rex closes its pane. If it has unsaved changes, milo writes the draft to the `drafts` folder of its state folder (`~/.local/state/milo`, or `milo` under an absolute `$XDG_STATE_HOME`), readable only by you, and prints one line about it once the terminal is yours again: one draft and one line for each tab that had unsaved changes. The project is not written to. If milo has no state folder, because neither that variable nor `HOME` names one, the line says the edits were lost.
 
 The next time you edit that file, the pane asks `Kept draft found: r restore · d delete · Esc later`. Restoring puts the kept text in place of the file's as one change, so `Ctrl-Z` shows the file as it is now. The kept copy is removed when you delete it or save the restored text, not before. If you defer or undo the restore and then the reader is closed from outside with new edits, both drafts are kept. After saving or deleting the offered draft, stop and start editing to see the next one. A process that is killed outright, or a machine that loses power, keeps nothing.
 
-In Rex, opening another file from Outline or History replaces the floating reader. While that reader has unsaved changes, the pane says `The open reader has unsaved edits.` and leaves it alone.
+In Rex, a file from another project is never a tab: when the pane has followed the shell to another project, or its reader is gone, the next file opens a new floating reader in place of the old one. While the old one has unsaved changes in any tab, the pane says `The open reader has unsaved edits.` and leaves it alone.
 
 ## Formatting
 

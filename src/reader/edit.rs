@@ -16,7 +16,7 @@ use super::buffer::{Buffer, Pos};
 use super::content::LIMIT;
 use super::disk::{self, Original, SaveError, Snapshot};
 use super::draw::LinePainter;
-use super::rescue::{self, Draft, Drafts, Mark};
+use super::rescue::{self, Draft, Drafts};
 use super::working_path::{Entry, LookupError};
 use crate::diff::{Line, LineKind, TAB};
 use crate::format::{self, Support, Tool};
@@ -67,8 +67,6 @@ pub(super) struct Place {
     pub(super) root: PathBuf,
     /// Milo's state folder, where a draft is kept if the reader is closed from outside.
     pub(super) state: Option<PathBuf>,
-    /// The Rex block this reader runs in, if any.
-    pub(super) block: Option<String>,
     /// The folders searched for a formatter, as `PATH` lists them.
     pub(super) tools: Option<OsString>,
 }
@@ -178,7 +176,6 @@ pub(super) struct Editor {
     comparison: Option<Comparison>,
     notice: Option<(Cow<'static, str>, Instant)>,
     formatting: Option<Formatting>,
-    mark: Option<Mark>,
     /// The user gave the draft up, so closing must not keep it.
     discarded: bool,
     /// The kept copy offered by the prompt.
@@ -311,7 +308,6 @@ impl Editor {
             comparison: None,
             notice: None,
             formatting: None,
-            mark: None,
             discarded: false,
             kept,
             restored: None,
@@ -323,9 +319,14 @@ impl Editor {
         self.top
     }
 
-    #[cfg(test)]
+    /// Whether the draft differs from what was last saved.
     pub(super) fn dirty(&self) -> bool {
         self.buffer.dirty()
+    }
+
+    /// Whether a question is waiting for its answer.
+    pub(super) fn asking(&self) -> bool {
+        self.prompt.is_some()
     }
 
     #[cfg(test)]
@@ -361,7 +362,6 @@ impl Editor {
     /// restore, is not an answer to that question.
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
-        self.sync_mark();
         if let Some((_, draft)) = self.restored.take_if(|(change, _)| self.buffer.holds(*change)) {
             draft.forget();
         }
@@ -370,17 +370,6 @@ impl Editor {
 
     pub(super) fn ask_overwrite(&mut self, close: bool) {
         self.prompt = Some(Prompt::Changed { close });
-    }
-
-    /// Announces unsaved edits to other panes for as long as there are any.
-    fn sync_mark(&mut self) {
-        if !self.buffer.dirty() {
-            self.mark = None;
-        } else if self.mark.is_none()
-            && let Place { state: Some(state), block: Some(block), .. } = &self.place
-        {
-            self.mark = Mark::set(state, block);
-        }
     }
 
     fn row(&self) -> &str {
@@ -394,7 +383,6 @@ impl Editor {
         self.column = None;
         self.follow = true;
         self.open.rewrote(first_row, old_last_row, last_row);
-        self.sync_mark();
         Step::Stay
     }
 

@@ -116,6 +116,12 @@ pub trait Pane {
         false
     }
 
+    /// The pane holds unsaved text even where it is not `editing`: Ctrl-C is a key for it,
+    /// so that it can ask before closing.
+    fn holds_drafts(&self) -> bool {
+        false
+    }
+
     /// Takes text pasted while `editing`, or `None` if the paste was too long to keep.
     fn paste(&mut self, _text: Option<&str>) -> After {
         After::Ignored
@@ -292,11 +298,12 @@ fn route_key(pane: &mut dyn Pane, screen: &mut Screen, help: &mut Option<Page>, 
         return After::Stay;
     }
     let editing = pane.editing();
+    let asks = editing || pane.holds_drafts();
     match (key, &mut *help) {
         (Key::Eof, _) => After::Leave,
         // A pane with unsaved text asks before it closes.
-        (Key::Ctrl(b'c'), None) if editing => pane.key(key),
-        (Key::Ctrl(b'c'), _) if !editing => After::Leave,
+        (Key::Ctrl(b'c'), None) if asks => pane.key(key),
+        (Key::Ctrl(b'c'), _) if !asks => After::Leave,
         // The pane still sees focus changes while its help is up.
         (Key::Focus(_), _) => pane.key(key),
         (_, Some(page)) => {
@@ -534,7 +541,7 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
     terminal.restore();
     // The terminal is the shell's again, so this line stays on screen. It
     // holds a file's name, and it must not wait for a terminal that has stopped reading.
-    if let Some(note) = crate::reader::take_rescue_note() {
+    for note in crate::reader::take_rescue_notes() {
         let safe: String = note.chars().filter(|c| !c.is_control()).collect();
         terminal.finish(format!("milo: {safe}\n").as_bytes());
     }

@@ -1700,13 +1700,16 @@ fn the_outline_edits_a_file_in_its_own_pane_and_returns_to_the_same_file() {
 }
 
 #[test]
-fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
+fn the_outline_adds_a_tab_to_its_floating_reader_and_ctrl_c_there_asks_about_a_draft_in_another_tab() {
     let project = Project::new();
-    fs::write(project.0.join("project/page.txt"), "data\n").unwrap();
+    fs::write(project.0.join("project/draft.txt"), "data\n").unwrap();
+    fs::write(project.0.join("project/page.txt"), "more\n").unwrap();
     let block = "block:11111111-1111-1111-1111-111111111111";
     let rex = project.0.join("rex");
+    // Every request is noted by its arguments, which say whether a reader is opened or only shown.
     let script = format!(
-        "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\ncat >/dev/null\necho open >> \"$HOME/opens\"\necho {block}\n"
+        "#!/bin/sh\n[ \"$1\" = ready ] && exit 0\ncat >/dev/null\nfor last do :; done\n\
+         echo \"$last\" >> \"$HOME/requests\"\necho {block}\n"
     );
     fs::write(&rex, script).unwrap();
     fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1730,10 +1733,14 @@ fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
             .args(args);
         command
     };
-    let wait_for_opens = |count: usize| {
+    let requests = |count: usize| {
         let until = Instant::now() + TEST_WAIT;
-        while fs::read_to_string(project.0.join("opens")).map_or(0, |log| log.lines().count()) != count {
-            assert!(Instant::now() < until, "expected {count} requests to open a reader");
+        loop {
+            let log = fs::read_to_string(project.0.join("requests")).unwrap_or_default();
+            if log.lines().count() == count {
+                return log.lines().last().unwrap_or_default().to_owned();
+            }
+            assert!(Instant::now() < until, "expected {count} requests to Rex, not:\n{log}");
             std::thread::sleep(Duration::from_millis(5));
         }
     };
@@ -1742,21 +1749,78 @@ fn the_outline_does_not_replace_a_floating_reader_that_has_unsaved_edits() {
     let mut outline = Terminal::run(&mut in_rex(&["outline"], "block:22222222-2222-2222-2222-222222222222"));
     outline.shows("page.txt");
     outline.master.write_all(b"\r").unwrap();
-    wait_for_opens(1);
-    let mut reader = Terminal::run(&mut in_rex(&["view", "page.txt", "--edit"], block));
+    assert!(requests(1).contains(r#""view""#));
+    let mut reader = Terminal::run(&mut in_rex(&["view", "draft.txt", "--edit"], block));
     reader.shows("^S save");
     reader.master.write_all(b"x").unwrap();
     reader.shows("unsaved");
 
+    // A second file goes to that reader as a tab: Rex is asked to show the block, not to run another.
+    outline.master.write_all(b"j\r").unwrap();
+    reader.shows("*draft.txt  page.txt ×");
+    reader.shows("more");
+    let shown = requests(2);
+    assert!(shown.contains(&format!(r#""block":"{block}""#)) && !shown.contains("view"), "{shown}");
+    assert!(shown.contains(r#""label":"page.txt""#), "{shown}");
+    // Asking for it again makes no second tab.
     outline.master.write_all(b"\r").unwrap();
-    outline.shows("The open reader has unsaved edits.");
-    wait_for_opens(1);
+    requests(3);
+    assert_eq!(reader.screen()[0].matches("page.txt").count(), 1, "{:#?}", reader.screen());
 
-    // Once the edit is taken back, the reader can be replaced again.
-    reader.master.write_all(b"\x1a").unwrap();
-    reader.hides("unsaved");
+    // Ctrl-C would end the reader with the other tab's draft, so that tab comes forward and asks.
+    reader.master.write_all(b"\x03").unwrap();
+    reader.shows("Unsaved edits: s save · d discard · Esc back");
+    reader.shows("*draft.txt ×  page.txt");
+    reader.master.write_all(b"s").unwrap();
+    reader.shows("Saved");
+    assert_eq!(fs::read_to_string(project.0.join("project/draft.txt")).unwrap(), "xdata\n");
+    reader.master.write_all(b"\x03").unwrap();
+    assert!(reader.wait_for_exit().success());
+    assert!(!project.0.join("state/milo/drafts").exists());
+
+    // With that reader gone there is nothing to add a tab to, and the outline opens another.
     outline.master.write_all(b"\r").unwrap();
-    wait_for_opens(2);
+    assert!(requests(4).contains(r#""view""#));
+}
+
+#[test]
+fn a_reader_ended_from_outside_says_which_tabs_drafts_it_kept() {
+    let project = Project::new();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(project.0.join("project").join(name), "old\n").unwrap();
+    }
+    let block = "block:11111111-1111-1111-1111-111111111111";
+    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
+    command.env("REX_SESSION", "test").env("REX_BLOCK", block);
+    let mut tty = Terminal::run(command.args(["view", "a.txt", "--edit"]));
+    tty.shows("^S save");
+    tty.master.write_all(b"one ").unwrap();
+    tty.shows("unsaved");
+
+    // What a pane writes to ask for a second file: its path, and no commit.
+    let pipe = fs::read_dir(project.0.join("state/milo/readers")).unwrap().next().unwrap().unwrap().path();
+    let request = format!("{}\0\0", project.0.join("project/b.txt").display());
+    fs::OpenOptions::new().write(true).open(pipe).unwrap().write_all(request.as_bytes()).unwrap();
+    tty.shows("*a.txt  b.txt ×");
+    tty.master.write_all(b"etwo ").unwrap();
+    tty.shows("*a.txt  *b.txt ×");
+
+    let pid = i32::try_from(tty.child.id()).unwrap();
+    // SAFETY: This is our own, still-owned child, not a process group.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    tty.wait_for_exit();
+    assert!(tty.restored());
+    tty.until("\x1b[?1049l");
+    for name in ["a.txt", "b.txt"] {
+        tty.until(&format!("{name} were kept"));
+    }
+    let mut drafts: Vec<String> = fs::read_dir(project.0.join("state/milo/drafts"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    drafts.sort();
+    assert_eq!(drafts, ["one old\n", "two old\n"]);
+    assert!(fs::read_dir(project.0.join("state/milo/readers")).unwrap().next().is_none());
 }
 
 #[test]
