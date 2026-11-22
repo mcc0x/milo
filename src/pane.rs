@@ -552,7 +552,8 @@ pub fn run(start: Start<'_>, open: &Open<'_>) -> Result<(), String> {
 /// draw in or read keys from: a pipe, a file, or a coding agent's shell.
 fn without_a_terminal() -> &'static str {
     use std::io::IsTerminal as _;
-    const PRINTS: &str = "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one";
+    const PRINTS: &str =
+        "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one";
     const IN_REX: &str = "; a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one, \
                           and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab";
     if io::stdout().is_terminal() && io::stdin().is_terminal() {

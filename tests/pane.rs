@@ -1146,7 +1146,8 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
         assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("{NEEDS}\n"), "{args:?}");
     }
     // Inside Rex there is a way to open the pane from a shell that has no terminal.
-    let output = project.command(env!("CARGO_BIN_EXE_milo")).env("REX_SESSION", "test").arg("outline").output().unwrap();
+    let output =
+        project.command(env!("CARGO_BIN_EXE_milo")).env("REX_SESSION", "test").arg("outline").output().unwrap();
     let in_rex = format!("{NEEDS}, and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab\n");
     assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex));
     // A mistake in the command is still reported as that mistake.

@@ -221,20 +221,8 @@ fn command_help(name: &str) -> Option<&'static str> {
 
 /// Every word `command_help` knows, in the order `--help` lists them.
 const COMMANDS: [&str; 14] = [
-    "outline",
-    "history",
-    "usage",
-    "menubar",
-    "setup",
-    "web",
-    "settings",
-    "doctor",
-    "presence",
-    "view",
-    "review",
-    "listen",
-    "alerts",
-    "claude-status",
+    "outline", "history", "usage", "menubar", "setup", "web", "settings", "doctor", "presence", "view", "review",
+    "listen", "alerts", "claude-status",
 ];
 const OPTIONS: [&str; 3] = ["--help", "--version", "--skip-onboarding"];
 
@@ -948,7 +936,10 @@ mod tests {
         assert_eq!(refused(&["--json"]), "no option --json; see milo --help");
         for flag in ["-h", "--help"] {
             let asked = [OsStr::new(flag), OsStr::new("review")];
-            assert_eq!(command(Some(asked[0]), Some(asked[1]), &[]), Ok(Command::Help(command_help("review").unwrap())));
+            assert_eq!(
+                command(Some(asked[0]), Some(asked[1]), &[]),
+                Ok(Command::Help(command_help("review").unwrap()))
+            );
             assert_eq!(
                 refused(&[flag, "reveiw"]),
                 "reveiw is not a command; did you mean milo review? Otherwise see milo --help for commands"

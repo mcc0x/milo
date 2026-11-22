@@ -279,7 +279,10 @@ mod column_tests {
         let narrow = drawn(&mut page, 56, 5);
         assert_eq!(narrow[..4], [&format!("   {:<52}▐", "one"), "   two", "   three", "   four"]);
         let wide = drawn(&mut page, 57, 5);
-        assert_eq!(wide[..2], [format!("   {:<25}   {:<25}▐", "one", "five"), format!("   {:<25}   {:<25}▐", "two", "six")]);
+        assert_eq!(
+            wide[..2],
+            [format!("   {:<25}   {:<25}▐", "one", "five"), format!("   {:<25}   {:<25}▐", "two", "six")]
+        );
         assert_eq!(wide[3], format!("   {:<25}   eight", "four"));
         // Three columns hold all nine rows, so nothing is left to scroll to.
         let all = drawn(&mut page, 85, 5);
