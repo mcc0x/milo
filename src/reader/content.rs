@@ -8,7 +8,7 @@ use super::working_path::{Entry, LookupError, Root, Stamp};
 use super::{Body, Reader, Source, Text, WorkingFile};
 use crate::diff::{self, FileDiff, Line, LineKind};
 use crate::git::run::OutputError;
-use crate::git::{CommitId, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
+use crate::git::{CommitId, CommitVersion, GIT_UNAVAILABLE, Kind, PendingFile, Repo};
 use crate::picture::{self, Picture};
 use crate::read::Content;
 use crate::syntax;
@@ -146,16 +146,32 @@ impl Attributes {
     }
 }
 
-impl Reader {
-    /// Opens `file`, which git may remember even if its directory is gone.
-    pub fn open(file: &Path) -> Option<Self> {
-        let Location { mut repo, relative } = Location::find(file, Repo::open_to_read)?;
+/// A requested working path and its held worktree directory, before reading the file.
+pub(super) struct WorkingTarget {
+    repo: Repo,
+    root: Root,
+    relative: PathBuf,
+}
+
+impl WorkingTarget {
+    pub(super) fn resolve(file: &Path) -> Option<Self> {
+        let Location { repo, relative } = Location::find(file, Repo::open_to_read)?;
         let root = Root::open(&repo.root).ok()?;
+        Some(Self { repo, root, relative })
+    }
+
+    pub(super) fn matches(&self, reader: &Reader) -> bool {
+        let Source::Working(work) = &reader.source else { return false };
+        work.relative == self.relative && work.repo.root == self.repo.root && work.root.same_directory(&self.root)
+    }
+
+    pub(super) fn load(self) -> Reader {
+        let Self { mut repo, root, relative } = self;
         if let Some(path) = relative.to_str() {
             repo.only(path);
         }
         let path = relative.to_string_lossy().into_owned();
-        let (icons, note) = Self::appearance_for(&repo);
+        let (icons, note) = Reader::appearance_for(&repo);
         let note = if repo.git_unavailable() { Some(GIT_UNAVAILABLE) } else { note };
         let watch_only = repo.reader_filter(&relative);
         let attributes = Attributes::new(&repo, &relative);
@@ -169,18 +185,28 @@ impl Reader {
             notified: false,
             stamp: None,
         }));
-        let mut reader = Self::new(path, source, icons, note);
+        let mut reader = Reader::new(path, source, icons, note);
         reader.refresh(true);
-        Some(reader)
+        reader
     }
+}
 
+/// A validated committed path whose body has not yet been read.
+pub(super) struct CommittedTarget {
+    repo: Repo,
+    path: String,
+    commit: CommitVersion,
+    changed: Option<PendingFile>,
+}
+
+impl CommittedTarget {
     /// The current repository takes precedence over whatever is at the old path today.
-    pub fn at_commit(file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
+    pub(super) fn resolve(file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
         let cwd = std::env::current_dir().map_err(|_| "Cannot find the current directory.")?;
-        Self::at_commit_from(&cwd, file, id)
+        Self::resolve_from(&cwd, file, id)
     }
 
-    pub(super) fn at_commit_from(cwd: &Path, file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
+    pub(super) fn resolve_from(cwd: &Path, file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
         let base = if file.is_absolute() { Path::new("") } else { cwd };
         let mut absolute = PathBuf::with_capacity(base.as_os_str().len() + file.as_os_str().len() + 1);
         absolute.push(base);
@@ -210,17 +236,40 @@ impl Reader {
             }
             (location.repo, location.relative)
         };
-        let path = relative.to_str().ok_or("File paths at a commit must be UTF-8.")?;
+        let path = relative.into_os_string().into_string().map_err(|_| "File paths at a commit must be UTF-8.")?;
         let commit = repo.resolve_commit(id).ok_or("No commit with that ID.")?;
-        let changed = repo.changed_file_at(&commit.hash, path).ok_or("Git did not answer for this commit.")?;
-        Ok(Self::committed(&repo, path, &commit.hash, commit.time, changed.as_ref()))
+        // Validate the resolved commit and its history even when a tab already holds its body.
+        let changed = repo.changed_file_at(&commit.hash, &path).ok_or("Git did not answer for this commit.")?;
+        Ok(Self { repo, path, commit, changed })
     }
 
-    pub(super) fn committed(repo: &Repo, path: &str, hash: &str, time: i64, file: Option<&PendingFile>) -> Self {
-        let short_id = hash[..hash.len().min(7)].to_string();
+    pub(super) fn matches(&self, reader: &Reader) -> bool {
+        reader.path == self.path
+            && matches!(&reader.source, Source::Committed { project, hash, .. }
+                if project == &self.repo.root && hash == &self.commit.hash)
+    }
+
+    pub(super) fn load(self) -> Reader {
+        Reader::committed(&self.repo, self.path, self.commit, self.changed.as_ref())
+    }
+}
+
+impl Reader {
+    /// Opens a working file, which Git may remember even if its directory is gone.
+    pub fn open(file: &Path) -> Option<Self> {
+        WorkingTarget::resolve(file).map(WorkingTarget::load)
+    }
+
+    pub fn at_commit(file: &Path, id: CommitId<'_>) -> Result<Self, &'static str> {
+        CommittedTarget::resolve(file, id).map(CommittedTarget::load)
+    }
+
+    pub(super) fn committed(repo: &Repo, path: String, commit: CommitVersion, file: Option<&PendingFile>) -> Self {
         let (icons, note) = Self::appearance_for(repo);
-        let mut reader = Self::new(path.to_string(), Source::Committed { short_id, time }, icons, note);
-        reader.body = Body::from_lines(committed_lines(repo, path, hash, file), syntax::for_file(path));
+        let body = Body::from_lines(committed_lines(repo, &path, &commit.hash, file), syntax::for_file(&path));
+        let source = Source::Committed { project: repo.root.clone(), hash: commit.hash, time: commit.time };
+        let mut reader = Self::new(path, source, icons, note);
+        reader.body = body;
         reader.read_only = reader.edit_refusal();
         reader
     }

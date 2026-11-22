@@ -363,7 +363,8 @@ impl Reader {
 
     fn draw_details(&self, s: &mut Screen) -> usize {
         let mut right = s.w - 1;
-        if let Source::Committed { short_id, time } = &self.source {
+        if let Source::Committed { hash, time, .. } = &self.source {
+            let short_id = super::short_commit_id(hash);
             let age = when::short_age(when::now().saturating_sub(*time));
             let ago = if age.count.is_some() { " ago" } else { "" };
             let bare = "commit ";
