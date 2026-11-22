@@ -154,6 +154,30 @@ static void StartupDeadline(void) {
     assert(LayoutDeadlineElapsed(36, &since, YES));
 }
 
+static BOOL ProbeSizedTerminal(int tty, unsigned short columns, unsigned short rows, BOOL menuOpen) {
+    struct winsize size = {.ws_col = columns, .ws_row = rows};
+    assert(ioctl(tty, TIOCSWINSZ, &size) == 0);
+    size = (struct winsize){0};
+    assert(ioctl(tty, TIOCGWINSZ, &size) == 0);
+    return CanProbeLayout(YES, MarkerFits(size.ws_col, size.ws_row), menuOpen);
+}
+
+static void StartupAfterResizeOrMenu(void) {
+    int master, slave;
+    assert(openpty(&master, &slave, NULL, NULL, NULL) == 0);
+    NSTimeInterval since = 0;
+    assert(!LayoutDeadlineElapsed(1, &since, ProbeSizedTerminal(slave, 31, 2, NO)) && since == 0);
+    assert(!LayoutDeadlineElapsed(9, &since, ProbeSizedTerminal(slave, 31, 2, NO)) && since == 0);
+    assert(!LayoutDeadlineElapsed(17, &since, ProbeSizedTerminal(slave, 32, 1, NO)) && since == 0);
+    assert(!LayoutDeadlineElapsed(18, &since, ProbeSizedTerminal(slave, 32, 2, NO)) && since == 18);
+    assert(!LayoutDeadlineElapsed(23, &since, ProbeSizedTerminal(slave, 32, 2, YES)) && since == 0);
+    assert(!LayoutDeadlineElapsed(31, &since, ProbeSizedTerminal(slave, 32, 2, YES)) && since == 0);
+    assert(!LayoutDeadlineElapsed(32, &since, ProbeSizedTerminal(slave, 32, 2, NO)) && since == 32);
+    assert(LayoutDeadlineElapsed(38, &since, ProbeSizedTerminal(slave, 32, 2, NO)));
+    close(slave);
+    close(master);
+}
+
 static struct {
     NSTimeInterval now, delay;
     size_t calls;
@@ -222,6 +246,7 @@ int main(void) {
         WindowOrdering();
         TerminalEcho();
         StartupDeadline();
+        StartupAfterResizeOrMenu();
         AcquisitionDeadline();
         puts("preview geometry tests passed");
     }

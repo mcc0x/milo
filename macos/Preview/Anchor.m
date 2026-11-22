@@ -496,8 +496,16 @@ static BOOL RestoreTTY(int fd, const struct termios *saved) {
     return status == 0;
 }
 
-static BOOL LayoutDeadlineElapsed(NSTimeInterval now, NSTimeInterval *since, BOOL requestedInFront) {
-    if (!requestedInFront) {
+static BOOL MarkerFits(unsigned short columns, unsigned short rows) {
+    return columns >= MarkerLength && rows >= 2;
+}
+
+static BOOL CanProbeLayout(BOOL requestedInFront, BOOL markerReady, BOOL menuOpen) {
+    return requestedInFront && markerReady && !menuOpen;
+}
+
+static BOOL LayoutDeadlineElapsed(NSTimeInterval now, NSTimeInterval *since, BOOL canProbe) {
+    if (!canProbe) {
         *since = 0;
         return NO;
     }
@@ -599,8 +607,8 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
 
 - (BOOL)drawMarker {
     static const char clear[] = "\033[H\033[2J";
-    static const char narrow[] = "Widen the preview pane to 32 columns.";
-    BOOL fits = _columns >= MarkerLength && _rows > 1;
+    static const char narrow[] = "Need 32 columns and two rows.";
+    BOOL fits = MarkerFits(_columns, _rows);
     const char *text = fits ? _marker.UTF8String : narrow;
     size_t length = fits ? MarkerLength : MIN((size_t)_columns, sizeof(narrow) - 1);
     if (!WriteAll(_tty, clear, sizeof(clear) - 1) || !WriteAll(_tty, text, length)) {
@@ -636,7 +644,7 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
         _rows = size.ws_row;
         if (![self drawMarker]) return NO;
     }
-    return _columns >= MarkerLength && _rows > 1;
+    return MarkerFits(_columns, _rows);
 }
 
 - (BOOL)frontmostRex {
@@ -820,11 +828,12 @@ static void AXChanged(AXObserverRef observer, AXUIElementRef element, CFStringRe
     if (_finished) return;
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     BOOL inFront = _requested && !_sessionInactive && !_screensAsleep && [self frontmostRex];
-    if (!_everShown && LayoutDeadlineElapsed(now, &_unprovenSince, inFront)) {
+    BOOL canProbe = CanProbeLayout(inFront, markerReady, _menuOpen);
+    if (!_everShown && LayoutDeadlineElapsed(now, &_unprovenSince, canProbe)) {
         [self finish:"could not verify the Rex pane's Accessibility geometry; close palettes, focus a Rex terminal, and use a window on one display outside full screen"];
         return;
     }
-    if (!inFront || _menuOpen || !markerReady) {
+    if (!canProbe) {
         if (_candidate.windowID || _cached || _probePending) [self invalidate];
         return;
     }
