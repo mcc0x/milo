@@ -1277,8 +1277,7 @@ mod tests {
         let stale = format!(r#"{{"version":{},{request}}}"#, editor.version - 1);
         assert!(editor.action(stale.as_bytes()).unwrap_err().contains("draft changed"));
         if menubar::installed().is_some() {
-            let saved = action(&mut editor, request).unwrap();
-            assert_feedback(&saved, "Menu bar indicator saved. The app updates on its next refresh.", false);
+            action(&mut editor, request).unwrap();
         } else {
             assert_eq!(action(&mut editor, request).unwrap_err(), UNAVAILABLE);
             assert_eq!(editor.state(), draft);

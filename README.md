@@ -99,6 +99,7 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
 | `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
+| `milo menubar indicator quota\|cpu\|memory` | Choose the menu bar reading for this profile without installing or opening the app |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
 | `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](docs/presence.md) |

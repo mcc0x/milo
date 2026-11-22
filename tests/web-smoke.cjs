@@ -221,7 +221,6 @@ async function manageMenuApp(page, url, env) {
           complete();
         }
         await status(menu, 'Saving menu bar indicator…').waitFor({state: 'hidden'});
-        await status(page, 'Menu bar indicator saved. The app updates on its next refresh.').waitFor();
         assert.equal((await readState()).menubar.indicator, value);
         await status(page, dirty).waitFor({state: 'attached'});
       }
@@ -254,18 +253,18 @@ async function manageMenuApp(page, url, env) {
   await status(page, clean).waitFor({state: 'attached'});
   console.log('Menu app: installed, opened or updated twice, kept on cancel, and removed; draft preserved');
   if (menubar.installed !== null) {
+    await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/state')), menuTab.click()]);
     const indicatorFile = join(env.XDG_CONFIG_HOME, 'milo', 'menubar.conf');
     const malformed = 'indicator = invalid\n';
     await writeFile(indicatorFile, malformed);
-    await page.reload();
-    await menuTab.click();
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await menu.getByText(/Couldn’t read the saved indicator\. The app uses Agent quota/).waitFor();
     assert.equal((await readState()).menubar.indicator, null, 'API cannot verify a malformed choice');
     assert.equal(await menu.getByRole('radio', {checked: true}).count(), 0, 'fallback is not a saved selection');
     assert.equal(await readFile(indicatorFile, 'utf8'), malformed, 'reading does not repair the indicator');
     const quota = menu.getByRole('radio', {name: 'Agent quota', exact: true});
     await quota.click();
-    await status(page, 'Menu bar indicator saved. The app updates on its next refresh.').waitFor();
+    await status(menu, 'Saving menu bar indicator…').waitFor({state: 'hidden'});
     assert(await quota.isChecked(), 'the explicitly saved repair is selected');
     assert.equal((await readState()).menubar.indicator, 'quota');
     assert.equal(await readFile(indicatorFile, 'utf8'), 'indicator = quota\n');

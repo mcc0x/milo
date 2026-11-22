@@ -77,7 +77,7 @@ impl Indicator {
             preferences::replace(dir, &path, &format!("indicator = {}\n", choice(&path)?.value()))
         })
         .map_err(|error| format!("Could not save the menu bar indicator: {error}"))?;
-        Ok("Menu bar indicator saved. The app updates on its next refresh.")
+        Ok("Menu bar indicator saved.")
     }
 }
 
