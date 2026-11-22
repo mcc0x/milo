@@ -44,7 +44,32 @@ fn mime(file: &str) -> Option<&'static str> {
     })
 }
 
+/// Ship the helper inside Milo, but link AppKit and WebKit only into the
+/// helper: a normal pane does not load either framework at startup.
+fn build_preview() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=macos/Preview");
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        _ => panic!("unsupported macOS preview architecture"),
+    };
+    let out = Path::new(&env::var_os("OUT_DIR").unwrap()).join("Milo Preview");
+    let compiled = std::process::Command::new("/usr/bin/xcrun")
+        .args(["--sdk", "macosx", "clang", "-target", &format!("{arch}-apple-macos13.0"), "-fobjc-arc", "-Os"])
+        .args(["macos/Preview/main.m", "macos/Preview/Anchor.m", "macos/Preview/Browser.m"])
+        .args(["-framework", "AppKit", "-framework", "WebKit", "-framework", "ApplicationServices"])
+        .args(["-framework", "CoreGraphics", "-Wl,-sectcreate,__TEXT,__info_plist,macos/Preview/Info.plist", "-o"])
+        .arg(out)
+        .status()
+        .expect("install Apple's Command Line Tools to build the WebKit preview");
+    assert!(compiled.success(), "could not compile the macOS WebKit preview");
+}
+
 fn main() {
+    build_preview();
     // Cargo source archives carry the production bundle. No Node, network or generated
     // framework intermediates are needed here. CI checks the source and asset digests.
     println!("cargo:rerun-if-changed={BUNDLE}");

@@ -15,6 +15,7 @@ categories = ["command-line-utilities", "development-tools"]
 # A unit test reads the one file under hosted/, shared with the relay's tests.
 include = [
     "/build.rs", "/dashboard/bundle/**", "/src/**", "/tests/**", "!/tests/*.sh",
+    "/macos/Preview/**",
     "/Cargo.lock", "/LICENSE", "/README.md", "/rustfmt.toml", "/hosted/milo-alert-texts.json",
 ]
 

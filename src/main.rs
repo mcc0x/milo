@@ -22,6 +22,7 @@ mod paths;
 mod picture;
 mod preferences;
 mod presence;
+mod preview;
 mod read;
 mod reader;
 mod review;
@@ -64,6 +65,7 @@ Usage: milo
        milo setup
        milo web [--port PORT] [--no-open]
        milo web --host HOST [--project DIR] [--port PORT] [--no-open]
+       milo preview URL [--placement right|left|above|below|floating]
        milo settings export GROUPS | import FILE [--apply] | undo
        milo doctor
        milo setup --repair | --remove
@@ -88,6 +90,8 @@ milo web opens local Settings in your browser. Use --no-open to print the link
   without opening it.
 milo web --host HOST opens the Settings of another Rex host here, through a Rex
   forward that ends with it.
+milo preview opens a local dev site beside the main terminal in this Rex tab
+  on macOS. --placement applies to this launch only.
 milo doctor explains local preferences, integration health and usage sources.
 milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose.
   It is off until you turn it on.
@@ -205,6 +209,7 @@ fn command_help(name: &str) -> Option<&'static str> {
         "web" => {
             "Usage: milo web [--port PORT] [--no-open]\n       milo web --host HOST [--project DIR] [--port PORT] [--no-open]\n\nEdit local settings in your browser. The default port is 6110; use --port 0 for a free port. --no-open prints the private link without launching a browser.\n\n--host opens the settings of another Rex host on this computer. HOST is a label from `rex hosts` or a server address, as for `rex -S`. Milo starts its editor on that host, carries it here with `rex forward` on 127.0.0.1 only, and closes both when you choose Done or press Ctrl-C. --project names a folder on the host, to edit that worktree's settings. The host needs this version of milo on the search path of its login shell."
         }
+        "preview" => preview::HELP,
         "doctor" => {
             "Usage: milo doctor\n\nShow effective preferences, integration health and local usage sources without changing anything."
         }
@@ -220,9 +225,9 @@ fn command_help(name: &str) -> Option<&'static str> {
 }
 
 /// Every word `command_help` knows, in the order `--help` lists them.
-const COMMANDS: [&str; 14] = [
-    "outline", "history", "usage", "menubar", "setup", "web", "settings", "doctor", "presence", "view", "review",
-    "listen", "alerts", "claude-status",
+const COMMANDS: [&str; 15] = [
+    "outline", "history", "usage", "menubar", "setup", "web", "preview", "settings", "doctor", "presence", "view",
+    "review", "listen", "alerts", "claude-status",
 ];
 const OPTIONS: [&str; 3] = ["--help", "--version", "--skip-onboarding"];
 
@@ -324,6 +329,8 @@ enum Command<'a> {
     Home,
     Setup,
     Web(web::Start<'a>),
+    Preview { url: &'a str, placement: Option<preferences::PreviewPlacement> },
+    PreviewAnchor { url: &'a str, main: &'a OsStr },
     SkipOnboarding,
     Doctor,
     Repair,
@@ -365,7 +372,9 @@ fn command<'a>(
             Command::ShellOutline(block)
         });
     }
-    if !rest.is_empty() && !matches!(name, Some("view" | "review" | "web" | "alerts" | "presence" | "settings")) {
+    if !rest.is_empty()
+        && !matches!(name, Some("view" | "review" | "web" | "preview" | "preview-anchor" | "alerts" | "presence" | "settings"))
+    {
         return Err(format!("too many arguments; see {}", guide(name)));
     }
     if rest.is_empty()
@@ -413,6 +422,23 @@ fn command<'a>(
             return Err("missing patch; use milo review PATCH [--from NAME] [--float]".to_string());
         }
         (Some("setup"), None) => Command::Setup,
+        (Some("preview"), _) => {
+            let url = preview::url(option.ok_or(preview::EXPECTED)?)?;
+            let placement = match rest {
+                [] => None,
+                [flag, value] if flag == "--placement" => {
+                    Some(value.to_str().and_then(preferences::PreviewPlacement::parse).ok_or(preview::EXPECTED)?)
+                }
+                _ => return Err(preview::EXPECTED.into()),
+            };
+            Command::Preview { url, placement }
+        }
+        (Some("preview-anchor"), _) => {
+            let [main] = rest else { return Err("missing preview terminal".into()) };
+            let url = preview::url(option.ok_or(preview::EXPECTED)?)?;
+            rex::exact_id(main, "block:").ok_or("invalid preview terminal")?;
+            Command::PreviewAnchor { url, main }
+        }
         (Some("web"), first_flag) => {
             const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";
             let mut open_browser = true;
@@ -568,6 +594,8 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::Usage => run(Start::Check, &|| Ok(Box::new(usage::Usage::open()))),
         Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),
         Command::Web(start) => web::run(start),
+        Command::Preview { url, placement } => preview::open(url, placement),
+        Command::PreviewAnchor { url, main } => preview::anchor(url, main),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),
@@ -864,6 +892,24 @@ mod tests {
             &["--project", "/srv/app"],
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn preview_distinguishes_the_saved_default_from_a_one_shot_placement() {
+        let first = Some(OsStr::new("preview"));
+        let url = "http://localhost:3000";
+        let second = Some(OsStr::new(url));
+        assert_eq!(command(first, second, &[]), Ok(Command::Preview { url, placement: None }));
+        for name in ["left", "right", "above", "below", "floating"] {
+            let args = [OsString::from("--placement"), OsString::from(name)];
+            let placement = preferences::PreviewPlacement::parse(name);
+            assert!(placement.is_some());
+            assert_eq!(command(first, second, &args), Ok(Command::Preview { url, placement }));
+        }
+        for rest in [vec!["--placement"], vec!["--placement", "auto"], vec!["--placement", "left", "extra"]] {
+            let args: Vec<_> = rest.into_iter().map(OsString::from).collect();
+            assert!(command(first, second, &args).is_err());
         }
     }
 

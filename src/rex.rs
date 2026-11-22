@@ -1,7 +1,11 @@
 //! Calls Rex for floating readers, setup, and the new-tab listener.
 
+#[cfg(target_os = "macos")]
+mod preview;
 mod server;
 
+#[cfg(target_os = "macos")]
+pub(crate) use preview::{open_preview, preview_watch, return_preview_focus};
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
 use std::ffi::{OsStr, OsString};
