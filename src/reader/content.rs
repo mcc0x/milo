@@ -17,7 +17,7 @@ use crate::syntax;
 pub(super) const LIMIT: u64 = 2 << 20;
 pub(super) const NOT_TEXT: &str = "This file is not text.";
 pub(super) const EMPTY: &str = "Empty.";
-const NOT_FILE: &str = "Not a file, so there is nothing to show.";
+pub(super) const NOT_FILE: &str = "Not a file, so there is nothing to show.";
 
 struct Location {
     repo: Repo,
@@ -354,7 +354,7 @@ fn could_be_picture(bytes: &[u8]) -> bool {
     prefix.starts_with(b"<") || prefix.starts_with(b"%PDF-") || text(bytes).is_none()
 }
 
-fn text(bytes: &[u8]) -> Option<&str> {
+pub(super) fn text(bytes: &[u8]) -> Option<&str> {
     if bytes.contains(&0) { None } else { std::str::from_utf8(bytes).ok() }
 }
 

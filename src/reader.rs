@@ -9,6 +9,7 @@ mod edit;
 #[cfg(test)]
 mod edit_tests;
 mod inbox;
+mod handed;
 mod rescue;
 mod tabs;
 #[cfg(test)]
@@ -36,6 +37,7 @@ use disk::{ReadOnly, SaveError};
 use edit::{Editor, Place, Step};
 pub use rescue::take_notes as take_rescue_notes;
 pub use tabs::Tabs;
+pub use handed::{Handed, handed_lines};
 
 /// Lines of context kept above a change when jumping to it.
 const LEAD: usize = 3;
@@ -96,7 +98,23 @@ enum JumpNotice {
 /// A working file can change; a commit needs only its name and date.
 enum Source {
     Working(Box<WorkingFile>),
-    Committed { short_id: String, time: i64 },
+    Committed {
+        short_id: String,
+        time: i64,
+    },
+    /// The working file as it was when read, marked with a handed-over patch's edits.
+    Handed(Handed),
+}
+
+impl Source {
+    /// The working file, or why what is shown in its place is never edited.
+    fn working(&self) -> Result<&WorkingFile, ReadOnly> {
+        match self {
+            Self::Working(work) => Ok(work),
+            Self::Committed { .. } => Err(ReadOnly::COMMIT),
+            Self::Handed(_) => Err(ReadOnly::HANDED),
+        }
+    }
 }
 
 struct WorkingFile {
@@ -300,10 +318,7 @@ impl Reader {
     }
 
     pub(super) fn working_repo(&self) -> Option<&Repo> {
-        match &self.source {
-            Source::Working(work) => Some(&work.repo),
-            Source::Committed { .. } => None,
-        }
+        self.source.working().ok().map(|work| &work.repo)
     }
 
     fn new(path: String, source: Source, icons: IconMode, preference_note: Option<&'static str>) -> Self {
@@ -469,8 +484,20 @@ impl Pane for Reader {
             }
             Some(ReadOnly(why)) => rows.extend([note("Read-only:"), note(why)]),
         }
-        if matches!(self.source, Source::Committed { .. }) {
-            rows.insert(1, note("As of a commit"));
+        match &self.source {
+            Source::Working(_) => {}
+            Source::Committed { .. } => rows.insert(1, note("As of a commit")),
+            Source::Handed(handed) => {
+                let files = (handed.total > 1).then(|| key("[ ]  ", "prev/next file"));
+                let about = [
+                    heading("Handed-over patch"),
+                    note("Marked lines are what"),
+                    note("the patch says it"),
+                    note("changed. Milo cannot"),
+                    note("tell who wrote them."),
+                ];
+                rows.splice(0..0, about.into_iter().chain(files).chain([key("r    ", "reload"), HelpRow::new()]));
+            }
         }
         Page::new(rows)
     }
@@ -537,7 +564,7 @@ impl Pane for Reader {
         }
         let force = match &mut self.source {
             Source::Working(work) => std::mem::take(&mut work.notified),
-            Source::Committed { .. } => false,
+            Source::Committed { .. } | Source::Handed(_) => false,
         };
         self.refresh(force);
         self.top = self.top.min(self.last_top());
@@ -615,7 +642,7 @@ impl Reader {
         if let Some(why) = self.read_only {
             return Err(why);
         }
-        let Source::Working(work) = &self.source else { return Err(ReadOnly::COMMIT) };
+        let work = self.source.working()?;
         let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
         let entry = stamp.reachable().and(entry.map_err(ReadOnly::of))?;
         let original = disk::load(&entry)?;
@@ -630,7 +657,10 @@ impl Reader {
 
     /// Whether the file may be edited, as far as its place and what is shown of it can say.
     fn edit_refusal(&self) -> Option<ReadOnly> {
-        let Source::Working(work) = &self.source else { return Some(ReadOnly::COMMIT) };
+        let work = match self.source.working() {
+            Ok(work) => work,
+            Err(why) => return Some(why),
+        };
         match &self.body {
             Body::Note(note) if *note == content::NOT_TEXT => return Some(ReadOnly::NOT_TEXT),
             Body::Picture(_) => return Some(ReadOnly::PICTURE),

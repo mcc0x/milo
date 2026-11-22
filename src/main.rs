@@ -7,6 +7,7 @@ mod fixture;
 mod format;
 mod fs_ops;
 mod git;
+mod handoff;
 mod help;
 mod history;
 mod home;
@@ -23,6 +24,7 @@ mod preferences;
 mod presence;
 mod read;
 mod reader;
+mod review;
 mod rex;
 mod screen;
 mod setup;
@@ -67,6 +69,7 @@ Usage: milo
        milo setup --repair | --remove
        milo presence [status] | enable | details DETAILS | application ID | disable
        milo view FILE [--commit ID | --edit]
+       milo review PATCH [--from NAME] [--float]
        milo PATH
        milo [setup] --skip-onboarding
        milo listen [--stop]
@@ -153,6 +156,12 @@ The reader colours supported code and marks added and removed lines. It
 shows a picture as a picture where the terminal can draw one.
 Use milo view FILE --commit ID to see the file as of that commit, not as
 it is now. ID is a full or abbreviated Git commit ID in hex.
+milo review PATCH reads a unified diff that a coding agent wrote of its own
+edits, and shows each file as it is now with only those edits marked. [ and ]
+move between the patch's files and r reads them again. Milo checks that a
+file still holds the patch's lines, not who wrote them, and shows no diff
+for a file that no longer does. --from NAME says whose patch it is; --float
+opens the review in a floating Rex pane from a program with no terminal.
 The reader only reads until you press e. Edits are a draft until saved, and
 a save never replaces a file that changed on disk without asking. Files at
 a commit, links, pictures and files that are not UTF-8 text stay read-only.
@@ -175,6 +184,9 @@ fn command_help(name: &str) -> Option<&'static str> {
         }
         "view" => {
             "Usage: milo view FILE [--commit ID | --edit]\n\nRead a file now or as it was at a Git commit. --edit starts editing a working text file; in the reader, e does the same."
+        }
+        "review" => {
+            "Usage: milo review PATCH [--from NAME] [--float]\n\nRead the edits in PATCH, a unified diff that a coding agent wrote of its own edits. Each file is shown as it is now with only those edits marked; other uncommitted work reads as unchanged. Milo checks that the file still holds the patch's lines, not who wrote them. A file that no longer holds them shows no diff.\n--from NAME shows whose patch it is said to be.\n--float opens the review in a floating Rex pane and prints what it shows, for a program with no terminal of its own."
         }
         "setup" => {
             "Usage: milo setup\n       milo setup --skip-onboarding | --repair | --remove\n\nOpen Settings, skip the welcome guide without a terminal, or maintain managed integrations."
@@ -231,6 +243,7 @@ enum Command<'a> {
     ShellHistory(&'a OsStr),
     PeekOutline(&'a OsStr),
     View { file: &'a OsStr, commit: Option<CommitId<'a>> },
+    Review { patch: &'a OsStr, from: Option<&'a str>, float: bool },
     Edit(&'a OsStr),
     Path(&'a OsStr),
     Usage,
@@ -280,7 +293,7 @@ fn command<'a>(
             Command::ShellOutline(block)
         });
     }
-    if !rest.is_empty() && !matches!(name, Some("view" | "web" | "alerts" | "presence" | "settings")) {
+    if !rest.is_empty() && !matches!(name, Some("view" | "review" | "web" | "alerts" | "presence" | "settings")) {
         return Err("too many arguments; see milo --help".to_string());
     }
     if rest.is_empty()
@@ -309,6 +322,24 @@ fn command<'a>(
             Command::View { file, commit }
         }
         (Some("view"), None) => return Err("missing file; use milo view FILE [--commit ID | --edit]".to_string()),
+        (Some("review"), Some(patch)) => {
+            let (mut from, mut float) = (None, false);
+            let mut flags = rest.iter();
+            while let Some(flag) = flags.next() {
+                match flag.to_str() {
+                    Some("--float") if !float => float = true,
+                    Some("--from") if from.is_none() => {
+                        let name = flags.next().and_then(|name| name.to_str()).and_then(review::name);
+                        from = Some(name.ok_or("--from requires a name of at most 40 characters")?);
+                    }
+                    _ => return Err("expected milo review PATCH [--from NAME] [--float]".to_string()),
+                }
+            }
+            Command::Review { patch, from, float }
+        }
+        (Some("review"), None) => {
+            return Err("missing patch; use milo review PATCH [--from NAME] [--float]".to_string());
+        }
         (Some("setup"), None) => Command::Setup,
         (Some("web"), first_flag) => {
             const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";
@@ -414,6 +445,12 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             setup::return_from_peek(origin);
             result
         }
+        Command::Review { patch, from, float: true } => {
+            print_report(review::float(Path::new("."), Path::new(patch), from))
+        }
+        Command::Review { patch, from, float: false } => run(Start::Reading(Path::new(".")), &|| {
+            Ok(Box::new(review::Review::open(Path::new("."), Path::new(patch), from)?))
+        }),
         Command::View { file, commit } => run(Start::Reading(file_dir(Path::new(file))), &|| {
             let path = Path::new(file);
             let reader = if let Some(id) = commit {
@@ -611,6 +648,26 @@ mod tests {
             let command = command(Some(OsStr::new("view")), Some(OsStr::new("-notes")), &args);
             assert_eq!(command, Err("commit ID must be 4 to 64 hex digits".to_string()));
         }
+    }
+
+    #[test]
+    fn the_review_command_takes_a_patch_then_a_name_and_float_in_either_order() {
+        let patch = OsStr::new("--odd.patch");
+        let review = |rest: &[&str]| {
+            let rest: Vec<OsString> = rest.iter().map(Into::into).collect();
+            command(Some(OsStr::new("review")), Some(patch), &rest).map(|command| format!("{command:?}"))
+        };
+        let both = format!("{:?}", Command::Review { patch, from: Some("omp"), float: true });
+        assert_eq!(review(&["--from", "omp", "--float"]), Ok(both.clone()));
+        assert_eq!(review(&["--float", "--from", "omp"]), Ok(both));
+        assert_eq!(review(&[]), Ok(format!("{:?}", Command::Review { patch, from: None, float: false })));
+        // The word after --from is a name, whatever it looks like.
+        let named_float = format!("{:?}", Command::Review { patch, from: Some("--float"), float: false });
+        assert_eq!(review(&["--from", "--float"]), Ok(named_float));
+        for bad in [&["--from"][..], &["--from", "a\u{1b}[2J"], &["--float", "--float"], &["extra"]] {
+            assert!(review(bad).is_err(), "{bad:?}");
+        }
+        assert!(command(Some(OsStr::new("review")), None, &[]).is_err_and(|why| why.starts_with("missing patch")));
     }
 
     #[test]

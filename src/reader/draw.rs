@@ -256,26 +256,33 @@ impl Reader {
     }
 
     fn draw_hint(&self, s: &mut Screen) {
+        let files = matches!(&self.source, Source::Handed(handed) if handed.total > 1);
         if self.can_fold() {
             let action = if self.review.is_compact() { "c full file" } else { "c changes only" };
-            let middle = &["e edit", "↑↓ scroll", "q close", "n N changes"][usize::from(self.read_only.is_some())..];
+            let middle: &[_] = match (files, self.read_only.is_some()) {
+                (true, _) => &["↑↓ scroll", "[ ] files", "q close", "n N changes"],
+                (false, true) => &["↑↓ scroll", "q close", "n N changes"],
+                (false, false) => &["e edit", "↑↓ scroll", "q close", "n N changes"],
+            };
             crate::help::draw_hint(s, action, middle, "? help");
             return;
         }
         let changes = matches!(&self.body, Body::Text(text)
             if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize);
-        let committed = matches!(self.source, Source::Committed { .. });
+        let working = matches!(self.source, Source::Working(_));
         let still = !matches!(self.body, Body::Text(_));
-        let action = match (changes, committed) {
-            (true, true) => "n N changes",
-            (true, false) => "n next change",
+        let action = match (changes, working) {
+            (true, false) => "n N changes",
+            (true, true) => "n next change",
             (false, _) => "",
         };
-        let middle: &[_] = match (still, self.read_only.is_none()) {
-            (true, true) => &["e edit", "q close"],
-            (true, false) => &["q close"],
-            (false, true) => &["↑↓ scroll", "e edit", "q close"],
-            (false, false) => &["↑↓ scroll", "q close"],
+        let middle: &[_] = match (still, self.read_only.is_none(), files) {
+            (true, _, true) => &["[ ] files", "q close"],
+            (false, _, true) => &["↑↓ scroll", "[ ] files", "q close"],
+            (true, true, false) => &["e edit", "q close"],
+            (true, false, false) => &["q close"],
+            (false, true, false) => &["↑↓ scroll", "e edit", "q close"],
+            (false, false, false) => &["↑↓ scroll", "q close"],
         };
         crate::help::draw_hint(s, action, middle, "? help");
     }
@@ -311,6 +318,31 @@ impl Reader {
             if width <= room {
                 right -= s.put_right(right, 0, short_id, FAINT);
                 right -= s.put_right(right, 0, bare, FAINT);
+            }
+        } else if let Source::Handed(handed) = &self.source {
+            // Whose patch it is said to be comes first: it is what tells this from a file's own changes.
+            let (lead, name) = match &handed.from {
+                Some(name) => ("patch from ", name.as_str()),
+                None => ("handed-over patch", ""),
+            };
+            let room = right.saturating_sub(NAME_ROOM);
+            let width = lead.len() + str_width(name);
+            let digits = |n: usize| n.max(1).ilog10() as usize + 1;
+            let (of, space) = (" of ", " · ");
+            if width <= room {
+                right -= s.put_right(right, 0, name, FAINT);
+                right -= s.put_right(right, 0, lead, FAINT);
+                let place = digits(handed.number) + of.len() + digits(handed.total) + str_width(space);
+                if handed.total > 1 && width + place <= room {
+                    right -= s.put_right(right, 0, space, FAINT);
+                    s.put_number(right, 0, handed.total as u64, FAINT);
+                    right -= digits(handed.total);
+                    right -= s.put_right(right, 0, of, FAINT);
+                    s.put_number(right, 0, handed.number as u64, FAINT);
+                    right -= digits(handed.number);
+                }
+            } else if "patch".len() <= room {
+                right -= s.put_right(right, 0, "patch", FAINT);
             }
         } else if let Body::Picture(picture) = &self.body {
             let size = format!("{}×{}", picture.width, picture.height);
