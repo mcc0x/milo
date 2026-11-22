@@ -874,6 +874,16 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 ),
                 None => unreachable!("the menu bar action is hidden when unavailable"),
             },
+            Row::MenuIndicator => Cell::choice(
+                "Menu bar indicator",
+                "Indicator",
+                self.menu_indicator.map_or("Unavailable", crate::menubar::Indicator::label),
+                if self.menu_indicator.is_some() {
+                    "Enter cycles Agent quota, CPU and Memory. Saves immediately for this profile without installing the app."
+                } else {
+                    "Could not read the saved indicator. Enter to reset it to Agent quota."
+                },
+            ),
             Row::PresenceOpen => Cell::toggle(
                 "Discord presence…",
                 "Discord",

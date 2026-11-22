@@ -21,6 +21,14 @@ impl Indicator {
         }
     }
 
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Quota => "Agent quota",
+            Self::Cpu => "CPU",
+            Self::Memory => "Memory",
+        }
+    }
+
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "quota" => Some(Self::Quota),
@@ -42,9 +50,33 @@ impl Indicator {
     }
 
     pub(crate) fn save(self, config: &Path) -> Result<&'static str, String> {
+        Self::update(config, |_| Ok(self))
+    }
+
+    pub(crate) fn advance(config: &Path, shown: Option<Self>) -> Result<&'static str, String> {
+        Self::update(config, |path| {
+            let current = match Self::load(path) {
+                Ok(current) => Some(current),
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => None,
+                Err(e) => return Err(e),
+            };
+            if current != shown {
+                return Err(io::Error::other("the indicator changed elsewhere; check its new value and try again"));
+            }
+            Ok(match current {
+                Some(Self::Quota) => Self::Cpu,
+                Some(Self::Cpu) => Self::Memory,
+                Some(Self::Memory) | None => Self::Quota,
+            })
+        })
+    }
+
+    fn update(config: &Path, choice: impl FnOnce(&Path) -> io::Result<Self>) -> Result<&'static str, String> {
         let path = Self::file(config);
-        preferences::locked(&path, |dir| preferences::replace(dir, &path, &format!("indicator = {}\n", self.value())))
-            .map_err(|error| format!("Could not save the menu bar indicator: {error}"))?;
+        preferences::locked(&path, |dir| {
+            preferences::replace(dir, &path, &format!("indicator = {}\n", choice(&path)?.value()))
+        })
+        .map_err(|error| format!("Could not save the menu bar indicator: {error}"))?;
         Ok("Menu bar indicator saved. The app updates on its next refresh.")
     }
 }
