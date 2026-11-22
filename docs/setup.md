@@ -109,6 +109,8 @@ The dashboard ships inside `milo`: using it needs no Node runtime, account, or i
 
 ## Several Rex hosts
 
+**Availability:** This section describes current source builds. The v0.1.5 release does not include remote settings (`milo web --host`) or settings transfer (`milo settings export`, `import`, and `undo`).
+
 Each Rex host has its own Milo: its own binary, settings, state and integrations. Nothing is shared or synchronised on its own. Three things make several hosts feel like one setup: Milo says which host you are looking at, you can open another host’s settings from the computer you are using, and you can copy the settings you choose from one host to another. With a single host nothing changes.
 
 Several Rex apps attached to one server, such as a Mac and a phone, are one host: they share one Milo and one set of settings.

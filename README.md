@@ -95,8 +95,8 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
-| `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings), opened here through a loopback Rex forward |
-| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](docs/setup.md#copy-settings-to-another-host) to another host, preview the import, and take it back |
+| `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings) through a loopback Rex forward (source builds; not in v0.1.5) |
+| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](docs/setup.md#copy-settings-to-another-host), preview the import, and take it back (source builds; not in v0.1.5) |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |

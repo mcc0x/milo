@@ -103,8 +103,8 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) |
-| `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings), opened here through a loopback Rex forward |
-| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host) to another host, preview the import, and take it back |
+| `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward (source builds; not in v0.1.5) |
+| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host), preview the import, and take it back (source builds; not in v0.1.5) |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
@@ -232,6 +232,8 @@ While the page is open, it periodically keeps the local session alive only if it
 The dashboard ships inside `milo`: using it needs no Node runtime, account, or internet connection. For UI development, use Node 26 and Bun: `cd dashboard && bun install --frozen-lockfile && bun run dev`. Open the private URL printed in the terminal. Next.js Fast Refresh updates the interface against a real local Milo session. `MILO_BIN` selects the backend executable (default `milo` on PATH); `MILO_PROJECT` selects the project to edit; `PORT` selects the development port (default `6110`). Stop the development server with `Ctrl-C`.
 
 ## Several Rex hosts
+
+**Availability:** This section describes current source builds. The v0.1.5 release does not include remote settings (`milo web --host`) or settings transfer (`milo settings export`, `import`, and `undo`).
 
 Each Rex host has its own Milo: its own binary, settings, state and integrations. Nothing is shared or synchronised on its own. Three things make several hosts feel like one setup: Milo says which host you are looking at, you can open another host’s settings from the computer you are using, and you can copy the settings you choose from one host to another. With a single host nothing changes.
 
