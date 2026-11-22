@@ -8,6 +8,8 @@ In Follow mode, Outline and History use the local shell's working directory, eve
 If Git temporarily cannot identify the shell's project, the pane keeps the last project and retries without another `cd`.
 If shell tracking itself stops, the notice changes to **Shell tracking unavailable**. Reopen the pane to reconnect.
 
+On a local Mac, `milo preview http://localhost:3000` requests a live WebKit pane in the current Rex tab. See the [experimental preview guide](rex-webkit.md) for placement, permissions, element selection and verification limits.
+
 ## What fits in a pane
 
 | Pane | Size | What you see |

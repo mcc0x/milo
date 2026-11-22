@@ -179,7 +179,7 @@ as an agent's shell would. It sees only the handed-over edits marked beside a
 person's uncommitted lines in the same file, a path outside the project
 refused, and a reason in place of the diff once the agent's line is rewritten.
 
-For a native web preview, first check [what the installed Rex server and Mac client can render](docs/rex-webkit.md). The disposable split probe there tests placement, not browser support.
+For the experimental macOS `milo preview` command, see the [WebKit preview guide](docs/rex-webkit.md). Exercise the native browser and the actual Rex anchor separately; passing a server layout test does not prove that an overlay is visible or correctly placed.
 
 ### Changing alert mirroring
 

@@ -94,6 +94,7 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
 | `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader |
+| `milo preview URL [--placement PLACEMENT]` | [Experimental local WebKit pane](docs/rex-webkit.md) in the current macOS Rex tab |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
 | `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |

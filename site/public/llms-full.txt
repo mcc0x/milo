@@ -102,6 +102,7 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo usage` | Usage limits |
 | `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
 | `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader |
+| `milo preview URL [--placement PLACEMENT]` | [Experimental local WebKit pane](https://github.com/mcc0x/milo/blob/main/docs/rex-webkit.md) in the current macOS Rex tab |
 | `milo setup` | Setup screen |
 | `milo web [--port PORT] [--no-open]` | [Local browser settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) |
 | `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
@@ -452,6 +453,8 @@ If you initialize Git in that folder, open panes pick up the repository and its 
 In Follow mode, Outline and History use the local shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin.
 If Git temporarily cannot identify the shell's project, the pane keeps the last project and retries without another `cd`.
 If shell tracking itself stops, the notice changes to **Shell tracking unavailable**. Reopen the pane to reconnect.
+
+On a local Mac, `milo preview http://localhost:3000` requests a live WebKit pane in the current Rex tab. See the [experimental preview guide](https://github.com/mcc0x/milo/blob/main/docs/rex-webkit.md) for placement, permissions, element selection and verification limits.
 
 ## What fits in a pane
 
@@ -1494,7 +1497,7 @@ as an agent's shell would. It sees only the handed-over edits marked beside a
 person's uncommitted lines in the same file, a path outside the project
 refused, and a reason in place of the diff once the agent's line is rewritten.
 
-For a native web preview, first check [what the installed Rex server and Mac client can render](https://github.com/mcc0x/milo/blob/main/docs/rex-webkit.md). The disposable split probe there tests placement, not browser support.
+For the experimental macOS `milo preview` command, see the [WebKit preview guide](https://github.com/mcc0x/milo/blob/main/docs/rex-webkit.md). Exercise the native browser and the actual Rex anchor separately; passing a server layout test does not prove that an overlay is visible or correctly placed.
 
 ### Changing alert mirroring
 

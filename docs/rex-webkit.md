@@ -1,34 +1,66 @@
-# Can Milo open a local site in a Rex pane?
+# Local WebKit preview (experimental, macOS)
 
-**Not on the tested Mac preview.** Rex can place a block beside the project's terminal, but neither the server nor the Mac client advertises a way for Milo to put a `WKWebView` in that block. [Issue #68](https://github.com/mcc0x/milo/issues/68) remains open. There is no `milo preview` command, external-browser fallback or element picker.
-
-## What was checked
-
-On 2026-11-22, the installed Apple Silicon client identified itself as Rex 0.1.0 (2061). Its [official Preview update feed](https://blob.superlogical.com/public/rex-app/preview-arm64/appcast.xml) pairs that build with Rex `0.1.0-preview.21`, commit `202b1b3fc0219883112258a8d0f9f95e2d47daa9`. `rex version` and the disposable server's `server.version` agreed: control API revision **18**, `darwin_arm64`. The feed identifies the builds; the detailed [beta changelog](https://www.superlogical.com/rex/docs/beta/community-mcp) requires Discord membership and was not used as evidence of missing capabilities. Other builds and platforms are unverified.
-
-The [server API](https://www.superlogical.com/rex/docs/automate/server-api) reports what the connected server can create. `rex block types --json` and Lua's `rex.call("block_creator.list")` returned the same four flavors:
-
-| Flavor | What it provides |
-| --- | --- |
-| `com.superlogical.terminal.shell` | A terminal running a shell or command |
-| `com.superlogical.onboarding.onboarding` | Rex's own walkthrough; exposes `state` and `set_step`, not URL navigation |
-| `com.superlogical.tunnel.dial` | A connection to a host and port |
-| `com.superlogical.tunnel.listen` | A listening socket for forwarded connections |
-
-To repeat the split probe with an installed Rex:
+Start your dev server first. In its **local Rex tab**, run:
 
 ```sh
-cargo test --locked --test rex_lab preview_block_capabilities -- --exact --ignored --nocapture
+milo preview http://localhost:3000
 ```
 
-It uses a private server, socket, home and session. `session.new_split` placed onboarding beside the terminal without moving focus. The same call with a deliberately unregistered flavor returned `block flavor not found` (`404`, `not_found`); the two blocks and terminal focus were unchanged. The inventory matters more than that error: a made-up name would fail even on a server with a browser under a different name.
+Rex owns the terminal anchor, divider and layer. A small Milo helper owns a borderless AppKit panel containing a real `WKWebView`. The page is not rendered into a bitmap, embedded in the settings dashboard or opened in the default browser. The command never searches for servers, picks a port, changes Rex settings or navigates an existing browser tab. Linux, SSH and remote sessions are not supported.
 
-The Mac client's own `rex -C CLIENT actions --json` offered Quick Look and Forward Port, but no action to mount a URL in a pane. [Quick Look](https://www.superlogical.com/rex/docs/reference/mac-actions) previews links on screen; [`rex forward open`](https://www.superlogical.com/rex/docs/reference/cli) opens the system browser unless passed `--no-open`. Neither gives Milo a browser block. `--block-dir` discovers **server** executables, not Mac view extensions. The [Lua API](https://www.superlogical.com/rex/docs/reference/lua) composes registered blocks; the third-party [Rust SDK](https://github.com/alpha-og/rexdk) wraps the server protocol. No public Rex client renderer SDK was found.
+## Placement
 
-## What would unblock it
+The default is **Right** of the main working terminal, not right of the sidebar. Choose **Preview placement** in `milo setup` → Workflow or `milo web` → Panes → Preview. These edit the same preference in the existing settings scopes. To try another placement once, without saving anything:
 
-Rex needs to advertise a browser flavor rendered by the **target client**, or a supported client extension point to mount a WebKit view. It must be possible to open a specified URL beside a specified block, return focus to the terminal and close only the new pane. A server version or a successful split does not prove the attached client can render it. Reject unsupported clients; for a remote project, require an explicit forward to its server or decline. Never guess a port or navigate an existing tab.
+```sh
+milo preview http://localhost:3000 --placement left
+```
 
-Element handoff is a separate opt-in. [React Grab 0.2.0](https://github.com/aidenybai/react-grab/tree/23bce0e56f2808902f1126ad581f6d8c3b5f639e/packages/react-grab) runs **in the page**; its [MIT license](https://github.com/aidenybai/react-grab/blob/23bce0e56f2808902f1126ad581f6d8c3b5f639e/LICENSE) doesn't supply a Rex renderer. Nothing is bundled. If added, pin and audit the shipped bundle and notices, disable its default version check, and load it locally only for the explicitly approved dev origin and main frame. Revoke access on navigation. Show the exact bounded selection as untrusted text in Milo-owned UI; copy or send only after the user chooses a destination and confirms. Page content must not select the recipient, invoke an agent, or type commands into a shell.
+The choices are `left`, `right`, `above`, `below` and `floating`. Floating requests a Rex floating layer **in the same tab**; it does not fall back to a split. An ambiguous main terminal or viewer is not a placement hint: Milo should refuse rather than attach to a different window.
 
-Before claiming support, show the disposable project's live page **inside Rex** beside its terminal. Exercise links, form input, scrolling, file-edit hot reload, focus in both directions, picker cancellation and teardown. Measure time to an interactive page and idle CPU/RSS including WebKit child processes against the same layout without the preview. The spike produced no browser measurements or screenshots: it created a walkthrough, not a browser.
+## Window ownership and permissions
+
+Milo does not patch Rex or install a plugin. On macOS the Cargo build compiles a separate system-framework helper, embeds it in `milo` and installs that exact helper in the private macOS user cache on demand. The terminal CLI does not link AppKit or WebKit. No separate package, JavaScript runtime or browser extension is required.
+
+The helper needs macOS **Accessibility** access to measure a pane. Milo checks access without prompting. There is no Screen Recording requirement for the preview itself. Rex layout events identify the visible block, not its screen coordinates. A random marker written in the anchor's terminal, the local viewer PID, the focused accessibility window and macOS window order must agree before the helper may draw. If Rex does not expose the required accessibility information, the view stays hidden. There is no fallback to a guessed rectangle. Moving between displays requires fresh proof; windows straddling or on mirrored displays are intentionally unsupported.
+
+The cached executable is `$(getconf DARWIN_USER_CACHE_DIR)/net.usemilo.preview/Milo Preview`. If access is denied, the launcher returns before creating a Rex split or layer; permission changes are up to you. A visible anchor also needs at least 32 columns and two rows for its marker.
+
+## Selecting an element for an agent
+
+Use **Select** in the preview and click the element. Review the structural path in Milo’s controls, then choose **Copy** or **Cancel**. Copying does not paste into a terminal, contact an agent or run a command. Paste it yourself if you want to share it. The picker returns a bounded path derived from tag kinds and sibling positions, not DOM content, attributes, input values, cookies, source files or screenshots. Navigation invalidates an outstanding selection.
+
+Milo’s picker is first-party code under the repository's MIT license. [React Grab](https://github.com/aidenybai/react-grab/tree/23bce0e56f2808902f1126ad581f6d8c3b5f639e/packages/react-grab) was evaluated ([MIT license](https://github.com/aidenybai/react-grab/blob/23bce0e56f2808902f1126ad581f6d8c3b5f639e/LICENSE)); it is **not** bundled or downloaded. The picker uses WebKit’s isolated content world in the explicitly opened loopback origin's main frame. It does not run arbitrary-origin scripts. The preview uses a nonpersistent WebKit data store, restricts navigation to the initial origin and does not open external windows. This is for your own dev server, **not a network sandbox for hostile applications**.
+
+## What has been verified
+
+The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b1b3fc0219883112258a8d0f9f95e2d47daa9`, control API revision 18) advertises terminal, onboarding and two tunnel flavors, not a browser block. The [official preview feed](https://blob.superlogical.com/public/rex-app/preview-arm64/appcast.xml), [server API](https://www.superlogical.com/rex/docs/automate/server-api), [Lua reference](https://www.superlogical.com/rex/docs/reference/lua), [Mac actions](https://www.superlogical.com/rex/docs/reference/mac-actions) and [Rust SDK](https://github.com/alpha-og/rexdk) distinguish server-created blocks from client UI. The detailed [beta changelog](https://www.superlogical.com/rex/docs/beta/community-mcp) requires membership. The overlay is a Milo design, **not a claim that Rex has added a browser API**.
+
+* A disposable Rex server created and closed all five placements in the same tab with a sidebar present. The layout lab used a simulated Unix viewer and inspected Rex’s actual split trees and floating layer, changed tile ratios, zoomed, moved/resized and minimized/restored the float, switched tabs, returned server-side focus and observed watcher shutdown. This was not a test of the Mac client's pixels or keyboard focus.
+* In a disposable AppKit panel, the production WebKit view loaded a real loopback server, accepted native keyboard/form input and hot-reloaded after a source change without a full navigation. The native smoke test exercises back/reload and select/review/cancel/copy. This tests the browser, not its registration over Rex.
+* The packaged dashboard was exercised at desktop and narrow widths; its placement setting survived save and restart. Linux rejected the command without opening a browser.
+* A real, undisplayed disposable Rex session refused preview without creating another block. On the two-display macOS test host, Accessibility and Screen Recording were not granted and Rex Remote Control was off. No privacy settings were changed. **No integrated Rex screenshot or successful GUI placement is claimed.**
+
+### Component measurements, not an end-to-end benchmark
+
+Apple Silicon, release-compiled helper component, local Bun dev page. Time to interactive page: 561 ms on the first measured run, then 313, 315 and 282 ms. Host RSS was 104–105 MiB. Across three five-second idle samples the host used 0.018–0.019 CPU seconds (about 0.4% of one core). In a separate four-second sample, the newly created WebContent, Networking and GPU workers that exited with the fixture totalled 66.8 MiB RSS and 0.02 CPU seconds. RSS can count shared pages more than once. These numbers exclude Rex and pane tracking; they are **not** measurements of the complete overlay. In 25 paired warm invocations, `milo --version` took a median 3.97 ms before and 3.93 ms after adding the helper.
+
+### Reproducing the checks
+
+From a checkout, run the production browser smoke test and the isolated Rex layout lab separately:
+
+```sh
+sh macos/Preview/tests/smoke.sh
+cargo test --locked --test rex_lab preview_layout_and_observer -- --exact --ignored --nocapture
+```
+
+The Rex lab uses a real server and a simulated Unix viewer. It cannot verify pixels, native keyboard focus, palette stacking or physical display movement.
+
+### Acceptance check on a permitted Mac
+
+Use a disposable Rex window and project, with a real server showing an editable field and a visibly changing source string. Do not use an existing work tab. Exercise the following before treating the feature as supported:
+
+1. With a Milo sidebar present, open each placement from the working shell and from the sidebar context. Inspect the tab, split parent/divider or floating layer. Compare Rex screenshots to the real page and confirm the sidebar is untouched.
+2. Navigate, type, scroll and change source on disk. Confirm hot reload preserves the field. Select an element, cancel, then select again and copy. Return keyboard focus to the original shell and type into it.
+3. Resize and zoom the tile. Move, resize and dismiss the float. Switch tabs, open the Rex palette, cover Rex with another app, move the window within and between displays and enter/leave a Space. The helper must hide rather than cover another surface when ownership is uncertain.
+4. Close the anchor, window and session separately; check that both the helper and its Rex observer exit. Compare startup, WebKit children, helper and Rex CPU/RSS against the same window without the preview. Capture only the disposable project.
