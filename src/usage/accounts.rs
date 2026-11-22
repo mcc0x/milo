@@ -12,7 +12,7 @@ use std::os::fd::RawFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::json::Value;
 use crate::preferences::{Show, UsageAccount, UsageAccounts};
@@ -240,6 +240,17 @@ pub(super) struct Fetched {
     asked: i64,
     /// The earliest time to ask it again unprompted.
     next: i64,
+}
+
+impl Fetched {
+    fn manual_at(&self) -> i64 {
+        let floor = self.asked.saturating_add(MANUAL_REST);
+        if self.failure == Some(Failure::Limited) { self.next.max(floor) } else { floor }
+    }
+
+    fn same_schedule(&self, other: &Self) -> bool {
+        (self.asked, self.next, self.failure) == (other.asked, other.next, other.failure)
+    }
 }
 
 impl UsageAccount {
@@ -666,13 +677,14 @@ impl Sources {
         origin: Origin,
         now: i64,
         manual: bool,
+        known: Option<Fetched>,
     ) -> Fetched {
         let scope = credentials.scope.as_deref();
         let before = cache.and_then(|path| Self::remembered(path, now));
-        if let Some(saved) = before {
-            // A reload may ask sooner than the schedule, but never inside a rate limit.
-            let limited = if saved.failure == Some(Failure::Limited) { saved.next } else { 0 };
-            let rest = if manual { limited.max(saved.asked + MANUAL_REST) } else { saved.next };
+        if let Some(saved) = before.filter(|saved| known.is_none_or(|known| !saved.same_schedule(&known))) {
+            // A new saved answer still coordinates with other processes. A
+            // known one already has an elapsed-time schedule in this process.
+            let rest = if manual { saved.manual_at() } else { saved.next };
             if now < rest {
                 return saved;
             }
@@ -730,19 +742,40 @@ pub(super) enum Status {
     Outdated,
 }
 
+/// The remaining waits, measured from when this process read or made the look.
+struct Cooldown {
+    since: Instant,
+    automatic: Duration,
+    manual: Duration,
+}
+
+impl Cooldown {
+    fn from_wall(fetched: &Fetched, now: i64, clock: Instant) -> Self {
+        let wait = |until: i64| Duration::from_secs(u64::try_from(until.saturating_sub(now)).unwrap_or_default());
+        Self {
+            since: clock,
+            automatic: wait(fetched.next.max(fetched.asked.saturating_add(MANUAL_REST))),
+            manual: wait(fetched.manual_at()),
+        }
+    }
+
+    fn ready(&self, clock: Instant, manual: bool) -> bool {
+        clock.saturating_duration_since(self.since) >= if manual { self.manual } else { self.automatic }
+    }
+}
+
 pub(super) struct Account {
     pub(super) which: UsageAccount,
     pub(super) show: Show,
     credentials: Option<Result<CredentialId, Failure>>,
     fetched: Option<Fetched>,
-    /// When this process should look again.
-    next: i64,
-    job: Option<sqlite::Job<Fetched>>,
+    cooldown: Option<Cooldown>,
+    job: Option<sqlite::Job<(Fetched, Cooldown)>>,
 }
 
 impl Account {
     fn new(which: UsageAccount, show: Show) -> Self {
-        Self { which, show, credentials: None, fetched: None, next: 0, job: None }
+        Self { which, show, credentials: None, fetched: None, cooldown: None, job: None }
     }
 
     /// Nothing observed under the previous key can be shown or delay this key.
@@ -752,7 +785,7 @@ impl Account {
         }
         self.credentials = Some(credentials);
         self.fetched = None;
-        self.next = 0;
+        self.cooldown = None;
         self.job = None;
         true
     }
@@ -829,7 +862,7 @@ impl Accounts {
     }
 
     /// Starts a look for each account that is due one, or for all on a deliberate reload.
-    pub(super) fn start(&mut self, now: i64, manual: bool) {
+    pub(super) fn start(&mut self, now: i64, clock: Instant, manual: bool) {
         let Some(sources) = &self.sources else { return };
         for account in &mut self.accounts {
             let which = account.which;
@@ -841,14 +874,15 @@ impl Accounts {
                 job.checking |= manual;
                 continue;
             }
-            if !manual && now < account.next {
+            if account.cooldown.as_ref().is_some_and(|cooldown| !cooldown.ready(clock, manual)) {
                 continue;
             }
-            let (cache, origin, first) = (sources.cache_file(which, id), sources.origin, account.fetched.is_none());
+            let (cache, origin, known) = (sources.cache_file(which, id), sources.origin, account.fetched);
             let credentials = credentials.into_owned();
             // If no thread can be started, the next check tries again.
-            account.job = sqlite::Job::start(first || manual, move || {
-                Some(Sources::fetch(which, &credentials, cache.as_deref(), origin, now, manual))
+            account.job = sqlite::Job::start(known.is_none() || manual, move || {
+                let fetched = Sources::fetch(which, &credentials, cache.as_deref(), origin, now, manual, known);
+                Some((fetched, Cooldown::from_wall(&fetched, now, clock)))
             })
             .ok();
         }
@@ -856,7 +890,7 @@ impl Accounts {
 
     /// Takes in finished looks. True when one changed what the pane shows or
     /// ended a look it was announcing.
-    pub(super) fn collect(&mut self, now: i64) -> bool {
+    pub(super) fn collect(&mut self, clock: Instant) -> bool {
         let Some(sources) = &self.sources else { return false };
         let mut changed = false;
         for account in &mut self.accounts {
@@ -867,11 +901,17 @@ impl Accounts {
                 continue;
             }
             let announced = account.job.take().is_some_and(|job| job.checking);
-            // A worker that died leaves what is known, and the look is tried again later.
-            account.next = result.map_or(now + MANUAL_REST, |fetched| fetched.next.max(fetched.asked + MANUAL_REST));
-            if let Some(fetched) = result {
+            if let Some((fetched, cooldown)) = result {
                 changed |= account.fetched != Some(fetched);
                 account.fetched = Some(fetched);
+                account.cooldown = Some(cooldown);
+            } else {
+                // A worker that died leaves what is known, and the look is tried again later.
+                account.cooldown = Some(Cooldown {
+                    since: clock,
+                    automatic: Duration::from_secs(MANUAL_REST as u64),
+                    manual: Duration::ZERO,
+                });
             }
             changed |= announced;
         }
@@ -962,18 +1002,22 @@ impl Sources {
 impl Accounts {
     /// Runs every due look to its end, as the pane's loop would over time.
     pub(super) fn settle(&mut self, now: i64, manual: bool) {
-        self.start(now, manual);
+        self.settle_at(now, Instant::now(), manual);
+    }
+
+    pub(super) fn settle_at(&mut self, now: i64, clock: Instant, manual: bool) {
+        self.start(now, clock, manual);
         while let Some(fd) = self.fd() {
             let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
             // SAFETY: `poll` points to one writable pollfd whose descriptor the job keeps open.
             unsafe { libc::poll(&raw mut poll, 1, 30_000) };
-            self.collect(now);
+            self.collect(clock);
         }
     }
 
     pub(super) fn set(&mut self, which: UsageAccount, reading: Option<Reading>, failure: Option<Failure>, now: i64) {
         let account = self.accounts.iter_mut().find(|account| account.which == which).expect("the account is on");
         account.fetched = Some(Fetched { reading, failure, asked: now, next: i64::MAX });
-        account.next = i64::MAX;
+        account.cooldown = Some(Cooldown { since: Instant::now(), automatic: Duration::MAX, manual: Duration::ZERO });
     }
 }

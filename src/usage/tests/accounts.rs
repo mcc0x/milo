@@ -20,6 +20,10 @@ const KEY: &str = "sk-test-0123456789abcdef";
 /// Devin's billing day that holds `NOW`, from 08:00 UTC to 08:00 UTC.
 const DEVIN_DAY: (i64, i64) = (1_795_075_200, 1_795_161_600);
 
+fn elapsed(start: Instant, seconds: i64) -> Instant {
+    start + Duration::from_secs(u64::try_from(seconds).unwrap())
+}
+
 struct Canned {
     status: u16,
     header: &'static str,
@@ -304,24 +308,25 @@ fn a_rate_limit_is_honoured_even_by_a_reload_and_the_last_answer_stays_with_its_
     let deepseek = UsageAccount::DeepSeek;
     provider.reply("deepseek", 200, "", DEEPSEEK);
     let mut usage = pane(&f, sources(&f, &provider, &[("MILO_DEEPSEEK_API_KEY", KEY)]), &[(deepseek, Show::Auto)]);
-    usage.accounts.settle(NOW, false);
+    let start = Instant::now();
+    let clock = |now| elapsed(start, now - NOW);
+    usage.accounts.settle_at(NOW, clock(NOW), false);
     let asked = || provider.asked("deepseek").len();
     assert_eq!(asked(), 1);
 
-    // Within the schedule nothing is asked, however often the pane checks.
-    for seconds in [1, 30, 4 * MINUTE] {
-        usage.accounts.settle(NOW + seconds, false);
-    }
-    assert_eq!(asked(), 1);
+    usage.accounts.settle_at(NOW + 1, clock(NOW + 1), false);
     // A reload may ask again, but not within half a minute of the last request.
-    usage.accounts.settle(NOW + 10, true);
+    usage.accounts.settle_at(NOW + 10, clock(NOW + 10), true);
+    usage.accounts.settle_at(NOW + 30, clock(NOW + 30), false);
     assert_eq!(asked(), 1);
-    usage.accounts.settle(NOW + 31, true);
+    usage.accounts.settle_at(NOW + 31, clock(NOW + 31), true);
+    // An automatic check still waits for the regular interval.
+    usage.accounts.settle_at(NOW + 4 * MINUTE, clock(NOW + 4 * MINUTE), false);
     assert_eq!(asked(), 2);
 
     provider.reply("deepseek", 429, "Retry-After: 1200\r\n", r#"{"error":{"message":"Rate limit reached"}}"#);
     let limited = NOW + 6 * MINUTE;
-    usage.accounts.settle(limited, false);
+    usage.accounts.settle_at(limited, clock(limited), false);
     assert_eq!(asked(), 3);
     // The last answer still stands, and is not yet old enough to say so.
     let Status::Reading(reading, None) = status(&usage, deepseek, limited) else { panic!() };
@@ -329,7 +334,7 @@ fn a_rate_limit_is_honoured_even_by_a_reload_and_the_last_answer_stays_with_its_
 
     provider.reply("deepseek", 200, "", DEEPSEEK);
     for (seconds, manual) in [(MINUTE, true), (10 * MINUTE, false), (19 * MINUTE, true)] {
-        usage.accounts.settle(limited + seconds, manual);
+        usage.accounts.settle_at(limited + seconds, clock(limited + seconds), manual);
         assert_eq!(asked(), 3, "asked {seconds}s into a 1200s wait");
     }
     let old = limited + 19 * MINUTE;
@@ -341,9 +346,38 @@ fn a_rate_limit_is_honoured_even_by_a_reload_and_the_last_answer_stays_with_its_
     assert_eq!(text(&mut usage, 15, 1), "DS ¥110.00 last");
     assert_eq!(text(&mut usage, 10, 1), "DS");
 
-    usage.accounts.settle(limited + 20 * MINUTE, false);
-    assert_eq!(asked(), 4);
-    assert!(matches!(status(&usage, deepseek, limited + 20 * MINUTE), Status::Reading(_, None)));
+    let mut reopened = pane(&f, sources(&f, &provider, &[("MILO_DEEPSEEK_API_KEY", KEY)]), &[(deepseek, Show::Auto)]);
+    reopened.accounts.settle_at(old, clock(old), true);
+    assert_eq!(asked(), 3, "the saved rate limit also applies to a new pane");
+
+    usage.accounts.settle_at(limited + HOUR, clock(limited + 20 * MINUTE - 1), true);
+    assert_eq!(asked(), 3, "moving the wall clock forward does not shorten Retry-After");
+    let now = limited - MINUTE;
+    usage.accounts.settle_at(now, clock(limited + 20 * MINUTE), false);
+    assert_eq!(asked(), 4, "moving the wall clock back does not extend Retry-After");
+    assert!(matches!(status(&usage, deepseek, now), Status::Reading(_, None)));
+}
+
+#[test]
+fn provider_intervals_and_reload_floor_use_elapsed_time_in_an_open_pane() {
+    for (manual, rest) in [(false, 5 * MINUTE), (true, 30)] {
+        let (f, provider) = (Fixture::folder(), Provider::start());
+        provider.reply("deepseek", 200, "", DEEPSEEK);
+        let deepseek = UsageAccount::DeepSeek;
+        let sources = sources(&f, &provider, &[("MILO_DEEPSEEK_API_KEY", KEY)]);
+        let mut usage = pane(&f, sources, &[(deepseek, Show::Auto)]);
+        let clock = Instant::now();
+        usage.accounts.settle_at(NOW, clock, false);
+        assert_eq!(provider.requests(), 1);
+
+        usage.accounts.settle_at(NOW + HOUR, elapsed(clock, rest - 1), manual);
+        assert_eq!(provider.requests(), 1, "a wall-clock advance must not shorten the wait (manual: {manual})");
+
+        let now = NOW - MINUTE;
+        usage.accounts.settle_at(now, elapsed(clock, rest), manual);
+        assert_eq!(provider.requests(), 2, "a wall-clock rollback must not extend the wait (manual: {manual})");
+        assert!(matches!(status(&usage, deepseek, now), Status::Reading(reading, None) if reading.observed == now));
+    }
 }
 
 #[test]
@@ -353,10 +387,12 @@ fn a_refused_key_is_not_offered_again_for_half_an_hour_unless_asked() {
     provider.reply("openrouter", 401, "", r#"{"error":{"code":401,"message":"No auth credentials found"}}"#);
     let mut usage =
         pane(&f, sources(&f, &provider, &[("MILO_OPENROUTER_API_KEY", KEY)]), &[(openrouter, Show::Always)]);
-    usage.accounts.settle(NOW, false);
+    let clock = Instant::now();
+    usage.accounts.settle_at(NOW, clock, false);
     assert_eq!(status(&usage, openrouter, NOW), Status::Failed(Failure::Refused));
     assert_eq!(text(&mut usage, 60, 2), "OpenRouter · key was refused\nCheck the key");
-    usage.accounts.settle(NOW + 29 * MINUTE, false);
+    let rest = 29 * MINUTE;
+    usage.accounts.settle_at(NOW + rest, elapsed(clock, rest), false);
     assert_eq!(provider.asked("openrouter").len(), 1);
 
     // Another pane opened meanwhile learns of the refusal from what was saved, without asking.
@@ -367,9 +403,9 @@ fn a_refused_key_is_not_offered_again_for_half_an_hour_unless_asked() {
     assert_eq!(provider.asked("openrouter").len(), 1);
 
     provider.reply("openrouter", 200, "", OPENROUTER);
-    usage.accounts.settle(NOW + 2 * MINUTE, true);
+    usage.accounts.settle_at(NOW + rest, elapsed(clock, rest), true);
     assert_eq!(provider.asked("openrouter").len(), 2);
-    let Status::Reading(reading, None) = status(&usage, openrouter, NOW + 2 * MINUTE) else { panic!() };
+    let Status::Reading(reading, None) = status(&usage, openrouter, NOW + rest) else { panic!() };
     assert_eq!(reading.figure, dollars(Kind::LimitLeft, 74.5));
     assert_eq!(reading.details, [Some(dollars(Kind::UsedToday, 1.25)), Some(dollars(Kind::UsedThisMonth, 25.5))]);
 }
@@ -471,7 +507,7 @@ fn an_open_pane_drops_old_readings_and_in_flight_results_when_the_settings_key_c
     assert!(text(&mut usage, 60, 1).contains("$74.50"));
 
     // Let an old-key reload finish without allowing the pane to collect it yet.
-    usage.accounts.start(NOW + MINUTE, true);
+    usage.accounts.start(NOW + MINUTE, elapsed(Instant::now(), MINUTE), true);
     let mut fd = libc::pollfd { fd: usage.external_fd().unwrap(), events: libc::POLLIN, revents: 0 };
     // SAFETY: `fd` is writable and the pane keeps its job descriptor open.
     assert_eq!(unsafe { libc::poll(&raw mut fd, 1, 5000) }, 1);
@@ -484,7 +520,7 @@ fn an_open_pane_drops_old_readings_and_in_flight_results_when_the_settings_key_c
     usage.accounts.settle(NOW + MINUTE + 1, false);
     assert!(text(&mut usage, 60, 1).contains("$12.50"));
     use_key(KEY);
-    usage.accounts.start(NOW + MINUTE + 2, false);
+    usage.accounts.start(NOW + MINUTE + 2, Instant::now(), false);
     assert!(!text(&mut usage, 60, 1).contains("$12.50"));
     usage.accounts.settle(NOW + MINUTE + 2, false);
     assert!(text(&mut usage, 60, 1).contains("$74.50"));
@@ -597,12 +633,13 @@ fn a_count_is_asked_for_again_when_its_period_ends_and_not_a_whole_interval_late
     let (_, end) = DEVIN_DAY;
     // Asked two minutes before Devin's day ends, the schedule alone would wait
     // thirteen minutes into the next day with no figure to show.
-    usage.accounts.settle(end - 2 * MINUTE, false);
-    usage.accounts.settle(end - 1, false);
+    let clock = Instant::now();
+    usage.accounts.settle_at(end - 2 * MINUTE, clock, false);
+    usage.accounts.settle_at(end - 1, elapsed(clock, 2 * MINUTE - 1), false);
     assert_eq!(provider.asked("devin").len(), 1);
     assert!(matches!(status(&usage, devin, end - 1), Status::Reading(reading, None) if reading.until == Some(end)));
 
-    usage.accounts.settle(end, false);
+    usage.accounts.settle_at(end, elapsed(clock, 2 * MINUTE), false);
     let asked = provider.asked("devin");
     assert_eq!(asked.len(), 2);
     assert!(asked[1].contains(&format!("time_after={end}&time_before={} ", end + DAY)), "{asked:?}");
@@ -619,26 +656,28 @@ fn unreachable_attempts_retry_after_one_minute_and_keep_the_last_reading() {
         let choices = [(devin, Show::Always)];
         let mut usage = pane(&f, sources.clone(), &choices);
         provider.reply("devin", 200, "", DEVIN);
-        usage.accounts.settle(NOW, false);
+        let start = Instant::now();
+        let clock = |now| elapsed(start, now - NOW);
+        usage.accounts.settle_at(NOW, clock(NOW), false);
 
         let wake = NOW + 20 * MINUTE;
         provider.reply("devin", failure, "", "");
-        usage.accounts.settle(wake, false);
+        usage.accounts.settle_at(wake, clock(wake), false);
         let reading = status(&usage, devin, wake);
         assert!(matches!(reading, Status::Reading(reading, None) if reading.observed == NOW));
         assert_eq!(provider.requests(), 2);
 
         provider.reply("devin", 200, "", DEVIN);
-        usage.accounts.settle(wake + MINUTE - 1, false);
+        usage.accounts.settle_at(wake + MINUTE - 1, clock(wake + MINUTE - 1), false);
         let mut reopened = pane(&f, sources, &choices);
-        reopened.accounts.settle(wake + MINUTE - 1, false);
+        reopened.accounts.settle_at(wake + MINUTE - 1, clock(wake + MINUTE - 1), false);
         assert_eq!(status(&reopened, devin, wake + MINUTE - 1), reading);
         assert_eq!(provider.requests(), 2);
 
-        reopened.accounts.settle(wake + MINUTE, false);
+        reopened.accounts.settle_at(wake + MINUTE, clock(wake + MINUTE), false);
         assert!(matches!(status(&reopened, devin, wake + MINUTE), Status::Reading(reading, None)
             if reading.observed == wake + MINUTE));
-        usage.accounts.settle(wake + MINUTE, false);
+        usage.accounts.settle_at(wake + MINUTE, clock(wake + MINUTE), false);
         assert_eq!(status(&usage, devin, wake + MINUTE), status(&reopened, devin, wake + MINUTE));
         assert_eq!(provider.requests(), 3);
     }

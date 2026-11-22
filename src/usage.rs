@@ -1095,7 +1095,7 @@ impl Usage {
     fn refresh(&mut self, now: i64, clock: Instant, manual: bool) -> bool {
         self.collect_omp();
         self.opencode.collect();
-        self.accounts.collect(now);
+        self.accounts.collect(clock);
         let cutoff = self.today.since(now);
         if manual {
             self.omp.reload(now, clock);
@@ -1109,7 +1109,7 @@ impl Usage {
             }
             self.opencode.poll.start(now, clock);
         }
-        self.accounts.start(now, manual);
+        self.accounts.start(now, clock, manual);
         let mut codex_budget = Budget::new(CODEX_BYTES);
         let mut claude_budget = Budget::new(CLAUDE_BYTES);
         self.check_limits(&mut claude_budget);
@@ -1245,7 +1245,7 @@ impl Pane for Usage {
 
     fn check_external(&mut self) -> External {
         let omp = self.collect_omp();
-        let accounts = self.accounts.collect(self.now());
+        let accounts = self.accounts.collect(Instant::now());
         if self.opencode.collect() || omp || accounts { External::Redraw } else { External::Unchanged }
     }
 
