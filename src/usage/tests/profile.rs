@@ -171,7 +171,6 @@ fn database_looks(
     mut usage: Usage,
     now: i64,
     rows: (u32, u32),
-    queries_per_read: u32,
     mut commit: impl FnMut(u32, i64),
     mut verify: impl FnMut(&Usage, u32),
 ) {
@@ -197,11 +196,10 @@ fn database_looks(
             fetched.push(complete);
         }
     }
-    let queries = jobs * queries_per_read;
     let slow = fetched.iter().filter(|duration| **duration > sqlite::QUERY_WAIT).count();
     let (seed_rows, day_rows) = rows;
     println!(
-        "{profile}\t{bytes}\t{seed_rows}\t{day_rows}\t{DB_LOOKS}\t{jobs}\t{queries}\t{slow}\t{}\t{}",
+        "{profile}\t{bytes}\t{seed_rows}\t{day_rows}\t{DB_LOOKS}\t{jobs}\t{slow}\t{}\t{}",
         micros(&mut inline),
         micros(&mut fetched)
     );
@@ -214,9 +212,9 @@ fn usage_profile_active_sqlite() {
         return;
     }
     println!("# WAL writers stay open; one change per 20s look; byte counts are base files; one warm-up omitted");
-    println!("# sqlite3 count follows successful reads (OMP: one query; OpenCode: shape and totals); longer fixture limit exposes slow reads");
+    println!("# Job completion includes process startup. A longer fixture limit exposes reads over one second.");
     println!(
-        "profile\tdatabase_bytes\tseed_rows\tday_assistant_rows\tcommits\tjobs\tsqlite3\tover_1s\tinline_p50_us\tinline_p95_us\tresult_p50_us\tresult_p95_us"
+        "profile\tdatabase_bytes\tseed_rows\tday_assistant_rows\tcommits\tjobs\tover_1s\tinline_p50_us\tinline_p95_us\tresult_p50_us\tresult_p95_us"
     );
     let now = local_noon();
     for (profile, cached) in [("omp-uncached", false), ("omp-cached", true)] {
@@ -232,7 +230,6 @@ fn usage_profile_active_sqlite() {
             usage,
             now,
             (HISTORY_ROWS, 0),
-            1,
             |look, at| {
                 if cached {
                     let observed = (at - 4) * 1000;
@@ -274,7 +271,6 @@ fn usage_profile_active_sqlite() {
             usage,
             now,
             (OPEN_CODE_ROWS, assistant_rows),
-            2,
             |look, at| {
                 writer.run(&steps_sql(look, 1, (at - 1) * 1000));
                 dated(&db.path, at - 1);
