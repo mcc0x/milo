@@ -2,6 +2,8 @@
 
 Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses. While you are [editing a file](#editing-in-the-reader), the keys you type are text: help is `Ctrl-G`, and `Ctrl-C` asks before it gives up unsaved changes.
 
+A help page longer than the pane continues in a second column, and a third, once the pane is 57 columns wide or more, so a full-width pane usually shows it whole. In the shell, `milo COMMAND --help` or `milo --help COMMAND` explains one command in a few lines, and `milo --help` lists every command and key.
+
 ## Moving around
 
 These keys work in the outline tree, history and reader. The reader and help page scroll instead of moving a selection.
