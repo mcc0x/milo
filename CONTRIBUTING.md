@@ -284,6 +284,16 @@ cargo test --release --locked --bin milo usage::tests::idle -- --ignored --nocap
 
 `tests/open_bench.rs` generates an ordinary repository of a few hundred files and a large one of fifty thousand, each with an upstream, unpushed commits, edited files and new ones. It times the first frame of the outline, the history and the reader, which is mostly the Git commands a pane runs before it can draw, then opening the outline's search and a letter typed into it. In the history it rewrites a file and times the slowest key pressed while the pane takes that in. It takes `MILO_BENCH_BASE` too. A pane's first frame varies by a few milliseconds from run to run and more on a busy machine, so compare medians of ten runs or more.
 
+To compare backend changes, run each build alone on the same machine:
+
+```sh
+cargo test --release --locked --bin milo usage_profile -- --ignored --nocapture --test-threads=1
+cargo build --release --locked
+python3 tests/settings-bench.py target/release/milo
+```
+
+The usage fixtures time transcript appends and SQLite reads with a writer still connected. They check token totals, window freshness and how often four loopback account providers are asked, including after a rate limit and a reopen. The settings fixture times reads during a competing save as well as independent edits and startup; its timings include loopback HTTP and Python JSON decoding. Neither fixture needs provider credentials. For delivery, saturation and idle measurements of the hosted relay, use its [isolated container benchmark](hosted/README.md#benchmark-the-shipped-relay).
+
 `tests/menu-bench.sh` times the macOS menu app with made-up frames, on a Mac with a menu bar to draw in:
 
 ```sh
@@ -490,6 +500,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/relay-container.sh` | Runs the relay image without a network: no start without its volume, no root, and pairing only for the canonical host. |
 | `tests/rex_hosts.rs` | Follows Doctor, a forwarded settings editor and a settings bundle across two disposable Rex servers, and checks the first host's files stay as they were. |
 | `tests/rex_lab.rs` | Exercises Rex layouts and presence on a disposable server, edits files in floating reader tabs, and opens a floating review of an agent-supplied patch. |
+| `tests/settings-bench.py` | Times settings requests, a competing save and first state beside a responding Rex stand-in. |
 | `tests/usage_idle/baseline-fa34ca4.tsv` | Records what `src/usage/tests/idle.rs` counted, in both journal modes, beside that revision's counts. |
 | `tests/rex_lab/app.lua` | Stands in for a connected Rex app on that server. |
 | `tests/rex_lab/view.lua` | Prints that server's sessions, tabs, and panes for the test. |
