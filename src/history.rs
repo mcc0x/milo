@@ -3,10 +3,12 @@
 mod draw;
 mod input;
 mod listing;
+mod refresh;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
+use std::os::fd::RawFd;
 use std::path::Path;
 #[cfg(test)]
 use std::sync::{
@@ -34,6 +36,18 @@ const FILE_PREVIEW: usize = 8;
 /// says it is reading them and takes the next key. Most commits are listed
 /// within it, and then show no such note.
 const PATIENCE: Duration = Duration::from_millis(40);
+/// The commits to show once the list drawn from `version` is no longer the
+/// repository's, or `Some(None)` while it still is. `None` if Git cannot answer.
+fn commits_since(repo: &Repo, version: Option<&HistoryVersion>) -> Option<Option<Vec<Commit>>> {
+    if !repo.ok() {
+        return None;
+    }
+    if version.is_some_and(|version| version.matches(repo)) {
+        return Some(None);
+    }
+    repo.history(LIMIT + 1).map(Some)
+}
+
 /// How soon the pane looks again for files that Git is still reading.
 const LISTING_LOOK: Duration = Duration::from_millis(10);
 
@@ -100,6 +114,9 @@ pub struct History {
     open: Option<OpenCommit>,
     /// The one read of a commit's files that is still running.
     listing: Option<Listing>,
+    /// Whether to poll Git on a thread of its own, as the pane loop can wait for.
+    refresh_away: bool,
+    refresh: Option<refresh::Running>,
     patience: Duration,
     #[cfg(test)]
     listing_releases: Option<Arc<AtomicUsize>>,
@@ -132,6 +149,8 @@ impl History {
             uncommitted: 0,
             open: None,
             listing: None,
+            refresh_away: false,
+            refresh: None,
             // Tests see a commit's files in the frame after the key, unless they ask otherwise.
             patience: if cfg!(test) { Duration::from_secs(60) } else { PATIENCE },
             #[cfg(test)]
@@ -165,6 +184,12 @@ impl History {
         self
     }
 
+    /// Polls Git away from the loop, which must then wait for `unfinished_check`.
+    pub fn refreshing_away(mut self) -> Self {
+        self.refresh_away = true;
+        self
+    }
+
     pub fn with_follow_new(mut self, follow: bool) -> Self {
         self.follow_new = follow;
         self
@@ -176,7 +201,8 @@ impl History {
         self
     }
 
-    fn refresh(&mut self) {
+    /// Reads everything again, and adopts a repository made where there was none.
+    fn reload(&mut self) {
         if !self.repo.git {
             let Some(repo) = self.repo.discover_git() else { return };
             let (prefs, notice) = Preferences::for_pane(Some(&repo.root));
@@ -195,14 +221,20 @@ impl History {
         if !self.repo.git {
             return;
         }
+        // What a refresh started before this read finds is no longer news.
+        self.refresh = None;
         self.repo.read();
-        if !self.repo.ok() {
-            return;
+        if let Some(commits) = commits_since(&self.repo, self.version.as_ref()) {
+            self.take_in(commits);
         }
+    }
+
+    /// Shows the repository as just read: its commits if they moved, or else
+    /// the same ones with the uncommitted work and the open commit's files of now.
+    fn take_in(&mut self, commits: Option<Vec<Commit>>) {
         let selected = self.selected();
         let uncommitted = self.repo.uncommitted_count();
-        if !self.version.as_ref().is_some_and(|version| version.matches(&self.repo)) {
-            let Some(commits) = self.repo.history(LIMIT + 1) else { return };
+        if let Some(commits) = commits {
             self.replace_commits(commits, selected, uncommitted);
         } else if self.load_files(self.patience) || self.uncommitted != uncommitted {
             self.uncommitted = uncommitted;
@@ -438,10 +470,23 @@ impl Pane for History {
         if self.reading.is_some() {
             return true;
         }
-        if !self.repo.git || self.repo.poll(&[]) {
-            self.refresh();
+        if !self.repo.git {
+            self.reload();
+            return true;
+        }
+        let away = self.refresh.is_some() || self.refresh_away && self.start_refresh();
+        if !away && self.repo.poll(&[]) {
+            self.load();
         }
         true
+    }
+
+    fn unfinished_check(&self) -> Option<RawFd> {
+        self.refresh.as_ref().map(refresh::Running::fd)
+    }
+
+    fn finish_check(&mut self) -> Option<bool> {
+        self.finish_refresh()
     }
 
     fn key(&mut self, key: Key) -> After {

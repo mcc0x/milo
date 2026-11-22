@@ -314,7 +314,7 @@ mod tests {
         assert!(outline.pending[outline.untracked.files.clone()].iter().all(|f| f.lines_pending));
 
         let mut rebuilt = Tree::default();
-        rebuilt.rebuild(outline.repo.tracked().unwrap(), &outline.pending);
+        rebuilt.rebuild(outline.repo.listed(), &outline.pending);
         rebuilt.layout(|_| true, false);
         let counts = |node: &Node| (node.kind, node.add, node.del, node.uncounted);
         assert_eq!(counts(outline.tree.node(0)), counts(rebuilt.node(0)));

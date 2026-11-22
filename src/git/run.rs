@@ -39,6 +39,31 @@ pub(super) fn output(root: &Path, guard: &[String], args: &[&str]) -> Option<Vec
     limited_output(root, guard, args, OUTPUT_LIMIT).ok()
 }
 
+/// Runs each command of `ahead` on a thread of its own while `main` runs on
+/// this one, and gives what `output` would for each, in order. Commands that
+/// do not need each other's answers then take as long as the slowest, not
+/// as long as all of them.
+pub(super) fn alongside<T, const N: usize>(
+    root: &Path,
+    guard: &[String],
+    ahead: [Option<&[&str]>; N],
+    main: impl FnOnce() -> T,
+) -> (T, [Option<Vec<u8>>; N]) {
+    std::thread::scope(|scope| {
+        let started = ahead.map(|args| {
+            let args = args?;
+            // Without a thread to spare, the command runs here after `main`.
+            Some(std::thread::Builder::new().spawn_scoped(scope, move || output(root, guard, args)).map_err(|_| args))
+        });
+        let answer = main();
+        let answers = started.map(|running| match running? {
+            Ok(thread) => thread.join().ok().flatten(),
+            Err(args) => output(root, guard, args),
+        });
+        (answer, answers)
+    })
+}
+
 pub(super) fn limited_output(root: &Path, guard: &[String], args: &[&str], limit: u64) -> Result<Vec<u8>, OutputError> {
     limited_output_until(root, guard, args, limit, None)
 }
@@ -173,6 +198,16 @@ pub(super) fn config(root: &Path) -> Option<Config> {
     filters.sort_unstable();
     filters.dedup();
     Some(Config { guard: filters.into_iter().map(str::to_owned).collect(), has_remote })
+}
+
+/// Reads the settings of the repository holding `dir` on a thread of its own
+/// while `main` runs on this one. `None` leaves them to be read later.
+pub(super) fn config_alongside<T>(dir: &Path, main: impl FnOnce() -> T) -> (Option<Config>, T) {
+    std::thread::scope(|scope| {
+        let reading = std::thread::Builder::new().spawn_scoped(scope, || config(dir)).ok();
+        let answer = main();
+        (reading.and_then(|thread| thread.join().ok().flatten()), answer)
+    })
 }
 
 /// Read the user's Git settings, but always inspect the requested checkout

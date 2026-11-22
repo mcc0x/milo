@@ -298,7 +298,7 @@ fn file_dir(path: &Path) -> &Path {
 
 fn open_repo(path: Option<&OsStr>) -> Result<Repo, String> {
     let dir = project_path(path);
-    Repo::open(dir).ok_or_else(|| {
+    Repo::open_to_read(dir).ok_or_else(|| {
         if dir.is_file() {
             format!("{0} is a file; to read it: milo view {0}", dir.display())
         } else {
@@ -660,6 +660,7 @@ fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
 fn history(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
     Box::new(
         History::new(repo, rex::inside())
+            .refreshing_away()
             .with_follow_new(prefs.history_follow_new)
             .with_appearance(prefs.icons.effective(), prefs.text_git_marks),
     )

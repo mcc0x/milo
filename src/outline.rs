@@ -217,7 +217,6 @@ impl Outline {
         self.refresh = None;
         self.repo.read();
         let files = self.repo.pending()?;
-        self.repo.tracked().map(drop)?;
         Some(self.take_in(files))
     }
 

@@ -246,6 +246,7 @@ enum ReadFor {
 }
 
 /// The state a loaded history list was drawn from.
+#[derive(Clone)]
 pub struct HistoryVersion {
     pub branch: String,
     tip: String,
@@ -295,6 +296,8 @@ pub struct Repo {
     empty_tree: OnceCell<String>,
     index_lock: Option<PathBuf>,
     config: run::Config,
+    /// The settings `open_to_read` read, for the first status to use.
+    opened_config: Option<run::Config>,
     read_for: ReadFor,
     /// When set, status is limited to this path.
     file: Option<String>,
@@ -440,7 +443,20 @@ fn git_dirs(dir: &Path) -> Result<Option<GitDirs>, &'static str> {
 impl Repo {
     /// Opens the repository containing `dir`, or the directory as a plain folder.
     pub fn open(dir: &Path) -> Option<Self> {
-        let discovered = git_dirs(dir);
+        Self::found(dir, git_dirs(dir))
+    }
+
+    /// Opens as `open` does, for a caller that reads the status next. The Git
+    /// settings that read starts with are read while the repository is found,
+    /// so opening takes one command's time, not two.
+    pub fn open_to_read(dir: &Path) -> Option<Self> {
+        let (config, discovered) = run::config_alongside(dir, || git_dirs(dir));
+        let mut repo = Self::found(dir, discovered)?;
+        repo.opened_config = config.filter(|_| repo.git);
+        Some(repo)
+    }
+
+    fn found(dir: &Path, discovered: Result<Option<GitDirs>, &'static str>) -> Option<Self> {
         let git_unavailable = discovered.is_err();
         let (root, git, git_dir, common_dir) = match discovered.ok().flatten() {
             Some(found) => (found.root, true, found.git, found.common),
@@ -636,7 +652,10 @@ impl Repo {
 
     fn status_raw(&mut self) -> Option<Vec<u8>> {
         // Filters added while the pane is open must be disabled too.
-        self.config = self.require(run::config(&self.root))?;
+        self.config = match self.opened_config.take() {
+            Some(config) => config,
+            None => self.require(run::config(&self.root))?,
+        };
         let path = self.file.as_deref();
         let args = [
             "status",
@@ -701,7 +720,7 @@ impl Repo {
     pub(crate) fn refreshed(mut self, files: &[PendingFile]) -> Refreshed {
         let pending = if self.poll(files) {
             self.read();
-            self.pending().filter(|_| self.tracked().is_some())
+            self.pending()
         } else {
             None
         };
@@ -779,35 +798,38 @@ impl Repo {
     }
 
     /// Returns pending files from the last `read`, uncommitted before unpushed.
-    /// Returns `None` if git cannot answer.
+    /// Lists the tracked paths for `listed` as well. Returns `None` if git
+    /// cannot answer.
     pub fn pending(&mut self) -> Option<Vec<PendingFile>> {
         if !self.ok() {
             return None;
         }
-        let mut files = self.tracked_uncommitted()?;
+        let ends = self.ends().clone();
+        let unpushed_moved = ends != self.unpushed.ends;
+        let unpushed = ends.base.as_deref().filter(|_| unpushed_moved);
+        let unpushed = unpushed.map(|base| ["diff", base, &ends.tip, "-M", "--raw", "--numstat", "-z", "--"]);
+        // Stamp the index before Git lists it, so a later change is listed again.
+        let index = self.diff_index();
+        let list = index.is_none() || index != self.tracked.index;
+        // The three reads need nothing from each other, so they run together.
+        let ahead = [unpushed.as_ref().map(|args| &args[..]), list.then_some(&["ls-files", "-z", "--cached"][..])];
+        let (root, guard) = (self.root.clone(), self.config.guard.clone());
+        let (files, [diff, listed]) = run::alongside(&root, &guard, ahead, || self.tracked_uncommitted());
+        let mut files = files?;
         files.extend(self.status.untracked.iter().map(|path| PendingFile::new(path, Kind::Untracked)));
-        self.add_unpushed(&mut files)?;
-        Some(files)
-    }
-
-    fn add_unpushed(&mut self, files: &mut Vec<PendingFile>) -> Option<()> {
-        let ends = self.ends();
-        if *ends != self.unpushed.ends {
-            let parsed = match &ends.base {
-                Some(base) => {
-                    let args = ["diff", base, &ends.tip, "-M", "--raw", "--numstat", "-z", "--"];
-                    parse_files(&self.git(&args)?)
-                }
-                None => DiffFiles::default(),
-            };
-            self.unpushed = Unpushed { ends: ends.clone(), diff: parsed };
+        if unpushed_moved {
+            let diff = if unpushed.is_some() { parse_files(&self.require(diff)?) } else { DiffFiles::default() };
+            self.unpushed = Unpushed { ends, diff };
         }
         files.extend(self.unpushed.diff.files.iter().cloned().map(|mut file| {
             file.unpushed = true;
             file.stamp = FileStamp::at(&self.root.join(&file.path));
             file
         }));
-        Some(())
+        if list {
+            self.keep_tracked(index, self.require(listed)?);
+        }
+        Some(files)
     }
 
     /// Some pathname bytes cannot be used by the panes' UTF-8 path model.
@@ -815,31 +837,24 @@ impl Repo {
         self.status.unrepresented != 0 || self.tracked.incomplete || self.unpushed.diff.unrepresented != 0
     }
 
-    /// Tracked paths relative to the root. A failed refresh leaves the cache intact.
-    pub fn tracked(&mut self) -> Option<impl Iterator<Item = &str>> {
-        if !self.ok() {
-            return None;
-        }
-        let index = self.diff_index();
-        if index.is_none() || index != self.tracked.index {
-            let raw = self.git(&["ls-files", "-z", "--cached"])?;
-            let (paths, incomplete) = match String::from_utf8(raw) {
-                Ok(paths) => (paths, false),
-                Err(invalid) => {
-                    let mut paths = String::new();
-                    for path in invalid.as_bytes().split(|&b| b == 0).filter_map(parse::utf8_path) {
-                        paths.push_str(path);
-                        paths.push('\0');
-                    }
-                    (paths, true)
+    /// Keeps the tracked paths Git listed while the index was at `index`.
+    fn keep_tracked(&mut self, index: Option<DiffStamp>, raw: Vec<u8>) {
+        let (paths, incomplete) = match String::from_utf8(raw) {
+            Ok(paths) => (paths, false),
+            Err(invalid) => {
+                let mut paths = String::new();
+                for path in invalid.as_bytes().split(|&b| b == 0).filter_map(parse::utf8_path) {
+                    paths.push_str(path);
+                    paths.push('\0');
                 }
-            };
-            self.tracked = Tracked { index, paths: paths.into(), incomplete };
-        }
-        Some(self.tracked.paths.split_terminator('\0'))
+                (paths, true)
+            }
+        };
+        self.tracked = Tracked { index, paths: paths.into(), incomplete };
     }
 
-    /// The tracked paths last listed, without asking Git again.
+    /// The tracked paths relative to the root, as `pending` last listed them.
+    /// A list that Git could not give leaves the one before it.
     pub(crate) fn listed(&self) -> impl Iterator<Item = &str> {
         self.tracked.paths.split_terminator('\0')
     }
@@ -946,11 +961,9 @@ impl Repo {
         }
         let limit = limit.to_string();
         let tip = &self.ends().tip;
-        let unpushed = match self.history_target() {
-            Some(target) => self.git(&["rev-list", "-n", &limit, "--end-of-options", &format!("{target}..{tip}")])?,
-            None => Vec::new(),
-        };
-        let raw = self.git(&[
+        let range = self.history_target().map(|target| format!("{target}..{tip}"));
+        let unpushed = range.as_ref().map(|range| ["rev-list", "-n", &limit, "--end-of-options", range]);
+        let log = [
             "log",
             "-n",
             &limit,
@@ -964,8 +977,12 @@ impl Repo {
             "--end-of-options",
             tip,
             "--",
-        ])?;
-        self.require(parse_history(&raw, &unpushed))
+        ];
+        // Which commits are unpushed and what each commit says are separate reads.
+        let (raw, [listed]) =
+            run::alongside(&self.root, self.guard(), [unpushed.as_ref().map(|args| &args[..])], || self.git(&log));
+        let unpushed = if unpushed.is_some() { self.require(listed)? } else { Vec::new() };
+        self.require(parse_history(&raw?, &unpushed))
     }
 }
 
@@ -1199,7 +1216,8 @@ mod tests {
         fs::write(&invalid, "raw path\n").unwrap();
         f.commit("both paths");
         let mut repo = read_repo(&f);
-        assert_eq!(repo.tracked().unwrap().collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
+        repo.pending().unwrap();
+        assert_eq!(repo.listed().collect::<Vec<_>>(), ["page\u{fffd}.txt"]);
         assert!(repo.paths_incomplete());
 
         let (cancel, _keep_open) = std::io::pipe().unwrap();
@@ -1323,7 +1341,7 @@ mod tests {
         let pending = repo.pending().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].path, "page.txt");
-        assert_eq!(repo.tracked().unwrap().collect::<Vec<_>>(), [".gitattributes", "page.txt"]);
+        assert_eq!(repo.listed().collect::<Vec<_>>(), [".gitattributes", "page.txt"]);
         assert_eq!(repo.history(1).unwrap()[0].subject, "first");
         assert!(repo.file_diff("page.txt", None).unwrap().windows(b"+changed".len()).any(|s| s == b"+changed"));
         assert_eq!(repo.moved_from("page.txt"), None);
@@ -1333,6 +1351,34 @@ mod tests {
         assert!(repo.ok());
         for marker in ["filter-ran", "hook-ran", "fsmonitor-ran"] {
             assert!(!f.root.join(".git").join(marker).exists(), "reading ran the driver for {marker}");
+        }
+    }
+
+    #[test]
+    fn a_repository_opened_to_read_disables_filters_set_before_and_after_its_first_status() {
+        let f = Fixture::new();
+        f.write(".gitattributes", "*.txt filter=mark\n*.md filter=late\n");
+        f.write("page.txt", "first\n");
+        f.write("notes.md", "first\n");
+        f.commit("first");
+        f.write("page.txt", "changed\n");
+        f.git(&["config", "filter.mark.clean", "touch .git/mark-ran; cat"]);
+        f.git(&["config", "filter.mark.required", "true"]);
+
+        let mut repo = Repo::open_to_read(&f.root).unwrap();
+        repo.read();
+        assert_eq!(repo.pending().unwrap().len(), 1);
+        assert!(repo.opened_config.is_none(), "only the first status may use the settings read at opening");
+
+        f.git(&["config", "filter.late.clean", "touch .git/late-ran; cat"]);
+        f.git(&["config", "filter.late.required", "true"]);
+        f.write("notes.md", "changed\n");
+        assert!(repo.poll(&[]));
+        repo.read();
+        assert_eq!(repo.pending().unwrap().len(), 2);
+        assert!(repo.ok());
+        for marker in ["mark-ran", "late-ran"] {
+            assert!(!f.root.join(".git").join(marker).exists(), "reading ran the filter for {marker}");
         }
     }
 
@@ -1466,10 +1512,11 @@ mod tests {
         f.write("page.txt", "first\n");
         f.commit("first");
         let mut repo = read_repo(&f);
-        assert_eq!(repo.tracked().unwrap().collect::<Vec<_>>(), ["page.txt"]);
+        repo.pending().unwrap();
+        assert_eq!(repo.listed().collect::<Vec<_>>(), ["page.txt"]);
         let previous = repo.tracked.index;
         f.write(".git/index", "corrupt index");
-        assert!(repo.tracked().is_none());
+        assert!(repo.pending().is_none());
         assert!(!repo.ok());
         assert_eq!(&*repo.tracked.paths, "page.txt\0");
         assert_eq!(repo.tracked.index, previous);
