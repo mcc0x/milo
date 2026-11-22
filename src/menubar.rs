@@ -1,3 +1,54 @@
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::preferences;
+
+/// The global menu bar display choice, independent of pane drafts and the app's quota badge mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Indicator {
+    #[default]
+    Quota,
+    Cpu,
+    Memory,
+}
+
+impl Indicator {
+    pub(crate) const fn value(self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "quota" => Some(Self::Quota),
+            "cpu" => Some(Self::Cpu),
+            "memory" => Some(Self::Memory),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn file(config: &Path) -> PathBuf {
+        config.join("menubar.conf")
+    }
+
+    pub(crate) fn load(file: &Path) -> io::Result<Self> {
+        let Some(text) = preferences::read(file, 4096)? else { return Ok(Self::default()) };
+        preferences::layer_value(&text, "indicator")
+            .and_then(Self::parse)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid menu bar indicator"))
+    }
+
+    pub(crate) fn save(self, config: &Path) -> Result<&'static str, String> {
+        let path = Self::file(config);
+        preferences::locked(&path, |dir| preferences::replace(dir, &path, &format!("indicator = {}\n", self.value())))
+            .map_err(|error| format!("Could not save the menu bar indicator: {error}"))?;
+        Ok("Menu bar indicator saved. The app updates on its next refresh.")
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Install,

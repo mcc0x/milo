@@ -823,7 +823,7 @@ fn no_account_figure_is_ever_drawn_or_streamed_as_a_percentage_or_a_limit_window
     assert_eq!(text(&mut usage, 14, 2), "DS ¥110.00\nOR $74.50");
 
     let mut line = String::new();
-    usage.menu_snapshot(&mut line);
+    usage.menu_snapshot(&mut line, crate::menubar::Indicator::Quota);
     let snapshot = Value::parse(line.as_bytes()).unwrap();
     let [providers] = snapshot.fields(["providers"]);
     let providers: Vec<_> = providers.unwrap().elements().unwrap().collect();
@@ -845,10 +845,10 @@ fn no_account_figure_is_ever_drawn_or_streamed_as_a_percentage_or_a_limit_window
     usage.accounts.set(UsageAccount::Devin, None, Some(Failure::Denied), NOW);
     usage.accounts.set(UsageAccount::Copilot, None, Some(Failure::Limited), NOW);
     line.clear();
-    usage.menu_snapshot(&mut line);
+    usage.menu_snapshot(&mut line, crate::menubar::Indicator::Quota);
     assert_eq!(
         line,
-        "{\"version\":1,\"providers\":[{\"id\":\"copilot\",\"name\":\"Copilot\",\"windows\":[],\"detail\":\"Rate limited\"}]}\n"
+        "{\"version\":1,\"indicator\":\"quota\",\"providers\":[{\"id\":\"copilot\",\"name\":\"Copilot\",\"windows\":[],\"detail\":\"Rate limited\"}]}\n"
     );
 }
 

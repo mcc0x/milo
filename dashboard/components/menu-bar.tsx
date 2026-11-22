@@ -1,13 +1,24 @@
 "use client";
 
+import { SettingRow } from "./controls";
 import { useSession } from "./session";
+import type { MenuIndicator } from "./session-state";
+
+const indicators: readonly (readonly [MenuIndicator, string])[] = [
+  ["quota", "Agent quota"],
+  ["cpu", "CPU"],
+  ["memory", "Memory"],
+];
 
 export default function MenuBar() {
   const { state, queue, connected, paused, running, closing, command, confirm } = useSession();
   const installed = state.menubar.installed;
   const operation = queue.find(item => item.action === "menubar");
-  const pending = !operation ? "" : operation.value === "uninstall" ? "Removing menu app…" :
-    installed ? "Opening or updating menu app…" : "Installing menu app…";
+  const changingIndicator = operation?.field === "indicator";
+  const indicator = changingIndicator ? operation.value : state.menubar.indicator;
+  const pending = !operation ? "" : changingIndicator ? "Saving menu bar indicator…" :
+    operation.value === "uninstall" ? "Removing menu app…" :
+      installed ? "Opening or updating menu app…" : "Installing menu app…";
   const unavailable = !connected || paused || closing || (running && !queue.length) ||
     queue.some(item => item.action !== "set");
   if (installed === null) return null;
@@ -46,6 +57,20 @@ export default function MenuBar() {
         </div>
         {installed && primaryAction}
       </div>
+      <SettingRow label="Menu bar indicator" detail="Saved immediately for this Milo profile. The app updates on its next refresh."
+        detailId="menubar-indicator-detail">
+        <fieldset className="choice-strip" aria-describedby="menubar-indicator-detail" aria-disabled={unavailable || undefined}>
+          <legend className="sr-only">Menu bar indicator</legend>
+          {indicators.map(([key, label]) => (
+            <label key={key}>
+              <input type="radio" name="menubar-indicator" id={`menubar-indicator-${key}`} checked={indicator === key}
+                onClick={event => { if (unavailable) event.preventDefault(); }}
+                onChange={() => { if (!unavailable) command("menubar", { field: "indicator", value: key }); }} />
+              <span>{label}</span>
+            </label>
+          ))}
+        </fieldset>
+      </SettingRow>
       <p className="setting-detail" id="menubar-status" role="status">{pending}</p>
     </section>
   );
