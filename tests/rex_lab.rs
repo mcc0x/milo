@@ -25,6 +25,10 @@
 //! A new shell tab gets its rail or the test fails; no tab is opened in the
 //! place of one that did not. Besides the tabs it opens one at a time, the
 //! test opens several back to back, with no pause between them, more than once.
+//!
+//! The guarded native coordinator regression additionally needs a macOS GUI
+//! login and Xcode's tools. Its nonactivating panel is never ordered onscreen:
+//! `cargo test --test rex_lab preview_confirmation_uses_rex_pty -- --ignored --nocapture`.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -35,6 +39,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+#[path = "rex_lab/preview_tick.rs"]
+mod preview_tick;
 
 const WAIT: Duration = Duration::from_secs(60);
 /// A rail normally appears well within a second of its tab. A tab still

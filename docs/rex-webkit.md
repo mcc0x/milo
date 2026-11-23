@@ -17,6 +17,8 @@ Rex owns the terminal anchor, divider and layer. A small Milo helper owns a bord
 3. If Milo says the terminal **isn’t owned** by a local Mac client, do not change permissions. A connected Mac, an active tab, or a Mac-owned sidebar does **not** establish ownership of the working block. An attached phone need not be disconnected.
 4. **Several sessions can stay attached to the same Mac.** With one visible Mac window, Milo opens the requested tile but leaves the page hidden. Click near the **center of the new tile**, keep the pointer there and wait for **ready to confirm**. Type `show` and press Return for a peek of up to 12 seconds. Before switching sessions, move the pointer outside and **wait until the page disappears**. Moving it back does not reopen the page.
 
+**Reading the tile:** `ready to confirm` means the focused terminal can accept a command, not that placement has passed. Wait for it once. `confirmation accepted; checking the tile` means Milo received the complete command. `preview visible` means the native panel passed its placement check, **not** that the dev server loaded. If the tile instead reports `not shown`, use the reason it gives: refocus the tile, let a moving divider settle, uncover the pinned window, or move the window wholly onto one display. Don't change privacy permissions. The helper reports stages and reasons, not typed text, URLs or page contents.
+
 To check from that same working shell, the following read-only commands print only the owner classification (requires `jq`):
 
 ```sh
@@ -83,7 +85,9 @@ The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b
 
 * The disposable Rex layout lab checks all four tiled placements in the same tab with a sidebar present, divider changes, zoom, tab switches, server-side focus return and observer shutdown. It uses a simulated Unix viewer, not the Mac client's pixels or keyboard focus.
 * With **one Mac-like Unix app connection attached to four live Rex sessions**, the same lab opened a right tile without moving focus. The observer stayed hidden for a different owner, reported guarded eligibility only for the focused, owned tile, hid on tab switch and restored eligibility (not the page) on return. It exited when the working terminal closed. Attaching another session during an ordinary preview did not change the originating session's layout revision.
+* The corrected coordinator accepted a command typed across three deliberately late 700 ms samples on a real Rex PTY. A separate 700 ms delay during first WebKit construction did not require a second command; an offscreen snapshot confirmed the loopback page painted. The same test discarded a partial command across **real focus loss**, concealed on a Rex tab switch and divider move, and produced one rejection rather than a prompt loop when the modeled window stack was wrong.
 * A disposable macOS PTY exercised the native confirmation reader: input queued before eligibility, a partial line and a second `show` could not open or extend a peek. The native lease fixture exercised pointer and expiry decisions; it did not move the physical pointer or switch the Mac app's displayed session.
+* In the earlier confirmation build, a controlled 700 ms gap in placement samples reset the terminal reader. In a real Rex-created foreground, canonical PTY, the first part of a command typed across that gap was flushed. A complete command in the same PTY reached confirmation and created the WebKit panel, but a late sample before ordering could clear it without displaying the page. These are two distinct paths to the same symptom; the old terminal prompt could not distinguish them. The sampler timing was controlled, not recorded from a user's window.
 * In a disposable AppKit panel, the production WebKit view loaded a real loopback server, accepted native keyboard/form input and hot-reloaded after a source change without a full navigation. The native smoke test exercises back/reload and select/review/cancel/copy. This tests the browser, not its registration over Rex.
 * The packaged dashboard was exercised at desktop and narrow widths; its placement setting survived save and restart. Linux rejected the command without opening a browser.
 * The human-test fixture loaded and navigated in the actual Milo `WKWebView` and reported its new viewport after a native resize from 510 to 350 points wide. This was a disposable nonactivating host, **not** visual acceptance over Rex.app.
@@ -107,9 +111,10 @@ From a checkout, run the production browser smoke test and the isolated Rex layo
 ```sh
 sh macos/Preview/tests/smoke.sh
 cargo test --locked --test rex_lab preview_layout_and_observer -- --exact --ignored --nocapture
+cargo test --locked --test rex_lab preview_tick::preview_confirmation_uses_rex_pty -- --exact --ignored --nocapture
 ```
 
-The Rex lab uses a real server and a simulated Unix viewer. It cannot verify pixels, native keyboard focus, palette stacking or physical display movement.
+The confirmation lab combines a real Rex server, a four-session Unix viewer fixture, the terminal's actual input and the native coordinator. It uses an offscreen `WKWebView` and models window stacking, foreground and pointer position. A verified page pixel there is not an on-screen Rex screenshot; actual keyboard focus, palette stacking and physical display movement remain separate checks.
 
 ### Human acceptance: start with the right split
 
