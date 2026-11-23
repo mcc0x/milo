@@ -727,6 +727,21 @@ fn the_alert_transaction_holds_the_config_lock_through_a_credential_write() {
 }
 
 #[test]
+fn credential_transaction_unlocks_before_its_last_descriptor_closes() {
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let destination = Destination::Telegram;
+    let credential = alerts.lock_credential(destination).unwrap();
+    // Model a descriptor inherited before exec without spawning a child.
+    let duplicate = credential.0.try_clone().unwrap();
+
+    assert!(alerts.forget(destination).unwrap_err().starts_with("Another Telegram connection change is in progress"));
+    drop(credential);
+    alerts.forget(destination).unwrap();
+    drop(duplicate);
+}
+
+#[test]
 fn failed_forget_revoke_never_rearms_the_forgotten_provider() {
     let f = Fixture::folder();
     let mut alerts = store(&f);
