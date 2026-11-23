@@ -1,6 +1,6 @@
-// Two accessory processes own the disposable AppKit surfaces. The Rex app
-// identity, foreground notification, and Chrome preferences are modeled; the
-// windows' frames, ordering, visibility, Space membership and WKWebView are real.
+// Separate accessory processes own the Rex stand-in, foreign surface and preview.
+// Rex identity, foreground notification and chrome preferences are modeled;
+// frames, z-order, visibility, Space membership and WKWebView are real.
 #import <assert.h>
 #import <fcntl.h>
 #import <objc/runtime.h>
@@ -12,7 +12,6 @@
 #import <unistd.h>
 #import <WebKit/WebKit.h>
 #import "../macos/Preview/Chrome.h"
-#import "../macos/Preview/MenuStrip.h"
 
 @interface FixtureWorkspace : NSObject
 + (instancetype)sharedWorkspace;
@@ -31,14 +30,10 @@
 static CFArrayRef FixtureWindows(CGWindowListOption, CGWindowID);
 static CFArrayRef FixturePin(CFArrayRef);
 static BOOL FixturePane(CGRect, CGRect, CGRect *);
-static BOOL FixtureSystemMenuOwner(pid_t);
-static BOOL FixturePreviewProcess(pid_t);
 
 #define CGWindowListCopyWindowInfo FixtureWindows
 #define CGWindowListCreateDescriptionFromArray FixturePin
 #define MiloApproximatePane FixturePane
-#define MiloSystemMenuOwner FixtureSystemMenuOwner
-#define MiloPreviewProcess FixturePreviewProcess
 #define NSWorkspace FixtureWorkspace
 #define windowNumberAtPoint fixtureWindowNumberAtPoint
 #define mouseLocation fixtureMouseLocation
@@ -46,13 +41,11 @@ static BOOL FixturePreviewProcess(pid_t);
 #undef mouseLocation
 #undef windowNumberAtPoint
 #undef NSWorkspace
-#undef MiloPreviewProcess
-#undef MiloSystemMenuOwner
 #undef MiloApproximatePane
 #undef CGWindowListCreateDescriptionFromArray
 #undef CGWindowListCopyWindowInfo
 
-static pid_t ownerPID, menuPID, competingPID;
+static pid_t ownerPID;
 static CGWindowID targetID, coverID, replacementID;
 static _Atomic(CGWindowID) panelID;
 static atomic_bool heldSample;
@@ -62,6 +55,7 @@ static int trace;
 static CGFloat quartzHeight;
 static NSPoint parkedPointer;
 static BOOL foreground = YES;
+static const char TileCovered[] = "another window overlaps the tile; waiting for clear placement";
 
 @interface FixtureOwner : NSObject
 @property (nonatomic) pid_t processIdentifier;
@@ -116,6 +110,22 @@ static CGRect QuartzFrame(NSRect frame) {
     return CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
 }
 
+static NSArray *ActualWindows(void) {
+    return CFBridgingRelease(CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+}
+
+static NSUInteger WindowIndex(NSArray *windows, CGWindowID id) {
+    for (NSUInteger i = 0; i < windows.count; ++i)
+        if ([windows[i][(__bridge NSString *)kCGWindowNumber] unsignedIntValue] == id) return i;
+    return NSNotFound;
+}
+
+static void ReadWindowIDs(void) {
+    assert(sscanf(Read(@"window-ids").UTF8String, "%u %u", &targetID, &replacementID) == 2);
+    assert(targetID && replacementID && targetID != replacementID);
+}
+
 static NSDictionary *WithOwner(NSDictionary *window, pid_t pid) {
     NSMutableDictionary *row = [window mutableCopy];
     row[(__bridge NSString *)kCGWindowOwnerPID] = @(pid);
@@ -163,8 +173,30 @@ static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
     MiloRexChrome chrome;
     return MiloDecodeRexChrome(@{}, &chrome) && MiloPaneInRexChrome(window, normalized, &chrome, pane);
 }
-static BOOL FixtureSystemMenuOwner(pid_t pid) { return pid == menuPID; }
-static BOOL FixturePreviewProcess(pid_t pid) { return pid == competingPID; }
+
+static CGRect CheckCover(NSArray *windows, NSString *position, CGRect tile) {
+    NSUInteger target = WindowIndex(windows, targetID), cover = WindowIndex(windows, coverID);
+    assert(target != NSNotFound && cover < target);
+    pid_t foreign = [windows[cover][(__bridge NSString *)kCGWindowOwnerPID] intValue];
+    assert(foreign > 1 && foreign != ownerPID && foreign != getpid());
+    CGRect host = WindowBounds(windows[target]), surface = WindowBounds(windows[cover]), pane;
+    assert(CGRectContainsRect(host, surface) && FixturePane(host, tile, &pane));
+    if ([position isEqual:@"tile"]) {
+        assert(CGRectContainsRect(pane, surface));
+    } else {
+        assert(CGRectIsEmpty(CGRectIntersection(pane, surface)));
+        if ([position isEqual:@"sibling"]) {
+            CGRect sibling;
+            assert(FixturePane(host, CGRectMake(0, 0, tile.origin.x, 1), &sibling));
+            assert(CGRectContainsRect(sibling, surface));
+        } else {
+            CGRect workspace;
+            assert([position isEqual:@"titlebar"] && FixturePane(host, CGRectMake(0, 0, 1, 1), &workspace));
+            assert(CGRectGetMaxY(surface) <= CGRectGetMinY(workspace));
+        }
+    }
+    return surface;
+}
 
 @implementation NSWindow (RexTickFixture)
 + (NSInteger)fixtureWindowNumberAtPoint:(NSPoint)point belowWindowWithWindowNumber:(NSInteger)below {
@@ -219,52 +251,89 @@ static int RunWindowHost(NSScreen *screen) {
     CGFloat w = fmin(NSWidth(usable) - 60, 720), h = fmin(NSHeight(usable) - 60, 430);
     assert(w > 380 && h > 240);
     NSRect frame = NSIntegralRect(NSMakeRect(NSMidX(usable) - w / 2, NSMidY(usable) - h / 2, w, h));
-    NSRect coverFrame = NSInsetRect(frame, 30, 30);
-    coverFrame.origin.x = NSMidX(frame);
-    coverFrame.size.width = NSMaxX(frame) - NSMinX(coverFrame) - 20;
     NSPanel *target = LabWindow(frame, @"Milo Rex Lab • Rex stand-in", NSColor.darkGrayColor);
-    NSPanel *cover = LabWindow(coverFrame, @"Milo Rex Lab • occluder", NSColor.grayColor);
     NSPanel *replacement = LabWindow(frame, @"Milo Rex Lab • replacement", NSColor.darkGrayColor);
     [target orderBack:nil];
-    __block NSString *applied;
+    __block BOOL replaced;
     __block BOOL announced;
     [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
         if (getppid() != parent) _exit(0);
         assert(!NSApp.active && !NSApp.keyWindow);
         if (!announced) {
-            CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly |
-                kCGWindowListExcludeDesktopElements, kCGNullWindowID);
-            NSArray *rows = CFBridgingRelease(list);
-            for (NSDictionary *row in rows) {
-                if ([row[(__bridge NSString *)kCGWindowNumber] integerValue] != target.windowNumber) continue;
+            NSArray *rows = ActualWindows();
+            NSUInteger index = WindowIndex(rows, (CGWindowID)target.windowNumber);
+            if (index != NSNotFound) {
                 assert(target.visible && target.onActiveSpace &&
-                    CGRectEqualToRect(WindowBounds(row), QuartzFrame(target.frame)));
-                Publish(@"window-ids", [NSString stringWithFormat:@"%ld %ld %ld %.0f\n",
-                    (long)target.windowNumber, (long)cover.windowNumber, (long)replacement.windowNumber, NSWidth(target.frame)]);
+                    CGRectEqualToRect(WindowBounds(rows[index]), QuartzFrame(target.frame)));
+                Publish(@"window-ids", [NSString stringWithFormat:@"%ld %ld %.0f\n",
+                    (long)target.windowNumber, (long)replacement.windowNumber, NSWidth(target.frame)]);
                 announced = YES;
-                break;
             }
         }
         NSString *command = Read(@"window-command");
-        if (!command || [command isEqual:applied]) return;
-        if ([command isEqual:@"cover"]) {
-            NSInteger preview = Read(@"panel-window").integerValue;
-            assert(preview > 0);
-            [cover orderWindow:NSWindowAbove relativeTo:preview];
-            assert(cover.visible && cover.onActiveSpace && !cover.keyWindow);
-        } else if ([command isEqual:@"uncover"]) {
-            [cover orderOut:nil];
-            assert(!cover.visible);
-        } else {
-            assert([command isEqual:@"replace"]);
-            // Keep the pinned ID alive but offscreen. An eligible-looking
-            // same-owner window must not be substituted for it.
-            [target orderOut:nil];
-            [replacement orderBack:nil];
-            assert(!target.visible && replacement.visible && replacement.onActiveSpace && !replacement.keyWindow);
+        if (replaced || ![command isEqual:@"replace"]) return;
+        // Keep the pinned ID alive but offscreen. An eligible-looking
+        // same-owner window must not be substituted for it.
+        [target orderOut:nil];
+        [replacement orderBack:nil];
+        assert(!target.visible && replacement.visible && replacement.onActiveSpace && !replacement.keyWindow);
+        replaced = YES;
+        Publish(@"window-applied", command);
+    }];
+    [NSApp run];
+    return 0;
+}
+
+static NSRect CoverFrame(NSRect target, NSString *position) {
+    BOOL titlebar = [position isEqual:@"titlebar"], sibling = [position isEqual:@"sibling"];
+    assert(titlebar || sibling || [position isEqual:@"tile"]);
+    CGFloat x = NSMinX(target) + NSWidth(target) * (sibling ? 0.20 : 0.87) - 24;
+    CGFloat y = titlebar ? NSMaxY(target) - 32 : NSMinY(target) + NSHeight(target) * 0.38 - 10;
+    return NSIntegralRect(NSMakeRect(x, y, 48, 20));
+}
+
+static int RunCoverHost(void) {
+    SetAccessory();
+    const pid_t parent = getppid();
+    NSArray *windows = ActualWindows();
+    NSUInteger index = WindowIndex(windows, targetID);
+    assert(index != NSNotFound && [windows[index][(__bridge NSString *)kCGWindowOwnerPID] intValue] != getpid());
+    CGRect bounds = WindowBounds(windows[index]);
+    NSRect target = NSMakeRect(CGRectGetMinX(bounds), quartzHeight - CGRectGetMaxY(bounds),
+        CGRectGetWidth(bounds), CGRectGetHeight(bounds));
+    NSPanel *cover = LabWindow(CoverFrame(target, @"tile"), @"Milo Rex Lab • occluder", NSColor.grayColor);
+    CGWindowID foreign = (CGWindowID)cover.windowNumber;
+    assert(foreign && foreign != targetID && foreign != replacementID);
+    Publish(@"cover-id", [NSString stringWithFormat:@"%u\n", foreign]);
+
+    __block NSString *requested, *applied;
+    __block CGWindowID above;
+    [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
+        (void)timer;
+        if (getppid() != parent) _exit(0);
+        assert(!NSApp.active && !NSApp.keyWindow);
+        NSString *command = Read(@"window-command");
+        if (!command || [command isEqual:@"replace"] || [command isEqual:applied]) return;
+        if (![command isEqual:requested]) {
+            requested = command;
+            [cover setFrame:CoverFrame(target, command) display:YES];
+            // Never order in front of unrelated windows. Once clear over the
+            // titlebar, put the cover above the visible preview; the next
+            // move onto the tile retains that order without bringing it front.
+            above = targetID;
+            if (!cover.visible || [command isEqual:@"titlebar"]) {
+                CGWindowID preview = (CGWindowID)Read(@"panel-window").longLongValue;
+                if (preview && WindowIndex(ActualWindows(), preview) != NSNotFound) above = preview;
+                [cover orderWindow:NSWindowAbove relativeTo:above];
+            }
         }
-        applied = command;
+        assert(cover.visible && cover.onActiveSpace && !cover.keyWindow);
+        NSArray *rows = ActualWindows();
+        NSUInteger coverIndex = WindowIndex(rows, foreign), aboveIndex = WindowIndex(rows, above);
+        if (aboveIndex == NSNotFound || coverIndex >= aboveIndex ||
+            !CGRectEqualToRect(WindowBounds(rows[coverIndex]), QuartzFrame(cover.frame))) return;
+        applied = requested;
         Publish(@"window-applied", applied);
     }];
     [NSApp run];
@@ -289,14 +358,25 @@ static void AssertNonactivating(MiloPreviewPanel *panel) {
     assert(!panel.canBecomeMainWindow && (panel.styleMask & NSWindowStyleMaskNonactivatingPanel));
 }
 
-static void CheckShown(MiloPreviewPanel *panel) {
+static void CheckShown(MiloPreviewPanel *panel, CGRect tile) {
     AssertNonactivating(panel);
     assert(panel.visible && panel.onActiveSpace && panel.placementProven &&
         !panel.contentView.hidden && !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
     assert(parkedPointer.x + 120 < NSMinX(panel.frame) && !NSPointInRect(parkedPointer, panel.frame));
     CGRect bounds = QuartzFrame(panel.frame);
-    Geometry stack = SampleGeometry(VisibleWindows(), ownerPID, targetID, getpid(), &bounds, NULL);
-    assert(stack.windowID == targetID); // Ordered above that exact real window.
+    NSArray *windows = VisibleWindows();
+    NSString *position = Read(@"window-applied");
+    CGRect foreign = CheckCover(windows, position, tile);
+    assert(CGRectIsEmpty(CGRectIntersection(bounds, foreign)));
+    NSUInteger target = WindowIndex(windows, targetID);
+    NSUInteger helper = WindowIndex(windows, (CGWindowID)panel.windowNumber);
+    assert(target != NSNotFound && helper < target);
+    if ([position isEqual:@"titlebar"]) assert(WindowIndex(windows, coverID) < helper);
+    Geometry stack = SampleGeometry(windows, ownerPID, targetID, getpid(), &bounds, &tile);
+    NSRect frame;
+    CGDirectDisplayID display;
+    assert(stack.windowID == targetID && !ScreenFrameFailure(stack, &frame, &display));
+    assert(NSEqualRects(frame, panel.frame));
 }
 
 static void (*ActualOrder)(MiloPreviewPanel *, SEL, NSWindowOrderingMode, NSInteger);
@@ -389,8 +469,8 @@ static void SeedForm(MiloPreviewPanel *panel, unsigned tries, BOOL navigating) {
     });
 }
 
-static void Probe(MiloPreviewPanel *panel, NSInteger sequence) {
-    CheckShown(panel);
+static void Probe(MiloPreviewPanel *panel, NSInteger sequence, CGRect tile) {
+    CheckShown(panel, tile);
     [panel.contentView layoutSubtreeIfNeeded];
     WKWebView *web = FindWebView(panel.contentView);
     assert(web && web == firstWeb && web.canGoBack && !web.loading);
@@ -436,64 +516,71 @@ static void Probe(MiloPreviewPanel *panel, NSInteger sequence) {
             NSWorkspaceDidActivateApplicationNotification : NSWorkspaceDidDeactivateApplicationNotification object:nil];
     }
     [super tick];
-    if (!_panel.placementProven) return;
+    if (!_panel.placementProven) {
+        static NSInteger lastBlocked;
+        NSInteger sequence = Read(@"blocked-probe").integerValue;
+        if (lastBlocked < sequence && _lastReason && !strcmp(_lastReason, TileCovered)) {
+            NSArray *windows = VisibleWindows();
+            CheckCover(windows, @"tile", _lease.tile);
+            assert(![self acceptsPanelInput]);
+            if (_panel) {
+                AssertNonactivating(_panel);
+                assert(!_panel.visible && !_panel.canBecomeKeyWindow &&
+                    _panel.contentView.hidden && _panel.ignoresMouseEvents);
+                if (WindowIndex(windows, (CGWindowID)_panel.windowNumber) != NSNotFound) return;
+            }
+            lastBlocked = sequence;
+            Trace("blocked %ld\n", (long)sequence);
+        }
+        return;
+    }
     static BOOL seeding;
     if (!seeding && Flag(@"seed-form")) {
         seeding = YES;
+        CheckShown(_panel, _lease.tile);
         SeedForm(_panel, 80, NO);
     }
-    static NSInteger lastProbe;
+    static NSInteger requestedProbe, lastProbe;
+    static NSTimeInterval probeAfter;
     NSInteger sequence = Read(@"probe").integerValue;
-    if (lastProbe < sequence) {
-        lastProbe = sequence;
-        Probe(_panel, sequence);
+    if (requestedProbe < sequence) {
+        requestedProbe = sequence;
+        probeAfter = NSProcessInfo.processInfo.systemUptime;
+    }
+    // The previous placement proof may predate the surface's latest move.
+    if (lastProbe < requestedProbe && _lastSample > probeAfter) {
+        lastProbe = requestedProbe;
+        Probe(_panel, requestedProbe, _lease.tile);
     }
 }
 @end
 
-static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect frame, int level) {
+static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect frame) {
     return @{
         (__bridge NSString *)kCGWindowOwnerPID: @(pid),
         (__bridge NSString *)kCGWindowNumber: @(id),
-        (__bridge NSString *)kCGWindowLayer: @(level),
+        (__bridge NSString *)kCGWindowLayer: @(CGWindowLevelForKey(kCGNormalWindowLevelKey)),
         (__bridge NSString *)kCGWindowAlpha: @1,
         (__bridge NSString *)kCGWindowBounds: CFBridgingRelease(CGRectCreateDictionaryRepresentation(frame)),
     };
 }
 
-static int Preflight(const char *scenario, NSScreen *screen) {
-    if (strcmp(scenario, "live")) {
-        // Reproduce menu and unsupported layouts with metadata, never order
-        // windows over the user's menu or change display state.
-        CGRect display = QuartzFrame(screen.frame);
-        NSRect frame = NSIntegralRect(NSInsetRect(screen.visibleFrame, 25, 25));
-        frame.size.height = NSMaxY(screen.frame) - NSMinY(frame) - 1;
-        CGRect targetFrame = QuartzFrame(frame), workspace;
-        assert(FixturePane(targetFrame, CGRectMake(0, 0, 1, 1), &workspace));
-        CGRect strip = CGRectMake(CGRectGetMinX(display), CGRectGetMinY(display), CGRectGetWidth(display), 29);
-        assert(!CGRectIsEmpty(CGRectIntersection(strip, targetFrame)) && CGRectIsEmpty(CGRectIntersection(strip, workspace)));
-        int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey), menu = CGWindowLevelForKey(kCGMainMenuWindowLevelKey);
-        NSDictionary *target = Metadata(ownerPID, targetID, targetFrame, normal);
-        NSDictionary *stripRow = Metadata(menuPID, coverID, strip, menu);
-        if (!strcmp(scenario, "menu")) preflightWindows = @[stripRow, target];
-        else if (!strcmp(scenario, "menu-lookalike")) preflightWindows = @[Metadata(1, coverID, strip, menu), target];
-        else if (!strcmp(scenario, "helper-status")) preflightWindows = @[
-            Metadata(competingPID, coverID, strip, CGWindowLevelForKey(kCGStatusWindowLevelKey)), target];
-        else if (!strcmp(scenario, "second-rex")) preflightWindows = @[
-            stripRow, target, Metadata(ownerPID, replacementID, targetFrame, normal)];
-        else if (!strcmp(scenario, "body-overlay")) {
-            CGRect overlay = CGRectOffset(strip, 0, CGRectGetMinY(workspace) - CGRectGetMinY(strip) + 1);
-            preflightWindows = @[Metadata(menuPID, coverID, overlay, menu), target];
-        } else if (!strcmp(scenario, "competing-preview")) {
-            CGRect panel = CGRectInset(workspace, CGRectGetWidth(workspace) / 4, CGRectGetHeight(workspace) / 4);
-            preflightWindows = @[stripRow, Metadata(competingPID, replacementID, panel, normal), target];
-        } else if (!strcmp(scenario, "background")) {
-            foreground = NO;
-            preflightWindows = @[target];
-        } else {
-            assert(!strcmp(scenario, "fullscreen"));
-            preflightWindows = @[Metadata(ownerPID, targetID, display, normal)];
-        }
+static int Preflight(NSString *scenario, NSScreen *screen, CGFloat right) {
+    if ([scenario isEqual:@"background"]) {
+        foreground = NO;
+    } else if ([scenario isEqual:@"second-rex"]) {
+        NSArray *windows = VisibleWindows();
+        NSUInteger index = WindowIndex(windows, targetID);
+        assert(index != NSNotFound);
+        NSDictionary *target = windows[index];
+        preflightWindows = @[target, Metadata(ownerPID, replacementID, WindowBounds(target))];
+    } else if ([scenario isEqual:@"fullscreen"]) {
+        // Unsupported display geometry without changing the user's display.
+        preflightWindows = @[Metadata(ownerPID, targetID, QuartzFrame(screen.frame))];
+    } else {
+        // The same disposable foreign process later moves this real surface
+        // while the watcher and AppKit coordinator remain running.
+        CheckCover(VisibleWindows(), scenario, CGRectMake(1 - right, 0, right, 1));
     }
     const char *reason = NULL;
     CGWindowID pinned = PinForegroundWindow((id)owner, ownerPID, &reason);
@@ -512,32 +599,33 @@ int main(int argc, const char **argv) {
         CGDirectDisplayID primary = CGMainDisplayID();
         assert(screen && [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == primary);
         quartzHeight = CGRectGetHeight(CGDisplayBounds(primary));
-        if (argc == 3 && !strcmp(argv[1], "--window-host")) {
+        if (argc == 3) {
             root = [NSString stringWithUTF8String:argv[2]];
-            return RunWindowHost(screen);
+            if (!strcmp(argv[1], "--window-host")) return RunWindowHost(screen);
+            assert(!strcmp(argv[1], "--cover-host"));
+            ReadWindowIDs();
+            return RunCoverHost();
         }
         BOOL preflight = argc == 6 && !strcmp(argv[1], "--preflight");
         assert(preflight || argc == 5);
         root = [NSString stringWithUTF8String:argv[3]];
-        assert(sscanf(Read(@"window-ids").UTF8String, "%u %u %u", &targetID, &coverID, &replacementID) == 3);
-        assert(targetID && coverID && replacementID && targetID != coverID && targetID != replacementID && coverID != replacementID);
+        ReadWindowIDs();
+        coverID = (CGWindowID)Read(@"cover-id").longLongValue;
+        assert(coverID && coverID != targetID && coverID != replacementID);
         ownerPID = (pid_t)strtol(argv[preflight ? 2 : 1], NULL, 10);
         assert(ownerPID > 1 && ownerPID != getpid());
         owner = [FixtureOwner new];
         owner.processIdentifier = ownerPID;
-        if (preflight) {
-            menuPID = getppid();
-            competingPID = (pid_t)strtol(argv[4], NULL, 10);
-            return Preflight(argv[5], screen);
-        }
+        if (preflight) return Preflight([NSString stringWithUTF8String:argv[4]], screen, strtod(argv[5], NULL));
 
         assert(strtoul(argv[4], NULL, 10) == targetID);
         SetAccessory();
         // Park the modeled pointer inside the working shell throughout the
         // test. Its left third stays in the shell at every tested split ratio.
-        Geometry host = SampleGeometry(VisibleWindows(), ownerPID, targetID, getpid(), NULL, NULL);
+        NSArray *windows = VisibleWindows();
+        NSUInteger target = WindowIndex(windows, targetID);
         CGRect shell;
-        assert(host.windowID == targetID && FixturePane(host.window, CGRectMake(0, 0, 1.0/3, 1), &shell));
+        assert(target != NSNotFound && FixturePane(WindowBounds(windows[target]), CGRectMake(0, 0, 1.0/3, 1), &shell));
         parkedPointer = NSMakePoint(CGRectGetMidX(shell), quartzHeight - CGRectGetMidY(shell));
         trace = open(Path(@"native.log").fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);

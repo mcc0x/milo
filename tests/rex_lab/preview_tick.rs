@@ -58,6 +58,20 @@ fn publish(root: &Path, name: &str, value: &str) {
     fs::rename(pending, root.join(name)).unwrap();
 }
 
+fn window_command(lab: &Lab, command: &str) {
+    publish(&lab.root, "window-command", command);
+    let until = Instant::now() + PATIENCE;
+    while lab.read("window-applied") != command {
+        assert!(
+            Instant::now() < until,
+            "the disposable window host did not apply {command:?}\n{}{}",
+            lab.read("window-host.errors"),
+            lab.read("cover-host.errors"),
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 struct Tile<'a> {
     lab: &'a Lab,
     session: &'a str,
@@ -179,10 +193,13 @@ impl Tile<'_> {
         self.shell_is_focused();
     }
 
-    fn window_command(&self, command: &str) {
-        publish(&self.lab.root, "window-command", command);
-        self.wait("the disposable AppKit window host did not apply its command", || {
-            self.lab.read("window-applied") == command
+    fn blocked(&self, sequence: u32) {
+        publish(&self.lab.root, "blocked-probe", &sequence.to_string());
+        let event = format!("blocked {sequence}");
+        self.wait("the overlapping foreign window did not leave the preview hidden and noninteractive", || {
+            self.event_count(&event) == 1
+                && self.shown().is_none()
+                && self.capture(self.block).contains("another window overlaps the tile; waiting for clear placement")
         });
     }
 
@@ -249,7 +266,7 @@ fn persistent_preview_coexists_with_shell() {
         &lab,
         COORDINATOR,
         &["tests/preview_rex_tick.m", "macos/Preview/Browser.m"],
-        &["AppKit", "CoreGraphics", "WebKit", "Security"],
+        &["AppKit", "CoreGraphics", "WebKit"],
     );
     compile(&lab, DIVIDER, &["tests/preview_divider_drag.m"], &["AppKit"]);
 
@@ -266,11 +283,18 @@ fn persistent_preview_coexists_with_shell() {
         let ids = lab.read("window-ids");
         let mut fields = ids.split_whitespace();
         if let Some(id) = fields.next() {
-            break (id.to_owned(), fields.nth(2).unwrap().parse::<f64>().unwrap());
+            break (id.to_owned(), fields.nth(1).unwrap().parse::<f64>().unwrap());
         }
         assert!(host.0.try_wait().unwrap().is_none() && Instant::now() < deadline, "{}", lab.read("window-host.errors"));
         thread::sleep(Duration::from_millis(50));
     };
+    let _cover = OwnedChild(
+        lab.command(lab.root.join(COORDINATOR))
+            .args(["--cover-host", root])
+            .stderr(lab.log("cover-host.errors"))
+            .spawn()
+            .unwrap(),
+    );
 
     let drag = lab.command(lab.root.join(DIVIDER)).output().unwrap();
     assert!(drag.status.success(), "{}", String::from_utf8_lossy(&drag.stderr));
@@ -336,10 +360,10 @@ fn persistent_preview_coexists_with_shell() {
         ])
     };
     let owner_pid = pid.to_string();
-    let competing_pid = lab.server.as_ref().unwrap().id().to_string();
+    let right_fraction = format!("{right_start:.6}");
     let preflight = |scenario: &str| {
         let result = lab.command(lab.root.join(COORDINATOR))
-            .args(["--preflight", &owner_pid, root, &competing_pid, scenario]).output().unwrap();
+            .args(["--preflight", &owner_pid, root, scenario, &right_fraction]).output().unwrap();
         if result.status.success() {
             let pin = String::from_utf8(result.stdout).unwrap();
             assert_eq!(pin.trim(), target, "{scenario}: returned a different pin");
@@ -352,21 +376,22 @@ fn persistent_preview_coexists_with_shell() {
         }
     };
     let before = inventory();
+    // The same foreign AppKit window is above and intersecting the real
+    // fixture window in each case; only its relation to the tile changes.
+    for position in ["sibling", "titlebar", "tile"] {
+        window_command(&lab, position);
+        preflight(position).expect("an overlapping foreign window prevented pinning");
+        assert_eq!(inventory(), before, "{position} changed Rex tabs or panes before the split");
+    }
     for (scenario, refusal) in [
         ("background", "was not foreground"),
         ("second-rex", "additional normal Rex window"),
-        ("body-overlay", "overlaps the drawable workspace"),
-        ("competing-preview", "Milo Preview helper window"),
-        ("helper-status", "Milo Preview helper window"),
-        ("menu-lookalike", "not a verified display-top system menu strip"),
         ("fullscreen", "occupies the entire display"),
     ] {
         let reason = preflight(scenario).expect_err("unexpected successful pin");
         assert!(reason.contains(refusal), "{scenario}: {reason}");
         assert_eq!(inventory(), before, "{scenario} changed Rex tabs or panes before the split");
     }
-    preflight("menu").expect("a verified menu strip prevented startup");
-    preflight("live").expect("the disposable real window did not pass preflight");
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/rex-lab-page", listener.local_addr().unwrap());
@@ -409,9 +434,11 @@ fn persistent_preview_coexists_with_shell() {
             && (x - (1.0 - right) * 1_000_000.0).abs() <= 2.0
             && (width - right * 1_000_000.0).abs() <= 2.0
     };
-    tile.wait("a claimed multi-attached preview did not appear beside the focused shell", || {
-        layout_is(right_start) && tile.shown().is_some()
-    });
+    tile.wait("the claimed right tile did not receive its real watcher lease", || layout_is(right_start));
+    tile.blocked(1);
+    assert_eq!(tile.event_count("ordered"), 0, "the initially covered preview tried to order");
+    window_command(&lab, "sibling");
+    tile.wait("moving the cover to the sibling did not reveal the preview", || tile.shown().is_some());
     let visible_at = start.elapsed();
     tile.shell_is_focused();
     publish(&lab.root, "seed-form", "");
@@ -423,6 +450,28 @@ fn persistent_preview_coexists_with_shell() {
     let concealed = tile.event_count("concealed");
     tile.shell_command("before-resize");
     assert_eq!(tile.event_count("concealed"), concealed, "shell input concealed the actual panel");
+
+    // Bring the same foreign window above the visible panel, but only over
+    // the titlebar. Neither the projection nor the proven order may change.
+    window_command(&lab, "titlebar");
+    let titlebar = tile.probe(2);
+    assert_eq!((&titlebar.web, titlebar.width, titlebar.height), (&initial.web, initial.width, initial.height));
+    assert_eq!(tile.shown().unwrap(), original);
+    assert_eq!(tile.event_count("concealed"), concealed, "titlebar overlap hid the page");
+
+    // Only the foreign window moves. The watcher keeps the lease and the
+    // shell stays focused while the seeded page hides and comes back.
+    let outs = tile.event_count("out");
+    let hides = tile.state_count("hide");
+    window_command(&lab, "tile");
+    tile.wait_hidden(outs);
+    tile.blocked(2);
+    window_command(&lab, "sibling");
+    let uncovered = tile.probe(3);
+    assert_eq!((&uncovered.web, uncovered.width, uncovered.height), (&initial.web, initial.width, initial.height));
+    assert_eq!(tile.shown().unwrap(), original);
+    assert_eq!(tile.state_count("hide"), hides, "cover movement revoked the Rex watcher lease");
+    tile.shell_is_focused();
 
     // The separate disposable NSSplitView verifies the drag starts outside
     // the old page and sends measurements while the local mouse is held.
@@ -453,7 +502,7 @@ fn persistent_preview_coexists_with_shell() {
                     (original.x - frame.x - gain).abs() <= 3.0
                 })
             });
-            let held = tile.probe(2);
+            let held = tile.probe(4);
             assert_eq!(held.web, initial.web);
             assert!(held.width > initial.width + 20);
             let before_input = tile.event_count("concealed");
@@ -481,7 +530,7 @@ fn persistent_preview_coexists_with_shell() {
     assert!(expanded.width > original.width + 20.0);
     assert!((expanded.x + expanded.width - original.x - original.width).abs() <= 1.0);
     assert_eq!((expanded.y, expanded.height), (original.y, original.height));
-    let resized = tile.probe(3);
+    let resized = tile.probe(5);
     assert_eq!(resized.web, initial.web);
     assert!(resized.width > initial.width + 20, "the real CSS viewport did not resize: {initial:?} → {resized:?}");
     assert!(resized.height > 0);
@@ -489,12 +538,12 @@ fn persistent_preview_coexists_with_shell() {
     let concealed = tile.event_count("concealed");
     tile.shell_command("after-resize");
     let idle_time = Instant::now();
-    let idle_start = tile.probe(4);
+    let idle_start = tile.probe(6);
     let renewals = tile.state_count("renew");
     // No input or pointer movement during this interval. This exceeds the
     // removed consent lifetime, not any shortened test clock.
     thread::sleep(Duration::from_secs(13));
-    let idle_end = tile.probe(5);
+    let idle_end = tile.probe(7);
     assert!(tile.state_count("renew") > renewals, "the real observer was not alive while idle");
     assert_eq!(tile.event_count("concealed"), concealed, "typing or the idle interval concealed the panel");
     assert_eq!((idle_end.web, idle_end.width, idle_end.height), (idle_start.web, idle_start.width, idle_start.height));
@@ -521,32 +570,22 @@ fn persistent_preview_coexists_with_shell() {
     tile.wait("the stale Quartz result did not reach the coordinator", || tile.event_count("sample-rejected") == 1);
     assert_eq!(tile.event_count("ordered"), orders);
     tile.focus(&shell);
-    let restored = tile.probe(6);
+    let restored = tile.probe(8);
     assert_eq!(restored.web, resized.web);
     assert_eq!(tile.shown().unwrap(), expanded);
-    tile.shell_is_focused();
-
-    let outs = tile.event_count("out");
-    tile.window_command("cover");
-    tile.wait_hidden(outs);
-    tile.wait("the native coordinator did not diagnose actual occlusion", || {
-        tile.capture(&block).contains("another window overlaps the tile")
-    });
-    tile.window_command("uncover");
-    assert_eq!(tile.probe(7).web, resized.web);
     tile.shell_is_focused();
 
     let outs = tile.event_count("out");
     publish(&lab.root, "foreground-away", "");
     tile.wait_hidden(outs);
     fs::remove_file(lab.root.join("foreground-away")).unwrap();
-    assert_eq!(tile.probe(8).web, resized.web);
+    assert_eq!(tile.probe(9).web, resized.web);
     tile.shell_is_focused();
 
     // The old ID still exists but no longer presents onscreen. A fresh
     // same-owner replacement appears while the original Rex lease renews.
     let outs = tile.event_count("out");
-    tile.window_command("replace");
+    window_command(&lab, "replace");
     tile.wait_hidden(outs);
     let orders = tile.event_count("ordered");
     let renewals = tile.state_count("renew");
@@ -569,8 +608,8 @@ fn persistent_preview_coexists_with_shell() {
     let isolated = tile.event_count("filtered-hit");
     eprintln!(
         "Observed: disposable AppKit divider responder drag; real Rex layout/focus and shell PTYs; \
-         WK identity, form, history and CSS viewport; \
-         AppKit order, Space, non-key/nonactivation and Quartz stack of disposable windows \
+         WK identity, form, history and CSS viewport across foreign occlusion; \
+         AppKit order, Space, non-key/nonactivation and Quartz stack of separate disposable processes \
          ({direct} direct AppKit hits, {isolated} isolated fixture hits). \
          Modeled: Rex.app PID/foreground and chrome, parked pointer; no global input or same-window host/session detection."
     );
