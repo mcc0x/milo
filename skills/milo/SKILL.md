@@ -37,7 +37,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 | Command | What it does |
 | --- | --- |
-| `milo` | Opens the interactive home menu. |
+| `milo` | Opens Home. In a standalone terminal, this checkout offers Outline, History and Usage without running setup. |
 | `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |

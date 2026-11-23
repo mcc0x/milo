@@ -32,7 +32,17 @@ impl Project {
     }
 
     fn command(&self, program: impl AsRef<Path>) -> Command {
-        let mut command = Command::new(program.as_ref());
+        self.configure(Command::new(program.as_ref()))
+    }
+
+    /// A stock shell's tools, without the developer's Rex or provider environment.
+    fn standalone(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_milo"));
+        command.env_clear().env("PATH", "/usr/bin:/bin");
+        self.configure(command)
+    }
+
+    fn configure(&self, mut command: Command) -> Command {
         command
             .current_dir(self.0.join("project"))
             .env("HOME", &self.0)
@@ -40,6 +50,12 @@ impl Project {
             .env("XDG_STATE_HOME", self.0.join("state"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("TERM", "xterm-256color")
+            .env_remove("TERM_PROGRAM")
+            .env_remove("TMUX")
+            .env_remove("STY")
+            .env_remove("COLORTERM")
+            .env_remove("MILO_GRAPHICS")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK");
@@ -131,6 +147,15 @@ impl Terminal {
             assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
         }
         let modes = modes(&slave);
+        for (name, default) in [("TERM", Some("xterm-256color")), ("TERM_PROGRAM", None), ("NO_COLOR", None)] {
+            if !command.get_envs().any(|(key, _)| key == name) {
+                if let Some(value) = default {
+                    command.env(name, value);
+                } else {
+                    command.env_remove(name);
+                }
+            }
+        }
         let child = command
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
@@ -313,7 +338,11 @@ esac
     let mut paths = vec![project.0.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    command.env("PATH", std::env::join_paths(paths).unwrap()).env("REX_SESSION", "test").env("REX_BLOCK", "test");
+    command
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("TERM_PROGRAM", "rex")
+        .env("REX_SESSION", "test")
+        .env("REX_BLOCK", "test");
     let mut tty = Terminal::run(command.arg("outline"));
     tty.until("page.txt");
     tty.master.write_all(b"\r\r").unwrap();
@@ -346,6 +375,32 @@ fn a_slow_open_reflows_its_loading_frame_without_waiting_for_git() {
     assert!(!terminal.restored());
     fs::write(project.0.join("go"), "").unwrap();
     terminal.until("page.txt");
+}
+
+#[test]
+fn home_cancels_before_starting_git_when_enter_and_ctrl_c_arrive_together() {
+    let project = Project::new();
+    let mut command = project.standalone();
+    project.stand_in_git(
+        &mut command,
+        "touch \"$HOME/git-started\"\nwhile [ -d \"$HOME\" ]; do sleep 0.02; done\nexit 1\n",
+    );
+    let started = project.0.join("git-started");
+    let mut terminal = Terminal::run(&mut command);
+    terminal.shows("› Outline");
+    terminal.master.write_all(b"\r\x03").unwrap();
+    let until = Instant::now() + TEST_WAIT;
+    let status = loop {
+        assert!(!started.exists(), "Home started Git before consuming Ctrl-C");
+        if let Some(status) = terminal.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < until, "Home did not cancel");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success());
+    assert!(!started.exists());
+    assert!(terminal.restored());
 }
 
 #[test]
@@ -527,9 +582,8 @@ fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
     }
 }
 
-/// An outline on two changed files and one clean one, whose Git stops at
-/// `status` for as long as the file `hold` is in the project's home.
-fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
+/// Two changed files and one clean one, with Git that can stop at `status`.
+fn project_with_a_git_that_can_be_held(project: &Project) -> Command {
     let root = project.0.join("project");
     project.git(&["init"]);
     for name in ["clean.txt", "first.txt", "second.txt"] {
@@ -542,24 +596,30 @@ fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
     }
     let real = Path::new(project.git(&["--exec-path"]).trim()).join("git");
     let script = format!(
-        "case \" $* \" in *\" status \"*)\n  if [ -e \"$HOME/hold\" ]; then\n    : > \"$HOME/held\"\n    \
+        "case \" $* \" in *\" status \"*)\n  if [ -e \"$HOME/hold\" ]; then\n    \
+         printf '%s\\n' \"$$\" > \"$HOME/held.tmp\"\n    mv \"$HOME/held.tmp\" \"$HOME/held\"\n    \
          while [ -e \"$HOME/hold\" ]; do sleep 0.02; done\n  fi;;\nesac\nexec '{}' \"$@\"\n",
         real.display()
     );
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
     project.stand_in_git(&mut command, &script);
+    command
+}
+
+fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
+    let mut command = project_with_a_git_that_can_be_held(project);
     let mut terminal = Terminal::sized(command.arg("outline"), 80, 12);
     terminal.shows("clean.txt");
     terminal
 }
 
-/// Changes the project and waits until the outline's Git is stopped reading it.
+/// Changes the project and waits until the pane's Git is stopped reading it.
 fn hold_git_at_a_change(project: &Project) {
     fs::write(project.0.join("hold"), "").unwrap();
     fs::write(project.0.join("project/later.txt"), "new file\n").unwrap();
     let until = Instant::now() + TEST_WAIT;
     while !project.0.join("held").exists() {
-        assert!(Instant::now() < until, "the outline did not ask Git about the change");
+        assert!(Instant::now() < until, "the pane did not ask Git about the change");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -631,6 +691,13 @@ fn search_stays_responsive_during_refresh_and_opens_the_updated_file_for_editing
     assert!(terminal.restored());
 }
 
+fn assert_held_git_was_reaped(project: &Project) {
+    let pid = fs::read_to_string(project.0.join("held")).unwrap().trim().parse::<libc::pid_t>().unwrap();
+    // SAFETY: Signal zero checks the held fixture's process without delivering a signal.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "held Git survived");
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
+
 #[test]
 fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
     let project = Project::new();
@@ -643,8 +710,31 @@ fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
     // A pane that waits gives Git fifteen seconds before it reads the key.
     assert!(asked.elapsed() < Duration::from_secs(10), "waited {:?} for Git", asked.elapsed());
     assert!(terminal.restored());
+    assert_held_git_was_reaped(&project);
     assert!(project.0.join("hold").exists());
     assert!(!project.0.join("project/.git/index.lock").exists());
+}
+
+#[test]
+fn returning_to_home_cancels_and_reaps_the_project_refresh() {
+    for (label, open, text) in [("Outline", &b"\r"[..], "clean.txt"), ("Git history", &b"j\r"[..], "Baseline")] {
+        let project = Project::new();
+        let mut terminal = Terminal::run(&mut project_with_a_git_that_can_be_held(&project));
+        terminal.shows("› Outline");
+        terminal.master.write_all(open).unwrap();
+        terminal.shows(text);
+        hold_git_at_a_change(&project);
+        let asked = Instant::now();
+        terminal.master.write_all(b"q").unwrap();
+        terminal.shows(&format!("› {label}"));
+        terminal.until("q quit");
+        assert_held_git_was_reaped(&project);
+        assert!(asked.elapsed() < Duration::from_secs(10), "Home waited for {label}'s Git");
+        assert!(project.0.join("hold").exists());
+        terminal.master.write_all(b"q").unwrap();
+        terminal.until("\x1b[?1049l");
+        assert!(terminal.wait_for_exit().success());
+    }
 }
 
 fn history_fixture(project: &Project, subject: &str) {
@@ -750,6 +840,7 @@ fn history_cancels_and_reaps_listings_on_repeated_project_switches() {
     let mut command = first.command(env!("CARGO_BIN_EXE_milo"));
     command
         .args(["history", "--shell", "block:11111111-1111-1111-1111-111111111111"])
+        .env("TERM_PROGRAM", "rex")
         .env("REX_SESSION", "test")
         .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222")
         .env_remove("CLOSE_LISTING_STDOUT");
@@ -878,6 +969,7 @@ fn follow_shell_promotion_applies_worktree_preferences_before_a_cwd_update() {
         command
             .args([pane, "--shell", anchor])
             .env("PATH", &path)
+            .env("TERM_PROGRAM", "rex")
             .env("REX_SESSION", "test")
             .env("REX_BLOCK", "block:22222222-2222-2222-2222-222222222222");
         let mut terminal = Terminal::run(&mut command);
@@ -1048,7 +1140,7 @@ fn a_picture_returns_after_resize_without_further_input() {
     let project = Project::new();
     fs::write(project.0.join("project/resize.png"), include_bytes!("../src/usage/marks/codex.png")).unwrap();
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    let mut terminal = Terminal::run(command.args(["view", "resize.png"]));
+    let mut terminal = Terminal::run(command.env("TERM", "xterm-kitty").args(["view", "resize.png"]));
     terminal.until("\x1b_Gi=31,s=1,v=1,a=q");
     terminal.master.write_all(b"\x1b_Gi=31;OK\x1b\\").unwrap();
     terminal.until(PLACE);
@@ -1140,20 +1232,113 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
     fs::write(project.0.join("project/page.txt"), "text\n").unwrap();
     const NEEDS: &str = "milo: cannot use this terminal: standard output is not a terminal; \
                          a pane needs an interactive terminal. milo doctor and milo COMMAND --help print without one";
-    for args in [&["outline"][..], &["history"], &["usage"], &["view", "page.txt"], &["."]] {
+    for args in [&[][..], &["outline"], &["history"], &["usage"], &["view", "page.txt"], &["."]] {
         let output = project.command(env!("CARGO_BIN_EXE_milo")).args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
         assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("{NEEDS}\n"), "{args:?}");
     }
-    // Inside Rex there is a way to open the pane from a shell that has no terminal.
-    let output =
-        project.command(env!("CARGO_BIN_EXE_milo")).env("REX_SESSION", "test").arg("outline").output().unwrap();
+    // A detached caller can carry a real Rex session ID without terminal metadata.
+    let output = project
+        .command(env!("CARGO_BIN_EXE_milo"))
+        .env("REX_SESSION", "session:00000000-0000-0000-0000-000000000001")
+        .arg("outline")
+        .output()
+        .unwrap();
     let in_rex = format!("{NEEDS}, and rex run -s \"$REX_SESSION\" -- milo COMMAND opens a pane in a Rex tab\n");
     assert_eq!((output.status.code(), String::from_utf8(output.stderr).unwrap()), (Some(1), in_rex));
     // A mistake in the command is still reported as that mistake.
     let output = project.command(env!("CARGO_BIN_EXE_milo")).args(["outline", "missing"]).output().unwrap();
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "milo: missing is not a directory\n");
+}
+
+#[test]
+fn unsupported_terminals_are_refused_before_entering_screen_modes() {
+    let project = Project::new();
+    for term in ["dumb", "linux"] {
+        let mut tty = Terminal::run(project.standalone().env("TERM", term).arg("outline"));
+        tty.until(&format!("TERM={term}"));
+        assert_eq!(tty.wait_for_exit().code(), Some(1));
+        assert!(!tty.bytes.contains(&0x1b));
+        assert!(tty.restored());
+        let help = project.standalone().env("TERM", term).args(["outline", "--help"]).output().unwrap();
+        assert!(help.status.success() && help.stdout.starts_with(b"Usage: milo outline"));
+    }
+}
+
+#[test]
+fn a_stale_rex_context_does_not_change_an_interactive_standalone_terminal() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "a standalone terminal\n").unwrap();
+    for (term, program, mux) in [
+        ("tmux-256color", Some("rex"), None),
+        ("xterm-256color", Some("rex"), Some("STY")),
+        ("xterm-256color", Some("rex"), Some("TMUX")),
+        ("xterm-256color", None, None),
+    ] {
+        let mut command = project.standalone();
+        command
+            .env("TERM", term)
+            .env("REX_SESSION", "session:00000000-0000-0000-0000-000000000001")
+            .env("REX_BLOCK", "block:00000000-0000-0000-0000-000000000002")
+            .env("REX_SERVER", project.0.join("absent.sock"))
+            .env("NO_COLOR", "1");
+        if let Some(program) = program {
+            command.env("TERM_PROGRAM", program);
+        }
+        if let Some(mux) = mux {
+            command.env(mux, "test-marker");
+        }
+        let mut tty = Terminal::run(command.arg("outline"));
+        tty.shows("page.txt");
+        assert!(tty.output().contains('•'));
+        tty.master.write_all(b"\r").unwrap();
+        tty.shows("a standalone terminal");
+        tty.master.write_all(b"qq").unwrap();
+        tty.until("\x1b[?1049l");
+        assert!(tty.wait_for_exit().success());
+        let output = tty.output();
+        assert!(!output.contains("\x1b_G"));
+        for sgr in output.split("\x1b[") {
+            if let Some((parameters, _)) = sgr.split_once('m')
+                && parameters.bytes().all(|byte| byte.is_ascii_digit() || byte == b';')
+            {
+                assert!(parameters.split(';').all(|p| matches!(p, "0" | "1" | "2" | "3" | "4" | "7" | "9")), "{sgr:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_late_split_terminal_reply_is_never_typed_into_the_reader() {
+    let project = Project::new();
+    let file = project.0.join("project/page.txt");
+    fs::write(&file, "original\n").unwrap();
+    let mut tty = Terminal::run(project.standalone().args(["view", "page.txt", "--edit"]));
+    tty.shows("^S save");
+    tty.master.write_all(b"\x1b_").unwrap();
+    // Leave the reply opener pending through both the sequence and probe waits.
+    std::thread::sleep(Duration::from_millis(350));
+    tty.master.write_all(b"Gi=31;q\x03\x1b").unwrap();
+    std::thread::sleep(Duration::from_millis(40));
+    tty.master.write_all(b"\\safe \x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(file).unwrap(), "safe original\n");
+    tty.master.write_all(b"\x03").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    tty.until("\x1b[?1049l");
+    assert!(tty.wait_for_exit().success());
+}
+
+#[test]
+fn a_floating_review_outside_rex_points_to_the_local_command() {
+    let project = Project::new();
+    let output = project.standalone().args(["review", "missing.patch", "--float"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let reason = String::from_utf8(output.stderr).unwrap();
+    assert!(reason.contains("--float needs a Rex pane") && reason.contains("milo review PATCH"), "{reason}");
 }
 
 #[test]
@@ -1294,7 +1479,7 @@ fn panes_keep_global_preferences_when_a_worktree_override_is_invalid() {
 }
 
 #[test]
-fn unattended_skip_is_shared_by_home_and_settings_without_applying_preferences() {
+fn unattended_skip_bypasses_the_explicit_setup_guide_without_applying_preferences() {
     let project = Project::new();
     let milo = env!("CARGO_BIN_EXE_milo");
     let command = || {
@@ -1304,13 +1489,119 @@ fn unattended_skip_is_shared_by_home_and_settings_without_applying_preferences()
     };
     let skipped = command().args(["setup", "--skip-onboarding"]).output().unwrap();
     assert!(skipped.status.success(), "{}", String::from_utf8_lossy(&skipped.stderr));
-    for (args, expected) in [(&[][..], "Uninstall"), (&["setup"][..], "Workflow")] {
-        let mut tty = Terminal::run(command().args(args));
-        tty.until(expected);
-        tty.master.write_all(b"q").unwrap();
-        assert!(tty.wait_for_exit().success());
-        assert!(tty.restored());
-    }
+    let mut tty = Terminal::run(command().arg("setup"));
+    tty.until("Workflow");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert!(!project.0.join("config/milo/preferences.conf").exists());
+    assert!(!project.0.join("config/rex/init.lua").exists());
+}
+
+#[test]
+fn fresh_home_opens_and_reopens_the_local_outline_without_setup() {
+    let project = Project::new();
+    let root = project.0.join("project");
+    let page = root.join("page.txt");
+    fs::write(&page, "Original text\n").unwrap();
+    let mut tty = Terminal::run(&mut project.standalone());
+    tty.shows("› Outline");
+    tty.shows("Open browser settings");
+    assert!(!tty.output().contains("Skip setup"));
+    assert!(!project.0.join("config").exists() && !project.0.join("state").exists());
+
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("page.txt");
+    fs::write(root.join("watched.txt"), "").unwrap();
+    tty.shows("watched.txt");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("Original text");
+    tty.master.write_all(b"e").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"q? \x1b[200~edited \x1b[201~\x03").unwrap();
+    tty.shows("Unsaved edits: s save");
+    tty.shows("q? edited Original text");
+    assert_eq!(fs::read_to_string(&page).unwrap(), "Original text\n");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("^S save");
+    tty.master.write_all(b"\x13").unwrap();
+    tty.shows("Saved");
+    assert_eq!(fs::read_to_string(&page).unwrap(), "q? edited Original text\n");
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("e edit");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("watched.txt");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("› Outline");
+
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("watched.txt");
+    tty.master.write_all(b"qq").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert!(!project.0.join("state/milo/welcome-complete").exists());
+    assert!(!project.0.join("config/milo/preferences.conf").exists());
+}
+
+#[test]
+fn a_failed_local_open_shows_its_error_and_returns_to_home() {
+    let project = Project::new();
+    let mut tty = Terminal::run(&mut project.command(env!("CARGO_BIN_EXE_milo")));
+    tty.shows("› Outline");
+    fs::remove_dir(project.0.join("project")).unwrap();
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows(". is not a directory");
+    tty.shows("Esc back");
+    assert!(!tty.restored());
+    tty.master.write_all(b"\x1b").unwrap();
+    tty.shows("› Outline");
+    // Consume Home's final row too: a PTY with no emulator to drain it can
+    // otherwise block the rest of the frame before Milo handles quit.
+    tty.shows("q quit");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+}
+
+#[test]
+fn fresh_home_opens_git_history_usage_and_terminal_settings_in_place() {
+    let project = Project::new();
+    let mut tty = Terminal::run(&mut project.standalone());
+    tty.shows("› Outline");
+    tty.master.write_all(b"j\r").unwrap();
+    tty.shows("Not a Git project.");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("› Git history");
+
+    project.git(&["init", "-q", "--template="]);
+    fs::write(project.0.join("project/page.txt"), "Historical contents\n").unwrap();
+    project.git(&["add", "--", "page.txt"]);
+    project.git(&["commit", "-qm", "HomeHistoryCommit"]);
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("HomeHistoryCommit");
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("page.txt");
+    tty.master.write_all(b"j\r").unwrap();
+    tty.shows("Historical contents");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("HomeHistoryCommit");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("› Git history");
+
+    tty.master.write_all(b"j\r").unwrap();
+    tty.shows("No usage to show yet");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("› Usage");
+    tty.master.write_all(b"jj\r").unwrap();
+    tty.shows("Workflow");
+    tty.master.write_all(b"2").unwrap();
+    tty.shows("Pulse");
+    tty.master.write_all(b"q").unwrap();
+    tty.shows("› Terminal settings");
+    tty.master.write_all(b"q").unwrap();
+    assert!(tty.wait_for_exit().success());
+    assert!(tty.restored());
+    assert!(!project.0.join("state/milo/welcome-complete").exists());
     assert!(!project.0.join("config/milo/preferences.conf").exists());
     assert!(!project.0.join("config/rex/init.lua").exists());
 }
@@ -1353,7 +1644,7 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
     assert!(project.command(milo).args(["setup", "--skip-onboarding"]).status().unwrap().success());
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
 
-    for (cols, rows) in [(40, 16), (28, 12)] {
+    for (cols, rows) in [(40, 12), (28, 12)] {
         let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
         tty.until("q quit");
         let (settings, home_quit) = {
@@ -1419,20 +1710,9 @@ fn repeat_clicks_do_not_cross_between_home_and_settings() {
 }
 
 #[test]
-fn repeat_clicks_do_not_cross_the_onboarding_handoff() {
+fn repeat_clicks_do_not_cross_the_explicit_setup_welcome_handoff() {
     let milo = env!("CARGO_BIN_EXE_milo");
-    for (cols, rows, skip_footer, skip_row) in [(40, 16, 27, 10), (28, 12, 17, 8)] {
-        let project = Project::new();
-        let mut tty = Terminal::sized(&mut project.command(milo), cols, rows);
-        tty.until("q skip");
-        tty.click(skip_footer, rows, "");
-        tty.until("Uninstall");
-        // "q skip" gives way to "q quit" at the same position.
-        tty.click(skip_footer, rows, "?");
-        tty.until("Milo home");
-        tty.master.write_all(b"qq").unwrap();
-        assert!(tty.wait_for_exit().success());
-
+    for (cols, rows, skip_row) in [(40, 16, 10), (28, 12, 8)] {
         let project = Project::new();
         let mut tty = Terminal::sized(project.command(milo).arg("setup"), cols, rows);
         tty.until("Continue");
@@ -1751,6 +2031,7 @@ fn the_outline_adds_a_tab_to_its_floating_reader_and_ctrl_c_there_asks_about_a_d
         let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
         command
             .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("TERM_PROGRAM", "rex")
             .env("REX_SESSION", "test")
             .env("REX_BLOCK", block)
             .args(args);
@@ -1814,7 +2095,7 @@ fn a_reader_ended_from_outside_says_which_tabs_drafts_it_kept() {
     }
     let block = "block:11111111-1111-1111-1111-111111111111";
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    command.env("REX_SESSION", "test").env("REX_BLOCK", block);
+    command.env("TERM_PROGRAM", "rex").env("REX_SESSION", "test").env("REX_BLOCK", block);
     let mut tty = Terminal::run(command.args(["view", "a.txt", "--edit"]));
     tty.shows("^S save");
     tty.master.write_all(b"one ").unwrap();

@@ -255,7 +255,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            icons: if cfg!(test) { IconMode::Plain } else { IconMode::Nerd },
+            icons: if !cfg!(test) && crate::rex::inside() { IconMode::Nerd } else { IconMode::Plain },
             static_marks: false,
             text_git_marks: false,
             follow_activity: true,

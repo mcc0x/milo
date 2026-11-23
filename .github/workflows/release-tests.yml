@@ -43,6 +43,10 @@ jobs:
         run: sh tests/install.sh
       - run: cargo +1.91.0 check --locked --all-targets --all-features
       - run: cargo +1.91.0 test --locked
+      - name: Read and edit in a standalone tmux pane
+        run: |
+          command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
+          sh tests/standalone-tmux.sh target/debug/milo
       - name: Verify the source package builds
         run: cargo +1.91.0 package --locked
 

@@ -1,11 +1,11 @@
 //! Refreshes the history away from the pane loop, so that keys are answered
 //! while Git reads the status of a large project.
 
-use std::io::{self, PipeReader};
-use std::os::fd::{AsRawFd, RawFd};
+use std::io;
+use std::os::fd::RawFd;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
 
+use crate::git::run::RefreshTask;
 use crate::git::{Commit, HistoryVersion, Repo};
 
 use super::{History, commits_since};
@@ -20,15 +20,14 @@ struct Refreshed {
 
 /// One refresh on its own thread. Its descriptor becomes readable when the answer is ready.
 pub(super) struct Running {
-    ready: PipeReader,
+    ready: RefreshTask,
     answer: Receiver<Refreshed>,
 }
 
 impl Running {
     fn start(mut repo: Repo, version: Option<HistoryVersion>) -> io::Result<Self> {
-        let (ready, done) = io::pipe()?;
         let (send, answer) = mpsc::sync_channel(1);
-        thread::Builder::new().spawn(move || {
+        let ready = RefreshTask::spawn(move || {
             let commits = if repo.poll(&[]) {
                 repo.read();
                 commits_since(&repo, version.as_ref())
@@ -36,14 +35,12 @@ impl Running {
                 None
             };
             let _ = send.send(Refreshed { repo, commits });
-            // Closing the write end wakes the pane loop after the answer is ready.
-            drop(done);
         })?;
         Ok(Self { ready, answer })
     }
 
     pub(super) fn fd(&self) -> RawFd {
-        self.ready.as_raw_fd()
+        self.ready.fd()
     }
 }
 

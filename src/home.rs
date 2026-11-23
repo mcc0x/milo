@@ -4,11 +4,12 @@ mod mascot;
 
 use std::ops::Range;
 use std::os::fd::RawFd;
+use std::path::Path;
 
 use crate::help::{self, HintHits, Page};
 use crate::keys::Key;
 use crate::menubar::{self, Action as MenuAppAction};
-use crate::pane::{After, External, Pane};
+use crate::pane::{After, External, Pane, Start};
 use crate::screen::{self, Screen, Style};
 use crate::setup::{Setup, doctor, wrap};
 use crate::ui::{self, DEL, FAINT, HEADING};
@@ -17,18 +18,47 @@ use mascot::Sprite;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BRAND_WIDTH: usize = "Milo  ".len() + VERSION.len();
-const MENU: &[&str] = &["Browser settings", "Terminal settings", "Doctor", "Uninstall Milo"];
-const MENU_WIDTH: usize = MENU[1].len() + 2;
-const APP_ROW: usize = 3;
+const LOCAL_ROWS: usize = 3;
+const OPEN_BROWSER: &str = "Open browser settings";
+const MENU: [&str; 7] =
+    ["Outline", "Git history", "Usage", OPEN_BROWSER, "Terminal settings", "Doctor", "Uninstall Milo"];
+const MENU_WIDTH: usize = OPEN_BROWSER.len() + 2;
+const APP_ROW: usize = 6;
 const REMOVE_APP_ROW: usize = APP_ROW + 1;
+const INSTALL_APP: &str = "Install and Open Menu App";
 const OPEN_APP: &str = "Open or Update Menu App";
 const INSTALLED_MENU_WIDTH: usize = OPEN_APP.len() + 2;
-const INSTALL_MENU: &[&str] = &[MENU[0], MENU[1], MENU[2], "Install Menu App", MENU[APP_ROW]];
+const INSTALL_MENU: &[&str] = &[MENU[0], MENU[1], MENU[2], MENU[3], MENU[4], MENU[5], INSTALL_APP, MENU[APP_ROW]];
 const INSTALLED_MENU: &[&str] = &menu_with_installed_app(OPEN_APP);
 const COMPACT_INSTALLED_MENU: &[&str] = &menu_with_installed_app("Open/Update App");
 
-const fn menu_with_installed_app(label: &str) -> [&str; 6] {
-    [MENU[0], MENU[1], MENU[2], label, "Remove Menu App", MENU[APP_ROW]]
+const fn menu_with_installed_app(label: &str) -> [&str; 9] {
+    [MENU[0], MENU[1], MENU[2], MENU[3], MENU[4], MENU[5], label, "Remove Menu App", MENU[APP_ROW]]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Destination {
+    Outline,
+    History,
+    Usage,
+}
+
+impl Destination {
+    pub(crate) fn start(self) -> Start<'static> {
+        match self {
+            Self::Outline | Self::History => Start::Reading(Path::new(".")),
+            Self::Usage => Start::Check,
+        }
+    }
+
+    pub(crate) fn open(self) -> Box<dyn Pane> {
+        let (title, result) = match self {
+            Self::Outline => (MENU[0], crate::open_outline(None)),
+            Self::History => (MENU[1], crate::open_history(None)),
+            Self::Usage => return Box::new(crate::usage::Usage::open()),
+        };
+        result.unwrap_or_else(|error| Box::new(Report::new(title, Err(error))))
+    }
 }
 
 /// Draws the largest prepared sprite that fits, centered within the supplied rectangle.
@@ -43,6 +73,7 @@ pub(crate) fn mascot(s: &mut Screen, x: usize, y: usize, width: usize, height: u
 pub(crate) struct Home {
     view: View,
     selected: usize,
+    standalone: bool,
     menu_app: Option<bool>,
     picker: Picker,
     footer: HintHits<'static>,
@@ -74,13 +105,14 @@ impl Removal {
 
 impl Home {
     pub(crate) fn new() -> Self {
-        Self::with_menu_app(menubar::installed())
+        Self::with_menu_app(!crate::rex::inside(), menubar::installed())
     }
 
-    fn with_menu_app(menu_app: Option<bool>) -> Self {
+    fn with_menu_app(standalone: bool, menu_app: Option<bool>) -> Self {
         Self {
             view: View::Menu,
             selected: 0,
+            standalone,
             menu_app,
             picker: Picker::default(),
             footer: HintHits::default(),
@@ -90,12 +122,13 @@ impl Home {
     }
 
     fn labels(&self, width: usize) -> &'static [&'static str] {
-        match self.menu_app {
-            None => MENU,
+        let labels: &[&str] = match self.menu_app {
+            None => &MENU,
             Some(false) => INSTALL_MENU,
             Some(true) if width < INSTALLED_MENU_WIDTH => COMPACT_INSTALLED_MENU,
             Some(true) => INSTALLED_MENU,
-        }
+        };
+        if self.standalone { labels } else { &labels[LOCAL_ROWS..] }
     }
 
     fn update_menu_app(&mut self, status: Option<bool>) -> bool {
@@ -138,7 +171,7 @@ impl Home {
     fn footer_hit(&self, x: usize, y: usize) -> Option<(Key, Range<usize>)> {
         let (index, _, span) = self.footer.hit(x, y)?;
         let key = match (&self.view, index) {
-            (View::Menu | View::Confirm { .. }, 2) | (View::Report(_), 1) => Key::Esc,
+            (View::Menu | View::Confirm { .. }, 2) => Key::Esc,
             // A pending keyboard move must not activate a different option than the one shown.
             (View::Menu, 0) if self.selected == self.picker.selected => Key::Enter,
             (View::Confirm { selected, .. }, 1) if *selected == self.picker.selected => Key::Enter,
@@ -165,7 +198,11 @@ impl Home {
     fn draw_menu(&mut self, s: &mut Screen, body: usize) {
         const GAP: usize = 5;
         let labels = self.labels(s.w);
-        let menu_width = if self.menu_app == Some(true) { INSTALLED_MENU_WIDTH } else { MENU_WIDTH };
+        let menu_width = match self.menu_app {
+            None => MENU_WIDTH,
+            Some(false) => INSTALL_APP.len() + 2,
+            Some(true) => INSTALLED_MENU_WIDTH,
+        };
         let width = s.w.saturating_sub(menu_width + GAP + 2);
         if let Some(art) = Sprite::fit(width, body.saturating_sub(2)).filter(|_| width >= BRAND_WIDTH) {
             let brand_width = art.width().max(BRAND_WIDTH);
@@ -201,9 +238,10 @@ impl Home {
 
 impl Pane for Home {
     fn draw(&mut self, s: &mut Screen) {
-        if let View::Settings(setup) = &mut self.view {
-            setup.draw(s);
-            return;
+        match &mut self.view {
+            View::Settings(setup) => return setup.draw(s),
+            View::Report(report) => return report.draw_with_status(s, self.diagnostics.checking()),
+            _ => {}
         }
         s.clear();
         self.footer = HintHits::default();
@@ -225,14 +263,13 @@ impl Pane for Home {
                     self.footer = help::draw_hint(s, "Enter open", &["↑↓ move"], "q quit");
                 }
             }
-            View::Report(report) => self.footer = report.draw(s, self.diagnostics.checking()),
             View::Confirm { removal, selected } => {
                 self.picker = draw_confirm(s, body, *removal, *selected);
                 if footer {
                     self.footer = help::draw_hint(s, "↑↓ move", &["Enter choose"], "Esc back");
                 }
             }
-            View::Settings(_) => unreachable!("settings draws its own frame"),
+            View::Report(_) | View::Settings(_) => unreachable!("view draws its own frame"),
         }
     }
 
@@ -265,7 +302,7 @@ impl Pane for Home {
             View::Settings(setup) => return setup.hover_span(x, y),
             View::Menu => self.picker.row_at(x, y, self.labels(self.picker.width)),
             View::Confirm { removal, .. } => self.picker.row_at(x, y, removal.choices()),
-            View::Report(_) => None,
+            View::Report(report) => return report.hover_span(x, y),
         };
         row.map(|(_, span)| span).or_else(|| self.footer_hit(x, y).map(|(_, span)| span))
     }
@@ -274,18 +311,19 @@ impl Pane for Home {
         use help::{heading, key};
         match &self.view {
             View::Settings(setup) => setup.help(),
-            View::Menu => Page::new(vec![
-                heading("Milo home"),
-                key("↑↓ / k j", "move"),
-                key("Enter   ", "open"),
-                key("q / Esc ", "quit"),
-            ]),
-            View::Report(report) => Page::new(vec![
-                heading(report.title),
-                key("↑↓ / k j", "scroll"),
-                key("PgUp/Dn ", "page"),
-                key("q / Esc ", "back to home"),
-            ]),
+            View::Menu => {
+                let mut rows = vec![
+                    heading("Milo home"),
+                    key("↑↓ / k j", "move"),
+                    key("Enter   ", "open"),
+                    key("q / Esc ", "quit"),
+                ];
+                if self.standalone {
+                    rows.push(help::note("q goes back from a pane"));
+                }
+                Page::new(rows)
+            }
+            View::Report(report) => report.help(),
             View::Confirm { removal, .. } => Page::new(vec![
                 heading(removal.choices()[1]),
                 key("↑↓ / k j", "move"),
@@ -300,7 +338,7 @@ impl Pane for Home {
             if self.transition_click.is_repeat(x, y) {
                 return After::Ignored;
             }
-            let key = if matches!(self.view, View::Settings(_)) {
+            let key = if matches!(self.view, View::Settings(_) | View::Report(_)) {
                 key
             } else {
                 let Some(key) = self.click(x, y) else { return After::Ignored };
@@ -317,23 +355,26 @@ impl Pane for Home {
             View::Menu if key == Key::Focus(true) => {
                 if self.update_menu_app(menubar::installed()) { self.show(View::Menu) } else { After::Ignored }
             }
-            View::Menu if choose => match self.selected {
-                0 => After::OpenWeb,
-                1 => {
+            View::Menu if choose => match self.selected + if self.standalone { 0 } else { LOCAL_ROWS } {
+                0 => After::Open(Destination::Outline),
+                1 => After::Open(Destination::History),
+                2 => After::Open(Destination::Usage),
+                3 => After::OpenWeb,
+                4 => {
                     let mut setup = Box::new(Setup::open());
                     setup.swap_diagnostics(&mut self.diagnostics);
                     self.show_guarded(View::Settings(setup), click)
                 }
-                2 => {
+                5 => {
                     let result = self.diagnostics.start(doctor::report).map(|()| String::new());
                     self.show_guarded(View::Report(Report::new(doctor::TITLE, result)), click)
                 }
                 APP_ROW if self.menu_app.is_some() => {
-                    let title = if self.menu_app == Some(true) { OPEN_APP } else { "Install Menu App" };
+                    let title = if self.menu_app == Some(true) { OPEN_APP } else { INSTALL_APP };
                     self.show_guarded(View::Report(Report::new(title, menubar::run(MenuAppAction::Install))), click)
                 }
                 REMOVE_APP_ROW if self.menu_app == Some(true) => self.confirm_removal(Removal::MenuApp, click),
-                index if index == self.labels(self.picker.width).len() - 1 => {
+                _ if self.selected + 1 == self.labels(self.picker.width).len() => {
                     self.confirm_removal(Removal::Milo, click)
                 }
                 _ => unreachable!("selection stays within the menu"),
@@ -349,11 +390,13 @@ impl Pane for Home {
                 }
                 after => after,
             },
-            View::Report(_) if back => {
-                self.diagnostics.discard();
-                self.show_menu(click)
-            }
-            View::Report(report) => report.scroll(key),
+            View::Report(report) => match report.key(key) {
+                After::Leave => {
+                    self.diagnostics.discard();
+                    self.show_menu(click)
+                }
+                after => after,
+            },
             View::Confirm { removal, selected: 1 } if choose => {
                 let title = removal.choices()[1];
                 let result = match removal {
@@ -481,16 +524,22 @@ struct Report {
     top: usize,
     last: usize,
     shown: usize,
+    footer: HintHits<'static>,
 }
 
 impl Report {
     fn new(title: &'static str, result: Result<String, String>) -> Self {
         let failed = result.is_err();
         let (Ok(text) | Err(text)) = result;
-        Self { title, text, failed, top: 0, last: 0, shown: 0 }
+        Self { title, text, failed, top: 0, last: 0, shown: 0, footer: HintHits::default() }
     }
 
-    fn draw(&mut self, s: &mut Screen, checking: bool) -> HintHits<'static> {
+    fn draw_with_status(&mut self, s: &mut Screen, checking: bool) {
+        s.clear();
+        self.footer = HintHits::default();
+        if s.w == 0 || s.h == 0 {
+            return;
+        }
         let x = usize::from(s.w >= 3);
         let width = s.w - 2 * x;
         let footer = s.h > 1;
@@ -514,7 +563,7 @@ impl Report {
         if x != 0 {
             ui::thumb(s, s.w - 1, y, self.shown, len, self.top);
         }
-        if footer { help::draw_hint(s, "↑↓ scroll", &[], "Esc back") } else { HintHits::default() }
+        self.footer = if footer { help::draw_hint(s, "↑↓ scroll", &[], "Esc back") } else { HintHits::default() };
     }
 
     fn scroll(&mut self, key: Key) -> After {
@@ -526,6 +575,39 @@ impl Report {
             }
         }
         After::Ignored
+    }
+}
+
+impl Pane for Report {
+    fn draw(&mut self, s: &mut Screen) {
+        self.draw_with_status(s, false);
+    }
+
+    fn tracks_hover(&self) -> bool {
+        true
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        let (index, _, span) = self.footer.hit(x, y)?;
+        (index == 1).then_some(span)
+    }
+
+    fn help(&self) -> Page {
+        use help::{heading, key};
+        Page::new(vec![
+            heading(self.title),
+            key("↑↓ / k j", "scroll"),
+            key("PgUp/Dn ", "page"),
+            key("q / Esc ", "back to home"),
+        ])
+    }
+
+    fn key(&mut self, key: Key) -> After {
+        match key {
+            Key::Esc | Key::Char('q') => After::Leave,
+            Key::Click(x, y) if self.hover_span(x, y).is_some() => After::Leave,
+            key => self.scroll(key),
+        }
     }
 }
 
@@ -543,7 +625,7 @@ mod tests {
 
     #[test]
     fn home_places_the_picker_beside_art_or_below_it() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(false, None);
         let mut wide = Screen::sized(60, 20);
         home.draw(&mut wide);
         let lines = wide.text();
@@ -561,7 +643,7 @@ mod tests {
 
     #[test]
     fn uninstall_opens_with_cancel_selected_every_time() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(false, None);
         let mut screen = Screen::sized(28, 12);
         home.draw(&mut screen);
         assert_eq!(home.key(Key::End), After::Stay);
@@ -578,17 +660,17 @@ mod tests {
 
     #[test]
     fn home_hover_only_matches_drawn_actions() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(false, None);
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
-        for label in ["Browser settings", "Terminal settings", "Doctor", "Uninstall Milo", "Enter open", "q quit"] {
+        for label in [OPEN_BROWSER, "Terminal settings", "Doctor", "Uninstall Milo", "Enter open", "q quit"] {
             let Key::Click(x, y) = click_on(&screen, label) else { unreachable!() };
             let end = x + label.len();
             assert_eq!(home.hover_span(x, y), Some(x..end));
             assert_eq!(home.hover_span(end - 1, y), Some(x..end));
             assert_eq!(home.hover_span(end, y), None);
         }
-        let Key::Click(x, y) = click_on(&screen, "Browser settings") else { unreachable!() };
+        let Key::Click(x, y) = click_on(&screen, OPEN_BROWSER) else { unreachable!() };
         assert_eq!(home.hover_span(x - 2, y), Some(x - 2..x - 1));
         assert_eq!(home.hover_span(x - 1, y), None);
         for label in ["Milo  v", "↑↓ move"] {
@@ -597,7 +679,7 @@ mod tests {
         }
         assert_eq!(home.selected, 0);
         let mut rail = Screen::sized(28, 12);
-        assert_eq!(home.key(click_on(&screen, "Browser settings")), After::OpenWeb);
+        assert_eq!(home.key(click_on(&screen, OPEN_BROWSER)), After::OpenWeb);
         home.key(Key::Home);
         home.draw(&mut rail);
         assert_eq!(rail.text()[11], " Enter open · q quit");
@@ -606,14 +688,14 @@ mod tests {
 
         let mut narrow = Screen::sized(4, 1);
         home.draw(&mut narrow);
-        assert_eq!(narrow.text(), ["Brow"]);
+        assert_eq!(narrow.text(), ["Open"]);
         assert_eq!(home.hover_span(3, 0), Some(0..4));
         assert_eq!(home.hover_span(4, 0), None);
     }
 
     #[test]
     fn home_and_confirmation_clicks_only_act_on_drawn_controls() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(false, None);
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
         let uninstall = click_on(&screen, "Uninstall");
@@ -650,14 +732,14 @@ mod tests {
 
     #[test]
     fn a_one_row_terminal_keeps_the_selected_action_visible() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(true, None);
         let mut screen = Screen::sized(9, 1);
         home.draw(&mut screen);
-        assert_eq!(screen.text(), ["Browser s"]);
-        assert_eq!(home.key(Key::Enter), After::OpenWeb);
+        assert_eq!(screen.text(), ["Outline"]);
+        assert_eq!(home.key(Key::Enter), After::Open(Destination::Outline));
         assert_eq!(home.key(Key::WheelDown), After::Stay);
         home.draw(&mut screen);
-        assert_eq!(screen.text(), ["Terminal"]);
+        assert_eq!(screen.text(), ["Git histo"]);
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut screen);
         assert_eq!(screen.text(), ["Uninstall"]);
@@ -665,26 +747,31 @@ mod tests {
 
     #[test]
     fn moving_to_the_last_choice_keeps_other_visible_choices_clickable() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(true, None);
         let mut wide = Screen::sized(60, 20);
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut wide);
         let lines = wide.text();
-        for &label in MENU {
+        for &label in &MENU {
             assert!(lines.iter().any(|line| line.contains(label)), "{lines:?}");
         }
-        assert_eq!(home.key(click_on(&wide, "Browser settings")), After::OpenWeb);
+        for (label, destination) in
+            [("Outline", Destination::Outline), ("Git history", Destination::History), ("Usage", Destination::Usage)]
+        {
+            assert_eq!(home.key(click_on(&wide, label)), After::Open(destination));
+        }
+        assert_eq!(home.key(click_on(&wide, OPEN_BROWSER)), After::OpenWeb);
     }
 
     #[test]
     fn menu_app_entry_tracks_availability_without_moving_focus_from_uninstall() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(true, None);
         let mut screen = Screen::sized(60, 20);
         home.draw(&mut screen);
         assert!(!screen.text().iter().any(|line| line.contains("Menu App")));
         assert_eq!(home.key(Key::End), After::Stay);
 
-        let choices: &[(bool, &[&str])] = &[(false, &["Install Menu App"]), (true, &[OPEN_APP, "Remove Menu App"])];
+        let choices: &[(bool, &[&str])] = &[(false, &[INSTALL_APP]), (true, &[OPEN_APP, "Remove Menu App"])];
         for &(status, labels) in choices {
             assert!(home.update_menu_app(Some(status)));
             home.draw(&mut screen);
@@ -711,7 +798,7 @@ mod tests {
 
     #[test]
     fn menu_app_removal_is_separate_cancelable_and_safe_in_one_row() {
-        let mut home = Home::with_menu_app(Some(true));
+        let mut home = Home::with_menu_app(true, Some(true));
         let mut tiny = Screen::sized(9, 1);
         assert_eq!(home.key(Key::End), After::Stay);
         home.draw(&mut tiny);
@@ -761,7 +848,7 @@ mod tests {
 
     #[test]
     fn reports_wrap_scroll_and_back_out() {
-        let mut home = Home::with_menu_app(None);
+        let mut home = Home::with_menu_app(false, None);
         home.show(View::Report(Report::new("Milo doctor", Ok("Milo doctor\nReads your settings.\nLast line.".into()))));
         let mut screen = Screen::sized(16, 4);
         home.draw(&mut screen);

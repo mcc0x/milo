@@ -5,7 +5,7 @@ mod server;
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt;
@@ -67,7 +67,16 @@ pub struct Target {
 
 impl Target {
     pub fn current() -> Option<Self> {
-        Some(Self { session: std::env::var_os("REX_SESSION")?, block: std::env::var_os("REX_BLOCK")? })
+        let session = inherited_id("REX_SESSION")?;
+        let block = inherited_id("REX_BLOCK")?;
+        let known = match term::host() {
+            term::Host::Rex => true,
+            term::Host::Unknown if detached() => {
+                exact_id(&session, "session:").is_some() && exact_block(&block).is_some()
+            }
+            _ => false,
+        };
+        known.then_some(Self { session, block })
     }
 }
 
@@ -288,10 +297,23 @@ fn json_chars(chars: impl Iterator<Item = char>, bytes: usize) -> String {
     out
 }
 
-/// Whether this is running in a Rex pane, where a file can be opened in a
-/// floating window.
+fn inherited_id(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|id| !id.is_empty())
+}
+
+fn detached() -> bool {
+    !io::stdin().is_terminal() && !io::stdout().is_terminal()
+}
+
+/// Interactive panes need Rex's terminal identity as well as inherited IDs.
+/// Detached callers can carry a complete session ID without terminal metadata.
 pub fn inside() -> bool {
-    std::env::var_os("REX_SESSION").is_some()
+    let Some(session) = inherited_id("REX_SESSION") else { return false };
+    match term::host() {
+        term::Host::Rex => inherited_id("REX_BLOCK").is_some() || detached(),
+        term::Host::Unknown if detached() => exact_id(&session, "session:").is_some(),
+        _ => false,
+    }
 }
 
 /// Opens a floating reader in the caller's tab and returns its block ID.
@@ -306,12 +328,10 @@ pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&st
 
 /// Opens a floating review of the patch in `patch` in the caller's tab.
 /// `from` is shown as the name of whoever handed the patch over.
-pub fn open_review(root: &Path, patch: &Path, from: Option<&str>) -> Result<(), &'static str> {
-    const FAILED: &str = "Rex did not open the review.";
-    let target = Target::current()
-        .ok_or("--float needs a Rex pane; elsewhere, run milo review PATCH in a terminal")?;
+pub fn open_review(target: &Target, root: &Path, patch: &Path, from: Option<&str>) -> Result<(), &'static str> {
+    const FAILED: &str = "Rex did not open the review. Run milo review PATCH without --float in a terminal.";
     let exe = std::env::current_exe().map_err(|_| FAILED)?;
-    float(&target, root, "Patch review", &review_command(&exe, patch, from), None).map(drop).ok_or(FAILED)
+    float(target, root, "Patch review", &review_command(&exe, patch, from), None).map(drop).ok_or(FAILED)
 }
 
 /// Runs `command`, a JSON list of words, in a new floating pane over the

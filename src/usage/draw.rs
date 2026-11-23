@@ -222,7 +222,7 @@ impl Metric<'_> {
     /// Columns the figure needs when drawn large on this screen.
     fn large_width(&self, screen: &Screen) -> usize {
         match self.number {
-            Some(number) if screen.pictures() == Some(true) => number.cols(screen.cell_size()),
+            Some(number) if screen.decorative_pictures() => number.cols(screen.cell_size()),
             Some(number) => digits::width(number.text),
             None => 1,
         }
@@ -251,7 +251,7 @@ impl Metric<'_> {
     /// The figure as a picture, as block digits, or as plain text in the middle of their rows.
     fn figure(&self, screen: &mut Screen, area: Area, y: usize, large: bool, slot: usize) {
         match (large, self.number) {
-            (true, Some(number)) if screen.pictures() == Some(true) && number.cols(screen.cell_size()) <= area.w => {
+            (true, Some(number)) if screen.decorative_pictures() && number.cols(screen.cell_size()) <= area.w => {
                 number.draw(screen, area, y, slot);
             }
             (true, Some(number)) if digits::width(number.text) <= area.w => {
@@ -897,7 +897,7 @@ impl<'a> Report<'a> {
     /// Draws the tool's mark `rows` tall in the middle of `area`, and
     /// returns the first row beneath it.
     fn mark(&self, screen: &mut Screen, area: Area, rows: usize, text_row: usize) -> usize {
-        if screen.pictures() == Some(true) {
+        if screen.decorative_pictures() {
             let mark = self.tool.picture();
             let (cols, rows) = mark.fit(screen.cell_size(), area.w, rows);
             let top = (area.h - rows) / 2;

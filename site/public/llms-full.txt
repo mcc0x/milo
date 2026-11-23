@@ -36,7 +36,7 @@ curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1
 
 The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. See [setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md) for source installation and uninstall instructions.
 
-Run `milo` inside Rex to choose your panes and save your workspace preferences.
+From a shell in your project, try `milo outline`. Press `Enter` on a file to read it, `e` to edit, `Ctrl-S` to save, and `q` while reading to go back. No Rex installation, browser, account or setup is needed. In Rex, use `milo setup` if you want the panes arranged beside your shell.
 
 ## Workspace settings
 
@@ -92,29 +92,30 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](https://github.com/mcc0x/milo/blob/main/docs/panes.md#editing-files).
 
-To review an agent’s edits without mixing in your own uncommitted work, have it pass its recorded patch to `milo review PATCH --float`. Milo opens a [read-only review](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) in Rex. It checks that the patch still fits, not who wrote it.
+To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it.
 
-## Commands
+## What works in each terminal
 
-| Command | Opens |
-| --- | --- |
-| `milo` | Milo Home: Browser settings, Terminal settings, Doctor and Uninstall |
-| `milo outline [PATH]` | File tree |
-| `milo history [PATH]` | Recent commits |
-| `milo usage` | Usage limits |
-| `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
-| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader |
-| `milo setup` | Setup screen |
-| `milo web [--port PORT] [--no-open]` | [Local browser settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) |
-| `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
-| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
-| `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
-| `milo menubar indicator quota\|cpu\|memory` | Choose the menu bar reading for this profile without installing or opening the app |
-| `milo doctor` | Read-only preference and integration report |
-| `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
-| `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
+The direct pane commands below already work in v0.1.6. **In this checkout**, bare `milo` also offers the local panes outside Rex; that picker is not in the pinned release above.
 
-`milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
+| Command or feature | Ordinary terminal, no Rex | What Rex adds |
+| --- | --- | --- |
+| `milo` (Home) | Choose Outline, History, Usage or settings. No first-run guide on this path. Quit a pane to return to Home. | The existing settings and maintenance Home, with a first-run guide. |
+| `milo outline [DIR]` or `milo DIR` | Browse and search a plain folder or Git worktree; open a file in place. | Managed sidebar, floating reader tabs, optional shell-following and temporary outline peek. |
+| `milo history [DIR]` | Browse Git commits, expand a commit and read its file at that revision in place. | Managed sidebar and floating reader tabs. |
+| `milo view FILE` / `--edit` / `--commit ID` | Read in the current terminal. Edit a working text file; save explicitly. A commit is read-only. | Same direct command. |
+| `milo review PATCH [--from NAME]` | Read a handed-over patch in place. | `--float` can open the review from a non-interactive caller in a Rex pane. |
+| `milo usage` / `usage --menu-stream` | Show available local figures in a pane, or emit a stream for the menu app. No provider sign-in required. | Optional compact Usage rail. |
+| `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
+| `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |
+| `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Transfer selected settings as a file. Import previews unless you ask to apply. | Saved rail geometry can be used by a Rex layout. |
+| `milo doctor`, `--help`, `--version` | Plain output; no TTY needed. Doctor distinguishes local preferences from optional integrations. | Reports Rex host and integration health. |
+| `milo alerts`, `milo presence` | Inspect the settings without a running session. | Actual event mirroring and activity presence require Rex and explicit opt-in. |
+| `milo listen`, arrange/remember rails, title tabs | Not standalone features. Run a direct pane command instead. | Managed by the Rex integration. |
+| `milo menubar install` / `uninstall` / `indicator` | Optional on macOS with a menu-enabled build; choosing an indicator does not install the app. | Not Rex-dependent. |
+| `milo claude-status` | Status-line helper for an explicitly configured Claude Code profile, not an interactive pane. | Not Rex-dependent. |
+
+`milo setup --skip-onboarding` records a skip without opening a TUI or applying settings. Direct pane commands never run the guide. See [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md) for input and display fallbacks, and [terminal checks and measurements](https://github.com/mcc0x/milo/blob/main/docs/evidence/terminal-portability/README.md) for the environments actually exercised.
 
 ## Documentation
 
@@ -163,6 +164,12 @@ The source installer also honours `MILO_BIN_DIR` and defaults to `~/.local/bin`.
 
 Current installers write a receipt for the binary and its install path. Use a current installer with `--uninstall` and the same `MILO_BIN_DIR` to remove it. If the binary has changed or the receipt is missing or invalid, the installer leaves the binary in place. Older installs may not have a receipt; verify the binary before removing it manually rather than running an older installer’s `--uninstall`.
 
+## Without Rex
+
+From the directory you want to browse, run `milo outline`, `milo history` or `milo usage`. Use `milo view FILE --edit` for a working text file. In this checkout you can also run bare `milo`, choose a pane with the arrow keys and `Enter`, and return to the picker with `q` after closing the reader. Standalone Home does not record a welcome choice or install anything.
+
+Choose **Terminal settings** for local preferences; you do not need to arrange a layout to save them. To use the browser editor without launching anything externally, run `milo web --no-open` and open its private link yourself. See the [command and feature matrix](https://github.com/mcc0x/milo/blob/main/README.md#what-works-in-each-terminal).
+
 ## In Rex
 
 In a Rex shell run `milo setup`. Pick **Just the tree**, **Project sidebar**, or start from the tab you already arranged. Adjust the individual panes and appearance if needed. Trying the layout does not change your saved default; undo the trial before saving if it isn't what you want.
@@ -193,7 +200,7 @@ Use the appearance choices to preview icons, choose text change marks, and turn 
 
 **Text zoom is separate from split size.** On Rex preview.21 (server API 18), Milo can read a terminal's cell dimensions, but creating or resizing a terminal does not set the font the Mac app renders. The app exposes relative font actions and an app-wide [starting font size](https://www.superlogical.com/rex/docs/reference/mac-settings.md#setting-typography-font-size), not an absolute per-pane zoom setting. Milo therefore remembers divider positions, not text zoom, for Outline, History and Usage.
 
-Run `milo` for Home or `milo setup` to go directly to Settings. Both share the same first-run guide. To skip it in an install script, run `milo setup --skip-onboarding`; it records the skip and exits without requiring a terminal or installing integrations. `milo outline` and the other direct pane commands never show the guide. Terminal panes work without Rex; split geometry and shell-following require Rex.
+Inside Rex, run `milo` for Home or `milo setup` to go directly to Settings. Both share the same first-run guide. To skip it in an install script, run `milo setup --skip-onboarding`; it records the skip and exits without requiring a terminal or installing integrations. `milo outline` and the other direct pane commands never show the guide. Terminal panes work without Rex; split geometry and shell-following require Rex.
 
 ## Tab titles and session names
 
@@ -213,7 +220,7 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 ## Browser editor
 
-Run `milo web` from the project you want to configure, or choose **Browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
+Run `milo web` from the project you want to configure, or choose **Open browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
 ![The local editor showing pane order, rail side, width and Usage height for an example worktree](https://github.com/mcc0x/milo/blob/main/docs/img/web-settings.webp)
 
@@ -448,11 +455,13 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/panes.md
 
 # Using the panes
 
-Run the panes in a Unix terminal with 256 colours. Outline and history start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, outline shows just the files and history says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
+Use a UTF-8, xterm-compatible terminal that supports cursor positioning and an alternate screen. Both input and output must be terminals. Hardware VTs and the Linux text console are not supported; a non-`dumb` `TERM` alone does not establish compatibility. With redirected output, `TERM=dumb` or `TERM=linux`, use `milo doctor`, `milo COMMAND --help` or another text command instead. You do not need Rex or a particular shell.
+
+Outline and History start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, Outline shows just the files and History says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
 
 If you initialize Git in that folder, open panes pick up the repository and its saved worktree choices without restarting. Switching branches does not erase remembered folder folds or mark the newly visible timeline as newly arrived.
 
-In Follow mode, Outline and History use the local shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin.
+In a managed Rex pane, Follow mode lets Outline and History use the adjacent shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin. A standalone pane stays in the project where you opened it.
 If Git temporarily cannot identify the shell's project, the pane keeps the last project and retries without another `cd`.
 If shell tracking itself stops, the notice changes to **Shell tracking unavailable**. Reopen the pane to reconnect.
 
@@ -743,10 +752,12 @@ Open a working file from Outline with `Enter` or a double-click. The preview is 
 
 | Working file | macOS | Linux |
 | --- | --- | --- |
-| PNG | Kitty bitmap where available; colored terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
+| PNG | Kitty bitmap where available; terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
 | JPEG, static WebP | Same as PNG, using the system image decoder | No conversion |
 | MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` |
 | `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same |
+
+Milo asks recognized graphics terminals whether they support Kitty images. It sends a bitmap only after a positive reply. For an unrecognized terminal that supports the protocol, try `MILO_GRAPHICS=kitty milo view FILE`; `MILO_GRAPHICS=off` disables the query. Neither setting enables passthrough in a detected tmux or screen session. With a decoded image but fewer than 256 colours, Milo uses monochrome cells instead. A shell name or a `TERM` value alone is not proof that an emulator displayed an image.
 
 **Pictures.** The image keeps its proportions and fits between the filename and the key hints. Input is limited to 64 MiB. The macOS decoder checks the format and dimensions, caps source images at 40 million pixels and 16,384 pixels per side, and has a five-second deadline. The Kitty bitmap is at most 1,600 pixels per side and 16 MiB; the cell raster is at most 512 pixels per side. Text named like a picture can still be read as text. Active documents such as SVG and PDF aren't rasterized.
 
@@ -785,6 +796,12 @@ Source: https://github.com/mcc0x/milo/blob/main/docs/keys.md
 Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-C` quits milo. Text pasted through a terminal that marks pastes is not read as key presses. While you are [editing a file](https://github.com/mcc0x/milo/blob/main/docs/keys.md#editing-in-the-reader), the keys you type are text: help is `Ctrl-G`, and `Ctrl-C` asks before it gives up unsaved changes.
 
 A help page longer than the pane continues in a second column, and a third, once the pane is 57 columns wide or more, so a full-width pane usually shows it whole. In the shell, `milo COMMAND --help` or `milo --help COMMAND` explains one command in a few lines, and `milo --help` lists every command and key.
+
+In standalone Home, use `↑`/`↓` and `Enter` to choose a pane; the mouse is optional. `q` in a reader opened from Outline or History returns to the list, then `q` returns to Home. A pane started directly returns to the shell instead.
+
+Pasting is distinct from typing only when the terminal supports bracketed paste and forwards its markers. Without it, pasted characters can act as shortcuts. Use the keyboard if your terminal or multiplexer intercepts mouse reports.
+
+If your terminal sends an unfinished reply, or an Alt key produces the same prefix as a reply, Milo drops the ambiguous input rather than typing it. Press `Ctrl-X` to end that sequence. Then carry on typing, or press `Ctrl-C` to quit.
 
 ## Moving around
 
@@ -887,6 +904,8 @@ Questions take the place of the last row and wait for one of the keys they list.
 In Usage, `r` checks local data without bypassing the [oh-my-pi read interval](https://github.com/mcc0x/milo/blob/main/docs/usage.md#where-the-figures-come-from), and `q` quits. In setup, use `1`–`4` or `Tab` for Layout, Appearance, Workflow and Health. Up / Down or `k` / `j` selects a row; `Enter` or `Space` activates it. In Layout, `a` tries the current draft and `u` undoes the trial. `s` asks **where** to save; choose the scope and confirm. `Esc` backs out of a confirmation without saving.
 
 ## Colours and marks
+
+Milo uses the palette advertised by the terminal. Set `NO_COLOR=1` to suppress text colours without losing the selection indicator. Standalone panes default to plain file symbols; saved icon choices and `MILO_ICONS=plain`, `nerd` or `off` override the default. Rex keeps its Nerd Font default.
 
 In a Git outline, **bold** means changes to commit and regular coloured names mean changes to push. Plain names have no changes marked.
 
@@ -1243,7 +1262,7 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 | Command | What it does |
 | --- | --- |
-| `milo` | Opens the interactive home menu. |
+| `milo` | Opens Home. In a standalone terminal, this checkout offers Outline, History and Usage without running setup. |
 | `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |

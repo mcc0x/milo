@@ -19,7 +19,7 @@ pub(super) fn picture(s: &mut Screen, rows: usize, picture: &Picture) -> Option<
     } else if let Some(rgb) = picture.raster() {
         fitted_cells(s, rows, rgb);
     } else if s.pictures() == Some(false) {
-        return Some("This picture needs Kitty graphics on this platform.");
+        return Some("Kitty graphics and a cell preview are unavailable here.");
     }
     None
 }
@@ -50,10 +50,10 @@ fn fitted_cells(s: &mut Screen, rows: usize, rgb: (&[u8], usize, usize)) {
     cells(s, origin, (cols, height), rgb);
 }
 
-/// One upper-half block carries two independently colored samples. The screen's ordinary
-/// dirty-cell comparison handles partial redraws, tab switches, overlays and teardown.
+/// Each cell takes two samples, drawn as two palette colours or one shade.
 fn cells(s: &mut Screen, (x, y): (usize, usize), (cols, rows): (usize, usize), rgb: (&[u8], usize, usize)) {
     let (pixels, width, height) = rgb;
+    let color = s.raster_colors();
     for row in 0..rows {
         let sample_row = |half: usize| ((4 * row + half) * height / (4 * rows)).min(height - 1) * width;
         let (upper, lower) = (sample_row(1), sample_row(3));
@@ -61,9 +61,17 @@ fn cells(s: &mut Screen, (x, y): (usize, usize), (cols, rows): (usize, usize), r
             let sx = (2 * col + 1) * width / (2 * cols);
             let sample = |start: usize| {
                 let i: usize = 3 * (start + sx);
-                palette(pixels[i], pixels[i + 1], pixels[i + 2])
+                (pixels[i], pixels[i + 1], pixels[i + 2])
             };
-            s.put(x + col, y + row, 1, "▀", Style::pixels(sample(upper), sample(lower)));
+            let (top, bottom) = (sample(upper), sample(lower));
+            if color {
+                let style = Style::pixels(palette(top.0, top.1, top.2), palette(bottom.0, bottom.1, bottom.2));
+                s.put(x + col, y + row, 1, "▀", style);
+            } else {
+                let value = |(r, g, b)| usize::from(r) * 3 + usize::from(g) * 6 + usize::from(b);
+                let level = (value(top) + value(bottom) + 637) / 1275;
+                s.put(x + col, y + row, 1, [" ", "░", "▒", "▓", "█"][level], Style::PLAIN);
+            }
         }
     }
 }
@@ -125,6 +133,16 @@ pub(super) fn help() -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::term::{Capabilities, Colors};
+
+    #[test]
+    fn a_low_colour_terminal_draws_rgb_samples_as_a_shade() {
+        let mut s = Screen::for_terminal(Capabilities { colors: Colors::Ansi, graphics: false });
+        s.resize(8, 5);
+        cells(&mut s, (1, 1), (1, 1), (&[0, 0, 0, 255, 255, 255], 1, 2));
+        let out = String::from_utf8(s.emitted()).unwrap();
+        assert!(out.contains("\x1b[2;2H\x1b[0m▒"), "{out:?}");
+    }
 
     #[test]
     fn a_red_over_blue_cell_is_positioned_below_the_strip_and_erased_on_close() {

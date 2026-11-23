@@ -106,6 +106,7 @@ impl Home {
         command.args(["web", "--no-open", "--port", "0"]).stdin(Stdio::null()).stdout(Stdio::piped());
         if scenario.rex.is_some() {
             command
+                .env("TERM_PROGRAM", "rex")
                 .env("REX_SESSION", "session:test")
                 .env("REX_BLOCK", "block:shell")
                 .env("REX_CONFIG", self.root.join("init.lua"));

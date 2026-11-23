@@ -41,21 +41,6 @@ impl Terminal<'_> {
         self.wait("text", text, |screen| screen.contains(text))
     }
 
-    /// Rex's screen exports do not serialize Kitty image placements.
-    /// Simulate a non-Kitty terminal's reply to exercise the actual cell renderer in Rex.
-    fn decline_kitty(&self) {
-        self.lab.rex(&[
-            "block",
-            "call",
-            "-s",
-            self.session,
-            "-b",
-            self.block,
-            "write",
-            r#"{"data":"\u001b_Gi=31;ENOTSUPPORTED\u001b\\"}"#,
-        ]);
-    }
-
     /// Rex may report its `login` wrapper rather than Milo as the terminal child.
     fn pid(&self) -> u32 {
         let json = self.lab.rex(&["block", "call", "-s", self.session, "-b", self.block, "process"]);
@@ -126,7 +111,9 @@ fn reaped(lab: &Lab, pid: u32) {
 }
 
 pub(super) fn verify() {
-    let mut lab = Lab::start();
+    // Rex captures text cells, not Kitty layers. Exercise the cell preview
+    // from startup; a late synthetic capability reply is not a terminal.
+    let mut lab = Lab::start_with_graphics(Some("off"));
     lab.start_app();
     let dir = lab.root.join("rich-reader");
     fs::create_dir(&dir).unwrap();
@@ -174,7 +161,6 @@ pub(super) fn verify() {
     assert_eq!(focused(), reader_id);
     reader.shows("480×270");
     let reader_pid = reader.pid();
-    reader.decline_kitty();
     let image = reader.wait("html", "a fitted 480×270 image", |html| picture(html).count() >= 8);
     evidence("after-image-non-kitty", &image);
 
@@ -279,7 +265,6 @@ pub(super) fn verify() {
         let still = Terminal { lab: &lab, session: &session, block: &block };
         still.shows("480×270");
         let pid = still.pid();
-        still.decline_kitty();
         previous =
             still.wait("html", label, |html| picture(html).count() >= 8 && !picture(html).eq(picture(&previous)));
         still.keys(&["esc"]);

@@ -179,7 +179,7 @@ fn wait_forward(output: &mut (impl Read + AsRawFd), wake: &PipeReader, port: u16
 pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String> {
     let host = request.host.to_string_lossy().into_owned();
     let there = rex::server(Some(request.host)).ok_or_else(|| {
-        format!("could not reach a Rex server at {host}. `rex hosts check` shows which hosts answer from here")
+        format!("could not reach a Rex server at {host}. Check `rex hosts check` for remote hosts, or run `milo web --no-open` for settings on this computer")
     })?;
     if rex::server(None).is_some_and(|here| here.host_id == there.host_id) {
         return Err(format!("{host} is this computer's own Rex server; run milo web without --host"));

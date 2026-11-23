@@ -1,5 +1,6 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
+use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
@@ -23,6 +24,7 @@ pub enum After {
     Stay,
     Help,
     Leave,
+    Open(crate::home::Destination),
     OpenWeb,
 }
 
@@ -513,6 +515,9 @@ fn with_loading<T>(
                         draw_loading(screen, dir, w, h);
                         if let Err(e) = screen.flush(|bytes| terminal.write_while_open(bytes, ready.as_raw_fd())) {
                             if e.kind() == io::ErrorKind::Interrupted && !terminal.stopping() {
+                                // The cancelled write may not have erased the previous pane.
+                                // Discard the diff's baseline and erase on the next frame.
+                                screen.resize(w, h);
                                 return;
                             }
                             break;
@@ -574,7 +579,7 @@ enum Exit {
 }
 
 fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Result<(), String> {
-    let mut screen = Screen::new();
+    let mut screen = Screen::for_terminal(terminal.capabilities());
     let exit = pane_loop(start, open, terminal, &mut screen);
     screen.release_pictures(|bytes| terminal.finish(bytes));
     match exit? {
@@ -587,21 +592,32 @@ fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Res
     }
 }
 
-fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: &mut Screen) -> Result<Exit, String> {
-    let check_on_open = matches!(start, Start::Check);
-    let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
-    let mut handoff_click = ConfirmClick::default();
-    let load = |open: &Open<'_>| {
+type LoadedPane = (Box<dyn Pane>, Watcher, Option<Pace>);
+
+fn load_pane(
+    start: Start<'_>,
+    open: &Open<'_>,
+    terminal: &mut Session,
+    screen: &mut Screen,
+) -> (Result<LoadedPane, String>, Option<bool>) {
+    let load = || {
         let started = Instant::now();
         let mut pane = open()?;
-        let (watcher, pace) = watch_opened_pane(pane.as_mut(), check_on_open, started.elapsed());
-        Ok::<_, String>((pane, watcher, pace))
+        let (watcher, pace) = watch_opened_pane(pane.as_mut(), matches!(start, Start::Check), started.elapsed());
+        Ok((pane, watcher, pace))
     };
-    let (opened, mut focused) = match start {
-        Start::Reading(dir) => with_loading(screen, Some(dir), terminal, LOADING_DELAY, || load(open)),
-        Start::Check => with_loading(screen, None, terminal, LOADING_DELAY, || load(open)),
-        _ => (load(open), None),
-    };
+    match start {
+        Start::Reading(dir) => with_loading(screen, Some(dir), terminal, LOADING_DELAY, load),
+        Start::Check => with_loading(screen, None, terminal, LOADING_DELAY, load),
+        _ => (load(), None),
+    }
+}
+
+fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: &mut Screen) -> Result<Exit, String> {
+    let mut check_on_open = matches!(start, Start::Check);
+    let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
+    let mut handoff_click = ConfirmClick::default();
+    let (opened, mut focused) = load_pane(start, open, terminal, screen);
     if term::TERMINATED.load(Ordering::Relaxed) {
         return Ok(Exit::Done);
     }
@@ -609,6 +625,8 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     if let Some(value) = focused {
         pane.key(Key::Focus(value));
     }
+    // Home can open one local pane. Readers and other subviews remain the pane's own.
+    let mut parent = None;
     let mut help = None;
     let mut redraw = true;
     let mut frame_due = None;
@@ -616,7 +634,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     let mut pointer = None;
     let mut highlighted = None;
     let mut first_frame = true;
-    let mut keys = Vec::new();
+    let mut keys = VecDeque::new();
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         let resized = term::RESIZED.swap(false, Ordering::Relaxed);
         if first_frame || resized {
@@ -678,7 +696,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
             Wait::Input => {
                 let mut overlay_changed = false;
                 keys.extend(terminal.receive());
-                for key in keys.drain(..) {
+                while let Some(key) = keys.pop_front() {
                     if let Key::Hover(x, y) = key {
                         if tracking && !overlay_changed && pane_row_available(screen, &help, &pace, y) {
                             pointer = Some((x, y));
@@ -693,7 +711,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                         pointer = None;
                         redraw |= highlighted.is_some();
                     }
-                    // Skip stale help targets and the repeated click that left onboarding.
+                    // Skip stale controls and the repeated click that opened another pane.
                     if let Key::Click(x, y) = key
                         && (overlay_changed || !pane_row_available(screen, &help, &pace, y) || handoff_click.is_repeat(x, y))
                     {
@@ -710,9 +728,34 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                         }
                         _ => route_key(pane.as_mut(), screen, &mut help, key),
                     };
+                    let mut changed_pane = false;
                     match after {
                         After::Ignored => {}
                         After::Stay => redraw = true,
+                        // Cancel a handoff before the loader or browser can start.
+                        After::Open(_) | After::OpenWeb
+                            if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) =>
+                        {
+                            break 'run;
+                        }
+                        After::Open(destination) => {
+                            let start = destination.start();
+                            let child_checks = matches!(start, Start::Check);
+                            let (opened, focus) = load_pane(start, &|| Ok(destination.open()), terminal, screen);
+                            if term::TERMINATED.load(Ordering::Relaxed) {
+                                break 'run;
+                            }
+                            let (child, child_watcher, child_pace) = opened?;
+                            debug_assert!(parent.is_none());
+                            parent = Some((std::mem::replace(&mut pane, child), check_on_open));
+                            (watcher, pace) = (child_watcher, child_pace);
+                            check_on_open = child_checks;
+                            // The loader read this after every key already in the queue.
+                            if let Some(value) = focus {
+                                keys.push_back(Key::Focus(value));
+                            }
+                            changed_pane = true;
+                        }
                         After::OpenWeb => return Ok(Exit::OpenWeb),
                         After::Help => {
                             if Page::fits(screen) {
@@ -721,23 +764,31 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                             }
                         }
                         After::Leave => {
-                            if !matches!(key, Key::Ctrl(b'c') | Key::Eof)
-                                && let Some(open) = next.take()
-                            {
-                                (pane, watcher, pace) = load(&open)?;
-                                if let Some(value) = focused {
-                                    pane.key(Key::Focus(value));
-                                }
-                                overlay_changed = true;
-                                // The same physical click target may perform another action after onboarding.
-                                if let Key::Click(x, y) = key {
-                                    handoff_click.opened(x, y);
-                                }
-                                redraw = true;
+                            if matches!(key, Key::Ctrl(b'c') | Key::Eof) {
+                                break 'run;
+                            } else if let Some((previous, previous_check)) = parent.take() {
+                                pane = previous;
+                                check_on_open = previous_check;
+                                (watcher, pace) = watch_pane(pane.as_mut(), check_on_open);
+                            } else if let Some(open) = next.take() {
+                                (pane, watcher, pace) = load_pane(Start::Loaded, &open, terminal, screen).0?;
                             } else {
                                 break 'run;
                             }
+                            changed_pane = true;
                         }
+                    }
+                    if changed_pane {
+                        if let Some(value) = focused {
+                            pane.key(Key::Focus(value));
+                        }
+                        handoff_click.clear();
+                        if let Key::Click(x, y) = key {
+                            handoff_click.opened(x, y);
+                        }
+                        help = None;
+                        overlay_changed = true;
+                        redraw = true;
                     }
                     overlay_changed |= had_help != help.is_some();
                 }
@@ -842,6 +893,25 @@ mod tests {
             assert!(output.contains("Reading…"), "{output:?}");
         });
         assert_eq!(focused, Some(true));
+    }
+
+    #[test]
+    fn a_queued_cancel_does_not_launch_browser_settings() {
+        let open = || Ok(Box::new(crate::home::Home::new()) as Box<dyn Pane>);
+        for cancel in [false, true] {
+            let (mut terminal, mut master, _signals) = Session::test_pty();
+            let keys: &[u8] = if crate::rex::inside() { b"\r\x03" } else { b"jjj\r\x03" };
+            let keys = &keys[..keys.len() - usize::from(!cancel)];
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let frame = read_until(&mut master, "q quit");
+                    assert!(frame.contains("q quit"));
+                    master.write_all(keys).unwrap();
+                });
+                let exit = pane_loop(Start::Loaded, &open, &mut terminal, &mut Screen::new());
+                assert!(if cancel { matches!(exit, Ok(Exit::Done)) } else { matches!(exit, Ok(Exit::OpenWeb)) });
+            });
+        }
     }
 
     #[test]

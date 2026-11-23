@@ -173,6 +173,7 @@ struct Lab {
     milo: PathBuf,
     server: Option<Child>,
     app: Option<Child>,
+    graphics: Option<&'static str>,
     /// What each session and tab should be called: the name given when it was
     /// made or renamed here, or Rex's own name for a tab nobody named.
     names: RefCell<BTreeMap<String, String>>,
@@ -182,6 +183,10 @@ struct Lab {
 
 impl Lab {
     fn start() -> Self {
+        Self::start_with_graphics(None)
+    }
+
+    fn start_with_graphics(graphics: Option<&'static str>) -> Self {
         let rex = installed_rex();
         let milo =
             std::env::var_os("MILO_TEST_BINARY").map_or_else(|| env!("CARGO_BIN_EXE_milo").into(), PathBuf::from);
@@ -212,7 +217,7 @@ impl Lab {
         );
         fs::write(root.join("home/.zshrc"), startup).unwrap();
         let (names, alone) = Default::default();
-        let mut lab = Self { root, rex, milo, server: None, app: None, names, alone };
+        let mut lab = Self { root, rex, milo, server: None, app: None, graphics, names, alone };
         for path in [&lab.rex, &lab.milo, &lab.root] {
             assert!(!path.to_string_lossy().contains('\''), "cannot quote {} for sh", path.display());
         }
@@ -270,8 +275,11 @@ impl Lab {
 
     fn start_server(&mut self) {
         let config = self.root.join("home/.config/rex/init.lua");
-        let server = self
-            .command(&self.rex)
+        let mut command = self.command(&self.rex);
+        if let Some(graphics) = self.graphics {
+            command.env("MILO_GRAPHICS", graphics);
+        }
+        let server = command
             .args(["server", "run", "--listen", &self.socket(), "--state-dir"])
             .arg(self.root.join("state"))
             .arg("--config")
