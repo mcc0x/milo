@@ -575,7 +575,7 @@ enum Exit {
 }
 
 fn run_entered(start: Start<'_>, open: &Open<'_>, terminal: &mut Session) -> Result<(), String> {
-    let mut screen = Screen::new();
+    let mut screen = Screen::for_terminal(terminal.capabilities());
     let exit = pane_loop(start, open, terminal, &mut screen);
     screen.release_pictures(|bytes| terminal.finish(bytes));
     match exit? {

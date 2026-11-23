@@ -176,6 +176,11 @@ impl Input {
         }
     }
 
+    pub fn end_answers(&mut self) {
+        self.answered = true;
+        self.drop_alt_prefix();
+    }
+
     pub fn receive(&mut self, keyboard: &mut File, keys: &mut Vec<Key>) {
         let mut buf = [0u8; READ_SIZE];
         let mut read_input = false;
@@ -256,11 +261,19 @@ impl Input {
                 }
                 self.pending.clear();
             }
-            // After its last answer the terminal sends no control string, so one
-            // that the wait did not finish is an Alt-modified key such as Alt-].
-            // Nothing would end it, and it would take every later key with it.
-            Some(sequence) if self.answered && sequence != Sequence::Csi => self.pending.clear(),
-            Some(_) => {}
+            Some(_) => self.drop_alt_prefix(),
+        }
+    }
+
+    fn drop_alt_prefix(&mut self) {
+        // A bare Alt-] (or similar) sends the same opener as a control
+        // string. Once probing ends, drop the bare key, but keep a partial
+        // payload so a split or malformed reply cannot type commands.
+        if self.answered
+            && self.pending.len() == 2
+            && Sequence::of(&self.pending[1..]).is_some_and(|s| s != Sequence::Csi)
+        {
+            self.pending.clear();
         }
     }
 }
@@ -682,6 +695,17 @@ mod tests {
         input.finish(&mut keys);
         input.feed(b"11;rgb:0/0/f\x1b\\\x1b[?62;22ck", &mut keys);
         assert_eq!(keys, [Key::Background([0, 0, 255]), Key::Answered, Key::Char('k')]);
+    }
+
+    #[test]
+    fn ending_probe_wait_does_not_release_a_partial_reply_as_keys() {
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.feed(b"\x1b_Gi=31;", &mut keys);
+        input.end_answers();
+        input.finish(&mut keys);
+        input.feed(b"q\x03\x1b\\k", &mut keys);
+        assert_eq!(keys, [Key::Pictures(false), Key::Char('k')]);
     }
 
     #[test]

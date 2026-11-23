@@ -1,6 +1,6 @@
 //! Sets terminal modes and waits for keyboard input, signals or file notifications.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, OsStr};
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, IsTerminal, PipeReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
@@ -24,11 +24,12 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 // Use the alternate screen, hide the cursor, ask for mouse and focus reports,
 // and ask the terminal to mark pasted text so it cannot act as key presses.
-// Turn off wrapping so a row never spills onto the next. Then ask for the
-// background colour, picture support, cell size, and terminal type. The
-// terminal type reply tells us the terminal has finished answering.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\
-    \x1b]11;?\x1b\\\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
+// Turn off wrapping so a row never spills onto the next.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h";
+const ASK_BACKGROUND: &[u8] = b"\x1b]11;?\x1b\\";
+const ASK_GRAPHICS: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+// Ask for cell size, then a device report to mark the end of the answers.
+const ASK_END: &[u8] = b"\x1b[16t\x1b[c";
 // Return to ground state before the next frame after a cancelled loading write.
 const CANCEL_FRAME: &[u8] = b"\x18\x1b[?2026l";
 // End a partial control string or synchronized update before changing modes.
@@ -36,6 +37,105 @@ const LEAVE: &[u8] =
     b"\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?1003l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// How long after asking a terminal may take to answer and still be waited for on the way out.
 const ANSWER_WAIT: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Host {
+    Rex,
+    Graphics,
+    Multiplexer,
+    Other,
+    Unknown,
+}
+
+pub(crate) fn host() -> Host {
+    host_with_term(&std::env::var_os("TERM").unwrap_or_default())
+}
+
+fn host_with_term(term: &OsStr) -> Host {
+    let program = std::env::var_os("TERM_PROGRAM").unwrap_or_default();
+    let host = identify(term, &program);
+    // These variables can outlive the mux. Use them only if the foreground
+    // terminal did not identify itself, not to override a branded Rex pane.
+    if host == Host::Unknown
+        && ["TMUX", "STY"].into_iter().any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+    {
+        Host::Multiplexer
+    } else {
+        host
+    }
+}
+
+fn identify(term: &OsStr, program: &OsStr) -> Host {
+    let name = term.as_bytes();
+    if name == b"tmux"
+        || name.starts_with(b"tmux-")
+        || name == b"screen"
+        || name.starts_with(b"screen-")
+        || matches!(program.as_bytes(), b"tmux" | b"screen")
+    {
+        return Host::Multiplexer;
+    }
+    if matches!(name, b"xterm-kitty" | b"xterm-ghostty" | b"ghostty" | b"wezterm" | b"konsole" | b"konsole-256color") {
+        return Host::Graphics;
+    }
+    match program.as_bytes() {
+        b"rex" => Host::Rex,
+        b"kitty" | b"ghostty" | b"WezTerm" | b"iTerm.app" | b"konsole" | b"WarpTerminal" => Host::Graphics,
+        b"" if name == b"xterm-rex" => Host::Rex,
+        b"" => Host::Unknown,
+        _ => Host::Other,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Colors {
+    None,
+    Ansi,
+    Indexed,
+    Rgb,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Capabilities {
+    pub colors: Colors,
+    pub graphics: bool,
+}
+
+impl Capabilities {
+    fn environment(term: &OsStr) -> Self {
+        let env = |name| std::env::var_os(name).unwrap_or_default();
+        let host = host_with_term(term);
+        Self::for_host(term, &env("COLORTERM"), &env("NO_COLOR"), &env("MILO_GRAPHICS"), host)
+    }
+
+    fn for_host(term: &OsStr, colorterm: &OsStr, no_color: &OsStr, graphics: &OsStr, host: Host) -> Self {
+        let term = term.as_bytes();
+        let legacy_vt = matches!(term, [b'v', b't', b'0'..=b'9', ..]);
+        let colors = if !no_color.is_empty() || legacy_vt {
+            Colors::None
+        } else if matches!(host, Host::Rex | Host::Graphics)
+            || term.ends_with(b"-direct")
+            || matches!(colorterm.as_bytes(), b"truecolor" | b"24bit")
+        {
+            Colors::Rgb
+        } else if term.ends_with(b"-256color") {
+            Colors::Indexed
+        } else {
+            Colors::Ansi
+        };
+        let graphics = host != Host::Multiplexer
+            && graphics != "off"
+            && (graphics == "kitty" || matches!(host, Host::Rex | Host::Graphics));
+        Self { colors, graphics }
+    }
+
+    fn asks_background(self) -> bool {
+        self.colors == Colors::Rgb || self.graphics && self.colors != Colors::None
+    }
+
+    #[cfg(test)]
+    const TEST: Self = Self { colors: Colors::Rgb, graphics: true };
+}
 
 /// Wakes a waiting loop with a byte. A full non-blocking pipe already holds a wakeup.
 pub fn wake(fd: RawFd) {
@@ -92,7 +192,8 @@ pub struct Session {
     pending_interrupt: bool,
     cancelled_output: bool,
     saved: Option<libc::termios>,
-    /// When to stop waiting, on the way out, for answers to what `ENTER` asked.
+    capabilities: Capabilities,
+    /// When to stop taking answers to the initial terminal queries.
     answers_due: Option<Instant>,
 }
 
@@ -118,12 +219,18 @@ impl Session {
         if !io::stdin().is_terminal() {
             return Err(io::Error::other("standard input is not a terminal"));
         }
+        let term = std::env::var_os("TERM").unwrap_or_default();
+        if term == "dumb" {
+            return Err(io::Error::other(
+                "TERM=dumb does not support panes; use an ANSI terminal, or try milo doctor or milo COMMAND --help",
+            ));
+        }
         let output = terminal_output(stdout.as_raw_fd())?;
         let keyboard = File::from(io::stdin().as_fd().try_clone_to_owned()?);
-        Self::enter(keyboard, output, listen()?)
+        Self::enter(keyboard, output, listen()?, Capabilities::environment(&term))
     }
 
-    fn enter(keyboard: File, output: File, signal: PipeReader) -> io::Result<Self> {
+    fn enter(keyboard: File, output: File, signal: PipeReader, capabilities: Capabilities) -> io::Result<Self> {
         let fd = keyboard.as_raw_fd();
         // SAFETY: A zeroed termios holds valid zero values in its integer fields.
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
@@ -152,13 +259,26 @@ impl Session {
             pending_interrupt: false,
             cancelled_output: false,
             saved: Some(saved),
+            capabilities,
             answers_due: None,
         };
         // There is no reliable distinction between a pasted control byte and a
         // key until the terminal receives the bracketed-paste mode request.
         session.write_until(ENTER, None, false)?;
         session.answers_due = Some(Instant::now() + ANSWER_WAIT);
+        if capabilities.asks_background() {
+            session.write_until(ASK_BACKGROUND, None, false)?;
+        }
+        if capabilities.graphics {
+            session.write_until(ASK_GRAPHICS, None, false)?;
+        }
+        session.write_until(ASK_END, None, false)?;
+        session.answers_due = Some(Instant::now() + ANSWER_WAIT);
         Ok(session)
+    }
+
+    pub(crate) fn capabilities(&self) -> Capabilities {
+        self.capabilities
     }
 
     /// Waits on the keyboard and on what the pane waits for: in `extra`, its
@@ -167,17 +287,84 @@ impl Session {
         if std::mem::take(&mut self.pending_interrupt) {
             return Wait::Interrupted;
         }
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, extra, false, !self.keys.is_empty())
+        let wait = wait_for(
+            self.keyboard.as_raw_fd(),
+            &self.signal,
+            self.replies_wait(timeout_ms),
+            extra,
+            false,
+            !self.keys.is_empty(),
+        );
+        self.after_wait(wait)
     }
 
-    pub fn wait_for_open(&self, timeout_ms: i32, done: RawFd) -> Wait {
+    pub fn wait_for_open(&mut self, timeout_ms: i32, done: RawFd) -> Wait {
         let extra = [Some(done), None, None];
-        wait_for(self.keyboard.as_raw_fd(), &self.signal, timeout_ms, extra, true, !self.keys.is_empty())
+        let wait = wait_for(
+            self.keyboard.as_raw_fd(),
+            &self.signal,
+            self.replies_wait(timeout_ms),
+            extra,
+            true,
+            !self.keys.is_empty(),
+        );
+        self.after_wait(wait)
+    }
+
+    fn replies_wait(&self, timeout_ms: i32) -> i32 {
+        let Some(due) = self.answers_due else { return timeout_ms };
+        let wait = milliseconds(due.saturating_duration_since(Instant::now()));
+        if timeout_ms < 0 { wait } else { wait.min(timeout_ms) }
+    }
+
+    fn after_wait(&mut self, wait: Wait) -> Wait {
+        let expired = self.expire_replies();
+        if matches!(wait, Wait::Timeout) && expired {
+            Wait::Input
+        } else {
+            wait
+        }
+    }
+
+    fn expire_replies(&mut self) -> bool {
+        if self.answers_due.is_some_and(|due| Instant::now() >= due) {
+            self.answers_due = None;
+            self.input.end_answers();
+            self.keys.push(Key::Answered);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn read_keys(&mut self) {
+        self.expire_replies();
+        let at = self.keys.len();
+        self.input.receive(&mut self.keyboard, &mut self.keys);
+        // Only the terminal we probed may enable uploads. Ignore unsolicited
+        // and late replies, but consume their escape strings in the decoder.
+        let mut kept = at;
+        for read in at..self.keys.len() {
+            let key = self.keys[read];
+            let waiting = self.answers_due.is_some();
+            let keep = match key {
+                Key::Background(_) => waiting && self.capabilities.asks_background(),
+                Key::Pictures(_) => waiting && self.capabilities.graphics,
+                Key::CellSize(..) => waiting,
+                Key::Answered => self.answers_due.take().is_some(),
+                _ => true,
+            };
+            if keep {
+                self.keys[kept] = key;
+                kept += 1;
+            }
+        }
+        self.keys.truncate(kept);
     }
 
     pub fn receive(&mut self) -> std::vec::Drain<'_, Key> {
         if self.keys.is_empty() {
-            self.input.receive(&mut self.keyboard, &mut self.keys);
+            self.read_keys();
         }
         self.keys.drain(..)
     }
@@ -252,7 +439,7 @@ impl Session {
                         // Use the same decoder as the pane, including an in-progress
                         // paste or terminal report. Keep other keys for the next wait.
                         let at = self.keys.len();
-                        self.input.receive(&mut self.keyboard, &mut self.keys);
+                        self.read_keys();
                         self.cancelled_input =
                             self.keys[at..].iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof));
                     }
@@ -287,7 +474,7 @@ impl Session {
         let (keyboard, master) = test_pair();
         let output = keyboard.try_clone().unwrap();
         let (signals, writer) = io::pipe().unwrap();
-        (Self::enter(keyboard, output, signals).unwrap(), master, writer)
+        (Self::enter(keyboard, output, signals, Capabilities::TEST).unwrap(), master, writer)
     }
 
     pub fn restore(&mut self) {
@@ -351,8 +538,10 @@ fn terminal_output(fd: RawFd) -> io::Result<File> {
 /// waiting on a stalled terminal. The setup screen carries the actual error.
 pub(crate) fn setup_status(failed: bool) {
     let stdout = io::stdout();
-    if crate::rex::inside()
+    if host() == Host::Rex
+        && crate::rex::inside()
         && stdout.is_terminal()
+        && !std::env::var_os("TERM").is_some_and(|term| term == "dumb")
         && let Ok(mut out) = terminal_output(stdout.as_raw_fd())
     {
         let record: &[u8] = if failed {
@@ -478,6 +667,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_terminal_identity_beats_stale_rex_branding() {
+        let host = |term, program| identify(OsStr::new(term), OsStr::new(program));
+        assert!(host("tmux-256color", "rex") == Host::Multiplexer);
+        assert!(host("screen", "rex") == Host::Multiplexer);
+        assert!(host("xterm-kitty", "rex") == Host::Graphics);
+        assert!(host("xterm-256color", "Apple_Terminal") == Host::Other);
+        assert!(host("xterm-rex", "") == Host::Rex);
+        assert!(host("xterm-256color", "rex") == Host::Rex);
+    }
+
+    #[test]
+    fn profiles_do_not_assume_truecolor_or_kitty_from_a_generic_term() {
+        let caps = |term, program, colorterm, no_color, graphics| {
+            let term = OsStr::new(term);
+            Capabilities::for_host(
+                term,
+                OsStr::new(colorterm),
+                OsStr::new(no_color),
+                OsStr::new(graphics),
+                identify(term, OsStr::new(program)),
+            )
+        };
+        let generic = caps("xterm-256color", "", "", "", "");
+        assert_eq!(generic.colors, Colors::Indexed);
+        assert!(!generic.asks_background());
+        assert!(!generic.graphics);
+        assert_eq!(caps("xterm", "", "", "", "").colors, Colors::Ansi);
+        assert_eq!(caps("vt100", "", "truecolor", "", "").colors, Colors::None);
+        assert_eq!(caps("vte-256color", "", "", "", "").colors, Colors::Indexed);
+        assert_eq!(caps("xterm-256color", "rex", "truecolor", "0", "").colors, Colors::None);
+        assert!(caps("xterm-ghostty", "", "", "", "").graphics);
+        assert!(!caps("xterm-rex", "rex", "", "", "off").graphics);
+        assert!(caps("xterm-256color", "", "", "", "kitty").graphics);
+        assert!(!caps("tmux-256color", "rex", "", "", "kitty").graphics);
+    }
+
+    #[test]
+    fn a_terminal_that_was_not_asked_cannot_enable_picture_uploads() {
+        let (keyboard, mut master) = test_pair();
+        let output = keyboard.try_clone().unwrap();
+        let (signal, _wake) = io::pipe().unwrap();
+        let capabilities = Capabilities { colors: Colors::Indexed, graphics: false };
+        let mut terminal = Session::enter(keyboard, output, signal, capabilities).unwrap();
+        let mut startup = [0; ENTER.len() + ASK_END.len()];
+        master.read_exact(&mut startup).unwrap();
+        assert_eq!(&startup[ENTER.len()..], ASK_END);
+        terminal.answers_due = Some(Instant::now() + Duration::from_secs(10));
+        master.write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[?1;2cq").unwrap();
+        assert!(matches!(terminal.wait(1000, [None; 3]), Wait::Input));
+        assert_eq!(terminal.receive().collect::<Vec<_>>(), [Key::CellSize(10, 20), Key::Answered, Key::Char('q')]);
+    }
+
+    #[test]
+    fn silence_ends_negotiation_and_late_replies_are_not_keys() {
+        let (mut terminal, mut master, _wake) = Session::test_pty();
+        terminal.answers_due = Some(Instant::now());
+        assert!(matches!(terminal.wait(0, [None; 3]), Wait::Input));
+        assert_eq!(terminal.receive().collect::<Vec<_>>(), [Key::Answered]);
+        master.write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[?1;2cq").unwrap();
+        assert!(matches!(terminal.wait(1000, [None; 3]), Wait::Input));
+        assert_eq!(terminal.receive().collect::<Vec<_>>(), [Key::Char('q')]);
+    }
+
+    #[test]
     fn keyboard_readiness_takes_priority_over_an_extra_wakeup() {
         let (keyboard, input) = io::pipe().unwrap();
         let (extra, writer) = io::pipe().unwrap();
@@ -572,6 +825,7 @@ mod tests {
             pending_interrupt: false,
             cancelled_output: false,
             saved: None,
+            capabilities: Capabilities::TEST,
             answers_due: None,
         };
         wake(wakeup.as_raw_fd());
@@ -619,6 +873,7 @@ mod tests {
             pending_interrupt: false,
             cancelled_output: false,
             saved: None,
+            capabilities: Capabilities::TEST,
             answers_due: None,
         };
         let frame = vec![b'x'; 1 << 20];
@@ -647,16 +902,20 @@ mod tests {
         let (keyboard, mut master) = test_pair();
         let before = modes(&keyboard);
         let result = std::panic::catch_unwind(|| {
-            let terminal =
-                Session::enter(keyboard.try_clone().unwrap(), keyboard.try_clone().unwrap(), io::pipe().unwrap().0)
-                    .unwrap();
+            let terminal = Session::enter(
+                keyboard.try_clone().unwrap(),
+                keyboard.try_clone().unwrap(),
+                io::pipe().unwrap().0,
+                Capabilities::TEST,
+            )
+            .unwrap();
             assert_ne!(modes(&terminal.keyboard), before);
             std::panic::resume_unwind(Box::new("panic while drawing"));
         });
         assert!(result.is_err());
         assert_eq!(modes(&keyboard), before);
         // The PTY may deliver the enter and leave sequences in separate reads.
-        let mut output = [0; ENTER.len() + LEAVE.len()];
+        let mut output = [0; ENTER.len() + ASK_BACKGROUND.len() + ASK_GRAPHICS.len() + ASK_END.len() + LEAVE.len()];
         let mut at = 0;
         while at < output.len() {
             let mut ready = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
@@ -673,7 +932,7 @@ mod tests {
         let (keyboard, _master) = test_pair();
         let before = modes(&keyboard);
         let read_only = File::open("/dev/null").unwrap();
-        let failed = Session::enter(keyboard.try_clone().unwrap(), read_only, io::pipe().unwrap().0);
+        let failed = Session::enter(keyboard.try_clone().unwrap(), read_only, io::pipe().unwrap().0, Capabilities::TEST);
         assert!(failed.is_err());
         assert_eq!(modes(&keyboard), before);
     }
@@ -681,9 +940,13 @@ mod tests {
     #[test]
     fn answers_that_arrive_as_a_pane_closes_are_not_left_for_the_shell() {
         let (keyboard, mut master) = test_pair();
-        let mut terminal =
-            Session::enter(keyboard.try_clone().unwrap(), keyboard.try_clone().unwrap(), io::pipe().unwrap().0)
-                .unwrap();
+        let mut terminal = Session::enter(
+            keyboard.try_clone().unwrap(),
+            keyboard.try_clone().unwrap(),
+            io::pipe().unwrap().0,
+            Capabilities::TEST,
+        )
+        .unwrap();
         // However busy the machine is, the answers come before the wait that `enter` set for them ends.
         terminal.answers_due = terminal.answers_due.map(|due| due + Duration::from_secs(60));
         let answering = std::thread::spawn(move || {

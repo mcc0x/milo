@@ -5,7 +5,7 @@ mod server;
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt;
@@ -67,7 +67,9 @@ pub struct Target {
 
 impl Target {
     pub fn current() -> Option<Self> {
-        Some(Self { session: std::env::var_os("REX_SESSION")?, block: std::env::var_os("REX_BLOCK")? })
+        let session = inherited_id("REX_SESSION")?;
+        let block = inherited_id("REX_BLOCK")?;
+        inherited_context().then_some(Self { session, block })
     }
 }
 
@@ -288,10 +290,20 @@ fn json_chars(chars: impl Iterator<Item = char>, bytes: usize) -> String {
     out
 }
 
-/// Whether this is running in a Rex pane, where a file can be opened in a
-/// floating window.
+fn inherited_id(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|id| !id.is_empty())
+}
+
+fn inherited_context() -> bool {
+    matches!(term::host(), term::Host::Rex | term::Host::Unknown)
+}
+
+/// Inherited context may identify a Rex pane. Ignore it under a different
+/// terminal or multiplexer. Detached processes can still name their session.
 pub fn inside() -> bool {
-    std::env::var_os("REX_SESSION").is_some()
+    inherited_id("REX_SESSION").is_some()
+        && inherited_context()
+        && (!io::stdin().is_terminal() && !io::stdout().is_terminal() || inherited_id("REX_BLOCK").is_some())
 }
 
 /// Opens a floating reader in the caller's tab and returns its block ID.

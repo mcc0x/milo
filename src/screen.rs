@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::picture::Picture;
+use crate::term::{Capabilities, Colors};
 use crate::width::{CellWidth, cell_width, char_width, str_width};
 
 // ANSI palette indices, so colours follow the terminal theme.
@@ -85,7 +86,8 @@ impl Style {
         ((self.0 & WASH) >> WASH_SHIFT) as usize
     }
 
-    fn sgr(self, out: &mut Vec<u8>, washes: &[u32; 3]) {
+    fn sgr(self, out: &mut Vec<u8>, washes: &[u32; 3], colors: Colors) {
+        let wash = self.wash_id();
         out.extend_from_slice(b"\x1b[0");
         if self.0 & BOLD != 0 {
             out.extend_from_slice(b";1");
@@ -99,32 +101,36 @@ impl Style {
         if self.0 & FAINT != 0 {
             out.extend_from_slice(b";2");
         }
-        if self.0 & REVERSE != 0 {
+        if self.0 & REVERSE != 0 || (wash == Wash::Bar as usize && colors < Colors::Indexed) {
             out.extend_from_slice(b";7");
         }
         if self.0 & STRIKE != 0 {
             out.extend_from_slice(b";9");
         }
-        match (self.0 & FG).checked_sub(1) {
-            None => {}
-            Some(c @ 0..8) => push_number(out, b";", 30 + c as usize),
-            Some(c @ 8..16) => push_number(out, b";", 82 + c as usize),
-            Some(c) => push_number(out, b";38;5;", c as usize),
-        }
-        if let Some(c) = (self.0 >> 17).checked_sub(1) {
-            push_number(out, b";48;5;", c as usize);
+        if colors != Colors::None {
+            match (self.0 & FG).checked_sub(1) {
+                None => {}
+                Some(c @ 0..8) => push_number(out, b";", 30 + c as usize),
+                Some(c @ 8..16) => push_number(out, b";", 82 + c as usize),
+                Some(c) if colors >= Colors::Indexed => push_number(out, b";38;5;", c as usize),
+                Some(_) => {}
+            }
+            if colors >= Colors::Indexed
+                && let Some(c) = (self.0 >> 17).checked_sub(1)
+            {
+                push_number(out, b";48;5;", c as usize);
+            }
         }
         // A wash is mixed from the terminal's own background. Where that is
-        // not known the bar falls back on the theme's grey, and the other
-        // washes on nothing: the lines they mark are marked in the margin too.
-        let wash = self.wash_id();
-        if wash != 0 {
-            let rgb = washes[wash - 1];
-            let _ = match (rgb, wash) {
-                (0, wash) if wash == Wash::Bar as usize => write!(out, ";100"),
-                (0, _) => Ok(()),
-                _ => write!(out, ";48;2;{};{};{}", rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255),
-            };
+        // not known, the bar falls back on the theme's grey (or reverse
+        // video without indexed colour). Changed lines also have margin marks.
+        if wash != 0 && colors >= Colors::Indexed {
+            let rgb = if colors == Colors::Rgb { washes[wash - 1] } else { 0 };
+            if rgb != 0 {
+                let _ = write!(out, ";48;2;{};{};{}", rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255);
+            } else if wash == Wash::Bar as usize {
+                out.extend_from_slice(b";100");
+            }
         }
         out.push(b'm');
     }
@@ -268,6 +274,7 @@ pub struct Screen {
     /// Previous cells still refer to `marks` until the next clear swaps arenas.
     marks_flushed: bool,
     out: Vec<u8>,
+    colors: Colors,
     light_background: bool,
     /// Each wash is 0 while unknown, otherwise 0x01RRGGBB.
     washes: [u32; 3],
@@ -277,7 +284,12 @@ pub struct Screen {
 }
 
 impl Screen {
+    #[cfg(test)]
     pub fn new() -> Screen {
+        Self::for_terminal(Capabilities { colors: Colors::Rgb, graphics: true })
+    }
+
+    pub(crate) fn for_terminal(capabilities: Capabilities) -> Self {
         Screen {
             w: 0,
             h: 0,
@@ -288,10 +300,11 @@ impl Screen {
             prev_marks: Marks::default(),
             marks_flushed: false,
             out: SYNC_ON.to_vec(),
+            colors: capabilities.colors,
             light_background: false,
             washes: [0; 3],
             prev_washes: [0; 3],
-            pictures: Pictures::default(),
+            pictures: Pictures { able: (!capabilities.graphics).then_some(false), ..Pictures::default() },
         }
     }
 
@@ -401,6 +414,15 @@ impl Screen {
         self.pictures.able
     }
 
+    /// Decorative graphics follow the colour preference; files opened on purpose do not.
+    pub(crate) fn decorative_pictures(&self) -> bool {
+        self.colors != Colors::None && self.pictures() == Some(true)
+    }
+
+    pub(crate) fn raster_colors(&self) -> bool {
+        self.colors >= Colors::Indexed
+    }
+
     pub fn cell_size(&self) -> (u16, u16) {
         self.pictures.cell
     }
@@ -409,7 +431,7 @@ impl Screen {
     /// tall, in the frame being drawn. Its data goes to the terminal once.
     pub fn show_picture(&mut self, picture: &Picture, x: usize, y: usize, cols: usize, rows: usize) {
         let pictures = &mut self.pictures;
-        if pictures.resize_due.is_some() {
+        if pictures.able != Some(true) || pictures.resize_due.is_some() {
             return;
         }
         let at = Placement { id: picture.id, x, y: y + self.top, cols, rows };
@@ -695,7 +717,7 @@ impl Screen {
                     self.out.push(b'H');
                 }
                 if active != Some(cell.st) {
-                    cell.st.sgr(&mut self.out, washes);
+                    cell.st.sgr(&mut self.out, washes, self.colors);
                     active = Some(cell.st);
                 }
                 match u8::try_from(cell.glyph.0) {
@@ -800,6 +822,36 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_text_remains_visible_without_palette_colours() {
+        for (colors, expected) in [
+            (Colors::None, "\x1b[0;1;7mA"),
+            (Colors::Ansi, "\x1b[0;1;7;31mA"),
+            (Colors::Indexed, "\x1b[0;1;31;100mA"),
+        ] {
+            let mut screen = Screen::for_terminal(Capabilities { colors, graphics: false });
+            screen.resize(4, 1);
+            screen.set_background([55; 3]);
+            screen.put(0, 0, 1, "A", Style::fg(RED).bold());
+            screen.wash(0, 0, 1, Wash::Bar);
+            let output = frame(&mut screen);
+            assert!(output.contains(expected) && !output.contains(";48;2;"), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn pictures_require_confirmation_and_monochrome_suppresses_decorations() {
+        let mut screen = Screen::for_terminal(Capabilities { colors: Colors::None, graphics: true });
+        screen.resize(20, 6);
+        let picture = Picture::sample(40, 20);
+        screen.show_picture(&picture, 2, 1, 5, 2);
+        assert!(!frame(&mut screen).contains("\x1b_G"));
+        screen.set_pictures(true);
+        assert!(!screen.decorative_pictures());
+        screen.show_picture(&picture, 2, 1, 5, 2);
+        assert!(frame(&mut screen).contains("\x1b_Ga=t,"));
+    }
 
     #[test]
     fn text_wider_than_the_screen_stops_at_the_end_of_its_row() {
@@ -975,6 +1027,7 @@ mod tests {
     fn a_picture_is_sent_once_then_only_moved_and_at_last_taken_away() {
         let picture = Picture::sample(40, 20);
         let mut screen = Screen::sized(20, 6);
+        screen.set_pictures(true);
         screen.show_picture(&picture, 2, 1, 5, 2);
         let first = frame(&mut screen);
         assert!(
@@ -1013,6 +1066,7 @@ mod tests {
         let a = Picture::png(png.clone().into()).unwrap();
         let b = Picture::png(png.into()).unwrap();
         let mut screen = Screen::sized(20, 6);
+        screen.set_pictures(true);
         screen.show_picture(&a, 2, 1, 4, 2);
         screen.show_picture(&b, 12, 1, 4, 2);
         let first = frame(&mut screen);
@@ -1056,6 +1110,7 @@ mod tests {
         let b = Picture::png(png.into()).unwrap();
         for resize in [false, true] {
             let mut screen = Screen::sized(20, 6);
+            screen.set_pictures(true);
             screen.show_picture(&a, 2, 1, 4, 2);
             frame(&mut screen);
             screen.clear();
@@ -1082,6 +1137,7 @@ mod tests {
         let picture = Picture::sample(40, 20);
         let start = Instant::now();
         let mut screen = Screen::new();
+        screen.set_pictures(true);
         screen.resize_interactive(20, 6, start);
         screen.show_picture(&picture, 2, 1, 5, 2);
         assert!(screen.picture_redraw_due().is_none());
