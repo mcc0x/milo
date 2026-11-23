@@ -580,7 +580,14 @@ rex.on("session_view_changed", function(ctx, event)
     and event.revision <= last_revision then return end
   refresh()
 end)
-for _, event in ipairs{ "active_window_changed", "block_owner_changed", "client_connected" } do
+rex.on("active_window_changed", function(ctx, event)
+  if ctx.session_id ~= a.session then return end
+  -- A quick round trip can restore the original tab before view() runs.
+  -- Revoke the old peek on the departure itself, not just the snapshot.
+  if confirm and event.window_id ~= a.window then emit() end
+  refresh()
+end)
+for _, event in ipairs{ "block_owner_changed", "client_connected" } do
   rex.on(event, function(ctx) if ctx.session_id == a.session then refresh() end end)
 end
 rex.on("client_disconnected", function(ctx, event)

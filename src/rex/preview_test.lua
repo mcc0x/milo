@@ -551,7 +551,11 @@ assert(watch_malformed("attachment_poll") == "hide\nguard-hide\n" .. guard .. "\
 
 local ready = fixture("watch", preview)
 ready.gui.session_ids, ready.window.focused_block_id = four_sessions, preview
-assert(call(ready)() == guarded)
+local watch_ready = call(ready)
+assert(watch_ready() == guarded)
+-- The away event arrives after the session view is already back. The same
+-- geometry is eligible again, but the prior native peek must not survive.
+assert(watch_ready("active_window_changed", { window_id = inactive }) == guarded .. guarded)
 
 -- All three startup paths retain the latch if the viewer is down to one
 -- attachment before the initial placement becomes eligible.

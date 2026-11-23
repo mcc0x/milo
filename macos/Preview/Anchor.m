@@ -394,8 +394,8 @@ static int OpenTTY(const char *path) {
 }
 
 static const char PeekInstructions[] =
-    "Click this tile, type show and press Return for a 12-second preview.\n"
-    "Keep the pointer inside the tile. Hide before switching sessions (type hide here or return focus from the preview).\n";
+    "Keep the pointer near the center of this tile. Type show and press Return for a 12-second preview.\n"
+    "Before switching sessions, move the pointer out and wait until the page disappears.\n";
 
 static void WritePeekHint(int tty) {
     static const char hint[] =
