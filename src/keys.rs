@@ -11,6 +11,7 @@ use crate::term::{milliseconds, wait_ready};
 /// Allow split terminal sequences and multibyte keys one short wait to finish.
 const SEQUENCE_WAIT: Duration = Duration::from_millis(25);
 const READ_SIZE: usize = 4096;
+const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 /// The longest paste kept for a pane that is taking text.
 const PASTE_LIMIT: usize = 1 << 20;
@@ -209,28 +210,14 @@ impl Input {
         self.finish(keys);
     }
 
-    fn feed(&mut self, mut bytes: &[u8], keys: &mut Vec<Key>) {
-        if let Some(sequence) = self.discard {
-            // Keep at most one ESC across reads so a split string terminator still works.
-            if self.pending.pop().is_some() && bytes.first().copied().is_some_and(string_end_after_escape) {
-                self.discard = None;
-                bytes = &bytes[1..];
-            } else if let Some((_, end)) = sequence.end(bytes) {
-                self.discard = None;
-                bytes = &bytes[end..];
-            } else {
-                if sequence != Sequence::Csi && bytes.ends_with(b"\x1b") {
-                    self.pending.push(0x1b);
-                }
-                return;
-            }
-        }
+    fn feed(&mut self, bytes: &[u8], keys: &mut Vec<Key>) {
         let decoded = keys.len();
         if self.pending.is_empty() {
-            self.pending.extend_from_slice(decode(bytes, &mut self.paste, keys));
+            let left = decode_input(bytes, &mut self.discard, &mut self.paste, keys);
+            self.pending.extend_from_slice(left);
         } else {
             self.pending.extend_from_slice(bytes);
-            let left = decode(&self.pending, &mut self.paste, keys).len();
+            let left = decode_input(&self.pending, &mut self.discard, &mut self.paste, keys).len();
             let used = self.pending.len() - left;
             self.pending.drain(..used);
         }
@@ -238,9 +225,9 @@ impl Input {
         if self.pending.len() >= READ_SIZE
             && let Some(sequence) = Sequence::of(&self.pending[1..])
         {
-            let split_end = sequence != Sequence::Csi && self.pending.ends_with(b"\x1b");
+            let keep = sequence.split_suffix(&self.pending).len();
             self.discard = Some(sequence);
-            self.pending.truncate(usize::from(split_end));
+            self.pending.drain(..self.pending.len() - keep);
         }
     }
 
@@ -253,7 +240,7 @@ impl Input {
         }
         // Keep an incomplete control string even when input pauses: an OSC
         // or APC opener is identical to Alt-] or Alt-_. Never replay its
-        // bytes as keys. The next terminator, CAN/SUB or two Escapes ends it.
+        // bytes as keys. A terminator, CAN/SUB or a new paste marker ends it.
     }
 }
 
@@ -327,7 +314,7 @@ impl Sequence {
         })
     }
 
-    /// Returns the body length and the offset to resume reading keys.
+    /// Returns the body length and the offset to resume reading in ground state.
     fn end(self, body: &[u8]) -> Option<(usize, usize)> {
         if self == Self::Csi {
             let i = body.iter().position(|b| !(0x20..=0x3f).contains(b))?;
@@ -337,18 +324,39 @@ impl Sequence {
             match byte {
                 0x18 | 0x1a => return Some((i, i + 1)), // CAN or SUB cancel a control string.
                 7 if self == Self::Osc => return Some((i, i + 1)),
-                0x1b if body.get(i + 1).copied().is_some_and(string_end_after_escape) => return Some((i, i + 2)),
+                0x1b if body.get(i + 1) == Some(&b'\\') => return Some((i, i + 2)),
+                // A fresh paste starts at its own ESC, even after a dangling ESC.
+                0x1b if body[i..].starts_with(PASTE_START) => return Some((i, i)),
                 _ => {}
             }
         }
         None
     }
+
+    /// Keep only a possible split string terminator or paste opener when discarding.
+    fn split_suffix(self, bytes: &[u8]) -> &[u8] {
+        if self != Self::Csi
+            && let Some(start) = bytes.iter().rposition(|&byte| byte == 0x1b)
+            && PASTE_START.starts_with(&bytes[start..])
+        {
+            return &bytes[start..];
+        }
+        &[]
+    }
 }
 
-fn string_end_after_escape(next: u8) -> bool {
-    // ESC ESC cannot occur in a reply. Consume both as explicit
-    // recovery rather than treating either as the pane's Escape key.
-    matches!(next, b'\\' | 0x1b)
+fn decode_input<'a>(
+    mut bytes: &'a [u8],
+    discard: &mut Option<Sequence>,
+    paste: &mut Paste,
+    keys: &mut Vec<Key>,
+) -> &'a [u8] {
+    if let Some(sequence) = *discard {
+        let Some((_, resume)) = sequence.end(bytes) else { return sequence.split_suffix(bytes) };
+        *discard = None;
+        bytes = &bytes[resume..];
+    }
+    decode(bytes, paste, keys)
 }
 
 /// Decodes complete keys and returns any partial sequence at the end.
@@ -383,6 +391,10 @@ fn decode<'a>(mut bytes: &'a [u8], paste: &mut Paste, keys: &mut Vec<Key>) -> &'
                     };
                     let Some((end, resume)) = sequence.end(body) else { return bytes };
                     let (answer, tail) = (&body[..end], &body[resume..]);
+                    if end == resume {
+                        bytes = tail;
+                        continue;
+                    }
                     let key = if end >= READ_SIZE {
                         None
                     } else {
@@ -393,7 +405,6 @@ fn decode<'a>(mut bytes: &'a [u8], paste: &mut Paste, keys: &mut Vec<Key>) -> &'
                             }
                             (Sequence::Csi, fin @ 0x40..=0x7e) => csi(answer, fin),
                             (_, 0x18 | 0x1a) => None,
-                            (_, 0x1b) if body.get(end + 1) == Some(&0x1b) => None,
                             (Sequence::Osc, _) => background_reply(answer).map(Key::Background),
                             (Sequence::Apc, _) if answer.starts_with(b"Gi=31;") => {
                                 Some(Key::Pictures(answer == b"Gi=31;OK"))
@@ -651,17 +662,15 @@ mod tests {
     #[test]
     fn unknown_and_overlong_terminal_strings_do_not_type_commands() {
         assert_eq!(keys(b"\x1bPq\x03\x1b\\k"), [Key::Char('k')]);
-        for terminator in [b"\\k", b"\x1bk"] {
-            let mut input = Input::default();
-            let mut keys = Vec::new();
-            input.feed(b"\x1b]", &mut keys);
-            input.feed(&[b'q'; READ_SIZE], &mut keys);
-            input.finish(&mut keys);
-            input.feed(b"q\x03\x1b", &mut keys);
-            input.finish(&mut keys);
-            input.feed(terminator, &mut keys);
-            assert_eq!(keys, [Key::Char('k')]);
-        }
+        let mut input = Input::default();
+        let mut keys = Vec::new();
+        input.feed(b"\x1b]", &mut keys);
+        input.feed(&[b'q'; READ_SIZE], &mut keys);
+        input.finish(&mut keys);
+        input.feed(b"q\x03\x1b", &mut keys);
+        input.finish(&mut keys);
+        input.feed(b"\\k", &mut keys);
+        assert_eq!(keys, [Key::Char('k')]);
     }
 
     #[test]
@@ -674,11 +683,37 @@ mod tests {
             input.feed(b"q\x03\x1b", &mut keys);
             input.finish(&mut keys);
             assert!(keys.is_empty(), "Alt-{}", char::from(opener));
-            input.feed(b"\x1b\x03", &mut keys);
+            input.feed(b"\x18\x03", &mut keys);
             assert_eq!(keys, [Key::Ctrl(b'c')]);
         }
         assert_eq!(keys(b"\x1b]ambiguous\x18\x03"), [Key::Ctrl(b'c')]);
         assert_eq!(keys(b"\x1b_Gambiguous\x1a\x03"), [Key::Ctrl(b'c')]);
+    }
+
+    #[test]
+    fn a_paste_after_a_dangling_escape_is_never_read_as_shortcuts() {
+        let pasted = b"\x1b[200~q\x03\x18\x1a\x07\x1b\\\x1b[201~k";
+        for len in [1, READ_SIZE - 4, READ_SIZE] {
+            let reply = [b"\x1b]".as_slice(), &vec![b'q'; len], b"\x1b"].concat();
+            for split in 0..=pasted.len() {
+                for keep in [false, true] {
+                    let mut input = Input::default();
+                    input.keep_pastes(keep);
+                    let mut keys = Vec::new();
+                    for bytes in [&reply[..], &pasted[..split], &pasted[split..]] {
+                        input.feed(bytes, &mut keys);
+                        input.finish(&mut keys);
+                    }
+                    let label = format!("reply length {len}, paste split at {split}, keep={keep}");
+                    if keep {
+                        assert_eq!(keys, [Key::Paste, Key::Char('k')], "{label}");
+                        assert_eq!(input.pasted().as_deref(), Some("q\x03\x18\x1a\x07\x1b\\"), "{label}");
+                    } else {
+                        assert_eq!(keys, [Key::Char('k')], "{label}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
