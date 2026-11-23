@@ -13,7 +13,7 @@
 
 ## Install
 
-The [v0.1.6 release](docs/releases/v0.1.6.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
+The [v0.1.7 release](docs/releases/v0.1.7.md) is available for Apple Silicon Macs running macOS 13 or later. Install it with Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -22,28 +22,21 @@ brew install mcc0x/milo/milo
 Without Homebrew, download and run the installer from the release tag:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh &&
   sh milo-install.sh
 ```
 
-The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
+The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. If you use the Rex integration, run `milo setup --repair` after upgrading. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
 
-From a shell in your project, try `milo outline`. Press `Enter` on a file to read it, `e` to edit, `Ctrl-S` to save, and `q` while reading to go back. No Rex installation, browser, account or setup is needed. In Rex, use `milo setup` if you want the panes arranged beside your shell.
-
-### On `main` since v0.1.6
-
-These workflows are in the source checkout, not yet in the installer above:
-
-- Run `milo` outside Rex to [pick a local pane](#what-works-in-each-terminal). Open a working file from Outline to [view images, play supported MP4s or switch between Markdown and source](docs/panes.md#reading-pictures-video-and-markdown).
-- On a local Mac, press **Ctrl-O** on a document in Outline, Find or Reader to open it in its default app; **Ctrl-R** [reveals it in Finder](docs/panes.md#opening-a-file-outside-milo-on-a-mac).
-- In the [Mac menu bar](docs/usage.md#macos-menu-bar), choose CPU or memory instead of the default agent quota indicator.
-- [Alert forwarding](docs/setup.md#mirror-rex-alerts) reconnects after Rex returns. An explicit pause stays paused. Lifecycle notices are optional for each destination and off by default. A separate, default-off choice can add the verified Rex session name to ordinary alerts.
+From a shell in your project, run `milo` to pick a local pane, or `milo outline` to go straight to the file tree. Press `Enter` on a file to read it, `e` to edit working text, `Ctrl-S` to save, and `q` while reading to go back. No Rex installation, browser, account or setup is needed. In Rex, use `milo setup` if you want the panes arranged beside your shell.
 
 ## Workspace settings
 
 Run `milo web` in your project to open the [settings dashboard](docs/setup.md#browser-editor). It’s built into the CLI and uses the same settings as `milo setup`. No account, Node.js, or separate install is needed.
 
 Choose a pane layout for one worktree or set a global default. Under **Integrations**, you can have Rex arrange new shell tabs, forward alerts to Discord or Telegram, or show Discord presence. To configure [another Rex host](docs/setup.md#several-rex-hosts), run `milo web --host HOST`.
+
+[Alert forwarding](docs/setup.md#mirror-rex-alerts) reconnects when Rex returns, but an explicit pause stays paused. Lifecycle notices are optional for each destination. A separate opt-in adds a verified Rex session label to ordinary alerts. Both choices are off by default.
 
 <p align="center"><img src="docs/img/web-settings.webp" width="760" alt="Milo settings for the tidebook worktree. The Integrations page shows Rex automation, Discord presence and alert forwarding, all off."></p>
 
@@ -73,7 +66,7 @@ See how much of each reported limit you have left. Milo reads local reports save
 
 ### In the macOS menu bar
 
-Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage. Click it for reset times, or choose **Browser settings…** to open the browser editor.
+Keep an eye on usage without switching to Rex. **Milo** shows the mascot beside your lowest fresh remaining percentage by default. Click it for reset times, switch to **CPU** or **Memory** under **More options → Menu bar indicator**, or choose **Browser settings…** to open the browser editor.
 
 <p align="center"><img src="docs/img/menu-bar.webp" width="312" alt="Milo’s macOS menu showing example Codex and Claude Code limits, reset times and a Settings button"></p>
 
@@ -91,13 +84,13 @@ Optionally show **In a Rex session** on your Discord profile, under Milo's name 
 
 Read a file with added and removed lines marked, or open it as it was at a commit. Press `n` or `N` to jump between changed blocks, or `c` to fold unchanged stretches. In Rex, files opened from the same Outline or History pane share one floating reader as [tabs](docs/panes.md#tabs-in-the-floating-reader). The reader colours [about thirty languages](docs/panes.md#languages), from Rust and TypeScript to Markdown, HTML and CSS.
 
+The working-file Reader can also [view pictures, play supported MP4s, and render Markdown](docs/panes.md#reading-pictures-video-and-markdown). On a verified local Mac, press `Ctrl-O` on a working document in Outline, Find or Reader to open it in its default app, or `Ctrl-R` to [reveal it in Finder](docs/panes.md#opening-a-file-outside-milo-on-a-mac).
+
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
 
 To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it.
 
 ## What works in each terminal
-
-The direct pane commands below already work in v0.1.6. **In this checkout**, bare `milo` also offers the local panes outside Rex; that picker is not in the pinned release above.
 
 | Command or feature | Ordinary terminal, no Rex | What Rex adds |
 | --- | --- | --- |

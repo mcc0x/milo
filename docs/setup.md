@@ -4,7 +4,7 @@
 
 ## Install
 
-The [v0.1.6 prebuilt release](releases/v0.1.6.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
+The [v0.1.7 prebuilt release](releases/v0.1.7.md) is for Apple Silicon Macs running macOS 13 or later. Use Homebrew:
 
 ```sh
 brew install mcc0x/milo/milo
@@ -13,13 +13,13 @@ brew install mcc0x/milo/milo
 Or download the versioned release installer from GitHub:
 
 ```sh
-curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh &&
+curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1.7/install.sh &&
   sh milo-install.sh
 ```
 
 The installer checks the binary against a pinned SHA-256 checksum before placing it in `~/.local/bin`. Set `MILO_BIN_DIR` to choose a different directory. The prebuilt installer does not need a compiler, Cargo or Git.
 
-To upgrade, run `brew upgrade mcc0x/milo/milo` for a Homebrew install, or download and run the new version’s installer for a script install. If you installed the Rex integration, run `milo setup --repair` after upgrading so Rex loads the current actions and listener.
+To upgrade, run `brew upgrade mcc0x/milo/milo` for a Homebrew install, or download and run the new version’s installer for a script install. If you installed the Rex integration, run `milo setup --repair` after upgrading so Rex loads the current actions and listener. If you installed the macOS menu app, run `milo menubar install` again to update it.
 
 To build from source instead, install Git and Rust 1.91 or later, then run:
 
@@ -37,7 +37,7 @@ Current installers write a receipt for the binary and its install path. Use a cu
 
 ## Without Rex
 
-From the directory you want to browse, run `milo outline`, `milo history` or `milo usage`. Use `milo view FILE --edit` for a working text file. In this checkout you can also run bare `milo`, choose a pane with the arrow keys and `Enter`, and return to the picker with `q` after closing the reader. Standalone Home does not record a welcome choice or install anything.
+From the directory you want to browse, run `milo outline`, `milo history` or `milo usage`. Use `milo view FILE --edit` for a working text file. Or run `milo`, choose a pane with the arrow keys and `Enter`, and return to the picker with `q` after closing the reader. Standalone Home does not record a welcome choice or install anything.
 
 Choose **Terminal settings** for local preferences; you do not need to arrange a layout to save them. To use the browser editor without launching anything externally, run `milo web --no-open` and open its private link yourself. See the [command and feature matrix](../README.md#what-works-in-each-terminal).
 
@@ -93,7 +93,7 @@ Both need the installed Rex integration. After upgrading Milo, run `milo setup -
 
 Run `milo web` from the project you want to configure, or choose **Open browser settings** from Milo Home. Milo opens the editor through a short-lived private file so it doesn’t pass the session key to the launcher. If the editor doesn’t open, use the private link printed in the terminal. `milo web --no-open` prints that link without opening a browser. The link is printed at once; a page opened from it waits the moment Milo takes to read your settings. Keep the command running while you edit. The page is served by the Milo executable on this machine, not by usemilo.net. No account, network service, or separate frontend install is needed. Don’t share the link.
 
-![The local editor showing pane order, rail side, width and Usage height for an example worktree](img/web-settings.webp)
+![The local editor’s Integrations page for an example worktree, with Rex automation, Discord presence and alert forwarding all off](img/web-settings.webp)
 
 On macOS, the optional [Milo menu app](usage.md#macos-menu-bar) also opens this editor from **Browser settings…**. To configure a particular worktree, run `milo web` from that project.
 
@@ -160,7 +160,7 @@ The protections are the same as for a local editor:
 - The host’s editor is told the one address the page will have on your computer before it starts. It accepts that exact `Host` and `Origin` and no other, including its own port on the host.
 - Every settings request still needs the session key in the link. Don’t share the link.
 
-**Done** in the page, `Ctrl-C` in the terminal, or 15 minutes without use ends the editor on the host, and Milo then closes the forward and removes the `milo-settings` session. If the host cannot confirm that, Milo says so and names the session to look for.
+**Done** in the page, `Ctrl-C` in the terminal, or 15 minutes without use ends the editor on the host. Milo closes the forward and removes the `milo-settings` session. If the watcher fails or the tunnel closes before the editor confirms it ended, `milo web --host` reports an error and still cleans up locally. If the host cannot confirm remote cleanup, Milo names the session to look for.
 
 The host needs the same version of `milo` on the search path of its login shell, and you need to be able to reach it with `rex -S`. If `milo web` runs on a host where every connected Rex app is on another device, it opens no browser there and prints this command instead.
 

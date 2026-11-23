@@ -36,7 +36,7 @@ body:
     attributes:
       label: Version and system
       description: The output of `milo --version`, your operating system and terminal, and the Rex version if Rex is involved.
-      placeholder: milo 0.1.6, macOS 26.1, Ghostty, Rex preview.21
+      placeholder: milo 0.1.7, macOS 26.1, Ghostty, Rex preview.21
   - type: textarea
     id: evidence
     attributes:

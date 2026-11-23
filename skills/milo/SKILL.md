@@ -12,8 +12,8 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 - Run `milo doctor` to see effective preferences, integration health and
   usage sources without changing anything. `rex actions` (without `-C` or
   `REX_CLIENT`) lists server actions such as `milo_layout`.
-- Review, remote settings and settings transfer are available in v0.1.6.
-  If using an older install, check the command’s `--help` before relying on it.
+- Standalone Home and the rich previews below require v0.1.7 or later. On an
+  older install, use a direct pane command and check its `--help`.
 - Open `milo setup` for interactive configuration. Trying a layout is not
   permission to save it. Distinguish the global default from the override for
   this Git worktree. `milo_remember_layout` captures an explicitly chosen rail;
@@ -37,14 +37,14 @@ description: Use milo in a user's terminal to show a Git file tree, recent commi
 
 | Command | What it does |
 | --- | --- |
-| `milo` | Opens Home. In a standalone terminal, this checkout offers Outline, History and Usage without running setup. |
+| `milo` | Opens Home. In a standalone terminal, choose Outline, History, Usage or settings without onboarding. |
 | `milo setup --skip-onboarding` | Dismisses the first-run guide and exits without a TUI or installation changes. |
 | `milo outline [PATH]` | Shows a live file tree with changes to commit or push. |
 | `milo history [PATH]` | Shows recent commits and the files they touched. |
 | `milo usage` | Shows local usage limits and today's activity for whichever of Codex, Claude Code and OpenCode have saved a figure. |
 | `milo view FILE [--commit ID \| --edit]` | Opens the reader. It only reads unless the user presses `e` or you pass `--edit`, which starts editing a working text file. |
 | `milo review PATCH [--from NAME] [--float]` | Shows the edits in `PATCH`, a unified diff you wrote of your own edits, and nothing else as changed. |
-| `milo setup` | Chooses a Rex layout and optionally enables Claude Code limits. |
+| `milo setup` | Opens terminal settings. In Rex it can also manage the sidebar layout. |
 | `milo web [--port PORT] [--no-open]` | Opens the settings dashboard on loopback. |
 | `milo web --host HOST [--project DIR]` | Opens another Rex host's settings dashboard on this computer through a loopback Rex forward, and closes both when done. `HOST` is a label from `rex hosts`. |
 | `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Copies chosen pane settings to another host as a file. `import` only previews until `--apply`. Never carries tokens, destinations, accounts or integrations. |
@@ -73,6 +73,12 @@ rex run -s "$session" -c "$project_dir" -- milo view "$file" --commit "$id"
 The user can press `n` or `N` to move between changed blocks and `q` or `Esc`
 to close the reader. In Rex, opening a file from the outline or history also
 opens a floating reader.
+
+Working images, supported MP4s and Markdown open in the Reader. `m` switches
+Markdown between preview and source/diff. Videos start paused; `Space` plays
+or pauses without audio, and Left/Right seek five seconds. Decoder and terminal
+support vary. Committed versions still show source/diffs or a binary-file
+note, never today's working file.
 
 The reader does not change a file unless the user edits and saves it. `e`
 starts an edit of a working text file, `Ctrl-S` saves, `Ctrl-F` formats the
