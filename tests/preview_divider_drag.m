@@ -1,9 +1,12 @@
 // Exercise AppKit's split responder without posting system events or activating a window.
-// stdout: right-hand fractions before and after a divider drag, for session.resize_pane.
+// No args: report endpoints. --live: stream measured right-hand fractions during the drag.
 #import <AppKit/AppKit.h>
+#import <unistd.h>
 
-int main(void) {
+int main(int argc, char **argv) {
     @autoreleasepool {
+        BOOL live = argc == 2 && !strcmp(argv[1], "--live");
+        if (argc != 1 && !live) return 2;
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
         NSRect frame = NSMakeRect(-32000, -32000, 800, 480);
@@ -31,16 +34,41 @@ int main(void) {
         };
         // NSSplitView tracks dragged/up events from its application's private event queue.
         // Both endpoints are outside the old page. Nothing is posted to the HID event stream.
-        [NSApp postEvent:event(NSEventTypeLeftMouseDragged, end, 2) atStart:NO];
-        [NSApp postEvent:event(NSEventTypeLeftMouseUp, end, 3) atStart:NO];
+        CGFloat space = split.bounds.size.width - split.dividerThickness;
+        id resizedObserver = nil;
+        alarm(live ? 20 : 5);
+        if (live) {
+            resizedObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSSplitViewDidResizeSubviewsNotification
+                object:split queue:nil usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    printf("%.6f\n", right.frame.size.width / space);
+                    fflush(stdout);
+                }];
+            // Schedule in the tracking run loop, not the system event stream.
+            // Keep the divider held during a pause; send the final drag before release.
+            NSArray<NSNumber *> *delays = @[@0.1, @0.25, @0.4, @13.0, @13.2];
+            for (NSUInteger i = 0; i < delays.count; ++i) {
+                BOOL up = i == delays.count - 1;
+                NSPoint p = up ? end : NSMakePoint(start.x - 24 * (i + 1), start.y);
+                NSEvent *next = event(up ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDragged, p, i + 2);
+                NSTimer *timer = [NSTimer timerWithTimeInterval:delays[i].doubleValue repeats:NO block:^(NSTimer *t) {
+                    (void)t;
+                    [NSApp postEvent:next atStart:NO];
+                }];
+                [NSRunLoop.currentRunLoop addTimer:timer forMode:NSEventTrackingRunLoopMode];
+            }
+        } else {
+            [NSApp postEvent:event(NSEventTypeLeftMouseDragged, end, 2) atStart:NO];
+            [NSApp postEvent:event(NSEventTypeLeftMouseUp, end, 3) atStart:NO];
+        }
         [split mouseDown:event(NSEventTypeLeftMouseDown, start, 1)];
+        if (resizedObserver) [NSNotificationCenter.defaultCenter removeObserver:resizedObserver];
         NSRect resized = right.frame;
         if (fabs(NSMinX(resized) - NSMinX(oldPage) + 96) > 1) {
             fprintf(stderr, "AppKit divider did not follow the drag: %.1f -> %.1f\n", NSMinX(oldPage), NSMinX(resized));
             return 3;
         }
-        CGFloat space = split.bounds.size.width - split.dividerThickness;
-        printf("%.6f %.6f\n", oldPage.size.width / space, resized.size.width / space);
+        if (!live) printf("%.6f %.6f\n", oldPage.size.width / space, resized.size.width / space);
         return 0;
     }
 }

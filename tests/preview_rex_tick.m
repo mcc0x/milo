@@ -1,11 +1,17 @@
-// Built only by the disposable Rex lab. Run the real Anchor coordinator and
-// Browser with the Rex pane as our controlling tty and the Lua watcher on stdin.
+// Two accessory processes own the disposable AppKit surfaces. The Rex app
+// identity, foreground notification, and Chrome preferences are modeled; the
+// windows' frames, ordering, visibility, Space membership and WKWebView are real.
 #import <assert.h>
+#import <fcntl.h>
 #import <objc/runtime.h>
-#import <os/lock.h>
+#import <mach/mach.h>
+#import <stdarg.h>
+#import <stdatomic.h>
+#import <sys/resource.h>
+#import <termios.h>
+#import <unistd.h>
 #import <WebKit/WebKit.h>
 #import "../macos/Preview/Chrome.h"
-#import "../macos/Preview/Browser.h"
 #import "../macos/Preview/MenuStrip.h"
 
 @interface FixtureWorkspace : NSObject
@@ -14,36 +20,31 @@
 @property (nonatomic, readonly) NSNotificationCenter *notificationCenter;
 @end
 
-@interface NSEvent (RexTickFixture)
-+ (NSPoint)fixtureMouseLocation;
-+ (NSUInteger)fixturePressedMouseButtons;
-@end
-
 @interface NSWindow (RexTickFixture)
 + (NSInteger)fixtureWindowNumberAtPoint:(NSPoint)point belowWindowWithWindowNumber:(NSInteger)below;
+@end
+
+@interface NSEvent (RexTickFixture)
++ (NSPoint)fixtureMouseLocation;
 @end
 
 static CFArrayRef FixtureWindows(CGWindowListOption, CGWindowID);
 static CFArrayRef FixturePin(CFArrayRef);
 static BOOL FixturePane(CGRect, CGRect, CGRect *);
-static NSView *SlowStartContent(NSURL *url, BOOL (^input)(void), void (^focus)(void));
-static BOOL FixtureSystemMenuOwner(pid_t pid);
-static BOOL FixturePreviewProcess(pid_t pid);
-#define MiloPreviewContent SlowStartContent
+static BOOL FixtureSystemMenuOwner(pid_t);
+static BOOL FixturePreviewProcess(pid_t);
+
 #define CGWindowListCopyWindowInfo FixtureWindows
 #define CGWindowListCreateDescriptionFromArray FixturePin
 #define MiloApproximatePane FixturePane
 #define MiloSystemMenuOwner FixtureSystemMenuOwner
 #define MiloPreviewProcess FixturePreviewProcess
 #define NSWorkspace FixtureWorkspace
-#define mouseLocation fixtureMouseLocation
-#define pressedMouseButtons fixturePressedMouseButtons
 #define windowNumberAtPoint fixtureWindowNumberAtPoint
+#define mouseLocation fixtureMouseLocation
 #import "../macos/Preview/Anchor.m"
-#undef MiloPreviewContent
-#undef windowNumberAtPoint
-#undef pressedMouseButtons
 #undef mouseLocation
+#undef windowNumberAtPoint
 #undef NSWorkspace
 #undef MiloPreviewProcess
 #undef MiloSystemMenuOwner
@@ -51,37 +52,22 @@ static BOOL FixturePreviewProcess(pid_t pid);
 #undef CGWindowListCreateDescriptionFromArray
 #undef CGWindowListCopyWindowInfo
 
-static const CGWindowID Target = UINT32_MAX - 1; // Stable modeled inventory ID; the launcher must obtain it from the pin.
-static const NSInteger RelativeWindow = 42; // Never passed to any actual order API.
-static const CGWindowID Panel = 43;
-static pid_t ownerPID;
-static pid_t menuPID, competingPID;
+static pid_t ownerPID, menuPID, competingPID;
+static CGWindowID targetID, coverID, replacementID;
+static _Atomic(CGWindowID) panelID;
+static atomic_bool heldSample;
 static NSArray *preflightWindows;
-static CGRect targetFrame;
-static CGFloat quartzHeight;
-static NSPoint pointer;
-static NSUInteger buttons;
-static unsigned pointerSerial;
-static NSString *denyPlacement;
-static NSString *delaySamples;
-static NSString *holdProof;
-static NSString *holdInput;
-static NSString *absentPanel, *missCenter, *rexOverlay;
-static NSString *leavePointer;
-static NSString *pointerState, *seedForm, *localReceipt, *fastRelease;
+static NSString *root;
 static int trace;
-static os_unfair_lock sampleLock = OS_UNFAIR_LOCK_INIT;
-static BOOL staged;
-static BOOL exercisedFirstOrder, omitFirstPanel;
-static CGRect stagedFrame;
+static CGFloat quartzHeight;
+static NSPoint parkedPointer;
+static BOOL foreground = YES;
 
-// The PID is the real, independent non-GUI peer that owns the disposable
-// Rex blocks. Only its Mac app representation and foreground state are modeled.
 @interface FixtureOwner : NSObject
 @property (nonatomic) pid_t processIdentifier;
 @end
 @implementation FixtureOwner
-- (BOOL)isActive { return YES; }
+- (BOOL)isActive { return foreground; }
 - (BOOL)isTerminated { return NO; }
 @end
 static FixtureOwner *owner;
@@ -93,7 +79,7 @@ static FixtureOwner *owner;
     dispatch_once(&once, ^{ workspace = [FixtureWorkspace new]; });
     return workspace;
 }
-- (NSRunningApplication *)frontmostApplication { return (NSRunningApplication *)owner; }
+- (NSRunningApplication *)frontmostApplication { return foreground ? (id)owner : nil; }
 - (NSNotificationCenter *)notificationCenter {
     static NSNotificationCenter *notifications;
     static dispatch_once_t once;
@@ -102,134 +88,187 @@ static FixtureOwner *owner;
 }
 @end
 
-static BOOL FixtureSystemMenuOwner(pid_t pid) { return pid == menuPID; }
-static BOOL FixturePreviewProcess(pid_t pid) { return pid == competingPID; }
+@implementation NSEvent (RexTickFixture)
++ (NSPoint)fixtureMouseLocation { return parkedPointer; }
+@end
 
-static void Trace(const char *event) {
-    assert(WriteAll(trace, event, strlen(event)));
+static NSString *Path(NSString *name) { return [root stringByAppendingPathComponent:name]; }
+static BOOL Flag(NSString *name) { return [NSFileManager.defaultManager fileExistsAtPath:Path(name)]; }
+static NSString *Read(NSString *name) {
+    return [NSString stringWithContentsOfFile:Path(name) encoding:NSUTF8StringEncoding error:NULL];
+}
+static void Publish(NSString *name, NSString *text) {
+    assert([text writeToFile:Path(name) atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+}
+static void Trace(const char *format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    int length = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    assert(length > 0 && (size_t)length < sizeof(buffer));
+    ssize_t written;
+    do { written = write(trace, buffer, (size_t)length); } while (written < 0 && errno == EINTR);
+    assert(written == length);
 }
 
-// A slow first construction outlives the frame used to accept the command.
-// The real browser must earn fresh placement proof, not a second PTY command.
-static NSView *SlowStartContent(NSURL *url, BOOL (^input)(void), void (^focus)(void)) {
-    usleep(700000);
-    Trace("cold-start-delay\n");
-    return MiloPreviewContent(url, input, focus);
+static CGRect QuartzFrame(NSRect frame) {
+    return CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
 }
 
-static NSDictionary *WindowMetadata(pid_t pid, CGWindowID window, CGRect frame, int level) {
-    return @{
-        (__bridge NSString *)kCGWindowOwnerPID: @(pid),
-        (__bridge NSString *)kCGWindowNumber: @(window),
-        (__bridge NSString *)kCGWindowLayer: @(level),
-        (__bridge NSString *)kCGWindowAlpha: @1,
-        (__bridge NSString *)kCGWindowBounds: CFBridgingRelease(CGRectCreateDictionaryRepresentation(frame)),
-    };
+static NSDictionary *WithOwner(NSDictionary *window, pid_t pid) {
+    NSMutableDictionary *row = [window mutableCopy];
+    row[(__bridge NSString *)kCGWindowOwnerPID] = @(pid);
+    return row;
 }
 
-static NSDictionary *Metadata(pid_t pid, CGWindowID window, CGRect frame) {
-    return WindowMetadata(pid, window, frame, CGWindowLevelForKey(kCGNormalWindowLevelKey));
-}
-
+// Filter out unrelated applications so the lab never depends on the user's
+// windows. Do not fabricate z-order, frames, IDs or panel visibility.
 static CFArrayRef FixtureWindows(CGWindowListOption options, CGWindowID relative) {
     assert(options == (kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements));
     assert(relative == kCGNullWindowID);
     if (preflightWindows) return CFBridgingRetain(preflightWindows);
-    os_unfair_lock_lock(&sampleLock);
-    BOOL hasPanel = staged;
-    CGRect frame = stagedFrame;
-    BOOL omit = hasPanel && omitFirstPanel;
-    if (omit) omitFirstPanel = NO;
-    os_unfair_lock_unlock(&sampleLock);
-    if ([NSFileManager.defaultManager fileExistsAtPath:delaySamples]) {
-        usleep(700000); // Deliberately outlive the production sample, without changing its clock.
-        Trace("late-sample\n");
+    NSArray *actual = CFBridgingRelease(CGWindowListCopyWindowInfo(options, relative));
+    if (!actual) return NULL;
+    CGWindowID preview = atomic_load(&panelID);
+    NSMutableArray *windows = [NSMutableArray new];
+    for (NSDictionary *row in actual) {
+        CGWindowID id = [row[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+        if (id == targetID || id == replacementID) [windows addObject:WithOwner(row, ownerPID)];
+        else if (id == coverID || id == preview) [windows addObject:row];
     }
-    NSDictionary *target = Metadata(ownerPID, Target, targetFrame);
-    NSArray *windows = @[target];
-    if ([NSFileManager.defaultManager fileExistsAtPath:rexOverlay]) {
-        NSDictionary *chrome = WindowMetadata(ownerPID, 55, targetFrame, CGWindowLevelForKey(kCGFloatingWindowLevelKey));
-        windows = @[chrome, target];
+    if (!NSThread.isMainThread && Flag(@"hold-sample")) {
+        // Preserve the actual captured stack, but deliver it after a real
+        // observer revocation. No fake geometry or altered sample clock.
+        Trace("sample-held\n");
+        NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 15;
+        while (Flag(@"hold-sample")) {
+            assert(NSProcessInfo.processInfo.systemUptime < deadline);
+            usleep(2000);
+        }
+        atomic_store(&heldSample, true);
     }
-    if (hasPanel && (omit || [NSFileManager.defaultManager fileExistsAtPath:absentPanel])) {
-        Trace("quartz-panel-absent\n");
-    } else if (hasPanel) {
-        NSDictionary *panel = Metadata(getpid(), Panel, frame);
-        BOOL deny = [NSFileManager.defaultManager fileExistsAtPath:denyPlacement];
-        windows = deny ? @[target, panel] : @[panel, target];
-    }
-    Trace("sample\n");
     return CFBridgingRetain(windows);
 }
 
 static CFArrayRef FixturePin(CFArrayRef ids) {
-    assert(CFArrayGetCount(ids) == 1 && (uintptr_t)CFArrayGetValueAtIndex(ids, 0) == Target);
-    return CFBridgingRetain(@[Metadata(ownerPID, Target, targetFrame)]);
+    assert(CFArrayGetCount(ids) == 1 && (uintptr_t)CFArrayGetValueAtIndex(ids, 0) == targetID);
+    NSArray *rows = CFBridgingRelease(CGWindowListCreateDescriptionFromArray(ids));
+    if (!rows.count) return CFBridgingRetain(rows);
+    assert(rows.count == 1);
+    return CFBridgingRetain(@[WithOwner(rows.firstObject, ownerPID)]);
 }
 
 static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
     MiloRexChrome chrome;
     return MiloDecodeRexChrome(@{}, &chrome) && MiloPaneInRexChrome(window, normalized, &chrome, pane);
 }
-
-@implementation NSEvent (RexTickFixture)
-+ (NSPoint)fixtureMouseLocation { return pointer; }
-+ (NSUInteger)fixturePressedMouseButtons { return buttons; }
-@end
+static BOOL FixtureSystemMenuOwner(pid_t pid) { return pid == menuPID; }
+static BOOL FixturePreviewProcess(pid_t pid) { return pid == competingPID; }
 
 @implementation NSWindow (RexTickFixture)
 + (NSInteger)fixtureWindowNumberAtPoint:(NSPoint)point belowWindowWithWindowNumber:(NSInteger)below {
-    if ([NSFileManager.defaultManager fileExistsAtPath:missCenter]) return 0;
+    assert(below == 0);
+    NSInteger actual = [NSWindow windowNumberAtPoint:point belowWindowWithWindowNumber:below];
+    if (actual == targetID || actual == coverID || actual == replacementID) {
+        Trace("appkit-hit\n");
+        return actual;
+    }
+    // If an unrelated window wins the global hit, use the front fixture
+    // window at that point. Relative order still goes to AppKit with its real ID.
+    Trace("filtered-hit\n");
     CGPoint quartz = CGPointMake(point.x, quartzHeight - point.y);
-    return !below && CGRectContainsPoint(targetFrame, quartz) ? RelativeWindow : 0;
+    for (NSDictionary *row in VisibleWindows()) {
+        if (CGRectContainsPoint(WindowBounds(row), quartz))
+            return [row[(__bridge NSString *)kCGWindowNumber] integerValue];
+    }
+    return 0;
 }
 @end
 
-static BOOL (*ActualVisible)(id, SEL);
-
-static BOOL FixtureVisible(id object, SEL selector) {
-    (void)object; (void)selector;
-    os_unfair_lock_lock(&sampleLock);
-    BOOL visible = staged;
-    os_unfair_lock_unlock(&sampleLock);
-    return visible;
+static void SetAccessory(void) {
+    assert([NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory]);
 }
 
-static BOOL FixtureActiveSpace(id object, SEL selector) {
-    (void)object; (void)selector;
-    return YES;
+@interface LabSurface : NSPanel
+@end
+@implementation LabSurface
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+static NSPanel *LabWindow(NSRect frame, NSString *title, NSColor *color) {
+    NSPanel *panel = [[LabSurface alloc] initWithContentRect:frame
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    panel.title = title;
+    panel.level = NSNormalWindowLevel;
+    panel.backgroundColor = color;
+    panel.hidesOnDeactivate = NO;
+    panel.releasedWhenClosed = NO;
+    panel.hasShadow = NO;
+    panel.animationBehavior = NSWindowAnimationBehaviorNone;
+    panel.ignoresMouseEvents = YES;
+    return panel;
 }
 
-static void FixtureOrder(MiloPreviewPanel *panel, SEL selector, NSWindowOrderingMode order, NSInteger relative) {
-    (void)selector;
-    assert(NSThread.isMainThread && !staged && order == NSWindowAbove && relative == RelativeWindow);
-    assert(!panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
-    assert(!panel.keyWindow && !NSApp.keyWindow && (panel.styleMask & NSWindowStyleMaskNonactivatingPanel));
-    assert(!ActualVisible(panel, @selector(isVisible)));
-    NSRect frame = panel.frame;
-    os_unfair_lock_lock(&sampleLock);
-    stagedFrame = CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
-    staged = YES;
-    omitFirstPanel = !exercisedFirstOrder;
-    exercisedFirstOrder = YES;
-    os_unfair_lock_unlock(&sampleLock);
-    // No order message reaches AppKit: the actual WKWebView and panel are always offscreen.
-    char event[128];
-    int length = snprintf(event, sizeof(event), "stage %.1f %.1f %.1f %.1f\n", NSMinX(frame), NSMinY(frame),
-        NSWidth(frame), NSHeight(frame));
-    assert(length > 0 && (size_t)length < sizeof(event));
-    Trace(event);
-}
-
-static void FixtureOrderOut(MiloPreviewPanel *panel, SEL selector, id sender) {
-    (void)selector; (void)sender;
-    assert(NSThread.isMainThread);
-    if (!staged) return;
-    assert(!panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents && !panel.keyWindow);
-    os_unfair_lock_lock(&sampleLock);
-    staged = NO;
-    os_unfair_lock_unlock(&sampleLock);
-    Trace("hidden\n");
+static int RunWindowHost(NSScreen *screen) {
+    SetAccessory();
+    const pid_t parent = getppid();
+    NSRect usable = screen.visibleFrame;
+    CGFloat w = fmin(NSWidth(usable) - 60, 720), h = fmin(NSHeight(usable) - 60, 430);
+    assert(w > 380 && h > 240);
+    NSRect frame = NSIntegralRect(NSMakeRect(NSMidX(usable) - w / 2, NSMidY(usable) - h / 2, w, h));
+    NSRect coverFrame = NSInsetRect(frame, 30, 30);
+    coverFrame.origin.x = NSMidX(frame);
+    coverFrame.size.width = NSMaxX(frame) - NSMinX(coverFrame) - 20;
+    NSPanel *target = LabWindow(frame, @"Milo Rex Lab • Rex stand-in", NSColor.darkGrayColor);
+    NSPanel *cover = LabWindow(coverFrame, @"Milo Rex Lab • occluder", NSColor.grayColor);
+    NSPanel *replacement = LabWindow(frame, @"Milo Rex Lab • replacement", NSColor.darkGrayColor);
+    [target orderBack:nil];
+    __block NSString *applied;
+    __block BOOL announced;
+    [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
+        (void)timer;
+        if (getppid() != parent) _exit(0);
+        assert(!NSApp.active && !NSApp.keyWindow);
+        if (!announced) {
+            CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly |
+                kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            NSArray *rows = CFBridgingRelease(list);
+            for (NSDictionary *row in rows) {
+                if ([row[(__bridge NSString *)kCGWindowNumber] integerValue] != target.windowNumber) continue;
+                assert(target.visible && target.onActiveSpace &&
+                    CGRectEqualToRect(WindowBounds(row), QuartzFrame(target.frame)));
+                Publish(@"window-ids", [NSString stringWithFormat:@"%ld %ld %ld %.0f\n",
+                    (long)target.windowNumber, (long)cover.windowNumber, (long)replacement.windowNumber, NSWidth(target.frame)]);
+                announced = YES;
+                break;
+            }
+        }
+        NSString *command = Read(@"window-command");
+        if (!command || [command isEqual:applied]) return;
+        if ([command isEqual:@"cover"]) {
+            NSInteger preview = Read(@"panel-window").integerValue;
+            assert(preview > 0);
+            [cover orderWindow:NSWindowAbove relativeTo:preview];
+            assert(cover.visible && cover.onActiveSpace && !cover.keyWindow);
+        } else if ([command isEqual:@"uncover"]) {
+            [cover orderOut:nil];
+            assert(!cover.visible);
+        } else {
+            assert([command isEqual:@"replace"]);
+            // Keep the pinned ID alive but offscreen. An eligible-looking
+            // same-owner window must not be substituted for it.
+            [target orderOut:nil];
+            [replacement orderBack:nil];
+            assert(!target.visible && replacement.visible && replacement.onActiveSpace && !replacement.keyWindow);
+        }
+        applied = command;
+        Publish(@"window-applied", applied);
+    }];
+    [NSApp run];
+    return 0;
 }
 
 static WKWebView *FindWebView(NSView *view) {
@@ -242,317 +281,283 @@ static WKWebView *FindWebView(NSView *view) {
 }
 
 static __weak WKWebView *firstWeb;
-static const char *const FormValue = "Rex divider form state";
+static NSString *firstURL;
+static NSString *const FormValue = @"Rex divider form state";
 
-static void VerifyForm(WKWebView *web, unsigned tries, BOOL seed) {
-    assert(tries);
-    if (![web.URL.path isEqualToString:@"/rex-lab-form"] || !web.canGoBack || web.loading) {
-        assert(seed);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            VerifyForm(web, tries - 1, seed);
-        });
+static void AssertNonactivating(MiloPreviewPanel *panel) {
+    assert(NSThread.isMainThread && !NSApp.active && !NSApp.keyWindow && !panel.keyWindow);
+    assert(!panel.canBecomeMainWindow && (panel.styleMask & NSWindowStyleMaskNonactivatingPanel));
+}
+
+static void CheckShown(MiloPreviewPanel *panel) {
+    AssertNonactivating(panel);
+    assert(panel.visible && panel.onActiveSpace && panel.placementProven &&
+        !panel.contentView.hidden && !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
+    assert(parkedPointer.x + 120 < NSMinX(panel.frame) && !NSPointInRect(parkedPointer, panel.frame));
+    CGRect bounds = QuartzFrame(panel.frame);
+    Geometry stack = SampleGeometry(VisibleWindows(), ownerPID, targetID, getpid(), &bounds, NULL);
+    assert(stack.windowID == targetID); // Ordered above that exact real window.
+}
+
+static void (*ActualOrder)(MiloPreviewPanel *, SEL, NSWindowOrderingMode, NSInteger);
+static void ObserveOrder(MiloPreviewPanel *panel, SEL sel, NSWindowOrderingMode order, NSInteger relative) {
+    AssertNonactivating(panel);
+    // AppKit implements orderOut: through this same method. A conceal is
+    // not an attempt to order the preview relative to a different window.
+    if (order == NSWindowOut) {
+        assert(!panel.placementProven && panel.ignoresMouseEvents);
+        ActualOrder(panel, sel, order, relative);
         return;
     }
-    NSString *readField =
-        @"document.readyState === 'complete' && document.getElementById('divider-form').value";
-    NSString *script = seed ? [NSString stringWithFormat:
-        @"document.getElementById('divider-form').value = '%s'; %@", FormValue, readField] : readField;
-    [web evaluateJavaScript:script completionHandler:^(id value, NSError *error) {
-        if (seed && (error || [value isEqual:@NO])) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-                VerifyForm(web, tries - 1, seed);
-            });
-            return;
-        }
-        assert(!error && [value isEqual:[NSString stringWithUTF8String:FormValue]]);
-        Trace(seed ? "webkit-form-seeded\n" : "webkit-state-preserved\n");
-    }];
+    assert(order == NSWindowAbove && relative == targetID);
+    assert(!panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents && !panel.canBecomeKeyWindow);
+    CGWindowID window = (CGWindowID)panel.windowNumber;
+    if (atomic_exchange(&panelID, window) != window) {
+        Publish(@"panel-window", [NSString stringWithFormat:@"%u", window]);
+    }
+    ActualOrder(panel, sel, order, relative);
+    assert(panel.visible);
+    AssertNonactivating(panel);
+    Trace("ordered\n");
 }
 
-static void NavigateToForm(WKWebView *web) {
-    assert([web.URL.path isEqualToString:@"/rex-lab-page"]);
-    [web evaluateJavaScript:@"document.getElementById('divider-link').click(); true"
-        completionHandler:^(id result, NSError *error) {
-        assert(!error && [result isEqual:@YES]);
-        VerifyForm(web, 80, YES);
-    }];
+static void (*ActualOut)(MiloPreviewPanel *, SEL, id);
+static void ObserveOut(MiloPreviewPanel *panel, SEL sel, id sender) {
+    BOOL wasVisible = panel.visible;
+    ActualOut(panel, sel, sender);
+    if (wasVisible) {
+        AssertNonactivating(panel);
+        assert(!panel.visible && !panel.placementProven && panel.contentView.hidden && panel.ignoresMouseEvents);
+        Trace("out\n");
+    }
 }
 
-static void VerifyPage(WKWebView *web, unsigned tries) {
-    if (!tries) return;
-    [web evaluateJavaScript:@"document.readyState === 'complete' && !!document.getElementById('rex-lab-page')"
-        completionHandler:^(id result, NSError *error) {
-        if (!error && [result isEqual:@YES]) {
-            Trace("webkit-loaded\n");
-            // A snapshot can be unavailable while ordered out. Record paint only
-            // if pixels really contain the fixture page's green background.
-            [web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *snapshotError) {
-                NSBitmapImageRep *bitmap = image && !snapshotError ?
-                    [NSBitmapImageRep imageRepWithData:image.TIFFRepresentation] : nil;
-                NSColor *pixel = [[bitmap colorAtX:bitmap.pixelsWide / 2 y:bitmap.pixelsHigh / 2]
-                    colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-                BOOL green = pixel && pixel.greenComponent > 0.55 && pixel.redComponent < 0.2 && pixel.blueComponent < 0.5;
-                Trace(green ? "webkit-offscreen-paint\n" : "webkit-snapshot-unavailable\n");
-            }];
-        } else {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-                VerifyPage(web, tries - 1);
-            });
-        }
-    }];
-}
-
-static void (*SetPlacementProven)(MiloPreviewPanel *, SEL, BOOL);
-static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
+static void (*ActualProven)(MiloPreviewPanel *, SEL, BOOL);
+static void ObserveProven(MiloPreviewPanel *panel, SEL sel, BOOL proven) {
     BOOL changed = panel.placementProven != proven;
-    SetPlacementProven(panel, selector, proven); // Observe the actual hide/reveal, don't replace it.
-    assert(panel.contentView.hidden != proven && panel.ignoresMouseEvents != proven);
-    if (!changed || !proven) return;
-    assert(staged && !panel.keyWindow && !NSApp.keyWindow);
-    assert(!ActualVisible(panel, @selector(isVisible)));
-    [panel.contentView layoutSubtreeIfNeeded];
-    Trace("revealed\n");
-    static BOOL checkedWeb;
+    ActualProven(panel, sel, proven);
+    if (!changed) return;
+    if (!proven) {
+        Trace("concealed\n");
+        return;
+    }
+    AssertNonactivating(panel);
+    assert(panel.visible && panel.onActiveSpace && !panel.contentView.hidden &&
+        !panel.ignoresMouseEvents && panel.canBecomeKeyWindow);
     WKWebView *web = FindWebView(panel.contentView);
     assert(web);
-    if (!checkedWeb) {
-        checkedWeb = YES;
-        firstWeb = web;
-        VerifyPage(web, 80);
-    } else {
-        assert(web == firstWeb);
-        if ([NSFileManager.defaultManager fileExistsAtPath:seedForm]) {
-            VerifyForm(web, 1, NO);
-        }
-    }
+    static BOOL seen;
+    if (!seen) { seen = YES; firstWeb = web; }
+    else assert(web == firstWeb); // Also fails if the original WK instance deallocated.
+    NSRect frame = panel.frame;
+    Trace("shown %p %.2f %.2f %.2f %.2f\n", (__bridge void *)web, NSMinX(frame), NSMinY(frame),
+        NSWidth(frame), NSHeight(frame));
 }
 
-@interface DismissalFixtureAnchor : MiloPreviewAnchor
-@end
-@implementation DismissalFixtureAnchor
-// Never install an item in the user's menu bar during the disposable test.
-- (BOOL)displayResumeCode:(uint32_t)code {
-    if (!code) { [NSFileManager.defaultManager removeItemAtPath:localReceipt error:NULL]; return YES; }
-    return [[NSString stringWithFormat:@"%06u", code] writeToFile:localReceipt atomically:YES
-        encoding:NSASCIIStringEncoding error:NULL];
-}
-- (void)handleLine:(size_t)length {
-    // Model a press, drag and release completed between native polls. Rex
-    // supplies the real updated layout; no simulated event grants permission.
-    if ([NSFileManager.defaultManager fileExistsAtPath:fastRelease]) {
-        VisibilityLease next = _lease;
-        if (UpdateVisibility(&next, LeaseNow(), ownerPID, _line, length) == VisibilityChanged &&
-            next.checked && next.tile.origin.x != _lease.tile.origin.x) {
-            pointer = NSMakePoint(CGRectGetMinX(targetFrame) + CGRectGetWidth(targetFrame) * next.tile.origin.x,
-                NSMidY(_candidateFrame));
-            buttons = 0;
-            assert([NSFileManager.defaultManager removeItemAtPath:fastRelease error:NULL]);
-        }
-    }
-    [super handleLine:length];
-}
-- (void)tick {
-    // Model only the Mac pointer and button sample, never the PTY or watcher.
-    NSString *state = [NSString stringWithContentsOfFile:pointerState encoding:NSUTF8StringEncoding error:NULL];
-    unsigned serial, pressed;
-    double x, y;
-    BOOL changed = state && sscanf(state.UTF8String, "%u %lf %lf %u", &serial, &x, &y, &pressed) == 4 &&
-        serial != pointerSerial;
-    if (changed) {
-        pointerSerial = serial;
-        pointer = NSMakePoint(x, y);
-        buttons = pressed;
-    }
-    static BOOL seeding;
-    if (!seeding && [NSFileManager.defaultManager fileExistsAtPath:seedForm]) {
-        assert(firstWeb);
-        seeding = YES;
-        NavigateToForm(firstWeb);
-    }
-    [super tick];
-    if (changed) {
-        char event[64];
-        snprintf(event, sizeof(event), "pointer %u\n", serial);
-        Trace(event);
-    }
-}
-
-- (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
-    generation:(NSUInteger)generation started:(NSTimeInterval)started {
-    BOOL checkInput = checkedPanel && [NSFileManager.defaultManager fileExistsAtPath:holdInput];
-    NSString *gate = checkInput ? holdInput : holdProof;
-    if (checkedPanel && [NSFileManager.defaultManager fileExistsAtPath:gate]) {
-        // This proof is already in flight. Give the test a chance to queue
-        // PTY dismissal or a real watcher revocation before it can reveal.
-        Trace(checkInput ? "awaiting-input-dismissal\n" : "awaiting-dismissal-burst\n");
-        NSTimeInterval deadline = LeaseNow() + 3;
-        while ([NSFileManager.defaultManager fileExistsAtPath:gate]) {
-            assert(LeaseNow() < deadline);
-            usleep(1000);
-        }
-        if (checkInput) {
-            assert(staged);
-            assert(![self acceptsPanelInput]); // Same authorization callback used by WebKit Copy.
-            // Denial on an old sample alone is insufficient: the queued hide
-            // must synchronously conceal this panel before the callback returns.
-            assert(!staged);
-            Trace("denied-input-after-dismissal\n");
-        }
-    }
-    NSPoint oldPointer = pointer;
-    BOOL movedPointer = checkedPanel && geometry.rejection == PanelNotListed &&
-        [NSFileManager.defaultManager fileExistsAtPath:leavePointer];
-    if (movedPointer) pointer = NSMakePoint(-100000, -100000);
-    [super applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:started];
-    if (movedPointer) pointer = oldPointer;
-    static NSRect projected;
-    if (_candidate.windowID && !NSEqualRects(projected, _candidateFrame)) {
-        projected = _candidateFrame;
-        struct winsize grid;
-        assert(ioctl(_tty, TIOCGWINSZ, &grid) == 0);
-        char center[64];
-        snprintf(center, sizeof(center), "cell-center %u %u\n", grid.ws_col / 2, grid.ws_row / 2);
-        Trace(center);
-        CGFloat divider = CGRectGetMinX(_candidate.window) + CGRectGetWidth(_candidate.window) * _lease.tile.origin.x;
-        char event[128];
-        snprintf(event, sizeof(event), "projected %.3f %.3f %.3f %.3f %.3f\n", NSMinX(projected), NSMinY(projected),
-            NSWidth(projected), NSHeight(projected), divider);
-        Trace(event);
-    }
-}
-@end
-
-static IMP Replace(Class cls, SEL selector, IMP replacement) {
+static IMP Hook(Class cls, SEL selector, IMP replacement) {
     Method method = class_getInstanceMethod(cls, selector);
     assert(method);
     IMP original = method_getImplementation(method);
-    // Replacing an inherited method here does not modify its superclass.
     class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
     return original;
 }
 
-static CGRect QuartzFrame(NSRect frame) {
-    return CGRectMake(NSMinX(frame), quartzHeight - NSMaxY(frame), NSWidth(frame), NSHeight(frame));
+static void SeedForm(MiloPreviewPanel *panel, unsigned tries, BOOL navigating) {
+    assert(tries && panel.placementProven);
+    WKWebView *web = FindWebView(panel.contentView);
+    assert(web && web == firstWeb);
+    if (!navigating && [web.URL.path isEqualToString:@"/rex-lab-page"] && !web.loading) {
+        [web evaluateJavaScript:@"document.getElementById('divider-link').click(); true"
+            completionHandler:^(id result, NSError *error) {
+                assert(!error && [result isEqual:@YES]);
+                SeedForm(panel, tries - 1, YES);
+            }];
+        return;
+    }
+    if (navigating && [web.URL.path isEqualToString:@"/rex-lab-form"] && web.canGoBack && !web.loading) {
+        firstURL = web.URL.absoluteString;
+        assert([web.backForwardList.backItem.URL.path isEqualToString:@"/rex-lab-page"]);
+        [web evaluateJavaScript:@"document.getElementById('divider-form').value = 'Rex divider form state'"
+            completionHandler:^(id result, NSError *error) {
+                assert(!error && [result isEqual:FormValue]);
+                Trace("form-seeded\n");
+            }];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        SeedForm(panel, tries - 1, navigating);
+    });
 }
 
-static int Preflight(const char *scenario, CGRect display) {
-    CGRect workspace;
-    assert(FixturePane(targetFrame, CGRectMake(0, 0, 1, 1), &workspace));
-    // Coordinates and scale come from AppKit/Quartz, not from a hardcoded
-    // resolution. Model the observed 29-point menu strip, not the user's
-    // windows or the current menu bar's appearance.
-    CGRect strip = CGRectMake(CGRectGetMinX(display), CGRectGetMinY(display), CGRectGetWidth(display), 29);
-    assert(!CGRectIsEmpty(CGRectIntersection(strip, targetFrame)));
-    assert(CGRectIsEmpty(CGRectIntersection(strip, workspace)));
-    int menuLevel = CGWindowLevelForKey(kCGMainMenuWindowLevelKey);
-    NSDictionary *menu = WindowMetadata(menuPID, 51, strip, menuLevel);
-    NSDictionary *target = Metadata(ownerPID, Target, targetFrame);
-    BOOL clearMenu = !strcmp(scenario, "menu");
-    if (clearMenu) {
-        preflightWindows = @[menu, target];
-    } else if (!strcmp(scenario, "menu-lookalike")) {
-        // Same layer and bounds as the real strip, but not WindowServer.
-        preflightWindows = @[WindowMetadata(1, 51, strip, menuLevel), target];
-    } else if (!strcmp(scenario, "helper-status")) {
-        preflightWindows = @[WindowMetadata(competingPID, 51, strip, CGWindowLevelForKey(kCGStatusWindowLevelKey)), target];
-    } else if (!strcmp(scenario, "second-rex")) {
-        preflightWindows = @[menu, target, Metadata(ownerPID, 52, targetFrame)];
-    } else if (!strcmp(scenario, "body-overlay")) {
-        // Even an otherwise menu-like row must not be ignored over the workspace.
-        CGRect overlay = CGRectOffset(strip, 0, CGRectGetMinY(workspace) - CGRectGetMinY(strip) + 1);
-        assert(!CGRectIsEmpty(CGRectIntersection(overlay, workspace)));
-        preflightWindows = @[WindowMetadata(menuPID, 51, overlay, menuLevel), target];
-    } else if (!strcmp(scenario, "competing-preview")) {
-        CGRect panel = CGRectInset(workspace, CGRectGetWidth(workspace) / 4, CGRectGetHeight(workspace) / 4);
-        preflightWindows = @[menu, Metadata(competingPID, Panel, panel), target];
-    } else {
-        assert(!strcmp(scenario, "fullscreen"));
-        preflightWindows = @[Metadata(ownerPID, Target, display)];
+static void Probe(MiloPreviewPanel *panel, NSInteger sequence) {
+    CheckShown(panel);
+    [panel.contentView layoutSubtreeIfNeeded];
+    WKWebView *web = FindWebView(panel.contentView);
+    assert(web && web == firstWeb && web.canGoBack && !web.loading);
+    assert([web.URL.absoluteString isEqual:firstURL] && [web.backForwardList.backItem.URL.path isEqual:@"/rex-lab-page"]);
+    NSSize size = web.bounds.size;
+    assert(size.width > 0 && size.height > 0);
+    [web evaluateJavaScript:@"[location.href, document.getElementById('divider-form').value, innerWidth, innerHeight]"
+        completionHandler:^(id result, NSError *error) {
+            assert(!error && [result isKindOfClass:NSArray.class] && [result count] == 4);
+            NSArray *state = result;
+            assert([state[0] isEqual:firstURL] && [state[1] isEqual:FormValue]);
+            int width = [state[2] intValue], height = [state[3] intValue];
+            assert(fabs(size.width - width) <= 1 && fabs(size.height - height) <= 1);
+            struct rusage usage;
+            assert(getrusage(RUSAGE_SELF, &usage) == 0);
+            double cpu = usage.ru_utime.tv_sec + usage.ru_stime.tv_sec +
+                (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
+            mach_task_basic_info_data_t memory;
+            mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+            assert(task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&memory, &count) == KERN_SUCCESS);
+            Trace("probe %ld %p %d %d %.6f %llu\n", (long)sequence, (__bridge void *)web, width, height, cpu,
+                (unsigned long long)memory.resident_size);
+        }];
+}
+
+@interface PersistentFixtureAnchor : MiloPreviewAnchor
+@end
+@implementation PersistentFixtureAnchor
+- (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
+    generation:(NSUInteger)generation started:(NSTimeInterval)started {
+    [super applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:started];
+    if (atomic_exchange(&heldSample, false)) {
+        assert(!_panel.placementProven && !_panel.visible);
+        Trace("sample-rejected\n");
+    }
+}
+
+- (void)tick {
+    BOOL active = !Flag(@"foreground-away");
+    if (active != foreground) {
+        foreground = active;
+        [FixtureWorkspace.sharedWorkspace.notificationCenter postNotificationName:active ?
+            NSWorkspaceDidActivateApplicationNotification : NSWorkspaceDidDeactivateApplicationNotification object:nil];
+    }
+    [super tick];
+    if (!_panel.placementProven) return;
+    static BOOL seeding;
+    if (!seeding && Flag(@"seed-form")) {
+        seeding = YES;
+        SeedForm(_panel, 80, NO);
+    }
+    static NSInteger lastProbe;
+    NSInteger sequence = Read(@"probe").integerValue;
+    if (lastProbe < sequence) {
+        lastProbe = sequence;
+        Probe(_panel, sequence);
+    }
+}
+@end
+
+static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect frame, int level) {
+    return @{
+        (__bridge NSString *)kCGWindowOwnerPID: @(pid),
+        (__bridge NSString *)kCGWindowNumber: @(id),
+        (__bridge NSString *)kCGWindowLayer: @(level),
+        (__bridge NSString *)kCGWindowAlpha: @1,
+        (__bridge NSString *)kCGWindowBounds: CFBridgingRelease(CGRectCreateDictionaryRepresentation(frame)),
+    };
+}
+
+static int Preflight(const char *scenario, NSScreen *screen) {
+    if (strcmp(scenario, "live")) {
+        // Reproduce menu and unsupported layouts with metadata, never order
+        // windows over the user's menu or change display state.
+        CGRect display = QuartzFrame(screen.frame);
+        NSRect frame = NSIntegralRect(NSInsetRect(screen.visibleFrame, 25, 25));
+        frame.size.height = NSMaxY(screen.frame) - NSMinY(frame) - 1;
+        CGRect targetFrame = QuartzFrame(frame), workspace;
+        assert(FixturePane(targetFrame, CGRectMake(0, 0, 1, 1), &workspace));
+        CGRect strip = CGRectMake(CGRectGetMinX(display), CGRectGetMinY(display), CGRectGetWidth(display), 29);
+        assert(!CGRectIsEmpty(CGRectIntersection(strip, targetFrame)) && CGRectIsEmpty(CGRectIntersection(strip, workspace)));
+        int normal = CGWindowLevelForKey(kCGNormalWindowLevelKey), menu = CGWindowLevelForKey(kCGMainMenuWindowLevelKey);
+        NSDictionary *target = Metadata(ownerPID, targetID, targetFrame, normal);
+        NSDictionary *stripRow = Metadata(menuPID, coverID, strip, menu);
+        if (!strcmp(scenario, "menu")) preflightWindows = @[stripRow, target];
+        else if (!strcmp(scenario, "menu-lookalike")) preflightWindows = @[Metadata(1, coverID, strip, menu), target];
+        else if (!strcmp(scenario, "helper-status")) preflightWindows = @[
+            Metadata(competingPID, coverID, strip, CGWindowLevelForKey(kCGStatusWindowLevelKey)), target];
+        else if (!strcmp(scenario, "second-rex")) preflightWindows = @[
+            stripRow, target, Metadata(ownerPID, replacementID, targetFrame, normal)];
+        else if (!strcmp(scenario, "body-overlay")) {
+            CGRect overlay = CGRectOffset(strip, 0, CGRectGetMinY(workspace) - CGRectGetMinY(strip) + 1);
+            preflightWindows = @[Metadata(menuPID, coverID, overlay, menu), target];
+        } else if (!strcmp(scenario, "competing-preview")) {
+            CGRect panel = CGRectInset(workspace, CGRectGetWidth(workspace) / 4, CGRectGetHeight(workspace) / 4);
+            preflightWindows = @[stripRow, Metadata(competingPID, replacementID, panel, normal), target];
+        } else if (!strcmp(scenario, "background")) {
+            foreground = NO;
+            preflightWindows = @[target];
+        } else {
+            assert(!strcmp(scenario, "fullscreen"));
+            preflightWindows = @[Metadata(ownerPID, targetID, display, normal)];
+        }
     }
     const char *reason = NULL;
-    CGWindowID pinned = PinForegroundWindow((NSRunningApplication *)owner, ownerPID, &reason);
-    if (clearMenu) {
-        if (pinned != Target) {
-            fprintf(stderr, "expected the unique fixture pin, got %u: %s\n", pinned, reason ?: "(no reason)");
-            return 2;
-        }
+    CGWindowID pinned = PinForegroundWindow((id)owner, ownerPID, &reason);
+    if (pinned) {
+        assert(pinned == targetID && !reason);
         printf("%u\n", pinned);
         return 0;
     }
-    assert(pinned == kCGNullWindowID && reason && *reason);
-    fprintf(stderr, "%s\n", reason);
+    fprintf(stderr, "%s\n", reason ?: "missing pin refusal");
     return 1;
 }
 
 int main(int argc, const char **argv) {
     @autoreleasepool {
-        assert(argc == 5);
-        BOOL preflight = !strcmp(argv[1], "--preflight");
+        NSScreen *screen = NSScreen.screens.firstObject;
+        CGDirectDisplayID primary = CGMainDisplayID();
+        assert(screen && [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == primary);
+        quartzHeight = CGRectGetHeight(CGDisplayBounds(primary));
+        if (argc == 3 && !strcmp(argv[1], "--window-host")) {
+            root = [NSString stringWithUTF8String:argv[2]];
+            return RunWindowHost(screen);
+        }
+        BOOL preflight = argc == 6 && !strcmp(argv[1], "--preflight");
+        assert(preflight || argc == 5);
+        root = [NSString stringWithUTF8String:argv[3]];
+        assert(sscanf(Read(@"window-ids").UTF8String, "%u %u %u", &targetID, &coverID, &replacementID) == 3);
+        assert(targetID && coverID && replacementID && targetID != coverID && targetID != replacementID && coverID != replacementID);
         ownerPID = (pid_t)strtol(argv[preflight ? 2 : 1], NULL, 10);
         assert(ownerPID > 1 && ownerPID != getpid());
         owner = [FixtureOwner new];
         owner.processIdentifier = ownerPID;
-        if (!preflight) assert([NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory]);
-        NSScreen *screen = NSScreen.screens.firstObject;
-        CGDirectDisplayID primary = CGMainDisplayID();
-        assert(screen && [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == primary);
-        assert(NSWidth(screen.visibleFrame) > 400 && NSHeight(screen.visibleFrame) > 300);
-        quartzHeight = CGRectGetHeight(CGDisplayBounds(primary));
-        CGRect display = QuartzFrame(screen.frame);
-        NSRect frame = NSIntegralRect(NSInsetRect(screen.visibleFrame, 25, 25));
-        frame.size.height = NSMaxY(screen.frame) - NSMinY(frame) - 1;
-        targetFrame = QuartzFrame(frame);
         if (preflight) {
-            // The launcher/test runner and server are distinct disposable
-            // processes; no real window owner is sampled in either mode.
             menuPID = getppid();
-            competingPID = (pid_t)strtol(argv[3], NULL, 10);
-            assert(menuPID > 1 && menuPID != ownerPID && menuPID != getpid());
-            assert(competingPID > 1 && competingPID != menuPID && competingPID != ownerPID && competingPID != getpid());
-            return Preflight(argv[4], display);
+            competingPID = (pid_t)strtol(argv[4], NULL, 10);
+            return Preflight(argv[5], screen);
         }
-        const char *pin = argv[4], *end = pin + strlen(pin);
-        uint32_t pinned;
-        assert(ReadDecimal(&pin, end, UINT32_MAX, &pinned) && pin == end && pinned == Target);
-        pointer = NSMakePoint(NSMinX(frame) + NSWidth(frame) * 0.85, NSMidY(frame));
-        NSString *root = [NSString stringWithUTF8String:argv[3]];
-        denyPlacement = [root stringByAppendingPathComponent:@"deny-placement"];
-        delaySamples = [root stringByAppendingPathComponent:@"delay-samples"];
-        holdProof = [root stringByAppendingPathComponent:@"hold-staged-proof"];
-        holdInput = [root stringByAppendingPathComponent:@"hold-visible-input"];
-        absentPanel = [root stringByAppendingPathComponent:@"absent-panel"];
-        missCenter = [root stringByAppendingPathComponent:@"miss-center"];
-        rexOverlay = [root stringByAppendingPathComponent:@"rex-overlay"];
-        leavePointer = [root stringByAppendingPathComponent:@"leave-pointer"];
-        pointerState = [root stringByAppendingPathComponent:@"pointer-state"];
-        seedForm = [root stringByAppendingPathComponent:@"seed-form"];
-        localReceipt = [root stringByAppendingPathComponent:@"test-menu-item"];
-        fastRelease = [root stringByAppendingPathComponent:@"fast-release"];
-        trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
-            O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
-        assert(trace >= 0);
-        ActualVisible = (BOOL (*)(id, SEL))Replace(MiloPreviewPanel.class, @selector(isVisible), (IMP)FixtureVisible);
-        Replace(MiloPreviewPanel.class, @selector(isOnActiveSpace), (IMP)FixtureActiveSpace);
-        Replace(MiloPreviewPanel.class, @selector(orderWindow:relativeTo:), (IMP)FixtureOrder);
-        Replace(MiloPreviewPanel.class, @selector(orderOut:), (IMP)FixtureOrderOut);
-        SetPlacementProven = (void (*)(MiloPreviewPanel *, SEL, BOOL))Replace(MiloPreviewPanel.class,
-            @selector(setPlacementProven:), (IMP)FixtureProven);
 
-        int tty = OpenTTY("/dev/tty"), focus[2];
-        struct termios before;
-        assert(tcgetattr(tty, &before) == 0);
-        assert(tty >= 0 && ForegroundCanonicalTTY(tty) && pipe(focus) == 0);
+        assert(strtoul(argv[4], NULL, 10) == targetID);
+        SetAccessory();
+        // Never warp the user's pointer. The helper sees this parked point
+        // far from any fixture tile if it ever queries the global pointer.
+        parkedPointer = NSMakePoint(NSMinX(screen.visibleFrame) + 1, NSMinY(screen.visibleFrame) + 1);
+        trace = open(Path(@"native.log").fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        assert(trace >= 0);
+        ActualOrder = (void (*)(MiloPreviewPanel *, SEL, NSWindowOrderingMode, NSInteger))
+            Hook(MiloPreviewPanel.class, @selector(orderWindow:relativeTo:), (IMP)ObserveOrder);
+        ActualOut = (void (*)(MiloPreviewPanel *, SEL, id))
+            Hook(MiloPreviewPanel.class, @selector(orderOut:), (IMP)ObserveOut);
+        ActualProven = (void (*)(MiloPreviewPanel *, SEL, BOOL))
+            Hook(MiloPreviewPanel.class, @selector(setPlacementProven:), (IMP)ObserveProven);
+
+        int tty = open("/dev/tty", O_RDONLY | O_CLOEXEC | O_NOCTTY), focus[2];
+        struct termios before, after;
+        assert(tty >= 0 && tcgetpgrp(tty) == getpgrp() && tcgetattr(tty, &before) == 0 && pipe(focus) == 0);
         assert(fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == 0 && fcntl(focus[0], F_SETFL, O_NONBLOCK) == 0);
         NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:argv[2]]];
         assert(url);
-        MiloPreviewAnchor *anchor = [[DismissalFixtureAnchor alloc] initWithURL:url rex:(NSRunningApplication *)owner
-            pinned:pinned stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid() tty:tty confirm:YES];
+        MiloPreviewAnchor *anchor = [[PersistentFixtureAnchor alloc] initWithURL:url rex:(id)owner
+            pinned:targetID stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid()];
         int result = [anchor run];
-        struct termios after;
-        assert(tcgetattr(tty, &after) == 0 && after.c_iflag == before.c_iflag &&
-            ((after.c_lflag ^ before.c_lflag) & ~PENDIN) == 0 &&
+        assert(tcgetattr(tty, &after) == 0 && after.c_iflag == before.c_iflag && after.c_oflag == before.c_oflag &&
+            after.c_cflag == before.c_cflag && ((after.c_lflag ^ before.c_lflag) & ~PENDIN) == 0 &&
             memcmp(after.c_cc, before.c_cc, sizeof(before.c_cc)) == 0);
-        // The sampling queue can still have a completion in flight when run returns.
+        Trace("stopped\n");
         return result;
     }
 }
