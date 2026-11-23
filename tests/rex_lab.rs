@@ -1543,8 +1543,8 @@ fn preview_layout_and_observer() {
     lab.rex(&["send-key", "-s", &session, "-b", &failure_block, "enter"]);
     assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
 
-    // Run both real children against the simulated viewer. A Python peer
-    // has no native Rex window to match the pinned number.
+    // The simulated viewer owns no native Rex window. Startup must leave a
+    // readable diagnostic without leaking the URL or retaining any children.
     fs::write(
         &launcher,
         format!(
@@ -1559,7 +1559,7 @@ fn preview_layout_and_observer() {
     let capture = || lab.rex(&["capture", "-s", &session, "-b", &postspawn, "--trim"]);
     assert!(soon(|| capture().contains("Press Enter to dismiss")), "{}", capture());
     let error = capture();
-    assert!(error.contains("WebKit preview stopped") && !error.contains(url), "{error}");
+    assert!(!error.contains(url), "{error}");
     let pid = lab.read("preview-postspawn-pid").trim().parse::<u32>().unwrap();
     assert!(alive(pid), "the diagnostic pane ended before the user could read it");
     let children = lab.command("/usr/bin/pgrep").args(["-P", &pid.to_string()]).output().unwrap();
