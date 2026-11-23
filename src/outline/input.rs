@@ -4,15 +4,17 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
+use crate::actions::{Choice, Menu, Step};
 use crate::keys::Direction::{Next, Previous};
 use crate::keys::{DOUBLE_CLICK, Key};
-use crate::native::Action as NativeAction;
+use crate::native::{self, Action as NativeAction};
 use crate::pane::{After, Pane};
 use crate::preferences::Preferences;
+use crate::preview;
 use crate::reader::ReadFile;
 
 use super::draw::{Layout, margin};
-use super::{NativeSelection, Note, Outline};
+use super::{Actions, NativeSelection, Note, Outline};
 
 pub(super) struct Click {
     target: ClickTarget,
@@ -57,6 +59,16 @@ impl Outline {
                 after => after,
             };
         }
+        if self.actions.is_some() {
+            return self.actions_key(key);
+        }
+        if key == Key::Ctrl(b'a')
+            || matches!(key, Key::Click(x, y)
+                if self.search.as_ref().map_or_else(|| self.painted.actions_at(x, y), |search| search.actions_at(x, y)))
+        {
+            self.start_actions(now);
+            return After::Stay;
+        }
         let native = NativeAction::key(key);
         if let Some(search) = &mut self.search {
             if let Some(action) = native {
@@ -100,10 +112,7 @@ impl Outline {
                 let path = if node.dir { path.strip_suffix('/').unwrap_or(path) } else { path };
                 action.run(&self.repo.root, self.root_identity, Path::new(path))
             });
-            match result {
-                Ok(()) => self.note = None,
-                Err(why) => self.say(why),
-            }
+            self.action_result(result);
             return After::Stay;
         }
         let by_click = self.by_click;
@@ -127,6 +136,122 @@ impl Outline {
             _ => self.tree_key(key, now),
         };
         if changed || reschedule || by_click != self.by_click { After::Stay } else { After::Ignored }
+    }
+
+    fn action_target(&self) -> Option<&str> {
+        if let Some(search) = &self.search {
+            return search.visible_path();
+        }
+        if self.painted.strip
+            || !matches!(self.native_selection, NativeSelection::Ready)
+            || !self.painted.tree_rows.contains(&self.sel)
+        {
+            return None;
+        }
+        self.tree.row(self.sel).map(|node| node.path.as_ref())
+    }
+
+    fn start_actions(&mut self, now: Instant) {
+        self.clicked = None;
+        let Some(path) = self.action_target() else {
+            if let Some(search) = &mut self.search {
+                search.actions_unshown();
+            } else if self.painted.strip {
+                self.note = Some((Note::StripFind, now));
+            } else {
+                self.say("Choose a visible item first");
+            }
+            return;
+        };
+        let folder = path.ends_with('/');
+        let relative = Path::new(path.strip_suffix('/').unwrap_or(path));
+        let (root, identity) = (&self.repo.root, self.root_identity);
+        let native = native::choices(root, identity, relative);
+        let mut choices = Vec::new();
+        if !folder {
+            choices.push(Choice::Read);
+        }
+        if !folder && native.open {
+            choices.push(Choice::Open);
+        }
+        if native.reveal {
+            choices.push(Choice::Reveal);
+        }
+        if !folder && preview::eligible(root, identity, relative) {
+            choices.push(Choice::Preview);
+        }
+        if choices.is_empty() {
+            self.say("No actions for this folder");
+            return;
+        }
+        let path = if self.search.is_some() {
+            Rc::from(path)
+        } else {
+            Rc::clone(&self.tree.row(self.sel).expect("the target is a visible tree row").path)
+        };
+        if let Some(search) = &mut self.search {
+            search.clear_click();
+        }
+        self.actions = Some(Actions { path, same_project: true, menu: Menu::new(choices, &self.repo.root) });
+    }
+
+    fn actions_key(&mut self, key: Key) -> After {
+        let Some(actions) = &mut self.actions else { return After::Ignored };
+        let key = if key == Key::Ctrl(b'c') { Key::Esc } else { key };
+        match actions.menu.key(key) {
+            Step::Stay => {}
+            Step::Close => self.dismiss_actions(),
+            Step::Run(choice) => {
+                let path = Rc::clone(&actions.path);
+                let valid = actions.same_project && self.action_target() == Some(path.as_ref());
+                self.dismiss_actions();
+                if valid {
+                    self.run_choice(choice, path);
+                } else {
+                    self.action_result(Err("Choose a visible item first"));
+                }
+            }
+        }
+        After::Stay
+    }
+
+    pub(super) fn dismiss_actions(&mut self) {
+        if self.actions.take().is_some() {
+            // These controls were behind the menu, not visible for the next click.
+            self.native_selection = NativeSelection::Hidden;
+            self.painted.clear_tree_targets();
+            if let Some(search) = &mut self.search {
+                search.dismiss_actions();
+            }
+        }
+    }
+
+    fn run_choice(&mut self, choice: Choice, path: Rc<str>) {
+        let relative = Path::new(path.strip_suffix('/').unwrap_or(&path));
+        let (root, identity) = (&self.repo.root, self.root_identity);
+        let result = match choice {
+            Choice::Read => {
+                self.search = None;
+                self.open_file(ClickTarget::Tree(path));
+                return;
+            }
+            Choice::Open => NativeAction::Open.run(root, identity, relative),
+            Choice::Reveal => NativeAction::Reveal.run(root, identity, relative),
+            Choice::Preview => preview::open(root, identity, relative),
+            Choice::Edit => unreachable!("editing is offered in Reader"),
+        };
+        self.action_result(result);
+    }
+
+    fn action_result(&mut self, result: Result<(), &'static str>) {
+        if let Some(search) = &mut self.search {
+            search.action_result(result);
+        } else {
+            match result {
+                Ok(()) => self.note = None,
+                Err(why) => self.say(why),
+            }
+        }
     }
 
     /// The strip has no cursor. Keys scroll it; a double click opens a file.

@@ -31,35 +31,159 @@ fn reader_hints_say_close_and_keep_help_last() {
     let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
     let rows = drawn(&mut reader, 80, 5);
     assert_eq!(rows[4].contains("^O open · ^R reveal"), cfg!(target_os = "macos"));
-    assert!(rows[4].ends_with("↑↓ scroll · e edit · q close · ? help"));
+    assert!(rows[4].ends_with("↑↓ scroll · e edit · q close · Ctrl-A Actions · ? help"));
     let help = reader.help();
     help.assert_rows_fit(26);
     let help = help.text();
+    assert!(help.contains("Ctrl-A  file actions"));
     assert_eq!(help.contains("^O  open in default app"), cfg!(target_os = "macos"));
     assert_eq!(help.contains("^R  reveal in Finder"), cfg!(target_os = "macos"));
-    assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · e edit · q close · ? help");
-    assert_eq!(drawn(&mut reader, 28, 5)[4], " e edit · q close · ? help");
-    assert_eq!(drawn(&mut reader, 20, 5)[4], " q close · ? help");
+    assert_eq!(drawn(&mut reader, 40, 5)[4], " q close · Ctrl-A Actions · ? help");
+    assert_eq!(drawn(&mut reader, 28, 5)[4], " q close · Actions · ? help");
+    assert_eq!(drawn(&mut reader, 20, 5)[4], " Actions · ? help");
+}
+
+/// The screen column of a label, ignoring byte expansion of earlier glyphs.
+fn column(row: &str, label: &str) -> usize {
+    crate::width::str_width(row.split_once(label).unwrap_or_else(|| panic!("no {label:?} in {row:?}")).0)
+}
+
+#[test]
+fn reader_footer_clicks_only_work_where_the_hint_is_drawn() {
+    let f = Fixture::folder();
+    f.write("page.txt", "one line\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    let rows = drawn(&mut reader, 28, 6);
+    let action = column(&rows[5], "Actions");
+    let help = column(&rows[5], "? help");
+    assert_eq!(reader.hover_span(action, 5), Some(action..action + "Actions".len()));
+    assert_eq!(reader.hover_span(help, 5), Some(help..help + "? help".len()));
+    assert_eq!(reader.key(Key::Click(action - 1, 5)), After::Ignored);
+    assert_eq!(reader.key(Key::Click(action, 4)), After::Ignored);
+    assert_eq!(reader.key(Key::Click(help, 5)), After::Help);
+
+    drawn(&mut reader, 28, 2);
+    assert_eq!(reader.hover_span(action, 5), None);
+    assert_eq!(reader.key(Key::Click(action, 5)), After::Ignored);
+    drawn(&mut reader, 28, 6);
+    assert_eq!(reader.key(Key::Click(action, 5)), After::Stay);
+    let menu = drawn(&mut reader, 28, 6);
+    assert!(menu[0].contains("Actions") && menu[0].contains("page.txt"), "{menu:?}");
+    assert!(!menu.iter().any(|row| row.contains("tkmp")), "{menu:?}");
+    let back = column(&menu[5], "Esc back");
+    assert_eq!(reader.key(Key::Click(back, 5)), After::Stay);
+    assert_eq!(drawn(&mut reader, 28, 6), rows);
+
+    assert_eq!(reader.key(Key::Char('n')), After::Stay);
+    let notice = drawn(&mut reader, 28, 6);
+    assert!(!notice[5].contains("Actions"));
+    assert_eq!(reader.key(Key::Click(column(&notice[5], "? help"), 5)), After::Help);
+}
+
+#[test]
+fn only_rendered_working_markdown_offers_tkmp_and_the_draft_keeps_its_keys() {
+    let f = Fixture::new();
+    f.write("page.md", "# Before\n");
+    f.commit("before");
+    f.write("page.md", "# After\n");
+    let mut reader = Reader::open(&f.root.join("page.md")).unwrap();
+    let rendered = drawn(&mut reader, 80, 10);
+    let ((), opened) = with_fake(Ok(()), || {
+        assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+        let menu = drawn(&mut reader, 80, 10);
+        assert!(menu.iter().any(|row| row.contains("tkmp")), "{menu:?}");
+        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r'), Key::Char('m'), Key::Char('e')] {
+            assert_eq!(reader.key(key), After::Stay);
+        }
+        assert_eq!(drawn(&mut reader, 80, 10), menu);
+        assert_eq!(reader.key(Key::Esc), After::Stay);
+    });
+    assert!(opened.is_empty());
+    assert_eq!(drawn(&mut reader, 80, 10), rendered);
+
+    assert_eq!(reader.key(Key::Char('m')), After::Stay);
+    let source = drawn(&mut reader, 80, 10);
+    assert!(source.iter().any(|row| row.contains("# Before")), "{source:?}");
+    assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+    let menu = drawn(&mut reader, 80, 10);
+    assert!(menu[1].contains("Edit in Milo") && !menu.iter().any(|row| row.contains("tkmp")), "{menu:?}");
+    assert_eq!(reader.key(Key::Enter), After::Stay);
+    assert!(reader.editing());
+    assert_eq!(reader.key(Key::End), After::Stay);
+    assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+    let rows = drawn(&mut reader, 80, 10);
+    assert!(!rows[9].contains("Actions") && !reader.help().text().contains("file actions"));
+    assert_eq!(reader.key(Key::Click(column(&rows[9], "^G help"), 9)), After::Help);
+    assert_eq!(reader.key(Key::Esc), After::Stay);
+    assert_eq!(drawn(&mut reader, 80, 10), source);
+}
+
+#[test]
+fn stale_rendered_markdown_does_not_offer_a_preview_after_the_path_becomes_a_link() {
+    let f = Fixture::folder();
+    f.write("page.md", "# Original\n");
+    f.write("replacement.md", "# Replacement\n");
+    let file = f.root.join("page.md");
+    let mut reader = Reader::open(&file).unwrap();
+    assert!(drawn(&mut reader, 80, 6).iter().any(|row| row.contains("Original")));
+    fs::remove_file(&file).unwrap();
+    symlink("replacement.md", &file).unwrap();
+    // Don't refresh: the file has changed since the frame the user acted on.
+    let ((), opened) = with_fake(Ok(()), || {
+        assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+        let rows = drawn(&mut reader, 80, 6);
+        assert!(rows[5].contains("No file actions here.") && !rows.iter().any(|row| row.contains("tkmp")), "{rows:?}");
+    });
+    assert!(opened.is_empty());
+}
+
+#[test]
+fn native_menu_actions_revalidate_the_path_after_the_menu_opens() {
+    let f = Fixture::folder();
+    f.write("one.txt", "first\n");
+    f.write("two.txt", "second\n");
+    let path = f.root.join("one.txt");
+    let mut reader = Reader::open(&path).unwrap();
+    let ((), opened) = with_fake(Ok(()), || {
+        assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+        let rows = drawn(&mut reader, 80, 7);
+        let label = "Reveal in Finder";
+        let at = rows.iter().position(|row| row.contains(label)).unwrap();
+        assert_eq!(reader.key(Key::Click(column(&rows[at], label), at)), After::Stay);
+        assert!(drawn(&mut reader, 80, 7)[6].contains("Revealed in Finder"));
+
+        assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+        let rows = drawn(&mut reader, 80, 7);
+        let at = rows.iter().position(|row| row.contains("Open in default app")).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink("two.txt", &path).unwrap();
+        assert_eq!(reader.key(Key::Click(column(&rows[at], "Open in default app"), at)), After::Stay);
+        assert!(drawn(&mut reader, 80, 7)[6].contains("symbolic link"));
+    });
+    assert_eq!(opened, [(Action::Reveal, path)]);
 }
 
 #[test]
 fn native_actions_refuse_commit_and_handed_over_views_of_a_working_file() {
     let f = Fixture::new();
-    f.write("page.txt", "before\n");
+    f.write("page.md", "before\n");
     f.commit("before");
-    f.write("page.txt", "after\n");
+    f.write("page.md", "after\n");
     let mut repo = Repo::open(&f.root).unwrap();
     repo.read();
     let history = repo.history(1).unwrap();
     let id = CommitId::parse(&history[0].hash).unwrap();
-    let committed = Reader::at_commit(&f.root.join("page.txt"), id).unwrap();
+    let committed = Reader::at_commit(&f.root.join("page.md"), id).unwrap();
     let patch = crate::handoff::Patch::parse(
-        "diff --git a/page.txt b/page.txt\n--- a/page.txt\n+++ b/page.txt\n@@ -1 +1 @@\n-before\n+after\n",
+        "diff --git a/page.md b/page.md\n--- a/page.md\n+++ b/page.md\n@@ -1 +1 @@\n-before\n+after\n",
     )
     .unwrap();
-    let handed = Reader::handed_over(&repo, &patch, "page.txt", Handed { from: None, number: 1, total: 1 });
+    let handed = Reader::handed_over(&repo, &patch, "page.md", Handed { from: None, number: 1, total: 1 });
     for (mut reader, why) in [(committed, "this is a commit"), (handed, "this shows a patch")] {
         assert!(!reader.help().text().contains("^O"));
+        assert!(!reader.help().text().contains("Ctrl-A"));
+        assert!(!drawn(&mut reader, 60, 4)[3].contains("Actions"));
+        assert_eq!(reader.key(Key::Ctrl(b'a')), After::Ignored);
         let ((), opened) = with_fake(Ok(()), || {
             for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
                 assert_eq!(reader.key(key), After::Stay);
@@ -94,7 +218,7 @@ fn an_empty_file_uses_the_body_row_not_the_hint_row() {
     f.write("empty.txt", "");
     let mut reader = Reader::open(&f.root.join("empty.txt")).unwrap();
     let rows = drawn(&mut reader, 40, 3);
-    assert_eq!(&rows[1..], ["  Empty.", " e edit · q close · ? help"]);
+    assert_eq!(&rows[1..], ["  Empty.", " q close · Ctrl-A Actions · ? help"]);
 }
 
 #[test]
@@ -464,6 +588,27 @@ fn folds_expand_individually_with_tab_enter_and_a_mouse_click() {
     assert_eq!(reader.key(Key::Click(1, 7)), After::Stay);
     let last = drawn(&mut reader, 15, 9);
     assert!(last[7].contains("line 45"), "{last:?}");
+}
+
+#[test]
+fn a_click_after_closing_actions_cannot_expand_a_fold_until_it_is_repainted() {
+    let f = Fixture::new();
+    let edited = review_fixture(&f);
+    f.write("page.txt", &edited);
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    drawn(&mut reader, 60, 24);
+    assert_eq!(reader.key(Key::Char('c')), After::Stay);
+    let compact = drawn(&mut reader, 60, 24);
+    assert!(compact[1].contains("… 7 unchanged lines"), "{compact:?}");
+
+    assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+    assert!(drawn(&mut reader, 60, 24)[0].contains("Actions"));
+    assert_eq!(reader.key(Key::Esc), After::Stay);
+    let click = Key::Click(6, 1);
+    assert_eq!(reader.key(click), After::Ignored);
+    assert_eq!(drawn(&mut reader, 60, 24), compact);
+    assert_eq!(reader.key(click), After::Stay);
+    assert!(drawn(&mut reader, 60, 24)[1].contains("1   line 1"));
 }
 
 #[test]

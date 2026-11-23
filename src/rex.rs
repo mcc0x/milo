@@ -1,6 +1,9 @@
-//! Calls Rex for floating readers, setup, and the new-tab listener.
+//! Calls Rex for floating readers, Markdown previews, setup, and the new-tab listener.
 
+mod preview;
 mod server;
+
+pub(crate) use preview::{available as preview_available, launch as preview, preview_anchor};
 
 #[cfg(target_os = "macos")]
 pub(crate) use server::native_app;
@@ -462,7 +465,9 @@ pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&st
     let target = Target::current().ok_or("Reading a file needs a Rex pane.")?;
     let exe = std::env::current_exe().map_err(|_| "Rex did not open the file.")?;
     let name = file.file_name().unwrap_or_default().to_string_lossy();
-    float(&target, root, &name, &reader_command(&exe, file, commit), previous).ok_or("Rex did not open the file.")
+    let origin = preview::anchor_argument().unwrap_or_default();
+    float(&target, root, &name, &reader_command(&exe, file, commit), previous, Some(origin))
+        .ok_or("Rex did not open the file.")
 }
 
 /// Opens a floating review of the patch in `patch` in the caller's tab.
@@ -470,18 +475,30 @@ pub fn open(root: &Path, file: &Path, commit: Option<&str>, previous: Option<&st
 pub fn open_review(target: &Target, root: &Path, patch: &Path, from: Option<&str>) -> Result<(), &'static str> {
     const FAILED: &str = "Rex did not open the review. Run milo review PATCH without --float in a terminal.";
     let exe = std::env::current_exe().map_err(|_| FAILED)?;
-    float(target, root, "Patch review", &review_command(&exe, patch, from), None).map(drop).ok_or(FAILED)
+    float(target, root, "Patch review", &review_command(&exe, patch, from), None, None).map(drop).ok_or(FAILED)
 }
 
 /// Runs `command`, a JSON list of words, in a new floating pane over the
 /// tab of `target`, and returns the pane's block ID.
-fn float(target: &Target, root: &Path, label: &str, command: &str, previous: Option<&str>) -> Option<String> {
+fn float(
+    target: &Target,
+    root: &Path,
+    label: &str,
+    command: &str,
+    previous: Option<&str>,
+    preview_origin: Option<&str>,
+) -> Option<String> {
     let previous = previous.map(json).unwrap_or_else(|| "null".into());
-    let args = format!(
-        r#"{{"label":{},"cwd":{},"command":{command},"previous":{previous}}}"#,
+    let mut args = format!(
+        r#"{{"label":{},"cwd":{},"command":{command},"previous":{previous}"#,
         reader_label(label),
         json(&root.to_string_lossy()),
     );
+    if let Some(origin) = preview_origin {
+        args.push_str(r#","preview_origin":"#);
+        args.push_str(&json(origin));
+    }
+    args.push('}');
     script(Some(target), &target.session, include_str!("rex_reader.lua"), ["--args", &args])
         .filter(|reply| exact_block(OsStr::new(reply)).is_some())
 }

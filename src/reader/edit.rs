@@ -9,6 +9,7 @@ mod compare;
 
 use std::borrow::Cow;
 use std::ffi::OsString;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -956,17 +957,17 @@ impl Editor {
         true
     }
 
-    pub(super) fn draw_hint(&self, s: &mut Screen) {
+    pub(super) fn draw_hint(&self, s: &mut Screen) -> Option<Range<usize>> {
         if let Some(comparison) = &self.comparison {
             comparison.hint(s);
-            return;
+            return None;
         }
         let middle: &[_] = if format::known(self.place.name()) {
             &["^Z undo", "^F format", "Esc done"]
         } else {
             &["^Z undo", "Esc done"]
         };
-        help::draw_hint(s, "^S save", middle, "^G help");
+        help::draw_hint(s, "^S save", middle, "^G help").span(middle.len() + 1)
     }
 }
 

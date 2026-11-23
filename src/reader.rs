@@ -24,11 +24,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::actions::{self, Choice, Menu};
 use crate::diff::{Line, LineKind};
 use crate::git::{Commit, CommitVersion, Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::{Direction, Key};
-use crate::native::Action;
+use crate::native::{self, Action};
 use crate::pane::{After, Pane};
 use crate::picture::Picture;
 use crate::preferences::{IconMode, Preferences};
@@ -39,6 +40,7 @@ use crate::ui::{ADD, DEL};
 use crate::watch::{Ignored, Scope};
 use changes::{Folds, Review};
 use disk::{ReadOnly, SaveError};
+use draw::{Hint, Hints};
 use edit::{Editor, Place, Step};
 pub use rescue::take_notes as take_rescue_notes;
 pub use tabs::Tabs;
@@ -81,6 +83,8 @@ pub struct Reader {
     read_only: Option<ReadOnly>,
     /// The draft, while the file is being edited.
     editor: Option<Box<Editor>>,
+    actions: Option<Menu>,
+    hints: Hints,
     /// The draft's top line, while the freshly inspected source is still loading.
     pending_editor_line: Option<usize>,
     /// Milo's state folder, where a draft is kept if the reader is closed from outside.
@@ -333,6 +337,99 @@ impl Reader {
         cfg!(target_os = "macos") && matches!(self.source, Source::Working(_))
     }
 
+    fn can_preview(&self) -> bool {
+        !self.markdown_source && self.markdown().is_some()
+    }
+
+    /// Use the current view to decide whether to advertise the menu. Check
+    /// the working path and external capabilities only on explicit input.
+    fn offers_actions(&self) -> bool {
+        matches!(self.source, Source::Working(_))
+            && (self.read_only.is_none() || self.can_preview() || self.offers_native_actions())
+    }
+
+    fn action_help(&self) -> Option<help::HelpRow> {
+        self.offers_actions().then(|| help::key("Ctrl-A", "file actions"))
+    }
+
+    fn show_actions(&mut self, now: Instant) -> After {
+        let Source::Working(work) = &self.source else { return After::Ignored };
+        let root = &work.repo.root;
+        let id = Some(work.root.identity());
+        let path = &work.relative;
+        let mut choices = Vec::new();
+        if self.read_only.is_none() && self.edit_refusal().is_none() {
+            choices.push(Choice::Edit);
+        }
+        if self.can_preview() && crate::preview::eligible(root, id, path) {
+            choices.push(Choice::Preview);
+        }
+        let native = native::choices(root, id, path);
+        if native.open {
+            choices.push(Choice::Open);
+        }
+        if native.reveal {
+            choices.push(Choice::Reveal);
+        }
+        if choices.is_empty() {
+            self.say("No file actions here.", now);
+        } else {
+            let menu = Menu::new(choices, root);
+            self.pause_video();
+            self.clear_hits();
+            self.actions = Some(menu);
+        }
+        After::Stay
+    }
+
+    fn run_action(&mut self, choice: Choice, now: Instant) -> After {
+        match choice {
+            Choice::Edit => self.edit(now),
+            Choice::Open => self.native_action(Action::Open, now),
+            Choice::Reveal => self.native_action(Action::Reveal, now),
+            Choice::Preview => {
+                let result = match &self.source {
+                    Source::Working(work) if self.can_preview() => {
+                        crate::preview::open(&work.repo.root, Some(work.root.identity()), &work.relative)
+                    }
+                    _ => Err("Markdown preview is unavailable here."),
+                };
+                self.say(result.err().unwrap_or("Opened in tkmp."), now);
+                After::Stay
+            }
+            Choice::Read => unreachable!("already reading this file"),
+        }
+    }
+
+    fn native_action(&mut self, action: Action, now: Instant) -> After {
+        match self.source.working() {
+            Ok(work) => {
+                let success = match action {
+                    Action::Open => "Opened in default app.",
+                    Action::Reveal => "Revealed in Finder.",
+                };
+                let result = action.run(&work.repo.root, Some(work.root.identity()), &work.relative);
+                self.say(result.err().unwrap_or(success), now);
+            }
+            Err(ReadOnly(why)) => {
+                let notice = JumpNotice::Said { lead: "Unavailable: ", text: why };
+                self.change_notice = Some((notice, now + CHANGE_NOTICE));
+            }
+        }
+        After::Stay
+    }
+
+    fn clear_hits(&mut self) {
+        self.hints = Hints::default();
+        self.review.click_width = 0;
+    }
+
+    fn hide(&mut self) {
+        self.actions = None;
+        self.clear_hits();
+        self.park_media();
+    }
+
     fn native_help(&self) -> impl Iterator<Item = help::HelpRow> {
         self.offers_native_actions()
             .then(|| [help::key("^O", "open in default app"), help::key("^R", "reveal in Finder")])
@@ -373,6 +470,8 @@ impl Reader {
             pan_limit: 0,
             read_only: None,
             editor: None,
+            actions: None,
+            hints: Hints::default(),
             pending_editor_line: None,
             state: rescue::state_dir(),
             tools: std::env::var_os("PATH"),
@@ -484,6 +583,7 @@ impl Pane for Reader {
         }
         if let Body::Video(video) = &self.body {
             let mut rows = media::help_rows(video);
+            rows.extend(self.action_help());
             rows.extend(self.native_help());
             rows.push(key("q Esc", "close"));
             return Page::new(rows);
@@ -497,6 +597,7 @@ impl Pane for Reader {
                 key("b    ", "page up"),
                 key("g G  ", "top/bottom"),
             ];
+            rows.extend(self.action_help());
             rows.extend(self.native_help());
             if let Some(ReadOnly(why)) = self.read_only {
                 rows.extend([note("Read-only:"), note(why)]);
@@ -532,6 +633,7 @@ impl Pane for Reader {
                 note("Or click a fold."),
             ]);
         }
+        rows.extend(self.action_help());
         rows.extend(self.native_help());
         rows.extend([
             key("g G  ", "top/bottom"),
@@ -567,6 +669,17 @@ impl Pane for Reader {
 
     fn cover(&mut self) {
         self.pause_video();
+    }
+
+    fn tracks_hover(&self) -> bool {
+        true
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<std::ops::Range<usize>> {
+        match &self.actions {
+            Some(menu) => menu.hover_span(x, y),
+            None => self.hints.at(x, y).map(|(_, span)| span.clone()),
+        }
     }
 
     fn editing(&self) -> bool {
@@ -667,26 +780,39 @@ impl Pane for Reader {
 
 impl Reader {
     fn input(&mut self, key: Key, now: Instant) -> After {
+        if let Some(menu) = &mut self.actions {
+            return match menu.key(key) {
+                actions::Step::Stay => After::Stay,
+                actions::Step::Close => {
+                    self.actions = None;
+                    After::Stay
+                }
+                actions::Step::Run(choice) => {
+                    self.actions = None;
+                    self.run_action(choice, now)
+                }
+            };
+        }
+        if let Key::Click(x, y) = key
+            && let Some((hint, _)) = self.hints.at(x, y)
+        {
+            return match hint {
+                Hint::Actions => self.show_actions(now),
+                Hint::Help => {
+                    self.cover();
+                    After::Help
+                }
+            };
+        }
         if let Some(editor) = &mut self.editor {
             let step = editor.key(key, now);
             return self.apply(step, now);
         }
+        if key == Key::Ctrl(b'a') {
+            return self.show_actions(now);
+        }
         if let Some(action) = Action::key(key) {
-            match self.source.working() {
-                Ok(work) => {
-                    let success = match action {
-                        Action::Open => "Opened in default app.",
-                        Action::Reveal => "Revealed in Finder.",
-                    };
-                    let result = action.run(&work.repo.root, Some(work.root.identity()), &work.relative);
-                    self.say(result.err().unwrap_or(success), now);
-                }
-                Err(ReadOnly(why)) => {
-                    let notice = JumpNotice::Said { lead: "Unavailable: ", text: why };
-                    self.change_notice = Some((notice, now + CHANGE_NOTICE));
-                }
-            }
-            return After::Stay;
+            return self.native_action(action, now);
         }
         if let Body::Video(video) = &mut self.body
             && let Some(after) = media::input(video, key)
@@ -704,6 +830,7 @@ impl Reader {
             if key == Key::Char('m') {
                 self.markdown_source = !self.markdown_source;
                 self.change_notice = None;
+                self.clear_hits();
                 return After::Stay;
             }
             if !self.markdown_source {
@@ -741,6 +868,7 @@ impl Reader {
         match self.open_editor() {
             Ok(editor) => {
                 self.editor = Some(Box::new(editor));
+                self.clear_hits();
                 self.clear_change();
             }
             Err(ReadOnly(why)) => {
@@ -861,6 +989,7 @@ impl Reader {
     /// Goes back to reading at the line the draft was showing.
     fn close_editor(&mut self, said: Option<&'static str>) {
         let Some(editor) = self.editor.take() else { return };
+        self.clear_hits();
         let line = editor.top();
         drop(editor);
         self.pending_editor_line = None;

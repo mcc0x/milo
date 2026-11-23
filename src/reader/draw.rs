@@ -28,6 +28,34 @@ fn text_for_draw(text: &str, pan: usize, width: usize) -> (usize, &str) {
 const NAME_ROOM: usize = 10;
 const PLACE_OF: &str = " of ";
 const PLACE_SPACE: &str = " · ";
+const HELP: &str = "? help";
+const ACTIONS: &str = "Ctrl-A Actions";
+const ACTIONS_SHORT: &str = "Actions";
+const GAP: &str = " · ";
+
+#[derive(Clone, Copy)]
+pub(super) enum Hint {
+    Actions,
+    Help,
+}
+
+#[derive(Default)]
+pub(super) struct Hints {
+    row: usize,
+    actions: Option<Range<usize>>,
+    help: Option<Range<usize>>,
+}
+
+impl Hints {
+    pub(super) fn at(&self, x: usize, y: usize) -> Option<(Hint, &Range<usize>)> {
+        if y != self.row {
+            return None;
+        }
+        [(Hint::Actions, &self.actions), (Hint::Help, &self.help)]
+            .into_iter()
+            .find_map(|(hint, span)| span.as_ref().filter(|span| span.contains(&x)).map(|span| (hint, span)))
+    }
+}
 
 fn digits(n: usize) -> usize {
     n.max(1).ilog10() as usize + 1
@@ -158,8 +186,9 @@ impl LinePainter<'_> {
 
 impl Reader {
     pub(super) fn draw_file(&mut self, s: &mut Screen, now: Instant) {
-        s.clear();
+        self.clear_hits();
         if let Some(mut editor) = self.editor.take() {
+            s.clear();
             // The frame before this one said a formatter was about to run; this one shows what it did.
             editor.format_if_announced();
             self.draw_editor(s, &mut editor, now);
@@ -173,17 +202,21 @@ impl Reader {
         if self.change_notice.is_some_and(|(_, until)| now >= until) {
             self.change_notice = None;
         }
+        if let Some(menu) = &mut self.actions {
+            menu.draw(s, &self.path);
+            return;
+        }
+        s.clear();
         let hint = s.h >= 3;
         self.rows = s.h.saturating_sub(1 + usize::from(hint));
         self.columns = 0;
         self.pan_limit = 0;
-        self.review.click_width = 0;
         if s.w == 0 || s.h == 0 {
             return;
         }
         let notice = self.change_notice.map(|(notice, _)| notice);
         let right = match notice {
-            Some(notice) if !hint => draw_change_notice(s, 0, notice),
+            Some(notice) if !hint => draw_change_notice(s, 0, notice).start,
             _ => self.draw_details(s),
         };
         self.draw_heading(s, right);
@@ -191,8 +224,15 @@ impl Reader {
             self.draw_body(s);
         }
         if hint {
+            self.hints.row = s.h - 1;
             if let Some(notice) = notice {
-                draw_change_notice(s, s.h - 1, notice);
+                let shown = draw_change_notice(s, self.hints.row, notice);
+                let start = shown.end + str_width(GAP);
+                if start + HELP.len() + shown.start <= s.w {
+                    s.put(shown.end, self.hints.row, str_width(GAP), GAP, FAINT);
+                    s.put(start, self.hints.row, HELP.len(), HELP, FAINT);
+                    self.hints.help = Some(start..start + HELP.len());
+                }
             } else {
                 self.draw_hint(s);
             }
@@ -211,7 +251,8 @@ impl Reader {
         // With no row for hints, a question or message takes the heading's row.
         let y = if hint { s.h - 1 } else { 0 };
         if !editor.draw_message(s, y, now) && hint {
-            editor.draw_hint(s);
+            self.hints.row = y;
+            self.hints.help = editor.draw_hint(s);
         }
     }
 
@@ -287,8 +328,7 @@ impl Reader {
     /// The hints of one file among several of a handed-over patch. Moving
     /// between the files is kept longest, and says which file this is where
     /// the heading has no room to.
-    fn draw_files_hint(&self, s: &mut Screen, handed: &Handed) {
-        const HELP: &str = "? help";
+    fn draw_files_hint(&self, s: &mut Screen, handed: &Handed) -> Option<Range<usize>> {
         let counted = if handed_place_fits(handed, s.w) {
             String::new()
         } else {
@@ -309,7 +349,7 @@ impl Reader {
             middle[count] = item;
             count += 1;
         }
-        crate::help::draw_hint(s, files, &middle[..count], HELP);
+        crate::help::draw_hint(s, files, &middle[..count], HELP).span(count + 1)
     }
 
     /// Whether `n` has a change to go to and a line that is not one to leave.
@@ -318,7 +358,7 @@ impl Reader {
             if text.added + text.removed > 0 && text.lines.len() > (text.added + text.removed) as usize)
     }
 
-    fn draw_hint(&self, s: &mut Screen) {
+    fn draw_hint(&mut self, s: &mut Screen) {
         if let Body::Video(video) = &self.body {
             if video.error().is_some() {
                 self.draw_reader_hint(s, "q close", &[]);
@@ -343,7 +383,8 @@ impl Reader {
         if let Source::Handed(handed) = &self.source
             && handed.total > 1
         {
-            return self.draw_files_hint(s, handed);
+            self.hints.help = self.draw_files_hint(s, handed);
+            return;
         }
         if self.can_fold() {
             let action = if self.review.is_compact() { "c full file" } else { "c changes only" };
@@ -372,15 +413,27 @@ impl Reader {
         self.draw_reader_hint(s, action, middle);
     }
 
-    fn draw_reader_hint(&self, s: &mut Screen, action: &str, middle: &[&str]) {
-        if self.offers_native_actions() {
-            // The new keys give way first, so the existing hints still fit as before.
-            let mut working = [""; 5];
-            working[0] = "^O open · ^R reveal";
-            working[1..1 + middle.len()].copy_from_slice(middle);
-            crate::help::draw_hint(s, action, &working[..1 + middle.len()], "? help");
-        } else {
-            crate::help::draw_hint(s, action, middle, "? help");
+    fn draw_reader_hint(&mut self, s: &mut Screen, action: &str, middle: &[&str]) {
+        let mut items = [""; 6];
+        let native = usize::from(self.offers_native_actions());
+        if native > 0 {
+            items[0] = "^O open · ^R reveal";
+        }
+        let actions_at = native + middle.len();
+        items[native..actions_at].copy_from_slice(middle);
+        let actions = self.offers_actions();
+        if actions {
+            // Prefer the short label when spelling the shortcut would crowd
+            // out even a close hint beside it.
+            let primary = if action.is_empty() { 0 } else { str_width(action) + str_width(GAP) };
+            let full = 2 + primary + str_width("q close · Ctrl-A Actions · ? help");
+            items[actions_at] = if s.w >= full { ACTIONS } else { ACTIONS_SHORT };
+        }
+        let count = actions_at + usize::from(actions);
+        let hits = crate::help::draw_hint(s, action, &items[..count], HELP);
+        self.hints.help = hits.span(count + 1);
+        if actions {
+            self.hints.actions = hits.span(actions_at + 1);
         }
     }
 
@@ -492,7 +545,7 @@ fn draw_fold(s: &mut Screen, y: usize, gutter: usize, fold: Fold, selected: bool
 }
 
 /// Uses the right edge of the heading or the left edge of the hint.
-fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> usize {
+fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> Range<usize> {
     const PREFIX: &str = "Change ";
     const OF: &str = " of ";
     let number_width = |n: usize| n.ilog10() as usize + 1;
@@ -526,14 +579,7 @@ fn draw_change_notice(s: &mut Screen, y: usize, notice: JumpNotice) -> usize {
             s.put_fit(x + led, y, width - led, text, st);
         }
     }
-    if y != 0 {
-        const HELP: &str = " · ? help";
-        let help_width = str_width(HELP);
-        if width + help_width <= room {
-            s.put(x + width, y, help_width, HELP, FAINT);
-        }
-    }
-    x
+    x..x + width
 }
 
 fn draw_note(s: &mut Screen, rows: usize, mut note: &str) {

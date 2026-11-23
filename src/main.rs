@@ -1,5 +1,6 @@
 //! Parses the command line and dispatches commands.
 
+mod actions;
 mod alerts;
 mod diff;
 #[cfg(test)]
@@ -23,6 +24,7 @@ mod paths;
 mod picture;
 mod preferences;
 mod presence;
+mod preview;
 mod read;
 mod reader;
 mod review;
@@ -113,6 +115,7 @@ Outline (tree):
   ↑↓ or k j     move
   Enter         toggle a folder or open a file
   /             find a file by its name or path
+  Ctrl-A        actions for the selected path (also in Find)
   Ctrl-O/R      open in the default Mac app / reveal in Finder (also in Find)
   Space         toggle a folder
   ← or h        close an open folder or go to the parent
@@ -151,6 +154,7 @@ Reader (also opened by milo view):
   m             rendered Markdown / source and changes
   Space, ←→     in an MP4: play/pause, seek back/forward five seconds
   e             edit a working text file
+  Ctrl-A        file actions while reading a working file
   Ctrl-O/R      open the working file in its default Mac app / reveal in Finder
   q or Esc      close
 
@@ -551,6 +555,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             })
         }),
         Command::ShellOutline(shell) => {
+            rex::preview_anchor(shell);
             run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), outline)))
         }
         Command::History(path) => run(Start::Reading(project_path(path)), &|| open_history(path)),
@@ -558,6 +563,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), history)))
         }
         Command::PeekOutline(origin) => {
+            rex::preview_anchor(origin);
             let result = run(Start::Reading(Path::new(".")), &|| {
                 Ok(workflow::project(open_repo(None)?, None, |repo, prefs| {
                     Box::new(Outline::with_preferences(repo, rex::inside(), prefs).into_peek().refreshing_away())

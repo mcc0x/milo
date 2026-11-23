@@ -219,26 +219,8 @@ fn native_clients(output: &[u8], session: &str, uid: u64) -> Option<Result<(), &
 /// Prefer the executable the kernel reports for a direct Rex parent. Otherwise
 /// use an absolute PATH entry, never a launcher or executable in the project.
 #[cfg(any(target_os = "macos", test))]
-fn native_program(root: &Path, parent: Option<PathBuf>, path: &OsStr) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let project = root.canonicalize().ok()?;
-    let outside = |path: &Path| !path.starts_with(root) && !path.starts_with(&project);
-    let executable = |file: PathBuf| {
-        if !file.is_absolute() || !outside(&file) || !outside(&file.parent()?.canonicalize().ok()?) {
-            return None;
-        }
-        let file = file.canonicalize().ok()?;
-        if !outside(&file) || !file.is_file() {
-            return None;
-        }
-        let name = std::ffi::CString::new(file.as_os_str().as_bytes()).ok()?;
-        // SAFETY: name is a live NUL-terminated path. access only checks permissions.
-        (unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0).then_some(file)
-    };
-    parent.filter(|file| file.file_name() == Some(OsStr::new("rex"))).and_then(executable).or_else(|| {
-        std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join("rex")).find_map(executable)
-    })
+fn native_program(root: &Path, cwd: &Path, parent: Option<&Path>, path: &OsStr) -> Option<PathBuf> {
+    crate::native::trusted::find("rex", Some(root), cwd, parent, path)
 }
 
 /// Check the same session and pane the local CLI sees, then count the apps
@@ -251,7 +233,7 @@ pub(crate) fn native_app(root: &Path, session: &OsStr, block: &OsStr) -> Result<
     let block = exact_id(block, "block:").ok_or(NATIVE_UNKNOWN)?;
     let parent = super::parent_program();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let exe = native_program(root, parent, &path).ok_or(NATIVE_UNKNOWN)?;
+    let exe = native_program(root, Path::new("."), parent.as_deref(), &path).ok_or(NATIVE_UNKNOWN)?;
     // Both probes run in the input loop, so they share one short deadline.
     let deadline = Instant::now() + Duration::from_millis(600);
     let probe = |args: &[&str]| {
@@ -385,18 +367,32 @@ mod tests {
         symlink(&checkout, outside_link.join("rex")).unwrap();
         let alias = installed.root.join("checkout-dir");
         symlink(&inside_link, &alias).unwrap();
+        let cwd = installed.root.join("invocation-directory");
+        let cwd_bin = binary("invocation-directory/bin/rex", 0o755);
+        let cwd_alias = installed.root.join("cwd-alias");
+        symlink(&cwd, &cwd_alias).unwrap();
+        let cwd_link = installed.root.join("cwd-link");
+        fs::create_dir(&cwd_link).unwrap();
+        symlink(&cwd_bin, cwd_link.join("rex")).unwrap();
+        let case_alias = root.with_file_name("PROJECT").join("bin");
         let bad_path = [
             Path::new("."),
             checkout.parent().unwrap(),
             &inside_link,
             &outside_link,
             &alias,
+            cwd_bin.parent().unwrap(),
+            &cwd_alias.join("bin"),
+            &cwd_link,
+            &case_alias,
             non_executable.parent().unwrap(),
         ];
-        assert_eq!(native_program(root, Some(checkout.clone()), &std::env::join_paths(bad_path).unwrap()), None);
+        let excluded = std::env::join_paths(bad_path).unwrap();
+        assert_eq!(native_program(root, &cwd, Some(&checkout), &excluded), None);
+        assert_eq!(native_program(root, &cwd, Some(&cwd_bin), &excluded), None);
         let path = std::env::join_paths(bad_path.into_iter().chain(executable.parent())).unwrap();
-        assert_eq!(native_program(root, None, &path), Some(executable));
-        assert_eq!(native_program(root, Some(parent.clone()), &path), Some(parent));
+        assert_eq!(native_program(root, &cwd, None, &path), Some(executable));
+        assert_eq!(native_program(root, &cwd, Some(&parent), &path), Some(parent));
     }
 
     #[test]

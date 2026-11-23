@@ -15,7 +15,7 @@ use crate::ui::{self, FAINT};
 use crate::walk;
 use crate::width::{byte_at_col, str_width};
 
-use super::{NATIVE_HINT, NativeSelection, Outline};
+use super::{ACTIONS_HINT, NATIVE_HINT, NativeSelection, Outline, SHORT_ACTIONS_HINT};
 
 pub(super) const WALK_FRAME: Duration = Duration::from_millis(40);
 const QUERY_LIMIT: usize = 4096;
@@ -94,7 +94,10 @@ pub(super) struct Search {
     width: usize,
     rows: usize,
     close: Range<usize>,
-    open_y: Option<usize>,
+    footer_y: Option<usize>,
+    open: Range<usize>,
+    actions: Range<usize>,
+    inline_result: Option<usize>,
     clicked: Option<(usize, usize, usize, Instant)>,
 }
 
@@ -199,13 +202,55 @@ impl Search {
             self.filtered_len = None;
         }
         (self.selected, self.top, self.pan) = (0, 0, 0);
-        self.painted = 0..0;
-        self.open_y = None;
-        self.clear_click();
+        self.clear_targets();
     }
 
     pub(super) fn selected_path(&self) -> Option<&str> {
         self.matches.get(self.selected).map(|&i| self.files.path(i))
+    }
+
+    pub(super) fn visible_path(&self) -> Option<&str> {
+        if self.width >= 3 && (self.painted.contains(&self.selected) || self.inline_result == Some(self.selected)) {
+            self.selected_path()
+        } else {
+            None
+        }
+    }
+
+    fn clear_targets(&mut self) {
+        self.painted = 0..0;
+        self.footer_y = None;
+        self.inline_result = None;
+        self.clear_click();
+    }
+
+    pub(super) fn dismiss_actions(&mut self) {
+        self.clear_targets();
+        self.close = 0..0;
+        self.match_fits = false;
+    }
+
+    pub(super) fn actions_at(&self, x: usize, y: usize) -> bool {
+        self.footer_y == Some(y) && self.actions.contains(&x)
+    }
+
+    pub(super) fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        if self.actions_at(x, y) {
+            Some(self.actions.clone())
+        } else if self.footer_y == Some(y) && self.open.contains(&x) {
+            Some(self.open.clone())
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn actions_unshown(&mut self) {
+        self.clear_click();
+        self.notice = (self.width != 0 && !self.match_fits).then_some(WIDEN);
+    }
+
+    pub(super) fn action_result(&mut self, result: Result<(), &'static str>) {
+        self.notice = result.err();
     }
 
     pub(super) fn clear_click(&mut self) {
@@ -253,7 +298,7 @@ impl Search {
                 return if self.selected_path().is_some() { Action::Open } else { Action::Ignored };
             }
             Key::Click(x, 0) if self.close.contains(&x) => return Action::Close,
-            Key::Click(x, y) if self.open_y == Some(y) && (1..1 + OPEN.len()).contains(&x) => return Action::Open,
+            Key::Click(x, y) if self.footer_y == Some(y) && self.open.contains(&x) => return Action::Open,
             Key::Click(x, y) => return self.click(x, y, now),
             Key::Char(ch) if !ch.is_control() => {
                 let action = self.paste(Some(ch.encode_utf8(&mut [0; 4])));
@@ -333,7 +378,8 @@ impl Search {
     fn draw(&mut self, s: &mut Screen) {
         self.filter();
         s.clear();
-        self.open_y = None;
+        self.footer_y = None;
+        self.inline_result = None;
         self.close = 0..0;
         let (w, h) = (s.w, s.h);
         if h == 0 || w == 0 {
@@ -420,6 +466,7 @@ impl Search {
                 self.path_width = badge_at.saturating_sub(x + 1);
                 if let Some(path) = self.selected_path() {
                     self.draw_path(s, x, 0, path);
+                    self.inline_result = Some(self.selected);
                 }
             }
             return;
@@ -446,13 +493,19 @@ impl Search {
             s.put_fit(inset, y, self.path_width, note, FAINT);
             return;
         }
-        if cfg!(target_os = "macos") && self.path_width >= OPEN.len() + str_width(NATIVE_HINT) + 3 {
-            help::draw_hint(s, OPEN, &["←→ pan", "↑↓ move"], NATIVE_HINT);
+        let actions =
+            if self.path_width >= OPEN.len() + 3 + ACTIONS_HINT.len() { ACTIONS_HINT } else { SHORT_ACTIONS_HINT };
+        let middle = ["←→ pan", "↑↓ move", actions];
+        let hits = if cfg!(target_os = "macos")
+            && self.path_width >= OPEN.len() + actions.len() + str_width(NATIVE_HINT) + 6
+        {
+            help::draw_hint(s, OPEN, &middle, NATIVE_HINT)
         } else {
-            let hint = if s.w >= 36 { "Enter open · ↑↓ move · ←→ pan" } else { "Enter open · ↑↓ move" };
-            s.put_fit(inset, y, self.path_width, hint, FAINT);
-        }
-        self.open_y = Some(y);
+            help::draw_hint(s, OPEN, &middle[..2], actions)
+        };
+        self.open = hits.span(0).unwrap_or_default();
+        self.actions = hits.span(3).unwrap_or_default();
+        self.footer_y = Some(y);
     }
 }
 

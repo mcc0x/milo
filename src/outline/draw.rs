@@ -12,7 +12,7 @@ use crate::ui::{self, FAINT};
 use crate::width::str_width;
 
 use super::attention::{LIVE, PULSE};
-use super::{NATIVE_HINT, Outline};
+use super::{ACTIONS_HINT, NATIVE_HINT, Note, Outline, SHORT_ACTIONS_HINT};
 
 /// The shortest pane with room for the project heading.
 const HEADING_ROWS: usize = 4;
@@ -24,6 +24,7 @@ const HINT_ROWS: usize = 12;
 const WIDE_COLS: usize = 52;
 const GIT_ERROR: &str = "git did not answer";
 const FIND: &str = "/ find";
+const HELP: &str = "? help";
 
 #[derive(Default)]
 pub(super) struct Layout {
@@ -38,7 +39,9 @@ pub(super) struct Layout {
     heading: bool,
     hint: bool,
     wide: bool,
-    find_y: Option<usize>,
+    footer_y: Option<usize>,
+    find: Range<usize>,
+    actions: Range<usize>,
     partial: bool,
 }
 
@@ -72,12 +75,26 @@ impl Layout {
     }
 
     pub(super) fn find_at(&self, x: usize, y: usize) -> bool {
-        self.find_y == Some(y) && (1..1 + FIND.len()).contains(&x)
+        self.footer_y == Some(y) && self.find.contains(&x)
+    }
+
+    pub(super) fn actions_at(&self, x: usize, y: usize) -> bool {
+        self.footer_y == Some(y) && self.actions.contains(&x)
+    }
+
+    pub(super) fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        if self.actions_at(x, y) {
+            Some(self.actions.clone())
+        } else if self.find_at(x, y) {
+            Some(self.find.clone())
+        } else {
+            None
+        }
     }
 
     pub(super) fn clear_tree_targets(&mut self) {
         self.tree_rows = 0..0;
-        self.find_y = None;
+        self.footer_y = None;
     }
 }
 
@@ -116,6 +133,10 @@ impl Outline {
         let folder_partial = self.listing.truncated || self.listing.unreadable && !self.listing.paths.is_empty();
         let partial = self.repo.paths_incomplete() || folder_partial;
         let mut layout = arrange(s.w, s.h, self.repo.git, partial);
+        if layout.strip && self.actions.is_some() {
+            self.dismiss_actions();
+            self.note = Some((Note::StripFind, now));
+        }
         layout.strip_hits = std::mem::take(&mut self.painted.strip_hits);
         layout.clear_strip_targets();
         if layout.width == 0 {
@@ -148,8 +169,8 @@ impl Outline {
             s.put_fit(1, s.h - 1, layout.width.saturating_sub(2), note, Style::fg(screen::YELLOW));
         } else if git_unavailable {
             s.put_fit(1, s.h - 1, s.w - 2, GIT_UNAVAILABLE, ui::DEL);
-        } else if layout.hint && self.attention.show_controls() && self.draw_hint(s) {
-            layout.find_y = Some(s.h - 1);
+        } else if layout.hint && self.attention.show_controls() {
+            self.draw_hint(s, &mut layout);
         }
         self.record_layout(layout);
     }
@@ -236,16 +257,24 @@ impl Outline {
 
     /// Words the keys for what they would do, with shorter hints in narrow
     /// panes. On screen a pending file is simply one that changed.
-    fn draw_hint(&self, s: &mut Screen) -> bool {
+    fn draw_hint(&self, s: &mut Screen, layout: &mut Layout) {
         let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
         // Leave room for the standard Find and changes-only hints before adding both macOS shortcuts.
         let last = if cfg!(target_os = "macos") && s.w >= 70 { NATIVE_HINT } else { "q quit" };
-        if self.repo.git {
-            let filter = if self.pending_only { "c all files" } else { "c changed only" };
-            let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
-            help::draw_hint(s, FIND, &[first, folders, filter, last], "? help").index_at(1, s.h - 1) == Some(0)
-        } else {
-            help::draw_hint(s, FIND, &["Enter open", folders, last], "? help").index_at(1, s.h - 1) == Some(0)
+        let filter = if self.pending_only { "c all files" } else { "c changed only" };
+        let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
+        let actions =
+            if s.w >= FIND.len() + ACTIONS_HINT.len() + HELP.len() + 8 { ACTIONS_HINT } else { SHORT_ACTIONS_HINT };
+        let git = [first, folders, filter, last, actions];
+        let folder = [first, folders, last, actions];
+        let middle = if self.repo.git { git.as_slice() } else { folder.as_slice() };
+        let can_act = layout.tree_rows.contains(&self.sel);
+        let middle = if can_act { middle } else { &middle[..middle.len() - 1] };
+        let hits = help::draw_hint(s, FIND, middle, HELP);
+        layout.footer_y = Some(s.h - 1);
+        layout.find = hits.span(0).unwrap_or_default();
+        if can_act {
+            layout.actions = hits.span(middle.len()).unwrap_or_default();
         }
     }
 

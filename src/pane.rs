@@ -711,6 +711,9 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                         pointer = None;
                         redraw |= highlighted.is_some();
                     }
+                    if !key.while_obscured() && !pane_row_available(screen, &help, &pace, 0) {
+                        continue;
+                    }
                     // Skip stale controls and the repeated click that opened another pane.
                     if let Key::Click(x, y) = key
                         && (overlay_changed || !pane_row_available(screen, &help, &pace, y) || handoff_click.is_repeat(x, y))

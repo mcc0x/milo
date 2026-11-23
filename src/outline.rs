@@ -8,12 +8,14 @@ mod search;
 mod untracked;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::actions::Menu;
 use crate::git::{Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::Key;
@@ -33,6 +35,14 @@ use self::draw::{ChangeColumns, Layout};
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
 const NATIVE_HINT: &str = "Ctrl-O open · Ctrl-R reveal";
+const ACTIONS_HINT: &str = "Ctrl-A Actions";
+const SHORT_ACTIONS_HINT: &str = "Actions";
+
+struct Actions {
+    path: Rc<str>,
+    same_project: bool,
+    menu: Menu,
+}
 
 enum Note {
     Tree(String),
@@ -102,6 +112,7 @@ pub struct Outline {
     opener: OpenReader,
     clicked: Option<input::Click>,
     search: Option<search::Search>,
+    actions: Option<Actions>,
     search_walk: Option<std::thread::JoinHandle<walk::Listing>>,
     /// Something to say in place of the key hint, and when it was said.
     note: Option<(Note, Instant)>,
@@ -173,6 +184,7 @@ impl Outline {
             opener: OpenReader::new(inside_rex),
             clicked: None,
             search: None,
+            actions: None,
             search_walk: None,
             note: None,
             reading: None,
@@ -243,6 +255,9 @@ impl Outline {
         }
         if repo.root != self.repo.root {
             self.root_identity = native::identity(&repo.root);
+            if let Some(actions) = &mut self.actions {
+                actions.same_project = false;
+            }
             self.native_selection = NativeSelection::Hidden;
             self.painted.clear_tree_targets();
             self.tree = Tree::default();
@@ -426,7 +441,7 @@ impl Outline {
     }
 
     fn follows_activity(&self, now: Instant) -> bool {
-        self.search.is_none() && self.follow_activity && self.attention.following(now)
+        self.search.is_none() && self.actions.is_none() && self.follow_activity && self.attention.following(now)
     }
 
     /// Shows a line in place of the key hint for a few seconds.
@@ -451,6 +466,9 @@ impl Outline {
         } else {
             self.draw_outline(screen, now);
         }
+        if let Some(actions) = &mut self.actions {
+            actions.menu.draw(screen, &actions.path);
+        }
     }
 }
 
@@ -468,10 +486,29 @@ impl Pane for Outline {
     }
 
     fn paste(&mut self, text: Option<&str>) -> After {
+        if self.actions.is_some() {
+            return After::Ignored;
+        }
         if let Some(reader) = &mut self.reading {
             reader.paste(text)
         } else {
             self.search.as_mut().map_or(After::Ignored, |search| search.paste(text))
+        }
+    }
+
+    fn tracks_hover(&self) -> bool {
+        self.reading.as_ref().is_none_or(Pane::tracks_hover)
+    }
+
+    fn hover_span(&self, x: usize, y: usize) -> Option<Range<usize>> {
+        if let Some(reader) = &self.reading {
+            reader.hover_span(x, y)
+        } else if let Some(actions) = &self.actions {
+            actions.menu.hover_span(x, y)
+        } else if let Some(search) = &self.search {
+            search.hover_span(x, y)
+        } else {
+            self.painted.hover_span(x, y)
         }
     }
 
@@ -560,6 +597,7 @@ impl Pane for Outline {
     }
 
     fn cover(&mut self) {
+        self.dismiss_actions();
         if let Some(reader) = &mut self.reading {
             reader.cover();
         }
@@ -605,6 +643,7 @@ impl Pane for Outline {
             key("Enter", "toggle folder"),
             key("Enter", "read in Milo"),
             key("/    ", "find file or path"),
+            key("Ctrl-A", "item actions"),
             key("Space", "toggle folder"),
             key("←    ", "close or parent"),
             key("→    ", "open folder"),
@@ -623,7 +662,16 @@ impl Pane for Outline {
             key("↑↓   ", "select a result"),
             key("←→   ", "pan long paths"),
             key("Enter", "read in Milo"),
+            key("Ctrl-A", "file actions"),
             key("Esc  ", "back to tree"),
+        ]);
+        rows.extend([
+            HelpRow::new(),
+            heading("Actions menu"),
+            key("↑↓   ", "choose an action"),
+            key("Enter", "run the action"),
+            key("Esc  ", "cancel"),
+            help::note("Preview: local Markdown"),
         ]);
         if cfg!(target_os = "macos") {
             rows.extend([
@@ -672,6 +720,170 @@ mod tests {
         let mut screen = Screen::sized(w, h);
         o.draw(&mut screen);
         screen
+    }
+
+    fn label_col(row: &str, label: &str) -> usize {
+        crate::width::str_width(row.split_once(label).unwrap().0)
+    }
+
+    #[test]
+    fn tree_actions_are_clickable_and_read_the_selected_file_in_a_short_pane() {
+        let f = Fixture::folder();
+        f.write("page.txt", "hello from the tree");
+        let mut o = open(&f);
+        let rows = draw(&mut o, 28, 12).text();
+        let x = label_col(&rows[11], "Actions");
+        assert_eq!(o.hover_span(x, 11), Some(x..x + 7));
+        assert_eq!(o.hover_span(x - 1, 11), None);
+        o.key(Key::Click(x - 1, 11));
+        assert!(o.actions.is_none());
+        o.key(Key::Click(x, 11));
+        assert!(o.actions.is_some());
+        o.key(Key::Char('/'));
+        let menu = draw(&mut o, 17, 2).text();
+        assert!(menu[0].contains("Read in Milo"));
+        assert!(menu[1].contains("Esc back"));
+        assert!(o.search.is_none());
+        o.key(Key::Enter);
+        assert!(o.reading.is_some());
+        assert!(draw(&mut o, 40, 8).text().iter().any(|row| row.contains("hello from the tree")));
+        o.key(Key::Char('q'));
+        draw(&mut o, 28, 12);
+        o.key(Key::Enter);
+        assert!(o.reading.is_some());
+    }
+
+    #[test]
+    fn tree_actions_never_retarget_a_missing_selection_after_refresh() {
+        use crate::native::tests::with_fake;
+
+        let f = Fixture::folder();
+        f.write("a.txt", "first");
+        f.write("b.txt", "second");
+        let mut o = open(&f);
+        draw(&mut o, 80, 12);
+        let (_, calls) = with_fake(Ok(()), || {
+            o.key(Key::Ctrl(b'a'));
+            assert!(draw(&mut o, 80, 12).text()[0].contains("a.txt"));
+            fs::remove_file(f.root.join("a.txt")).unwrap();
+            o.check();
+            assert_eq!(o.selected_path().as_deref(), Some("b.txt"));
+            let rows = draw(&mut o, 80, 12).text();
+            assert!(rows[0].contains("a.txt"));
+            let reveal = rows.iter().position(|row| row.contains("Reveal in Finder")).unwrap();
+            o.key(Key::Click(5, reveal));
+        });
+        assert!(calls.is_empty());
+        assert!(o.actions.is_none());
+        assert!(o.reading.is_none());
+        assert!(draw(&mut o, 80, 12).text()[11].contains("Choose a visible item first"));
+    }
+
+    #[test]
+    fn tree_actions_filter_folders_and_recheck_native_open_on_selection() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::folder();
+        f.write("folder/note.txt", "nested");
+        f.write("page.txt", "text");
+        let mut o = open(&f);
+        let (_, calls) = with_fake(Ok(()), || {
+            o.choose_row(o.tree.row_of("folder/").unwrap());
+            draw(&mut o, 80, 12);
+            o.key(Key::Ctrl(b'a'));
+            let menu = draw(&mut o, 80, 12).text();
+            assert!(menu[1].contains("Reveal in Finder"));
+            assert!(menu[2].is_empty());
+            o.key(Key::Enter);
+            assert!(!o.folds.is_open("folder/"));
+
+            o.choose_row(o.tree.row_of("page.txt").unwrap());
+            draw(&mut o, 80, 12);
+            o.key(Key::Ctrl(b'a'));
+            let menu = draw(&mut o, 80, 12).text();
+            assert!(menu[1].contains("Read in Milo"));
+            let open = menu.iter().position(|row| row.contains("Open in default app")).unwrap();
+            fs::set_permissions(f.root.join("page.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+            o.key(Key::Click(5, open));
+        });
+        assert_eq!(calls, [(Action::Reveal, f.root.join("folder"))]);
+        assert!(draw(&mut o, 80, 12).text()[11].contains("Use Reveal"));
+        assert!(o.reading.is_none());
+    }
+
+    #[test]
+    fn find_actions_require_a_painted_result_and_preserve_the_query() {
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::new();
+        f.write("a.txt", "first");
+        f.write("sub/b.txt", "second");
+        f.commit("first");
+        let mut o = open(&f);
+        o.key(Key::Char('/'));
+        draw(&mut o, 52, 5);
+        o.paste(Some("b.txt"));
+        o.key(Key::Ctrl(b'a'));
+        assert!(o.actions.is_none());
+        // The query fits, but this one-row pane does not paint its matching path.
+        let rows = draw(&mut o, 16, 1).text();
+        assert!(rows[0].contains("b.txt") && !rows[0].contains("sub/b.txt"));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("sub/b.txt"));
+        o.key(Key::Ctrl(b'a'));
+        assert!(o.actions.is_none());
+
+        let rows = draw(&mut o, 28, 5).text();
+        let x = label_col(&rows[4], "Actions");
+        assert!(o.hover_span(x, 4).is_some());
+        let (_, calls) = with_fake(Ok(()), || {
+            o.key(Key::Click(x, 4));
+            assert_eq!(o.paste(Some("ignored")), After::Ignored);
+            o.key(Key::Ctrl(b'o'));
+            let rows = draw(&mut o, 52, 5).text();
+            assert!(rows[0].contains("sub/b.txt"));
+            let reveal = rows.iter().position(|row| row.contains("Reveal in Finder")).unwrap();
+            o.key(Key::Click(5, reveal));
+        });
+        assert_eq!(calls, [(Action::Reveal, f.root.join("sub/b.txt"))]);
+        let rows = draw(&mut o, 52, 5).text();
+        assert!(rows[0].contains("b.txt") && rows[1].contains("sub/b.txt"));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("sub/b.txt"));
+        o.key(Key::Ctrl(b'a'));
+        o.key(Key::Esc);
+        assert!(o.search.is_some());
+        o.key(Key::Enter);
+        assert!(o.reading.is_some());
+    }
+
+    #[test]
+    fn find_offers_preview_only_for_eligible_working_markdown() {
+        use std::os::unix::fs::symlink;
+
+        use crate::native::tests::with_fake;
+
+        let f = Fixture::new();
+        f.write("working.md", "# notes");
+        f.write("gone.md", "# notes");
+        f.write("text.txt", "notes");
+        symlink("working.md", f.root.join("linked.md")).unwrap();
+        f.commit("first");
+        fs::remove_file(f.root.join("gone.md")).unwrap();
+        let mut o = open(&f);
+        for (path, preview) in [("working.md", true), ("gone.md", false), ("text.txt", false), ("linked.md", false)] {
+            o.key(Key::Char('/'));
+            o.paste(Some(path));
+            draw(&mut o, 80, 12);
+            with_fake(Err("Not on the local desktop"), || o.key(Key::Ctrl(b'a')));
+            let menu = draw(&mut o, 80, 12).text();
+            assert!(menu[0].contains(path), "{menu:?}");
+            assert!(menu[1].contains("Read in Milo"));
+            // Preview can either be enabled or explain what's missing.
+            assert_eq!(!menu[2].is_empty(), preview, "{menu:?}");
+            o.key(Key::Esc);
+            o.key(Key::Esc);
+        }
     }
 
     #[test]
@@ -893,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn native_shortcuts_on_the_strip_do_not_use_the_last_click_or_tree_cursor() {
+    fn actions_shortcuts_on_the_strip_do_not_use_the_last_click_or_tree_cursor() {
         use crate::native::tests::with_fake;
 
         let f = project();
@@ -902,17 +1114,40 @@ mod tests {
         let rows = draw(&mut o, 60, 7).text();
         let y = rows.iter().position(|row| row.contains("notes.txt")).unwrap();
         o.key(Key::Click(2, y));
-        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
+        for key in [Key::Ctrl(b'a'), Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
             let (after, calls) = with_fake(Ok(()), || o.key(key));
             assert_eq!(after, After::Stay);
             assert!(calls.is_empty());
         }
+        assert!(o.actions.is_none());
         assert_eq!(o.selected_path(), selected);
         assert!(draw(&mut o, 60, 7).text()[6].contains("Use / to choose a file"));
         assert!(draw(&mut o, 60, 1).text()[0].contains("Use / to choose a file"));
         o.key(Key::Char('/'));
         assert!(draw(&mut o, 60, 7).text()[0].contains("Find files"));
         assert!(o.reading.is_none());
+    }
+
+    #[test]
+    fn shrinking_outline_to_the_strip_dismisses_actions_and_points_to_find() {
+        let f = project();
+        let mut o = open(&f);
+        draw(&mut o, 60, 8);
+        o.key(Key::Ctrl(b'a'));
+        assert!(draw(&mut o, 60, 8).text()[0].contains("Actions"));
+
+        let strip = draw(&mut o, 60, 7).text();
+        assert!(o.actions.is_none());
+        assert!(strip[6].contains("Use / to choose a file"));
+        o.key(Key::Enter);
+        assert!(o.reading.is_none());
+
+        o.key(Key::Char('/'));
+        o.paste(Some("notes.txt"));
+        draw(&mut o, 60, 7);
+        o.key(Key::Ctrl(b'a'));
+        let menu = draw(&mut o, 60, 7).text();
+        assert!(menu[0].contains("notes.txt") && menu[0].contains("Actions"));
     }
 
     #[test]
@@ -1385,7 +1620,8 @@ mod tests {
         let f = Fixture::folder();
         f.write("page.txt", "a file\n");
         let mut o = open(&f);
-        assert_eq!(draw(&mut o, 60, 12).text()[11], " / find · Enter open · e open all · q quit · ? help");
+        assert_eq!(draw(&mut o, 60, 12).text()[11], " / find · e open all · q quit · Ctrl-A Actions · ? help");
+        assert_eq!(draw(&mut o, 28, 12).text()[11], " / find · Actions · ? help");
         assert_eq!(draw(&mut o, 24, 12).text()[11], " / find · ? help");
     }
 
