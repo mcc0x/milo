@@ -166,7 +166,7 @@ fn parse_pin_reply(code: Option<i32>, reply: &[u8]) -> Result<NonZeroU32, String
                 })
                 .and_then(|reason| std::str::from_utf8(reason).ok());
             Err(match reason {
-                Some(reason) => format!("Preview could not pin a Rex window: {reason}\nNo pane was opened."),
+                Some(reason) => format!("Preview could not pin a Rex window: {reason}. No pane was opened."),
                 None => ABNORMAL_PIN_EXIT.into(),
             })
         }
@@ -299,7 +299,7 @@ mod tests {
         let refusal = b"refused: another window overlaps Rex\n";
         assert_eq!(
             parse_pin_reply(Some(PIN_REFUSED), refusal).unwrap_err(),
-            "Preview could not pin a Rex window: another window overlaps Rex\nNo pane was opened."
+            "Preview could not pin a Rex window: another window overlaps Rex. No pane was opened."
         );
         for code in [None, Some(1)] {
             assert_eq!(parse_pin_reply(code, refusal).unwrap_err(), ABNORMAL_PIN_EXIT);
