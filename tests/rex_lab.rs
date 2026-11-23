@@ -964,6 +964,21 @@ fn preview_layout_and_observer() {
         })
     }
 
+    fn continues_tile(record: &str, current: &str) -> bool {
+        current.starts_with("show ") && (record == "renew" || record == current)
+    }
+
+    fn watch_changes(log: &str, started_at: u64) -> impl Iterator<Item = &str> {
+        let mut current = "";
+        watch_records(log, started_at).filter(move |&record| {
+            if continues_tile(record, current) {
+                return false;
+            }
+            current = record;
+            true
+        })
+    }
+
     struct PausedWatcher(u32);
     impl Drop for PausedWatcher {
         fn drop(&mut self) {
@@ -1314,7 +1329,7 @@ fn preview_layout_and_observer() {
         let watch = start_watch(block, child);
         let records = || fs::read_to_string(watch.with_extension("watch.log")).unwrap_or_default();
         let cursor = std::cell::Cell::new(0);
-        let lease_active = std::cell::Cell::new(false);
+        let current = RefCell::new(String::new());
         let next_record = |deadline| {
             let index = cursor.get();
             loop {
@@ -1331,12 +1346,12 @@ fn preview_layout_and_observer() {
             let deadline = Instant::now() + PATIENCE;
             loop {
                 let line = next_record(deadline);
-                if line == "renew" {
-                    assert!(lease_active.get() && Instant::now() < deadline, "{placement}: unexpected or excessive renewals");
+                if continues_tile(&line, &current.borrow()) {
+                    assert!(Instant::now() < deadline, "{placement}: excessive heartbeats");
                     continue;
                 }
                 assert_eq!(line, state, "{placement}: {}", records());
-                lease_active.set(state.starts_with("show "));
+                *current.borrow_mut() = line;
                 break;
             }
         };
@@ -1390,15 +1405,16 @@ fn preview_layout_and_observer() {
             assert_eq!(focus_main(block).trim(), "ok");
             check_focus(&main);
             assert_eq!(focus_main(block).trim(), "ok", "Rex already targets the working shell");
-            // Observe regular renewals with unchanged geometry beyond the CLI timeout.
+            // Observe regular positive observations with unchanged geometry.
             let deadline = Instant::now() + PATIENCE;
             let log = records();
             for line in watch_records(&log, started_at).skip(cursor.get()) {
-                assert_eq!(line, "renew");
+                assert!(continues_tile(line, &show), "{placement}: {line}");
                 cursor.set(cursor.get() + 1);
             }
             for _ in 0..4 {
-                assert_eq!(next_record(deadline), "renew");
+                let line = next_record(deadline);
+                assert!(continues_tile(&line, &show), "{placement}: {line}");
             }
 
             // Stop just the lab's watcher and leave its output open. The
@@ -1413,14 +1429,15 @@ fn preview_layout_and_observer() {
             }));
             let silent = records();
             for line in watch_records(&silent, started_at).skip(cursor.get()) {
-                assert_eq!(line, "renew");
+                assert!(continues_tile(line, &show), "{placement}: {line}");
                 cursor.set(cursor.get() + 1);
             }
             std::thread::sleep(Duration::from_millis(3250));
             assert_eq!(records(), silent);
             assert!(alive(watcher));
             drop(paused);
-            assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
+            let line = next_record(Instant::now() + PATIENCE);
+            assert!(continues_tile(&line, &show), "{placement}: {line}");
             check_focus(&main);
         }
         if placement == "above" {
@@ -1459,11 +1476,13 @@ fn preview_layout_and_observer() {
             let revision = || scope("print(assert(rex.session.view{}).revision)");
             let before = revision();
             viewer_session("session.attach", &background);
-            assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
+            let line = next_record(Instant::now() + PATIENCE);
+            assert!(continues_tile(&line, &show), "{placement}: {line}");
             assert_eq!(revision(), before, "other-session attachment changed the scoped layout");
             let before = revision();
             viewer_session("session.detach", &background);
-            assert_eq!(next_record(Instant::now() + PATIENCE), "renew");
+            let line = next_record(Instant::now() + PATIENCE);
+            assert!(continues_tile(&line, &show), "{placement}: {line}");
             assert_eq!(revision(), before, "other-session detachment changed the scoped layout");
             check_focus(&main);
         }
@@ -1486,7 +1505,7 @@ fn preview_layout_and_observer() {
             // delivers its final hide. EOF is sufficient for the native pane.
             assert!(soon(|| !alive(watcher)));
             let log = records();
-            let mut tail = watch_records(&log, started_at).skip(cursor.get()).skip_while(|line| *line == "renew");
+            let mut tail = watch_records(&log, started_at).skip(cursor.get()).skip_while(|line| continues_tile(line, &show));
             if let Some(final_state) = tail.next() {
                 assert_eq!(final_state, "hide");
                 assert!(tail.next().is_none(), "{placement}: records after close: {log}");
@@ -1579,7 +1598,7 @@ fn preview_layout_and_observer() {
     let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
     let expect_states = |expected: &[&str]| {
         assert!(
-            soon(|| watch_records(&records(), started_at).filter(|line| *line != "renew").eq(expected.iter().copied())),
+            soon(|| watch_changes(&records(), started_at).eq(expected.iter().copied())),
             "{}",
             records()
         );
@@ -1595,14 +1614,18 @@ fn preview_layout_and_observer() {
     let visible = ["hide", first.as_str(), resized.as_str()];
     expect_states(&visible);
     let started = Instant::now();
-    let mut renewals = 0;
+    let (mut renewals, mut full_snapshots) = (0, 0);
     while started.elapsed() < Duration::from_secs(13) {
         let log = records();
-        assert!(watch_records(&log, started_at).filter(|line| *line != "renew").eq(visible), "{log}");
-        renewals = watch_records(&log, started_at).filter(|line| *line == "renew").count();
+        assert!(watch_changes(&log, started_at).eq(visible), "{log}");
+        (renewals, full_snapshots) = watch_records(&log, started_at)
+            .skip_while(|line| *line != resized.as_str())
+            .fold((0, 0), |(renew, full), line| {
+                (renew + usize::from(line == "renew"), full + usize::from(line == resized.as_str()))
+            });
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(renewals >= 10, "missing sustained heartbeats: {}", records());
+    assert!(renewals >= 8 && full_snapshots >= 2, "missing sustained heartbeats: {}", records());
     check_focus(&main);
     let (mut other, input, output, other_id) = transfer(&anchor_block);
     scope(&format!(

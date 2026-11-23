@@ -270,6 +270,42 @@ static NSTimeInterval RealtimeNow(void) {
     return (NSTimeInterval)clock_gettime_nsec_np(CLOCK_REALTIME) / NSEC_PER_SEC;
 }
 
+typedef struct {
+    NSTimeInterval before, wall, after;
+} ClockObservation;
+
+typedef struct {
+    ClockObservation previous;
+    NSTimeInterval rejectThrough;
+    BOOL uncertain;
+} ObserverClock;
+
+static ClockObservation ObserveClock(void) {
+    NSTimeInterval before = LeaseNow(), wall = RealtimeNow();
+    return (ClockObservation){before, wall, LeaseNow()};
+}
+
+// Return YES when previously issued proof must be discarded. Bound when the
+// wall clock was read with the continuous clock, including across suspension.
+static BOOL UpdateObserverClock(ObserverClock *clock, ClockObservation current) {
+    const NSTimeInterval tolerance = 0.25; // Ignore ordinary drift and read jitter.
+    BOOL uncertain = current.before <= 0 || current.wall <= 0 || current.after < current.before ||
+        current.after - current.before >= tolerance;
+    BOOL invalidate = uncertain && !clock->uncertain;
+    clock->uncertain = uncertain;
+    if (uncertain) return invalidate;
+    ClockObservation previous = clock->previous;
+    clock->previous = current;
+    if (previous.before > 0 && previous.wall + (current.before - previous.after) - current.wall > tolerance) {
+        // Even a buffered observation close to our next callback could
+        // predate the jump. Fence off the old projected wall-clock range.
+        NSTimeInterval upper = previous.wall + (current.after - previous.before) + tolerance;
+        clock->rejectThrough = MAX(clock->rejectThrough, upper);
+        return YES;
+    }
+    return invalidate;
+}
+
 typedef NS_ENUM(NSUInteger, FocusReply) { FocusWaiting, FocusApproved, FocusRefused, FocusEnded, FocusFailed };
 
 static FocusReply ReadFocusReply(int fd, NSTimeInterval now, NSTimeInterval *deadline) {
@@ -292,7 +328,7 @@ typedef enum {
 } VisibilityUpdate;
 
 static VisibilityUpdate UpdateVisibility(VisibilityLease *lease, NSTimeInterval now, NSTimeInterval wall,
-    pid_t expected, const char *line, size_t length) {
+    NSTimeInterval rejectThrough, pid_t expected, const char *line, size_t length) {
     if (length == 4 && !memcmp(line, "hide", 4)) {
         *lease = (VisibilityLease){0};
         return VisibilityChanged;
@@ -323,7 +359,7 @@ static VisibilityUpdate UpdateVisibility(VisibilityLease *lease, NSTimeInterval 
     // refresh. Conservatively charge that fraction and all pipe delay.
     // Store the check on a continuous clock, not the adjustable wall clock.
     NSTimeInterval age = wall - (NSTimeInterval)epoch;
-    BOOL plausible = age >= 0 && epoch >= lease->announcedAt;
+    BOOL plausible = age >= 0 && epoch > rejectThrough && epoch >= lease->announcedAt;
     NSTimeInterval checked = plausible && age < LeaseLifetime && now > age ? now - age : 0;
     BOOL unchanged = checked && LeaseFresh(lease, now) && CGRectEqualToRect(tile, lease->tile);
     if (renew) {
@@ -513,6 +549,7 @@ static int PrepareFocusInput(int stateFD) {
     dispatch_source_t _stateSource, _parentSource;
     NSMutableArray<dispatch_source_t> *_signalSources;
     VisibilityLease _lease;
+    ObserverClock _clock;
     Geometry _candidate;
     NSRect _candidateFrame;
     CGRect _orderedPanelFrame;
@@ -521,6 +558,7 @@ static int PrepareFocusInput(int stateFD) {
     NSUInteger _generation;
     const char *_lastPhase, *_lastReason;
     BOOL _firstOrderedSample, _samplePending, _finished, _sessionInactive, _screensAsleep;
+    BOOL _drainingState;
     char _line[96];
     size_t _lineLength;
     int _status;
@@ -547,6 +585,7 @@ static int PrepareFocusInput(int stateFD) {
         _sampleQueue = dispatch_queue_create("milo.preview.window", DISPATCH_QUEUE_SERIAL);
         _notificationTokens = [NSMutableArray array];
         _signalSources = [NSMutableArray array];
+        UpdateObserverClock(&_clock, ObserveClock());
     }
     return self;
 }
@@ -593,14 +632,30 @@ static int PrepareFocusInput(int stateFD) {
     [NSApp postEvent:wake atStart:YES];
 }
 
+- (BOOL)observerEligible {
+    return !_drainingState && !_lineLength && !_clock.uncertain &&
+        LeaseFresh(&_lease, LeaseNow()) && _lease.checked >= _scopeSince;
+}
+
 - (BOOL)canSample {
-    return !_finished && !_sessionInactive && !_screensAsleep && !_lineLength && !_focusDeadline &&
-        LeaseFresh(&_lease, LeaseNow()) && _lease.checked >= _scopeSince && FrontmostRex(_rex);
+    return !_finished && !_sessionInactive && !_screensAsleep && !_focusDeadline &&
+        [self observerEligible] && FrontmostRex(_rex);
+}
+
+- (ClockObservation)observeClock {
+    ClockObservation observation = ObserveClock();
+    if (UpdateObserverClock(&_clock, observation)) {
+        _lease = (VisibilityLease){0};
+        [self invalidatePlacement];
+    }
+    return observation;
 }
 
 - (void)handleLine:(size_t)length {
-    NSTimeInterval now = LeaseNow();
-    switch (UpdateVisibility(&_lease, now, RealtimeNow(), _rex.processIdentifier, _line, length)) {
+    ClockObservation observation = [self observeClock];
+    NSTimeInterval rejectThrough = _clock.uncertain ? INFINITY : _clock.rejectThrough;
+    switch (UpdateVisibility(&_lease, observation.before, observation.wall, rejectThrough,
+        _rex.processIdentifier, _line, length)) {
         case VisibilityUnchanged: break;
         case VisibilityChanged: [self invalidatePlacement]; break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
@@ -614,6 +669,7 @@ static int PrepareFocusInput(int stateFD) {
 - (void)readState {
     // Bound continuous writer activity and never reveal or accept input
     // before draining queued revocations all the way to an empty read.
+    [self observeClock];
     for (NSUInteger chunk = 0; chunk < 8 && !_finished; ++chunk) {
         char bytes[192];
         ssize_t count = read(_stateFD, bytes, sizeof(bytes));
@@ -624,7 +680,12 @@ static int PrepareFocusInput(int stateFD) {
         if (count < 0) {
             if (errno == EINTR) continue;
             if (errno != EAGAIN) [self finish:"could not read Rex visibility state"];
-            else if (_lineLength) [self invalidatePlacement];
+            else {
+                [self observeClock];
+                BOOL wasDraining = _drainingState;
+                _drainingState = _lineLength != 0;
+                if (_drainingState && !wasDraining) [self invalidatePlacement];
+            }
             return;
         }
         for (ssize_t i = 0; i < count && !_finished; ++i) {
@@ -639,7 +700,12 @@ static int PrepareFocusInput(int stateFD) {
             }
         }
     }
-    if (!_finished) [self finish:"too many pending Rex visibility messages; reopen the preview"];
+    if (!_finished && !_drainingState) {
+        // A finite burst larger than our per-callback budget is not a fatal
+        // protocol error. Suspend until another pass reaches a complete drain.
+        _drainingState = YES;
+        [self invalidatePlacement];
+    }
 }
 
 - (BOOL)acceptsPanelInput {

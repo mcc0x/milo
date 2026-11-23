@@ -64,11 +64,13 @@ The Rex observer follows the published tile in the original session and tab. It 
 
 Milo checks Rex ownership once a second while observing. A silent observer cannot keep a visible panel authorized indefinitely: its last authorization expires after three seconds. A confirmed loss of the pinned Quartz window ends the helper; temporary occlusion, an offscreen window, or unavailable window metadata does not transfer the pin.
 
+If the Mac’s clock moves backward far enough to make queued observations ambiguous, Milo keeps the page loaded but hides it. It waits for the clock to pass its previous time and for new geometry evidence before showing it again. Closing and reopening the preview starts a new observation.
+
 **What a pin cannot tell Milo:** [`client.list`](https://www.superlogical.com/rex/docs/reference/api#clientlist) reports attachments. `session.view` reports the active tab and focused block **within each session**. Neither identifies the session painted in the pinned native window. Other sessions can retain a focused block simultaneously. The Mac's `session.select` action changes the displayed session; it is not a query. Milo checks only the original server; it neither queries other hosts nor selects a session on your behalf.
 
 One visible window is a placement requirement, not proof of the displayed session. If Rex draws a palette within that window, or changes the displayed session or host without changing the original session's active tab, there may be no observable change in window geometry, order or ownership. **The pane can remain visible and interactive over unrelated content until closed.** Use it only in a local window you control. Close it before switching hosts or sessions or opening an in-window palette. Do not rely on the pointer or a timeout to hide it.
 
-Divider changes update the same WebKit view. While Milo checks a changed frame or a known obstruction, the panel may briefly disappear; the URL, history and form are not reset. A visible page returns automatically when its original tile and window pass the checks again. Closing the anchor is different: it ends the preview rather than moving the page elsewhere.
+Divider changes update the same WebKit view. During continuous movement the panel can stay hidden until the divider pauses or settles long enough to verify the new frame and window order. It then returns automatically, including if the pointer is still on the divider. The URL, history and form are not reset. Closing the anchor is different: it ends the preview rather than moving the page elsewhere.
 
 ## Selecting an element for an agent
 
@@ -86,14 +88,14 @@ The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b
 
 * A human verified **clicking, typing and navigation over Rex.app** on an earlier build. Physical dragging on the previous builds dismissed the page. Those results do not verify divider or focus behavior on the persistent implementation.
 * The browser component has been exercised in a disposable AppKit panel against a real loopback dev server: keyboard input, navigation, source hot reload retaining a draft, and select/review/cancel/copy. The packaged settings UI was checked at desktop and narrow widths; the saved placement survived restart. Linux refused the preview without opening a browser.
-* On the persistent implementation, one Unix app peer attached to **four real Rex sessions**. All four placements opened beside the working shell with a sidebar present. The right-split test executed commands in the sibling PTY before, during and after a drag. An AppKit divider responder streamed four measured positions into `session.resize_pane`; the drag started outside the old page and ended after 13 seconds. The same WebKit view retained the form, navigation history and URL, with a wider CSS viewport.
+* The layout/observer lab opened each of the four placements beside the working terminal with a sidebar present. Separately, the **visible WebKit test used a right split** and one Unix app peer attached to four real Rex sessions. The sibling PTY executed commands before, during and after a drag. An AppKit divider responder streamed measured positions into `session.resize_pane`; the drag started outside the old page and lasted over 13 seconds. The same WebKit view retained the form, navigation history and URL, with a wider CSS viewport.
 * With the test pointer parked in the sibling, the page remained visible throughout a separate 13-second idle interval. The original Rex tab disappearing, an overlapping fixture window and loss of foreground suspended the panel; it restored without input. A replacement window did not acquire the pin, and closing the original working block ended the helper and observer.
 * This test used real nonactivating AppKit windows, Quartz order and a loopback `WKWebView`. It modeled the Mac viewer identity, foreground, chrome and parked pointer and filtered the stack to its own windows. It did **not** move a physical pointer, drive the Rex.app divider, or capture a user's desktop.
 * Physical acceptance of the persistent panel in Rex.app is separate from the disposable fixtures below. No screenshot of an offscreen WebKit view establishes registration over Rex. Actual client focus return, palettes, Spaces and mixed-scale display movement still need manual verification.
 
 ### Persistent right-split fixture measurement
 
-One Apple Silicon run: 1.13 s from creating the Rex split to visible WebKit; 1.65 s to the navigated form with a draft. Across 13.38 s idle, the native fixture used 0.045 CPU seconds (0.34% of one core); RSS was 102.8 → 102.7 MiB. These include test instrumentation and exclude Rex.app, the server, observer and separate WebKit workers. They are not whole-application measurements.
+One Apple Silicon run with sustained divider movement: 1.16 s from creating the Rex split to visible WebKit; 1.62 s to the navigated form with a draft. Across 13.32 s idle, the native fixture used 0.049 CPU seconds (0.37% of one core); RSS was 102.9 → 102.8 MiB. These include test instrumentation and exclude Rex.app, the server, observer and separate WebKit workers. They are not whole-application measurements.
 
 ### Earlier component measurements, not an end-to-end benchmark
 

@@ -44,14 +44,16 @@ int main(int argc, char **argv) {
                     printf("%.6f\n", right.frame.size.width / space);
                     fflush(stdout);
                 }];
-            // Schedule in the tracking run loop, not the system event stream.
-            // Keep the divider held during a pause; send the final drag before release.
-            NSArray<NSNumber *> *delays = @[@0.1, @0.25, @0.4, @13.0, @13.2];
-            for (NSUInteger i = 0; i < delays.count; ++i) {
-                BOOL up = i == delays.count - 1;
-                NSPoint p = up ? end : NSMakePoint(start.x - 24 * (i + 1), start.y);
+            // Begin moving, hold while the sibling is used, then keep moving
+            // faster than the geometry sampler until the final release.
+            const NSUInteger last = 19;
+            for (NSUInteger i = 0; i <= last; ++i) {
+                BOOL up = i == last;
+                CGFloat offset = i < 3 ? 24 * (i + 1) : i >= last - 1 ? 96 : 73 + i - 3;
+                NSTimeInterval delay = i < 3 ? 0.1 + i * 0.15 : 11.6 + (i - 3) * 0.12;
+                NSPoint p = NSMakePoint(start.x - offset, start.y);
                 NSEvent *next = event(up ? NSEventTypeLeftMouseUp : NSEventTypeLeftMouseDragged, p, i + 2);
-                NSTimer *timer = [NSTimer timerWithTimeInterval:delays[i].doubleValue repeats:NO block:^(NSTimer *t) {
+                NSTimer *timer = [NSTimer timerWithTimeInterval:delay repeats:NO block:^(NSTimer *t) {
                     (void)t;
                     [NSApp postEvent:next atStart:NO];
                 }];

@@ -464,7 +464,7 @@ fn persistent_preview_coexists_with_shell() {
         }
     }
     assert!(live_drag.0.wait().unwrap().success(), "{}", lab.read("divider-live.errors"));
-    assert!(checked_while_held && updates >= 4 && (right - right_end).abs() <= 0.000002,
+    assert!(checked_while_held && updates >= 12 && (right - right_end).abs() <= 0.000002,
         "incomplete live AppKit drag: {updates} updates; final {right}");
     assert!(drag_start.elapsed() > Duration::from_secs(12), "AppKit released the local divider early");
     // The production chrome projection applies at most ten points of

@@ -442,6 +442,8 @@ end
 
 local host, cli_pid = local_host()
 local last, verified, published, claimed, last_revision, tab_departed
+local heartbeats_since_show = 0
+local full_refresh_interval = 5
 local function write(record, observed_at)
   if observed_at then record = string.format("%s @%.0f", record, observed_at) end
   io.stdout:write(record, "\n")
@@ -450,6 +452,7 @@ end
 local function emit(state, observed_at)
   state = state or "hide"
   if last ~= state then
+    heartbeats_since_show = 0
     last = state
     write(state, observed_at)
     return true
@@ -523,7 +526,17 @@ local function refresh(heartbeat)
   local x, y, w, h = tile_rect(leaf_rect(layer.layout))
   if not x then return emit() end
   local changed = emit(string.format("show %d tile %d %d %d %d", a.owner_pid, x, y, w, h), observed_at)
-  if heartbeat and not changed then write("renew", observed_at) end
+  if heartbeat and not changed then
+    heartbeats_since_show = heartbeats_since_show + 1
+    -- The helper may have rejected an earlier announcement. Give it a
+    -- fresh full snapshot even when the tile's geometry stays unchanged.
+    if heartbeats_since_show == full_refresh_interval then
+      heartbeats_since_show = 0
+      write(last, observed_at)
+    else
+      write("renew", observed_at)
+    end
+  end
 end
 
 local function poll_owner()

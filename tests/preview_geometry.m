@@ -4,6 +4,7 @@
 // /tmp/preview-geometry
 // /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
+#import <time.h>
 #import "../macos/Preview/Chrome.h"
 
 // Exercise production remapping with deterministic chrome, not the user's settings.
@@ -12,9 +13,22 @@ static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
     return MiloDecodeRexChrome(@{}, &chrome) && MiloPaneInRexChrome(window, normalized, &chrome, pane);
 }
 
+static struct {
+    uint64_t continuous, realtime;
+    BOOL enabled;
+} fixtureClock;
+
+static uint64_t FixtureClockNanos(clockid_t clock) {
+    if (!fixtureClock.enabled) return clock_gettime_nsec_np(clock);
+    return clock == CLOCK_REALTIME ? fixtureClock.realtime : fixtureClock.continuous;
+}
+
+#define clock_gettime_nsec_np FixtureClockNanos
+
 #define MiloApproximatePane FixturePane
 #import "../macos/Preview/Anchor.m"
 #undef MiloApproximatePane
+#undef clock_gettime_nsec_np
 
 static void ScreenPlacement(void) {
     CGRect primary = CGRectMake(0, 0, 1440, 900);
@@ -253,7 +267,7 @@ static VisibilityUpdate PipeRecord(const int pipeFD[2], VisibilityLease *lease, 
     assert(length && length <= sizeof(line) && record[length - 1] == '\n');
     assert(WriteAll(pipeFD[1], record, length));
     assert(read(pipeFD[0], line, sizeof(line)) == (ssize_t)length);
-    return UpdateVisibility(lease, now, 1700000000 + now, 123, line, length - 1);
+    return UpdateVisibility(lease, now, 1700000000 + now, 0, 123, line, length - 1);
 }
 
 static void WatcherLease(void) {
@@ -294,6 +308,8 @@ static void WatcherLease(void) {
     assert(PipeRecord(pipeFD, &lease, 20.25, "renew @1700000021\n") == VisibilityChanged && !LeaseFresh(&lease, 20.25));
     assert(PipeRecord(pipeFD, &lease, 20.5, "show 123 tile 0 0 1 1 @18446744073709551615\n") == VisibilityChanged);
     assert(!lease.announcedAt && !LeaseFresh(&lease, 20.5));
+    assert(PipeRecord(pipeFD, &lease, 21, "show 123 tile 0 0 1 1 @1700000021\n") == VisibilityChanged);
+    assert(LeaseFresh(&lease, 21)); // An unusable future stamp cannot poison a later correct show.
     assert(PipeRecord(pipeFD, &lease, 21, "unclaimed\n") == VisibilityUnclaimed);
     close(pipeFD[1]);
     close(pipeFD[0]);
@@ -342,13 +358,27 @@ static void FocusAcknowledgment(void) {
 - (BOOL)isTerminated { return NO; }
 @end
 
+// Only the panel's state is needed to test synchronous input revocation;
+// the default geometry test does not create any actual windows.
+@interface WatcherFixturePanel : NSObject
+@property (nonatomic) BOOL placementProven;
+@property (nonatomic, getter=isVisible) BOOL visible;
+- (void)orderOut:(id)sender;
+@end
+
+@implementation WatcherFixturePanel
+- (void)orderOut:(id)sender { (void)sender; self.visible = NO; }
+@end
+
 @interface WatcherFixtureAnchor : MiloPreviewAnchor
 - (void)exerciseDrain:(int)writer;
+- (void)exerciseBurst:(int)writer;
+- (void)exerciseClockJump:(int)writer;
 @end
 
 @implementation WatcherFixtureAnchor
 - (BOOL)canSample {
-    return LeaseFresh(&_lease, LeaseNow());
+    return [self observerEligible];
 }
 
 static void WriteStamped(int writer, const char *record, time_t stamp) {
@@ -399,14 +429,86 @@ static void WriteStamped(int writer, const char *record, time_t stamp) {
     assert(LeaseFresh(&_lease, LeaseNow()) && !_candidate.windowID);
     assert(CGRectEqualToRect(_lease.tile, CGRectMake(0.6, 0, 0.4, 1)));
 }
+
+- (void)exerciseBurst:(int)writer {
+    static const char show[] = "show 123 tile 500000 0 500000 1000000";
+    time_t stamp = time(NULL);
+    WriteStamped(writer, show, stamp);
+    [self readState];
+    assert([self observerEligible]);
+    WatcherFixturePanel *panel = [WatcherFixturePanel new];
+    panel.placementProven = panel.visible = YES;
+    _panel = (MiloPreviewPanel *)panel;
+    NSUInteger generation = _generation;
+
+    // At least 2160 bytes of valid queued records exceed one 1536-byte
+    // read budget, so the first pass cannot reach the trailing hide.
+    for (size_t i = 0; i < 120; ++i) WriteStamped(writer, "renew", stamp);
+    assert(WriteAll(writer, "hide\n", 5));
+    assert(![self acceptsPanelInput]);
+    assert(!_finished && _drainingState && _lease.announcedAt && ![self observerEligible]);
+    assert(!panel.visible && !panel.placementProven && _panel == (MiloPreviewPanel *)panel);
+    assert(_generation != generation);
+
+    [self readState];
+    assert(!_finished && !_drainingState && !_lineLength && !_lease.announcedAt);
+    WriteStamped(writer, "renew", time(NULL));
+    [self readState];
+    assert(![self observerEligible]);
+    WriteStamped(writer, show, time(NULL));
+    [self readState];
+    assert([self observerEligible] && !panel.visible && _panel == (MiloPreviewPanel *)panel);
+    assert(![self proofCurrent:generation started:NSProcessInfo.processInfo.systemUptime]);
+    _panel = nil;
+}
+
+- (void)exerciseClockJump:(int)writer {
+    static const char show[] = "show 123 tile 500000 0 500000 1000000";
+    WriteStamped(writer, show, 1000);
+    [self readState];
+    assert([self observerEligible] && _lease.checked == 100);
+    WatcherFixturePanel *panel = [WatcherFixturePanel new];
+    panel.placementProven = panel.visible = YES;
+    _panel = (MiloPreviewPanel *)panel;
+    NSUInteger generation = _generation;
+
+    // Forty continuous seconds elapsed while the watcher accumulated old
+    // evidence. The wall clock stepped back to 1020; 1019 looks fresh if
+    // we compute wall age alone. Reject it before handling input or proof.
+    WriteStamped(writer, show, 1019);
+    WriteStamped(writer, "renew", 1019);
+    fixtureClock.continuous = 140 * NSEC_PER_SEC;
+    fixtureClock.realtime = 1020 * NSEC_PER_SEC;
+    assert(![self acceptsPanelInput]);
+    assert(!_finished && _clock.rejectThrough >= 1040 && !_lease.announcedAt && ![self observerEligible]);
+    assert(!panel.visible && !panel.placementProven && _panel == (MiloPreviewPanel *)panel);
+    assert(![self proofCurrent:generation started:NSProcessInfo.processInfo.systemUptime]);
+
+    fixtureClock.continuous = 160 * NSEC_PER_SEC;
+    fixtureClock.realtime = 1040 * NSEC_PER_SEC;
+    WriteStamped(writer, show, 1040);
+    [self readState];
+    assert(![self observerEligible] && !_lease.announcedAt);
+    fixtureClock.continuous = 161 * NSEC_PER_SEC;
+    fixtureClock.realtime = 1041 * NSEC_PER_SEC;
+    WriteStamped(writer, "renew", 1041);
+    [self readState];
+    assert(![self observerEligible]);
+    generation = _generation;
+    WriteStamped(writer, show, 1041);
+    assert(![self proofCurrent:generation started:NSProcessInfo.processInfo.systemUptime]);
+    assert([self observerEligible] && !panel.visible && _panel == (MiloPreviewPanel *)panel);
+    assert([self proofCurrent:_generation started:NSProcessInfo.processInfo.systemUptime]);
+    _panel = nil;
+}
 @end
 
-static void WatcherDrain(void) {
+static void WatcherDrain(void (^exercise)(WatcherFixtureAnchor *, int)) {
     int pipeFD[2];
     assert(pipe(pipeFD) == 0 && fcntl(pipeFD[0], F_SETFL, O_NONBLOCK) == 0);
     WatcherFixtureAnchor *anchor = [[WatcherFixtureAnchor alloc] initWithURL:nil
         rex:(NSRunningApplication *)[WatcherFixtureOwner new] pinned:1 stateFD:pipeFD[0] focusFD:-1 parent:getppid()];
-    [anchor exerciseDrain:pipeFD[1]];
+    exercise(anchor, pipeFD[1]);
     close(pipeFD[1]);
     close(pipeFD[0]);
 }
@@ -426,7 +528,13 @@ int main(int argc, const char *argv[]) {
         RemapPinnedWindow();
         WatcherProtocol();
         WatcherLease();
-        WatcherDrain();
+        WatcherDrain(^(WatcherFixtureAnchor *anchor, int writer) { [anchor exerciseDrain:writer]; });
+        WatcherDrain(^(WatcherFixtureAnchor *anchor, int writer) { [anchor exerciseBurst:writer]; });
+        fixtureClock.continuous = 100 * NSEC_PER_SEC;
+        fixtureClock.realtime = 1000 * NSEC_PER_SEC;
+        fixtureClock.enabled = YES;
+        WatcherDrain(^(WatcherFixtureAnchor *anchor, int writer) { [anchor exerciseClockJump:writer]; });
+        fixtureClock.enabled = NO;
         FocusAcknowledgment();
         puts("preview geometry tests passed");
     }

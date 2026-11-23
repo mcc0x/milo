@@ -533,7 +533,7 @@ for tick = 1, 35 do
     multi.gui.session_ids = four_sessions
     multi.second_viewer = second_viewer(gui, { another_session })
   end
-  persistent = persistent .. stamp("renew") .. "\n"
+  persistent = persistent .. (tick % 5 == 0 and show or stamp("renew")) .. "\n"
   assert(poll("heartbeat") == persistent)
 end
 assert(poll("deadline") == persistent and poll("claim_deadline") == persistent and not multi.stopped)
@@ -602,6 +602,21 @@ end
 local watch_waiting = call(waiting)
 assert(waiting.now == epoch + 9 and watch_waiting() == shown)
 assert(watch_waiting("heartbeat") == shown .. stamp("renew", epoch + 9) .. "\n" and waiting.now == epoch + 18)
+
+-- A backwards wall clock can invalidate the helper's announced geometry.
+-- Once wall time recovers, a later full snapshot repairs the baseline
+-- without any tab, focus or geometry change.
+local clock = fixture("watch", preview)
+local watch_clock = call(clock)
+assert(watch_clock() == shown)
+local clock_log = shown
+local tile = "show 40 tile 625000 0 375000 1000000"
+for tick = 1, 10 do
+  clock.now = (tick <= 5 and epoch - 60 or epoch) + tick
+  clock_log = clock_log .. stamp(tick % 5 == 0 and tile or "renew", clock.now) .. "\n"
+  assert(watch_clock("heartbeat") == clock_log)
+end
+assert(not clock.stopped and clock.window.focused_block_id == main)
 
 for _, side in ipairs{ "main", "anchor" } do
   local remote_pane = fixture("watch", preview)
