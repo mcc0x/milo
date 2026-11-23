@@ -8,6 +8,7 @@
 #import <sys/wait.h>
 #import <util.h>
 #import "../macos/Preview/Chrome.h"
+#import "../macos/Preview/ResizeInput.h"
 
 // Exercise production remapping with deterministic chrome, not the user's settings.
 static BOOL FixturePane(CGRect window, CGRect normalized, CGRect *pane) {
@@ -480,6 +481,144 @@ static void GuardedTTY(void) {
     close(wire[0]);
 }
 
+static void ResizeExpect(int wire, ResizeInput *input, int tty, ResizeInputResult expected) {
+    TTYStep(wire);
+    assert(ReadResizeInput(input, tty) == expected);
+}
+
+static void ResizeTTYRestored(int tty, const struct termios *before, int flags) {
+    struct termios after;
+    assert(tcgetattr(tty, &after) == 0);
+    int restoredFlags = fcntl(tty, F_GETFL);
+    // Check the public open modes, not private status bits Darwin sets
+    // after the first write to a freshly opened /dev/tty descriptor.
+    const int openModes = O_ACCMODE | O_NONBLOCK | O_APPEND | O_ASYNC;
+    assert(restoredFlags >= 0 && (restoredFlags & openModes) == (flags & openModes));
+    assert(before->c_iflag == after.c_iflag && before->c_oflag == after.c_oflag &&
+        before->c_cflag == after.c_cflag && before->c_lflag == after.c_lflag &&
+        !memcmp(before->c_cc, after.c_cc, sizeof(after.c_cc)) &&
+        cfgetispeed(before) == cfgetispeed(&after) && cfgetospeed(before) == cfgetospeed(&after));
+}
+
+static void ResizeTTYChild(int wire) {
+    int tty = OpenTTY("/dev/tty");
+    assert(tty >= 0);
+    int flags = fcntl(tty, F_GETFL);
+    struct termios mode, before;
+    assert(tcgetattr(tty, &mode) == 0);
+    mode.c_lflag = (mode.c_lflag | ICANON) & ~(ECHO | ECHONL);
+    mode.c_iflag = (mode.c_iflag | ICRNL) & ~(IGNCR | INLCR);
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
+    ResizeInput input = {0};
+    TTYStep(wire); // Drop complete lines and partial packets from before the new scope.
+    assert(BeginResizeInput(&input, tty) && !ResizeInputReady(&input));
+    assert(ReadResizeInput(&input, tty) == ResizeInputWaiting);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Replies plus a partial paste.
+    assert(!ResizeInputReady(&input));
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Finish the paste before arming.
+    assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Split a valid motion packet.
+    ResizeExpect(wire, &input, tty, ResizeInputMotion);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Release, drag, wheel and off-grid press.
+    ResizeExpect(wire, &input, tty, ResizeInputExplicit); // Fresh left press.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Typed show.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // DCS containing fake input and BEL.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Malformed CSI followed by Return.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Multiline paste with fake input.
+    ResizeExpect(wire, &input, tty, ResizeInputDismiss); // A later hide wins over a press.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Leave an unfinished packet in the parser.
+    assert(EndResizeInput(&input, tty) && EndResizeInput(&input, tty));
+    ResizeTTYRestored(tty, &before, flags);
+
+    TTYStep(wire); // Discard old packet tail and queued Return.
+    assert(BeginResizeInput(&input, tty) && ReadResizeInput(&input, tty) == ResizeInputWaiting);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // 2004 supported, 1003 unsupported.
+    assert(ResizeInputReady(&input) && input.mode == ResizeCanonical);
+    assert(tcgetattr(tty, &mode) == 0 && (mode.c_lflag & ICANON));
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Paste's newline is not Return.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Typed show after the paste trailer.
+    ResizeExpect(wire, &input, tty, ResizeInputExplicit); // Separate, empty canonical Return.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Eight reads cannot exhaust this burst.
+    assert(ReadResizeInput(&input, tty) == ResizeInputDismiss);
+
+    mode.c_lflag &= ~ICANON;
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && ReadResizeInput(&input, tty) == ResizeInputFailed);
+    ResizeTTYRestored(tty, &before, flags);
+    assert(BeginResizeInput(&input, tty));
+    ResizeExpect(wire, &input, tty, ResizeInputFailed); // No verified bracketed paste.
+    assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
+    ResizeTTYRestored(tty, &before, flags);
+    close(tty);
+}
+
+static void GuardedResizeTTY(void) {
+    int wire[2], master;
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, wire) == 0);
+    struct winsize size = {.ws_row = 24, .ws_col = 80};
+    int diagnostics = dup(STDERR_FILENO);
+    assert(diagnostics >= 0);
+    pid_t child = forkpty(&master, NULL, NULL, &size);
+    assert(child >= 0);
+    if (!child) {
+        assert(dup2(diagnostics, STDERR_FILENO) >= 0);
+        close(diagnostics);
+        close(wire[0]);
+        ResizeTTYChild(wire[1]);
+        _exit(0);
+    }
+    close(diagnostics);
+    close(wire[1]);
+    const char *steps[] = {
+        "show\r\033[<0;2;",
+        "\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y\033[200~\r",
+        "\033[<0;2;3M\r\033[201~",
+        "\033[<35;3;", "4M",
+        "\033[<0;3;4m\033[<32;3;4M\033[<64;3;4M\033[<0;81;4M\033[<0;3;25M",
+        "\033[<0;3;4M",
+        "show\r",
+        "\033PReply\a\033[<0;3;4M\r\r\033\\\r",
+        "\033[<0;;4M\r",
+        "\033[200~\r\033[<0;3;4M\rhide\r\033[201~",
+        "\033[<0;3;4Mhide\r",
+        "\033[<0;3;",
+        "4M\r",
+        "\033[?2004;1$y\033[?1006;1$y\033[?1003;0$y",
+        "\033[200~\r\033[201~",
+        "show\r",
+        "\r",
+        "\rx\rx\rx\rx\rx\rx\rx\rhide\r",
+        "\033[?2004;0$y\033[?1006;1$y\033[?1003;1$y",
+    };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
+        char step;
+        assert(read(wire[0], &step, 1) == 1 && step == '?');
+        assert(WriteAll(master, steps[i], strlen(steps[i])) && WriteAll(wire[0], "!", 1));
+    }
+    char output[512] = {0};
+    size_t used = 0;
+    ssize_t count;
+    while ((count = read(master, output + used, sizeof(output) - 1 - used)) > 0) {
+        used += (size_t)count;
+        assert(used < sizeof(output) - 1);
+    }
+    const char *save = "\033[?1003;1006;2004s";
+    const char *restore = "\033[?1003;1006;2004r";
+    const char *cursor = output;
+    for (unsigned i = 0; i < 3; ++i) {
+        cursor = strstr(cursor, save);
+        assert(cursor && strstr(cursor, "\033[?2004h\033[?1006h\033[?1003h"));
+        cursor = strstr(cursor, restore);
+        assert(cursor);
+        cursor += strlen(restore);
+    }
+    assert(!strstr(cursor, save) && !strstr(cursor, restore));
+    assert(strstr(output, "\033[?1003;1006r"));
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(master);
+    close(wire[0]);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 2 && strcmp(argv[1], "--panel-staging") == 0) {
@@ -499,6 +638,7 @@ int main(int argc, const char *argv[]) {
         GuardedLease();
         GuardedPresentation();
         GuardedTTY();
+        GuardedResizeTTY();
         puts("preview geometry tests passed");
     }
     return 0;
