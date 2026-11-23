@@ -59,7 +59,7 @@ static NSString *holdProof;
 static NSString *holdInput;
 static NSString *absentPanel, *missCenter, *rexOverlay;
 static NSString *leavePointer;
-static NSString *pointerState, *seedForm;
+static NSString *pointerState, *seedForm, *localReceipt, *fastRelease;
 static int trace;
 static os_unfair_lock sampleLock = OS_UNFAIR_LOCK_INIT;
 static BOOL staged;
@@ -314,6 +314,28 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
 @interface DismissalFixtureAnchor : MiloPreviewAnchor
 @end
 @implementation DismissalFixtureAnchor
+// Never install an item in the user's menu bar during the disposable test.
+- (BOOL)displayResumeCode:(uint32_t)code {
+    if (!code) { [NSFileManager.defaultManager removeItemAtPath:localReceipt error:NULL]; return YES; }
+    return [[NSString stringWithFormat:@"%06u", code] writeToFile:localReceipt atomically:YES
+        encoding:NSASCIIStringEncoding error:NULL];
+}
+- (void)handleLine:(size_t)length {
+    // Model a press, drag and release completed between native polls. Rex
+    // supplies the real updated layout; no simulated event grants permission.
+    if ([NSFileManager.defaultManager fileExistsAtPath:fastRelease]) {
+        VisibilityLease next = _lease;
+        if (UpdateVisibility(&next, LeaseNow(), ownerPID, _line, length) == VisibilityChanged &&
+            next.checked && next.tile.origin.x != _lease.tile.origin.x) {
+            CGRect pane;
+            assert(FixturePane(targetFrame, next.tile, &pane));
+            pointer = NSMakePoint(CGRectGetMinX(pane) - 1, NSMidY(_candidateFrame));
+            buttons = 0;
+            assert([NSFileManager.defaultManager removeItemAtPath:fastRelease error:NULL]);
+        }
+    }
+    [super handleLine:length];
+}
 - (void)tick {
     // Model only the Mac pointer and button sample, never the PTY or watcher.
     NSString *state = [NSString stringWithContentsOfFile:pointerState encoding:NSUTF8StringEncoding error:NULL];
@@ -371,6 +393,11 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
     static NSRect projected;
     if (_candidate.windowID && !NSEqualRects(projected, _candidateFrame)) {
         projected = _candidateFrame;
+        struct winsize grid;
+        assert(ioctl(_tty, TIOCGWINSZ, &grid) == 0);
+        char center[64];
+        snprintf(center, sizeof(center), "cell-center %u %u\n", grid.ws_col / 2, grid.ws_row / 2);
+        Trace(center);
         CGFloat divider = CGRectGetMinX(_candidate.window) + CGRectGetWidth(_candidate.window) * _lease.tile.origin.x;
         char event[128];
         snprintf(event, sizeof(event), "projected %.3f %.3f %.3f %.3f %.3f\n", NSMinX(projected), NSMinY(projected),
@@ -412,6 +439,8 @@ int main(int argc, const char **argv) {
         leavePointer = [root stringByAppendingPathComponent:@"leave-pointer"];
         pointerState = [root stringByAppendingPathComponent:@"pointer-state"];
         seedForm = [root stringByAppendingPathComponent:@"seed-form"];
+        localReceipt = [root stringByAppendingPathComponent:@"test-menu-item"];
+        fastRelease = [root stringByAppendingPathComponent:@"fast-release"];
         trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);
@@ -425,6 +454,8 @@ int main(int argc, const char **argv) {
             @selector(setPlacementProven:), (IMP)FixtureProven);
 
         int tty = OpenTTY("/dev/tty"), focus[2];
+        struct termios before;
+        assert(tcgetattr(tty, &before) == 0);
         assert(tty >= 0 && ForegroundCanonicalTTY(tty) && pipe(focus) == 0);
         assert(fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == 0 && fcntl(focus[0], F_SETFL, O_NONBLOCK) == 0);
         NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:argv[2]]];
@@ -432,6 +463,10 @@ int main(int argc, const char **argv) {
         MiloPreviewAnchor *anchor = [[DismissalFixtureAnchor alloc] initWithURL:url rex:(NSRunningApplication *)owner
             pinned:Target stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid() tty:tty confirm:YES];
         int result = [anchor run];
+        struct termios after;
+        assert(tcgetattr(tty, &after) == 0 && after.c_iflag == before.c_iflag &&
+            ((after.c_lflag ^ before.c_lflag) & ~PENDIN) == 0 &&
+            memcmp(after.c_cc, before.c_cc, sizeof(before.c_cc)) == 0);
         // The sampling queue can still have a completion in flight when run returns.
         return result;
     }

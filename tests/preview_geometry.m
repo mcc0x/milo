@@ -498,7 +498,7 @@ static void ResizeTTYRestored(int tty, const struct termios *before, int flags) 
     const int openModes = O_ACCMODE | O_NONBLOCK | O_APPEND | O_ASYNC;
     assert(restoredFlags >= 0 && (restoredFlags & openModes) == (flags & openModes));
     assert(before->c_iflag == after.c_iflag && before->c_oflag == after.c_oflag &&
-        before->c_cflag == after.c_cflag && ((before->c_lflag ^ after.c_lflag) & ~PENDIN) == 0 &&
+        before->c_cflag == after.c_cflag && before->c_lflag == after.c_lflag &&
         !memcmp(before->c_cc, after.c_cc, sizeof(after.c_cc)) &&
         cfgetispeed(before) == cfgetispeed(&after) && cfgetospeed(before) == cfgetospeed(&after));
 }
@@ -509,45 +509,80 @@ static void ResizeTTYChild(int wire) {
     int flags = fcntl(tty, F_GETFL);
     struct termios mode, before;
     assert(tcgetattr(tty, &mode) == 0);
-    mode.c_lflag = (mode.c_lflag | ICANON) & ~(ECHO | ECHONL);
+    mode.c_lflag = (mode.c_lflag | ICANON) & ~(ECHO | ECHONL | PENDIN);
     mode.c_iflag = (mode.c_iflag | ICRNL) & ~(IGNCR | INLCR);
-    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcflush(tty, TCIFLUSH) == 0);
     ResizeInput input = {0};
     TTYStep(wire); // Drop complete lines and partial packets from before the new scope.
-    assert(BeginResizeInput(&input, tty) && !ResizeInputReady(&input));
+    mode.c_lflag |= ECHO;
+    assert(tcsetattr(tty, TCSANOW, &mode) == 0 && tcgetattr(tty, &before) == 0);
+    assert(!BeginResizeInput(&input, tty, 99999) && !BeginResizeInput(&input, tty, 1000000));
+    ResizeTTYRestored(tty, &before, flags);
+    assert(BeginResizeInput(&input, tty, 123456) && !ResizeInputReady(&input));
+    int queued;
+    assert(ioctl(tty, FIONREAD, &queued) == 0 && queued == 0);
     assert(ReadResizeInput(&input, tty) == ResizeInputWaiting);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Replies plus a partial paste.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Queued code, replies and a partial paste.
     assert(!ResizeInputReady(&input));
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Finish the paste before arming.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Paste trailer and a pre-arm code prefix.
     assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Code suffix cannot cross negotiation.
     ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Split a valid motion packet.
     ResizeExpect(wire, &input, tty, ResizeInputMotion);
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Release, drag, wheel and off-grid press.
-    ResizeExpect(wire, &input, tty, ResizeInputExplicit); // Fresh left press.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Typed show.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // DCS containing fake input and BEL.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Malformed CSI followed by Return.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Multiline paste with fake input.
-    ResizeExpect(wire, &input, tty, ResizeInputDismiss); // A later hide wins over a press.
+    assert(input.motionX == 2.5 / 80 && input.motionY == 3.5 / 24);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Release, drag, wheel and off-grid reports.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Fresh left press is not consent.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Typed show and bare Return.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // DCS containing fake code and BEL.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Malformed CSI taints the code line.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Split a code candidate across reads.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Motion breaks the same candidate.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Code prefix before a multiline paste.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Suffix after a split paste trailer.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Even an empty paste taints its whole line.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Extra or missing digits/whitespace.
+    ResizeExpect(wire, &input, tty, ResizeInputDismiss); // Queued hide wins over the exact code.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Dismissal consumed the challenge.
     ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Leave an unfinished packet in the parser.
+    TTYStep(wire); // Leave the next epoch's exact code queued through restoration.
     assert(EndResizeInput(&input, tty) && EndResizeInput(&input, tty));
     ResizeTTYRestored(tty, &before, flags);
+    char pending;
+    assert(read(tty, &pending, sizeof(pending)) < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
 
     TTYStep(wire); // Discard old packet tail and queued Return.
-    assert(BeginResizeInput(&input, tty) && ReadResizeInput(&input, tty) == ResizeInputWaiting);
+    assert(BeginResizeInput(&input, tty, 654321) && ReadResizeInput(&input, tty) == ResizeInputWaiting);
     ResizeExpect(wire, &input, tty, ResizeInputWaiting); // 2004 supported, 1003 unsupported.
     assert(ResizeInputReady(&input) && input.mode == ResizeCanonical);
     assert(tcgetattr(tty, &mode) == 0 && (mode.c_lflag & ICANON));
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Paste's newline is not Return.
-    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Typed show after the paste trailer.
-    ResizeExpect(wire, &input, tty, ResizeInputExplicit); // Separate, empty canonical Return.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Code inside/after canonical bracketed paste.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // No bare Return or show in fallback.
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // The code from the old epoch is wrong.
+    ResizeExpect(wire, &input, tty, ResizeInputCode);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Correct code is one-shot.
     ResizeExpect(wire, &input, tty, ResizeInputWaiting); // Eight reads cannot exhaust this burst.
     assert(ReadResizeInput(&input, tty) == ResizeInputDismiss);
 
     mode.c_lflag &= ~ICANON;
     assert(tcsetattr(tty, TCSANOW, &mode) == 0 && ReadResizeInput(&input, tty) == ResizeInputFailed);
     ResizeTTYRestored(tty, &before, flags);
-    assert(BeginResizeInput(&input, tty));
+    assert(BeginResizeInput(&input, tty, 809073));
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting);
+    assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // A clean prefix survives ordinary read boundaries.
+    ResizeExpect(wire, &input, tty, ResizeInputCode);
+    assert(EndResizeInput(&input, tty));
+    ResizeTTYRestored(tty, &before, flags);
+
+    assert(BeginResizeInput(&input, tty, 100000));
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting);
+    assert(ResizeInputReady(&input) && input.mode == ResizeMouse);
+    ResizeExpect(wire, &input, tty, ResizeInputWaiting); // First and second wrong guesses.
+    ResizeExpect(wire, &input, tty, ResizeInputFailed); // Third wrong guess, even with the code behind it.
+    assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
+    ResizeTTYRestored(tty, &before, flags);
+
+    assert(BeginResizeInput(&input, tty, 999999));
     ResizeExpect(wire, &input, tty, ResizeInputFailed); // No verified bracketed paste.
     assert(!ResizeInputReady(&input) && EndResizeInput(&input, tty));
     ResizeTTYRestored(tty, &before, flags);
@@ -572,24 +607,37 @@ static void GuardedResizeTTY(void) {
     close(diagnostics);
     close(wire[1]);
     const char *steps[] = {
-        "show\r\033[<0;2;",
-        "\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y\033[200~\r",
-        "\033[<0;2;3M\r\033[201~",
+        "123456\r\033[<0;2;",
+        "123456\r\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y\033[200~\r",
+        "\033[<0;2;3M\r\033[201~123456\r123",
+        "456\r",
         "\033[<35;3;", "4M",
-        "\033[<0;3;4m\033[<32;3;4M\033[<64;3;4M\033[<0;81;4M\033[<0;3;25M",
+        "\033[<0;3;4m\033[<32;3;4M\033[<64;3;4M\033[<35;81;4M\033[<0;3;25M",
         "\033[<0;3;4M",
-        "show\r",
-        "\033PReply\a\033[<0;3;4M\r\r\033\\\r",
-        "\033[<0;;4M\r",
-        "\033[200~\r\033[<0;3;4M\rhide\r\033[201~",
-        "\033[<0;3;4Mhide\r",
+        "show\r\r",
+        "\033PReply\a123456\rhide\r\033\\123456\r",
+        "\033[<0;;4M123456\r",
+        "123", "\033[<35;3;4M456\r",
+        "123\033[200~456\rhide\r\033[20", "1~456\r",
+        "\033[200~\033[201~123456\r",
+        "1234567\r 123456\r12345\r",
+        "123456\rhide\r",
+        "123456\r",
         "\033[<0;3;",
+        "654321\r",
         "4M\r",
         "\033[?2004;1$y\033[?1006;1$y\033[?1003;0$y",
-        "\033[200~\r\033[201~",
-        "show\r",
-        "\r",
+        "\033[200~654321\r\033[201~654321\r",
+        "show\r\r",
+        "123456\r",
+        "654321\r",
+        "654321\r",
         "\rx\rx\rx\rx\rx\rx\rx\rhide\r",
+        "\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y",
+        "809", "073\r",
+        "\033[?2004;1$y\033[?1006;1$y\033[?1003;1$y",
+        "111111\r222222\r",
+        "333333\r100000\r",
         "\033[?2004;0$y\033[?1006;1$y\033[?1003;1$y",
     };
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
@@ -607,7 +655,7 @@ static void GuardedResizeTTY(void) {
     const char *save = "\033[?1003;1006;2004s";
     const char *restore = "\033[?1003;1006;2004r";
     const char *cursor = output;
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < 5; ++i) {
         cursor = strstr(cursor, save);
         assert(cursor && strstr(cursor, "\033[?2004h\033[?1006h\033[?1003h"));
         cursor = strstr(cursor, restore);
@@ -616,6 +664,8 @@ static void GuardedResizeTTY(void) {
     }
     assert(!strstr(cursor, save) && !strstr(cursor, restore));
     assert(strstr(output, "\033[?1003;1006r"));
+    assert(!strstr(output, "123456") && !strstr(output, "654321") &&
+        !strstr(output, "809073") && !strstr(output, "100000"));
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     close(master);

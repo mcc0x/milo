@@ -195,10 +195,24 @@ impl Tile<'_> {
     }
 
     fn motion(&self, viewer: &mut impl FnMut(&str, &str)) {
+        let log = self.read("native.log");
+        let center = records(&log).filter_map(|line| line.strip_prefix("cell-center ")).last().unwrap();
+        let (x, y) = center.split_once(' ').unwrap();
         viewer("block.event", &format!(
-            r#"{{"session_id":"{}","block_id":"{}","event":{{"type":"mouse","payload":{{"action":"motion","x":3,"y":3}}}}}}"#,
+            r#"{{"session_id":"{}","block_id":"{}","event":{{"type":"mouse","payload":{{"action":"motion","x":{x},"y":{y}}}}}}}"#,
             self.session, self.block,
         ));
+    }
+
+    fn confirm_local_receipt(&self) {
+        self.wait("no local-only menu receipt after release", || self.read("test-menu-item").len() == 6);
+        let digits = self.read("test-menu-item");
+        assert!(digits.bytes().all(|b| b.is_ascii_digit()));
+        assert!(!self.capture().contains(&digits), "native receipt appeared in the shared terminal");
+        let mut args = vec!["send-key", "-s", self.session, "-b", self.block];
+        args.extend((0..6).map(|i| &digits[i..i + 1]));
+        args.push("enter");
+        self.lab.rex(&args);
     }
 
     fn active_route_modes(&self) -> usize {
@@ -603,8 +617,27 @@ fn preview_confirmation_uses_rex_pty() {
     tile.motion(&mut viewer);
     tile.samples(4);
     assert_eq!(tile.presentation(), long, "mouse motion revived expired consent");
-    tile.enter(); // Actual Return in the owning Rex PTY, not another `show`.
+    tile.enter();
+    tile.samples(2);
+    assert_eq!(tile.presentation(), long, "a bare Return from a Rex client renewed expired consent");
+    tile.confirm_local_receipt();
     tile.restored(long, new);
+
+    // No sampled button-down or hover interval. Handle a quick release on
+    // either side of the *old* boundary, but don't infer consent from a ratio.
+    for ratio in [0.57, 0.48] {
+        let before = tile.presentation();
+        let route = tile.count(ROUTE_READY);
+        fs::write(lab.root.join("fast-release"), "").unwrap();
+        let new = tile.resize(&mut viewer, &main, ratio);
+        tile.route_ready(route);
+        tile.pointer(new.center(), false);
+        tile.motion(&mut viewer);
+        tile.samples(2);
+        assert_eq!(tile.presentation(), before);
+        tile.confirm_local_receipt();
+        tile.restored(before, new);
+    }
 
     // Real tab loss while concealed is a hard revocation, even if the same
     // tab and block are selected again and then receive terminal input.
@@ -629,27 +662,21 @@ fn preview_confirmation_uses_rex_pty() {
     tile.show();
     tile.wait("a new confirmation did not recover from tab loss", || tile.event("revealed") == pending.1 + 1);
 
-    // Close the working block with a routed return waiting on final proof.
-    // A transparent staging order is allowed, but it may never be revealed.
+    // Close the working block while the hidden tile still owns mouse
+    // reporting and noncanonical input. No staged return has restored them.
     let closing = tile.start_drag();
     let new = tile.resize(&mut viewer, &main, 0.48);
     tile.pointer(new.divider(), true);
     let route = tile.count(ROUTE_READY);
     tile.pointer(new.divider(), false);
     tile.route_ready(route);
-    let proofs = tile.event("awaiting-dismissal-burst");
-    fs::write(&hold, "").unwrap();
-    tile.pointer(new.center(), false);
-    tile.motion(&mut viewer);
-    tile.wait("the return did not reach final placement proof", || tile.event("awaiting-dismissal-burst") > proofs);
-    let hidden = tile.event("hidden");
+    assert_eq!(tile.active_route_modes(), 3);
     let hides = tile.state("hide");
     lab.rex(&["block", "close", "-s", &session, &main]);
     tile.wait("the real watcher did not revoke placement on close", || tile.state("hide") > hides);
-    fs::remove_file(&hold).unwrap();
     tile.wait("anchor did not end on watcher EOF", || tile.read("native-exit") == "0\n");
-    assert!(tile.event("hidden") > hidden, "close left the staged panel ordered");
-    assert_eq!(tile.event("revealed"), closing.1, "a late proof revealed after close");
+    assert_eq!(tile.active_route_modes(), initial_modes, "closing the pane leaked reporting modes");
+    assert_eq!(tile.event("revealed"), closing.1, "a late receipt revealed after close");
 
     // Use another anchor in the same four-attached viewer to exercise actual
     // owner attachment loss independently of working-terminal closure.
@@ -685,10 +712,34 @@ fn preview_confirmation_uses_rex_pty() {
     let route = tile.count(ROUTE_READY);
     tile.pointer(new.divider(), false);
     tile.route_ready(route);
-    let hold = client_root.join("hold-staged-proof");
-    fs::write(&hold, "").unwrap();
+    // Another app joins this same source session after release. It can send
+    // input to this PTY; none of it should count as a passive local return.
+    let mut second = lab.command("python3")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_viewer.py"))
+        .arg(lab.root.join("s.sock"))
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut second_in = second.stdin.take().unwrap();
+    let mut second_out = BufReader::new(second.stdout.take().unwrap());
+    let mut reply = String::new();
+    second_out.read_line(&mut reply).unwrap();
+    assert!(reply.starts_with("client:"));
+    writeln!(second_in, r#"["session.attach",{owner_session}]"#).unwrap();
+    reply.clear();
+    second_out.read_line(&mut reply).unwrap();
+    assert!(reply.contains(r#""type":"response""#), "{reply}");
+    tile.wait("watcher did not report a shared source session", || tile.state("shared-input") == 1);
     tile.pointer(new.center(), false);
     tile.motion(&mut viewer);
+    tile.enter();
+    tile.samples(3);
+    assert_eq!(tile.presentation(), detached, "shared PTY input alone revived a concealed page");
+    let hold = client_root.join("hold-staged-proof");
+    fs::write(&hold, "").unwrap();
+    tile.pointer(new.center(), true);
+    tile.enter();
+    tile.samples(2);
+    assert_eq!(tile.presentation(), detached, "an unrelated local press plus shared Return revived the page");
+    tile.confirm_local_receipt();
     tile.wait("the return did not reach final placement proof", || tile.event("awaiting-dismissal-burst") == 1);
     let hidden = tile.event("hidden");
     let hides = tile.state("hide");
@@ -698,6 +749,8 @@ fn preview_confirmation_uses_rex_pty() {
     tile.wait("the anchor survived owner attachment loss", || tile.read("native-exit") == "0\n");
     assert!(tile.event("hidden") > hidden, "owner loss left the staged panel ordered");
     assert_eq!(tile.event("revealed"), detached.1, "a late proof referred to the departed client");
+    drop(second_in);
+    assert!(second.wait().unwrap().success());
     drop((input, output));
     lab.stop_server();
 }
