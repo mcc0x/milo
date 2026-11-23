@@ -1,9 +1,11 @@
 //! Require positive evidence that a native action belongs on this Mac.
 
-pub(super) fn check() -> Result<(), &'static str> {
+use std::path::Path;
+
+pub(super) fn check(_root: &Path) -> Result<(), &'static str> {
     #[cfg(target_os = "macos")]
     {
-        mac::check()
+        mac::check(_root)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -14,7 +16,7 @@ pub(super) fn check() -> Result<(), &'static str> {
 #[cfg(all(test, not(target_os = "macos")))]
 #[test]
 fn a_non_mac_has_no_native_opening() {
-    assert_eq!(check(), Err("Native opening is only available on macOS"));
+    assert_eq!(check(Path::new(".")), Err("Native opening is only available on macOS"));
 }
 
 #[cfg(target_os = "macos")]
@@ -23,8 +25,13 @@ mod mac {
     use std::ffi::OsStr;
     use std::io::{self, IsTerminal as _};
     use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Path;
+
+    use crate::term::{self, Host};
 
     const LOCAL_TERMINAL: &str = "Native opening needs a local graphical terminal";
+    const REX_UNCONFIRMED: &str = "Could not confirm a local Rex app for this pane";
+    const MULTIPLEXER: &str = "Native opening is unavailable inside a terminal multiplexer";
     const GRAPHICAL: u32 = 0x0010;
     const REMOTE: u32 = 0x1000;
 
@@ -33,17 +40,46 @@ mod mac {
         fn SessionGetInfo(session: u32, id: *mut u32, attributes: *mut u32) -> i32;
     }
 
-    pub(super) fn check() -> Result<(), &'static str> {
+    pub(super) fn check(root: &Path) -> Result<(), &'static str> {
         let terminal = env::var_os("TERM");
         let program = env::var_os("TERM_PROGRAM");
         check_markers(|name| env::var_os(name).is_some(), terminal.as_deref(), program.as_deref())?;
         if !foreground_terminal() {
             return Err(LOCAL_TERMINAL);
         }
-        match (env::var_os("REX_SESSION"), env::var_os("REX_BLOCK")) {
-            (Some(session), Some(block)) => crate::rex::native_app(&session, &block),
-            (None, None) => standalone(),
-            _ => Err("Could not confirm a local Rex app for this pane"),
+        let session = env::var_os("REX_SESSION");
+        let block = env::var_os("REX_BLOCK");
+        let rex_server = env::var_os("REX_SERVER").is_some();
+        match route(term::host(), program.as_deref(), session.as_deref(), block.as_deref(), rex_server)? {
+            Route::Rex { session, block } => crate::rex::native_app(root, session, block),
+            Route::Standalone => standalone(),
+        }
+    }
+
+    enum Route<'a> {
+        Rex { session: &'a OsStr, block: &'a OsStr },
+        Standalone,
+    }
+
+    fn route<'a>(
+        host: Host,
+        program: Option<&OsStr>,
+        session: Option<&'a OsStr>,
+        block: Option<&'a OsStr>,
+        rex_server: bool,
+    ) -> Result<Route<'a>, &'static str> {
+        match host {
+            Host::Rex => match (session, block) {
+                (Some(session), Some(block)) => Ok(Route::Rex { session, block }),
+                _ => Err(REX_UNCONFIRMED),
+            },
+            Host::Multiplexer => Err(MULTIPLEXER),
+            // Launch Services may pass the launching process's Rex environment to a different
+            // terminal. Take the standalone path, which still verifies the actual executable.
+            Host::Graphics => Ok(Route::Standalone),
+            Host::Other if program == Some(OsStr::new("Apple_Terminal")) => Ok(Route::Standalone),
+            Host::Other | Host::Unknown if session.is_none() && block.is_none() && !rex_server => Ok(Route::Standalone),
+            Host::Other | Host::Unknown => Err(REX_UNCONFIRMED),
         }
     }
 
@@ -63,7 +99,7 @@ mod mac {
         });
         let mux_program = program.is_some_and(|program| matches!(program.as_bytes(), b"tmux" | b"screen" | b"zellij"));
         if mux.into_iter().any(present) || mux_terminal || mux_program {
-            return Err("Native opening is unavailable inside a terminal multiplexer");
+            return Err(MULTIPLEXER);
         }
         Ok(())
     }
@@ -178,8 +214,46 @@ mod mac {
 
     #[cfg(test)]
     mod tests {
-        use super::{Ancestor, GRAPHICAL, Program, REMOTE, check_markers, direct_terminal, graphical, program};
+        use super::{
+            Ancestor, GRAPHICAL, Host, Program, REMOTE, REX_UNCONFIRMED, Route, check_markers, direct_terminal,
+            graphical, program, route,
+        };
         use std::ffi::OsStr;
+
+        const SESSION: &str = "session:01a1fe07-6593-7bcb-a091-bfac0d945bd5";
+        const BLOCK: &str = "block:01a1fe07-6593-7d94-b45e-a15c13d6737c";
+
+        #[test]
+        fn recognized_standalone_terminals_do_not_query_rex_with_inherited_ids() {
+            for (host, program) in [(Host::Graphics, "ghostty"), (Host::Other, "Apple_Terminal")] {
+                let route =
+                    route(host, Some(OsStr::new(program)), Some(OsStr::new(SESSION)), Some(OsStr::new(BLOCK)), true);
+                assert!(matches!(route, Ok(Route::Standalone)));
+            }
+        }
+
+        #[test]
+        fn rex_branding_requires_both_ids_and_never_falls_back() {
+            let ids = (Some(OsStr::new(SESSION)), Some(OsStr::new(BLOCK)));
+            for (session, block) in [(None, None), (ids.0, None), (None, ids.1)] {
+                assert!(matches!(route(Host::Rex, None, session, block, false), Err(REX_UNCONFIRMED)));
+            }
+            assert!(matches!(
+                route(Host::Rex, None, ids.0, ids.1, true),
+                Ok(Route::Rex { session, block }) if session == SESSION && block == BLOCK
+            ));
+        }
+
+        #[test]
+        fn an_ambiguous_terminal_cannot_use_inherited_rex_signals() {
+            for host in [Host::Other, Host::Unknown] {
+                assert!(matches!(
+                    route(host, None, Some(OsStr::new(SESSION)), Some(OsStr::new(BLOCK)), false),
+                    Err(REX_UNCONFIRMED)
+                ));
+                assert!(matches!(route(host, None, None, None, true), Err(REX_UNCONFIRMED)));
+            }
+        }
 
         #[test]
         fn ssh_and_multiplexer_evidence_veto_even_a_native_terminal_label() {

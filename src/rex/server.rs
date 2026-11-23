@@ -8,6 +8,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+#[cfg(any(target_os = "macos", test))]
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -214,22 +216,42 @@ fn native_clients(output: &[u8], session: &str, uid: u64) -> Option<Result<(), &
     })
 }
 
+/// Prefer the executable the kernel reports for a direct Rex parent. Otherwise
+/// use an absolute PATH entry, never a launcher or executable in the project.
+#[cfg(any(target_os = "macos", test))]
+fn native_program(root: &Path, parent: Option<PathBuf>, path: &OsStr) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let project = root.canonicalize().ok()?;
+    let outside = |path: &Path| !path.starts_with(root) && !path.starts_with(&project);
+    let executable = |file: PathBuf| {
+        if !file.is_absolute() || !outside(&file) || !outside(&file.parent()?.canonicalize().ok()?) {
+            return None;
+        }
+        let file = file.canonicalize().ok()?;
+        if !outside(&file) || !file.is_file() {
+            return None;
+        }
+        let name = std::ffi::CString::new(file.as_os_str().as_bytes()).ok()?;
+        // SAFETY: name is a live NUL-terminated path. access only checks permissions.
+        (unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0).then_some(file)
+    };
+    parent.filter(|file| file.file_name() == Some(OsStr::new("rex"))).and_then(executable).or_else(|| {
+        std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join("rex")).find_map(executable)
+    })
+}
+
 /// Check the same session and pane the local CLI sees, then count the apps
 /// attached to that session. The web editor's server-wide viewer hint is not an authorization check.
 #[cfg(target_os = "macos")]
-pub(crate) fn native_app(session: &OsStr, block: &OsStr) -> Result<(), &'static str> {
+pub(crate) fn native_app(root: &Path, session: &OsStr, block: &OsStr) -> Result<(), &'static str> {
     use std::time::Instant;
 
     let session = exact_id(session, "session:").ok_or(NATIVE_UNKNOWN)?;
     let block = exact_id(block, "block:").ok_or(NATIVE_UNKNOWN)?;
-    // Do not let a relative PATH entry run a program from the checkout.
+    let parent = super::parent_program();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let exe = std::env::split_paths(&path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("rex"))
-        .find(|exe| exe.is_file())
-        .or_else(|| super::parent_program().filter(|exe| exe.file_name() == Some(OsStr::new("rex"))))
-        .ok_or(NATIVE_UNKNOWN)?;
+    let exe = native_program(root, parent, &path).ok_or(NATIVE_UNKNOWN)?;
     // Both probes run in the input loop, so they share one short deadline.
     let deadline = Instant::now() + Duration::from_millis(600);
     let probe = |args: &[&str]| {
@@ -324,14 +346,58 @@ impl RemoteEditor {
 mod tests {
     use super::{
         CommandVersion, NATIVE_REMOTE, NATIVE_UNKNOWN, Server, Viewers, native_clients, native_identity,
-        parse_command_version, parse_created, parse_server, parse_viewers,
+        native_program, parse_command_version, parse_created, parse_server, parse_viewers,
     };
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::path::Path;
+
+    use crate::fixture::Fixture;
 
     const HOST: &str = "d4744373-81e8-4cdb-a5be-9a5be80c2c4a";
     const SESSION: &str = "session:01a1fe07-6593-7bcb-a091-bfac0d945bd5";
     const BLOCK: &str = "block:01a1fe07-6593-7d94-b45e-a15c13d6737c";
     const PEER: &str = r#"{"kind":"peer","transport":"unix","uid":501}"#;
     const REMOTE: &str = r#"{"kind":"tailscale","transport":"tailscale"}"#;
+
+    #[test]
+    fn native_probe_skips_checkout_paths_links_and_non_executables() {
+        let fixture = Fixture::folder();
+        let root = &fixture.root;
+        let installed = Fixture::folder();
+        let binary = |name: &str, mode| {
+            installed.write(name, "");
+            let binary = installed.root.join(name);
+            fs::set_permissions(&binary, fs::Permissions::from_mode(mode)).unwrap();
+            binary
+        };
+        let non_executable = binary("non-executable/rex", 0o644);
+        let executable = binary("installed/rex", 0o755);
+        let parent = binary("parent/rex", 0o755);
+        fixture.write("bin/rex", "");
+        let checkout = root.join("bin/rex");
+        fs::set_permissions(&checkout, fs::Permissions::from_mode(0o755)).unwrap();
+        let inside_link = root.join("link");
+        fs::create_dir(&inside_link).unwrap();
+        symlink(&executable, inside_link.join("rex")).unwrap();
+        let outside_link = installed.root.join("checkout-link");
+        fs::create_dir(&outside_link).unwrap();
+        symlink(&checkout, outside_link.join("rex")).unwrap();
+        let alias = installed.root.join("checkout-dir");
+        symlink(&inside_link, &alias).unwrap();
+        let bad_path = [
+            Path::new("."),
+            checkout.parent().unwrap(),
+            &inside_link,
+            &outside_link,
+            &alias,
+            non_executable.parent().unwrap(),
+        ];
+        assert_eq!(native_program(root, Some(checkout.clone()), &std::env::join_paths(bad_path).unwrap()), None);
+        let path = std::env::join_paths(bad_path.into_iter().chain(executable.parent())).unwrap();
+        assert_eq!(native_program(root, None, &path), Some(executable));
+        assert_eq!(native_program(root, Some(parent.clone()), &path), Some(parent));
+    }
 
     #[test]
     fn a_server_is_known_by_its_whole_host_id_and_a_plain_version() {

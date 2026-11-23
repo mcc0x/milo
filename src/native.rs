@@ -10,7 +10,8 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::{fs_ops, keys::Key};
 
@@ -20,6 +21,8 @@ const MISSING: &str = "The selected path no longer exists";
 const LINK: &str = "Can't use a symbolic link or a path through one";
 const UNVERIFIED: &str = "Can't verify the selected path";
 const LAUNCHABLE: &str = "Use Reveal for launchable files and aliases";
+const OPEN_WAIT: Duration = Duration::from_secs(2);
+const OPEN_TIMEOUT: &str = "The macOS opener took too long";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
@@ -38,9 +41,9 @@ impl Action {
 
     pub(crate) fn run(self, root: &Path, identity: Option<(u64, u64)>, relative: &Path) -> Result<(), &'static str> {
         #[cfg(test)]
-        tests::locality().unwrap_or_else(local::check)?;
+        tests::locality().unwrap_or_else(|| local::check(root))?;
         #[cfg(not(test))]
-        local::check()?;
+        local::check(root)?;
 
         let target = self.target(root, identity, relative)?;
         let command = self.command(&target);
@@ -94,7 +97,15 @@ impl Action {
 
 /// Capture the original directory before the user can request an action.
 pub(crate) fn identity(root: &Path) -> Option<(u64, u64)> {
-    dir_id(&root_dir(root)?)
+    #[cfg(any(target_os = "macos", test))]
+    {
+        dir_id(&root_dir(root)?)
+    }
+    #[cfg(not(any(target_os = "macos", test)))]
+    {
+        let _ = root;
+        None
+    }
 }
 
 fn dir_id(dir: &File) -> Option<(u64, u64)> {
@@ -201,7 +212,8 @@ fn xattr(file: &File, name: &CStr, buffer: &mut [u8]) -> Result<Option<usize>, &
         return usize::try_from(size).map(Some).map_err(|_| UNVERIFIED);
     }
     match io::Error::last_os_error().raw_os_error() {
-        Some(libc::ENOATTR | libc::ENOTSUP) => Ok(None),
+        Some(libc::ENOATTR) => Ok(None),
+        Some(libc::ENOTSUP) => Err("Can't verify Finder metadata; use Reveal instead"),
         _ => Err(UNVERIFIED),
     }
 }
@@ -213,10 +225,25 @@ fn launch(mut command: Command) -> Result<(), &'static str> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "Can't start the macOS opener")?;
-    if !child.wait().map_err(|_| "Can't wait for the macOS opener")?.success() {
-        return Err("The macOS opener couldn't open the selected path");
-    }
-    Ok(())
+    wait_for_open(&mut child, OPEN_WAIT)
+}
+
+fn wait_for_open(child: &mut Child, timeout: Duration) -> Result<(), &'static str> {
+    let deadline = Instant::now() + timeout;
+    let failure = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => return Err("The macOS opener couldn't open the selected path"),
+            Err(_) => break "Can't wait for the macOS opener",
+            Ok(None) => {
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else { break OPEN_TIMEOUT };
+                std::thread::sleep(left.min(Duration::from_millis(10)));
+            }
+        }
+    };
+    let _ = child.kill();
+    child.wait().map_err(|_| "Can't reap the macOS opener")?;
+    Err(failure)
 }
 
 #[cfg(test)]
@@ -225,6 +252,7 @@ pub(crate) mod tests {
     use std::ffi::OsStr;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::process::ExitStatusExt as _;
 
     use super::*;
     use crate::fixture::Fixture;
@@ -441,5 +469,17 @@ pub(crate) mod tests {
         let mut failing = Command::new("/bin/sh");
         failing.args(["-c", "exit 7"]);
         assert_eq!(launch(failing), Err("The macOS opener couldn't open the selected path"));
+    }
+
+    #[test]
+    fn kills_and_reaps_an_opener_that_does_not_exit() {
+        let mut child = Command::new("/bin/cat").stdin(Stdio::piped()).spawn().unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        assert_eq!(wait_for_open(&mut child, Duration::from_millis(20)), Err(OPEN_TIMEOUT));
+        // SAFETY: This is our disposable child, with no output status requested.
+        let status = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(status, -1, "the child wasn't reaped");
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+        assert_eq!(child.try_wait().unwrap().unwrap().signal(), Some(libc::SIGKILL));
     }
 }
