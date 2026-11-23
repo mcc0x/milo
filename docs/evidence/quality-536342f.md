@@ -1,6 +1,6 @@
 # Outline, Markdown, usage and alert measurements
 
-Baseline: `536342ffab5b` (main). Both sides used the same release profile, Rust 1.100.0 and Apple M5 Pro on arm64 macOS. Workloads used generated files, fresh processes and warm filesystem caches. Times below are medians unless noted. These are comparisons on one machine, not release thresholds.
+Baseline: `536342ffab5b` (main). Candidate implementations: `77ff9f41` (alerts), `353e9e0a` (Markdown), `bf772c25` (Outline) and `55cac25c` (revised usage query). Both sides used the same release profile, Rust 1.100.0 and Apple M5 Pro on arm64 macOS. Workloads used generated files, fresh processes and warm filesystem caches. Times below are medians unless noted. These are comparisons on one machine, not release thresholds.
 
 ## Outline: getting a completed refresh onto the screen
 
@@ -23,7 +23,7 @@ Only the same shared tracked listing and the same ordered pending paths, kinds a
 | Dense, spawn to first rendered frame | 29.07 ms | 28.67 ms |
 | Plain, spawn to first rendered frame | 28.23 ms | 28.05 ms |
 
-Both files contain 3,930 list items and 522,690 source bytes. The dense input alternates inline code and plain text; the control changes only the inline pattern. Builds alternate on the same input. The first frame, nine page-downs and the last page produced byte-identical synchronized frames across builds. RSS at the last page matched first-frame RSS at median. This exercises an actual release Reader in a PTY, not a Rex window or an installed app. RSS includes allocator and process effects and is not peak memory.
+Both files contain 3,930 list items and 522,690 source bytes. The dense input alternates inline code and plain text; the control changes only the inline pattern. Builds alternate on the same input. The driver checks the requested row and hashes the synchronized terminal update that showed it: the first frame, nine page-downs and the last page matched byte for byte. These are sampled updates, not full styled-screen snapshots. RSS at the last page matched first-frame RSS at median. This exercises a release Reader in a PTY, not a Rex window or an installed app. RSS includes allocator and process effects and is not peak memory.
 
 A separate in-process capacity measurement attributed 4,194,304 → 2,097,152 bytes to the dense fixture's 235,800 style runs. The bounded preview can represent their byte offsets in 32 bits; the text itself is not truncated further. The regression renders styled, multibyte text beyond the first 64 KiB. The change does not target first-frame latency.
 
@@ -31,12 +31,18 @@ A separate in-process capacity measurement attributed 4,194,304 → 2,097,152 by
 
 | 200,000 OMP history rows, WAL writer connected | Baseline | Changed |
 |---|---:|---:|
-| No cached report, result p50 / p95 | 219.1 / 226.2 ms | 119.9 / 132.2 ms |
-| Fresh cached report, result p50 / p95 | 36.2 / 36.8 ms | 36.2 / 37.1 ms |
+| Upstream indexes, dense selected history, p50 / p95 | 234.5 / 341.2 ms | 137.4 / 168.7 ms |
+| Upstream indexes, sparse selected history, p50 / p95 | 4.72 / 5.22 ms | 4.63 / 5.18 ms |
+| No indexes, no cached report, p50 / p95 | 221.8 / 226.3 ms | 219.6 / 273.9 ms |
+| No indexes, fresh cached report, p50 / p95 | 36.5 / 38.3 ms | 36.6 / 38.1 ms |
 
 The release sampler committed one new observation per simulated 20-second interval and checked the displayed percentage after each of 12 reads. One warm-up was excluded. Times include launching the read-only SQLite CLI (3.54.0) and consuming the result. Each build was run separately; this is not menu repaint time, battery usage, or a provider API benchmark.
 
+The improvement is concentrated in dense histories with provider indexes. Without those indexes the uncached median was flat and the slowest measured read was worse. With only twelve samples the reported p95 is the maximum, not a stable tail estimate.
+
 The query first finds the latest eligible time for each account and limit, resolves tied timestamps by row ID, then fetches the selected payloads. The account, freshness and clock-skew rules still apply. A later backfill cannot outrank a newer observation just because it has a higher ID; an unknown newer limit must not resurrect an older value. The sampler still rechecks an active WAL. Costs depend on SQLite's planner, row distribution and indexes; the query still reads history and is not constant-time.
+
+A separate SQL-only comparison used OMP's [provider/account/limit/time and recorded-time indexes](https://github.com/can1357/oh-my-pi/blob/v18.18.0/packages/ai/src/auth/sqlite-credential-store.ts#L657-L672). With 200,000 rows for a selected provider, the median CLI query fell from 194.7 to 132.1 ms. With 200,000 unrelated rows between eligible IDs, it was 4.75 versus 4.98 ms. An earlier version took 24.14 ms on the latter fixture: scanning an ID range to resolve ties defeated the provider index. The final query instead reuses a temporary set of just the eligible keys, IDs and times. That costs temporary storage proportional to eligible history, not just to the number of winning windows. These CLI measurements alternate queries on the same database and check equal results; they exclude the pane and its worker.
 
 ## Alert queues: retain only the selected content
 
@@ -52,7 +58,7 @@ Metadata mode no longer copies status text into the event. Notification text is 
 
 ## Repeating the workloads
 
-Build both revisions with `cargo build --release --locked`. Run the in-crate fixtures separately in each checkout. The settings and Reader drivers take binary paths; use the candidate checkout's Markdown driver for both binaries.
+Build both revisions with `cargo build --release --locked`. Run the in-crate fixtures separately. For the indexed WAL comparisons, copy only `src/usage/tests.rs` and `src/usage/tests/profile.rs` from the candidate into a disposable baseline checkout before compiling its tests. This adds the same fixtures without replacing the baseline query. The settings and Reader drivers take binary paths; use the candidate checkout's Markdown driver for both binaries.
 
 ```sh
 cargo test --release --locked --bin milo adopting_edits_in_a_large_worktree -- --ignored --nocapture
