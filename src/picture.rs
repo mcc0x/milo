@@ -393,13 +393,22 @@ fn write_png_pixels(
 /// Standard base64, with padding.
 fn append_base64(data: &[u8], out: &mut Vec<u8>) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    for group in data.chunks(3) {
-        let bits = group.iter().fold(0u32, |bits, &byte| bits << 8 | u32::from(byte)) << (8 * (3 - group.len()));
-        for place in 0..4 {
-            // A group of one or two bytes fills only its first two or three places.
-            let letter = if place <= group.len() { ALPHABET[(bits >> (18 - 6 * place) & 63) as usize] } else { b'=' };
-            out.push(letter);
-        }
+    let encode = |a: u8, b: u8, c: u8| {
+        [
+            ALPHABET[usize::from(a >> 2)],
+            ALPHABET[usize::from(((a & 3) << 4) | (b >> 4))],
+            ALPHABET[usize::from(((b & 15) << 2) | (c >> 6))],
+            ALPHABET[usize::from(c & 63)],
+        ]
+    };
+    let (triples, tail) = data.as_chunks::<3>();
+    for &[a, b, c] in triples {
+        out.extend_from_slice(&encode(a, b, c));
+    }
+    if let Some((&a, rest)) = tail.split_first() {
+        let mut encoded = encode(a, rest.first().copied().unwrap_or(0), 0);
+        encoded[tail.len() + 1..].fill(b'=');
+        out.extend_from_slice(&encoded);
     }
 }
 
@@ -474,6 +483,7 @@ mod tests {
             String::from_utf8(out).unwrap()
         };
         assert_eq!([text(b""), text(b"f"), text(b"fo"), text(b"foo")], ["", "Zg==", "Zm8=", "Zm9v"]);
+        assert_eq!([text(b"foob"), text(b"fooba"), text(b"foobar")], ["Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"]);
         assert_eq!(text(b"\xff\xfe\xfd\xfc"), "//79/A==");
     }
 
