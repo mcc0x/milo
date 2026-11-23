@@ -774,6 +774,7 @@ static NSString *const PreviewWebKeyPaths[] = {@"URL", @"canGoBack", @"canGoForw
 }
 
 - (void)controlTextDidBeginEditing:(NSNotification *)notification {
+    if (_pickState != PickIdle) [self finishPick:@""];
     NSTextView *editor = notification.userInfo[@"NSFieldEditor"];
     editor.continuousSpellCheckingEnabled = NO;
     editor.grammarCheckingEnabled = NO;
@@ -984,7 +985,7 @@ static BOOL PreviewFragmentChange(NSURL *from, NSURL *to) {
 }
 
 - (BOOL)canPick {
-    return [self hasCommittedLocalPage] && PreviewPickerFits(self.bounds.size) &&
+    return !_address.currentEditor && [self hasCommittedLocalPage] && PreviewPickerFits(self.bounds.size) &&
         self.window.isKeyWindow && self.window.isVisible && _acceptsPanelInput();
 }
 
@@ -1203,7 +1204,14 @@ static BOOL PreviewPickerResponse(NSURLResponse *resource) {
     NSHTTPURLResponse *http = (NSHTTPURLResponse *)resource;
     for (NSString *key in @[@"Content-Security-Policy", @"X-WebKit-CSP"]) {
         NSString *policy = [http valueForHTTPHeaderField:key];
-        if ([policy rangeOfString:@"sandbox" options:NSCaseInsensitiveSearch].length) return NO;
+        if (!policy.length || ![policy rangeOfString:@"sandbox" options:NSCaseInsensitiveSearch].length) continue;
+        NSCharacterSet *space = NSCharacterSet.whitespaceAndNewlineCharacterSet;
+        for (NSString *part in [policy componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@";,"]]) {
+            NSString *directive = [part stringByTrimmingCharactersInSet:space];
+            NSRange word = [directive rangeOfCharacterFromSet:space];
+            NSString *name = word.location == NSNotFound ? directive : [directive substringToIndex:word.location];
+            if ([name caseInsensitiveCompare:@"sandbox"] == NSOrderedSame) return NO;
+        }
     }
     return YES;
 }

@@ -419,6 +419,13 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
     SetViewport(self, 144, 240);
     CHECK(_select.isEnabled && _copy.isHidden && _review.isHidden && _path.string.length == 0);
     CheckControlFrames(self, @[_back, _reload, _select, _terminal]);
+    SetViewport(self, 80, 70);
+    [self layoutSubtreeIfNeeded];
+    CHECK(!_address.isHidden && _terminal.isHidden && NSHeight(_web.frame) >= PreviewMinPageHeight);
+    SetViewport(self, 80, 45);
+    [self layoutSubtreeIfNeeded];
+    CHECK(_address.isHidden && NSEqualRects(_web.frame, self.bounds));
+    SetViewport(self, 144, 240);
     CHECK(!self.window.isVisible && !self.window.isKeyWindow);
 }
 
@@ -438,6 +445,17 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
 
     NSArray *nodes = @[@[@([PreviewTags() indexOfObject:@"html"]), @1]];
     setAuthorized(YES);
+    _rulesReady = YES;
+    [self armPick:nil];
+    CHECK(web.reply && _pickState == PickArming);
+    [_address selectText:nil]; // click/field-editor path, not the Cmd-L action
+    NSTextView *draft = (NSTextView *)_address.currentEditor;
+    CHECK(draft && self.window.firstResponder == draft);
+    [draft insertText:@"draft.example" replacementRange:draft.selectedRange];
+    [web deliverMode:@"arm" result:@YES];
+    CHECK(self.window.firstResponder == draft && _pickState == PickIdle);
+    CHECK([draft.string isEqualToString:@"draft.example"]);
+    [self endAddressEdit];
     [self armPick:nil];
     CHECK(_pickState == PickArming);
     [web deliverMode:@"arm" result:@YES];
@@ -728,6 +746,15 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSU
     CHECK(select.enabled && copy.isHidden && TestBoard.changeCount == unchanged);
 
     ClickElement(web, @"redirect");
+    BOOL canAssociateRedirect = NO;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
+    if (@available(macOS 27.0, *)) canAssociateRedirect = YES;
+#endif
+    if (!canAssociateRedirect) {
+        CHECK(WaitFor(^BOOL{ return back.enabled && HasStatus(content, @"Open a link or enter an address"); }));
+        CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
+        SubmitAddress(content, address, outside.absoluteString);
+    }
     CHECK(WaitForPage(content, address, outside, @"Outside fixture") == general);
     CHECK(!select.enabled && [NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".redirect"]]);
     CHECK(![NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".referrer"]]);

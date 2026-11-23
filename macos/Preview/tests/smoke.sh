@@ -51,6 +51,8 @@ class QuietHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', mime)
         self.send_header('Content-Length', str(len(data)))
+        if urlsplit(self.path).path == '/start':
+            self.send_header('Content-Security-Policy', 'report-uri /sandbox-report')
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
