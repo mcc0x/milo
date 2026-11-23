@@ -53,6 +53,14 @@ impl Files {
         git.iter().map(AsRef::as_ref).chain(folder.iter().map(String::as_str))
     }
 
+    fn len(&self) -> usize {
+        match self {
+            Self::Git(paths) => paths.len(),
+            Self::Folder(paths) => paths.len(),
+            Self::None => 0,
+        }
+    }
+
     fn path(&self, i: usize) -> &str {
         match self {
             Self::Git(paths) => &paths[i],
@@ -70,7 +78,8 @@ pub(super) struct Search {
     query: String,
     notice: Option<&'static str>,
     matches: Vec<usize>,
-    dirty: bool,
+    /// Byte length of the query prefix used to build `matches`, if still valid.
+    filtered_len: Option<usize>,
     selected: usize,
     top: usize,
     pan: usize,
@@ -99,7 +108,6 @@ impl Outline {
                 Status::Complete
             };
             search.files = Files::Git(paths);
-            search.invalidate();
         } else {
             // A full, bounded walk may be slow. Keep Escape and typing responsive,
             // and reuse an in-flight walk if search was just closed and reopened.
@@ -145,11 +153,23 @@ impl Search {
         };
         listing.paths.retain(|path| !path.ends_with('/'));
         self.files = Files::Folder(listing.paths);
+        self.filtered_len = None;
         self.invalidate();
     }
 
     fn filter(&mut self) {
-        if !std::mem::take(&mut self.dirty) {
+        let len = self.query.len();
+        let previous = self.filtered_len.replace(len);
+        if previous == Some(len) {
+            return;
+        }
+        let files = self.files.len();
+        if len == 0 {
+            self.matches.clear();
+            self.matches.extend(0..files);
+            return;
+        }
+        if previous.is_some() && self.matches.is_empty() {
             return;
         }
         let folded = if self.query.is_ascii() {
@@ -157,13 +177,21 @@ impl Search {
         } else {
             Cow::Owned(self.query.chars().flat_map(char::to_lowercase).collect())
         };
-        self.matches.clear();
-        self.matches
-            .extend(self.files.paths().enumerate().filter_map(|(i, path)| contains(path, &folded).then_some(i)));
+        // Extending a substring query cannot add matches. Keep the current
+        // order and reuse the same buffer, unless every path still needs testing.
+        if previous.is_some() && self.matches.len() < files {
+            self.matches.retain(|&i| contains(self.files.path(i), &folded));
+        } else {
+            self.matches.clear();
+            self.matches
+                .extend(self.files.paths().enumerate().filter_map(|(i, path)| contains(path, &folded).then_some(i)));
+        }
     }
 
     fn invalidate(&mut self) {
-        self.dirty = true;
+        if self.filtered_len.is_some_and(|len| len > self.query.len()) {
+            self.filtered_len = None;
+        }
         (self.selected, self.top, self.pan) = (0, 0, 0);
         self.painted = 0..0;
         self.open_y = None;
@@ -418,6 +446,50 @@ mod tests {
         assert!(screen.text()[0].contains("No matches"));
         assert!(screen.text()[0].contains("Partial"));
         assert!(matches!(search.key(Key::Enter, Instant::now()), Action::Ignored));
+    }
+
+    #[test]
+    fn outline_search_widens_even_when_a_new_suffix_is_typed_before_paint() {
+        let mut search = Search::default();
+        search.load_folder(walk::Listing {
+            paths: vec!["Quartz-alpha.txt".into(), "quartz-beta.txt".into(), "zebra.txt".into()],
+            ..walk::Listing::default()
+        });
+        let now = Instant::now();
+        search.paste(Some("quartz-"));
+        search.filter();
+        assert_eq!(search.matches, [0, 1]);
+        search.selected = 1;
+        search.paste(Some("a"));
+        search.filter();
+        assert_eq!(search.selected_path(), Some("Quartz-alpha.txt"));
+        search.key(Key::Backspace, now);
+        search.paste(Some("B"));
+        search.filter();
+        assert_eq!(search.selected_path(), Some("quartz-beta.txt"));
+
+        search.key(Key::Ctrl(b'u'), now);
+        search.filter();
+        assert_eq!(search.matches, [0, 1, 2]);
+    }
+
+    #[test]
+    fn outline_search_rescans_when_a_folder_listing_replaces_empty_results() {
+        let mut search = Search::default();
+        search.paste(Some("I"));
+        search.filter();
+        assert!(search.matches.is_empty());
+        search.load_folder(walk::Listing {
+            paths: vec!["Istanbul.txt".into(), "Rome.txt".into(), "İstanbul.txt".into()],
+            ..walk::Listing::default()
+        });
+        search.filter();
+        assert_eq!(search.matches, [0, 2]);
+
+        // Appending a non-ASCII character changes how the query is folded.
+        search.paste(Some("\u{0307}"));
+        search.filter();
+        assert_eq!(search.selected_path(), Some("İstanbul.txt"));
     }
 
     #[test]
