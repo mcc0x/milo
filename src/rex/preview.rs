@@ -148,17 +148,14 @@ fn tab(reply: &str) -> Option<(&str, &str)> {
 /// A lock serializes requests from independent Milo processes in the same tab.
 fn record(rex: &Rex, instance: &str, window: &str) -> Result<File, &'static str> {
     let cwd = Project::open(Path::new(".")).ok_or(RECORD)?;
-    let base = [std::env::temp_dir(), PathBuf::from("/tmp")]
-        .into_iter()
-        .filter(|p| p.is_absolute())
-        .find_map(|p| {
-            let path = p.canonicalize().ok()?;
-            let meta = path.metadata().ok()?;
-            (meta.is_dir() && matches!(meta.uid(), 0) || meta.is_dir() && meta.uid() == rex.uid).then_some(())?;
-            let private_or_sticky = meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0;
-            (private_or_sticky && rex.project.outside(&path) && cwd.outside(&path)).then_some(path)
-        })
-        .ok_or(RECORD)?;
+    // A login shell and a floating Reader can have different TMPDIRs.
+    // Use one base so independent Milo processes share the tab's lock and ID.
+    let base = Path::new("/tmp").canonicalize().map_err(|_| RECORD)?;
+    let meta = base.metadata().map_err(|_| RECORD)?;
+    let private_or_sticky = meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0;
+    if !meta.is_dir() || (meta.uid() != 0 && meta.uid() != rex.uid) || !private_or_sticky {
+        return Err(RECORD);
+    }
     let dir = base.join(format!(".milo-rex-preview-{}", rex.uid));
     if !rex.project.outside(&dir) || !cwd.outside(&dir) {
         return Err(RECORD);

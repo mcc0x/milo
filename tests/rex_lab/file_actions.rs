@@ -23,6 +23,11 @@ fn markdown_handoff_reuses_only_its_own_split() {
     // A user-chosen label is not proof Milo owns this long-running command.
     lab.rex(&["split", "-s", &session, "-b", &shell, "--label", label, "--shell=none", "--", "/bin/sleep", "600"]);
     let other = lab.view().tab(&tab).pane(label).block.clone();
+    // Give Outline a pane-specific TMPDIR. Rex starts the floating Reader
+    // below with the server's environment instead.
+    let temp = lab.root.join("login-tmp");
+    fs::create_dir(&temp).unwrap();
+    let temp = format!("TMPDIR={}", temp.display());
     lab.rex(&[
         "split",
         "-s",
@@ -36,6 +41,8 @@ fn markdown_handoff_reuses_only_its_own_split() {
         "-c",
         dir.to_str().unwrap(),
         "--",
+        "/usr/bin/env",
+        &temp,
         lab.milo.to_str().unwrap(),
         "outline",
         "--shell",
@@ -104,9 +111,16 @@ fn markdown_handoff_reuses_only_its_own_split() {
         owned.block.clone()
     };
     preview(&outline);
-    check_call(first);
+    let first_preview = check_call(first);
     keys(&outline, &["[Slash]", "r", "o", "u", "t", "e"]);
     wait(&outline, &|frame| frame.contains("/ route") && frame.contains(second));
+    let calls = lab.read("calls");
+    fs::write(dir.join(second), b"# Invalid encoding\n\xff").unwrap();
+    preview(&outline);
+    wait(&outline, &|frame| frame.contains("Preview needs UTF-8"));
+    assert_eq!(lab.read("calls"), calls, "an unreadable selection must not reach tkmp");
+    assert!(lab.view().tab(&tab).panes.iter().any(|p| p.block == first_preview));
+    fs::write(dir.join(second), "# Route\n\nFollow the river.\n").unwrap();
     preview(&outline);
     check_call(second);
 
