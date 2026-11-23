@@ -30,7 +30,12 @@ fn discord_timestamp() -> String {
     let utc = unsafe { utc.assume_init() };
     format!(
         ",\"timestamp\":\"{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z\"",
-        utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec
     )
 }
 
@@ -126,19 +131,22 @@ pub(crate) fn body(destination: Destination, chat: &str, text: &str, kind: Optio
             )
         }
         Destination::Discord => {
+            let test = kind.is_none() && text == TEST;
             let (title, color) = match kind {
                 Some(Kind::Blocked) => ("Needs attention", 0xe5a53b),
                 Some(Kind::Error) => ("Program error", 0xd95363),
                 Some(Kind::Done) => ("Finished", 0x369b73),
                 Some(Kind::Notification) => ("Notification", MILO_BLUE),
                 Some(Kind::Bell) => ("Terminal bell", MILO_BLUE),
-                None => ("Connection test", MILO_BLUE),
+                None if test => ("Connection test", MILO_BLUE),
+                None => ("Forwarding status", MILO_BLUE),
             };
             // Discord puts the icon to the left of the author line, not the title.
-            let description = if kind.is_none() { "**Connected.** Milo can send Rex alerts to this channel." } else { text };
+            let description = if test { "**Connected.** Milo can send Rex alerts to this channel." } else { text };
             format!(
                 "{{\"embeds\":[{{\"author\":{{\"name\":\"milo - {title}\",\"icon_url\":\"{MILO_ICON}\"}},\"color\":{color},\"description\":{}{}}}],\"allowed_mentions\":{{\"parse\":[]}}}}",
-                json(description), discord_timestamp()
+                json(description),
+                discord_timestamp()
             )
         }
     }

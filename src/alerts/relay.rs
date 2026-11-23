@@ -81,7 +81,7 @@ impl Origin {
         }
         let address = format!("{}/v1/binding", self.url());
         let request = send::relay_request(&address, "DELETE", None, Some(capability));
-        match send::response(&request, RESPONSE_LIMIT, None) {
+        match send::response(&request, RESPONSE_LIMIT) {
             Some((body, 204)) => body.is_empty(),
             Some((_, 401)) => !self.production(),
             _ => false,
@@ -155,13 +155,13 @@ impl<'a> ConnectionRequest<'a> {
     pub(crate) fn run(&self) -> Result<Connected, ConnectError> {
         self.operation.run(&self.origin)
     }
-    /// The caller holds the alert settings lock and has confirmed this credential was not saved.
+    /// The caller confirmed this credential was not saved and excludes concurrent writes to it.
     pub(crate) fn compensate(&self, claim: &Claim) -> bool {
         match claim.provider {
             Destination::Telegram => self.origin.revoke(&claim.credential),
             Destination::Discord => {
                 let request = send::relay_request(&claim.credential, "DELETE", None, None);
-                matches!(send::response(&request, RESPONSE_LIMIT, None), Some((_, 204 | 404)))
+                matches!(send::response(&request, RESPONSE_LIMIT), Some((_, 204 | 404)))
             }
         }
     }
@@ -176,13 +176,7 @@ pub(crate) struct Claim {
 enum Pairing<'a> {
     Start(Destination),
     Preview { provider: Destination, key: Cow<'a, str>, finish: Option<Cow<'a, str>> },
-    Save {
-        provider: Destination,
-        key: Cow<'a, str>,
-        finish: Option<Cow<'a, str>>,
-        label: Cow<'a, str>,
-        version: u64,
-    },
+    Save { provider: Destination, key: Cow<'a, str>, finish: Option<Cow<'a, str>>, label: Cow<'a, str>, version: u64 },
 }
 
 #[cfg(test)]
@@ -225,7 +219,7 @@ impl<'a> Pairing<'a> {
     }
 
     fn run(&self, origin: &Origin) -> Result<Connected, ConnectError> {
-        let (reply, status) = send::response(&self.request(origin), RESPONSE_LIMIT, None).ok_or(ConnectError::Unavailable)?;
+        let (reply, status) = send::response(&self.request(origin), RESPONSE_LIMIT).ok_or(ConnectError::Unavailable)?;
         self.reply(origin, status, &reply)
     }
 
@@ -285,8 +279,7 @@ fn paired(origin: &Origin, provider: Destination, reply: &str) -> Option<String>
     let public_key = match provider {
         Destination::Telegram => {
             let (bot, start) = url.strip_prefix("https://t.me/")?.split_once("?start=")?;
-            if !(5..=32).contains(&bot.len()) || !bot.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            {
+            if !(5..=32).contains(&bot.len()) || !bot.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
                 return None;
             }
             start
@@ -362,9 +355,10 @@ fn fields<'a, const N: usize>(object: &'a str, names: [&str; N]) -> Option<[Opti
     let mut fields = [None; N];
     let mut valid = true;
     crate::json::settings_object(object, |member| {
-        valid &= names.iter().position(|name| member.key.is(name)).is_some_and(|index| {
-            fields[index].replace(member.value).is_none()
-        });
+        valid &= names
+            .iter()
+            .position(|name| member.key.is(name))
+            .is_some_and(|index| fields[index].replace(member.value).is_none());
     })?;
     valid.then_some(fields)
 }
@@ -373,21 +367,31 @@ fn fields<'a, const N: usize>(object: &'a str, names: [&str; N]) -> Option<[Opti
 pub(super) mod tests {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::alerts::{Alerts, TelegramChatsError};
+    use crate::alerts::{Alerts, HostedConnectionError, TelegramChatsError};
     use crate::fixture::Fixture;
 
     const DEVICE: &str = concat!("aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaa");
     const LINK_KEY: &str = concat!("bbbbbbbbbb", "bbbbbbbbbb", "bbbbbbbbbb", "bbbbbbbbbb", "bbb");
     pub(in crate::alerts) const CAPABILITY: &str =
         concat!("milorelay_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
-    const PROD_CAPABILITY: &str = concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
+    const PROD_CAPABILITY: &str =
+        concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
     const MANUAL: &str = "123456:syntheticSYNTHETICsynthetic00";
 
     pub(in crate::alerts) fn with_replies<T>(replies: &[(u16, &str)], act: impl FnOnce(&str) -> T) -> (T, Vec<String>) {
+        with_replies_after(replies, |_| {}, act)
+    }
+
+    fn with_replies_after<T>(
+        replies: &[(u16, &str)],
+        mut before_reply: impl FnMut(usize) + Send,
+        act: impl FnOnce(&str) -> T,
+    ) -> (T, Vec<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -395,7 +399,8 @@ pub(super) mod tests {
             let fixture = scope.spawn(move || {
                 replies
                     .iter()
-                    .map(|(status, body)| {
+                    .enumerate()
+                    .map(|(index, (status, body))| {
                         let deadline = Instant::now() + Duration::from_secs(5);
                         let mut socket = loop {
                             match listener.accept() {
@@ -419,6 +424,7 @@ pub(super) mod tests {
                             name.eq_ignore_ascii_case("Content-Length").then(|| value.trim().parse::<u64>().unwrap())
                         });
                         (&mut reader).take(len.unwrap_or(0)).read_to_string(&mut wire).unwrap();
+                        before_reply(index);
                         if *status != 0 {
                             write!(
                                 socket,
@@ -462,9 +468,8 @@ pub(super) mod tests {
             );
             assert!(Pairing::parse(&origin, body.as_bytes()).is_none());
         }
-        let body = format!(
-            r#"{{"action":"preview","provider":"discord","deviceKey":"{DEVICE}","finishCode":"ABCD1234"}}"#,
-        );
+        let body =
+            format!(r#"{{"action":"preview","provider":"discord","deviceKey":"{DEVICE}","finishCode":"ABCD1234"}}"#,);
         let parse = || Pairing::parse(&origin, body.as_bytes()).unwrap();
         assert!(Pairing::parse(&Origin::Local, body.as_bytes()).is_none());
         let options = parse().request(&origin).options;
@@ -563,13 +568,11 @@ pub(super) mod tests {
             r#"{{"action":"save","provider":"telegram","deviceKey":"{DEVICE}","label":"Telegram DM · 42","version":1}}"#,
         );
         let pair = format!(r#"{{"deviceKey":"{DEVICE}","url":"https://t.me/MiloBot?start={LINK_KEY}"}}"#);
-        let expected = format!(
-            r#"{{"deviceKey":"{DEVICE}","url":"https://t.me/MiloBot?start={LINK_KEY}","mode":"local"}}"#,
-        );
+        let expected =
+            format!(r#"{{"deviceKey":"{DEVICE}","url":"https://t.me/MiloBot?start={LINK_KEY}","mode":"local"}}"#,);
         let metadata = r#"{"provider":"telegram","label":"Telegram DM · 42","chat":"42"}"#;
-        let ready = format!(
-            r#"{{"provider":"telegram","label":"Telegram DM · 42","credential":"{CAPABILITY}","chat":"42"}}"#,
-        );
+        let ready =
+            format!(r#"{{"provider":"telegram","label":"Telegram DM · 42","credential":"{CAPABILITY}","chat":"42"}}"#,);
         let huge = "x".repeat(usize::try_from(RESPONSE_LIMIT).unwrap() + 1);
         let replies = [
             (200, pair.as_str()),
@@ -632,12 +635,9 @@ pub(super) mod tests {
         assert!(claimed(&Origin::Production, Destination::Telegram, discord_claim).is_none());
         let old_host = discord_claim.replace("discord.com", "discordapp.com");
         assert!(claimed(&Origin::Production, Destination::Discord, &old_host).is_none());
-        for (credential, chat, label) in [
-            (MANUAL, "42", "42"),
-            (CAPABILITY, "-42", "-42"),
-            (CAPABILITY, "42", "41"),
-            (PROD_CAPABILITY, "42", "42"),
-        ] {
+        for (credential, chat, label) in
+            [(MANUAL, "42", "42"), (CAPABILITY, "-42", "-42"), (CAPABILITY, "42", "41"), (PROD_CAPABILITY, "42", "42")]
+        {
             let reply = format!(
                 r#"{{"provider":"telegram","label":"Telegram DM · {label}","credential":"{credential}","chat":"{chat}"}}"#,
             );
@@ -659,7 +659,7 @@ pub(super) mod tests {
         let throttled = r#"{"error":"Too many requests; try again later.","retry_after":35}"#;
         let (outcome, _) = with_replies(&[(429, throttled)], |origin| {
             let request = Origin::Test(origin.to_owned()).send_request(CAPABILITY, "text").unwrap();
-            send::post(&request, None)
+            send::launch(&request, None).unwrap().post()
         });
         assert_eq!(outcome, send::Outcome::Wait(Duration::from_secs(35)));
     }
@@ -669,7 +669,7 @@ pub(super) mod tests {
         let replies = [(422, "{}"), (502, "{}"), (200, "<html>OK</html>"), (0, "")];
         let (outcomes, _) = with_replies(&replies, |origin| {
             let request = Origin::Test(origin.to_owned()).send_request(CAPABILITY, "text").unwrap();
-            replies.map(|_| send::post(&request, None))
+            replies.map(|_| send::launch(&request, None).unwrap().post())
         });
         assert_eq!(
             outcomes,
@@ -694,11 +694,113 @@ pub(super) mod tests {
         ];
         let (outcomes, _) = with_replies(&replies, |origin| {
             let request = Origin::Test(origin.to_owned()).send_request(CAPABILITY, "text").unwrap();
-            replies.map(|_| send::post(&request, None))
+            replies.map(|_| send::launch(&request, None).unwrap().post())
         });
         assert_eq!(outcomes[0], send::Outcome::Unavailable(Duration::from_secs(5)));
         for (outcome, (code, _)) in outcomes.into_iter().zip(replies).skip(1) {
             assert_eq!(outcome, send::Outcome::Uncertain(Some(code)));
+        }
+    }
+
+    #[test]
+    fn forwarding_pauses_before_hosted_claim_revoke_or_compensation_finishes() {
+        const NEW: &str = concat!("milorelay_", "zyxwvutsrq", "ponmlkjihg", "fedcba9876", "543210ZYXW", "VUT");
+        const WEBHOOK: &str = "https://discord.com/api/webhooks/1234567891/synthetic_SYNTHETICsynthetic-01";
+        let (telegram, discord) = (Destination::Telegram, Destination::Discord);
+        let body = format!(
+            r#"{{"action":"save","provider":"telegram","deviceKey":"{DEVICE}","label":"Telegram DM · 43","version":1}}"#,
+        );
+        let reply =
+            format!(r#"{{"provider":"telegram","label":"Telegram DM · 43","credential":"{NEW}","chat":"43"}}"#,);
+
+        for old_revoked in [true, false] {
+            let replies = [(200, reply.as_str()), (if old_revoked { 204 } else { 503 }, ""), (204, "")];
+            let (entered, waiting) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let (_, wire) = with_replies_after(
+                &replies[..if old_revoked { 2 } else { 3 }],
+                move |stage| {
+                    entered.send(stage).unwrap();
+                    released.recv_timeout(Duration::from_secs(3)).unwrap();
+                },
+                |origin| {
+                    let f = Fixture::folder();
+                    let (config, state) = (f.root.join("config"), f.root.join("state"));
+                    let mut alerts = Alerts::at(&config, &state);
+                    alerts.relay = Some(Origin::Test(origin.to_owned()));
+                    alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+                    alerts.set_forwarding(telegram, true).unwrap();
+                    alerts.set_discord(WEBHOOK).unwrap();
+                    alerts.set_forwarding(discord, true).unwrap();
+                    let other = Alerts::at(&config, &state);
+                    let origin = Origin::Test(origin.to_owned());
+                    let operation = Pairing::parse(&origin, body.as_bytes()).unwrap();
+                    let request = ConnectionRequest { origin, operation };
+
+                    thread::scope(|scope| {
+                        let save = scope.spawn(|| alerts.save_hosted(&request));
+                        let before_reply = |stage, edit: &(dyn Fn() -> Result<(), String> + Sync)| {
+                            assert_eq!(waiting.recv_timeout(Duration::from_secs(5)).unwrap(), stage);
+                            thread::scope(|scope| {
+                                let (done, finished) = mpsc::channel();
+                                scope.spawn(move || done.send(edit()).unwrap());
+                                let result = finished.recv_timeout(Duration::from_secs(2));
+                                release.send(()).unwrap();
+                                result.expect("pause waited for the relay reply").unwrap();
+                            });
+                        };
+                        before_reply(0, &|| {
+                            other.set_forwarding(discord, false)?;
+                            assert!(!other.settings().unwrap().active(discord));
+                            assert!(other.set_telegram(MANUAL, "44").unwrap_err().contains("in progress"));
+                            // Restore this test's unrelated active provider for the next pause.
+                            other.set_forwarding(discord, true)?;
+                            Ok(())
+                        });
+                        let pause = || {
+                            assert!(other.settings().unwrap().active(discord));
+                            other.disable()?;
+                            other.choose(discord)?;
+                            assert!(!other.settings().unwrap().has_active());
+                            Ok(())
+                        };
+                        before_reply(1, &|| {
+                            assert!(!other.settings().unwrap().active(telegram));
+                            assert!(other.set_forwarding(telegram, true).unwrap_err().contains("in progress"));
+                            if old_revoked { pause() } else { Ok(()) }
+                        });
+                        if !old_revoked {
+                            before_reply(2, &|| {
+                                assert!(other.forget(telegram).unwrap_err().contains("in progress"));
+                                pause()
+                            });
+                        }
+                        let result = save.join().unwrap();
+                        if old_revoked {
+                            assert!(result.is_ok());
+                            assert_eq!(alerts.secret(telegram).unwrap(), format!("{NEW}:43"));
+                        } else {
+                            assert!(matches!(
+                                result,
+                                Err(HostedConnectionError::Discarded { cleanup_confirmed: true })
+                            ));
+                            assert_eq!(alerts.secret(telegram).unwrap(), format!("{CAPABILITY}:42"));
+                        }
+                    });
+                    let settings = other.settings().unwrap();
+                    assert!(!settings.enabled);
+                    assert_eq!(settings.destination, Some(discord));
+                    assert!(!settings.active(telegram) && !settings.active(discord));
+                    assert_eq!(settings.telegram_chat, if old_revoked { "43" } else { "42" });
+                },
+            );
+            assert!(wire[0].starts_with("POST /v1/claim HTTP/1.1\r\n"));
+            assert!(wire[1].starts_with("DELETE /v1/binding HTTP/1.1\r\n"));
+            assert!(wire[1].contains(&format!("Authorization: Bearer {CAPABILITY}\r\n")));
+            if !old_revoked {
+                assert!(wire[2].starts_with("DELETE /v1/binding HTTP/1.1\r\n"));
+                assert!(wire[2].contains(&format!("Authorization: Bearer {NEW}\r\n")));
+            }
         }
     }
 
