@@ -12,6 +12,7 @@
 #import <stdlib.h>
 #import <string.h>
 #import <math.h>
+#import <sys/ioctl.h>
 #import <sys/stat.h>
 #import <termios.h>
 #import <time.h>
@@ -435,7 +436,12 @@ static BOOL ArmPeekTTY(GuardedPeek *peek, int tty) {
     static const char ready[] = "Milo Preview: ready to confirm.\n";
     // Only a new consent epoch needs to discard canonical partial input. A
     // sample, a resize, or an ordinary lease renewal is not a new epoch.
-    if (!ForegroundCanonicalTTY(tty) || tcflush(tty, TCIFLUSH) < 0 || !ForegroundCanonicalTTY(tty)) return NO;
+    if (!ForegroundCanonicalTTY(tty)) return NO;
+    // Canonical FIONREAD counts readable input without reading any text.
+    // A complete line discarded on a later rearm deserves a receipt too.
+    int queued = 0;
+    BOOL discardedLine = peek->announced && ioctl(tty, FIONREAD, &queued) == 0 && queued > 0;
+    if (tcflush(tty, TCIFLUSH) < 0 || !ForegroundCanonicalTTY(tty)) return NO;
     if (!peek->announced && !WriteAll(tty, ready, sizeof(ready) - 1)) return NO;
     if (peek->pendingIdleReset && !peek->announcedIdleReset) {
         static const char reset[] =
@@ -443,6 +449,11 @@ static BOOL ArmPeekTTY(GuardedPeek *peek, int tty) {
             "Click this tile and type show after focus settles.\n";
         WriteAll(tty, reset, sizeof(reset) - 1);
         peek->announcedIdleReset = YES;
+        peek->pendingIdleReset = NO;
+    } else if (discardedLine) {
+        static const char discarded[] =
+            "Milo Preview: input discarded before confirmation was rearmed; type show and press Return again.\n";
+        WriteAll(tty, discarded, sizeof(discarded) - 1);
         peek->pendingIdleReset = NO;
     }
     peek->announced = peek->ttyReady = YES;
@@ -676,7 +687,11 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     // AppKit events and WebKit completions can run before the pipe source.
     // Never use a cached lease across a revocation already on the pipe.
     if (_finished || !_panel.visible || !_panel.placementProven) return NO;
-    [self readState];
+    if (_lease.guarded) {
+        if (![self readPeek]) return NO;
+    } else {
+        [self readState];
+    }
     return !_finished && _panel.visible && _panel.placementProven && _panel.onActiveSpace &&
         (!_lease.guarded || _peek.phase == PeekVisible) && [self canReveal] &&
         NSEqualRects(_panel.frame, _candidateFrame) && SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
@@ -856,7 +871,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return; }
     if (lostPin) { [self finish:NULL]; return; }
     // Prefer queued observer revocation over staging or revealing a panel.
-    if (_lease.guarded) [self readState];
+    [self readState];
     if (_finished) return;
     if (generation != _generation) return;
     PeekFailure failure = [self eligibilityFailure];

@@ -331,14 +331,28 @@ fn preview_confirmation_uses_rex_pty() {
 
     fs::remove_file(lab.root.join("deny-placement")).unwrap();
     tile.samples(4);
-    // A dismissal after more than one callback's input budget still wins
-    // over reveal. Send one burst to the actual terminal line discipline.
-    tile.type_text("show\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nhide\n");
+    // Inject only when the main thread is at the final stacked-panel proof;
+    // no earlier tick can have consumed part of this burst.
+    let hold = lab.root.join("hold-staged-proof");
+    fs::write(&hold, "").unwrap();
+    tile.show();
+    tile.wait("did not reach the post-stage proof", || tile.event("awaiting-dismissal-burst") == 1);
+    tile.type_text("\n\n\n\n\n\n\n\nhide\n");
+    fs::remove_file(hold).unwrap();
     tile.wait("queued dismissal was not consumed", || tile.count("not shown: the confirmation was canceled") == 1);
     assert_eq!(tile.event("revealed"), 4);
     tile.samples(4);
     tile.show();
     tile.wait("fresh confirmation did not recover after clearing the obstruction", || tile.event("revealed") == 5);
+    let input_gate = lab.root.join("hold-visible-input");
+    fs::write(&input_gate, "").unwrap();
+    tile.wait("did not reach visible input gate", || tile.event("awaiting-input-dismissal") == 1);
+    tile.type_text("hide\n");
+    fs::remove_file(input_gate).unwrap();
+    tile.wait("queued dismissal did not deny input", || tile.event("denied-input-after-dismissal") == 1);
+    tile.samples(4);
+    tile.show();
+    tile.wait("did not recover after terminal dismissal", || tile.event("revealed") == 6);
     // A canceled attempt may also order out a transparent staging window.
     let hidden_before_close = tile.event("hidden");
     lab.rex(&["block", "close", "-s", &session, &main]);

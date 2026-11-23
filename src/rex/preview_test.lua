@@ -556,6 +556,12 @@ assert(watch_ready() == guarded)
 -- The away event arrives after the session view is already back. The same
 -- geometry is eligible again, but the prior native peek must not survive.
 assert(watch_ready("active_window_changed", { window_id = inactive }) == guarded .. guarded)
+local ownership = guarded .. guarded
+assert(watch_ready("block_owner_changed", { block_id = other }) == ownership)
+for _, block in ipairs{ preview, main } do
+  ownership = ownership .. guarded
+  assert(watch_ready("block_owner_changed", { block_id = block }) == ownership)
+end
 
 -- All three startup paths retain the latch if the viewer is down to one
 -- attachment before the initial placement becomes eligible.

@@ -50,6 +50,8 @@ static CGFloat quartzHeight;
 static NSPoint pointer;
 static NSString *denyPlacement;
 static NSString *delaySamples;
+static NSString *holdProof;
+static NSString *holdInput;
 static int trace;
 static os_unfair_lock sampleLock = OS_UNFAIR_LOCK_INIT;
 static BOOL staged;
@@ -244,6 +246,31 @@ static void FixtureProven(MiloPreviewPanel *panel, SEL selector, BOOL proven) {
     }
 }
 
+@interface DismissalFixtureAnchor : MiloPreviewAnchor
+@end
+@implementation DismissalFixtureAnchor
+- (void)applySample:(Geometry)geometry checkedPanel:(BOOL)checkedPanel lostPin:(BOOL)lostPin
+    generation:(NSUInteger)generation started:(NSTimeInterval)started {
+    BOOL checkInput = checkedPanel && [NSFileManager.defaultManager fileExistsAtPath:holdInput];
+    NSString *gate = checkInput ? holdInput : holdProof;
+    if (checkedPanel && [NSFileManager.defaultManager fileExistsAtPath:gate]) {
+        // The PTY already accepted show. Queue a dismissal *after* staging
+        // and after any tick that drained input to request this proof.
+        Trace(checkInput ? "awaiting-input-dismissal\n" : "awaiting-dismissal-burst\n");
+        NSTimeInterval deadline = LeaseNow() + 3;
+        while ([NSFileManager.defaultManager fileExistsAtPath:gate]) {
+            assert(LeaseNow() < deadline);
+            usleep(1000);
+        }
+        if (checkInput) {
+            assert(![self acceptsPanelInput]); // Same authorization callback used by WebKit Copy.
+            Trace("denied-input-after-dismissal\n");
+        }
+    }
+    [super applySample:geometry checkedPanel:checkedPanel lostPin:lostPin generation:generation started:started];
+}
+@end
+
 static IMP Replace(Class cls, SEL selector, IMP replacement) {
     Method method = class_getInstanceMethod(cls, selector);
     assert(method);
@@ -268,6 +295,8 @@ int main(int argc, const char **argv) {
         NSString *root = [NSString stringWithUTF8String:argv[3]];
         denyPlacement = [root stringByAppendingPathComponent:@"deny-placement"];
         delaySamples = [root stringByAppendingPathComponent:@"delay-samples"];
+        holdProof = [root stringByAppendingPathComponent:@"hold-staged-proof"];
+        holdInput = [root stringByAppendingPathComponent:@"hold-visible-input"];
         trace = open([root stringByAppendingPathComponent:@"native.log"].fileSystemRepresentation,
             O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);
@@ -285,7 +314,7 @@ int main(int argc, const char **argv) {
         assert(fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == 0 && fcntl(focus[0], F_SETFL, O_NONBLOCK) == 0);
         NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:argv[2]]];
         assert(url);
-        MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:url rex:(NSRunningApplication *)owner
+        MiloPreviewAnchor *anchor = [[DismissalFixtureAnchor alloc] initWithURL:url rex:(NSRunningApplication *)owner
             pinned:Target stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid() tty:tty confirm:YES];
         int result = [anchor run];
         // The sampling queue can still have a completion in flight when run returns.

@@ -587,9 +587,14 @@ rex.on("active_window_changed", function(ctx, event)
   if confirm and event.window_id ~= a.window then emit() end
   refresh()
 end)
-for _, event in ipairs{ "block_owner_changed", "client_connected" } do
-  rex.on(event, function(ctx) if ctx.session_id == a.session then refresh() end end)
-end
+rex.on("block_owner_changed", function(ctx, event)
+  if ctx.session_id ~= a.session then return end
+  -- The snapshot may already show the owner restored. Do not carry a
+  -- previous lease across a handoff of either terminal.
+  if not event.block_id or event.block_id == a.block or event.block_id == a.main then emit() end
+  refresh()
+end)
+rex.on("client_connected", function(ctx) if ctx.session_id == a.session then refresh() end end)
 rex.on("client_disconnected", function(ctx, event)
   if ctx.session_id == a.session and event.client_id == a.owner then stop() end
 end)
