@@ -613,15 +613,6 @@ fn load_pane(
     }
 }
 
-fn focus_after_open(previous: Option<bool>, latest: Option<bool>, pending: &mut VecDeque<Key>) -> Option<bool> {
-    if latest.is_some() {
-        // This report was read during loading, after the entire input batch.
-        // Do not replay older focus changes on the newly opened pane.
-        pending.retain(|key| !matches!(key, Key::Focus(_)));
-    }
-    latest.or(previous)
-}
-
 fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: &mut Screen) -> Result<Exit, String> {
     let mut check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
@@ -741,12 +732,13 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                     match after {
                         After::Ignored => {}
                         After::Stay => redraw = true,
+                        // Cancel a handoff before the loader or browser can start.
+                        After::Open(_) | After::OpenWeb
+                            if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) =>
+                        {
+                            break 'run;
+                        }
                         After::Open(destination) => {
-                            // The loading thread can read the terminal, but not the
-                            // rest of this decoded burst. Cancel before handing it off.
-                            if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
-                                break 'run;
-                            }
                             let start = destination.start();
                             let child_checks = matches!(start, Start::Check);
                             let (opened, focus) = load_pane(start, &|| Ok(destination.open()), terminal, screen);
@@ -758,7 +750,10 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                             parent = Some((std::mem::replace(&mut pane, child), check_on_open));
                             (watcher, pace) = (child_watcher, child_pace);
                             check_on_open = child_checks;
-                            focused = focus_after_open(focused, focus, &mut keys);
+                            // The loader read this after every key already in the queue.
+                            if let Some(value) = focus {
+                                keys.push_back(Key::Focus(value));
+                            }
                             changed_pane = true;
                         }
                         After::OpenWeb => return Ok(Exit::OpenWeb),
@@ -897,9 +892,26 @@ mod tests {
             let output = read_until(&mut master, "Reading…");
             assert!(output.contains("Reading…"), "{output:?}");
         });
-        let mut pending = VecDeque::from([Key::Focus(false), Key::Char('e'), Key::Paste, Key::Enter]);
-        assert_eq!(focus_after_open(None, focused, &mut pending), Some(true));
-        assert_eq!(pending, VecDeque::from([Key::Char('e'), Key::Paste, Key::Enter]));
+        assert_eq!(focused, Some(true));
+    }
+
+    #[test]
+    fn a_queued_cancel_does_not_launch_browser_settings() {
+        let open = || Ok(Box::new(crate::home::Home::new()) as Box<dyn Pane>);
+        for cancel in [false, true] {
+            let (mut terminal, mut master, _signals) = Session::test_pty();
+            let keys: &[u8] = if crate::rex::inside() { b"\r\x03" } else { b"jjj\r\x03" };
+            let keys = &keys[..keys.len() - usize::from(!cancel)];
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let frame = read_until(&mut master, "q quit");
+                    assert!(frame.contains("q quit"));
+                    master.write_all(keys).unwrap();
+                });
+                let exit = pane_loop(Start::Loaded, &open, &mut terminal, &mut Screen::new());
+                assert!(if cancel { matches!(exit, Ok(Exit::Done)) } else { matches!(exit, Ok(Exit::OpenWeb)) });
+            });
+        }
     }
 
     #[test]

@@ -691,6 +691,13 @@ fn search_stays_responsive_during_refresh_and_opens_the_updated_file_for_editing
     assert!(terminal.restored());
 }
 
+fn assert_held_git_was_reaped(project: &Project) {
+    let pid = fs::read_to_string(project.0.join("held")).unwrap().trim().parse::<libc::pid_t>().unwrap();
+    // SAFETY: Signal zero checks the held fixture's process without delivering a signal.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "held Git survived");
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
+
 #[test]
 fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
     let project = Project::new();
@@ -703,6 +710,7 @@ fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
     // A pane that waits gives Git fifteen seconds before it reads the key.
     assert!(asked.elapsed() < Duration::from_secs(10), "waited {:?} for Git", asked.elapsed());
     assert!(terminal.restored());
+    assert_held_git_was_reaped(&project);
     assert!(project.0.join("hold").exists());
     assert!(!project.0.join("project/.git/index.lock").exists());
 }
@@ -716,23 +724,15 @@ fn returning_to_home_cancels_and_reaps_the_project_refresh() {
         terminal.master.write_all(open).unwrap();
         terminal.shows(text);
         hold_git_at_a_change(&project);
-        let pid = fs::read_to_string(project.0.join("held")).unwrap().trim().parse::<libc::pid_t>().unwrap();
         let asked = Instant::now();
         terminal.master.write_all(b"q").unwrap();
         terminal.shows(&format!("› {label}"));
-        let until = asked + Duration::from_secs(10);
-        loop {
-            // SAFETY: Signal zero checks the held fixture's process without delivering a signal.
-            if unsafe { libc::kill(pid, 0) } == -1 {
-                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
-                break;
-            }
-            assert!(Instant::now() < until, "{label} did not reap its Git refresh");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        terminal.until("q quit");
+        assert_held_git_was_reaped(&project);
         assert!(asked.elapsed() < Duration::from_secs(10), "Home waited for {label}'s Git");
         assert!(project.0.join("hold").exists());
         terminal.master.write_all(b"q").unwrap();
+        terminal.until("\x1b[?1049l");
         assert!(terminal.wait_for_exit().success());
     }
 }

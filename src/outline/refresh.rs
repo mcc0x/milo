@@ -2,18 +2,17 @@
 //! while Git reads a large project.
 
 use std::io;
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
+use std::os::fd::RawFd;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use crate::git::run::spawn_refresh;
+use crate::git::run::RefreshTask;
 use crate::git::{Kind, PendingFile, Refreshed, Repo};
 
 use super::Outline;
 
 /// One refresh on its own thread. Its descriptor becomes readable when the answer is ready.
 pub(super) struct Running {
-    ready: UnixStream,
+    ready: RefreshTask,
     answer: Receiver<Refreshed>,
     /// What the reader sharing the pane said of itself when this started.
     reader_settled: bool,
@@ -22,14 +21,14 @@ pub(super) struct Running {
 impl Running {
     fn start(repo: Repo, files: Vec<PendingFile>, reader_settled: bool) -> io::Result<Self> {
         let (send, answer) = mpsc::sync_channel(1);
-        let ready = spawn_refresh(move || {
+        let ready = RefreshTask::spawn(move || {
             let _ = send.send(repo.refreshed(&files));
         })?;
         Ok(Self { ready, answer, reader_settled })
     }
 
     pub(super) fn fd(&self) -> RawFd {
-        self.ready.as_raw_fd()
+        self.ready.fd()
     }
 }
 

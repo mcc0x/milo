@@ -26,17 +26,37 @@ thread_local! {
     static REFRESH_CANCEL: Cell<RawFd> = const { Cell::new(-1) };
 }
 
-/// The worker closes its end when the answer is ready. Closing the pane's
-/// end first wakes its Git commands, without waiting for the worker to exit.
-pub(crate) fn spawn_refresh(work: impl FnOnce() + Send + 'static) -> io::Result<UnixStream> {
-    let (ready, worker) = UnixStream::pair()?;
-    std::thread::Builder::new().spawn(move || {
-        REFRESH_CANCEL.set(worker.as_raw_fd());
-        work();
-        REFRESH_CANCEL.set(-1);
-        drop(worker);
-    })?;
-    Ok(ready)
+/// The socket signals completion to the pane and cancellation to the worker.
+pub(crate) struct RefreshTask {
+    ready: UnixStream,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RefreshTask {
+    pub(crate) fn spawn(work: impl FnOnce() + Send + 'static) -> io::Result<Self> {
+        let (ready, worker) = UnixStream::pair()?;
+        let thread = std::thread::Builder::new().spawn(move || {
+            REFRESH_CANCEL.set(worker.as_raw_fd());
+            work();
+            REFRESH_CANCEL.set(-1);
+            drop(worker);
+        })?;
+        Ok(Self { ready, thread: Some(thread) })
+    }
+
+    pub(crate) fn fd(&self) -> RawFd {
+        self.ready.as_raw_fd()
+    }
+}
+
+impl Drop for RefreshTask {
+    fn drop(&mut self) {
+        // Even on immediate process exit, reap Git before the worker disappears.
+        let _ = self.ready.shutdown(std::net::Shutdown::Write);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Cache the executable so frequent commands can bypass the macOS git launcher.
