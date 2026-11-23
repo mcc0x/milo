@@ -162,19 +162,22 @@ mod mac {
         program: Program,
         parent: libc::pid_t,
         uid: libc::uid_t,
-        started: (u64, u64),
     }
 
     fn inspect(pid: libc::pid_t) -> Option<Ancestor> {
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
-        // SAFETY: info is writable storage for the full PROC_PIDTBSDINFO record.
-        let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
+        // The short record is available even for the root-owned login process.
+        // SAFETY: info is writable storage for the full PROC_PIDT_SHORTBSDINFO record.
+        let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDT_SHORTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
         if read != size {
             return None;
         }
         // SAFETY: proc_pidinfo said it wrote the full record above.
         let info = unsafe { info.assume_init() };
+        if libc::pid_t::try_from(info.pbsi_pid).ok()? != pid {
+            return None;
+        }
         let mut path = [0; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         let size = u32::try_from(path.len()).ok()?;
         // SAFETY: path is writable for size bytes; the call looks up the executable in the kernel.
@@ -182,9 +185,8 @@ mod mac {
         let exe = path.get(..usize::try_from(len).ok()?)?;
         Some(Ancestor {
             program: program(exe)?,
-            parent: libc::pid_t::try_from(info.pbi_ppid).ok()?,
-            uid: info.pbi_uid,
-            started: (info.pbi_start_tvsec, info.pbi_start_tvusec),
+            parent: libc::pid_t::try_from(info.pbsi_ppid).ok()?,
+            uid: info.pbsi_uid,
         })
     }
 
@@ -193,20 +195,14 @@ mod mac {
         uid: libc::uid_t,
         mut inspect: impl FnMut(libc::pid_t) -> Option<Ancestor>,
     ) -> bool {
-        let mut child_started = None;
         for _ in 0..16 {
             if pid <= 1 {
                 break;
             }
             let Some(ancestor) = inspect(pid) else { break };
-            // A newer process cannot be the parent we meant to inspect.
-            if child_started.is_some_and(|started| ancestor.started > started) {
-                break;
-            }
             if ancestor.program == Program::Terminal {
                 return ancestor.uid == uid;
             }
-            child_started = Some(ancestor.started);
             pid = ancestor.parent;
         }
         false
@@ -281,20 +277,19 @@ mod mac {
             assert_eq!(program(b"/tmp/Ghostty.app/Contents/MacOS/ghostty"), None);
             assert_eq!(program(b"/opt/homebrew/bin/tmux"), None);
             let inspect = |pid| match pid {
-                11 => Some(Ancestor { program: Program::Shell, parent: 10, uid: 501, started: (1, 2) }),
-                10 => Some(Ancestor { program: Program::Terminal, parent: 1, uid: 501, started: (1, 1) }),
+                12 => Some(Ancestor { program: program(b"/bin/bash")?, parent: 11, uid: 501 }),
+                11 => Some(Ancestor { program: program(b"/usr/bin/login")?, parent: 10, uid: 0 }),
+                10 => Some(Ancestor {
+                    program: program(b"/Applications/Ghostty.app/Contents/MacOS/ghostty")?,
+                    parent: 1,
+                    uid: 501,
+                }),
                 _ => None,
             };
-            assert!(direct_terminal(11, 501, inspect));
-            assert!(!direct_terminal(11, 502, inspect));
-            assert!(!direct_terminal(12, 501, inspect));
-            assert!(!direct_terminal(11, 501, |pid| {
-                let mut ancestor = inspect(pid)?;
-                if pid == 10 {
-                    ancestor.started = (2, 0);
-                }
-                Some(ancestor)
-            }));
+            assert!(direct_terminal(12, 501, inspect));
+            assert!(!direct_terminal(12, 502, inspect));
+            assert!(!direct_terminal(13, 501, inspect));
+            assert!(!direct_terminal(12, 501, |pid| if pid == 11 { None } else { inspect(pid) }));
         }
     }
 }
