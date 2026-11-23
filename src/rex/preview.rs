@@ -98,11 +98,7 @@ fn publish_with_readback(mut request: impl FnMut(&str) -> Result<String, String>
     let published = request("publish").and_then(parse_status);
     // A lost reply can follow a successful label change. Don't make another
     // mutation: read back the exact, still-authenticated placement once.
-    if published.is_err() && request("published").and_then(parse_status).is_ok() {
-        Ok(())
-    } else {
-        published
-    }
+    if published.is_err() && request("published").and_then(parse_status).is_ok() { Ok(()) } else { published }
 }
 
 fn problem(reply: &str) -> &'static str {
@@ -234,11 +230,8 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
     let tile = exact_block(OsStr::new(&launched)).ok_or_else(|| problem(&launched).to_owned())?;
     let staged = format!(r#","tile":{},"placement":{}{anchor}"#, json(tile), json(placement.value()));
     let approve = |pid| format!(r#"{staged},"anchor_pid":{pid}"#);
-    let result = startup.start(
-        url,
-        |pid| connection.call("authorize", &approve(pid)),
-        |pid| connection.publish(&approve(pid)),
-    );
+    let result =
+        startup.start(url, |pid| connection.call("authorize", &approve(pid)), |pid| connection.publish(&approve(pid)));
     if let Err(error) = result {
         let _ = connection.call("cancel", &staged);
         return Err(error);
@@ -253,10 +246,7 @@ pub(crate) fn preview_observer_command(anchor: Anchor<'_>, startup_fd: RawFd) ->
     let connection = Connection::local()?;
     let mut command = connection.command();
     let scope = format!(r#"{},"startup_fd":{startup_fd}"#, anchor_args(anchor));
-    command
-        .args(["--args", &connection.args("watch", &scope)])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null());
+    command.args(["--args", &connection.args("watch", &scope)]).stdin(Stdio::null()).stderr(Stdio::null());
     Ok(command)
 }
 
@@ -274,7 +264,9 @@ mod tests {
 
     #[test]
     fn a_lost_publication_reply_requires_one_readback_and_never_republishes() {
-        for (publish, verified) in [(Ok("ok"), None), (Err("reply lost"), Some("ok")), (Err("reply lost"), Some("changed"))] {
+        for (publish, verified) in
+            [(Ok("ok"), None), (Err("reply lost"), Some("ok")), (Err("reply lost"), Some("changed"))]
+        {
             let mut calls = Vec::new();
             let result = publish_with_readback(|mode| {
                 calls.push(mode.to_owned());

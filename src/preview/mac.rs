@@ -199,13 +199,19 @@ impl StartupStatus {
     fn from_reply(reply: u8) -> Result<(), String> {
         let problem = match reply {
             n if n == Self::Ready as u8 => return Ok(()),
-            n if n == Self::ObserverScope as u8 => "couldn't confirm the preview's local Rex session; reopen from the local working terminal",
+            n if n == Self::ObserverScope as u8 => {
+                "couldn't confirm the preview's local Rex session; reopen from the local working terminal"
+            }
             n if n == Self::ObserverPipe as u8 => "couldn't open the Rex preview observer pipe",
             n if n == Self::FocusPipe as u8 => "couldn't open the preview focus acknowledgment pipe",
             n if n == Self::HelperLaunch as u8 => "couldn't launch the local WebKit helper",
-            n if n == Self::HelperInit as u8 => "the WebKit helper couldn't initialize; check the Rex window is still visible and reopen the preview",
+            n if n == Self::HelperInit as u8 => {
+                "the WebKit helper couldn't initialize; check the Rex window is still visible and reopen the preview"
+            }
             n if n == Self::ObserverLaunch as u8 => "couldn't start the local Rex preview observer",
-            n if n == Self::ObserverInit as u8 => "Rex couldn't verify the preview terminal and its viewer; reopen from the local working terminal",
+            n if n == Self::ObserverInit as u8 => {
+                "Rex couldn't verify the preview terminal and its viewer; reopen from the local working terminal"
+            }
             _ => "the local preview returned an invalid startup response",
         };
         Err(problem.into())
@@ -310,7 +316,8 @@ fn peer_pid(peer: &UnixStream) -> io::Result<u32> {
     // SAFETY: pid is valid for the indicated output size and peer owns fd.
     if unsafe {
         libc::getsockopt(peer.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut size)
-    } != 0 {
+    } != 0
+    {
         return Err(io::Error::last_os_error());
     }
     if size != expected || pid < 2 {
@@ -398,26 +405,24 @@ impl Drop for QuietInput {
 fn start_anchor(url: &str, anchor: Anchor<'_>) -> Result<(Child, Child, io::PipeWriter), StartupStatus> {
     let (input, mut state) = io::pipe().map_err(|_| StartupStatus::ObserverPipe)?;
     let (mut watch_ready, send_ready) = io::pipe().map_err(|_| StartupStatus::ObserverPipe)?;
-    let mut watch =
-        crate::rex::preview_observer_command(anchor, send_ready.as_raw_fd()).map_err(|_| StartupStatus::ObserverScope)?;
+    let mut watch = crate::rex::preview_observer_command(anchor, send_ready.as_raw_fd())
+        .map_err(|_| StartupStatus::ObserverScope)?;
     inherit_pipe(&mut watch, send_ready);
     let (reader, reply) = focus_pipe().map_err(|_| StartupStatus::FocusPipe)?;
     let mut helper = spawn(&["--address-stdin", &anchor.native_window_id.to_string()], input.into(), Some(reader))
         .map_err(|_| StartupStatus::HelperLaunch)?;
-    let watcher = write_address(&mut state, url)
-        .map_err(|_| StartupStatus::HelperInit)
-        .and_then(|()| {
-            // No observation may precede the helper's clock baseline.
-            after_clock_ready(&mut helper).map_err(|_| StartupStatus::HelperInit)?;
-            let mut watcher = watch.stdout(state).spawn().map_err(|_| StartupStatus::ObserverLaunch)?;
-            drop(watch); // Rust must not keep the write end alive across a refused startup.
-            if !read_ready(&mut watch_ready, 3_000) {
-                let _ = watcher.kill();
-                let _ = watcher.wait();
-                return Err(StartupStatus::ObserverInit);
-            }
-            Ok(watcher)
-        });
+    let watcher = write_address(&mut state, url).map_err(|_| StartupStatus::HelperInit).and_then(|()| {
+        // No observation may precede the helper's clock baseline.
+        after_clock_ready(&mut helper).map_err(|_| StartupStatus::HelperInit)?;
+        let mut watcher = watch.stdout(state).spawn().map_err(|_| StartupStatus::ObserverLaunch)?;
+        drop(watch); // Rust must not keep the write end alive across a refused startup.
+        if !read_ready(&mut watch_ready, 3_000) {
+            let _ = watcher.kill();
+            let _ = watcher.wait();
+            return Err(StartupStatus::ObserverInit);
+        }
+        Ok(watcher)
+    });
     match watcher {
         Ok(watcher) => Ok((helper, watcher, reply)),
         Err(status) => {
