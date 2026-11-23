@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use super::event::{self, Alert, Seen, Waiting};
 use super::{
-    Alerts, Content, Destination, Kind, Settings, forward, message, send, stand_in, valid_chat, valid_token, webhook,
+    Alerts, Content, Destination, Kind, Settings, forward, lifecycle, message, send, stand_in, valid_chat, valid_token,
+    webhook,
 };
 use crate::fixture::Fixture;
 use crate::json::Value;
@@ -220,7 +221,8 @@ fn each_destination_is_told_how_to_read_the_text_and_to_notify_nobody_by_name() 
     let text = "Rex: \"quoted\" \\ back\nline";
     let discord = message::body(Destination::Discord, "", text, Some(Kind::Blocked));
     let mut embeds = field(&discord, "embeds").elements().unwrap();
-    let [author, description, color, timestamp] = embeds.next().unwrap().fields(["author", "description", "color", "timestamp"]);
+    let [author, description, color, timestamp] =
+        embeds.next().unwrap().fields(["author", "description", "color", "timestamp"]);
     let [name, icon] = author.unwrap().fields(["name", "icon_url"]);
     assert!(name.unwrap().is("milo - Needs attention"));
     assert!(icon.unwrap().is("https://usemilo.net/apple-touch-icon.png"));
@@ -245,10 +247,24 @@ fn each_destination_is_told_how_to_read_the_text_and_to_notify_nobody_by_name() 
 }
 
 #[test]
+fn discord_lifecycle_embeds_carry_only_the_fixed_notice_text() {
+    for notice in lifecycle::Notice::ALL {
+        let text = notice.text();
+        let body = message::body(Destination::Discord, "", text, None);
+        let embed = field(&body, "embeds").elements().unwrap().next().unwrap();
+        let [description] = embed.fields(["description"]);
+        assert!(description.unwrap().is(text));
+        let [parse] = field(&body, "allowed_mentions").fields(["parse"]);
+        assert_eq!(parse.unwrap().elements().unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn mirroring_is_off_and_sends_no_text_until_chosen() {
     let settings = Settings::default();
     assert!(!settings.enabled && settings.destination.is_none() && settings.content == Content::Metadata);
     assert_eq!(Destination::ALL.map(|destination| settings.active(destination)), [false; 2]);
+    assert_eq!(settings.notices, [false; 2]);
     assert_eq!(Kind::ALL.map(|kind| settings.mirrors(kind)), [true, true, true, false, false]);
     assert_eq!(Settings::parse("").unwrap(), settings);
 }
@@ -261,7 +277,9 @@ fn saved_settings_read_back_and_a_broken_file_mirrors_nothing() {
         targets: None,
         kinds: [true, false, false, true, true],
         content: Content::Text,
+        notices: [true, false],
         telegram_chat: "@synthetic_channel".into(),
+        ..Settings::default()
     };
     assert_eq!(Settings::parse(&chosen.render()).unwrap(), chosen);
     assert_eq!(Destination::ALL.map(|destination| chosen.active(destination)), [true, false]);
@@ -412,23 +430,39 @@ fn queue_content_tracks_consent_without_collapsing_distinct_notifications() {
 }
 
 #[test]
-fn rex_is_reached_for_again_for_ten_minutes_however_long_it_was_followed() {
-    let start = Instant::now();
-    let at = |seconds: u64| start + Duration::from_secs(seconds);
-    let mut away = forward::Away::new();
-    // A stream followed for two hours ends: the wait for Rex begins now, not then.
-    assert_eq!(away.wait(Duration::from_secs(7200), at(0)), Some(Duration::from_secs(1)));
-    assert_eq!(away.wait(Duration::ZERO, at(1)), Some(Duration::from_secs(2)));
-    for (seconds, wait) in [(3, 4), (7, 8), (15, 16), (31, 30), (61, 30), (599, 30)] {
-        assert_eq!(away.wait(Duration::ZERO, at(seconds)), Some(Duration::from_secs(wait)), "{seconds}");
+fn retries_back_off_but_do_not_expire() {
+    let mut retry = forward::Backoff::new();
+    for seconds in [1, 2, 4, 8, 16] {
+        assert_eq!(retry.next(), Duration::from_secs(seconds));
     }
-    assert_eq!(away.wait(Duration::ZERO, at(600)), None);
-    // Rex came back and was followed for a while: the next absence is a new one.
-    assert_eq!(away.wait(Duration::from_secs(90), at(700)), Some(Duration::from_secs(1)));
+    for _ in 0..128 {
+        assert_eq!(retry.next(), Duration::from_secs(30));
+    }
+    // Establishing a stream starts a new backoff episode.
+    retry = forward::Backoff::new();
+    assert_eq!(retry.next(), Duration::from_secs(1));
 }
 
 fn store(f: &Fixture) -> Alerts {
     Alerts::at(&f.root.join("config"), &f.root.join("state"))
+}
+
+#[test]
+fn a_notice_review_cannot_opt_in_a_forgotten_and_resaved_connection() {
+    let f = Fixture::folder();
+    let alerts = store(&f);
+    let provider = Destination::Discord;
+    let review = || alerts.summary().unwrap().consent.token(super::ConsentFor::Destination(provider)).unwrap();
+
+    alerts.set_discord(LINK).unwrap();
+    let old = review();
+    alerts.forget(provider).unwrap();
+    alerts.set_discord(LINK).unwrap();
+
+    assert!(alerts.set_notices_reviewed(provider, old).unwrap_err().contains("Review them again"));
+    assert_eq!(alerts.settings().unwrap().notices, [false; 2]);
+    alerts.set_notices_reviewed(provider, review()).unwrap();
+    assert_eq!(alerts.settings().unwrap().notices, [false, true]);
 }
 
 #[test]
@@ -658,10 +692,11 @@ fn the_alert_transaction_holds_the_config_lock_through_a_credential_write() {
     let f = Fixture::folder();
     let alerts = Alerts::at(&f.root, &f.root);
     let probe = crate::fs_ops::open_dir(&f.root).unwrap();
+    let _credential = alerts.lock_credential(Destination::Discord).unwrap();
     alerts
         .locked(|edit| {
             assert!(matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
-            edit.save_discord(LINK, false)?;
+            edit.keep(Destination::Discord, webhook(LINK).unwrap(), None, super::SaveMode::Manual)?;
             assert!(matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
             Ok(())
         })
@@ -706,7 +741,7 @@ fn failed_uninstall_revoke_leaves_mirroring_durably_disabled() {
 
     // No request can be sent in the wrong relay environment.
     alerts.relay = None;
-    assert!(alerts.locked(|edit| edit.remove()).unwrap_err().contains("Could not disconnect"));
+    assert!(alerts.remove().unwrap_err().contains("Could not disconnect"));
     let reopened = store(&f);
     assert!(!reopened.settings().unwrap().has_active());
     assert!(reopened.enable().is_err());
@@ -743,7 +778,7 @@ fn a_connection_no_relay_can_revoke_is_removed_only_by_the_local_forget_and_disc
     alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
     assert!(!alerts.forget_telegram_locally().unwrap().contains("/stop"));
     // What kept Milo's integrations from being removed is gone.
-    alerts.locked(|edit| edit.remove()).unwrap();
+    alerts.remove().unwrap();
     assert!(!f.root.join("config/alerts.conf").exists() && !f.root.join("state/alerts-secrets").exists());
 }
 
@@ -784,6 +819,7 @@ fn the_messages_the_relay_is_tested_with_are_the_ones_milo_words() {
         (Kind::Bell, None),
     ];
     let mut sent = vec![message::TEST.to_owned()];
+    sent.extend(lifecycle::Notice::ALL.map(|notice| notice.text().to_owned()));
     for (index, (kind, waiting)) in states.into_iter().enumerate() {
         let named = Alert { kind, waiting, app: Some("a.b+c_d-e".into()), text: hostile.into() };
         sent.push(message::text(&named, Content::Metadata, 0, Destination::Telegram));
@@ -809,6 +845,9 @@ fn hosted_replacement_and_forget_leave_the_other_provider_active() {
     };
     alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
     alerts.set_hosted_discord(LINK).unwrap();
+    for destination in Destination::ALL {
+        alerts.locked(|edit| edit.set_notices(destination, true)).unwrap();
+    }
     assert_eq!(active(), [false; 2]);
     alerts.set_forwarding(telegram, true).unwrap();
     alerts.set_forwarding(discord, true).unwrap();
@@ -817,12 +856,15 @@ fn hosted_replacement_and_forget_leave_the_other_provider_active() {
     const NEW_LINK: &str = "https://discord.com/api/webhooks/1234567891/SYNTHETIC_synthetic-SYNTHETIC1";
     alerts.set_hosted_discord(NEW_LINK).unwrap();
     assert_eq!(active(), [true, false]);
+    assert_eq!(alerts.settings().unwrap().notices, [true, false]);
     assert_eq!(alerts.summary().unwrap().saved, [true, true]);
 
+    alerts.locked(|edit| edit.set_notices(discord, true)).unwrap();
     alerts.set_forwarding(discord, true).unwrap();
     alerts.choose(telegram).unwrap();
     alerts.forget(telegram).unwrap();
     let settings = alerts.settings().unwrap();
+    assert_eq!(settings.notices, [false, true]);
     assert_eq!(settings.destination, None);
     assert!(settings.telegram_chat.is_empty());
     assert_eq!(active(), [false, true]);
@@ -861,7 +903,7 @@ fn the_keychain_keeps_and_forgets_a_secret() {
         .status()
         .unwrap();
     assert!(made.success());
-    let store = Store::Keychain(Some(keychain));
+    let store = Store::real(&f.root, Some(keychain), None);
     assert_eq!(store.get(Destination::Telegram).unwrap(), None);
     store.set(Destination::Telegram, TOKEN).unwrap();
     store.set(Destination::Telegram, "654321:SYNTHETICsyntheticSYNTHETIC11").unwrap();

@@ -125,38 +125,20 @@ impl Editor {
         request: &alerts::relay::ConnectionRequest<'_>,
     ) -> Result<String, HostedSaveError> {
         use HostedSaveError::{Discarded, Local, Pending, Relay, Stale};
-        use alerts::relay::{ConnectError, Connected};
+        use alerts::HostedConnectionError;
 
         if version != self.version {
             return Err(Stale);
         }
         let alerts = self.setup.alerts.as_ref().ok_or_else(|| Local(UNAVAILABLE.into()))?;
-        let saved = alerts.locked(|edit| {
-            if request.provider() == alerts::Destination::Telegram
-                && let Err(error) = edit.check_telegram_reconnect()
-            {
-                return Ok(Err(Local(error)));
-            }
-            let claim = match request.run() {
-                Ok(Connected::Claimed(claim)) => claim,
-                Ok(Connected::Pending) => return Ok(Err(Pending)),
-                Ok(Connected::Ready(_)) => return Ok(Err(Relay(ConnectError::Invalid))),
-                Err(error) => return Ok(Err(Relay(error))),
-            };
-            let result = match claim.provider {
-                alerts::Destination::Telegram => edit.set_hosted_telegram(&claim.credential, &claim.chat),
-                alerts::Destination::Discord => edit.set_hosted_discord(&claim.credential),
-            };
-            Ok(result.map_err(|error| {
-                if edit.hosted_save_absent(claim.provider, &claim.credential) {
-                    Discarded { cleanup_confirmed: request.compensate(&claim) }
-                } else {
-                    Local(error)
-                }
-            }))
-        });
+        let saved = alerts.save_hosted(request);
         self.setup.refresh_alerts();
-        let text = saved.map_err(Local)??;
+        let text = saved.map_err(|error| match error {
+            HostedConnectionError::Local(error) => Local(error),
+            HostedConnectionError::Discarded { cleanup_confirmed } => Discarded { cleanup_confirmed },
+            HostedConnectionError::Pending => Pending,
+            HostedConnectionError::Relay(error) => Relay(error),
+        })?;
         self.setup.message = None;
         if let Some(line) = text.lines().next() {
             self.setup.report_text(Ok(Cow::Owned(line.to_owned())));
@@ -752,13 +734,11 @@ impl Action {
                 _ => return None,
             },
             [None, None, Some(group), None] if action.is("discard") => Self::Discard(Group::parse(group)?),
-            [None, Some(value), None, None] if action.is("menubar") => {
-                Self::Menubar(match value.string(9)?.as_ref() {
-                    "install" => menubar::Action::Install,
-                    "uninstall" => menubar::Action::Uninstall,
-                    _ => return None,
-                })
-            }
+            [None, Some(value), None, None] if action.is("menubar") => Self::Menubar(match value.string(9)?.as_ref() {
+                "install" => menubar::Action::Install,
+                "uninstall" => menubar::Action::Uninstall,
+                _ => return None,
+            }),
             [Some(field), Some(value), None, None] if action.is("menubar") && field.is("indicator") => {
                 Self::MenubarIndicator(Indicator::parse(&value.string(6)?)?)
             }
@@ -798,9 +778,14 @@ impl Action {
 enum AlertChange {
     Enable(alerts::ConsentFor, alerts::ConsentToken),
     Disable(Option<alerts::Destination>),
+    EnableNotices(alerts::Destination, alerts::ConsentToken),
+    DisableNotices(alerts::Destination),
     Kind(alerts::Kind, bool),
     Content(alerts::Content),
-    Telegram { token: String, chat: String },
+    Telegram {
+        token: String,
+        chat: String,
+    },
     Discord(String),
     Test(Option<alerts::Destination>),
     Forget(alerts::Destination),
@@ -831,6 +816,15 @@ impl AlertChange {
                     Self::Disable(Some(target))
                 }
             }
+            "notices" => {
+                let [target, enabled, token] = value.fields(["destination", "enabled", "consent"]);
+                let target = destination(target?)?;
+                if enabled?.boolean()? {
+                    Self::EnableNotices(target, consent(token?)?)
+                } else {
+                    Self::DisableNotices(target)
+                }
+            }
             "content" => Self::Content(alerts::Content::parse(value.string(8)?.as_ref())?),
             "telegram" => {
                 let [token, chat, hosted] = value.fields(["token", "chat", "hosted"]);
@@ -853,6 +847,8 @@ impl AlertChange {
             Self::Enable(scope, reviewed) => alerts.enable_reviewed(scope, reviewed),
             Self::Disable(None) => alerts.disable(),
             Self::Disable(Some(destination)) => alerts.set_forwarding(destination, false),
+            Self::EnableNotices(destination, reviewed) => alerts.set_notices_reviewed(destination, reviewed),
+            Self::DisableNotices(destination) => alerts.locked(|edit| edit.set_notices(destination, false)),
             Self::Kind(kind, on) => alerts.set_kind(kind, on),
             Self::Content(content) => alerts.set_content(content),
             Self::Telegram { token, chat } => alerts.set_telegram(token.trim(), chat.trim()),
@@ -882,21 +878,24 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
     write!(
         out,
         concat!(
-            "{{\"enabled\":{},\"running\":{},\"destination\":{},\"consent\":{},",
-            "\"telegram\":{{\"saved\":{},\"active\":{},\"chat\":{},\"consent\":{},\"needs_local_forget\":{}}},",
-            "\"discord\":{{\"saved\":{},\"active\":{},\"consent\":{}}},\"events\":{{"
+            "{{\"enabled\":{},\"running\":{},\"health\":{},\"destination\":{},\"consent\":{},",
+            "\"telegram\":{{\"saved\":{},\"active\":{},\"notices\":{},\"chat\":{},\"consent\":{},\"needs_local_forget\":{}}},",
+            "\"discord\":{{\"saved\":{},\"active\":{},\"notices\":{},\"consent\":{}}},\"events\":{{"
         ),
         settings.enabled,
         summary.running,
+        Quoted(summary.health.label()),
         Optional(settings.destination.map(|destination| Quoted(destination.name()))),
         consent(alerts::ConsentFor::All),
         telegram,
         settings.active(alerts::Destination::Telegram),
+        settings.notices[alerts::Destination::Telegram as usize],
         Quoted(&settings.telegram_chat),
         consent(alerts::ConsentFor::Destination(alerts::Destination::Telegram)),
         summary.telegram_needs_local_forget,
         discord,
         settings.active(alerts::Destination::Discord),
+        settings.notices[alerts::Destination::Discord as usize],
         consent(alerts::ConsentFor::Destination(alerts::Destination::Discord)),
     )
     .expect("writing to a string");
@@ -1236,7 +1235,8 @@ mod tests {
             Some(installed) => assert_eq!(status.boolean(), Some(installed)),
             None => assert!(status.null()),
         }
-        for (operation, expected) in [("install", menubar::Action::Install), ("uninstall", menubar::Action::Uninstall)] {
+        for (operation, expected) in [("install", menubar::Action::Install), ("uninstall", menubar::Action::Uninstall)]
+        {
             let request = format!(r#""action":"menubar","value":"{operation}""#);
             let body = format!(r#"{{"version":{},{request}}}"#, editor.version);
             assert!(matches!(Action::parse(body.as_bytes()), Some((_, Action::Menubar(parsed))) if parsed == expected));
@@ -1513,7 +1513,11 @@ mod tests {
         let edited = set(&mut editor, "workflow.tab_titles", "true");
         assert!(field(Value::parse(edited.as_bytes()).unwrap(), "reopen_panes").null());
         let saved = action(&mut editor, save_global).unwrap();
-        assert_feedback(&saved, "Saved global pane preferences. Milo uses the title setting when naming Rex tabs.", false);
+        assert_feedback(
+            &saved,
+            "Saved global pane preferences. Milo uses the title setting when naming Rex tabs.",
+            false,
+        );
 
         set(&mut editor, "workflow.history_follow_new", "true");
         let saved = action(&mut editor, save_global).unwrap();
@@ -1735,8 +1739,10 @@ mod tests {
             ("forwarding", r#"{"destination":"telegram","enabled":true,"consent":"invalid"}"#),
             ("forwarding", r#"{"destination":"telegram"}"#),
             ("forwarding", r#"{"destination":"other","enabled":true}"#),
-        ]
-        {
+            ("notices", r#"{"destination":"telegram","enabled":true}"#),
+            ("notices", r#"{"destination":"discord","enabled":"true"}"#),
+            ("notices", r#"{"destination":"other","enabled":false}"#),
+        ] {
             assert_eq!(change(&mut editor, name, value).unwrap_err(), BAD_ACTION, "{name}");
         }
 
@@ -1776,7 +1782,8 @@ mod tests {
     fn browser_telegram_reconnect_reports_an_incompatible_binding_and_accepts_local_forget() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        const CAPABILITY: &str = concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
+        const CAPABILITY: &str =
+            concat!("milorelay_prod_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
         let f = Fixture::folder();
         let mut editor = outside(fixture_store(&f), None);
         let config = f.root.join("alerts");
@@ -1858,6 +1865,46 @@ mod tests {
     }
 
     #[test]
+    fn browser_lifecycle_notice_preferences_are_scoped_to_a_reviewed_connection() {
+        const WEBHOOK: &str = "https://discord.com/api/webhooks/12345/SYNTHETICsyntheticSYNTHETIC00";
+        const REPLACEMENT: &str = "https://discord.com/api/webhooks/12345/SYNTHETICsyntheticSYNTHETIC01";
+        let f = Fixture::folder();
+        let mut editor = outside(fixture_store(&f), None);
+        let open_alerts = || Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state"));
+        editor.setup.alerts = Some(open_alerts());
+        let cli = open_alerts();
+        cli.set_telegram("123456:SYNTHETICsyntheticSYNTHETIC00", "42").unwrap();
+        cli.set_discord(WEBHOOK).unwrap();
+        let opt_in = |editor: &mut Editor, consent: &str| {
+            change_alert(
+                editor,
+                "notices",
+                &format!(r#"{{"destination":"discord","enabled":true,"consent":{consent:?}}}"#),
+            )
+        };
+
+        editor.setup.refresh_alerts();
+        let reviewed = alert_consent(&editor, Some("discord"));
+        cli.set_discord(REPLACEMENT).unwrap();
+        assert!(opt_in(&mut editor, &reviewed).is_err());
+        assert_eq!(cli.settings().unwrap().notices, [false, false]);
+
+        let reviewed = alert_consent(&editor, Some("discord"));
+        let state = opt_in(&mut editor, &reviewed).unwrap();
+        let state = Value::parse(state.as_bytes()).unwrap();
+        let alerts = field(state, "alerts");
+        assert!(field(alerts, "health").is("Paused"));
+        assert_eq!(field(alerts, "enabled").boolean(), Some(false));
+        assert_eq!(field(field(alerts, "telegram"), "notices").boolean(), Some(false));
+        assert_eq!(field(field(alerts, "discord"), "notices").boolean(), Some(true));
+        assert_eq!(field(state, "dirty").boolean(), Some(false));
+        assert_eq!(cli.settings().unwrap().notices, [false, true]);
+
+        change_alert(&mut editor, "notices", r#"{"destination":"discord","enabled":false}"#).unwrap();
+        assert_eq!(cli.settings().unwrap().notices, [false, false]);
+    }
+
+    #[test]
     fn saving_hosted_destinations_is_explicit_and_disarms_the_replaced_destination() {
         const CAPABILITY: &str = concat!("milorelay_", "0123456789", "abcdefghij", "ABCDEFGHIJ", "9876543210", "_-x");
         const MANUAL: &str = "123456:syntheticSYNTHETICsynthetic00";
@@ -1887,16 +1934,12 @@ mod tests {
         assert_eq!(change(&mut editor, "discord", &discord).unwrap_err(), BAD_ACTION);
 
         let save_hosted = |editor: &mut Editor, destination| {
-            editor
-                .setup
-                .alerts
-                .as_ref()
-                .unwrap()
-                .locked(|edit| match destination {
-                    alerts::Destination::Telegram => edit.set_hosted_telegram(CAPABILITY, "42"),
-                    alerts::Destination::Discord => edit.set_hosted_discord(WEBHOOK),
-                })
-                .unwrap();
+            let saved = editor.setup.alerts.as_ref().unwrap();
+            match destination {
+                alerts::Destination::Telegram => saved.set_hosted_telegram(CAPABILITY, "42"),
+                alerts::Destination::Discord => saved.set_hosted_discord(WEBHOOK),
+            }
+            .unwrap();
             change(editor, "refresh", "null").unwrap()
         };
         let state = save_hosted(&mut editor, alerts::Destination::Discord);
@@ -2000,8 +2043,15 @@ mod tests {
         let own = action(&mut editor, &format!(r#""action":"presence","field":"application","value":"{ID}""#)).unwrap();
         let (_, _, id, _, public) = presence(&own, "both");
         assert_eq!(id.as_deref(), Some(ID), "the ID survives as text");
-        assert_eq!(public, presence::public(presence::Details::Both, true), "the notice names the person's own application");
-        assert_eq!(fs::read_to_string(&file).unwrap(), format!("presence = true\napplication_id = {ID}\ndetails = both\n"));
+        assert_eq!(
+            public,
+            presence::public(presence::Details::Both, true),
+            "the notice names the person's own application"
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            format!("presence = true\napplication_id = {ID}\ndetails = both\n")
+        );
 
         let off = action(&mut editor, r#""action":"presence","value":"off""#).unwrap();
         let (enabled, details, id, status, _) = presence(&off, "both");

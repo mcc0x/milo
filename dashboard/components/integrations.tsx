@@ -82,7 +82,7 @@ export default function Integrations() {
   const summaries = {
     automation: rules ? `${rules} ${rules === 1 ? 'rule' : 'rules'} on` : 'Off',
     presence: presence ? (presence.enabled ? 'On' : 'Off') : unavailable,
-    alerts: alerts ? (forwarding ? (alerts.running ? 'On' : 'Not running') : 'Off') : unavailable,
+    alerts: alerts?.health ?? unavailable,
   };
   const descriptions = {
     automation: 'Tab titles and new shell layouts',

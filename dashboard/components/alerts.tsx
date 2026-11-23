@@ -16,10 +16,11 @@ const events = [
   ["bell", "Terminal bell", "At most one per terminal in 30 seconds."],
 ] as const;
 const content = [["metadata", "Kind and program name"], ["text", "Also program text"]] as const;
+const noticeDisclosure = "Milo can send a short notice when forwarding is turned on, paused, or recovers. Notices don’t include Rex alerts or program text. A pause notice may not arrive.";
 
 type Destination = (typeof destinations)[number][0];
 type DestinationEditor = "closed" | "list" | Destination;
-type Field = "forwarding" | "content" | "test" | "forget" | "forget_local" | Destination | `events.${(typeof events)[number][0]}`;
+type Field = "forwarding" | "notices" | "content" | "test" | "forget" | "forget_local" | Destination | `events.${(typeof events)[number][0]}`;
 
 function AlertGroup({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -192,7 +193,6 @@ export default function Alerts() {
   const saved = destinations.filter(([name]) => alerts[name].saved);
   const targetLabels = { telegram: `Telegram chat ${alerts.telegram.chat}`, discord: "Discord channel" };
   const targets = (active.length ? active : saved).map(([name]) => targetLabels[name]);
-  const status = !active.length ? "Forwarding off" : alerts.running ? "Forwarding on" : "Enabled, not running";
   const destinationsOpen = editor !== "closed";
   const actionError = localError || operationWarning;
   const selectedEvents = events.filter(([kind]) => alerts.events[kind]);
@@ -246,9 +246,21 @@ export default function Alerts() {
       send("forwarding", { destination, enabled: false });
     } else if (consent) {
       const selected = selectedEvents.length ? `Events: ${selectedEvents.map(([, label]) => label).join(", ")}.` : noEvents;
+      const notices = alerts?.[destination].notices ? `\n${noticeDisclosure}` : "";
       confirm("Turn on alert forwarding?",
-        `Destination: ${targetLabels[destination]}.\n${selected}\n${payload}\n${rexNotifications}`, "Turn on",
+        `Destination: ${targetLabels[destination]}.\n${selected}\n${payload}${notices}\n${rexNotifications}`, "Turn on",
         () => send("forwarding", { destination, enabled: true, consent }));
+    }
+  }
+
+  function toggleNotices(destination: Destination) {
+    const consent = alerts?.[destination].consent;
+    if (alerts?.[destination].notices) {
+      send("notices", { destination, enabled: false });
+    } else if (consent) {
+      confirm("Turn on lifecycle notices?",
+        `Destination: ${targetLabels[destination]}.\n${noticeDisclosure}\nThis doesn’t turn on forwarding.`, "Turn on",
+        () => send("notices", { destination, enabled: true, consent }));
     }
   }
 
@@ -260,12 +272,16 @@ export default function Alerts() {
             <div className="alerts-destination-line">
               <p className="setting-label">{targets.length ? targets.join(" and ") : "No destination"}</p>
               <span className="setting-detail alerts-status" id="group-alerts-status" role="status"
-                data-running={active.length > 0 && alerts.running}>{status}</span>
+                data-running={alerts.running}>{alerts.health}</span>
             </div>
             {!targets.length ? <p className="setting-detail">Connect a chat or channel. Forwarding stays off until you turn it on.</p> : null}
             {alerts.note ? <p className="setting-detail disclosure-text">{alerts.note}</p> : null}
           </div>
           <div className="button-row">
+            <button type="button" className="button secondary alerts-refresh" aria-controls="group-alerts-status"
+              aria-disabled={busy} onClick={() => {
+                if (!busy) command("alerts", { field: "refresh", value: null });
+              }}>Refresh status</button>
             <button type="button" className={`button ${targets.length ? "secondary" : "primary"}`}
               id="alerts-destinations-toggle" aria-haspopup="dialog" aria-controls="alerts-destinations"
               onClick={() => { showEditor("list"); manager.current?.showModal(); }}>
@@ -288,36 +304,49 @@ export default function Alerts() {
             <div className="alerts-manager-body" key={editor}>
               {editor === "list" && <div className="alerts-provider-picker" role="group" aria-label="Choose a destination">
                 {destinations.map(([name, label]) => {
-                  const { active, saved, consent } = alerts[name];
+                  const { active, saved, consent, notices } = alerts[name];
                   return (
-                    <div className="alerts-provider-row" key={name}>
-                    <button type="button" className="alerts-provider" id={`alerts-edit-${name}`} aria-label={label}
-                      onClick={() => showEditor(name)}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        {name === "telegram" ? <path d="M21.5 3.7 18 20.1c-.2.9-.8 1.1-1.5.6l-5.3-3.9-2.5 2.4.4-4.8L18 6.6c.4-.4.1-.6-.4-.3L6.5 13.2 2 11.8c-1-.3-1-1 .2-1.5L20.5 3.3c.7-.3 1.2-.1 1 .4Z"/> :
-                          <path fillRule="evenodd" d="M8.5 4.5c-1.6.2-3 .7-4.1 1.3C2 9.4 1.1 13.3 1.5 17c1.6 1.2 3.2 2 5.1 2.5l1.1-1.7-1.7-.9.4-.3c3.5 1.6 7.7 1.6 11.2 0l.4.3-1.7.9 1.1 1.7c1.9-.5 3.5-1.3 5.1-2.5.4-3.7-.5-7.6-2.9-11.2-1.1-.6-2.5-1.1-4.1-1.3l-.6 1.2a15 15 0 0 0-5.8 0ZM8.4 14.6a1.6 2 0 1 1 0-4 1.6 2 0 1 1 0 4Zm7.2 0a1.6 2 0 1 1 0-4 1.6 2 0 1 1 0 4Z"/>}
-                      </svg>
-                      <span>{label}<small>{active ? (alerts.running ? "Forwarding on" : "Enabled, not running") : saved ? "Forwarding off" : "Not connected"}</small></span>
-                      <span className="alerts-edit-label">{saved ? "Edit" : "Set up"}</span>
-                    </button>
-                    {active || saved ? (
-                      <div className="alerts-provider-controls">
-                        <IntegrationSwitch id={`alerts-forward-${name}`} label={`Forward to ${label}`} enabled={active} disabled={busy || (!active && !consent)}
-                          onClick={() => toggleForwarding(name)} />
-                        {saved ? <button type="button" className="button text-button" id={`alerts-test-${name}`} disabled={busy}
-                          aria-label={`Send test to ${label}`} aria-describedby="alerts-test-detail"
-                          onClick={() => send("test", name)}>Send test</button> : null}
+                    <div className="alerts-provider-entry" key={name}>
+                      <div className="alerts-provider-row">
+                        <button type="button" className="alerts-provider" id={`alerts-edit-${name}`} aria-label={label}
+                          onClick={() => showEditor(name)}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            {name === "telegram" ? <path d="M21.5 3.7 18 20.1c-.2.9-.8 1.1-1.5.6l-5.3-3.9-2.5 2.4.4-4.8L18 6.6c.4-.4.1-.6-.4-.3L6.5 13.2 2 11.8c-1-.3-1-1 .2-1.5L20.5 3.3c.7-.3 1.2-.1 1 .4Z"/> :
+                              <path fillRule="evenodd" d="M8.5 4.5c-1.6.2-3 .7-4.1 1.3C2 9.4 1.1 13.3 1.5 17c1.6 1.2 3.2 2 5.1 2.5l1.1-1.7-1.7-.9.4-.3c3.5 1.6 7.7 1.6 11.2 0l.4.3-1.7.9 1.1 1.7c1.9-.5 3.5-1.3 5.1-2.5.4-3.7-.5-7.6-2.9-11.2-1.1-.6-2.5-1.1-4.1-1.3l-.6 1.2a15 15 0 0 0-5.8 0ZM8.4 14.6a1.6 2 0 1 1 0-4 1.6 2 0 1 1 0 4Zm7.2 0a1.6 2 0 1 1 0-4 1.6 2 0 1 1 0 4Z"/>}
+                          </svg>
+                          <span>{label}<small>{active ? alerts.health : saved ? "Forwarding off" : "Not connected"}</small></span>
+                          <span className="alerts-edit-label">{saved ? "Edit" : "Set up"}</span>
+                        </button>
+                        {active || saved ? (
+                          <div className="alerts-provider-controls">
+                            <IntegrationSwitch id={`alerts-forward-${name}`} label={`Forward to ${label}`} enabled={active} disabled={busy || (!active && !consent)}
+                              onClick={() => toggleForwarding(name)} />
+                            {saved ? <button type="button" className="button text-button" id={`alerts-test-${name}`} disabled={busy}
+                              aria-label={`Send test to ${label}`} aria-describedby="alerts-test-detail"
+                              onClick={() => send("test", name)}>Send test</button> : null}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
+                      {saved ? (
+                        <div className="alerts-provider-notices">
+                          <label className="setting-detail" htmlFor={`alerts-notices-${name}`}>Lifecycle notices</label>
+                          <IntegrationSwitch id={`alerts-notices-${name}`} label={`Lifecycle notices for ${label}`} enabled={notices}
+                            disabled={busy || (!notices && !consent)} onClick={() => toggleNotices(name)} />
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
-                {saved.length ? <p className="setting-detail" id="alerts-test-detail">A test sends one message from Milo, not a Rex alert.</p> : null}
+                {saved.length ? <>
+                  <p className="setting-detail">{noticeDisclosure}</p>
+                  <p className="setting-detail" id="alerts-test-detail">A test sends one message from Milo, not a Rex alert.</p>
+                </> : null}
               </div>}
               <div id="alerts-provider-setup">
                 {destinations.map(([name, label]) => editor === name && (
                   <div key={name}>
                     {alerts[name].saved ? <p className="setting-detail alerts-saved-destination">Saved destination{name === "telegram" ? ` · ${alerts.telegram.chat}` : ""}</p> : null}
+                    {alerts[name].notices ? <p className="setting-detail">Replacing this destination turns off its lifecycle notices.</p> : null}
                     {name === "telegram" && alerts.telegram.needs_local_forget ? (
                       <div className="alerts-setup alerts-local-forget">
                         <p className="setting-detail">Milo can’t disconnect this Telegram connection using the current relay. Return to the original relay if possible, or forget the connection on {forgetHost} before connecting again.</p>

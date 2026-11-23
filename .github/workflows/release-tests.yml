@@ -131,6 +131,9 @@ jobs:
         run: sh tests/install.sh
       - name: Verify the embedded dashboard matches its source
         run: node dashboard/scripts/bundle.mjs --check
+      # Only a debug build accepts the loopback endpoints and disposable keychains.
+      - name: Exercise alert worker recovery with disposable destinations
+        run: cargo test --locked --test alerts
       - name: Test release build on Apple Silicon
         run: |
           test "$(uname -m)" = arm64

@@ -709,7 +709,7 @@ async function checkHostedConnections(page, destination) {
     saved.push(body);
     const alerts = {...state.alerts};
     alerts.destination ??= provider;
-    alerts[provider] = {saved: true, active: false, consent: alertConsents[provider],
+    alerts[provider] = {saved: true, active: false, notices: false, consent: alertConsents[provider],
       ...(provider === 'telegram' ? {chat, needs_local_forget: false} : {})};
     state = {...state, version: state.version + 1, alerts, message: null};
     await route.fulfill({json: state});
@@ -731,6 +731,13 @@ async function checkHostedConnections(page, destination) {
       assert(alerts[destination].saved, 'only a saved provider can be toggled');
       alerts[destination] = {...alerts[destination], active: enabled};
       alerts.running = alerts.enabled = alerts.telegram.active || alerts.discord.active;
+      alerts.health = alerts.running ? 'Listening' : 'Paused';
+    } else if (field === 'notices') {
+      const {destination, enabled, consent} = value;
+      assert.equal(consent, enabled ? alertConsents[destination] : undefined);
+      assert(alerts[destination].saved, 'only a saved provider can receive notices');
+      scoped.push({field, value});
+      alerts[destination] = {...alerts[destination], notices: enabled};
     } else if (field === 'test') {
       scoped.push({field, value});
       const provider = providers.find(({provider}) => provider === value);
@@ -740,7 +747,7 @@ async function checkHostedConnections(page, destination) {
       assert.equal(value, 'telegram', 'local forget is scoped to Telegram');
       assert(alerts.telegram.needs_local_forget);
       scoped.push({field, value});
-      alerts.telegram = {saved: false, active: false, chat: '', consent: null, needs_local_forget: false};
+      alerts.telegram = {saved: false, active: false, notices: false, chat: '', consent: null, needs_local_forget: false};
       alerts.destination = 'discord';
       message = {text: 'Removed the locally saved Telegram connection.', error: false};
     } else {
@@ -944,10 +951,25 @@ async function checkHostedConnections(page, destination) {
     await status(manager, 'Discord accepted the test message.').waitFor();
     await button(manager, 'Send test to Telegram').click();
     await status(manager, 'Telegram accepted the test message.').waitFor();
+    const noticeSwitch = (name, checked) => manager.getByRole('switch', {name: `Lifecycle notices for ${name}`, checked});
+    const noticeConfirm = dialog(page, 'Turn on lifecycle notices?');
+    const beforeNotices = scoped.length;
+    await noticeSwitch('Discord', false).press('Space');
+    await noticeConfirm.getByText(/Destination: Discord channel/).waitFor();
+    await noticeConfirm.getByText(/Notices don’t include Rex alerts or program text/).waitFor();
+    await button(noticeConfirm, 'Keep editing').click();
+    assert.equal(scoped.length, beforeNotices, 'cancel did not apply the notice choice');
+    assert(await noticeSwitch('Discord', false).evaluate(control => document.activeElement === control));
+    await noticeSwitch('Discord', false).press('Space');
+    await button(noticeConfirm, 'Turn on').click();
+    await noticeSwitch('Discord', true).waitFor();
+    await noticeSwitch('Telegram', false).waitFor();
+    await manager.getByRole('switch', {name: 'Forward to Discord', checked: false}).waitFor();
     const confirmation = dialog(page, 'Turn on alert forwarding?');
     for (const [name, target] of [['Telegram', 'Telegram chat 1234'], ['Discord', 'Discord channel']]) {
       await manager.getByRole('switch', {name: `Forward to ${name}`, checked: false}).click();
       await confirmation.getByText(`Destination: ${target}.`, {exact: false}).waitFor();
+      assert.equal(await confirmation.getByText(/Notices don’t include Rex alerts or program text/).count(), name === 'Discord' ? 1 : 0);
       await button(confirmation, 'Turn on').click();
       await manager.getByRole('switch', {name: `Forward to ${name}`, checked: true}).waitFor();
     }
@@ -958,10 +980,32 @@ async function checkHostedConnections(page, destination) {
     assert.deepEqual(scoped, [
       {field: 'test', value: 'discord'},
       {field: 'test', value: 'telegram'},
+      {field: 'notices', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: true, consent: alertConsents.telegram}},
       {field: 'forwarding', value: {destination: 'discord', enabled: true, consent: alertConsents.discord}},
       {field: 'forwarding', value: {destination: 'telegram', enabled: false}},
     ]);
+
+    await button(manager, 'Discord').getByText('Listening', {exact: true}).waitFor();
+    await noticeSwitch('Discord', true).click();
+    await noticeSwitch('Discord', false).waitFor();
+    assert.deepEqual(scoped.at(-1), {field: 'notices', value: {destination: 'discord', enabled: false}});
+    assert(await manager.getByRole('switch', {name: 'Forward to Discord'}).isChecked(),
+      'turning off notices keeps Discord forwarding');
+
+    await button(manager, 'Close destinations').click();
+    const summary = destination.locator('#group-alerts-status');
+    assert.equal(await summary.textContent(), 'Listening');
+    const beforeRefresh = scoped.length;
+    state = {...state, alerts: {...state.alerts, running: false, health: 'Waiting for Rex'}};
+    const refresh = button(destination, 'Refresh status');
+    await refresh.press('Enter');
+    await status(destination, 'Waiting for Rex').waitFor();
+    assert.equal(scoped.length, beforeRefresh, 'refresh did not edit forwarding preferences');
+    assert(await refresh.evaluate(control => document.activeElement === control), 'refresh retained keyboard focus');
+    await button(destination, 'Manage destinations').click();
+    await manager.getByRole('switch', {name: 'Forward to Discord', checked: true}).waitFor();
+    await noticeSwitch('Discord', false).waitFor();
 
     // Another local editor restored an old credential just before the user tried to reconnect.
     await button(manager, 'Telegram').click();
@@ -1063,7 +1107,7 @@ async function checkTelegramWizard(page, destination) {
     received.push(action);
     if (action.value.chat === rejectedChat) return route.fulfill({status: 400, json: {error: saveError}});
     state = {...state, version: state.version + 1, alerts: {...state.alerts,
-      destination: 'telegram', telegram: {saved: true, active: false, chat: action.value.chat,
+      destination: 'telegram', telegram: {saved: true, active: false, notices: false, chat: action.value.chat,
         consent: null, needs_local_forget: false}}};
     await route.fulfill({json: state});
   };
@@ -1153,6 +1197,7 @@ async function checkAlerts(page) {
   await section(page, 'Integrations').click();
   await button(page, 'Alert forwarding').click();
   const destination = page.getByRole('region', {name: 'Destinations', exact: true});
+  await status(destination, /^Off$/).waitFor();
   await button(destination, 'Set up destination').click();
   const manager = dialog(page, 'Destinations');
   assert.equal(await manager.getByRole('switch').count(), 0, 'unconfigured providers cannot forward');

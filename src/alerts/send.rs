@@ -4,13 +4,16 @@
 //! never on its command line. curl follows no redirect and reads no user
 //! settings file; only the loopback relay and test stand-ins use plain HTTP.
 
-use std::io::{Read as _, Write as _};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::borrow::Borrow;
+use std::ffi::CStr;
+use std::io::{self, Read as _, Write as _};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::Destination;
 use crate::json::Value;
+use crate::setup::lock;
 
 const CURL: &str = "/usr/bin/curl";
 const ANSWER_LIMIT: u64 = 1 << 16;
@@ -44,7 +47,9 @@ impl Outcome {
             Self::Unavailable(wait) => {
                 format!("the Telegram relay is not ready; it asks to wait {} seconds", wait.as_secs())
             }
-            Self::Refused(401) if hosted_telegram => "Telegram pairing expired or was revoked; reconnect with Milo".into(),
+            Self::Refused(401) if hosted_telegram => {
+                "Telegram pairing expired or was revoked; reconnect with Milo".into()
+            }
             Self::Refused(422) if hosted_telegram => "Telegram rejected this message".into(),
             Self::Refused(code @ (401 | 403 | 404)) => {
                 format!("{name} refused the saved secret or destination (HTTP {code}); save it again")
@@ -60,12 +65,14 @@ impl Outcome {
             Self::Failed(None) => format!("{name} could not be reached"),
         }
     }
+
+    pub(super) fn refused_credentials(&self) -> bool {
+        matches!(self, Self::Refused(401 | 403 | 404))
+    }
 }
 
-/// Sends a prepared request and reports the answer. While curl runs, its
-/// process ID is in `running`, for a signal handler to end it.
-pub(super) fn post(request: &Request, running: Option<&AtomicI32>) -> Outcome {
-    let (body, code) = match run(request, ANSWER_LIMIT, running) {
+fn outcome(request: &Request, response: Result<(String, u16), ResponseError>) -> Outcome {
+    let (body, code) = match response {
         Ok(response) => response,
         Err(ResponseError::Unconfirmed) if request.relay => return Outcome::Uncertain(None),
         Err(_) => return Outcome::Failed(None),
@@ -85,14 +92,39 @@ pub(super) fn post(request: &Request, running: Option<&AtomicI32>) -> Outcome {
     }
 }
 
+/// Starts the transport without giving it the request yet. With a lease,
+/// the process making the request owns the lock until it exits.
+pub(super) fn launch<R: Borrow<Request>>(request: R, lease: Option<(&Path, &CStr)>) -> io::Result<Launched<R>> {
+    let mut command = command(request.borrow());
+    if let Some((dir, name)) = lease {
+        lock::hold_in_child(&mut command, dir, name)?;
+    }
+    Ok(Launched { curl: command.spawn()?, request })
+}
+
+pub(super) struct Launched<R> {
+    curl: Child,
+    request: R,
+}
+
+impl<R: Borrow<Request>> Launched<R> {
+    /// Supplies the request on stdin and waits for the outcome, without
+    /// holding the settings lock or launching another process.
+    pub(super) fn post(self) -> Outcome {
+        let request = self.request.borrow();
+        outcome(request, read_response(self.curl, request, ANSWER_LIMIT))
+    }
+}
+
 /// Posts a query and returns only a successful answer, bounded by `limit` bytes.
 pub(super) fn query(address: &str, body: &str, limit: u64) -> Option<String> {
-    let (body, code) = response(&request(address, body), limit, None)?;
+    let (body, code) = response(&request(address, body), limit)?;
     (200..=299).contains(&code).then_some(body)
 }
 
-pub(super) fn response(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Option<(String, u16)> {
-    run(request, limit, running).ok()
+pub(super) fn response(request: &Request, limit: u64) -> Option<(String, u16)> {
+    let curl = command(request).spawn().ok()?;
+    read_response(curl, request, limit).ok()
 }
 
 /// curl's options, in the form of its own settings file.
@@ -162,33 +194,24 @@ enum ResponseError {
     Unconfirmed,
 }
 
-fn run(request: &Request, limit: u64, running: Option<&AtomicI32>) -> Result<(String, u16), ResponseError> {
+fn command(request: &Request) -> Command {
     let mut command = Command::new(CURL);
     if request.relay {
         // Don't inherit proxy, custom CA, or debug/traffic-logging settings.
         command.env_clear();
     }
     // `-q` must come first: it keeps curl from reading the user's own curlrc.
-    let mut curl = command
-        .args(["-q", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ResponseError::Unconfirmed)?;
-    if let Some(running) = running {
-        running.store(curl.id().try_into().unwrap_or(0), Ordering::Relaxed);
-    }
+    command.args(["-q", "--config", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    command
+}
+
+fn read_response(mut curl: Child, request: &Request, limit: u64) -> Result<(String, u16), ResponseError> {
     let written = curl.stdin.take().map(|mut input| input.write_all(request.options.as_bytes()));
     let mut answer = String::new();
     let read = curl.stdout.take().map(|output| output.take(limit + 1).read_to_string(&mut answer));
     let over_limit = answer.len() as u64 > limit;
     if over_limit {
         let _ = curl.kill();
-    }
-    // The output was closed; from here the process ID may no longer be signalled.
-    if let Some(running) = running {
-        running.store(0, Ordering::Relaxed);
     }
     let status = curl.wait().map_err(|_| ResponseError::Unconfirmed)?;
     if over_limit || !matches!(written, Some(Ok(()))) || !matches!(read, Some(Ok(_))) {

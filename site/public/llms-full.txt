@@ -376,16 +376,22 @@ milo alerts on                        # starts, and says again what is sent
 milo alerts on discord                # enable just Discord, leaving Telegram as configured
 milo alerts on telegram               # now send to both
 milo alerts test telegram             # test only Telegram
+milo alerts notices on discord        # let Milo announce forwarding changes in this channel
+milo alerts notices off discord       # silence those notices, without pausing Rex alerts
 milo alerts off                       # ends it at once
 ```
 
-The same choices are under **Integrations → Alert forwarding** in `milo web`, and under **Workflow → Mirror Rex alerts…** in `milo setup`; both say what will be sent and ask before turning it on. The setup screen switches between saved destinations but never takes a secret: save one with `milo alerts` or the browser editor.
+In `milo web`, open **Integrations → Alert forwarding** to manage destinations, forwarding switches and lifecycle notices. In `milo setup`, **Workflow → Mirror Rex alerts…** controls global mirroring, event kinds and content, and can test a saved destination. Both ask before turning on forwarding. The terminal setup panel never takes a secret: save one with `milo alerts` or the browser editor.
 
 In the browser, choose **Set up destination** (or **Manage destinations**). For Telegram, enter the bot token and look for a chat in its recent updates. If your chat isn’t listed, message the bot there and try again, or enter the chat ID or public `@channel` yourself. Bots already using a webhook need manual entry; Milo doesn’t disconnect their webhook. Looking for chats doesn’t save a destination or turn on forwarding.
 
 Each saved destination has its own forwarding switch and test button. Turn on both switches to send each alert to both places, or test either destination without enabling forwarding. Forgetting one leaves the other connected.
 
+**Lifecycle notices** are optional for each saved destination and off by default. Under **Manage destinations**, turn on **Lifecycle notices** for the chat or channel where you want them. Milo can send a short message there when forwarding is enabled, explicitly paused, or recovers after an interruption. A notice contains only the forwarding state, not the Rex alert, program, host, chat name or reason for the interruption. Milo does not announce each retry. The final pause notice is best effort: turning forwarding off does not wait for the destination to answer. Forgetting or replacing the destination resets its notice choice.
+
 Changing the recipient or replacing its credential turns off forwarding to that provider until you approve it again. Re-saving identical manual credentials leaves forwarding unchanged. If another editor changes what will be sent while confirmation is open, review the updated details. An old preview Telegram credential without a verifiable chat identity must be paired again; Milo will not guess which DM it belongs to.
+
+Alerts use separate credentials for each config directory. The default config directory keeps its existing saved connections. A custom `XDG_CONFIG_HOME` or `HOME` that previously used a shared credential must reconnect the destination in that profile and turn forwarding back on. Milo cannot tell which old profile approved the shared credential, so it does not copy it into another profile.
 
 If Milo cannot disconnect a saved Telegram credential using the current relay (for example, one from the old production preview), use its original relay if possible. Otherwise, choose **Forget on this host** (or **Forget on “HOST”** in forwarded settings) in Telegram’s destination settings, or run `milo alerts forget telegram --local-only` on the affected host before reconnecting. This stops Telegram forwarding and removes its credential on that host only; it does not revoke the old connection on the relay or change Discord. To revoke all Milo connections to that chat, send `/stop` to Milo’s bot in the original chat while the issuing relay is available.
 
@@ -412,9 +418,13 @@ Discord sends one Milo card per alert, with the Milo icon beside the status, inl
 
 **Once, not twice.** One background process mirrors, whatever number of tabs, panes and Rex apps are open. Rex repeats a status each time a program reports it; Milo sends it when a terminal enters a state or changes what it is waiting for. A terminal's bell is sent at most once in 30 seconds, and so is a notification that repeats that terminal's last one.
 
-**When things go wrong.** Messages are spaced about a second apart and limited to 20 a minute; a burst beyond that is not sent, and the next message says how many were left out. If the destination asks Milo to slow down, Milo sends nothing until the time it gives has passed, and tries the waiting alert again if that is within a minute. An unreachable or failing destination is tried three times before the alert is dropped. If the destination refuses the secret, or turns down five messages in a row, Milo stops asking until you save the destination again, change a choice or run `milo alerts on`. `milo alerts` shows the last outcome.
+**When things go wrong.** Ordinary alerts are spaced about a second apart and limited to 20 a minute. Milo drops excess alerts and says how many were omitted in the next message. If a destination asks it to slow down, Milo waits and retries the alert if the requested wait is within a minute. A failing destination gets up to three attempts per alert. After a confirmed credential refusal, Milo stops automatic sends to that destination, including notices. Check the connection, then re-save it or turn that provider off and on to retry. A refusal by Telegram does not pause Discord, or vice versa. `milo alerts` reports the last outcome.
 
-**Limits.** Mirroring needs `/usr/bin/curl`, and follows the Rex server on this machine only. It starts with `milo alerts on`, and again whenever Rex starts Milo's listener, which Rex does each time its server loads a [saved layout](https://github.com/mcc0x/milo/blob/main/docs/setup.md#in-rex); without a saved layout, run `milo alerts on` after restarting the machine. Alerts raised while Rex or the mirroring process is not running are not sent later, because Rex does not replay events. Rex decides in each app whether to show its own notification (for example only in the background, or not for a muted tab) and does not report that decision, so Milo mirrors what programs reported, not what Rex showed. A terminal's notifications through OSC 99 do not appear in Rex's event stream and are not mirrored.
+**When Rex goes away.** Milo keeps your forwarding choices. One worker listens for fresh events; if it exits unexpectedly, Milo retries it, and if Rex disconnects, Milo waits and reconnects. Repeated failures increase the wait up to 30 seconds. `milo alerts` and Settings distinguish waiting for Rex or retrying the worker from a user pause. `milo alerts off` pauses both destinations, even during a retry. Use `milo alerts off discord` (or `telegram`) to pause just one. Reconnecting Rex or starting the login listener does not undo a pause.
+
+Use **Refresh status** in the browser or `r` in the setup panel to check again without changing forwarding. See [Waiting for Rex and per-destination lifecycle notices](https://github.com/mcc0x/milo/blob/main/docs/img/alert-forwarding-after.webp) in desktop and mobile Settings.
+
+**Limits.** Mirroring needs `/usr/bin/curl` and follows only the local Rex server. After a machine restart, Milo resumes enabled forwarding when Rex starts Milo’s [saved layout listener](https://github.com/mcc0x/milo/blob/main/docs/setup.md#in-rex). If the layout integration is missing, disabled, or too old to start the listener, run `milo alerts on` yourself. Rex does not replay alerts raised during an interruption. Rex decides in each app whether to show its own notification (for example only in the background, or not for a muted tab) and does not report that decision, so Milo mirrors what programs reported, not what Rex showed. A terminal's notifications through OSC 99 do not appear in Rex's event stream and are not mirrored.
 
 ## Remove milo
 
@@ -1577,9 +1587,11 @@ Mirroring stays off until the user turns it on. The setup screen and the browser
 
 A secret goes from standard input or the browser editor to `secret.rs` and from there to curl's standard input. Never put one in an argument, a settings file, a status note, a log, or anything sent back to a settings page. Destinations are fixed hosts; do not add one the user can type.
 
+Lifecycle notice consent is bound to the exact provider credential and, for Telegram, the chat. The versioned local tag is salted separately for each approval; it is not a credential and cannot be used to send a message. Do not accept a missing, unknown, or mismatched tag. If Rust changes the hash algorithm used by the tag, notices require explicit reapproval; regular forwarding and saved connections are unchanged.
+
 `cargo test alerts` runs the unit tests and `cargo test --test alerts` runs the real `milo alerts` against stand-ins: a `rex` that prints the events a test writes, and a server on the loopback address for both destinations. `MILO_ALERTS_TEST_ENDPOINT` names that server, and is refused unless it is `http://127.0.0.1:PORT`. On macOS `MILO_ALERTS_KEYCHAIN` names a keychain file of the test's own, so that tests never touch yours. Only a development build reads either variable: a release build has no setting that changes where a secret is kept or sent, so with `--release` these tests do nothing. No test may use a real token, webhook or chat, or post to Telegram or Discord.
 
-To try it against Rex itself, use a disposable server as `tests/rex_lab.rs` does and a development build, with those two variables set and a local server in place of the destinations. A program in a lab terminal raises a synthetic alert with `printf '\033]7501;state=blocked:kind=permission:app=synthetic\033\\'`.
+`cargo test --test alerts real_rex -- --ignored` exercises the real event subscription against an installed Rex, still with a loopback destination and a throwaway home, settings, state, keychain and socket. Set `MILO_TEST_REX` if the executable isn't on `PATH`. The test stops and restarts only its own server, then checks that a fresh program-status alert arrives exactly once without re-enabling forwarding. The non-ignored tests use the controllable stream to exercise flapping, worker exits and a pause during backoff.
 
 ### Changing support for several Rex hosts
 
@@ -1878,7 +1890,8 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/width.rs` | Measures and shortens text in terminal columns. |
 | `src/width/data.rs` | Lists the Unicode 17.0.0 ranges of nonspacing marks and wide characters. |
 | `src/workflow.rs` | Retargets a pane to the worktree of the shell it was opened beside, when the user chose to follow it. |
-| `tests/alerts.rs` | Runs `milo alerts` with stand-ins for Rex, Telegram and Discord: opt-in, repeats, failures, rate limits and turning off. |
+| `tests/alerts.rs` | Starts real workers with disposable Rex and destination stand-ins; checks flaps, crashes, pause during retries, isolated providers, cancellations and notice counts. |
+| `tests/alerts/real_rex.rs` | Repeats the disconnect/reconnect scenario with a disposable Rex server, private Unix socket and a loopback destination. With Rex installed, run `cargo test --test alerts real_rex -- --ignored`. |
 | `tests/backend_reader.py` | Profiles reader tabs, large handed patches, memory and input during a held Git read in a disposable terminal. |
 | `tests/backend_refresh.py` | Counts real Git processes through project discovery, warm refresh and watcher bursts in synthetic worktrees. |
 | `tests/bench/report.rs` | Chooses the builds a timing test runs and writes its report beside a base build's. |

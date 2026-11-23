@@ -35,16 +35,8 @@ pub(crate) fn layout_available() -> Option<bool> {
 
 fn layout_catalog(output: &[u8]) -> Option<bool> {
     const ACTIONS: [&str; 10] = [
-        "milo_layout",
-        "milo_outline",
-        "milo_history",
-        "milo_usage",
-        "milo_close",
-        "milo_peek_outline",
-        "milo_close_peek",
-        "milo_remember_layout",
-        "milo_reset_layout",
-        "milo_name_session",
+        "milo_layout", "milo_outline", "milo_history", "milo_usage", "milo_close", "milo_peek_outline",
+        "milo_close_peek", "milo_remember_layout", "milo_reset_layout", "milo_name_session",
     ];
     let [actions] = crate::json::Value::parse(output)?.fields(["actions"]);
     let mut missing = (1u16 << ACTIONS.len()) - 1;
@@ -231,11 +223,27 @@ pub fn exec_listener(script: &Path) -> io::Error {
     }
 }
 
+/// `events` applies this timeout to starting delivery, not to a live stream.
+pub(crate) const ALERTS_CONNECT: Duration = Duration::from_millis(2500);
+
+/// A separate bounded local request distinguishes an idle stream from Rex
+/// being down. This never starts Rex and never uses a delivery credential.
+pub(crate) fn alerts_available() -> bool {
+    finished(
+        Command::new("rex")
+            .args(["--autostart=false", "--timeout=2s", "ls", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        ALERTS_CONNECT,
+    )
+}
+
 /// Starts `rex events`, which prints every event of every session of the
 /// server as a line of JSON until it is ended. It never starts a server.
 pub(crate) fn events() -> io::Result<Child> {
     Command::new("rex")
-        .args(["--autostart=false", "events", "--all", "--json"])
+        .args(["--autostart=false", "--timeout=2s", "events", "--all", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

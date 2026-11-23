@@ -6,13 +6,16 @@ use std::ffi::CStr;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::fs_ops;
 
 const LISTENER_LOCK: &CStr = c"listener.lock";
 const ALERTS_LOCK: &CStr = c"alerts.lock";
+const ALERTS_SUPERVISOR_LOCK: &CStr = c"alerts-supervisor.lock";
 /// Held by the one process that may set the user's Discord activity.
 pub(crate) const PRESENCE_LOCK: &CStr = c"presence.lock";
 /// How long a listener asked to stop is given to wind down.
@@ -110,26 +113,36 @@ pub(crate) fn held(dir: &Path, name: &CStr) -> io::Result<bool> {
     }
 }
 
-/// Whether a process is mirroring Rex alerts.
-pub(crate) fn alerts_running(dir: &Path) -> io::Result<bool> {
-    held(dir, ALERTS_LOCK)
+/// The actual worker, not the process keeping it running.
+pub(crate) fn alerts_worker(dir: &Path) -> io::Result<Option<libc::pid_t>> {
+    existing(dir, ALERTS_LOCK)?.as_ref().map(holder).transpose().map(Option::flatten)
 }
 
-/// Makes this process the one that mirrors Rex alerts. None if another
-/// already is. Dropping the file, or opening the lock again, gives it up.
+pub(crate) fn alerts_supervised(dir: &Path) -> io::Result<bool> {
+    held(dir, ALERTS_SUPERVISOR_LOCK)
+}
+
 pub(crate) fn hold_alerts(dir: &Path) -> io::Result<Option<File>> {
-    let lock = create(dir, ALERTS_LOCK)?;
-    Ok(take(&lock)?.then_some(lock))
+    hold(dir, ALERTS_LOCK, Duration::ZERO)
 }
 
-/// Ends the process mirroring Rex alerts, if one is running.
+pub(crate) fn hold_alerts_supervisor(dir: &Path) -> io::Result<Option<File>> {
+    hold(dir, ALERTS_SUPERVISOR_LOCK, Duration::ZERO)
+}
+
+/// Stop the supervisor before the worker so it cannot race to replace it.
 pub(crate) fn stop_alerts(dir: &Path) -> io::Result<()> {
-    stop_when(dir, ALERTS_LOCK, |asked| asked.elapsed() >= WIND_DOWN)
+    stop_holder(dir, ALERTS_SUPERVISOR_LOCK)?;
+    stop_alerts_worker(dir)
+}
+
+pub(crate) fn stop_alerts_worker(dir: &Path) -> io::Result<()> {
+    stop_holder(dir, ALERTS_LOCK)
 }
 
 /// A process started in the background needs a moment to take its lock.
-pub(crate) fn wait_alerts_running(dir: &Path) -> io::Result<bool> {
-    wait_held(dir, ALERTS_LOCK, START)
+pub(crate) fn wait_alerts_supervised(dir: &Path) -> io::Result<bool> {
+    wait_held(dir, ALERTS_SUPERVISOR_LOCK, START)
 }
 
 /// Takes the lock called `name` for as long as the returned file stays open.
@@ -180,9 +193,26 @@ pub(super) fn listen(dir: &Path, script: &Path) -> io::Result<()> {
     Err(crate::rex::exec_listener(script))
 }
 
+/// Makes the child own a lock across exec. Stopping the holder always
+/// reaches the child itself, even if the process that started it has died.
+pub(crate) fn hold_in_child(command: &mut Command, dir: &Path, name: &CStr) -> io::Result<()> {
+    let lock = create(dir, name)?;
+    // SAFETY: After fork, `take` and `keep_across_exec` only call fcntl
+    // and return raw OS errors. The parent already opened the file.
+    unsafe {
+        command.pre_exec(move || {
+            if !take(&lock)? {
+                return Err(io::Error::from_raw_os_error(libc::EAGAIN));
+            }
+            keep_across_exec(&lock)
+        });
+    }
+    Ok(())
+}
+
 fn keep_across_exec(lock: &File) -> io::Result<()> {
-    // SAFETY: The descriptor is open. Left open in `rex`, it keeps the lock:
-    // a process gives its lock up when it closes the file.
+    // SAFETY: The descriptor is open. Left open across exec, it keeps the
+    // lock: a process gives its lock up when it closes the file.
     if unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -201,18 +231,33 @@ pub(crate) fn stop_holder(dir: &Path, name: &CStr) -> io::Result<()> {
     stop_when(dir, name, |asked| asked.elapsed() >= WIND_DOWN)
 }
 
+/// Asks the process holding this lock to stop, without waiting for it.
+pub(crate) fn signal_holder(dir: &Path, name: &CStr) -> io::Result<()> {
+    if let Some(lock) = existing(dir, name)?
+        && let Some(pid) = holder(&lock)?
+    {
+        signal(pid)?;
+    }
+    Ok(())
+}
+
+fn signal(pid: libc::pid_t) -> io::Result<()> {
+    // SAFETY: The system has just identified the holder of the lock.
+    // The only race is PID reuse before the signal arrives.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn stop_when(dir: &Path, name: &CStr, mut expired: impl FnMut(Instant) -> bool) -> io::Result<()> {
     let Some(lock) = existing(dir, name)? else { return Ok(()) };
     for _ in 0..2 {
         let Some(listener) = holder(&lock)? else { return Ok(()) };
-        // SAFETY: The system has just identified the holder of the lock.
-        // The only race is PID reuse before the signal arrives.
-        if unsafe { libc::kill(listener, libc::SIGTERM) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
-        }
+        signal(listener)?;
         let asked = Instant::now();
         loop {
             match holder(&lock)? {
@@ -231,8 +276,6 @@ fn stop_when(dir: &Path, name: &CStr, mut expired: impl FnMut(Instant) -> bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::CommandExt as _;
-    use std::process::Command;
 
     use crate::fixture::Fixture;
 
@@ -254,6 +297,27 @@ mod tests {
         assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
         assert_eq!(holder(&lock).unwrap(), None);
         stop(&f.root).unwrap();
+    }
+
+    #[test]
+    fn the_execed_child_owns_its_cancellable_lock() {
+        const REQUEST: &CStr = c"request.lock";
+        let f = Fixture::folder();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("10");
+        hold_in_child(&mut command, &f.root, REQUEST).unwrap();
+        let mut child = command.spawn().unwrap();
+        let expected = child.id().try_into().unwrap();
+        let lock = existing(&f.root, REQUEST).unwrap().unwrap();
+        let owner = holder(&lock).unwrap();
+        let stopped = stop_holder(&f.root, REQUEST);
+        if stopped.is_err() || owner != Some(expected) {
+            let _ = child.kill();
+        }
+        assert!(!child.wait().unwrap().success());
+        assert_eq!(owner, Some(expected));
+        assert!(stopped.is_ok());
+        assert!(!held(&f.root, REQUEST).unwrap());
     }
 
     #[test]
