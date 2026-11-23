@@ -142,7 +142,8 @@ impl Store {
             Self::V2 { legacy: false } => new,
             Self::V2 { legacy: true } => format!(
                 "{new} UNION ALL SELECT NULL, 1, NULL {old} AND NOT EXISTS (
-                     SELECT 1 FROM session_message n WHERE n.session_id=m.session_id AND n.time_created>={since})"
+                     SELECT 1 FROM session_message n
+                     WHERE n.session_id=m.session_id AND n.time_created>={since} AND n.time_created<{until})"
             ),
         };
         // Whatever is dated after `now` is not counted yet, and will be without another write.
@@ -153,11 +154,26 @@ impl Store {
                  WHERE typeof(time_created) IN ('integer','real') AND time_created>={until}"
             )
         };
+        let legacy_ahead = || {
+            let scan = ahead("message");
+            // Later 1.x adds a time range to the session index. On earlier
+            // indexes, IN would fetch every message through the table.
+            // Orphan messages cannot affect the totals: both generations join sessions.
+            format!(
+                "SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM pragma_index_list('message') i, pragma_index_xinfo(i.name) c
+                    WHERE i.partial=0 AND c.key=1 AND c.coll='BINARY' AND (
+                        (c.seqno=0 AND c.name='session_id') OR (c.seqno=1 AND c.name='time_created'))
+                    GROUP BY i.name HAVING count(*)=2
+                ) THEN ({scan} AND session_id IN (SELECT id FROM session))
+                  ELSE ({scan}) END AS at"
+            )
+        };
         let ahead = match self {
-            Self::V1 => ahead("message"),
+            Self::V1 => legacy_ahead(),
             Self::V2 { legacy: false } => ahead("session_message"),
             Self::V2 { legacy: true } => {
-                format!("SELECT min(at) FROM ({} UNION ALL {})", ahead("session_message"), ahead("message"))
+                format!("SELECT min(at) FROM ({} UNION ALL {})", ahead("session_message"), legacy_ahead())
             }
         };
         format!("{GUARD}WITH step AS ({steps}){TOTALS}, ({ahead}) AS ahead_ms\nFROM step;\n")

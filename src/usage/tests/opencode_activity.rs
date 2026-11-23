@@ -352,6 +352,27 @@ fn a_1x_binary_still_writing_to_an_upgraded_database_makes_the_day_unknown() {
 }
 
 #[test]
+fn a_future_2x_step_does_not_yet_cover_legacy_activity_in_its_session() {
+    if !sqlite_installed() {
+        return;
+    }
+    let now = local_noon();
+    let f = Fixture::folder();
+    let mut db = busy_day(&f, UPGRADED, now);
+    db.writer = Writer::Old;
+    db.session("ses_pending", "1.19.6", now - HOUR, None);
+    db.step("ses_pending", now - MINUTE, &FIRST);
+    db.writer = Writer::New;
+    db.session("ses_pending", "1.19.6", now - HOUR, None);
+    let due = now + MINUTE;
+    db.step("ses_pending", due, &SECOND);
+
+    assert_eq!(db.read(now), Report::Unsupported);
+    assert_eq!(db.read(due - 1), Report::Unsupported);
+    assert_eq!(today(db.read(due)).steps, 3);
+}
+
+#[test]
 fn the_queries_return_counters_and_never_message_text() {
     if !sqlite_installed() {
         return;
