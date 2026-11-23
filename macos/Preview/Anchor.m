@@ -1,7 +1,6 @@
 #import "Anchor.h"
 #import "Browser.h"
 #import "Chrome.h"
-#import "MenuStrip.h"
 
 #import <AppKit/AppKit.h>
 #import <dispatch/dispatch.h>
@@ -117,9 +116,10 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
     for (NSUInteger i = 0; i < windows.count; ++i) {
         NSDictionary *window = windows[i];
         int64_t owner, layer, number;
-        if (![window isKindOfClass:NSDictionary.class] ||
-            !WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &owner) ||
-            !WindowInteger(window, kCGWindowLayer, INT_MIN, INT_MAX, &layer) ||
+        if (![window isKindOfClass:NSDictionary.class] || !WindowInteger(window, kCGWindowOwnerPID, 1, INT_MAX, &owner))
+            return RejectedGeometry("incomplete Quartz window identity");
+        if (!pinned && owner != rexPID) continue;
+        if (!WindowInteger(window, kCGWindowLayer, INT_MIN, INT_MAX, &layer) ||
             !WindowInteger(window, kCGWindowNumber, 1, UINT32_MAX, &number))
             return RejectedGeometry("incomplete Quartz window identity");
         if (pinned && number == pinned && (owner != rexPID || layer != normal))
@@ -161,6 +161,9 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
     if (panel != NSNotFound && panel >= match) return RejectedGeometry("helper panel is behind the pinned Rex window");
     if (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))
         return RejectedGeometry("Rex chrome and tile layout do not yield a usable pane");
+    // Pinning identifies the unique eligible Rex window; it grants no
+    // permission to display. Only a subsequent pinned sample has a tile.
+    if (!pinned) return geometry;
 
     for (NSUInteger i = 0; i < match; ++i) {
         if (i == panel) continue;
@@ -170,28 +173,11 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         if (alpha == 0) continue;
         CGRect bounds = WindowBounds(window);
         if (CGRectIsNull(bounds)) return RejectedGeometry("occlusion cannot be checked: missing bounds");
-        if (!CGRectIsEmpty(CGRectIntersection(bounds, pinned ? geometry.pane : geometry.window))) {
+        if (!CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane))) {
             pid_t owner = [window[(__bridge NSString *)kCGWindowOwnerPID] intValue];
-            if (!pinned) {
-                if (owner == rexPID) return RejectedGeometry("a separate Rex surface overlaps the candidate window");
-                if (owner == helperPID || MiloPreviewProcess(owner))
-                    return RejectedGeometry("a Milo Preview helper window overlaps the candidate Rex window");
-                int layer = [window[(__bridge NSString *)kCGWindowLayer] intValue];
-                if (layer == CGWindowLevelForKey(kCGMainMenuWindowLevelKey)) {
-                    if (!CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane)))
-                        return RejectedGeometry("a menu-level surface overlaps the drawable workspace");
-                    CGDirectDisplayID display = 0;
-                    uint32_t count = 0;
-                    if (alpha == 1 && CGGetDisplaysWithRect(geometry.window, 1, &display, &count) == kCGErrorSuccess && count == 1 &&
-                        MiloMenuStripOnDisplay(bounds, geometry.window, geometry.pane, CGDisplayBounds(display)) &&
-                        MiloSystemMenuOwner(owner)) continue;
-                    return RejectedGeometry("overlapping menu-level surface is not a verified display-top system menu strip");
-                }
-                return RejectedGeometry("a non-Rex window overlaps the candidate Rex window");
-            }
             if (owner == rexPID) return RejectedGeometry("a Rex overlay overlaps the tile; dismiss it");
             if (owner == helperPID) return RejectedGeometry("another helper window overlaps the tile");
-            return RejectedGeometry("another window overlaps the tile; uncover the tile");
+            return RejectedGeometry("another window overlaps the tile; waiting for clear placement");
         }
     }
     if (orderedPanel && panel == NSNotFound) {

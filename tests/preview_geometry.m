@@ -1,6 +1,6 @@
 // macOS, no GUI interaction or permission needed:
 // xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
-//   -framework AppKit -framework CoreGraphics -framework WebKit -framework Security -o /tmp/preview-geometry
+//   -framework AppKit -framework CoreGraphics -framework WebKit -o /tmp/preview-geometry
 // /tmp/preview-geometry
 // /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
@@ -100,34 +100,78 @@ static void PinLookupResults(void) {
 
 static void WindowPinning(void) {
     CGRect window = CGRectMake(20, 40, 1000, 800);
-    CGRect right = CGRectMake(0.5, 0, 0.5, 1);
-    CGRect overlap = CGRectMake(700, 180, 100, 100);
+    const CGRect right = CGRectMake(0.5, 0, 0.5, 1);
     NSDictionary *rex = Metadata(100, 1, window);
     NSDictionary *otherRex = Metadata(100, 2, CGRectMake(0, 0, 10, 10));
-    NSDictionary *occluding = Metadata(200, 3, overlap);
-    NSDictionary *harmless = Metadata(200, 5, CGRectMake(22, 180, 100, 100));
     NSDictionary *wrongPID = Metadata(200, 1, window);
-    NSDictionary *floating = Replacing(occluding, kCGWindowLayer, @(CGWindowLevelForKey(kCGNormalWindowLevelKey) + 25));
 
     assert(WindowID(@[rex], 0, NULL) == 1);
-    assert(!WindowID(@[harmless, rex], 0, NULL)); // Preflight has no pane, so checks the window.
     assert(!WindowID(@[rex, otherRex], 0, NULL)); // Even a disjoint second Rex window is ambiguous.
+    assert(!WindowID(@[rex, rex], 0, NULL));
     assert(!WindowID(@[otherRex, rex], 1, &right));
-    NSDictionary *chrome = Replacing(otherRex, kCGWindowLayer, @25);
-    assert(WindowID(@[chrome, rex], 1, &right) == 1); // Non-overlapping Rex chrome, not another normal window.
-    assert(!WindowID(@[Replacing(chrome, kCGWindowBounds, occluding[(__bridge NSString *)kCGWindowBounds]), rex], 1, &right));
+    assert(!WindowID(@[rex, otherRex], 1, &right));
+    assert(!WindowID(@[rex, rex], 1, &right));
+    assert(!WindowID(@[wrongPID], 0, NULL));
     assert(!WindowID(@[wrongPID, otherRex], 1, &right));
     assert(!WindowID(@[otherRex], 1, &right)); // Never use a replacement window.
-    assert(!WindowID(@[Replacing(rex, kCGWindowLayer, @25)], 1, &right));
-    assert(!WindowID(@[Replacing(rex, kCGWindowAlpha, @0)], 1, &right));
-    assert(WindowID(@[Replacing(otherRex, kCGWindowAlpha, @0), rex], 1, &right) == 1);
-    assert(!WindowID(@[occluding, rex], 1, &right));
-    assert(!WindowID(@[floating, rex], 1, &right));
-    assert(WindowID(@[Replacing(occluding, kCGWindowAlpha, @0), rex], 1, &right) == 1);
-    assert(!WindowID(@[Replacing(occluding, kCGWindowAlpha, nil), rex], 1, &right));
-    assert(!WindowID(@[Replacing(harmless, kCGWindowBounds, nil), rex], 1, &right));
-    assert(!WindowID(@[rex, Replacing(harmless, kCGWindowLayer, nil)], 1, &right));
-    assert(!WindowID(@[rex, Replacing(harmless, kCGWindowOwnerPID, @100.5)], 1, &right));
+    NSDictionary *floatingRex = Replacing(rex, kCGWindowLayer, @25);
+    NSDictionary *transparentRex = Replacing(rex, kCGWindowAlpha, @0);
+    assert(!WindowID(@[floatingRex], 0, NULL));
+    assert(!WindowID(@[floatingRex], 1, &right));
+    assert(!WindowID(@[transparentRex], 0, NULL));
+    assert(!WindowID(@[transparentRex], 1, &right));
+    NSDictionary *transparentOther = Replacing(otherRex, kCGWindowAlpha, @0);
+    assert(WindowID(@[transparentOther, rex], 0, NULL) == 1);
+    assert(WindowID(@[transparentOther, rex], 1, &right) == 1);
+    assert(!WindowID(@[Replacing(rex, kCGWindowBounds, nil)], 0, NULL));
+    assert(!WindowID(@[Replacing(rex, kCGWindowAlpha, nil)], 0, NULL));
+    NSDictionary *foreign = Metadata(200, 3, window);
+    assert(!WindowID(@[rex, Replacing(foreign, kCGWindowLayer, nil)], 1, &right));
+    assert(!WindowID(@[rex, Replacing(foreign, kCGWindowOwnerPID, @100.5)], 1, &right));
+}
+
+static void PaneOcclusion(void) {
+    CGRect window = CGRectMake(20, 40, 1000, 800);
+    const CGRect right = CGRectMake(0.5, 0, 0.5, 1);
+    NSDictionary *rex = Metadata(100, 1, window);
+    Geometry clear = SampleGeometry(@[rex], 100, 1, 300, NULL, &right);
+    assert(clear.windowID == 1);
+
+    NSDictionary *sibling = Metadata(200, 3, CGRectMake(22, 180, 100, 100));
+    CGRect titlebarRect = CGRectMake(700, 40, 100, 24);
+    NSDictionary *titlebar = Metadata(200, 4, titlebarRect);
+    NSDictionary *titlebarChrome = Replacing(Metadata(100, 10, titlebarRect), kCGWindowLayer, @25);
+    CGRect edge = CGRectMake(CGRectGetMinX(clear.pane) - 100, 180, 100, 100);
+    NSDictionary *touching = Metadata(200, 5, edge);
+    for (NSDictionary *surface in @[sibling, titlebar, titlebarChrome, touching]) {
+        assert(WindowID(@[surface, rex], 0, NULL) == 1);
+        assert(WindowID(@[surface, rex], 1, &right) == 1);
+    }
+
+    edge.size.width += 0.5; // One pixel at 2x, just inside the pane.
+    NSDictionary *onePixel = Metadata(200, 6, edge);
+    NSDictionary *covered = Metadata(200, 7, window);
+    NSDictionary *menu = Replacing(covered, kCGWindowLayer, @(CGWindowLevelForKey(kCGMainMenuWindowLevelKey)));
+    NSDictionary *chrome = Replacing(Metadata(100, 8, window), kCGWindowLayer, @25);
+    NSDictionary *helper = Metadata(300, 9, window);
+    for (NSDictionary *surface in @[onePixel, covered, menu, chrome, helper]) {
+        assert(WindowID(@[surface, rex], 0, NULL) == 1); // Pin identity even while covered.
+        assert(!WindowID(@[surface, rex], 1, &right));
+        assert(WindowID(@[rex, surface], 1, &right) == 1);
+    }
+    const CGRect workspace = CGRectMake(0, 0, 1, 1);
+    assert(WindowID(@[covered, rex], 0, &workspace) == 1); // Foreground preflight projects the workspace.
+    Geometry blocked = SampleGeometry(@[onePixel, rex], 100, 1, 300, NULL, &right);
+    assert(blocked.rejection && !strcmp(blocked.rejection, "another window overlaps the tile; waiting for clear placement"));
+    assert(WindowID(@[Replacing(covered, kCGWindowAlpha, @0), rex], 1, &right) == 1);
+
+    NSDictionary *unknownOpacity = Replacing(covered, kCGWindowAlpha, nil);
+    NSDictionary *unknownBounds = Replacing(sibling, kCGWindowBounds, nil);
+    for (NSDictionary *surface in @[unknownOpacity, unknownBounds]) {
+        assert(WindowID(@[surface, rex], 0, NULL) == 1);
+        assert(!WindowID(@[surface, rex], 1, &right)); // Unknown coverage above the pane is unsafe.
+        assert(WindowID(@[rex, surface], 1, &right) == 1);
+    }
 }
 
 static void PanelOrdering(void) {
@@ -524,6 +568,7 @@ int main(int argc, const char *argv[]) {
         ScreenPlacement();
         PinLookupResults();
         WindowPinning();
+        PaneOcclusion();
         PanelOrdering();
         RemapPinnedWindow();
         WatcherProtocol();
