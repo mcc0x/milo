@@ -64,7 +64,8 @@ const statusMessages: Record<string, true> = {
   "Milo: Rex alert forwarding recovered after an interruption.": true,
 };
 const code = "<code>(?:[^<>&\\n]|&(?:amp|lt|gt);)+</code>";
-const alert = new RegExp(`^Rex: (?:a program|a terminal|${code}) (?:is waiting for (?:permission|an answer|you(?: to sign in)?)|reported an error|finished|sent a notification|rang its bell)(?:\\n${code})?(?:\\n\\([0-9]{1,10} earlier (?:alert was|alerts were) not sent\\.\\))?$`);
+const origin = "<code>[A-Za-z0-9](?:[A-Za-z0-9 _-]{0,62}[A-Za-z0-9])?</code>";
+const alert = new RegExp(`^Rex: (?:a program|a terminal|${code}) (?:is waiting for (?:permission|an answer|you(?: to sign in)?)|reported an error|finished|sent a notification|rang its bell)(?: · ${origin})?(?:\\n${code})?(?:\\n\\([0-9]{1,10} earlier (?:alert was|alerts were) not sent\\.\\))?$`);
 const markup = /<code>|<\/code>|&(?:amp|lt|gt);|[<>&]/g;
 
 // Program-derived text stays inside literal code spans, where Telegram won't

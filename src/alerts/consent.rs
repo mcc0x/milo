@@ -66,7 +66,15 @@ impl ConsentFor {
             Self::All => "all",
             Self::Destination(destination) => destination.name(),
         };
-        let reviewed = (scope, telegram, discord, settings.kinds, settings.content.name());
+        let reviewed = (
+            scope,
+            telegram,
+            discord,
+            settings.kinds,
+            settings.content.name(),
+            settings.origin,
+            settings.disclosure_revision,
+        );
         Some(ConsentToken([0u8, 1].map(|domain| KEY.hash_one((domain, reviewed)))))
     }
 

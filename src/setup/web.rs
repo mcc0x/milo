@@ -782,6 +782,7 @@ enum AlertChange {
     DisableNotices(alerts::Destination),
     Kind(alerts::Kind, bool),
     Content(alerts::Content),
+    Origin(bool),
     Telegram {
         token: String,
         chat: String,
@@ -826,6 +827,7 @@ impl AlertChange {
                 }
             }
             "content" => Self::Content(alerts::Content::parse(value.string(8)?.as_ref())?),
+            "origin" => Self::Origin(value.boolean()?),
             "telegram" => {
                 let [token, chat, hosted] = value.fields(["token", "chat", "hosted"]);
                 if hosted.is_some() {
@@ -851,6 +853,7 @@ impl AlertChange {
             Self::DisableNotices(destination) => alerts.locked(|edit| edit.set_notices(destination, false)),
             Self::Kind(kind, on) => alerts.set_kind(kind, on),
             Self::Content(content) => alerts.set_content(content),
+            Self::Origin(on) => alerts.set_origin(on),
             Self::Telegram { token, chat } => alerts.set_telegram(token.trim(), chat.trim()),
             Self::Discord(webhook) => alerts.set_discord(webhook.trim()),
             Self::Test(Some(destination)) => alerts.test_destination(destination),
@@ -905,10 +908,11 @@ fn alerts_state(out: &mut String, alerts: &Alerts, summary: &alerts::Summary) {
     }
     write!(
         out,
-        "}},\"content\":\"{}\",\"place\":{},\"disclosure\":{},\"note\":{}}}",
+        "}},\"content\":\"{}\",\"origin\":{},\"place\":{},\"disclosure\":{},\"note\":{}}}",
         settings.content.name(),
+        settings.origin,
         Quoted(alerts.place()),
-        Quoted(&alerts::disclosure(settings)),
+        Quoted(&alerts::sends(settings)),
         Quoted(&summary.note),
     )
     .expect("writing to a string");
@@ -1729,6 +1733,7 @@ mod tests {
         for (name, value) in [
             ("events.everything", "true"),
             ("content", "\"all\""),
+            ("origin", "\"true\""),
             ("test", "true"),
             ("test", "\"other\""),
             ("forget", "\"x\""),
@@ -1755,6 +1760,15 @@ mod tests {
         assert_eq!(field(field(alerts, "telegram"), "active").boolean(), Some(false));
         assert_eq!(field(alerts, "enabled").boolean(), Some(false));
         assert!(field(alerts, "disclosure").string(600).unwrap().contains("No text from the program"));
+        assert_eq!(field(alerts, "origin").boolean(), Some(false));
+        assert!(field(alerts, "disclosure").string(600).unwrap().contains("Origin label: off."));
+
+        let state = change(&mut editor, "origin", "true").unwrap();
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert_eq!(field(alerts, "origin").boolean(), Some(true));
+        assert!(field(alerts, "content").is("metadata"));
+        let disclosure = field(alerts, "disclosure").string(600).unwrap();
+        assert!(disclosure.contains("No text from the program") && disclosure.contains("Rex session label"));
 
         change(&mut editor, "events.bell", "true").unwrap();
         change(&mut editor, "content", "\"text\"").unwrap();
@@ -1766,6 +1780,11 @@ mod tests {
         assert_eq!(field(field(alerts, "events"), "bell").boolean(), Some(true));
         assert!(field(alerts, "disclosure").string(600).unwrap().contains("up to 300 characters"));
         assert!(saved(&editor).enabled && saved(&editor).content == alerts::Content::Text);
+        assert!(saved(&editor).origin);
+        let state = change(&mut editor, "origin", "false").unwrap();
+        let alerts = field(Value::parse(state.as_bytes()).unwrap(), "alerts");
+        assert_eq!(field(alerts, "origin").boolean(), Some(false));
+        assert!(field(alerts, "content").is("text"));
         // Alert choices are no draft: there is nothing to save or discard.
         assert_eq!(field(Value::parse(state.as_bytes()).unwrap(), "dirty").boolean(), Some(false));
 
@@ -1856,6 +1875,19 @@ mod tests {
         cli.set_content(alerts::Content::Text).unwrap();
         reject(&mut editor, None, &reviewed);
 
+        // Both forwarding review scopes include the independent origin choice.
+        let all = alert_consent(&editor, None);
+        let discord = alert_consent(&editor, Some("discord"));
+        cli.set_origin(true).unwrap();
+        reject(&mut editor, None, &all);
+        reject(&mut editor, Some("discord"), &discord);
+
+        // Restoring the old disclosure still requires a new review.
+        let before_opt_out = alert_consent(&editor, Some("discord"));
+        cli.set_origin(false).unwrap();
+        cli.set_origin(true).unwrap();
+        reject(&mut editor, Some("discord"), &before_opt_out);
+
         let reviewed = alert_consent(&editor, Some("telegram"));
         reject(&mut editor, Some("discord"), &reviewed);
         enable_alerts(&mut editor, Some("telegram"), &reviewed).unwrap();
@@ -1889,8 +1921,13 @@ mod tests {
         assert!(opt_in(&mut editor, &reviewed).is_err());
         assert_eq!(cli.settings().unwrap().notices, [false, false]);
 
-        let reviewed = alert_consent(&editor, Some("discord"));
-        let state = opt_in(&mut editor, &reviewed).unwrap();
+        // A provider token cannot opt another provider into lifecycle notices.
+        let telegram = alert_consent(&editor, Some("telegram"));
+        assert!(opt_in(&mut editor, &telegram).is_err());
+        assert_eq!(cli.settings().unwrap().notices, [false, false]);
+
+        let forwarding = alert_consent(&editor, Some("discord"));
+        let state = opt_in(&mut editor, &forwarding).unwrap();
         let state = Value::parse(state.as_bytes()).unwrap();
         let alerts = field(state, "alerts");
         assert!(field(alerts, "health").is("Paused"));
@@ -1899,6 +1936,10 @@ mod tests {
         assert_eq!(field(field(alerts, "discord"), "notices").boolean(), Some(true));
         assert_eq!(field(state, "dirty").boolean(), Some(false));
         assert_eq!(cli.settings().unwrap().notices, [false, true]);
+
+        let error = enable_alerts(&mut editor, Some("discord"), &forwarding).unwrap_err();
+        assert!(error.contains("Review them again"), "{error}");
+        assert!(!cli.settings().unwrap().enabled, "forwarding cannot start from a review without the notice");
 
         change_alert(&mut editor, "notices", r#"{"destination":"discord","enabled":false}"#).unwrap();
         assert_eq!(cli.settings().unwrap().notices, [false, false]);

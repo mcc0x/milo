@@ -5,7 +5,7 @@
 //! for a desktop notification, or one that rings the bell. Milo hears these on
 //! Rex's event stream, beside Rex, so Rex's own notifications are untouched.
 //! Mirroring is off until the user turns it on, and sends the kind of alert
-//! and the program's short name only, unless the user asks for its text too.
+//! and the program's short name only, unless the user opts into text or an origin label.
 
 mod cli;
 mod consent;
@@ -13,6 +13,7 @@ mod event;
 mod forward;
 mod lifecycle;
 mod message;
+mod origin;
 mod profile;
 pub(crate) mod relay;
 mod secret;
@@ -30,7 +31,7 @@ use std::process::{Command, Stdio};
 pub(crate) use cli::{HELP, command};
 pub(crate) use consent::{Consent, ConsentFor, ConsentToken};
 pub(crate) use event::Kind;
-pub(crate) use message::disclosure;
+pub(crate) use message::{origin_disclosure, sends};
 
 use crate::preferences;
 use crate::setup::lock;
@@ -102,7 +103,7 @@ impl Destination {
     }
 }
 
-/// How much of an alert leaves this machine.
+/// Whether to send the program's own alert text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Content {
     /// The kind of alert and the program's short name.
@@ -135,6 +136,10 @@ pub(crate) struct Settings {
     /// One choice for each kind, in `Kind::ALL` order.
     pub(crate) kinds: [bool; 5],
     pub(crate) content: Content,
+    /// Include a short Rex session label when the session can be verified for the event.
+    pub(crate) origin: bool,
+    /// Invalidates queued alerts even when privacy is changed back before a worker rereads it.
+    disclosure_revision: u64,
     /// Lifecycle notices for the saved connection, in `Destination::ALL` order.
     pub(crate) notices: [bool; 2],
     notice_bindings: [Option<lifecycle::Binding>; 2],
@@ -152,6 +157,8 @@ impl Default for Settings {
             targets: None,
             kinds: [true, true, true, false, false],
             content: Content::Metadata,
+            origin: false,
+            disclosure_revision: 0,
             notices: [false; 2],
             notice_bindings: [None; 2],
             connection_revision: [0; 2],
@@ -184,6 +191,8 @@ impl Settings {
                 }
                 "events" => settings.kinds = parse_kinds(value).ok_or_else(|| invalid(key))?,
                 "content" => settings.content = Content::parse(value).ok_or_else(|| invalid(key))?,
+                "origin" => settings.origin = value.parse().map_err(|_| invalid(key))?,
+                "disclosure_revision" => settings.disclosure_revision = value.parse().map_err(|_| invalid(key))?,
                 "telegram_notices" => settings.notices[0] = value.parse().map_err(|_| invalid(key))?,
                 "discord_notices" => settings.notices[1] = value.parse().map_err(|_| invalid(key))?,
                 "telegram_notice_binding" => settings.notice_bindings[0] = lifecycle::Binding::parse(value),
@@ -221,6 +230,10 @@ impl Settings {
         }
         let _ = writeln!(text, "events = {}", self.kind_names().join(","));
         let _ = writeln!(text, "content = {}", self.content.name());
+        let _ = writeln!(text, "origin = {}", self.origin);
+        if self.disclosure_revision != 0 {
+            let _ = writeln!(text, "disclosure_revision = {}", self.disclosure_revision);
+        }
         for destination in Destination::ALL {
             let index = destination as usize;
             let _ = writeln!(text, "{}_notices = {}", destination.name(), self.notices[index]);
@@ -875,12 +888,7 @@ impl Alerts {
 
     /// Mirrors one kind of alert, or stops mirroring it.
     pub(crate) fn set_kind(&self, kind: Kind, on: bool) -> Result<String, String> {
-        self.locked(|edit| {
-            let mut settings = edit.editable()?;
-            settings.kinds[kind as usize] = on;
-            edit.save(&settings)?;
-            Ok(message::disclosure(&settings))
-        })
+        self.change_disclosure(|settings| settings.kinds[kind as usize] = on, message::disclosure)
     }
 
     /// Where secrets are kept, to tell the user.
@@ -893,11 +901,32 @@ impl Alerts {
     }
 
     pub(crate) fn set_kinds(&self, kinds: [bool; 5]) -> Result<String, String> {
-        self.locked(|edit| edit.set_kinds(kinds))
+        self.change_disclosure(|settings| settings.kinds = kinds, message::disclosure)
     }
 
     pub(crate) fn set_content(&self, content: Content) -> Result<String, String> {
-        self.locked(|edit| edit.set_content(content))
+        self.change_disclosure(|settings| settings.content = content, message::sends)
+    }
+
+    pub(crate) fn set_origin(&self, origin: bool) -> Result<String, String> {
+        self.change_disclosure(|settings| settings.origin = origin, message::sends)
+    }
+
+    fn change_disclosure(
+        &self,
+        change: impl FnOnce(&mut Settings),
+        describe: fn(&Settings) -> String,
+    ) -> Result<String, String> {
+        self.locked(|edit| {
+            let mut settings = edit.editable()?;
+            let before = (settings.kinds, settings.content, settings.origin);
+            change(&mut settings);
+            if (settings.kinds, settings.content, settings.origin) != before {
+                settings.disclosure_revision = settings.disclosure_revision.wrapping_add(1);
+                edit.save(&settings)?;
+            }
+            Ok(describe(&settings))
+        })
     }
 
     pub(crate) fn enable(&self) -> Result<String, String> {
@@ -1363,26 +1392,11 @@ impl AlertsEdit<'_> {
         }
         let mut report = format!("Selected {}.", describe(&settings));
         if settings.has_active() {
-            let _ = write!(report, " Alerts go to {}.", describe_active(&settings));
+            let _ = write!(report, " Alerts go to {}.\n{}", describe_active(&settings), message::disclosure(&settings));
         } else {
             report.push_str(" Mirroring is still off. Check the destination with milo alerts test.");
         }
         Ok(report)
-    }
-
-    fn set_kinds(&self, kinds: [bool; 5]) -> Result<String, String> {
-        let mut settings = self.editable()?;
-        settings.kinds = kinds;
-        self.save(&settings)?;
-        Ok(message::disclosure(&settings))
-    }
-
-    /// Chooses what is sent, and says it first of all in the answer.
-    fn set_content(&self, content: Content) -> Result<String, String> {
-        let mut settings = self.editable()?;
-        settings.content = content;
-        self.save(&settings)?;
-        Ok(message::sends(content).to_owned())
     }
 
     pub(crate) fn set_notices(&self, destination: Destination, on: bool) -> Result<String, String> {

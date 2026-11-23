@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use super::event::{self, Alert, Seen};
 use super::send::{self, Outcome};
-use super::{Alerts, Destination, Health, Settings, lifecycle, message, secret};
+use super::{Alerts, Destination, Health, Settings, lifecycle, message, origin, secret};
 use crate::setup::lock;
 use crate::{preferences, rex};
 
@@ -275,7 +275,11 @@ pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) 
     status.update(Health::WaitingForRex, recovery);
     loop {
         let Some(settings) = wanted(alerts) else { return Ok(()) };
-        if !rex::alerts_available() {
+        let source = rex::AlertSource::select(settings.origin);
+        if !source.available() {
+            if source.replaced() {
+                continue;
+            }
             recovery.refresh(settings.active_revisions());
             recovery.lost();
             status.update(Health::WaitingForRex, recovery);
@@ -285,7 +289,7 @@ pub(super) fn run(alerts: &Alerts, parent: libc::pid_t, mut recovery: Recovery) 
         if changed(alerts, &settings).is_some() {
             continue;
         }
-        match mirror(alerts, &status, &settings, &mut deliveries, &mut recovery, &mut retry) {
+        match mirror(alerts, &status, &settings, source, &mut deliveries, &mut recovery, &mut retry) {
             Ended::Off => return Ok(()),
             Ended::Changed => status.update(Health::WaitingForRex, recovery),
             Ended::Stream => return Err(io::Error::other("Rex event stream did not close")),
@@ -375,7 +379,10 @@ fn wanted(alerts: &Alerts) -> Option<Settings> {
 }
 
 fn same_disclosure(before: &Settings, now: &Settings) -> bool {
-    before.kinds == now.kinds && before.content == now.content
+    before.disclosure_revision == now.disclosure_revision
+        && before.kinds == now.kinds
+        && before.content == now.content
+        && before.origin == now.origin
 }
 
 fn changed(alerts: &Alerts, settings: &Settings) -> Option<Ended> {
@@ -407,6 +414,7 @@ fn mirror(
     alerts: &Alerts,
     status: &Status,
     settings: &Settings,
+    source: rex::AlertSource,
     deliveries: &mut [Delivery; 2],
     recovery: &mut Recovery,
     retry: &mut Backoff,
@@ -414,12 +422,17 @@ fn mirror(
     let cancelled = AtomicBool::new(false);
     let contexts =
         Destination::ALL.map(|destination| Pump { alerts, settings, status, destination, cancelled: &cancelled });
+    for (delivery, revision) in deliveries.iter_mut().zip(settings.active_revisions()) {
+        delivery.rebind(revision);
+    }
     let secrets = contexts
         .each_ref()
         .map(|context| provider_secret(context, settings, &deliveries[context.destination as usize]));
     if secrets.iter().all(Option::is_none) {
         // A newly enabled provider may have arrived during credential loading.
-        if wanted(alerts).is_some_and(|now| now.active_revisions() != settings.active_revisions()) {
+        if wanted(alerts).is_some_and(|now| {
+            now.active_revisions() != settings.active_revisions() || !same_disclosure(settings, &now)
+        }) {
             return Ended::Changed;
         }
         status.update(Health::Stopped, *recovery);
@@ -436,7 +449,8 @@ fn mirror(
             let dropped = &dropped[index];
             workers[index] = Some(scope.spawn(move || delivery.pump(&waiting, dropped, &context, secret)));
         }
-        let ended = follow(alerts, status, settings, &senders, &dropped, recovery, retry);
+        let queues = Queues { senders: &senders, dropped: &dropped };
+        let ended = follow(alerts, status, settings, source, queues, recovery, retry);
         cancelled.store(true, Ordering::Relaxed);
         drop(senders);
         for worker in workers.iter().flatten() {
@@ -446,12 +460,17 @@ fn mirror(
     })
 }
 
+struct Queues<'a> {
+    senders: &'a [Option<mpsc::SyncSender<Queued>>; 2],
+    dropped: &'a [AtomicU32; 2],
+}
+
 fn follow(
     alerts: &Alerts,
     status: &Status,
     settings: &Settings,
-    senders: &[Option<mpsc::SyncSender<Queued>>; 2],
-    dropped: &[AtomicU32; 2],
+    mut source: rex::AlertSource,
+    queues: Queues<'_>,
     recovery: &mut Recovery,
     retry: &mut Backoff,
 ) -> Ended {
@@ -460,8 +479,8 @@ fn follow(
         if let Some(ended) = changed(alerts, settings) {
             return ended;
         }
-        if available && let Ok(mut stream) = rex::events() {
-            let ended = read_stream(&mut stream, alerts, settings, senders, dropped, |phase, revisions| {
+        if available && let Ok(mut stream) = source.events() {
+            let ended = read_stream(&mut stream, alerts, settings, source.origin(), &queues, |phase, revisions| {
                 let recovered = match phase {
                     StreamProgress::Opened => recovery.connected(revisions),
                     StreamProgress::Updated => {
@@ -479,7 +498,6 @@ fn follow(
                     lifecycle::recovered(alerts, interrupted);
                 }
             });
-            let _ = stream.kill();
             let _ = stream.wait();
             if let Some(ended) = ended {
                 if ended != Ended::Stream {
@@ -490,16 +508,21 @@ fn follow(
                 // pipe open. Restart the worker to clean its entire group.
                 return Ended::Stream;
             }
+        } else if source.replaced() {
+            return Ended::Changed;
         }
-        if let Some(now) = wanted(alerts) {
-            recovery.refresh(now.active_revisions());
+        let Some(now) = wanted(alerts) else { return Ended::Off };
+        if !same_disclosure(settings, &now) {
+            return Ended::Changed;
         }
+        recovery.refresh(now.active_revisions());
         recovery.lost();
         status.update(Health::WaitingForRex, *recovery);
         if let Some(ended) = wait_for_rex(alerts, settings, retry.next()) {
             return ended;
         }
-        available = rex::alerts_available();
+        source = rex::AlertSource::select(settings.origin);
+        available = source.available();
     }
 }
 
@@ -524,22 +547,29 @@ fn read_stream(
     stream: &mut Child,
     alerts: &Alerts,
     settings: &Settings,
-    senders: &[Option<mpsc::SyncSender<Queued>>; 2],
-    dropped: &[AtomicU32; 2],
+    server: Option<&rex::AlertServer>,
+    queues: &Queues<'_>,
     mut connected: impl FnMut(StreamProgress, Revisions),
 ) -> Option<Ended> {
-    let output = stream.stdout.take()?;
+    let output = stream.stdout.take().expect("piped Rex event stream");
     let (reading, ended) = mpsc::channel::<()>();
     let cancelled = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let cancellation = &cancelled;
         scope.spawn(move || {
-            read(Stream { output, cancellation }, settings, |alert| {
-                if let Some(now) = wanted(alerts)
-                    && same_disclosure(settings, &now)
-                {
-                    fan_out(alert, now.active_revisions(), senders, dropped);
+            read(Stream { output, cancellation }, settings, |mut alert, envelope| {
+                if cancellation.load(Ordering::Relaxed) {
+                    return false;
                 }
+                let Some(now) = wanted(alerts).filter(|now| same_disclosure(settings, now)) else { return false };
+                if let Some(server) = server {
+                    alert.origin = origin::label(envelope, &server.host, |id| server.session(id));
+                }
+                if cancellation.load(Ordering::Relaxed) {
+                    return false;
+                }
+                fan_out(alert, now.active_revisions(), queues.senders, queues.dropped);
+                true
             });
             drop(reading);
         });
@@ -578,6 +608,11 @@ fn read_stream(
                             // successful local probe and a stream past Rex's
                             // subscription deadline distinguish it from a failed spawn.
                             if !opened && lasted >= rex::ALERTS_CONNECT {
+                                // The CLI may have connected to a replacement between the
+                                // pre-spawn check and its subscription. Repin, not recover.
+                                if server.is_some_and(|server| !server.is_current()) {
+                                    break Some(Ended::Changed);
+                                }
                                 opened = true;
                                 connected(StreamProgress::Opened, revisions);
                             } else if !settled && lasted >= SETTLE {
@@ -702,6 +737,8 @@ impl Target<'_> {
 
 #[derive(Default)]
 struct Delivery {
+    /// Keep delivery state tied to the provider across disclosure-only reconnects.
+    revision: Option<u64>,
     /// When each of the last minute's messages was sent or may have been sent.
     sent_at: VecDeque<Instant>,
     sent: u32,
@@ -713,11 +750,20 @@ struct Delivery {
     refusals: u32,
     /// Set when the destination refuses the secret or keeps refusing
     /// messages. Asking again and again could have the bot or this address
-    /// banned, so nothing more is sent until this process is started again.
+    /// banned. Only a new provider generation or worker may try it again;
+    /// credential refusals also persist across worker restarts.
     refused: bool,
 }
 
 impl Delivery {
+    fn rebind(&mut self, revision: Option<u64>) -> bool {
+        if self.revision == revision {
+            return false;
+        }
+        *self = Self { revision, ..Self::default() };
+        true
+    }
+
     fn pump(
         &mut self,
         waiting: &Receiver<Queued>,
@@ -726,7 +772,6 @@ impl Delivery {
         mut cached: Option<String>,
     ) {
         let Pump { alerts, settings: baseline, status, destination, cancelled } = *context;
-        let mut revision = baseline.active_revision(destination);
         while let Ok(queued) = waiting.recv() {
             if cancelled.load(Ordering::Relaxed) {
                 break;
@@ -739,9 +784,7 @@ impl Delivery {
             if settings.active_revision(destination) != Some(work_revision) || !same_disclosure(baseline, &settings) {
                 continue;
             }
-            if revision != Some(work_revision) {
-                *self = Self::default();
-                revision = Some(work_revision);
+            if self.rebind(Some(work_revision)) {
                 dropped.store(0, Ordering::Relaxed);
                 cached = provider_secret(context, &settings, self);
             }
@@ -1000,7 +1043,12 @@ pub(crate) fn forget_note(state: &Path) {
 /// too long to be an alert is skipped whole. What each terminal last said is
 /// kept only for this stream: Rex repeats nothing to a listener that joins
 /// late, so after the stream is opened again nothing remembered can be trusted.
-pub(super) fn read(stream: impl io::Read, settings: &Settings, mut queue: impl FnMut(Alert)) {
+/// The handler returns false to stop processing even a buffered stream.
+pub(super) fn read(
+    stream: impl io::Read,
+    settings: &Settings,
+    mut queue: impl FnMut(Alert, &event::Envelope<'_>) -> bool,
+) {
     let mut stream = BufReader::new(stream);
     let mut seen = Seen::default();
     let mut line = Vec::new();
@@ -1014,10 +1062,13 @@ pub(super) fn read(stream: impl io::Read, settings: &Settings, mut queue: impl F
                 }
             }
             Ok(_) => {
-                let alert = event::parse(line.trim_ascii_end(), settings.content)
-                    .and_then(|event| seen.alert(event, Instant::now()));
-                if let Some(alert) = alert.filter(|alert| settings.mirrors(alert.kind)) {
-                    queue(alert);
+                let Some(envelope) = event::Envelope::read(line.trim_ascii_end()) else { continue };
+                let alert =
+                    event::parse(&envelope, settings.content).and_then(|event| seen.alert(event, Instant::now()));
+                if let Some(alert) = alert.filter(|alert| settings.mirrors(alert.kind))
+                    && !queue(alert, &envelope)
+                {
+                    return;
                 }
             }
         }
@@ -1093,7 +1144,8 @@ fn a_refusal_recorded_while_listening_prevents_ordinary_delivery() {
         .unwrap();
 
     let mut delivery = Delivery::default();
-    delivery.deliver(&Alert { kind: super::Kind::Bell, waiting: None, app: None, text: String::new() }, &target);
+    let alert = Alert { kind: super::Kind::Bell, waiting: None, app: None, text: String::new(), origin: None };
+    delivery.deliver(&alert, &target);
     assert!(delivery.refused);
     assert!(note(alerts.state_dir()).contains(REFUSED_CREDENTIAL));
 }
@@ -1108,7 +1160,12 @@ fn a_full_queue_drops_only_that_destinations_copy() {
     let senders = [Some(telegram), Some(discord)];
     let dropped = Destination::ALL.map(|_| AtomicU32::new(0));
     for kind in [Kind::Bell, Kind::Blocked] {
-        fan_out(Alert { kind, waiting: None, app: None, text: String::new() }, [Some(0); 2], &senders, &dropped);
+        fan_out(
+            Alert { kind, waiting: None, app: None, text: String::new(), origin: None },
+            [Some(0); 2],
+            &senders,
+            &dropped,
+        );
     }
     let kinds: Vec<_> = discord_waiting
         .try_iter()
@@ -1119,6 +1176,94 @@ fn a_full_queue_drops_only_that_destinations_copy() {
         .collect();
     assert_eq!(kinds, [Kind::Bell, Kind::Blocked]);
     assert_eq!(dropped.map(AtomicU32::into_inner), [1, 0]);
+}
+
+#[cfg(test)]
+#[test]
+fn toggling_origin_off_and_back_on_discards_pending_labels_without_rotating_providers() {
+    use super::Kind;
+    use super::relay::{
+        Origin,
+        tests::{CAPABILITY, with_replies},
+    };
+    use crate::fixture::Fixture;
+
+    let (_, wire) = with_replies(&[(503, r#"{"retry_after":3}"#), (204, "")], |origin| {
+        let fixture = Fixture::folder();
+        let mut alerts = Alerts::at(&fixture.root.join("config"), &fixture.root.join("state"));
+        alerts.relay = Some(Origin::Test(origin.into()));
+        alerts.stand_in = Some(origin.into());
+        alerts.set_hosted_telegram(CAPABILITY, "42").unwrap();
+        alerts.set_discord("https://discord.com/api/webhooks/1234567891/synthetic_SYNTHETICsynthetic-01").unwrap();
+        for destination in Destination::ALL {
+            alerts.set_forwarding(destination, true).unwrap();
+        }
+        alerts.set_origin(true).unwrap();
+        let settings = alerts.settings().unwrap();
+        let status = Status { file: alerts.state_dir().join("alerts.status"), notes: Mutex::default() };
+        let cancelled = AtomicBool::new(false);
+        let destination = Destination::Telegram;
+        let telegram = Target {
+            alerts: &alerts,
+            settings: &settings,
+            status: &status,
+            destination,
+            secret: alerts.target_secret(&settings, destination).unwrap(),
+            hosted_telegram: true,
+            cancelled: &cancelled,
+        };
+        let alert = Alert {
+            kind: Kind::Blocked,
+            waiting: None,
+            app: None,
+            text: String::new(),
+            origin: Some("old-label".into()),
+        };
+        let mut delivery = Delivery::default();
+        std::thread::scope(|scope| {
+            let sender = scope.spawn(|| delivery.deliver(&alert, &telegram));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !note(alerts.state_dir()).contains("Trying again:") {
+                assert!(Instant::now() < deadline, "Telegram did not schedule a retry");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            alerts.set_origin(false).unwrap();
+            alerts.set_origin(true).unwrap();
+            sender.thread().unpark();
+            sender.join().unwrap();
+        });
+        assert_eq!((delivery.sent, delivery.unsent), (0, 0));
+
+        let now = alerts.settings().unwrap();
+        assert!(now.origin);
+        assert_eq!(now.active_revisions(), settings.active_revisions());
+        assert_eq!(changed(&alerts, &settings), Some(Ended::Changed));
+        let context =
+            Pump { alerts: &alerts, settings: &settings, status: &status, destination, cancelled: &cancelled };
+        let (sender, waiting) = mpsc::sync_channel(1);
+        sender.send(Queued::Only(settings.active_revision(destination).unwrap(), alert)).unwrap();
+        drop(sender);
+        let dropped = AtomicU32::new(1);
+        delivery.pump(&waiting, &dropped, &context, Some(telegram.secret));
+        assert_eq!(dropped.into_inner(), 1, "stale queue reached delivery");
+
+        let destination = Destination::Discord;
+        let discord = Target {
+            settings: &now,
+            destination,
+            secret: alerts.target_secret(&now, destination).unwrap(),
+            hosted_telegram: false,
+            ..telegram
+        };
+        let mut delivery = Delivery::default();
+        let fresh = Alert { kind: Kind::Done, waiting: None, app: None, text: String::new(), origin: None };
+        delivery.deliver(&fresh, &discord);
+        assert_eq!(delivery.sent, 1);
+    });
+    assert!(wire[0].starts_with("POST /v1/send "));
+    assert!(wire[0].contains("old-label"));
+    assert!(wire[1].starts_with("POST /api/v10/webhooks/"));
+    assert!(!wire[1].contains("old-label"));
 }
 
 #[cfg(test)]
@@ -1156,7 +1301,7 @@ fn a_relay_outage_retries_only_telegram_and_only_up_to_the_limit() {
             hosted_telegram: destination == Destination::Telegram,
             cancelled: &cancelled,
         });
-        let alert = Alert { kind: Kind::Blocked, waiting: None, app: None, text: String::new() };
+        let alert = Alert { kind: Kind::Blocked, waiting: None, app: None, text: String::new(), origin: None };
         let mut telegram_delivery = Delivery::default();
         let began = Instant::now();
         std::thread::scope(|scope| {
@@ -1220,7 +1365,7 @@ fn a_relay_connection_failure_is_retried_and_counted_but_a_lost_reply_is_not() {
             hosted_telegram: true,
             cancelled: &cancelled,
         };
-        delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new() }, &target);
+        delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new(), origin: None }, &target);
     };
 
     let began = Instant::now();
@@ -1280,7 +1425,7 @@ fn a_page_from_in_front_of_the_relay_does_not_pause_mirroring() {
         };
         let mut delivery = Delivery::default();
         for kind in [Kind::Blocked, Kind::Done] {
-            delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new() }, &target);
+            delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new(), origin: None }, &target);
             assert!(!delivery.refused, "{}", note(alerts.state_dir()));
         }
         assert_eq!((delivery.sent, delivery.unsent), (2, 0));

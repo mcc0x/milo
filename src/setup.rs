@@ -1174,10 +1174,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
             Row::MenuIndicator => self.menu_installed.is_none() || self.store.is_none(),
             Row::Presence | Row::PresenceDetails | Row::PresenceApp => self.presence_view.is_none(),
-            Row::Continue if self.panel == Panel::Confirm(Confirm::MirrorAlerts) => !self.visible.alert_review_complete,
             Row::Continue if self.panel == Panel::Confirm(Confirm::PresenceApp) => {
                 presence::application_id(&self.application_draft).is_none()
             }
+            Row::Continue if self.panel == Panel::Confirm(Confirm::MirrorAlerts) => self.visible.alert_review.is_none(),
             Row::Repair | Row::Remove => self.trial.is_some(),
             _ => false,
         }
@@ -1257,14 +1257,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     return After::Stay;
                 }
                 Panel::Confirm(Confirm::MirrorAlerts) => {
-                    let scope = alerts::ConsentFor::All;
-                    // Changing panels refreshes the summary. Use the one the question actually showed.
-                    let reviewed = self.alert_summary.as_ref().and_then(|summary| summary.consent.token(scope));
+                    let Some(reviewed) = self.visible.alert_review else { return After::Ignored };
                     self.select_panel(Panel::Alerts, Some(Row::AlertsOn));
-                    self.change_alerts(|alerts| {
-                        let token = reviewed.ok_or("No saved destination can be reviewed. Nothing was turned on.")?;
-                        alerts.enable_reviewed(scope, token)
-                    });
+                    self.change_alerts(|alerts| alerts.enable_reviewed(alerts::ConsentFor::All, reviewed));
                     return After::Stay;
                 }
                 Panel::Confirm(confirm @ (Confirm::Presence | Confirm::PresenceDetails(_) | Confirm::PresenceApp)) => {

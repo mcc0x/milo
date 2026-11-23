@@ -1399,11 +1399,11 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert!(pane.selected_row() == Some(Row::Cancel));
     assert!(!saved(&pane).enabled);
     let rows = frame(&mut pane, 80, 24).join("\n");
-    assert!(rows.contains("Nothing the") && rows.contains("Turn mirroring on"), "{rows}");
-    choose(&mut pane, Row::Continue);
-    assert_eq!(pane.panel, Panel::Alerts);
+    assert!(rows.contains("No saved destination to review"), "{rows}");
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored);
     assert!(!saved(&pane).enabled);
-    assert!(frame(&mut pane, 80, 24).join("\n").contains("Nothing was turned on"));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert_eq!(pane.panel, Panel::Alerts);
     choose(&mut pane, Row::AlertsDestination);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("No other destination is saved"));
 
@@ -1429,13 +1429,15 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     choose(&mut pane, Row::AlertsOn);
     let review = frame(&mut pane, 80, 24).join("\n");
     assert!(review.contains("Telegram chat -1001234567890") && review.contains("Events: blocked, error, bell"));
-    pane.alerts.as_ref().unwrap().set_content(alerts::Content::Metadata).unwrap();
+    assert!(review.contains("Origin label: off."), "{review}");
+    pane.alerts.as_ref().unwrap().set_origin(true).unwrap();
     choose(&mut pane, Row::Continue);
     assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Review them again"));
 
     choose(&mut pane, Row::AlertsOn);
-    frame(&mut pane, 80, 24);
+    let review = frame(&mut pane, 80, 24).join("\n");
+    assert!(review.contains("Origin label: on.") && review.contains("Turn mirroring on with labels"), "{review}");
     choose(&mut pane, Row::Continue);
     assert!(saved(&pane).enabled);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Rex alert mirroring is on."));
@@ -1448,39 +1450,58 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
 }
 
 #[test]
-fn alert_confirmation_cannot_enable_from_a_truncated_or_unpainted_review() {
+fn alert_forwarding_review_must_fit_before_it_can_be_approved() {
+    const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
     let f = Fixture::folder();
     let alerts = Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state"));
-    alerts.set_telegram("123456:SYNTHETICsyntheticSYNTHETIC00", "-1001234567890").unwrap();
+    alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
     alerts.set_content(alerts::Content::Text).unwrap();
+    alerts.set_origin(true).unwrap();
     alerts.locked(|edit| edit.set_notices(alerts::Destination::Telegram, true)).unwrap();
     let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("alerts do not call Rex"));
     pane.alerts = Some(alerts);
+    let enabled = |pane: &Setup<_>| pane.alerts.as_ref().unwrap().settings().unwrap().enabled;
     choose(&mut pane, Row::Alerts);
     choose(&mut pane, Row::AlertsOn);
-    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "no review was painted");
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "opening the modal has not displayed the review");
 
-    let rows = frame(&mut pane, 80, 24).join("\n");
-    assert!(rows.contains("Telegram chat -1001234567890"), "{rows}");
-    assert!(rows.contains("300 characters"), "{rows}");
-    assert!(rows.contains("Events: blocked, error, done"), "{rows}");
-    assert!(rows.contains("Lifecycle notices (forwarding status only): Telegram."), "{rows}");
+    let full = frame(&mut pane, 80, 24).join("\n");
+    for detail in [
+        "Destination: Telegram chat -1001234567890",
+        "Events: blocked, error, done",
+        "Lifecycle notices (forwarding status only): Telegram.",
+        "up to 300 characters",
+        "Origin label: on. Milo adds a short Rex session label",
+        "Rex's own notifications are unchanged.",
+        "Turn mirroring on with labels",
+    ] {
+        assert!(full.contains(detail), "{full}");
+    }
     assert!(!pane.disabled(Row::Continue));
 
-    // Resizing an already visible review never leaves a hidden approval active.
-    let rows = frame(&mut pane, 18, 8);
-    let blocked = rows.iter().position(|row| row.starts_with('›') && row.contains("milo web")).unwrap();
-    assert_eq!(pane.key(click_at(&rows, blocked, "milo web")), After::Ignored);
-    assert_eq!(pane.key(Key::Enter), After::Ignored);
+    // Shrinking an already reviewed pane invalidates approval for both input paths.
+    for (width, height) in [(80, 10), (18, 8)] {
+        let rows = frame(&mut pane, width, height);
+        assert!(rows.iter().all(|line| !line.contains("Destination:") && !line.contains("Turn mirroring on")));
+        let hint = rows.iter().position(|row| row.starts_with('›') && row.contains("milo web")).unwrap();
+        assert_eq!(pane.key(click_at(&rows, hint, "milo web")), After::Ignored);
+        assert_eq!(pane.key(Key::Enter), After::Ignored);
+        assert!(!enabled(&pane));
+    }
     frame(&mut pane, 80, 5);
     assert_eq!(pane.key(Key::Char(' ')), After::Ignored);
     assert_eq!(pane.panel, Panel::Confirm(Confirm::MirrorAlerts));
-    assert!(!pane.alerts.as_ref().unwrap().settings().unwrap().enabled);
+    assert!(!enabled(&pane));
 
     frame(&mut pane, 80, 24);
     assert!(!pane.disabled(Row::Continue), "approval returns when the review fits");
     assert_eq!(pane.key(Key::Esc), After::Stay);
-    assert!(!pane.alerts.as_ref().unwrap().settings().unwrap().enabled);
+    assert!(!enabled(&pane));
+
+    choose(&mut pane, Row::AlertsOn);
+    frame(&mut pane, 80, 24);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert!(enabled(&pane));
 }
 
 #[test]

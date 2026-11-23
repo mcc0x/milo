@@ -37,7 +37,7 @@ These workflows are in the source checkout, not yet in the installer above:
 - Run `milo` outside Rex to [pick a local pane](#what-works-in-each-terminal). Open a working file from Outline to [view images, play supported MP4s or switch between Markdown and source](docs/panes.md#reading-pictures-video-and-markdown).
 - On a local Mac, press **Ctrl-O** on a document in Outline, Find or Reader to open it in its default app; **Ctrl-R** [reveals it in Finder](docs/panes.md#opening-a-file-outside-milo-on-a-mac).
 - In the [Mac menu bar](docs/usage.md#macos-menu-bar), choose CPU or memory instead of the default agent quota indicator.
-- [Alert forwarding](docs/setup.md#mirror-rex-alerts) reconnects after Rex returns. An explicit pause stays paused. Lifecycle notices are optional for each destination and off by default.
+- [Alert forwarding](docs/setup.md#mirror-rex-alerts) reconnects after Rex returns. An explicit pause stays paused. Lifecycle notices are optional for each destination and off by default. A separate, default-off choice can add the verified Rex session name to ordinary alerts.
 
 ## Workspace settings
 

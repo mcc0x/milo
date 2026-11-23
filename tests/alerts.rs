@@ -19,12 +19,16 @@ use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+#[path = "alerts/origin.rs"]
+mod origin;
 
 const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
 const LINK: &str = "https://discord.com/api/webhooks/1234567890/SYNTHETIC_synthetic-SYNTHETIC0";
@@ -37,7 +41,7 @@ const ENABLED: &str = "Milo: Rex alert forwarding was enabled.";
 const PAUSED: &str = "Milo: Rex alert forwarding was paused.";
 const RECOVERED: &str = "Milo: Rex alert forwarding recovered after an interruption.";
 
-/// Emulates a login command, a reachability check, or an event subscription.
+/// Emulates a login command, a local identity or session query, or a subscription.
 /// `shown` marks the prefix not to replay on new subscriptions. A live stream
 /// exits when Rex is taken down or its disposable home disappears.
 const REX: &str = r#"#!/bin/sh
@@ -45,6 +49,17 @@ case "$1" in
     ready|do) exit 0 ;;
 esac
 case " $* " in
+    *" whoami "*)
+        [ ! -f "$HOME/rex-down" ] || exit 1
+        exec cat "$HOME/identity" ;;
+    *" session inspect "*)
+        [ ! -f "$HOME/rex-down" ] || exit 1
+        for arg do
+            case "$arg" in
+                session:*) printf '%s\n' "$arg" >> "$HOME/lookups"; exec cat "$HOME/$arg" ;;
+            esac
+        done
+        exit 1 ;;
     *" ls "*)
         [ ! -f "$HOME/rex-down" ] || exit 1
         printf '%s\n' '[]'
@@ -295,11 +310,19 @@ fn text_of(body: &str) -> String {
 struct Home {
     root: PathBuf,
     destination: Destination,
+    _stand_in_socket: Option<UnixListener>,
 }
 
 impl Home {
     /// None for a release build, which no test may run against.
     fn new() -> Option<Self> {
+        let mut home = Self::new_unbound()?;
+        home._stand_in_socket = Some(UnixListener::bind(home.rex_socket()).unwrap());
+        Some(home)
+    }
+
+    /// Origin fixtures and the real server bind (and replace) their own socket.
+    fn new_unbound() -> Option<Self> {
         if !cfg!(debug_assertions) {
             return None;
         }
@@ -319,8 +342,13 @@ impl Home {
         fs::write(&rex, REX).unwrap();
         fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
         // A test thread's fork can briefly inherit the file open for writing.
-        assert!(soon(|| Command::new(&rex).arg("ready").status().is_ok_and(|status| status.success())));
-        let home = Self { root, destination: Destination::start() };
+        assert!(soon(|| Command::new(&rex)
+            .env_clear()
+            .current_dir(&root)
+            .arg("ready")
+            .status()
+            .is_ok_and(|status| status.success())));
+        let home = Self { root, destination: Destination::start(), _stand_in_socket: None };
         if cfg!(target_os = "macos") {
             let made = Command::new("/usr/bin/security")
                 .args(["create-keychain", "-p", "test"])
@@ -336,6 +364,14 @@ impl Home {
         self.root.join("test.keychain-db")
     }
 
+    fn rex_socket(&self) -> PathBuf {
+        self.root.join("r.sock")
+    }
+
+    fn rex_endpoint(&self) -> String {
+        format!("unix://{}", self.rex_socket().display())
+    }
+
     fn milo(&self, args: &[&str]) -> Command {
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.root.join("bin").display());
         let mut milo = Command::new(env!("CARGO_BIN_EXE_milo"));
@@ -343,9 +379,11 @@ impl Home {
             .env_clear()
             .env("HOME", &self.root)
             .env("PATH", path)
+            .env("XDG_RUNTIME_DIR", &self.root)
             .env("TMPDIR", &self.root)
             .env("MILO_ALERTS_TEST_ENDPOINT", format!("http://127.0.0.1:{}", self.destination.port))
             .env("MILO_ALERTS_KEYCHAIN", self.keychain())
+            .env("REX_SERVER", self.rex_endpoint())
             .current_dir(&self.root)
             .env("MILO_RELAY_ORIGIN", "disabled")
             .stdin(Stdio::null());

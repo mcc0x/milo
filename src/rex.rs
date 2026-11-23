@@ -10,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -223,32 +224,160 @@ pub fn exec_listener(script: &Path) -> io::Error {
     }
 }
 
+/// The local endpoint and host of one alert subscription. A socket replaced
+/// after Rex restarts must not resolve labels for events from the old stream.
+pub(crate) struct AlertServer {
+    endpoint: String,
+    socket: (u64, u64),
+    pub(crate) host: String,
+}
+
+impl AlertServer {
+    fn local(selected: &str) -> Option<Self> {
+        let socket = if selected == "localhost" { None } else { Some(socket_identity(selected)?) };
+        let reply = probe_output(
+            alert_command(Some(selected)).args(["--timeout", "400ms", "whoami", "--json"]),
+            Duration::from_millis(500),
+        )?;
+        let [principal, endpoint, host] =
+            crate::json::Value::parse(&reply)?.fields(["principal", "endpoint", "host_id"]);
+        let [kind, transport] = principal?.fields(["kind", "transport"]);
+        if !kind?.is("peer") || !transport?.is("unix") {
+            return None;
+        }
+        let endpoint = endpoint?.string(4096)?;
+        let identity = socket_identity(&endpoint)?;
+        if selected != "localhost" && (socket_path(&endpoint) != socket_path(selected) || socket != Some(identity)) {
+            return None;
+        }
+        let host = host?.string(36)?;
+        uuid(&host).then(|| Self { endpoint: endpoint.into_owned(), socket: identity, host: host.into_owned() })
+    }
+
+    pub(crate) fn session(&self, id: &str) -> Option<Vec<u8>> {
+        exact_id(OsStr::new(id), "session:")?;
+        self.is_current().then_some(())?;
+        let reply = probe_output(
+            alert_command(Some(&self.endpoint)).args(["--timeout", "400ms", "session", "inspect", id, "--json"]),
+            Duration::from_millis(500),
+        )?;
+        self.is_current().then_some(reply)
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        socket_identity(&self.endpoint) == Some(self.socket)
+    }
+}
+
+fn socket_path(endpoint: &str) -> Option<&Path> {
+    let path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+    (path.starts_with('/') && !path.bytes().any(|byte| byte.is_ascii_control())).then(|| Path::new(path))
+}
+
+fn socket_identity(endpoint: &str) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(socket_path(endpoint)?).ok()?;
+    meta.file_type().is_socket().then(|| (meta.dev(), meta.ino()))
+}
+
+fn alert_command(endpoint: Option<&str>) -> Command {
+    let mut command = Command::new("rex");
+    command.arg("--autostart=false");
+    if let Some(endpoint) = endpoint {
+        command.args(["-S", endpoint]);
+        for key in ["REX_SERVER", "REX_SESSION", "REX_BLOCK", "REX_CLIENT"] {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
+/// One subscription attempt, with the same endpoint for its health probe,
+/// event stream and optional verified label lookup.
+pub(crate) enum AlertSource {
+    Inherited,
+    Local(String),
+    Pinned(AlertServer),
+}
+
+impl AlertSource {
+    pub(crate) fn select(label: bool) -> Self {
+        let selected = std::env::var_os("REX_SERVER").unwrap_or_default();
+        let local = match selected.to_str() {
+            Some("" | "localhost") => Some("localhost"),
+            Some(endpoint) if socket_path(endpoint).is_some() => Some(endpoint),
+            _ => None,
+        };
+        if label && let Some(server) = local.and_then(AlertServer::local) {
+            return Self::Pinned(server);
+        }
+        match local {
+            Some(endpoint) if endpoint != "localhost" => Self::Local(endpoint.to_owned()),
+            _ => Self::Inherited,
+        }
+    }
+
+    pub(crate) fn origin(&self) -> Option<&AlertServer> {
+        match self {
+            Self::Pinned(server) => Some(server),
+            _ => None,
+        }
+    }
+
+    /// Another socket already owns the pinned address. Probe the successor
+    /// before declaring an outage just because the old pin is stale.
+    pub(crate) fn replaced(&self) -> bool {
+        self.origin()
+            .is_some_and(|server| socket_identity(&server.endpoint).is_some_and(|current| current != server.socket))
+    }
+
+    fn endpoint(&self) -> Option<&str> {
+        match self {
+            Self::Inherited => None,
+            Self::Local(endpoint) => Some(endpoint),
+            Self::Pinned(server) => Some(&server.endpoint),
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        match self {
+            Self::Inherited => true,
+            Self::Local(endpoint) => socket_identity(endpoint).is_some(),
+            Self::Pinned(server) => server.is_current(),
+        }
+    }
+
+    /// A separate bounded request distinguishes an idle stream from Rex
+    /// being down. This never starts Rex or uses a delivery credential.
+    pub(crate) fn available(&self) -> bool {
+        self.is_current()
+            && finished(
+                alert_command(self.endpoint())
+                    .args(["--timeout=2s", "ls", "--json"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+                ALERTS_CONNECT,
+            )
+            && self.is_current()
+    }
+
+    /// Starts the event stream without starting Rex. An explicitly selected
+    /// local socket must not fall back to another server when it disappears.
+    pub(crate) fn events(&self) -> io::Result<Child> {
+        if !self.is_current() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        alert_command(self.endpoint())
+            .args(["--timeout=2s", "events", "--all", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+    }
+}
+
 /// `events` applies this timeout to starting delivery, not to a live stream.
 pub(crate) const ALERTS_CONNECT: Duration = Duration::from_millis(2500);
-
-/// A separate bounded local request distinguishes an idle stream from Rex
-/// being down. This never starts Rex and never uses a delivery credential.
-pub(crate) fn alerts_available() -> bool {
-    finished(
-        Command::new("rex")
-            .args(["--autostart=false", "--timeout=2s", "ls", "--json"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-        ALERTS_CONNECT,
-    )
-}
-
-/// Starts `rex events`, which prints every event of every session of the
-/// server as a line of JSON until it is ended. It never starts a server.
-pub(crate) fn events() -> io::Result<Child> {
-    Command::new("rex")
-        .args(["--autostart=false", "--timeout=2s", "events", "--all", "--json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-}
 
 /// A search path on which a program started from here finds `rex`, when
 /// this one's does not. The Rex server starts programs with a short system
@@ -545,13 +674,15 @@ fn exact_block(id: &OsStr) -> Option<&str> {
 /// A whole Rex ID of the given kind, such as `window:` followed by its UUID.
 pub(crate) fn exact_id<'a>(id: &'a OsStr, kind: &str) -> Option<&'a str> {
     let id = id.to_str()?;
-    let suffix = id.strip_prefix(kind)?;
-    (suffix.len() == 36
-        && suffix.bytes().enumerate().all(|(i, b)| match i {
+    uuid(id.strip_prefix(kind)?).then_some(id)
+}
+
+fn uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match i {
             8 | 13 | 18 | 23 => b == b'-',
             _ => b.is_ascii_hexdigit(),
-        }))
-    .then_some(id)
+        })
 }
 
 /// What an observer script prints: an update a line, of which the latest counts.

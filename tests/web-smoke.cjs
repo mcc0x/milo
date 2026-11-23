@@ -957,6 +957,8 @@ async function checkHostedConnections(page, destination) {
     await noticeSwitch('Discord', false).press('Space');
     await noticeConfirm.getByText(/Destination: Discord channel/).waitFor();
     await noticeConfirm.getByText(/Notices don’t include Rex alerts or program text/).waitFor();
+    await noticeConfirm.getByText(/never include Rex origin labels/).waitFor();
+    assert.equal(await noticeConfirm.getByText(/up to 300 characters|Origin label: on\./).count(), 0);
     await button(noticeConfirm, 'Keep editing').click();
     assert.equal(scoped.length, beforeNotices, 'cancel did not apply the notice choice');
     assert(await noticeSwitch('Discord', false).evaluate(control => document.activeElement === control));
@@ -969,6 +971,9 @@ async function checkHostedConnections(page, destination) {
     for (const [name, target] of [['Telegram', 'Telegram chat 1234'], ['Discord', 'Discord channel']]) {
       await manager.getByRole('switch', {name: `Forward to ${name}`, checked: false}).click();
       await confirmation.getByText(`Destination: ${target}.`, {exact: false}).waitFor();
+      await confirmation.getByText(/up to 300 characters/).waitFor();
+      await confirmation.getByText(/Origin label: on\./).waitFor();
+      await confirmation.getByText(/Rex’s own notifications are unchanged/).waitFor();
       assert.equal(await confirmation.getByText(/Notices don’t include Rex alerts or program text/).count(), name === 'Discord' ? 1 : 0);
       await button(confirmation, 'Turn on').click();
       await manager.getByRole('switch', {name: `Forward to ${name}`, checked: true}).waitFor();
@@ -1068,7 +1073,6 @@ async function checkTelegramWizard(page, destination) {
   const initial = await page.request.get(new URL('/api/state', url).href, {headers: {authorization}});
   assert(initial.ok(), 'the real editor supplied the initial fixture state');
   let state = await initial.json();
-  const initialVersion = state.version;
   const fakeToken = 'smoke-test-token-not-a-credential';
   const chatId = '-1001234567890';
   const providerError = 'provider diagnostic must not appear in the dashboard';
@@ -1097,8 +1101,9 @@ async function checkTelegramWizard(page, destination) {
     await route.fulfill(reply);
   };
   const saveTelegram = async route => {
-    const action = route.request().postDataJSON();
+    const {version, ...action} = route.request().postDataJSON();
     if (action.action !== 'alerts') return route.fallback();
+    assert.equal(version, state.version, 'each alert action uses the current fixture revision, including after refresh');
     if (action.field === 'refresh') {
       state = {...state, version: state.version + 1};
       return route.fulfill({json: state});
@@ -1182,8 +1187,8 @@ async function checkTelegramWizard(page, destination) {
       }
     }
     assert.equal(lookups, replies.length);
-    assert.deepEqual(received, [chatId, rejectedChat, '@public_channel'].map((chat, index) => ({
-      action: 'alerts', field: 'telegram', value: {token: fakeToken, chat}, version: initialVersion + index,
+    assert.deepEqual(received, [chatId, rejectedChat, '@public_channel'].map(chat => ({
+      action: 'alerts', field: 'telegram', value: {token: fakeToken, chat},
     })), 'discovered and manual chat IDs use the same Telegram save action');
     await button(wizard, 'Close destinations').click();
   } finally {
@@ -1203,10 +1208,27 @@ async function checkAlerts(page) {
   assert.equal(await manager.getByRole('switch').count(), 0, 'unconfigured providers cannot forward');
   assert.equal(await manager.getByRole('button', {name: /^Send test to /}).count(), 0, 'unconfigured providers cannot send tests');
   await button(manager, 'Close destinations').click();
+  const content = page.getByRole('group', {name: 'Content', exact: true});
+  const origin = page.getByRole('switch', {name: 'Include Rex origin label', exact: true});
+  assert.equal(await origin.isChecked(), false, 'old and new settings do not share labels');
+  await content.getByRole('radio', {name: 'Also program text'}).click();
+  await page.getByText(/up to 300 characters/i).first().waitFor();
+  assert.equal(await origin.isChecked(), false, 'selecting text does not share origin labels');
+  await origin.click();
+  await page.getByText(/Origin label: on\./).first().waitFor();
+
   await checkHostedConnections(page, destination);
   await page.reload(); // Drop the hosted route fixture before checking manual setup.
   await section(page, 'Integrations').click();
-  await button(page, 'Alert forwarding').click();
+  // Take the manual wizard's fixture snapshot only after the real entry refresh
+  // commits; otherwise the browser is already one revision ahead of the fixture.
+  await Promise.all([
+    page.waitForResponse(response => response.url().endsWith('/api/action')
+      && response.request().postDataJSON()?.field === 'refresh' && response.ok()),
+    button(page, 'Alert forwarding').click(),
+  ]);
+  assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
+  assert(await origin.isChecked(), 'the separate origin choice persists');
   await checkTelegramWizard(page, destination);
   await page.reload(); // Drop the route fixture's Telegram destination before testing real settings.
   await section(page, 'Integrations').click();
@@ -1226,15 +1248,11 @@ async function checkAlerts(page) {
   await button(page, 'Use your own webhook').click();
   assert.equal(await webhook.inputValue(), '', 'closing destination setup forgets unsaved credentials');
   await button(page, 'Close destinations').click();
-  const content = page.getByRole('group', {name: 'Content', exact: true});
-  await content.getByRole('radio', {name: 'Also program text'}).click();
-  await page.getByText(/up to 300 characters/i).first().waitFor();
-  await page.reload();
-  await section(page, 'Integrations').click();
-  await button(page, 'Alert forwarding').click();
-  assert(await content.getByRole('radio', {name: 'Also program text'}).isChecked(), 'the alert disclosure follows the persisted choice');
   await content.getByRole('radio', {name: 'Kind and program name'}).click();
   await page.getByText(/no text from the program/i).first().waitFor();
+  assert(await origin.isChecked(), 'metadata-only does not discard the origin choice');
+  await origin.click();
+  await page.getByText(/Origin label: off\./).first().waitFor();
   await button(page, 'Back to integrations').click();
   await button(page, 'Alert forwarding').waitFor();
   await section(page, 'Layout').click();
