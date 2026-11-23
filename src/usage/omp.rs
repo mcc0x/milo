@@ -30,23 +30,23 @@ WITH cache_json AS (
     SELECT *, row_number() OVER (PARTITION BY provider ORDER BY observed_ms DESC,key) AS rank
     FROM reports WHERE provider IN ('anthropic','openai-codex') AND typeof(observed_ms)='integer'
       AND observed_ms BETWEEN 0 AND {latest}
-), latest_times AS MATERIALIZED (
-    SELECT h.provider, h.account_key, h.limit_id, max(h.recorded_at) AS recorded_at,
-           min(h.id) AS first_id, max(h.id) AS last_id
+), eligible AS MATERIALIZED (
+    SELECT h.id, h.provider, h.account_key, h.limit_id, h.recorded_at
     FROM usage_history h LEFT JOIN picked r ON r.provider=h.provider AND r.rank=1
     WHERE h.provider IN ('anthropic','openai-codex') AND typeof(h.recorded_at)='integer'
       AND h.recorded_at BETWEEN 0 AND {latest}
       AND (r.observed_ms IS NULL OR (
           h.recorded_at>r.observed_ms AND substr(r.key,-length(h.account_key)-1)=':'||h.account_key
       ))
-    GROUP BY h.provider,h.account_key,h.limit_id
+), latest_times AS (
+    SELECT provider, account_key, limit_id, max(recorded_at) AS recorded_at
+    FROM eligible GROUP BY provider,account_key,limit_id
 ), history_heads AS (
-    -- Scan the IDs spanned by the eligible rows, usually only recent
-    -- appends with a fresh cache. IDs need not follow timestamp order.
+    -- Break timestamp ties within the filtered history, not by scanning
+    -- every provider's rows between the oldest and newest eligible IDs.
     SELECT t.provider, t.account_key, max(h.id) AS id, t.recorded_at
-    FROM usage_history h CROSS JOIN latest_times t USING (provider,account_key,recorded_at)
-    WHERE h.limit_id IS t.limit_id AND typeof(h.recorded_at)='integer'
-      AND h.id BETWEEN (SELECT min(first_id) FROM latest_times) AND (SELECT max(last_id) FROM latest_times)
+    FROM eligible h JOIN latest_times t USING (provider,account_key,recorded_at)
+    WHERE h.limit_id IS t.limit_id
     GROUP BY t.provider,t.account_key,t.limit_id
 ), history_accounts AS (
     -- The newest eligible row per provider is also the newest for its limit.

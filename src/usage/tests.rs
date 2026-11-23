@@ -436,6 +436,12 @@ mod omp_limits {
             used_fraction REAL, status TEXT, resets_at INTEGER);
     ";
 
+    // OMP v18.18.0's series and time indexes. Keep unindexed fixtures too.
+    pub(super) const HISTORY_INDEXES: &str = "
+        CREATE INDEX idx_usage_history_series ON usage_history(provider,account_key,limit_id,recorded_at);
+        CREATE INDEX idx_usage_history_recorded ON usage_history(recorded_at);
+    ";
+
     pub(super) fn sqlite(f: &Fixture) -> Option<PathBuf> {
         if !sqlite_installed() {
             return None;
@@ -646,6 +652,7 @@ mod omp_limits {
     fn omp_history_breaks_timestamp_ties_without_reviving_an_older_limit() {
         let f = Fixture::folder();
         let Some(path) = sqlite(&f) else { return };
+        exec(&path, HISTORY_INDEXES);
         let now = NOW * 1000;
         let future = (NOW + CLOCK_SKEW + 1) * 1000;
         let five = window("anthropic:5h", "0.125", (NOW + HOUR) * 1000, 300, "null");

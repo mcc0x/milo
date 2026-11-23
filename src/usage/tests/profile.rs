@@ -217,10 +217,15 @@ fn usage_profile_active_sqlite() {
         "profile\tdatabase_bytes\tseed_rows\tday_assistant_rows\tcommits\tjobs\tover_1s\tinline_p50_us\tinline_p95_us\tresult_p50_us\tresult_p95_us"
     );
     let now = local_noon();
-    for (profile, cached) in [("omp-uncached", false), ("omp-cached", true)] {
+    for (profile, cached) in [("omp-uncached", false), ("omp-cached", true), ("omp-indexed-sparse", false)] {
         let f = Fixture::folder();
         let path = omp_limits::sqlite(&f).unwrap();
         history(&path, HISTORY_ROWS, (now - 60) * 1000, "0.25");
+        if profile == "omp-indexed-sparse" {
+            // Keep one eligible row before the unrelated history and append another after it on every look.
+            exec(&path, "UPDATE usage_history SET provider='other' WHERE id>1;");
+            exec(&path, omp_limits::HISTORY_INDEXES);
+        }
         let mut writer = Writer::open(&f, &path);
         let mut usage = unopened(&f, now);
         usage.omp = omp::poll(Some(path.clone()), TEST_WAIT);
