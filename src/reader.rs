@@ -668,6 +668,8 @@ impl Pane for Reader {
     }
 
     fn cover(&mut self) {
+        self.actions = None;
+        self.clear_hits();
         self.pause_video();
     }
 

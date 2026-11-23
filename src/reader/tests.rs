@@ -43,6 +43,25 @@ fn reader_hints_say_close_and_keep_help_last() {
     assert_eq!(drawn(&mut reader, 20, 5)[4], " Actions · ? help");
 }
 
+#[test]
+fn covering_a_reader_dismisses_actions_before_help_takes_over() {
+    let f = Fixture::folder();
+    f.write("page.txt", "working text\n");
+    let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    drawn(&mut reader, 60, 6);
+    assert_eq!(reader.key(Key::Ctrl(b'a')), After::Stay);
+    let menu = drawn(&mut reader, 60, 6);
+    assert!(menu[1].contains("Edit in Milo"));
+    assert!(reader.hover_span(3, 1).is_some());
+
+    // The pane loop covers the Reader before painting help. An Enter after
+    // leaving help in the same batch must not run the old menu's choice.
+    reader.cover();
+    assert_eq!(reader.hover_span(3, 1), None);
+    assert_eq!(reader.key(Key::Enter), After::Ignored);
+    assert!(!reader.editing());
+}
+
 /// The screen column of a label, ignoring byte expansion of earlier glyphs.
 fn column(row: &str, label: &str) -> usize {
     crate::width::str_width(row.split_once(label).unwrap_or_else(|| panic!("no {label:?} in {row:?}")).0)

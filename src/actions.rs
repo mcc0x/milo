@@ -38,6 +38,7 @@ pub(crate) struct Menu {
     choices: Vec<Choice>,
     preview_unavailable: Option<&'static str>,
     selected: usize,
+    painted_selection: usize,
     first: usize,
     row: usize,
     shown: usize,
@@ -53,6 +54,7 @@ impl Menu {
             choices,
             preview_unavailable,
             selected: 0,
+            painted_selection: 0,
             first: 0,
             row: 0,
             shown: 0,
@@ -78,6 +80,7 @@ impl Menu {
         self.shown = self.choices.len().min(s.h.saturating_sub(self.row + footer));
         self.first = ui::selection_start(self.selected, self.choices.len(), self.shown);
         self.width = s.w;
+        self.painted_selection = self.selected;
         for (i, choice) in self.choices.iter().skip(self.first).take(self.shown).enumerate() {
             let y = self.row + i;
             let selected = self.first + i == self.selected;
@@ -123,7 +126,8 @@ impl Menu {
             Key::Esc | Key::Char('q') | Key::Ctrl(b'a') => Step::Close,
             Key::Click(x, y) => match self.footer.index_at(x, y) {
                 Some(0) => self.key(if x == 1 { Key::Up } else { Key::Down }),
-                Some(1) => self.key(Key::Enter),
+                Some(1) if self.selected == self.painted_selection => self.key(Key::Enter),
+                Some(1) => Step::Stay,
                 Some(2) => Step::Close,
                 _ => self.hit(x, y).map_or(Step::Stay, |(choice, _)| Step::Run(choice)),
             },
@@ -158,5 +162,20 @@ mod tests {
         assert!(matches!(menu.key(Key::Click(5, 1)), Step::Run(Choice::Reveal)));
         assert!(matches!(menu.key(Key::Click(24, 1)), Step::Stay));
         assert!(matches!(menu.key(Key::Esc), Step::Close));
+    }
+
+    #[test]
+    fn choose_footer_waits_for_the_new_selection_to_be_painted() {
+        let mut menu = Menu::new(vec![Choice::Read, Choice::Open], Path::new("."));
+        let mut s = Screen::sized(60, 5);
+        menu.draw(&mut s, "plan.md");
+        let choose = Key::Click(menu.footer.span(1).unwrap().start, 4);
+        assert!(matches!(menu.key(choose), Step::Run(Choice::Read)));
+
+        menu.key(Key::Down);
+        assert!(matches!(menu.key(choose), Step::Stay));
+        assert!(matches!(menu.key(Key::Click(5, 1)), Step::Run(Choice::Read)));
+        menu.draw(&mut s, "plan.md");
+        assert!(matches!(menu.key(choose), Step::Run(Choice::Open)));
     }
 }
