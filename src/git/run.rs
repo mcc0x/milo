@@ -1,9 +1,11 @@
 //! Runs read-only git commands without letting a repository run its own programs.
 
+use std::cell::Cell;
 use std::ffi::OsStr;
-use std::io::Read as _;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::io::{self, Read as _};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -18,6 +20,24 @@ use crate::term;
 const OUTPUT_LIMIT: u64 = 256 << 20;
 /// How long a git command may run before it is killed.
 const DEADLINE: Duration = Duration::from_secs(15);
+
+thread_local! {
+    /// Only a refresh and its scoped Git helpers inherit this descriptor.
+    static REFRESH_CANCEL: Cell<RawFd> = const { Cell::new(-1) };
+}
+
+/// The worker closes its end when the answer is ready. Closing the pane's
+/// end first wakes its Git commands, without waiting for the worker to exit.
+pub(crate) fn spawn_refresh(work: impl FnOnce() + Send + 'static) -> io::Result<UnixStream> {
+    let (ready, worker) = UnixStream::pair()?;
+    std::thread::Builder::new().spawn(move || {
+        REFRESH_CANCEL.set(worker.as_raw_fd());
+        work();
+        REFRESH_CANCEL.set(-1);
+        drop(worker);
+    })?;
+    Ok(ready)
+}
 
 /// Cache the executable so frequent commands can bypass the macOS git launcher.
 pub(crate) static GIT: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -49,11 +69,19 @@ pub(super) fn alongside<T, const N: usize>(
     ahead: [Option<&[&str]>; N],
     main: impl FnOnce() -> T,
 ) -> (T, [Option<Vec<u8>>; N]) {
+    let cancel = REFRESH_CANCEL.get();
     std::thread::scope(|scope| {
         let started = ahead.map(|args| {
             let args = args?;
             // Without a thread to spare, the command runs here after `main`.
-            Some(std::thread::Builder::new().spawn_scoped(scope, move || output(root, guard, args)).map_err(|_| args))
+            Some(
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, move || {
+                        REFRESH_CANCEL.set(cancel);
+                        output(root, guard, args)
+                    })
+                    .map_err(|_| args),
+            )
         });
         let answer = main();
         let answers = started.map(|running| match running? {
@@ -230,8 +258,14 @@ pub(super) fn config(root: &Path) -> Option<Config> {
 /// Reads the settings of the repository holding `dir` on a thread of its own
 /// while `main` runs on this one. `None` leaves them to be read later.
 pub(super) fn config_alongside<T>(dir: &Path, main: impl FnOnce() -> T) -> (Option<Config>, T) {
+    let cancel = REFRESH_CANCEL.get();
     std::thread::scope(|scope| {
-        let reading = std::thread::Builder::new().spawn_scoped(scope, || config(dir)).ok();
+        let reading = std::thread::Builder::new()
+            .spawn_scoped(scope, move || {
+                REFRESH_CANCEL.set(cancel);
+                config(dir)
+            })
+            .ok();
         let answer = main();
         (reading.and_then(|thread| thread.join().ok().flatten()), answer)
     })
@@ -336,8 +370,9 @@ fn capture(
     cancel: Option<BorrowedFd<'_>>,
 ) -> Result<(ExitStatus, Vec<u8>), OutputError> {
     let started = Instant::now();
-    let mut stop = libc::pollfd { fd: cancel.map_or(-1, |fd| fd.as_raw_fd()), events: libc::POLLIN, revents: 0 };
-    if cancel.is_some() {
+    let cancel = cancel.map_or_else(|| REFRESH_CANCEL.get(), |fd| fd.as_raw_fd());
+    let mut stop = libc::pollfd { fd: cancel, events: libc::POLLIN, revents: 0 };
+    if cancel >= 0 {
         if term::wait_ready(std::slice::from_mut(&mut stop), 0) > 0 {
             return Err(OutputError::Failed);
         }
@@ -348,7 +383,7 @@ fn capture(
     let pipe = child.stdout.take().expect("git stdout was piped");
     let result = collect(pipe, limit, started, stop).and_then(|out| wait(&mut child, started, stop).map(|s| (s, out)));
     if result.is_err() {
-        if cancel.is_some()
+        if cancel >= 0
             && let Ok(group) = libc::pid_t::try_from(child.id())
             && group > 1
         {

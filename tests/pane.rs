@@ -582,9 +582,8 @@ fn git_panes_wait_for_a_persistent_index_lock_without_removing_it() {
     }
 }
 
-/// An outline on two changed files and one clean one, whose Git stops at
-/// `status` for as long as the file `hold` is in the project's home.
-fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
+/// Two changed files and one clean one, with Git that can stop at `status`.
+fn project_with_a_git_that_can_be_held(project: &Project) -> Command {
     let root = project.0.join("project");
     project.git(&["init"]);
     for name in ["clean.txt", "first.txt", "second.txt"] {
@@ -597,24 +596,30 @@ fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
     }
     let real = Path::new(project.git(&["--exec-path"]).trim()).join("git");
     let script = format!(
-        "case \" $* \" in *\" status \"*)\n  if [ -e \"$HOME/hold\" ]; then\n    : > \"$HOME/held\"\n    \
+        "case \" $* \" in *\" status \"*)\n  if [ -e \"$HOME/hold\" ]; then\n    \
+         printf '%s\\n' \"$$\" > \"$HOME/held.tmp\"\n    mv \"$HOME/held.tmp\" \"$HOME/held\"\n    \
          while [ -e \"$HOME/hold\" ]; do sleep 0.02; done\n  fi;;\nesac\nexec '{}' \"$@\"\n",
         real.display()
     );
     let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
     project.stand_in_git(&mut command, &script);
+    command
+}
+
+fn outline_with_a_git_that_can_be_held(project: &Project) -> Terminal {
+    let mut command = project_with_a_git_that_can_be_held(project);
     let mut terminal = Terminal::sized(command.arg("outline"), 80, 12);
     terminal.shows("clean.txt");
     terminal
 }
 
-/// Changes the project and waits until the outline's Git is stopped reading it.
+/// Changes the project and waits until the pane's Git is stopped reading it.
 fn hold_git_at_a_change(project: &Project) {
     fs::write(project.0.join("hold"), "").unwrap();
     fs::write(project.0.join("project/later.txt"), "new file\n").unwrap();
     let until = Instant::now() + TEST_WAIT;
     while !project.0.join("held").exists() {
-        assert!(Instant::now() < until, "the outline did not ask Git about the change");
+        assert!(Instant::now() < until, "the pane did not ask Git about the change");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -700,6 +705,36 @@ fn the_outline_quits_without_waiting_for_a_git_that_is_still_reading() {
     assert!(terminal.restored());
     assert!(project.0.join("hold").exists());
     assert!(!project.0.join("project/.git/index.lock").exists());
+}
+
+#[test]
+fn returning_to_home_cancels_and_reaps_the_project_refresh() {
+    for (label, open, text) in [("Outline", &b"\r"[..], "clean.txt"), ("Git history", &b"j\r"[..], "Baseline")] {
+        let project = Project::new();
+        let mut terminal = Terminal::run(&mut project_with_a_git_that_can_be_held(&project));
+        terminal.shows("› Outline");
+        terminal.master.write_all(open).unwrap();
+        terminal.shows(text);
+        hold_git_at_a_change(&project);
+        let pid = fs::read_to_string(project.0.join("held")).unwrap().trim().parse::<libc::pid_t>().unwrap();
+        let asked = Instant::now();
+        terminal.master.write_all(b"q").unwrap();
+        terminal.shows(&format!("› {label}"));
+        let until = asked + Duration::from_secs(10);
+        loop {
+            // SAFETY: Signal zero checks the held fixture's process without delivering a signal.
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+                break;
+            }
+            assert!(Instant::now() < until, "{label} did not reap its Git refresh");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(asked.elapsed() < Duration::from_secs(10), "Home waited for {label}'s Git");
+        assert!(project.0.join("hold").exists());
+        terminal.master.write_all(b"q").unwrap();
+        assert!(terminal.wait_for_exit().success());
+    }
 }
 
 fn history_fixture(project: &Project, subject: &str) {

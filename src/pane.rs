@@ -1,5 +1,6 @@
 //! Runs terminal panes with shared input, help, redraws and file watching.
 
+use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
@@ -612,6 +613,15 @@ fn load_pane(
     }
 }
 
+fn focus_after_open(previous: Option<bool>, latest: Option<bool>, pending: &mut VecDeque<Key>) -> Option<bool> {
+    if latest.is_some() {
+        // This report was read during loading, after the entire input batch.
+        // Do not replay older focus changes on the newly opened pane.
+        pending.retain(|key| !matches!(key, Key::Focus(_)));
+    }
+    latest.or(previous)
+}
+
 fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: &mut Screen) -> Result<Exit, String> {
     let mut check_on_open = matches!(start, Start::Check);
     let mut next = if let Start::Welcome(open) = start { Some(open) } else { None };
@@ -633,7 +643,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
     let mut pointer = None;
     let mut highlighted = None;
     let mut first_frame = true;
-    let mut keys = Vec::new();
+    let mut keys = VecDeque::new();
     'run: while !term::TERMINATED.load(Ordering::Relaxed) {
         let resized = term::RESIZED.swap(false, Ordering::Relaxed);
         if first_frame || resized {
@@ -695,8 +705,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
             Wait::Input => {
                 let mut overlay_changed = false;
                 keys.extend(terminal.receive());
-                let mut pending = keys.drain(..);
-                while let Some(key) = pending.next() {
+                while let Some(key) = keys.pop_front() {
                     if let Key::Hover(x, y) = key {
                         if tracking && !overlay_changed && pane_row_available(screen, &help, &pace, y) {
                             pointer = Some((x, y));
@@ -735,7 +744,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                         After::Open(destination) => {
                             // The loading thread can read the terminal, but not the
                             // rest of this decoded burst. Cancel before handing it off.
-                            if pending.as_slice().iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
+                            if keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
                                 break 'run;
                             }
                             let start = destination.start();
@@ -749,7 +758,7 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                             parent = Some((std::mem::replace(&mut pane, child), check_on_open));
                             (watcher, pace) = (child_watcher, child_pace);
                             check_on_open = child_checks;
-                            focused = focus.or(focused);
+                            focused = focus_after_open(focused, focus, &mut keys);
                             changed_pane = true;
                         }
                         After::OpenWeb => return Ok(Exit::OpenWeb),
@@ -888,7 +897,9 @@ mod tests {
             let output = read_until(&mut master, "Reading…");
             assert!(output.contains("Reading…"), "{output:?}");
         });
-        assert_eq!(focused, Some(true));
+        let mut pending = VecDeque::from([Key::Focus(false), Key::Char('e'), Key::Paste, Key::Enter]);
+        assert_eq!(focus_after_open(None, focused, &mut pending), Some(true));
+        assert_eq!(pending, VecDeque::from([Key::Char('e'), Key::Paste, Key::Enter]));
     }
 
     #[test]

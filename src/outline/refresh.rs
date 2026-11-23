@@ -1,18 +1,19 @@
 //! Refreshes the outline away from the pane loop, so that keys are answered
 //! while Git reads a large project.
 
-use std::io::{self, PipeReader};
+use std::io;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
 
+use crate::git::run::spawn_refresh;
 use crate::git::{Kind, PendingFile, Refreshed, Repo};
 
 use super::Outline;
 
 /// One refresh on its own thread. Its descriptor becomes readable when the answer is ready.
 pub(super) struct Running {
-    ready: PipeReader,
+    ready: UnixStream,
     answer: Receiver<Refreshed>,
     /// What the reader sharing the pane said of itself when this started.
     reader_settled: bool,
@@ -20,12 +21,9 @@ pub(super) struct Running {
 
 impl Running {
     fn start(repo: Repo, files: Vec<PendingFile>, reader_settled: bool) -> io::Result<Self> {
-        let (ready, done) = io::pipe()?;
         let (send, answer) = mpsc::sync_channel(1);
-        thread::Builder::new().spawn(move || {
+        let ready = spawn_refresh(move || {
             let _ = send.send(repo.refreshed(&files));
-            // Closing the write end wakes the pane loop after the answer is ready.
-            drop(done);
         })?;
         Ok(Self { ready, answer, reader_settled })
     }
