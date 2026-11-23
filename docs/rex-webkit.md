@@ -86,13 +86,40 @@ Serve the page, assets and hot-reload WebSocket from the same origin (scheme, ho
 
 The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b1b3fc0219883112258a8d0f9f95e2d47daa9`, control API revision 18) advertises terminal, onboarding and two tunnel flavors, not a browser block. The [official preview feed](https://blob.superlogical.com/public/rex-app/preview-arm64/appcast.xml), [server API](https://www.superlogical.com/rex/docs/automate/server-api), [Lua reference](https://www.superlogical.com/rex/docs/reference/lua), [Mac actions](https://www.superlogical.com/rex/docs/reference/mac-actions) and [Rust SDK](https://github.com/alpha-og/rexdk) distinguish server-created blocks from client UI. The detailed [beta changelog](https://www.superlogical.com/rex/docs/beta/community-mcp) requires membership. The overlay is a Milo design, **not a claim that Rex has added a browser API**.
 
-* A human verified **clicking, typing and navigation over Rex.app** on an earlier build. Physical dragging on the previous builds dismissed the page. Those results do not verify divider or focus behavior on the persistent implementation.
+* The [maintainer’s physical acceptance baseline](https://github.com/mcc0x/milo/pull/69#issuecomment-7096963561) is the persistent **right split in Rex.app with multiple sessions attached** (`9f37252`; tested executable SHA-256 `484a560f90d19669800b7e3d8c2b5ea6c91a3d39d88d5a66c0075acde6e104fa`). Divider responsiveness remained a performance target. That acceptance does not extend to every placement, display or same-window session switch. An earlier build also passed physical click, typing and navigation.
 * The browser component has been exercised in a disposable AppKit panel against a real loopback dev server: keyboard input, navigation, source hot reload retaining a draft, and select/review/cancel/copy. The packaged settings UI was checked at desktop and narrow widths; the saved placement survived restart. Linux refused the preview without opening a browser.
 * The layout/observer lab opened each of the four placements beside the working terminal with a sidebar present. Separately, the **visible WebKit test used a right split** and one Unix app peer attached to four real Rex sessions. The sibling PTY executed commands before, during and after a drag. An AppKit divider responder streamed measured positions into `session.resize_pane`; the drag started outside the old page and lasted over 13 seconds. The same WebKit view retained the form, navigation history and URL, with a wider CSS viewport.
 * With the test pointer parked in the sibling, the page remained visible throughout a separate 13-second idle interval. The original Rex tab disappearing, an overlapping fixture window and loss of foreground suspended the panel; it restored without input. A replacement window did not acquire the pin, and closing the original working block ended the helper and observer.
 * In one four-session run, a separate nonactivating AppKit window covered three parts of a borderless host fixture: the sibling, the modeled titlebar region and the intended right tile. Preflight returned the same host window ID in all three positions. The split started with the tile covered: no panel was ordered and the input gate refused interaction. Moving the cover to the sibling revealed the page; overlap in the modeled titlebar region left it visible. Covering the loaded tile again and moving the cover away restored the same view, URL, history and draft before the divider and idle checks. Occlusion is sampled, not a synchronous notification of every window movement.
 * This test used real nonactivating AppKit windows, Quartz order and a loopback `WKWebView`. It modeled the Mac viewer identity, foreground, chrome and parked pointer and filtered the stack to its own windows. It did **not** move a physical pointer, drive the Rex.app divider, or capture a user's desktop.
-* Physical acceptance of the persistent panel in Rex.app is separate from the disposable fixtures below. No screenshot of an offscreen WebKit view establishes registration over Rex. Actual client focus return, palettes, Spaces and mixed-scale display movement still need manual verification.
+* Fixture timings are not physical divider or keyboard latency. Native focus return, palettes, Spaces and mixed-scale display movement still need manual verification.
+
+### Divider performance: accepted baseline vs candidate
+
+Apple M5 Pro, macOS 27.2.1 (26B131), Rex `0.1.0-preview.21` / API 18. Accepted `9f37252` → candidate `334f136`. One counted run per cell: baseline light, candidate light, candidate busy, baseline busy. Both used the same four-session fixture, compiler flags and pages; the busy page contains 420 responsive cards with wrapped text and inline SVGs. Each cell is **before → after**. These are not physical Rex.app measurements.
+
+| Right split | Light page | Busy page |
+|---|---:|---:|
+| Request → proven, visible native frame, p50 / p95 (24 per build) | 633 / 751 → 59 / 72 ms | 613 / 734 → 57 / 70 ms |
+| Native interarrival jitter, p50 / p95 (23 intervals) | 67 / 192 → 10 / 18 ms | 76 / 216 → 7 / 24 ms |
+| Last request in 60 Hz burst → visible (one burst per build) | 703 → 187 ms | 736 → 182 ms |
+| Split → both visible and first DOM layout received (one launch per build) | 1,370 → 344 ms | 1,367 → 363 ms |
+| Sibling CLI send → PTY receipt during burst, p50 / p95 (8 lines) | 22 / 51 → 23 / 49 ms | 23 / 44 → 23 / 44 ms |
+| Request → CSS resize notification, p50 / p95 | 507 / 944 → 44 / 948 ms (24 → 24) | 438 / 940 → 64 / 944 ms (24 → 23) |
+
+The baseline waited for successive 250 ms safety ticks to identify, order and reveal a changed tile. The candidate explicitly schedules those proof steps; the periodic safety checks and input gates remain. During a fast drag, the first geometry change revokes the old frame. Repeated changes within 150 ms reuse one timer; after a pause the helper verifies the current frame and window order anew. Both builds exposed **one of 24** requested widths in the 60 Hz burst, the last one. This improves catch-up, not continuous 60 fps dragging.
+
+In the candidate burst, neither page delivered a matching CSS notification inside the two-second passive observation window. Both later reported the final size around the explicit DOM check; that check matched the exposed WebKit viewport but is **not** a passive latency sample. The native WebKit frame change → CSS callback p95 for individual steps **increased** from 627 to 915 ms (light) and 587 to 906 ms (busy). These callbacks include WebKit and main-queue delivery; they do not measure paint or the execution time of WebKit layout.
+
+Rex and the viewer were already running at startup. The layout origin is a synthetic viewer's socket send, not a physical divider event. The fixture matches each unique width within its phase, not an end-to-end revision ID: CSS observations may arrive after the next request or match an equivalent size. Missing notifications are not counts of missed display refreshes. The idle/drag resource windows do not include late CSS work after the fixed tail, and the counted observer synchronously logs each API invocation. Raw helper and observer costs should not be added to reaped-child CPU or treated as total system energy.
+
+| Helper cost | Light: before → after | Busy: before → after |
+|---|---:|---:|
+| Idle: CPU ms / interrupt wakeups in 6 s | 22 / 97 → 19 / 130 | 21 / 100 → 25 / 139 |
+| Individual changes: CPU ms / interrupt wakeups in 23.1 s | 501 / 3,396 → 481 / 2,607 | 536 / 3,181 → 510 / 3,845 |
+| Burst including fixed tail: CPU ms / interrupt wakeups in ~1 s | 16 / 57 → 14 / 78 | 11 / 52 → 14 / 77 |
+
+Idle remained at 24 background window samples per six seconds. Individual changes used more samples (93 → 160 light, 93 → 161 busy); no wakeup reduction is claimed. Helper costs include fixture instrumentation, not the WebContent worker or WindowServer. The observer did not change: per layout workload it saw 48 layout events, made 92 view and 92 owner-list calls, wrote 48 geometry and 24 renewal records, and started no subprocess during resize or idle. It ran one shell and one `ps` identity check at startup. The sibling input probe itself starts a Rex CLI for each line.
 
 ### Persistent right-split fixture measurement
 
@@ -117,6 +144,17 @@ cargo test --locked --test rex_lab preview_tick::persistent_preview_coexists_wit
 ```
 
 The divider fixture sends drag and release events through AppKit’s `NSSplitView` responder in its own process. It never moves the system pointer. The layout lab uses a disposable Rex server and Mac-identifying Unix app peer; it does not drive a user's Rex.app.
+
+To compare revisions, use the **same benchmark checkout** for both. Point `MILO_REX_TICK_SOURCE` at a checkout or archive containing the selected revision’s `macos/Preview` and `src/rex/preview.lua`. With a macOS GUI login and Rex installed:
+
+```sh
+for page in light busy; do
+  MILO_REX_TICK_SOURCE=/absolute/path/to/revision MILO_REX_TICK_PAGE=$page \
+    cargo test --locked --test rex_lab preview_tick::benchmark_persistent_preview -- --exact --ignored --nocapture
+done
+```
+
+The driver sends 24 individual layout changes 937 ms apart, then returns through 24 widths at 60 requests/second. It times the viewer's socket send to the native panel becoming eligible and visible, and separately to delivery of WebKit’s DOM resize notification. Neither endpoint measures physical pixels. Jitter is the absolute difference between the interval of two completed updates and the interval of their requests; skipped widths are counted separately. The sibling PTY timestamps receipt of a line, including CLI launch and transport but not physical keystrokes. Counter collection is identical on both runs; `MILO_REX_TICK_COUNT=0` disables observer instrumentation. Run serially, report skipped widths, and compare both percentiles and sample counts rather than only the fastest frames.
 
 ### Human acceptance: start with the right split
 
