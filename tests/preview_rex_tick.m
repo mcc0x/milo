@@ -698,15 +698,22 @@ static WKNavigation *ObserveLoad(WKWebView *web, SEL sel, NSURLRequest *request)
 }
 
 static void SeedForm(MiloPreviewPanel *panel, unsigned tries, BOOL navigating) {
-    assert(tries && panel.placementProven);
+    if (!tries || !panel.placementProven) {
+        WKWebView *current = FindWebView(panel.contentView);
+        Trace("seed-refused tries=%u proven=%d requested=%d start=%d form=%d loading=%d history=%d\n",
+              tries, panel.placementProven, navigating, [current.URL.path isEqual:@"/rex-lab-page"],
+              [current.URL.path isEqual:@"/rex-lab-form"], current.loading, current.canGoBack);
+        abort();
+    }
     WKWebView *web = FindWebView(panel.contentView);
     assert(web && web == firstWeb);
     if (!navigating && [web.URL.path isEqualToString:@"/rex-lab-page"] && !web.loading) {
-        [web evaluateJavaScript:@"document.getElementById('divider-link').click(); true"
-            completionHandler:^(id result, NSError *error) {
-                assert(!error && [result isEqual:@YES]);
-                SeedForm(panel, tries - 1, YES);
-            }];
+        // Seed an ordinary native navigation, without assuming a synthetic DOM
+        // click on a just-loaded, never-key window creates a history entry.
+        // The browser smoke separately drives actual WebKit link interaction.
+        NSURL *formURL = [NSURL URLWithString:@"/rex-lab-form" relativeToURL:web.URL].absoluteURL;
+        assert([web loadRequest:[NSURLRequest requestWithURL:formURL]]);
+        dispatch_async(dispatch_get_main_queue(), ^{ SeedForm(panel, tries - 1, YES); });
         return;
     }
     if (navigating && [web.URL.path isEqualToString:@"/rex-lab-form"] && web.canGoBack && !web.loading) {
