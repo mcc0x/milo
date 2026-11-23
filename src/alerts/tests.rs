@@ -51,7 +51,7 @@ fn alerts(seen: &mut Seen, lines: &[String], seconds: u64) -> Vec<Alert> {
         .iter()
         .zip(0..)
         .filter_map(|(line, step)| {
-            seen.alert(event::parse(line.as_bytes())?, start + Duration::from_secs(seconds * step))
+            seen.alert(event::parse(line.as_bytes(), Content::Text)?, start + Duration::from_secs(seconds * step))
         })
         .collect()
 }
@@ -90,7 +90,7 @@ fn only_the_events_rex_raises_as_alerts_become_alerts() {
 #[test]
 fn another_kind_of_block_is_never_taken_for_a_terminal() {
     let other = line("a", "bell", "{}").replace("com.superlogical.terminal", "com.example.plugin");
-    assert_eq!(event::parse(other.as_bytes()), None);
+    assert_eq!(event::parse(other.as_bytes(), Content::Metadata), None);
 }
 
 #[test]
@@ -380,7 +380,8 @@ fn a_line_too_long_to_be_an_alert_is_skipped_without_losing_the_next() {
     let huge = line("a", "clipboard_written", &format!("{{\"text\":\"{}\"}}", "x".repeat(200_000)));
     let stream = format!("{huge}\n{}\n{}", line("a", "bell", "{}"), line("b", "bell", "{}"));
     let mut kinds = Vec::new();
-    forward::read(stream.as_bytes(), [true; 5], |alert| kinds.push(alert.kind));
+    let settings = Settings { kinds: [true; 5], ..Settings::default() };
+    forward::read(stream.as_bytes(), &settings, |alert| kinds.push(alert.kind));
     assert_eq!(kinds, [Kind::Bell, Kind::Bell]);
 }
 
@@ -391,8 +392,23 @@ fn what_is_an_alert_is_decided_as_each_event_arrives_and_only_chosen_kinds_wait(
     let lines =
         [blocked("a", "permission", "x"), working("a"), line("a", "bell", "{}"), blocked("a", "permission", "x")];
     let mut kinds = Vec::new();
-    forward::read(lines.join("\n").as_bytes(), [true, true, true, false, false], |alert| kinds.push(alert.kind));
+    forward::read(lines.join("\n").as_bytes(), &Settings::default(), |alert| kinds.push(alert.kind));
     assert_eq!(kinds, [Kind::Blocked, Kind::Blocked]);
+}
+
+#[test]
+fn queue_content_tracks_consent_without_collapsing_distinct_notifications() {
+    let notice = |body| line("a", "desktop_notification", &format!(r#"{{"body":"{body}"}}"#));
+    let stream = [blocked("a", "permission", "status detail"), notice("one"), notice("one"), notice("two")].join("\n");
+    for content in [Content::Metadata, Content::Text] {
+        let settings = Settings { content, kinds: [true; 5], ..Settings::default() };
+        let mut queued = Vec::new();
+        forward::read(stream.as_bytes(), &settings, |alert| queued.push(alert));
+        assert_eq!(kinds(&queued), [Kind::Blocked, Kind::Notification, Kind::Notification]);
+        assert_eq!(queued[0].app.as_deref(), Some("synthetic"));
+        let text: Vec<_> = queued.iter().map(|alert| alert.text.as_str()).collect();
+        assert_eq!(text, if content == Content::Text { ["status detail", "one", "two"] } else { [""; 3] });
+    }
 }
 
 #[test]
