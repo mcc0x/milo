@@ -1783,6 +1783,17 @@ fn a_floating_reader_holds_the_outlines_files_as_tabs_and_keeps_their_unsaved_ed
     assert!(soon(|| kept() == ["also typed first\n"]), "{:?}", kept());
 }
 
+#[cfg(target_os = "macos")]
+#[path = "rex_lab/rich_reader.rs"]
+mod rich_reader;
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs installed Rex and FFmpeg 8.0 or newer; starts a disposable server"]
+fn outline_reader_previews_images_video_and_markdown_in_one_floating_reader() {
+    rich_reader::verify();
+}
+
 /// A program with no terminal hands a patch of its own edits to `milo review --float`.
 #[test]
 #[ignore = "needs an installed Rex; starts a disposable server"]

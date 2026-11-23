@@ -1,15 +1,19 @@
 use std::io::{BufRead as _, BufReader};
 use std::thread;
 
-use super::super::menu::{global_choices, snapshots};
+use crate::menubar::Indicator;
+
+use super::super::menu::{Refresh, global_choices, snapshots};
 use super::*;
 
 fn snapshot(usage: &mut Usage) -> String {
     let mut line = String::new();
-    usage.menu_snapshot(&mut line);
+    usage.menu_snapshot(&mut line, Indicator::Quota, false);
     assert!(line.ends_with('\n'));
     assert_eq!(line.lines().count(), 1);
-    assert_eq!(field(Value::parse(line.as_bytes()).unwrap(), "version").unsigned(), Some(1));
+    let [version, indicator] = Value::parse(line.as_bytes()).unwrap().fields(["version", "indicator"]);
+    assert_eq!(version.unwrap().unsigned(), Some(1));
+    assert!(indicator.unwrap().is("quota"));
     line
 }
 
@@ -243,20 +247,34 @@ fn menu_stream_flushes_on_startup_newline_timer_and_stops_at_eof() {
     let (input, mut request) = io::pipe().unwrap();
     let (output, response) = io::pipe().unwrap();
     let stream = thread::spawn(move || {
+        let f = Fixture::folder();
+        let mut usage = automatic(&f, NOW);
         snapshots(input, response, |line, request| {
-            match request {
-                None => line.push_str("{\"test\":\"startup\"}\n"),
-                Some(true) => line.push_str("{\"test\":\"manual\"}\n"),
-                Some(false) => line.push_str("{\"test\":\"timer\"}\n"),
-            }
-            Ok(if request == Some(true) { Duration::from_millis(20) } else { Duration::from_secs(5) })
+            let (indicator, interval) = match request {
+                Refresh::Start | Refresh::Scheduled => (Indicator::Quota, Some(Duration::from_secs(5))),
+                Refresh::Manual { .. } => (Indicator::Memory, Some(Duration::from_millis(20))),
+                Refresh::Indicator => (Indicator::Cpu, None),
+            };
+            usage.menu_snapshot(line, indicator, request.acknowledges_indicator());
+            Ok(interval)
         })
     });
     let mut lines = BufReader::new(output).lines();
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"test":"startup"}"#);
+    let mut expect = |indicator: Indicator, ack: bool| {
+        let line = lines.next().unwrap().unwrap();
+        let [choice, actual_ack] = Value::parse(line.as_bytes()).unwrap().fields(["indicator", "indicatorAck"]);
+        assert!(choice.unwrap().is(indicator.value()));
+        assert_eq!(actual_ack.map(|ack| ack.boolean().unwrap()), ack.then_some(true));
+    };
+    expect(Indicator::Quota, false);
+    request.write_all(&[0]).unwrap();
+    expect(Indicator::Cpu, true);
+    request.write_all(b"refresh\n\0").unwrap();
+    expect(Indicator::Memory, true);
+    expect(Indicator::Quota, false);
     request.write_all(b"refresh\n").unwrap();
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"test":"manual"}"#);
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"test":"timer"}"#);
+    expect(Indicator::Memory, false);
+    expect(Indicator::Quota, false);
     drop(request);
     assert!(lines.next().is_none());
     stream.join().unwrap().unwrap();
@@ -269,7 +287,7 @@ fn menu_stream_treats_a_broken_pipe_as_normal_shutdown() {
     drop(output);
     snapshots(input, response, |line, _| {
         line.push_str("{}\n");
-        Ok(Duration::from_secs(60))
+        Ok(Some(Duration::from_secs(60)))
     })
     .unwrap();
 }
@@ -282,7 +300,7 @@ fn menu_stream_quits_when_an_idle_output_loses_its_reader() {
     thread::spawn(move || {
         let finished = snapshots(input, response, |line, _| {
             line.push_str("{}\n");
-            Ok(Duration::from_secs(60))
+            Ok(Some(Duration::from_secs(60)))
         });
         let _ = done.send(finished);
     });

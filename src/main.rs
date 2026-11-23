@@ -62,6 +62,7 @@ Usage: milo
        milo history [PATH]
        milo usage [--menu-stream]
        milo menubar install | uninstall
+       milo menubar indicator quota | cpu | memory
        milo setup
        milo web [--port PORT] [--no-open]
        milo web --host HOST [--project DIR] [--port PORT] [--no-open]
@@ -144,6 +145,8 @@ Reader (also opened by milo view):
   n N           next/previous block of changed lines
   c             show only the changed lines, or the full file
   Tab Enter     choose the next run of hidden lines, show it
+  m             rendered Markdown / source and changes
+  Space, ←→     in an MP4: play/pause, seek back/forward five seconds
   e             edit a working text file
   q or Esc      close
 
@@ -195,7 +198,7 @@ fn command_help(name: &str) -> Option<&'static str> {
             "Usage: milo usage [--menu-stream]\n\nSee Codex and Claude Code limits and OpenCode activity.\n--menu-stream prints one JSON snapshot per line using global preferences. It refreshes about every 30 seconds or on a newline from stdin, and exits at EOF."
         }
         "menubar" => {
-            "Usage: milo menubar install | uninstall\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings."
+            "Usage: milo menubar install | uninstall\n       milo menubar indicator quota | cpu | memory\n\nInstall and open the optional macOS usage app, or remove it without changing Milo settings.\nThe indicator command saves what the menu bar shows without opening the app."
         }
         "view" => {
             "Usage: milo view FILE [--commit ID | --edit]\n\nRead a file now or as it was at a Git commit. --edit starts editing a working text file; in the reader, e does the same."
@@ -326,6 +329,7 @@ enum Command<'a> {
     Usage,
     UsageMenuStream,
     MenuBar(menubar::Action),
+    MenuIndicator(menubar::Indicator),
     Home,
     Setup,
     Web(web::Start<'a>),
@@ -373,7 +377,20 @@ fn command<'a>(
         });
     }
     if !rest.is_empty()
-        && !matches!(name, Some("view" | "review" | "web" | "preview" | "preview-anchor" | "alerts" | "presence" | "settings"))
+        && !matches!(
+            name,
+            Some(
+                "view"
+                    | "review"
+                    | "web"
+                    | "preview"
+                    | "preview-anchor"
+                    | "alerts"
+                    | "presence"
+                    | "settings"
+                    | "menubar"
+            )
+        )
     {
         return Err(format!("too many arguments; see {}", guide(name)));
     }
@@ -384,11 +401,18 @@ fn command<'a>(
         return Ok(Command::Help(help));
     }
     Ok(match (name, second) {
-        (Some("menubar"), _) => Command::MenuBar(match option {
-            Some("install") => menubar::Action::Install,
-            Some("uninstall") => menubar::Action::Uninstall,
-            _ => return Err("expected milo menubar install | uninstall".into()),
-        }),
+        (Some("menubar"), _) => match (option, rest) {
+            (Some("install"), []) => Command::MenuBar(menubar::Action::Install),
+            (Some("uninstall"), []) => Command::MenuBar(menubar::Action::Uninstall),
+            (Some("indicator"), args) => {
+                let indicator = match args {
+                    [value] => value.to_str().and_then(menubar::Indicator::parse),
+                    _ => None,
+                };
+                Command::MenuIndicator(indicator.ok_or("expected milo menubar indicator quota | cpu | memory")?)
+            }
+            _ => return Err("see milo menubar --help for commands".into()),
+        },
         (Some("outline"), path) => Command::Outline(path),
         (Some("history"), path) => Command::History(path),
         (Some("view"), Some(file)) => {
@@ -554,6 +578,10 @@ fn command<'a>(
 fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Result<(), String>) -> Result<(), String> {
     match command {
         Command::MenuBar(action) => print_report(menubar::run(action)),
+        Command::MenuIndicator(indicator) => {
+            let config = paths::config_dir().ok_or("Milo's configuration directory is unavailable")?;
+            print_line(indicator.save(&config)?)
+        }
         Command::Outline(path) => run(Start::Reading(project_path(path)), &|| open_outline(path)),
         Command::Path(path) => run(Start::Reading(Path::new(path)), &|| {
             open_outline(Some(path)).map_err(|why| match instead_of(path) {

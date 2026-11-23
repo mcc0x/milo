@@ -5,6 +5,7 @@ export type UsageChoice = 'auto' | 'always' | 'hide';
 export type PresenceDetails = 'generic' | 'session' | 'project' | 'both';
 export type AlertKind = 'blocked' | 'error' | 'done' | 'notification' | 'bell';
 export type AlertDestination = 'telegram' | 'discord';
+export type MenuIndicator = 'quota' | 'cpu' | 'memory';
 
 export interface GroupState {
   scope: Scope | 'default';
@@ -113,7 +114,7 @@ export interface SessionState {
     preview_placement: 'right' | 'left' | 'above' | 'below';
   };
   account: {claude_limits: boolean; claude_status: string};
-  menubar: {installed: boolean | null};
+  menubar: {installed: boolean | null; indicator: MenuIndicator | null};
   groups: Record<GroupKey, GroupState>;
   capabilities: {capture: boolean; try: boolean; undo: boolean; auto_arrange: boolean};
   dirty: boolean;

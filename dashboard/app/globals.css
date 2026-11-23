@@ -211,7 +211,8 @@ h1, h2, h3, p, figure { margin: 0; }
 .choice-strip .git-example { font: 650 .7rem/1.2 var(--mono); color: #785817; }
 .choice-strip input:checked + span { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px #204e802b; }
 .choice-strip input:focus-visible + span { outline: 2px solid var(--blue); }
-.choice-strip:disabled { opacity: .6; }
+.choice-strip:disabled, .choice-strip[aria-disabled="true"] { opacity: .6; }
+.choice-strip[aria-disabled="true"] input { cursor: default; }
 @media (forced-colors: active) { .choice-strip input:checked + span { outline: 2px solid Highlight; } }
 #pane-preview + .group-controls .choice-strip { flex-wrap: wrap; }
 .pane-picker { margin: 0; padding: .35rem 0; border: 0; min-width: 0; }

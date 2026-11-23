@@ -471,6 +471,12 @@ impl Pane for Outline {
         [mark, note, counts, sweep].into_iter().flatten().min()
     }
 
+    fn cover(&mut self) {
+        if let Some(reader) = &mut self.reading {
+            reader.cover();
+        }
+    }
+
     fn help(&self) -> Page {
         use help::{HelpRow, heading, key, sample};
 

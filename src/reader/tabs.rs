@@ -116,13 +116,13 @@ impl Tabs {
                 .and_then(|id| CommittedTarget::resolve(&request.file, id))
                 .map(|target| {
                     if !self.select_existing(|tab| target.matches(tab)) {
-                        self.add(target.load());
+                        self.add(|| target.load());
                     }
                 })
         } else {
             WorkingTarget::resolve(&request.file).ok_or("That file is not in a folder.").map(|target| {
                 if !self.select_existing(|tab| target.matches(tab)) {
-                    self.add(target.load());
+                    self.add(|| target.load());
                 }
             })
         };
@@ -141,8 +141,9 @@ impl Tabs {
         true
     }
 
-    fn add(&mut self, reader: Reader) {
-        self.tabs.push(reader);
+    fn add(&mut self, load: impl FnOnce() -> Reader) {
+        self.reader_mut().park_media();
+        self.tabs.push(load());
         // The first snapshot was just loaded. Rescope so the pane loop still
         // reconciles it after installing the watcher, without forcing a second diff now.
         self.activate(self.tabs.len() - 1);
@@ -162,6 +163,9 @@ impl Tabs {
 
     /// Brings a tab forward as its file is now, not as it was when the tab was last shown.
     fn show(&mut self, tab: usize) {
+        if tab != self.shown {
+            self.reader_mut().park_media();
+        }
         self.activate(tab);
         let reader = self.reader_mut();
         if !reader.git_busy() {
@@ -192,7 +196,8 @@ impl Tabs {
             return After::Leave;
         }
         self.tabs.remove(self.shown);
-        self.show(self.shown.min(self.tabs.len() - 1));
+        self.shown = self.shown.min(self.tabs.len() - 1);
+        self.show(self.shown);
         After::Stay
     }
 
@@ -406,6 +411,10 @@ impl Pane for Tabs {
             ]);
         }
         page
+    }
+
+    fn cover(&mut self) {
+        self.reader_mut().cover();
     }
 
     fn notice(&self) -> Option<&'static str> {

@@ -160,6 +160,10 @@ impl<F: Fn(Repo, &Preferences) -> Box<dyn Pane>> Pane for Project<F> {
         self.pane.help()
     }
 
+    fn cover(&mut self) {
+        self.pane.cover();
+    }
+
     fn watch_scope(&self) -> Scope {
         self.pane.watch_scope()
     }

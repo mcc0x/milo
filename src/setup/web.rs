@@ -7,7 +7,7 @@ use super::claude::ClaudeSnapshot;
 use super::*;
 use crate::host::Host;
 use crate::json::{self, Value};
-use crate::menubar;
+use crate::menubar::{self, Indicator};
 use crate::preferences::{Show, UsageAccount};
 
 const BAD_ACTION: &str = "Unknown or invalid Settings action.";
@@ -268,6 +268,11 @@ impl Editor {
         Ok(())
     }
 
+    pub(crate) fn menu_indicator(&self) -> impl Display {
+        let choice = self.setup.store.as_ref().and_then(|store| Indicator::load(&Indicator::file(&store.config)).ok());
+        Optional(choice.map(|choice| Quoted(choice.value())))
+    }
+
     pub(crate) fn state(&self) -> String {
         let setup = &self.setup;
         let layout = &setup.layout;
@@ -309,7 +314,7 @@ impl Editor {
             "\"usage_deepseek\":\"{}\",\"usage_openrouter\":\"{}\",\"usage_devin\":\"{}\",\"usage_copilot\":\"{}\"}},",
             "\"workflow\":{{\"project_mode\":\"{}\",\"follow_activity\":{},\"changes_only\":{},\"history_follow_new\":{},",
             "\"tab_titles\":{},\"preview_placement\":\"{}\"}},",
-            "\"menubar\":{{\"installed\":{}}},",
+            "\"menubar\":{{\"installed\":{},\"indicator\":{}}},",
             "\"account\":{{\"claude_limits\":{},\"claude_status\":{}}},",
             "\"groups\":{{\"layout\":{},\"preferences\":{},\"account\":{}}},",
             "\"capabilities\":{{\"capture\":{},\"try\":{},\"undo\":{},\"auto_arrange\":{}}},",
@@ -323,8 +328,7 @@ impl Editor {
             usage_codex, usage_claude, usage_opencode,
             usage_deepseek, usage_openrouter, usage_devin, usage_copilot,
             project, prefs.follow_activity, prefs.changes_only, prefs.history_follow_new, prefs.tab_titles,
-            prefs.preview_placement.value(),
-            Optional(menubar::installed()),
+            prefs.preview_placement.value(), Optional(menubar::installed()), self.menu_indicator(),
             setup.show_limits, Quoted(status), layout_state, prefs_state, account_state,
             capture, try_layout, trial, auto_arrange, setup.dirty(), trial,
             Optional(self.doctor.as_ref()),
@@ -486,6 +490,10 @@ impl Editor {
             Action::Menubar(action) if menubar::installed().is_some() => {
                 // Install also opens an existing app, replacing it only when the bundled copy differs.
                 return menubar::run(action).map(|text| Some(Ok(text.into())));
+            }
+            Action::MenubarIndicator(indicator) if menubar::installed().is_some() => {
+                // An explicit choice can repair a malformed file without saving any draft.
+                Some(Ok(indicator.save(&self.setup.store()?.config)?.into()))
             }
             Action::Alerts(change) => {
                 // Like the menu app, alert choices are saved at once and are no part of the draft.
@@ -706,6 +714,7 @@ enum Action {
     Undo,
     Doctor,
     Menubar(menubar::Action),
+    MenubarIndicator(Indicator),
     Alerts(AlertChange),
     /// Change Discord presence, or with `None` turn it off.
     Presence(Option<presence::Change>),
@@ -750,6 +759,9 @@ impl Action {
                     "uninstall" => menubar::Action::Uninstall,
                     _ => return None,
                 })
+            }
+            [Some(field), Some(value), None, None] if action.is("menubar") && field.is("indicator") => {
+                Self::MenubarIndicator(Indicator::parse(&value.string(6)?)?)
             }
             [Some(field), Some(value), None, None] if action.is("alerts") => {
                 Self::Alerts(AlertChange::parse(field, value)?)
@@ -1248,6 +1260,75 @@ mod tests {
         assert!(editor.action(stale.as_bytes()).unwrap_err().contains("draft changed"));
         assert_eq!(editor.state(), before);
         assert!(!editor.setup.store().unwrap().config.exists());
+    }
+
+    #[test]
+    fn menu_indicator_is_global_and_does_not_replace_or_stale_a_preferences_draft() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), Some(&f.root));
+        let draft = set(&mut editor, "workflow.project_mode", "\"pin\"");
+        let state = Value::parse(draft.as_bytes()).unwrap();
+        assert!(field(field(state, "menubar"), "indicator").is("quota"));
+        for request in [
+            r#""action":"menubar","field":"indicator","value":"icon""#,
+            r#""action":"menubar","field":"indicator","value":true"#,
+            r#""action":"menubar","field":"indicator","value":"cpu","scope":"worktree""#,
+            r#""action":"set","field":"menubar.indicator","value":"cpu""#,
+        ] {
+            assert_eq!(action(&mut editor, request).unwrap_err(), BAD_ACTION);
+        }
+        let request = r#""action":"menubar","field":"indicator","value":"cpu""#;
+        let stale = format!(r#"{{"version":{},{request}}}"#, editor.version - 1);
+        assert!(editor.action(stale.as_bytes()).unwrap_err().contains("draft changed"));
+        if menubar::installed().is_some() {
+            action(&mut editor, request).unwrap();
+        } else {
+            assert_eq!(action(&mut editor, request).unwrap_err(), UNAVAILABLE);
+            assert_eq!(editor.state(), draft);
+            // A save by the CLI also reaches the open editor, even without a bundled installer.
+            Indicator::Cpu.save(&store.config).unwrap();
+        }
+        let saved = editor.state();
+        let state = Value::parse(saved.as_bytes()).unwrap();
+        assert!(field(field(state, "menubar"), "indicator").is("cpu"));
+        assert!(field(field(state, "workflow"), "project_mode").is("pin"));
+        assert_eq!(field(state, "dirty").boolean(), Some(true));
+        assert!(!crate::preferences::layer_file(&store.config, None).exists());
+
+        action(&mut editor, r#""action":"save","group":"preferences","scope":"worktree""#).unwrap();
+        let reopened = outside(store, None).state();
+        let state = Value::parse(reopened.as_bytes()).unwrap();
+        assert!(field(field(state, "menubar"), "indicator").is("cpu"));
+        assert!(field(field(state, "workflow"), "project_mode").is("follow"));
+    }
+
+    #[test]
+    fn menu_indicator_read_errors_are_unknown_until_an_explicit_repair() {
+        let f = Fixture::folder();
+        let store = fixture_store(&f);
+        let mut editor = outside(store.clone(), None);
+        let file = Indicator::file(&store.config);
+        let malformed = b"indicator = invalid\n";
+        Indicator::Cpu.save(&store.config).unwrap();
+        for invalid in [b"\xff".as_slice(), malformed] {
+            fs::write(&file, invalid).unwrap();
+            let state = editor.state();
+            let state = Value::parse(state.as_bytes()).unwrap();
+            assert!(field(field(state, "menubar"), "indicator").null());
+            assert_eq!(fs::read(&file).unwrap(), invalid);
+        }
+
+        let request = r#""action":"menubar","field":"indicator","value":"quota""#;
+        if menubar::installed().is_some() {
+            let saved = action(&mut editor, request).unwrap();
+            let state = Value::parse(saved.as_bytes()).unwrap();
+            assert!(field(field(state, "menubar"), "indicator").is("quota"));
+            assert_eq!(fs::read_to_string(&file).unwrap(), "indicator = quota\n");
+        } else {
+            assert_eq!(action(&mut editor, request).unwrap_err(), UNAVAILABLE);
+            assert_eq!(fs::read(&file).unwrap(), malformed.as_slice());
+        }
     }
 
     #[test]

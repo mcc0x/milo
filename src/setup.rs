@@ -157,6 +157,7 @@ enum Row {
     AlertsContent,
     AlertsTest,
     MenuBar,
+    MenuIndicator,
     RemoveMenuBar,
     /// Opens the Discord presence choices.
     PresenceOpen,
@@ -208,6 +209,7 @@ const WORKFLOW: &[Row] = &[
     Row::Alerts,
     Row::PresenceOpen,
     Row::MenuBar,
+    Row::MenuIndicator,
     Row::RemoveMenuBar,
 ];
 const ALERTS: &[Row] = &[
@@ -246,6 +248,7 @@ pub struct Setup<R = fn(&[&OsStr]) -> bool> {
     claude: Claude,
     show_limits: bool,
     menu_installed: Option<bool>,
+    menu_indicator: Option<menubar::Indicator>,
     presence: Option<presence::Control>,
     /// The saved Discord presence choice and what its helper last did, if they could be read.
     presence_view: Option<presence::Status>,
@@ -285,6 +288,7 @@ impl Setup {
         let mut setup = Self::new(store, inside, target, root, rex::run);
         setup.tab_size = tab_size;
         setup.menu_installed = menubar::installed();
+        setup.reload_menu_indicator();
         setup.alerts = Alerts::real();
         setup.presence = setup.presence.take().map(presence::Control::starting_helper);
         setup.icon_override = IconMode::environment();
@@ -338,6 +342,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             claude,
             show_limits: claude == Claude::On,
             menu_installed: None,
+            menu_indicator: None,
             presence,
             presence_view: None,
             application_draft: String::new(),
@@ -422,7 +427,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Workflow => match self.menu_installed {
                 Some(true) => WORKFLOW,
                 Some(false) => &WORKFLOW[..WORKFLOW.len() - 1],
-                None => &WORKFLOW[..WORKFLOW.len() - 2],
+                None => &WORKFLOW[..WORKFLOW.len() - 3],
             },
             Panel::Alerts => ALERTS,
             Panel::Health => &[Row::Diagnostics, Row::Repair, Row::Remove],
@@ -452,6 +457,9 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         if matches!(panel, Panel::Workflow | Panel::Presence) {
             // The helper comes and goes with Rex and Discord, so say what is true now.
             self.reload_presence();
+        }
+        if panel == Panel::Workflow {
+            self.reload_menu_indicator();
         }
         if panel == Panel::Diagnostics && panel != previous {
             self.refresh_health();
@@ -899,6 +907,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         }
     }
 
+    fn reload_menu_indicator(&mut self) {
+        self.menu_indicator = self
+            .menu_installed
+            .and(self.store.as_ref())
+            .and_then(|store| menubar::Indicator::load(&menubar::Indicator::file(&store.config)).ok());
+    }
+
     fn change_menu_app(&mut self, action: MenuAction) {
         let install = action == MenuAction::Install;
         let result = menubar::run(action);
@@ -1172,6 +1187,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             | Row::PreviewPlacement
             | Row::TabTitles => self.saved_prefs.is_none(),
             Row::ClaudeLimits | Row::SaveClaude => !self.claude.editable(),
+            Row::MenuIndicator => self.menu_installed.is_none() || self.store.is_none(),
             Row::Presence | Row::PresenceDetails | Row::PresenceApp => self.presence_view.is_none(),
             Row::Continue if self.panel == Panel::Confirm(Confirm::PresenceApp) => {
                 presence::application_id(&self.application_draft).is_none()
@@ -1191,6 +1207,15 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Row::SaveClaude => self.save_claude().map(Cow::Borrowed),
             Row::MenuBar if self.menu_installed.is_some() => {
                 self.change_menu_app(MenuAction::Install);
+                return After::Stay;
+            }
+            Row::MenuIndicator => {
+                let result = self
+                    .store()
+                    .map_err(str::to_owned)
+                    .and_then(|store| menubar::Indicator::advance(&store.config, self.menu_indicator));
+                self.reload_menu_indicator();
+                self.report_text(result.map(Cow::Borrowed).map_err(Cow::Owned));
                 return After::Stay;
             }
             Row::RemoveMenuBar if self.menu_installed == Some(true) => {

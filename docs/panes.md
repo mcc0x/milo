@@ -291,8 +291,41 @@ How a formatter is run:
 
 The pane shows `Formatting with NAME…` and does not redraw until the formatter is done.
 
-## Reading pictures
+## Reading pictures, video and Markdown
 
-The working-file reader can show PNG, JPEG, GIF, WebP, HEIC and HEIF, TIFF, BMP, ICO and ICNS, SVG, PSD and the first page of a PDF, where conversion is supported. It fits the picture without changing its proportions. On macOS, `/usr/bin/sips` converts other formats and resizes large PNGs; other systems show only PNGs that do not need conversion. Ordinary text still shows as text if a file has a picture extension. At a commit, the reader shows the stored file as text or a note, not as a picture.
+Open a working file from Outline with `Enter` or a double-click. The preview is the file's Reader tab, not a browser, dev server or external player. `milo view FILE` uses the same path. History, `--commit` and handed-over patches still show the source/diff or a binary-file note; they never substitute today's file for the requested revision.
 
-Pictures need a terminal that supports the kitty graphics protocol, such as Rex. Milo asks the terminal whether it can draw pictures and shows a message if it cannot.
+| Working file | macOS | Linux |
+| --- | --- | --- |
+| PNG | Kitty bitmap where available; colored terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
+| JPEG, static WebP | Same as PNG, using the system image decoder | No conversion |
+| MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` |
+| `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same |
+
+**Pictures.** The image keeps its proportions and fits between the filename and the key hints. Input is limited to 64 MiB. The macOS decoder checks the format and dimensions, caps source images at 40 million pixels and 16,384 pixels per side, and has a five-second deadline. The Kitty bitmap is at most 1,600 pixels per side and 16 MiB; the cell raster is at most 512 pixels per side. Text named like a picture can still be read as text. Active documents such as SVG and PDF aren't rasterized.
+
+Single-image GIF, BMP without linked profiles, and single-page TIFF without nested image directories are also recognized on macOS. Animated GIF/WebP, multi-page TIFF, HEIC/HEIF, PSD, ICO/ICNS, SVG and PDF aren't passed to a general-purpose converter.
+
+**Video.** Opens paused. `Space` plays or pauses; `←` / `→` seek five seconds in either direction. Leaving the tab or opening help pauses playback. The Reader never opens an audio device. It streams scaled frames (up to 320 × 240 at 12 fps) as colored terminal cells. Only standalone MP4 with a local H.264, HEVC or MPEG-4 Part 2 video track is accepted, up to 128 MiB and one hour. The track header must fit 8,192 pixels per side; decoding is limited to 9.5 million pixels per frame. External tracks aren't followed. Milo looks for an already-installed decoder, never installs one, and gives a reason when it can't play a file.
+
+Leaving an image or movie tab releases its prepared pixels and private movie snapshot. Returning loads the selected working file again. An unchanged movie remembers its paused position; a replaced movie starts from the beginning.
+
+Media file reads run in the background. A canceled read still waiting on the filesystem keeps one of two slots until it returns; the Reader can still switch tabs or close. On macOS, a cloud placeholder must already be downloaded to open as media. Closing the Reader doesn't wait for cloud storage or start a download.
+
+Limits on bytes, pixels and output apply before or during decoding. The macOS helper watchdog also stops a decoder observed above 384 MiB resident memory; this is sampled, not a hard ceiling on instantaneous process memory.
+
+**Markdown.** Headings, paragraphs, lists, quotes, emphasis and code render in the pane's own text styles. Links show text; embedded images show their labels, not fetched pixels. No HTML, scripts, URLs or file references are executed or loaded. `m` switches back and forth without losing the source diff. `e` opens the ordinary source editor; only an explicit save writes. Large previews stop at a labeled limit (512 KiB of text, 20,000 source lines or 32,000 wrapped rows); the source Reader keeps its own limits.
+
+### Representative open times
+
+Median of five release-build starts on an Apple M5 Pro, macOS 27.2.1, FFmpeg 9.0.2. Measured from spawning Milo to the first complete content frame on a 160 × 50 cell terminal. RSS is Milo's resident memory at that frame, not peak memory or the decoder's RSS. Release builds, terminal sizes and decoder builds affect these numbers.
+
+| Fixture | Input bytes | First frame (ms) | Milo RSS (KiB) |
+| --- | ---: | ---: | ---: |
+| 1920 × 1080 PNG | 215,387 | 142.0 | 9,056 |
+| 1920 × 1080 JPEG | 75,347 | 143.7 | 9,056 |
+| 1920 × 1080 WebP | 46,604 | 140.3 | 8,992 |
+| 1920 × 1080 H.264 MP4, 8 seconds | 5,557,338 | 141.2 | 7,920 |
+| Markdown, 2,048 list items | 114,703 | 24.1 | 8,976 |
+
+Reproduce with `python3 tests/rich_reader_bench.py target/release/milo`. Fixture generation uses local `ffmpeg` and `cwebp`; the reader doesn't need `cwebp`.

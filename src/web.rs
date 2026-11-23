@@ -464,6 +464,7 @@ impl Client {
                 Input::Rejected(rejection) => (rejection.response(), false),
                 Input::Ready(
                     route @ (Route::Action
+                    | Route::MenuIndicator
                     | Route::Close
                     | Route::TelegramChats
                     | Route::HostedConnect
@@ -494,9 +495,12 @@ fn respond_read(route: Route, snapshot: &Arc<String>) -> Response {
     match route {
         Route::Static(asset) => asset.response(),
         Route::State => Response::json(Arc::clone(snapshot)),
-        Route::Action | Route::Close | Route::TelegramChats | Route::HostedConnect | Route::Transfer => {
-            unreachable!("route runs on the editor worker")
-        }
+        Route::Action
+        | Route::MenuIndicator
+        | Route::Close
+        | Route::TelegramChats
+        | Route::HostedConnect
+        | Route::Transfer => unreachable!("route runs on the editor worker"),
     }
 }
 
@@ -514,6 +518,12 @@ struct Completion {
 impl EditorJob {
     fn apply(self, editor: &mut Editor, hosted: &mut Vec<HostedReceipt>) -> Completion {
         let body = self.request.body();
+        if self.route == Route::MenuIndicator {
+            // The committed draft snapshot can be served while the worker is busy.
+            // Only this explicit menu read needs to observe another client's save.
+            let response = Response::json(Arc::new(editor.menu_indicator().to_string()));
+            return Completion { response, snapshot: None, close: false };
+        }
         if self.route == Route::Close {
             let (response, close) = respond_close(body, editor);
             return Completion { response, snapshot: None, close };

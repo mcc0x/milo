@@ -1,13 +1,40 @@
 "use client";
 
+import { useEffect } from "react";
+import { SettingRow } from "./controls";
 import { useSession } from "./session";
+import type { MenuIndicator } from "./session-state";
+
+const indicators: readonly (readonly [MenuIndicator, string])[] = [
+  ["quota", "Agent quota"],
+  ["cpu", "CPU"],
+  ["memory", "Memory"],
+];
 
 export default function MenuBar() {
-  const { state, queue, connected, paused, running, closing, command, confirm } = useSession();
-  const installed = state.menubar.installed;
+  const { state, queue, connected, paused, running, closing, command, confirm, refreshMenuIndicator } = useSession();
+  useEffect(() => {
+    let controller: AbortController | undefined;
+    const refresh = () => {
+      controller?.abort();
+      controller = new AbortController();
+      void refreshMenuIndicator(controller.signal);
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => { controller?.abort(); window.removeEventListener("focus", refresh); };
+  }, [refreshMenuIndicator]);
+  const { installed, indicator: savedIndicator } = state.menubar;
   const operation = queue.find(item => item.action === "menubar");
-  const pending = !operation ? "" : operation.value === "uninstall" ? "Removing menu app…" :
-    installed ? "Opening or updating menu app…" : "Installing menu app…";
+  const changingIndicator = operation?.field === "indicator";
+  const indicator = savedIndicator !== null && changingIndicator ? operation.value : savedIndicator;
+  const indicatorDetail = savedIndicator === null
+    ? "Couldn’t read the saved indicator. The app uses Agent quota until you save a choice."
+    : installed ? "Applies on the app’s next refresh. Choose Open Milo to update an older app."
+      : "Saved for this Milo profile. Takes effect when you install the menu app.";
+  const pending = !operation ? "" : changingIndicator ? "Saving menu bar indicator…" :
+    operation.value === "uninstall" ? "Removing menu app…" :
+      installed ? "Opening or updating menu app…" : "Installing menu app…";
   const unavailable = !connected || paused || closing || (running && !queue.length) ||
     queue.some(item => item.action !== "set");
   if (installed === null) return null;
@@ -46,6 +73,20 @@ export default function MenuBar() {
         </div>
         {installed && primaryAction}
       </div>
+      <SettingRow label="Menu bar indicator" detail={indicatorDetail} detailId="menubar-indicator-detail">
+        <fieldset className="choice-strip" aria-describedby="menubar-indicator-detail" aria-disabled={unavailable || undefined}>
+          <legend className="sr-only">Menu bar indicator</legend>
+          {indicators.map(([key, label]) => (
+            <label key={key}>
+              <input type="radio" name="menubar-indicator" id={`menubar-indicator-${key}`} checked={indicator === key}
+                aria-disabled={unavailable || undefined}
+                onClick={event => { if (unavailable) event.preventDefault(); }}
+                onChange={() => { if (!unavailable) command("menubar", { field: "indicator", value: key }); }} />
+              <span>{label}</span>
+            </label>
+          ))}
+        </fieldset>
+      </SettingRow>
       <p className="setting-detail" id="menubar-status" role="status">{pending}</p>
     </section>
   );

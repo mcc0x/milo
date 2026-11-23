@@ -6,6 +6,7 @@ use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::menubar::Indicator;
 use crate::pane::Pane as _;
 use crate::preferences::{Preferences, UsageAccounts};
 use crate::{paths, term, when};
@@ -17,11 +18,26 @@ use super::{
 
 const INTERVAL: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Refresh {
+    Start,
+    Scheduled,
+    Manual { indicator_ack: bool },
+    Indicator,
+}
+
+impl Refresh {
+    pub(super) fn acknowledges_indicator(self) -> bool {
+        matches!(self, Self::Indicator | Self::Manual { indicator_ack: true })
+    }
+}
+
 pub fn menu_stream() -> io::Result<()> {
     let home = paths::home();
     let home = home.as_deref();
     let config = paths::config_dir();
     let config = config.as_deref();
+    let indicator_file = config.map(Indicator::file);
     let (tools, chosen) = global_choices(config).unwrap_or_default();
     let mut usage = Usage::for_home(home, when::now(), tools).with_databases(
         omp::database(home),
@@ -29,14 +45,22 @@ pub fn menu_stream() -> io::Result<()> {
         sqlite::QUERY_WAIT,
     );
     usage.accounts = accounts::Accounts::open(chosen);
+    // Every frame uses quota if the saved choice cannot be read, never a stale resource mode.
+    let load_indicator = || indicator_file.as_deref().and_then(|file| Indicator::load(file).ok()).unwrap_or_default();
     snapshots(io::stdin(), io::stdout().lock(), |line, request| {
-        if request.is_some()
+        let indicator_ack = request.acknowledges_indicator();
+        if request == Refresh::Indicator {
+            // A display choice must not force provider lookups or postpone their next refresh.
+            usage.menu_snapshot(line, load_indicator(), indicator_ack);
+            return Ok(None);
+        }
+        if request != Refresh::Start
             && let Some((tools, chosen)) = global_choices(config)
         {
             usage.apply_menu_tools(home, tools);
             usage.accounts.choose(chosen, accounts::Sources::installed);
         }
-        let settled = usage.refresh(usage.now(), Instant::now(), request.unwrap_or(false));
+        let settled = usage.refresh(usage.now(), Instant::now(), matches!(request, Refresh::Manual { .. }));
         // The pane repaints when its SQLite jobs finish. Here a complete refresh
         // is one line, so collect both bounded reads before publishing it.
         while let Some(fd) = usage.database_fd() {
@@ -52,8 +76,8 @@ pub fn menu_stream() -> io::Result<()> {
         let waiting = !settled || usage.accounts.pending();
         let interval = if waiting { Duration::from_secs(1) } else { INTERVAL };
         let wait = interval.min(usage.next_frame().unwrap_or(interval));
-        usage.menu_snapshot(line);
-        Ok(wait)
+        usage.menu_snapshot(line, load_indicator(), indicator_ack);
+        Ok(Some(wait))
     })
 }
 
@@ -92,13 +116,17 @@ impl Usage {
         }
     }
 
-    pub(super) fn menu_snapshot(&mut self, output: &mut String) {
+    pub(super) fn menu_snapshot(&mut self, output: &mut String, indicator: Indicator, indicator_ack: bool) {
         let now = self.now();
         let today = self.today.since(now);
         let codex = self.codex.reported(now);
         let claude = self.claude.reported(now);
         let presence = [self.codex.presence(codex), self.claude.presence(claude), self.opencode.presence(today)];
-        output.push_str(r#"{"version":1,"providers":["#);
+        write!(output, r#"{{"version":1,"indicator":"{}","#, indicator.value()).unwrap();
+        if indicator_ack {
+            output.push_str(r#""indicatorAck":true,"#);
+        }
+        output.push_str(r#""providers":["#);
         let mut separator = "";
         for (tool, presence) in UsageTool::ALL.into_iter().zip(presence) {
             if !presence.placed(self.tools[tool]) {
@@ -207,26 +235,29 @@ fn limit_windows(
 pub(super) fn snapshots(
     input: impl AsFd,
     mut output: impl Write + AsFd,
-    mut refresh: impl FnMut(&mut String, Option<bool>) -> io::Result<Duration>,
+    mut refresh: impl FnMut(&mut String, Refresh) -> io::Result<Option<Duration>>,
 ) -> io::Result<()> {
     let mut line = String::with_capacity(1024);
-    let mut request = None;
+    let mut request = Refresh::Start;
+    let mut deadline = Instant::now();
     loop {
         line.clear();
-        let interval = refresh(&mut line, request)?;
+        if let Some(interval) = refresh(&mut line, request)? {
+            deadline = Instant::now() + interval;
+        }
         match output.write_all(line.as_bytes()).and_then(|()| output.flush()) {
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
             result => result?,
         }
-        match next_refresh(input.as_fd().as_raw_fd(), output.as_fd().as_raw_fd(), Instant::now() + interval)? {
-            Some(manual) => request = Some(manual),
+        match next_refresh(input.as_fd().as_raw_fd(), output.as_fd().as_raw_fd(), deadline)? {
+            Some(next) => request = next,
             None => return Ok(()),
         }
     }
 }
 
-/// Idle until the cadence or a newline; multiple pending requests can share one refresh.
-fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Option<bool>> {
+/// A newline refreshes usage; NUL only rereads the display choice. Coalesce queued requests.
+fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Option<Refresh>> {
     let mut fds = [
         libc::pollfd { fd: input, events: libc::POLLIN, revents: 0 },
         // Darwin requires POLLHUP in the mask to report a closed pipe reader.
@@ -235,7 +266,7 @@ fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Op
     let mut buffer = [0u8; 256];
     loop {
         if ready(&mut fds, Some(deadline))? == 0 {
-            return Ok(Some(false));
+            return Ok(Some(Refresh::Scheduled));
         }
         if fds[1].revents != 0 {
             return Ok(None);
@@ -250,11 +281,19 @@ fn next_refresh(input: RawFd, output: RawFd, deadline: Instant) -> io::Result<Op
                 }
             }
             0 => return Ok(None),
-            n if buffer[..usize::try_from(n).unwrap()].contains(&b'\n') => return Ok(Some(true)),
-            _ => {}
+            n => {
+                let bytes = &buffer[..usize::try_from(n).unwrap()];
+                let indicator_ack = bytes.contains(&0);
+                if bytes.contains(&b'\n') {
+                    return Ok(Some(Refresh::Manual { indicator_ack }));
+                }
+                if indicator_ack {
+                    return Ok(Some(Refresh::Indicator));
+                }
+            }
         }
         if Instant::now() >= deadline {
-            return Ok(Some(false));
+            return Ok(Some(Refresh::Scheduled));
         }
     }
 }

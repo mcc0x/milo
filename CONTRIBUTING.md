@@ -69,7 +69,7 @@ On pushes and pull requests, website-, docs-, relay- and Railway-only changes sk
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -372,7 +372,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
 | `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
-| `src/menubar.rs` | Installs or removes the optional macOS menu app from the archive built into a menu-enabled binary. |
+| `src/menubar.rs` | Stores the profile-wide menu indicator and manages the optional macOS app in menu-enabled builds. |
 | `src/menubar.sh` | Verifies, installs, upgrades and removes that app for `menubar.rs`. It is embedded, never downloaded. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
@@ -501,11 +501,12 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
 | `tests/menu-badge.swift` | Checks which provider and window the menu bar badge shows. |
+| `tests/menu-resources.swift` | Checks system CPU deltas, discontinuities and physical RAM accounting with synthetic counters. |
 | `tests/menu-bench.sh` | Builds a throwaway copy of the menu app and times frames and opening the popover in it. |
 | `tests/menu-bench.swift` | Feeds that copy made-up frames and reports the times. |
 | `tests/menu-bench/baseline-d7be344.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/menu-handoff.swift` | Checks that the menu app hands the browser its private link through an owner-only file. |
-| `tests/menubar.sh` | Verifies the built menu app's signature, runs those three checks, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
+| `tests/menubar.sh` | Verifies the built menu app’s signature, exercises its Swift fixtures, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
 | `tests/open_bench.rs` | Times the first frame of the outline, history and reader on an ordinary and a large project, the outline's search, and History's keys during a refresh. |
 | `tests/open_bench/baseline-7d2a6f4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |

@@ -40,11 +40,11 @@ Run `milo` inside Rex to choose your panes and save your workspace preferences.
 
 ## Workspace settings
 
-Choose a tree or a project sidebar, try it in this tab, then save it globally or just for this Git worktree. Drag a divider in an installed Milo sidebar and Milo remembers the proportions for that worktree. With **Arrange new shell tabs** enabled, the next shell tab restores them; command tabs and existing layouts are left alone. With **Title Rex tabs** enabled, tabs you have not named show their project, worktree and agent.
+Run `milo web` in your project to open the [settings dashboard](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor). It’s built into the CLI and uses the same settings as `milo setup`. No account, Node.js, or separate install is needed.
 
-Prefer a browser? Run `milo web` in your project. It opens the [local settings editor](https://github.com/mcc0x/milo/blob/main/docs/setup.md#browser-editor) built into the CLI. It shares settings with `milo setup`; no account or separate install is needed. With several Rex hosts, open another host’s editor with `milo web --host HOST` or [copy selected settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#several-rex-hosts) without copying credentials or integrations.
+Choose a pane layout for one worktree or set a global default. Under **Integrations**, you can have Rex arrange new shell tabs, forward alerts to Discord or Telegram, or show Discord presence. To configure [another Rex host](https://github.com/mcc0x/milo/blob/main/docs/setup.md#several-rex-hosts), run `milo web --host HOST`.
 
-<p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-settings.webp" width="760" alt="Milo’s browser editor with Outline, History and Usage in order, a left rail at 20% width, and a two-row Usage pane"></p>
+<p align="center"><img src="https://github.com/mcc0x/milo/blob/main/docs/img/web-settings.webp" width="760" alt="Milo settings for the tidebook worktree. The Integrations page shows Rex automation, Discord presence and alert forwarding, all off."></p>
 
 ## Outline
 
@@ -92,6 +92,8 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](https://github.com/mcc0x/milo/blob/main/docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](https://github.com/mcc0x/milo/blob/main/docs/panes.md#editing-files).
 
+To review an agent’s edits without mixing in your own uncommitted work, have it pass its recorded patch to `milo review PATCH --float`. Milo opens a [read-only review](https://github.com/mcc0x/milo/blob/main/docs/panes.md#reviewing-an-agents-edits) in Rex. It checks that the patch still fits, not who wrote it.
+
 ## Commands
 
 | Command | Opens |
@@ -108,6 +110,7 @@ Press `e` to edit a working text file where you are reading it. The edit is a dr
 | `milo web --host HOST` | [Another Rex host’s settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
 | `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](https://github.com/mcc0x/milo/blob/main/docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
 | `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
+| `milo menubar indicator quota\|cpu\|memory` | Choose the menu bar reading for this profile without installing or opening the app |
 | `milo doctor` | Read-only preference and integration report |
 | `milo alerts` | [Mirror Rex alerts](https://github.com/mcc0x/milo/blob/main/docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
 | `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md) |
@@ -741,11 +744,44 @@ How a formatter is run:
 
 The pane shows `Formatting with NAME…` and does not redraw until the formatter is done.
 
-## Reading pictures
+## Reading pictures, video and Markdown
 
-The working-file reader can show PNG, JPEG, GIF, WebP, HEIC and HEIF, TIFF, BMP, ICO and ICNS, SVG, PSD and the first page of a PDF, where conversion is supported. It fits the picture without changing its proportions. On macOS, `/usr/bin/sips` converts other formats and resizes large PNGs; other systems show only PNGs that do not need conversion. Ordinary text still shows as text if a file has a picture extension. At a commit, the reader shows the stored file as text or a note, not as a picture.
+Open a working file from Outline with `Enter` or a double-click. The preview is the file's Reader tab, not a browser, dev server or external player. `milo view FILE` uses the same path. History, `--commit` and handed-over patches still show the source/diff or a binary-file note; they never substitute today's file for the requested revision.
 
-Pictures need a terminal that supports the kitty graphics protocol, such as Rex. Milo asks the terminal whether it can draw pictures and shows a message if it cannot.
+| Working file | macOS | Linux |
+| --- | --- | --- |
+| PNG | Kitty bitmap where available; colored terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
+| JPEG, static WebP | Same as PNG, using the system image decoder | No conversion |
+| MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` |
+| `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same |
+
+**Pictures.** The image keeps its proportions and fits between the filename and the key hints. Input is limited to 64 MiB. The macOS decoder checks the format and dimensions, caps source images at 40 million pixels and 16,384 pixels per side, and has a five-second deadline. The Kitty bitmap is at most 1,600 pixels per side and 16 MiB; the cell raster is at most 512 pixels per side. Text named like a picture can still be read as text. Active documents such as SVG and PDF aren't rasterized.
+
+Single-image GIF, BMP without linked profiles, and single-page TIFF without nested image directories are also recognized on macOS. Animated GIF/WebP, multi-page TIFF, HEIC/HEIF, PSD, ICO/ICNS, SVG and PDF aren't passed to a general-purpose converter.
+
+**Video.** Opens paused. `Space` plays or pauses; `←` / `→` seek five seconds in either direction. Leaving the tab or opening help pauses playback. The Reader never opens an audio device. It streams scaled frames (up to 320 × 240 at 12 fps) as colored terminal cells. Only standalone MP4 with a local H.264, HEVC or MPEG-4 Part 2 video track is accepted, up to 128 MiB and one hour. The track header must fit 8,192 pixels per side; decoding is limited to 9.5 million pixels per frame. External tracks aren't followed. Milo looks for an already-installed decoder, never installs one, and gives a reason when it can't play a file.
+
+Leaving an image or movie tab releases its prepared pixels and private movie snapshot. Returning loads the selected working file again. An unchanged movie remembers its paused position; a replaced movie starts from the beginning.
+
+Media file reads run in the background. A canceled read still waiting on the filesystem keeps one of two slots until it returns; the Reader can still switch tabs or close. On macOS, a cloud placeholder must already be downloaded to open as media. Closing the Reader doesn't wait for cloud storage or start a download.
+
+Limits on bytes, pixels and output apply before or during decoding. The macOS helper watchdog also stops a decoder observed above 384 MiB resident memory; this is sampled, not a hard ceiling on instantaneous process memory.
+
+**Markdown.** Headings, paragraphs, lists, quotes, emphasis and code render in the pane's own text styles. Links show text; embedded images show their labels, not fetched pixels. No HTML, scripts, URLs or file references are executed or loaded. `m` switches back and forth without losing the source diff. `e` opens the ordinary source editor; only an explicit save writes. Large previews stop at a labeled limit (512 KiB of text, 20,000 source lines or 32,000 wrapped rows); the source Reader keeps its own limits.
+
+### Representative open times
+
+Median of five release-build starts on an Apple M5 Pro, macOS 27.2.1, FFmpeg 9.0.2. Measured from spawning Milo to the first complete content frame on a 160 × 50 cell terminal. RSS is Milo's resident memory at that frame, not peak memory or the decoder's RSS. Release builds, terminal sizes and decoder builds affect these numbers.
+
+| Fixture | Input bytes | First frame (ms) | Milo RSS (KiB) |
+| --- | ---: | ---: | ---: |
+| 1920 × 1080 PNG | 215,387 | 142.0 | 9,056 |
+| 1920 × 1080 JPEG | 75,347 | 143.7 | 9,056 |
+| 1920 × 1080 WebP | 46,604 | 140.3 | 8,992 |
+| 1920 × 1080 H.264 MP4, 8 seconds | 5,557,338 | 141.2 | 7,920 |
+| Markdown, 2,048 list items | 114,703 | 24.1 | 8,976 |
+
+Reproduce with `python3 tests/rich_reader_bench.py target/release/milo`. Fixture generation uses local `ffmpeg` and `cwebp`; the reader doesn't need `cwebp`.
 
 ---
 
@@ -807,6 +843,9 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | --- | --- |
 | `b` / `Space` | Scroll a page up or down |
 | Left / Right or `h` / `l` | Scroll sideways |
+| `m` in a working Markdown file | Switch between rendered text and the source/diff |
+| `Space` in a video | Play or pause (always muted) |
+| Left / Right or `h` / `l` in a video | Seek back or forward five seconds |
 | `n` / `N` | Next or previous block of added or removed lines |
 | `c` | Switch between the full diff and changes with nearby context |
 | `Tab`, then `Enter` | Select and expand a folded stretch of unchanged lines; clicking the fold expands it too |
@@ -916,6 +955,13 @@ If the CLI that installed the app has changed or moved, **Browser settings…** 
 Click the menu bar item to see the same local usage windows as the pane. The menu uses **global** provider visibility, not the preferences of whichever worktree happens to be focused. Automatic display picks the lowest fresh remaining percentage; when none is fresh it shows just Milo. Options lets you pin a provider, show only the mascot, or opt into launch at login. Quitting the app also stops its reader.
 
 Hover over the percentage to see which provider and limit it represents, how much is left, and when it resets if known. Open the menu to see that same window first. Icon-only mode keeps the usual provider order.
+
+In **More options → Menu bar indicator**, choose **CPU** or **Memory** to put a system reading beside Milo instead. The same choice is in **Workflow → Menu bar indicator** in `milo setup` and the browser editor’s **Menu Bar** tab. From a shell, use `milo menubar indicator` followed by `quota`, `cpu`, or `memory`. The choice is saved for this Milo profile, not per project, and doesn’t install the app. In either system mode, click Milo to see both readings under **This Mac**, above your agent limits. Switch back to **Agent quota** (the default) to restore your previous quota display and stop system sampling.
+
+- **CPU** is the percentage of time all logical cores together were busy over the last sample interval. All cores busy is 100%, not 100% per core. The first reading, including after wake, is a dash until Milo has two usable samples.
+- **Memory** is physical RAM used, not memory pressure. The popover shows used / installed GiB. Using the names from `vm_stat`, used pages are **anonymous − purgeable + wired down + occupied by compressor**. This counts the compressor’s actual RAM once, excludes file cache and swap, and need not match Activity Monitor’s “Memory Used” exactly.
+
+The running app reads macOS counters about every five seconds in system modes. Readings stay in memory: no history, network requests, permissions or extra service. A stalled sample or counter reset doesn’t turn into a zero or a spike.
 
 Low-quota notifications are **off by default**. In **More options → Low-quota alerts**, choose 10%, 20%, or 30% remaining and allow notifications when macOS asks. Milo alerts only when a visible provider’s fresh reading moves from above your threshold to at or below it, at most once for that provider and reset time. Starting below the threshold is silent. Stale, elapsed, hidden, and unknown-reset readings do not trigger alerts. Choose **Off** to stop them.
 
@@ -1391,7 +1437,7 @@ On pushes and pull requests, website-, docs-, relay- and Railway-only changes sk
 
 **It keeps untrusted repositories safe.** Keep the user's Git settings, but disable hooks, filters, external diffs, text converters, file-system monitors and on-demand fetching. Do not follow a folder link out of the project to show a file or let names and messages send terminal controls.
 
-**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
+**It keeps subprocesses in one place per tool.** Start Git through `src/git/run.rs`, `/usr/bin/sips` through `src/picture/sips.rs`, FFmpeg and FFprobe through `src/reader/video/decode.rs`, `/usr/bin/sqlite3` through `src/usage/sqlite.rs`, `/usr/bin/curl` through `src/usage/http.rs` or `src/alerts/send.rs`, `/usr/bin/security` through `src/alerts/secret.rs`, Rex through `src/rex.rs`, and formatters through `src/format.rs`. Use their existing safeguards. Never run a command named by project files or Git settings.
 
 **It writes to a project only when the user saves.** Every git command milo runs only reads. The one thing that changes a project is `Ctrl-S` in the reader's editor, and it goes through `src/reader/disk.rs`: the file is opened without following a link, read again, and written only if it is still what the edit started from or the user says to overwrite it. Do not add a second way to write, and do not let anything else (a formatter, a cache, a temporary file) write into the project. What milo keeps for itself, such as a draft from a reader that was ended, goes in its state folder.
 
@@ -1694,7 +1740,7 @@ By contributing you agree that your work is released under the MIT licence that 
 | `src/json.rs` | Validates JSON and lets callers read fields without copying values. |
 | `src/keys.rs` | Decodes keys, mouse events, pasted text, and terminal replies. |
 | `src/main.rs` | Parses and dispatches commands and supplies CLI help. |
-| `src/menubar.rs` | Installs or removes the optional macOS menu app from the archive built into a menu-enabled binary. |
+| `src/menubar.rs` | Stores the profile-wide menu indicator and manages the optional macOS app in menu-enabled builds. |
 | `src/menubar.sh` | Verifies, installs, upgrades and removes that app for `menubar.rs`. It is embedded, never downloaded. |
 | `src/outline.rs` | Updates the file tree, pending changes, and recent marks. |
 | `src/outline/attention.rs` | Uses focus and recent activity to follow writes and fade marks. |
@@ -1823,11 +1869,12 @@ By contributing you agree that your work is released under the MIT licence that 
 | `tests/listener.rs` | Runs listener locking and stopping with real processes and a Rex stand-in. |
 | `tests/menu-alerts.swift` | Checks when the menu app raises a low-quota notification, with a stand-in for the system. |
 | `tests/menu-badge.swift` | Checks which provider and window the menu bar badge shows. |
+| `tests/menu-resources.swift` | Checks system CPU deltas, discontinuities and physical RAM accounting with synthetic counters. |
 | `tests/menu-bench.sh` | Builds a throwaway copy of the menu app and times frames and opening the popover in it. |
 | `tests/menu-bench.swift` | Feeds that copy made-up frames and reports the times. |
 | `tests/menu-bench/baseline-d7be344.tsv` | Records those times for one revision on the machine named in its header. |
 | `tests/menu-handoff.swift` | Checks that the menu app hands the browser its private link through an owner-only file. |
-| `tests/menubar.sh` | Verifies the built menu app's signature, runs those three checks, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
+| `tests/menubar.sh` | Verifies the built menu app’s signature, exercises its Swift fixtures, then installs, upgrades and removes stand-in apps in a throwaway home without Launch Services. |
 | `tests/open_bench.rs` | Times the first frame of the outline, history and reader on an ordinary and a large project, the outline's search, and History's keys during a refresh. |
 | `tests/open_bench/baseline-7d2a6f4.tsv` | Records those times beside that revision's, on the machine named in its header. |
 | `tests/pane.rs` | Checks pane startup, input, editing, and cleanup through a real terminal. |

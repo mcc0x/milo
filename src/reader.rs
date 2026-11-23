@@ -10,10 +10,14 @@ mod edit;
 mod edit_tests;
 mod inbox;
 mod handed;
+mod markdown;
+mod media;
+mod media_load;
 mod rescue;
 mod tabs;
 #[cfg(test)]
 mod tests;
+mod video;
 mod working_path;
 
 use std::path::{Path, PathBuf};
@@ -53,6 +57,8 @@ pub struct Reader {
     /// What happened to the working file.
     kind: Kind,
     body: Body,
+    /// The source/diff and rendered document keep independent scroll positions in this tab.
+    markdown_source: bool,
     /// Scratch space reused when colouring code.
     spans: Vec<Span>,
     /// Reveal the first change once the viewport has room for the file.
@@ -74,6 +80,8 @@ pub struct Reader {
     read_only: Option<ReadOnly>,
     /// The draft, while the file is being edited.
     editor: Option<Box<Editor>>,
+    /// The draft's top line, while the freshly inspected source is still loading.
+    pending_editor_line: Option<usize>,
     /// Milo's state folder, where a draft is kept if the reader is closed from outside.
     state: Option<PathBuf>,
     /// The folders searched for a formatter, as `PATH` lists them.
@@ -128,6 +136,9 @@ struct WorkingFile {
     attributes: content::Attributes,
     notified: bool,
     stamp: Option<content::WorkingStamp>,
+    media: Option<media_load::State>,
+    media_check: Option<content::MediaCheck>,
+    media_recheck: bool,
 }
 
 /// A file selected in a pane that can open the reader.
@@ -216,13 +227,14 @@ enum Body {
     Text(Text),
     Note(&'static str),
     Picture(Picture),
+    Video(Box<video::Video>),
 }
 
 impl Body {
     fn lines(&self) -> &[Line] {
         match self {
             Self::Text(text) => &text.lines,
-            Self::Note(_) | Self::Picture(_) => &[],
+            Self::Note(_) | Self::Picture(_) | Self::Video(_) => &[],
         }
     }
 
@@ -236,6 +248,7 @@ impl Body {
 
 struct Text {
     lines: Vec<Line>,
+    preview: Option<Box<markdown::Preview>>,
     lang: Option<&'static Lang>,
     /// Start lines at which the open syntax differs from the preceding line.
     starts: Vec<(usize, State)>,
@@ -286,7 +299,7 @@ impl Text {
         if let Some(end) = end_of_change.filter(|_| previous == LineKind::Same) {
             folds.push(end + LEAD, lines.len());
         }
-        Self { lines, lang, starts, changes, folds, digits: last.ilog10() as usize + 1, added, removed }
+        Self { lines, preview: None, lang, starts, changes, folds, digits: last.ilog10() as usize + 1, added, removed }
     }
 }
 
@@ -295,6 +308,16 @@ fn short_commit_id(hash: &str) -> &str {
 }
 
 impl Reader {
+    fn markdown(&self) -> Option<&markdown::Preview> {
+        if let Body::Text(text) = &self.body { text.preview.as_deref() } else { None }
+    }
+
+    fn pause_video(&mut self) {
+        if let Body::Video(video) = &mut self.body {
+            video.pause();
+        }
+    }
+
     /// Whether the file is being edited and the draft is not what was last saved.
     fn unsaved(&self) -> bool {
         self.editor.as_ref().is_some_and(|editor| editor.dirty())
@@ -325,6 +348,7 @@ impl Reader {
             preference_note,
             kind: Kind::None,
             body: Body::Note("Git did not answer."),
+            markdown_source: false,
             spans: Vec::new(),
             opening: true,
             top: 0,
@@ -337,6 +361,7 @@ impl Reader {
             pan_limit: 0,
             read_only: None,
             editor: None,
+            pending_editor_line: None,
             state: rescue::state_dir(),
             tools: std::env::var_os("PATH"),
         }
@@ -445,6 +470,31 @@ impl Pane for Reader {
         if let Some(editor) = &self.editor {
             return editor.help();
         }
+        if let Body::Video(video) = &self.body {
+            if video.error().is_some() {
+                return Page::new(vec![heading("Video unavailable"), key("q Esc", "close")]);
+            }
+            return media::help();
+        }
+        if self.markdown().is_some() && !self.markdown_source {
+            let mut rows = vec![
+                heading("Rendered Markdown"),
+                key("m    ", "source / diff"),
+                key("↑↓   ", "scroll (k j)"),
+                key("Space", "page down"),
+                key("b    ", "page up"),
+                key("g G  ", "top/bottom"),
+            ];
+            if let Some(ReadOnly(why)) = self.read_only {
+                rows.extend([note("Read-only:"), note(why)]);
+            } else {
+                rows.push(key("e    ", "edit source"));
+                let name = self.path.rsplit('/').next().unwrap_or_default();
+                rows.extend(edit::format_help(name, self.tools.as_deref()));
+            }
+            rows.extend([key("q Esc", "close"), note("Links are not opened.")]);
+            return Page::new(rows);
+        }
         let mut rows = vec![
             heading("Lines"),
             sample("+", ADD.bold(), "added"),
@@ -458,6 +508,9 @@ impl Pane for Reader {
             key("n N  ", "next/prev change"),
             key("←→   ", "scroll (h l)"),
         ];
+        if self.markdown().is_some() {
+            rows.push(key("m    ", "render Markdown"));
+        }
         if self.can_fold() {
             rows.extend([
                 key("c    ", "changes only/full"),
@@ -496,6 +549,10 @@ impl Pane for Reader {
             }
         }
         Page::new(rows)
+    }
+
+    fn cover(&mut self) {
+        self.pause_video();
     }
 
     fn editing(&self) -> bool {
@@ -540,7 +597,11 @@ impl Pane for Reader {
 
     fn git_busy(&self) -> bool {
         let Source::Working(work) = &self.source else { return false };
-        self.editor.is_none() && work.repo.busy() && work.root.at_path(&work.repo.root) == Ok(true)
+        // A pending or ready preview does not wait for the index; its status can.
+        self.editor.is_none()
+            && matches!(work.media, None | Some(media_load::State::Text { .. }))
+            && work.repo.busy()
+            && work.root.at_path(&work.repo.root) == Ok(true)
     }
 
     fn filesystem_changed(&mut self) {
@@ -571,7 +632,13 @@ impl Pane for Reader {
         let now = Instant::now();
         match &self.editor {
             Some(editor) => editor.next_frame(now),
-            None => self.change_notice.map(|(_, until)| until.saturating_duration_since(now)),
+            None => {
+                let message = self.change_notice.map(|(_, until)| until.saturating_duration_since(now));
+                let loading = matches!(&self.source, Source::Working(work)
+                    if matches!(&work.media, Some(media_load::State::Loading(_))) || work.media_check.is_some());
+                let playing = matches!(&self.body, Body::Video(video) if video.needs_tick());
+                (loading || playing).then_some(Duration::from_millis(30)).into_iter().chain(message).min()
+            }
         }
     }
 
@@ -590,11 +657,33 @@ impl Reader {
             let step = editor.key(key, now);
             return self.apply(step, now);
         }
+        if let Body::Video(video) = &mut self.body
+            && let Some(after) = media::input(video, key)
+        {
+            return after;
+        }
         let key = match key {
             Key::Char(' ') => Key::PgDn,
             Key::Char('b') => Key::PgUp,
             _ => key,
         };
+        if let Body::Text(text) = &mut self.body
+            && let Some(preview) = text.preview.as_deref_mut()
+        {
+            if key == Key::Char('m') {
+                self.markdown_source = !self.markdown_source;
+                self.change_notice = None;
+                return After::Stay;
+            }
+            if !self.markdown_source {
+                if let Some(delta) = key.rows(self.rows) {
+                    return if preview.scroll(delta) { After::Stay } else { After::Ignored };
+                }
+                if !matches!(key, Key::Char('e' | 'q') | Key::Esc) {
+                    return After::Ignored;
+                }
+            }
+        }
         let before = (self.top, self.pan);
         match key {
             Key::Char('q') | Key::Esc => return After::Leave,
@@ -660,6 +749,7 @@ impl Reader {
         match &self.body {
             Body::Note(note) if *note == content::NOT_TEXT => return Some(ReadOnly::NOT_TEXT),
             Body::Picture(_) => return Some(ReadOnly::PICTURE),
+            Body::Video(_) => return Some(ReadOnly::NOT_TEXT),
             _ => {}
         }
         let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
@@ -684,6 +774,9 @@ impl Reader {
 
     /// The file line at the top of the view, counted from zero and skipping removed lines.
     fn top_line(&self) -> usize {
+        if !self.markdown_source && let Some(preview) = self.markdown() {
+            return preview.source_line();
+        }
         self.line_number_at(self.source_top())
     }
 
@@ -712,7 +805,7 @@ impl Reader {
 
     /// Writes the draft over the file it was read from, if that file is still where it was.
     fn save(&mut self, close: bool, overwrite: bool, now: Instant) {
-        let (Source::Working(work), Some(editor)) = (&self.source, &mut self.editor) else { return };
+        let (Source::Working(work), Some(editor)) = (&mut self.source, &mut self.editor) else { return };
         let saved = {
             let (entry, stamp) = content::WorkingStamp::at(&work.repo, &work.root, &work.relative);
             match stamp.reachable() {
@@ -723,6 +816,8 @@ impl Reader {
         match saved {
             Ok(()) => {
                 editor.saved(now);
+                // Even a save indistinguishable by its stamp needs a fresh source.
+                work.stamp = None;
                 if close {
                     self.close_editor(Some("Saved"));
                 }
@@ -732,22 +827,38 @@ impl Reader {
         }
     }
 
-    /// Goes back to reading at the line the draft was showing, with a fresh diff.
+    /// Goes back to reading at the line the draft was showing.
     fn close_editor(&mut self, said: Option<&'static str>) {
         let Some(editor) = self.editor.take() else { return };
         let line = editor.top();
         drop(editor);
-        // A save into the same file can leave it looking, to the reader's
-        // cheap check, like the file it had already read.
-        if let Source::Working(work) = &mut self.source {
-            work.stamp = None;
-            work.notified = false;
+        self.pending_editor_line = None;
+        let force = match &mut self.source {
+            Source::Working(work) => std::mem::take(&mut work.notified),
+            _ => false,
+        };
+        self.refresh(force);
+        if self.markdown_source || self.markdown().is_none() {
+            self.opening = false;
         }
-        self.refresh(true);
-        self.opening = false;
-        self.clear_change();
-        self.pan = 0;
-        self.set_source_top(self.source_row(line));
+        if matches!(self.body, Body::Note(media_load::PENDING)) {
+            self.pending_editor_line = Some(line);
+        } else if line != self.top_line() {
+            self.show_editor_line(line);
+        }
         self.change_notice = said.map(|text| (JumpNotice::Said { lead: "", text }, Instant::now() + CHANGE_NOTICE));
+    }
+
+    fn show_editor_line(&mut self, line: usize) {
+        if !self.markdown_source
+            && let Body::Text(text) = &mut self.body
+            && let Some(preview) = &mut text.preview
+        {
+            preview.go_to_line(line);
+        } else {
+            self.opening = false;
+            self.pan = 0;
+            self.set_source_top(self.source_row(line));
+        }
     }
 }

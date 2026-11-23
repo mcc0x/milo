@@ -10,6 +10,7 @@ private extension AppDelegate {
     // A popover that closes at a click or another app's activation would end a row or a check early.
     func showPopover() { popover.animates = false; popover.behavior = .applicationDefined; show() }
     func closePopover() { popover.close() }
+    var statusTitle: String? { status.button?.title }
 }
 
 @MainActor
@@ -164,6 +165,152 @@ private enum MenuBench {
         return before != nil && after != nil && before != after
     }
 
+    static func checkIndicators(_ delegate: AppDelegate) {
+        var saved = frame()
+        delegate.model.mode = "codex"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle == " 41%")
+        saved.indicator = "cpu"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle == " CPU —", "First sample cannot be a percentage")
+        precondition(delegate.model.badge == nil, "A quota row must not claim the system badge")
+        saved.indicator = "memory"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle?.hasPrefix(" MEM ") == true)
+        delegate.model.setSleeping(true)
+        precondition(delegate.model.monitor.reading == SystemReading())
+        delegate.model.setSleeping(false)
+        precondition(delegate.model.monitor.reading.cpuPercent == nil)
+        saved.indicator = "quota"
+        delegate.model.receive(saved)
+        precondition(delegate.statusTitle == " 41%" && delegate.model.monitor.reading == SystemReading())
+        delegate.model.mode = "auto"
+    }
+
+    static func checkInstallProfile() throws {
+        let files = FileManager.default
+        let home = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let apps = home.appendingPathComponent("Applications", isDirectory: true)
+        let expected = apps.appendingPathComponent("Milo.app", isDirectory: true)
+        let profileFile = apps.appendingPathComponent(".milo-menu-profile.plist")
+        let standalone = home.appendingPathComponent("Milo.app", isDirectory: true)
+        let alternate = home.appendingPathComponent("alternate", isDirectory: true)
+        let defaultFile = home.appendingPathComponent(".config/milo/menubar.conf")
+        let alternateFile = alternate.appendingPathComponent("milo/menubar.conf")
+        let defaults = Data("indicator = cpu\n".utf8), override = Data("indicator = quota\n".utf8)
+        try files.createDirectory(at: expected, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: home) }
+        try files.createDirectory(at: standalone, withIntermediateDirectories: true)
+        for (file, contents) in [(defaultFile, defaults), (alternateFile, override)] {
+            try files.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try contents.write(to: file)
+        }
+        func checkRefusal(_ fault: String) throws {
+            let model = Model(installation: MenuProfile.installed(bundle: expected, home: home))
+            var fallback = frame()
+            fallback.indicator = "cpu"
+            model.receive(fallback)
+            precondition(model.indicator == .quota && model.monitor.reading == SystemReading())
+            model.setSleeping(true)
+            model.setSleeping(false)
+            precondition(model.monitor.reading == SystemReading())
+            guard case .failure(.invalidProfile) = model.indicatorSaveProcess(.memory) else {
+                preconditionFailure("Expected a repair error for \(fault), not default-profile fallback")
+            }
+            let actualDefault = try Data(contentsOf: defaultFile), actualAlternate = try Data(contentsOf: alternateFile)
+            precondition(actualDefault == defaults && actualAlternate == override)
+        }
+        try checkRefusal("missing profile")
+        try Data("invalid".utf8).write(to: profileFile)
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: profileFile.path)
+        try checkRefusal("malformed plist")
+
+        let installer = MenuProfile.Installer(path: "/bin/sh")!
+        let encoder = PropertyListEncoder()
+        let invalidPath = MenuProfile(paths: ["XDG_CONFIG_HOME": ""], installer: installer)
+        try encoder.encode(invalidPath).write(to: profileFile)
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: profileFile.path)
+        try checkRefusal("invalid captured config path")
+
+        let valid = MenuProfile(paths: ["XDG_CONFIG_HOME": alternate.path], installer: installer)
+        try encoder.encode(valid).write(to: profileFile)
+        try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: profileFile.path)
+        try checkRefusal("non-private profile")
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: profileFile.path)
+        try files.setAttributes([.posixPermissions: 0o775], ofItemAtPath: apps.path)
+        try checkRefusal("group-writable Applications")
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: apps.path)
+        guard case let .installed(profile) = MenuProfile.installed(bundle: expected, home: home) else {
+            preconditionFailure("A valid owner-private profile must be usable")
+        }
+        var environment = ["HOME": home.path]
+        profile.applyPaths(to: &environment)
+        precondition(environment["XDG_CONFIG_HOME"] == alternate.path)
+
+        let linkedProfile = home.appendingPathComponent("linked-profile.plist")
+        try files.moveItem(at: profileFile, to: linkedProfile)
+        try files.createSymbolicLink(at: profileFile, withDestinationURL: linkedProfile)
+        try checkRefusal("symlinked profile")
+        try files.removeItem(at: profileFile)
+        try files.moveItem(at: linkedProfile, to: profileFile)
+        try files.removeItem(at: expected)
+        try files.createSymbolicLink(at: expected, withDestinationURL: standalone)
+        try checkRefusal("symlink at the installed app location")
+        guard case .standalone = MenuProfile.installed(bundle: standalone, home: home) else {
+            preconditionFailure("A copy outside Applications is standalone, even when Milo.app is a link to it")
+        }
+    }
+
+    static func checkIndicatorSaveReplies() async throws {
+        let files = FileManager.default
+        let home = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try files.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? files.removeItem(at: home) }
+        for acknowledge in [false, true] {
+            let model = Model(installation: .standalone)
+            defer { model.quit() }
+            var saved = frame()
+            saved.indicator = "cpu"
+            model.receive(saved)
+            var choices = [MenuIndicator](), locked = [Bool]()
+            model.changed = { [weak model] in
+                guard let model else { return }
+                choices.append(model.indicator)
+                locked.append(model.savingIndicator)
+            }
+            let wakeup = home.appendingPathComponent("wakeup")
+            let config = home.appendingPathComponent("menubar.conf")
+            let reader = Process()
+            reader.executableURL = URL(fileURLWithPath: "/bin/sh")
+            reader.arguments = ["-c", #"""
+                /bin/dd bs=1 count=1 of="$1" 2>/dev/null || exit 1
+                printf '%s\n' '{"version":1,"providers":[],"indicator":"quota"}'
+                if [ "$2" = yes ]; then
+                    printf '%s\n' '{"version":1,"providers":[],"indicator":"memory","indicatorAck":true}'
+                    printf '%s\n' '{"version":1,"providers":[],"indicator":"cpu"}'
+                fi
+                """#, "reader-fixture", wakeup.path, acknowledge ? "yes" : "no"]
+            model.startReader(reader)
+            precondition(model.failure == nil, "Fixture reader did not start")
+
+            let writer = Process()
+            writer.executableURL = URL(fileURLWithPath: "/bin/sh")
+            writer.arguments = ["-c", #"printf 'indicator = quota\n' > "$1""#, "writer-fixture", config.path]
+            model.saveIndicator(.quota, using: writer)
+            for _ in 0..<500 where model.failure == nil { await pause(10) }
+            precondition(model.failure?.contains("disconnected") == true && !model.savingIndicator)
+            let receivedWakeup = try Data(contentsOf: wakeup), writtenChoice = try String(contentsOf: config, encoding: .utf8)
+            precondition(receivedWakeup == Data([0]) && writtenChoice == "indicator = quota\n")
+            if acknowledge {
+                precondition(choices == [.cpu, .memory, .cpu, .cpu], "A superseding choice must be accepted at and after the ordered reply")
+                precondition(locked == [true, false, false, false])
+            } else {
+                precondition(choices == [.cpu, .quota], "An in-flight frame must not flicker before the committed fallback")
+                precondition(locked == [true, false] && model.monitor.reading == SystemReading(), "A saved quota choice must stop sampling on EOF")
+            }
+        }
+    }
+
     /// A row also changes when its reset passes, with no new frame to say so: the panel has to
     /// show that whether it was on screen at the time or is opened afterwards.
     static func followsClock(_ delegate: AppDelegate) async -> Bool {
@@ -179,6 +326,7 @@ private enum MenuBench {
 private struct MenuBenchApp {
     @MainActor static func main() {
         setvbuf(stdout, nil, _IOLBF, 0)
+        signal(SIGPIPE, SIG_IGN)
         // An app with nothing on screen is slowed down to save power, which would time the scheduler.
         let awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Timing the menu app")
         defer { ProcessInfo.processInfo.endActivity(awake) }
@@ -187,6 +335,11 @@ private struct MenuBenchApp {
         Task { @MainActor in
             // The menu bar item needs a moment before a popover can open from it.
             if CommandLine.arguments.contains("--check") { try? await Task.sleep(nanoseconds: 1_000_000_000) } else { await MenuBench.run(delegate) }
+            do {
+                try MenuBench.checkInstallProfile()
+                try await MenuBench.checkIndicatorSaveReplies()
+            } catch { preconditionFailure("Indicator fixture failed: \(error)") }
+            MenuBench.checkIndicators(delegate)
             exit(await MenuBench.followsClock(delegate) ? 0 : 1)
         }
         withExtendedLifetime(delegate) { app.run() }
