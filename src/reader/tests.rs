@@ -38,7 +38,16 @@ fn reader_hints_say_close_and_keep_help_last() {
     assert!(help.contains("Ctrl-A  file actions"));
     assert_eq!(help.contains("^O  open in default app"), cfg!(target_os = "macos"));
     assert_eq!(help.contains("^R  reveal in Finder"), cfg!(target_os = "macos"));
-    assert_eq!(drawn(&mut reader, 40, 5)[4], " q close · Ctrl-A Actions · ? help");
+    let compact = drawn(&mut reader, 36, 12);
+    assert!(compact[11].contains("e edit") && compact[11].contains("Actions") && compact[11].ends_with("? help"));
+    let at = column(&compact[11], "Actions");
+    assert_eq!(reader.hover_span(at, 11), Some(at..at + "Actions".len()));
+    assert_eq!(reader.key(Key::Click(at, 11)), After::Stay);
+    assert!(drawn(&mut reader, 36, 12)[1].contains("Edit in Milo"));
+    assert_eq!(reader.key(Key::Esc), After::Stay);
+    assert_eq!(reader.key(Key::Char('e')), After::Stay);
+    assert!(reader.editing());
+    assert_eq!(reader.key(Key::Esc), After::Stay);
     assert_eq!(drawn(&mut reader, 28, 5)[4], " q close · Actions · ? help");
     assert_eq!(drawn(&mut reader, 20, 5)[4], " Actions · ? help");
 }
@@ -237,7 +246,8 @@ fn an_empty_file_uses_the_body_row_not_the_hint_row() {
     f.write("empty.txt", "");
     let mut reader = Reader::open(&f.root.join("empty.txt")).unwrap();
     let rows = drawn(&mut reader, 40, 3);
-    assert_eq!(&rows[1..], ["  Empty.", " q close · Ctrl-A Actions · ? help"]);
+    assert_eq!(rows[1], "  Empty.");
+    assert!(rows[2].contains("Actions"));
 }
 
 #[test]

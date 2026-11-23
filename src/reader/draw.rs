@@ -422,15 +422,26 @@ impl Reader {
         let actions_at = native + middle.len();
         items[native..actions_at].copy_from_slice(middle);
         let actions = self.offers_actions();
+        let mut compact = false;
         if actions {
-            // Prefer the short label when spelling the shortcut would crowd
-            // out even a close hint beside it.
-            let primary = if action.is_empty() { 0 } else { str_width(action) + str_width(GAP) };
-            let full = 2 + primary + str_width("q close · Ctrl-A Actions · ? help");
-            items[actions_at] = if s.w >= full { ACTIONS } else { ACTIONS_SHORT };
+            // Keep the direct edit shortcut with the new menu where possible.
+            // The painter retains a suffix, so budget the labels after Edit too.
+            let edit = middle.iter().position(|&item| item == "e edit");
+            let tail = edit.map_or(&["q close"][..], |i| &middle[i..]);
+            let occupied = 2 + HELP.len() + str_width(action) + tail.iter().map(|item| str_width(item)).sum::<usize>();
+            let gaps = 1 + usize::from(!action.is_empty()) + tail.len();
+            let decorated = occupied + gaps * str_width(GAP);
+            items[actions_at] = if s.w >= decorated + ACTIONS.len() { ACTIONS } else { ACTIONS_SHORT };
+            compact = edit.is_some()
+                && s.w < decorated + ACTIONS_SHORT.len()
+                && s.w >= occupied + gaps + ACTIONS_SHORT.len();
         }
         let count = actions_at + usize::from(actions);
-        let hits = crate::help::draw_hint(s, action, &items[..count], HELP);
+        let hits = if compact {
+            crate::help::draw_compact_hint(s, action, &items[..count], HELP)
+        } else {
+            crate::help::draw_hint(s, action, &items[..count], HELP)
+        };
         self.hints.help = hits.span(count + 1);
         if actions {
             self.hints.actions = hits.span(actions_at + 1);
