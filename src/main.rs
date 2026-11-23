@@ -79,12 +79,17 @@ Usage: milo
        milo claude-status
        milo --help [COMMAND] | --version
 
-Bare milo opens Home. milo PATH opens the outline at PATH.
+Outside Rex, bare milo opens Home: Outline and Git history for the current
+  folder, plus Usage and Terminal settings. Move with ↑/↓, open with Enter,
+  and use q to go back. Open browser settings launches your browser.
+milo PATH opens the outline at PATH.
 milo COMMAND --help, or milo --help COMMAND, explains one command briefly.
-On first launch, milo and milo setup share a short welcome guide.
+On first launch, milo setup shows a short welcome guide. In Rex, bare milo
+  shares that guide before opening Home.
 --skip-onboarding marks the guide skipped and exits without opening a terminal
   or changing settings.
-milo setup saves a Rex layout and can enable Claude Code usage limits.
+milo setup opens Terminal settings, where you can enable Claude Code usage
+  limits or, in Rex, save a Rex layout.
 milo web opens local Settings in your browser. Use --no-open to print the link
   without opening it.
 milo web --host HOST opens the Settings of another Rex host here, through a Rex
@@ -545,9 +550,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::ShellOutline(shell) => {
             run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), outline)))
         }
-        Command::History(path) => {
-            run(Start::Reading(project_path(path)), &|| Ok(workflow::project(open_repo(path)?, None, history)))
-        }
+        Command::History(path) => run(Start::Reading(project_path(path)), &|| open_history(path)),
         Command::ShellHistory(shell) => {
             run(Start::Reading(Path::new(".")), &|| Ok(workflow::project(open_repo(None)?, Some(shell), history)))
         }
@@ -595,7 +598,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
             } else {
                 || Ok(Box::new(setup::Setup::open()))
             };
-            if setup::needs_welcome()? {
+            if (command == Command::Setup || rex::inside()) && setup::needs_welcome()? {
                 run(Start::Welcome(destination), &|| Ok(Box::new(setup::Welcome::open()?)))
             } else {
                 run(Start::Loaded, &destination)
@@ -668,6 +671,10 @@ fn print_line(text: &str) -> Result<(), String> {
 
 fn open_outline(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
     Ok(workflow::project(open_repo(path)?, None, outline))
+}
+
+fn open_history(path: Option<&OsStr>) -> Result<Box<dyn Pane>, String> {
+    Ok(workflow::project(open_repo(path)?, None, history))
 }
 
 fn outline(repo: Repo, prefs: &preferences::Preferences) -> Box<dyn Pane> {
