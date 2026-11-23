@@ -859,6 +859,11 @@ impl Repo {
         self.tracked.paths.split_terminator('\0')
     }
 
+    /// The identity of the tracked path listing, shared by repository snapshots.
+    pub(crate) fn listed_paths(&self) -> &Arc<str> {
+        &self.tracked.paths
+    }
+
     pub fn is_untracked(&self, path: &str) -> bool {
         self.status.untracked.iter().any(|p| p == path)
     }

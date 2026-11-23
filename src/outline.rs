@@ -43,6 +43,8 @@ pub struct Outline {
     listing: walk::Listing,
     folder_filter: Option<Arc<Ignored>>,
     tree: Tree,
+    /// The tracked path listing the current Git tree was built from.
+    tree_paths: Option<Arc<str>>,
     /// Measured once per row layout, and only when there is room for details.
     change_columns: Option<ChangeColumns>,
     folds: Folds,
@@ -115,6 +117,7 @@ impl Outline {
             listing: walk::Listing::default(),
             folder_filter: None,
             tree: Tree::default(),
+            tree_paths: None,
             change_columns: None,
             folds,
             fold_store,
@@ -222,14 +225,33 @@ impl Outline {
 
     /// Shows the pending files and tracked paths just read, returning the old files.
     fn take_in(&mut self, mut files: Vec<PendingFile>) -> Vec<PendingFile> {
-        let selected = self.selected_path();
         self.untracked.retain_details(&self.pending, &mut files);
-        let files = std::mem::replace(&mut self.pending, files);
-        self.tree.rebuild(self.repo.listed(), &self.pending);
-        self.folds.prune(|path| self.tree.has_folder(path));
+        let old = std::mem::replace(&mut self.pending, files);
+        let listed = self.repo.listed_paths();
+        let same_rows = self.tree_paths.as_ref().is_some_and(|paths| Arc::ptr_eq(paths, listed))
+            && old.len() == self.pending.len()
+            && old.iter().zip(&self.pending).all(|(before, after)| {
+                before.path == after.path && before.kind == after.kind && before.unpushed == after.unpushed
+            });
+        let selected = if same_rows {
+            for (i, (before, after)) in old.iter().zip(&self.pending).enumerate() {
+                self.tree.update_pending_lines(i, after, (before.add, before.del, before.lines_pending), |_| {});
+            }
+            self.painted.tree_rows = 0..0;
+            self.change_columns = None;
+            None
+        } else {
+            let selected = self.selected_path();
+            self.tree_paths = Some(Arc::clone(listed));
+            self.tree.rebuild(self.repo.listed(), &self.pending);
+            self.folds.prune(|path| self.tree.has_folder(path));
+            selected
+        };
         self.update_recent();
-        self.relayout(selected);
-        files
+        if !same_rows {
+            self.relayout(selected);
+        }
+        old
     }
 
     fn update_recent(&mut self) {

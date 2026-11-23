@@ -183,6 +183,55 @@ mod tests {
     }
 
     #[test]
+    fn a_recount_keeps_the_tree_until_git_reports_a_structural_change() {
+        let f = project();
+        let path = "src/nested/main.rs";
+        f.write(path, "keep\nold-1\nold-2\nold-3\n");
+        f.commit("nested file");
+        f.write(path, "keep\nedit\nold-2\nold-3\n");
+        let mut o = open(&f).refreshing_away();
+        assert_eq!(o.selected_path().as_deref(), Some(path));
+        let totals = |o: &Outline| {
+            [path, "src/nested/", "src/"].map(|path| {
+                let node = o.tree.row(o.tree.row_of(path).unwrap()).unwrap();
+                (node.kind, node.add, node.del, node.pending)
+            })
+        };
+        let refresh = |o: &mut Outline| {
+            assert!(o.check());
+            assert_eq!(finish(o), Some(true));
+        };
+
+        f.write(path, "keep\nnew-1\nnew-2\nold-3\n");
+        refresh(&mut o);
+        assert_eq!(o.selected_path().as_deref(), Some(path));
+        assert_eq!(totals(&o), [(Kind::Modified, 2, 2, 1); 3]);
+        let before = rows(&mut o);
+
+        let index = f.root.join(".git/index");
+        let saved = fs::read(&index).unwrap();
+        fs::write(&index, "corrupt index").unwrap();
+        f.write(path, "keep\nnew-1\nnew-2\nnew-3\n");
+        refresh(&mut o);
+        let failed = rows(&mut o);
+        assert!(failed[0].ends_with("git did not answer"), "{failed:?}");
+        assert_eq!(failed[1..], before[1..]);
+
+        fs::write(index, saved).unwrap();
+        f.write("src/clean.rs", "tracked separately\n");
+        f.git(&["add", "src/clean.rs"]);
+        f.git(&["commit", "-qm", "add a clean path"]);
+        refresh(&mut o);
+        assert!(shows(&mut o, "clean.rs"));
+        assert_eq!(o.selected_path().unwrap().as_ref(), path);
+        assert_eq!(totals(&o), [(Kind::Modified, 3, 3, 1); 3]);
+
+        fs::remove_file(f.root.join(path)).unwrap();
+        refresh(&mut o);
+        assert_eq!(totals(&o), [(Kind::Deleted, 0, 4, 1); 3]);
+    }
+
+    #[test]
     fn a_check_does_not_start_a_second_refresh_beside_one_that_is_running() {
         let f = project();
         let mut o = open(&f).refreshing_away();
