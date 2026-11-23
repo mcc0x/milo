@@ -268,6 +268,7 @@ fn opening_a_long_commit_in_a_narrow_pane_keeps_the_subject_and_previews_eight_n
     assert!(active_row(&draw(&mut history, 30, 12), "page39.txt"));
     f.write("pending.txt", "uncommitted work\n");
     history.key(Key::Char('r'));
+    assert_eq!(history.rows.get(0), Some(TimelineRow::Uncommitted));
     assert!(active_row(&draw(&mut history, 30, 12), "page39.txt"));
     history.key(Key::Left);
     history.key(Key::Enter);

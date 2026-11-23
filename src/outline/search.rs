@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(search.selected_path(), Some("Quartz-alpha.txt"));
         search.key(Key::Backspace, now);
         search.paste(Some("B"));
-        search.filter();
+        assert!(matches!(search.key(Key::Enter, now), Action::Open));
         assert_eq!(search.selected_path(), Some("quartz-beta.txt"));
 
         search.key(Key::Ctrl(b'u'), now);

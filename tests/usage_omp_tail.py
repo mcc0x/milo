@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQL-only OMP WAL benchmark: python3 tests/usage_omp_tail.py [pre-#75] [current]."""
+"""Compare the OMP SQL from two revisions on matched WAL snapshots (no Rust sampler)."""
 
 import argparse
 import json
@@ -178,8 +178,8 @@ def measure(root, name, queries, count, env, raw):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pre", default="536342f", nargs="?")
-    parser.add_argument("current", default="9576854", nargs="?", help="revision or '-' for worktree SQL")
+    parser.add_argument("pre", default="9576854", nargs="?", help="baseline revision (default: post-#75 main)")
+    parser.add_argument("current", default="HEAD", nargs="?", help="candidate revision or '-' for worktree SQL")
     parser.add_argument("--pairs", type=int, default=120, help="matched pairs per profile (even)")
     parser.add_argument("--indexed-pairs", type=int, default=0, help="also run this many pairs per indexed control (even)")
     parser.add_argument("--raw", action="store_true", help="print individual times as TSV")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare History paging in release binaries with real Git and a 160x50 PTY.
 
-Usage: python3 tests/history_paging.py BASE [CANDIDATE] [--runs 15]
+Usage: python3 -B tests/history_paging.py BASE [CANDIDATE] [--runs 24]
 
 The two builds alternate on the same synthetic history. Only the separate Git
 count probe uses a wrapper. Timings start at a key and end at its rendered

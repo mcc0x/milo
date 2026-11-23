@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare macOS release Readers in a 160×50 PTY (cells and Kitty).
 
-python3 tests/picture_upload.py BASE_BINARY CANDIDATE_BINARY [--runs 15]
+python3 -B tests/picture_upload.py BASE_BINARY CANDIDATE_BINARY [--runs 24]
 
 First-frame time ends at receipt of a complete synchronized update. RSS and
 process I/O counters are sampled there, before checking its output. Disk and
@@ -22,6 +22,7 @@ import random
 import re
 import statistics
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -135,6 +136,7 @@ def compare(root, binaries, runs):
         directory.mkdir()
     env = dict(HOME=str(home), TMPDIR=str(temp), PATH="/usr/bin:/bin", TERM="xterm-256color", LC_ALL="C",
                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, **{k: str(v) for k, v in xdg.items()})
+    subprocess.run(["git", "init", "-q", "--template=", str(repo)], env=env, check=True)
     counters = ProcessCounters()
     answer = backend.ANSWER
     print("file\tfile_B\tterminal\tbuild\tn\tquantile\tfirst_ms\tmilo_cpu_ms\tchild_cpu_ms\tfirst_rss_KiB"
