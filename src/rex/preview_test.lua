@@ -575,6 +575,38 @@ ownership = ownership .. guarded
 assert(watch_ready("session_view_changed") == ownership)
 assert(watch_ready("attachment_poll") == ownership .. "renew\n")
 
+for _, first_refresh in ipairs{ "session_view_changed", "attachment_poll" } do
+  local fence = fixture("watch", preview)
+  fence.rex.args.confirm, fence.window.focused_block_id = true, preview
+  local watch = call(fence)
+  assert(watch() == guarded)
+  local expected = guarded .. "renew\n"
+  assert(watch("attachment_poll") == expected)
+
+  -- A single revision is safe whether the layout callback or poll sees it first.
+  fence.view.revision = 2
+  fence.main_leaf.rect[3], fence.leaf.rect = 0.45, { 0.7, 0, 0.3, 1 }
+  expected = expected .. "guard 40 tile 700000 0 300000 1000000\n"
+  assert(watch("session_view_changed", { revision = 2 }) == expected)
+  fence.view.revision = 3
+  fence.main_leaf.rect[3], fence.leaf.rect = 0.375, { 0.625, 0, 0.375, 1 }
+  expected = expected .. guard .. "\n"
+  assert(watch("attachment_poll") == expected)
+  assert(watch("session_view_changed", { revision = 3 }) == expected)
+
+  -- Both focus changes commit before Lua sees either callback. The first
+  -- refresh sees revision 5 with the original tab, focus, and geometry.
+  fence.view.revision, fence.window.focused_block_id = 4, main
+  local departure = { revision = fence.view.revision }
+  fence.view.revision, fence.window.focused_block_id = 5, preview
+  local returned = { revision = fence.view.revision }
+  expected = expected .. guarded
+  assert(watch(first_refresh, departure) == expected)
+  assert(watch("session_view_changed", returned) == expected)
+  assert(watch("session_view_changed", departure) == expected)
+  assert(watch("attachment_poll") == expected .. "renew\n" and not fence.stopped)
+end
+
 -- All three startup paths retain the latch if the viewer is down to one
 -- attachment before the initial placement becomes eligible.
 for _, initial in ipairs{

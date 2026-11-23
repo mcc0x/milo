@@ -485,12 +485,13 @@ local function emit(state)
       -- the native helper to conceal and prompt, without granting eligibility.
       last = state
       write("guard-hide")
-      return
+      return true
     end
   end
   if last ~= state then
     last = state
     write(state)
+    return true
   end
 end
 
@@ -535,7 +536,8 @@ local function refresh(owner_checked)
   if not owner_checked then owner_allowed = owner_permitted() end
   local view = current_view()
   if not view then return stop(1) end
-  last_revision = view.revision
+  local previous_revision, revision = last_revision, view.revision
+  last_revision = revision
   local block, window, layer, index = locate(view, a.block)
   local main, place, tiled = locate(view, a.main)
   if block and layer.kind ~= "tiled" then return stop() end
@@ -571,12 +573,18 @@ local function refresh(owner_checked)
   local rect, pair = leaf_rect(layer.layout)
   local state = tile_state(confirm and "guard" or "show", a.owner_pid, rect)
   if confirm and state then
-    -- Only a ratio change of the same working-terminal/anchor pair can
-    -- retain a paused drag. Reparenting or swapping panes revokes it.
-    if last and last:match("^guard ") and (pair ~= last_pair or (not pair and state ~= last)) then emit() end
+    if last and last:match("^guard ") then
+      -- Rex exposes same-tab focus only through the latest view. A skipped
+      -- revision could hide a round trip, even when the final focus is unchanged.
+      local step = type(previous_revision) == "number" and type(revision) == "number"
+        and revision - previous_revision
+      -- Within a continuous view, only changes to the same working pair
+      -- can retain a paused drag; reparenting or swapping panes revokes it.
+      if (step ~= 0 and step ~= 1) or pair ~= last_pair or (not pair and state ~= last) then emit() end
+    end
     last_pair = pair
   end
-  emit(state)
+  return emit(state)
 end
 
 local function poll_owner()
@@ -584,18 +592,19 @@ local function poll_owner()
   -- attachments by this app. Check its connections before renewing.
   -- After a stalled tick, refresh the layout even if an overdue timer
   -- happens to run before the queued layout events.
-  local previous, previous_state = owner_allowed, last
+  local previous = owner_allowed
   owner_allowed = owner_permitted()
   local now = os.time()
   local delayed = last_poll and (now < last_poll or now - last_poll >= 3)
   last_poll = now
+  local changed
   -- Eligibility in guarded mode must not be renewed from cached focus.
   if previous == nil or (owner_allowed and (confirm or not previous or delayed)) then
-    refresh(true)
+    changed = refresh(true)
   elseif not owner_allowed then
     emit()
   end
-  if owner_allowed and last ~= "hide" and last == previous_state then
+  if owner_allowed and last ~= "hide" and not changed then
     write("renew")
   end
   rex.after(1, poll_owner)
