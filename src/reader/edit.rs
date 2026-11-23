@@ -187,12 +187,19 @@ pub(super) struct Editor {
 struct Restored {
     /// The change that put the kept text in place.
     change: u64,
-    draft: Draft,
+    /// The kept copy, until the restored text is successfully saved.
+    draft: Option<Draft>,
     /// The file held other text than the draft was written over, or it cannot be told: a save
     /// would replace text that whoever wrote the draft never saw.
     over_other_text: bool,
     /// Whether the kept draft had a structural mark, independent of the file on disk.
     marked: bool,
+}
+
+impl Restored {
+    fn unconfirmed(&self) -> Option<&Draft> {
+        self.draft.as_ref().filter(|_| self.over_other_text)
+    }
 }
 
 /// The display column at which the character at `byte` starts.
@@ -364,12 +371,14 @@ impl Editor {
         if overwrite && expected.is_none() {
             return Err(SaveError::Refused("Not saved: confirm the disk version first."));
         }
+        let restored = self.restored();
         let basis = match &expected {
             Some(confirmed) => disk::Basis::Confirmed(confirmed),
-            None if self.restored().is_some_and(|restored| restored.over_other_text) => disk::Basis::Unconfirmed,
+            None if restored.and_then(Restored::unconfirmed).is_some() => disk::Basis::Unconfirmed,
             None => disk::Basis::Original,
         };
-        self.conflict = disk::save(entry, &mut self.original, || self.buffer.text(), basis)?;
+        let marked = self.write_mark(restored);
+        self.conflict = disk::save(entry, &mut self.original, || disk::with_mark(self.buffer.text(), marked), basis)?;
         if self.conflict.is_some() { Err(SaveError::Changed) } else { Ok(()) }
     }
 
@@ -378,8 +387,11 @@ impl Editor {
     /// restore, is not an answer to that question.
     pub(super) fn saved(&mut self, now: Instant) {
         self.buffer.mark_saved();
-        if let Some(restored) = self.restored.take_if(|restored| self.buffer.holds(restored.change)) {
-            restored.draft.forget();
+        if let Some(restored) = &mut self.restored
+            && self.buffer.holds(restored.change)
+            && let Some(draft) = restored.draft.take()
+        {
+            draft.forget();
         }
         self.say("Saved", now);
     }
@@ -521,7 +533,7 @@ impl Editor {
             (Prompt::Changed { close }, Key::Char('o' | 'O')) => Step::Save { close, overwrite: true },
             (Prompt::Changed { .. }, Key::Char('c' | 'C')) => {
                 if let Some(snapshot) = self.conflict.take() {
-                    let draft = self.original.with_mark(self.buffer.text());
+                    let draft = disk::with_mark(self.buffer.text(), self.write_mark(self.restored()));
                     self.comparison = Some(Comparison::new(snapshot, draft));
                 }
                 return Step::Stay;
@@ -546,9 +558,15 @@ impl Editor {
         step
     }
 
-    /// The kept copy whose text is in the draft now: restored and not undone.
+    /// The change that restored text, if it is still part of the edit.
     fn restored(&self) -> Option<&Restored> {
         self.restored.as_ref().filter(|restored| self.buffer.holds(restored.change))
+    }
+
+    /// A matching restore resumes the source editor's encoding, even after its first save
+    /// removes the kept copy. Undoing it or restoring over a different base uses the current file.
+    fn write_mark(&self, restored: Option<&Restored>) -> bool {
+        restored.filter(|restored| !restored.over_other_text).map_or(self.original.marked(), |restored| restored.marked)
     }
 
     /// Puts a kept draft in place of the text as one change, so that undo shows the file again.
@@ -564,7 +582,8 @@ impl Editor {
         let step = self.replace(Pos::default(), self.buffer.end(), unmarked.unwrap_or(&kept));
         // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
         let marked = unmarked.is_some();
-        self.restored = Some(Restored { change: self.buffer.last_change(), draft, over_other_text, marked });
+        self.restored =
+            Some(Restored { change: self.buffer.last_change(), draft: Some(draft), over_other_text, marked });
         self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
         let over = if over_other_text { " over a changed file" } else { "" };
         self.say(format!("Draft restored{over} · ^Z undoes"), now);
@@ -957,15 +976,16 @@ impl Drop for Editor {
             return;
         }
         let restored = self.restored();
-        // A draft restored over other text and kept again still belongs to the text it was written over.
-        let base = match restored {
-            Some(restored) if restored.over_other_text => restored.draft.base().map(str::to_owned),
-            _ => Some(rescue::base(self.original.read())),
+        let unconfirmed = restored.and_then(|restored| restored.unconfirmed().map(|draft| (draft, restored.marked)));
+        // Keeping an unconfirmed edit again preserves the source base and encoding.
+        let (base, marked) = match unconfirmed {
+            Some((draft, marked)) => (draft.base().map(Cow::Borrowed), marked),
+            None => (Some(Cow::Owned(rescue::base(self.original.read()))), self.write_mark(restored)),
         };
         let text = self.buffer.text();
-        let marked = restored.map_or_else(|| self.original.marked(), |restored| restored.marked);
+        let predecessor = restored.and_then(|restored| restored.draft.as_ref());
         let note = match self.place.drafts() {
-            Some(drafts) => drafts.keep(&text, marked, base.as_deref(), restored.map(|restored| &restored.draft)),
+            Some(drafts) => drafts.keep(&text, marked, base.as_deref(), predecessor),
             None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
         };
         rescue::tell(note);

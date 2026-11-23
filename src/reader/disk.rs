@@ -79,14 +79,14 @@ impl Original {
     pub(super) fn marked(&self) -> bool {
         self.marked
     }
+}
 
-    /// The text of the file when it holds the draft.
-    pub(super) fn with_mark(&self, mut text: String) -> String {
-        if self.marked {
-            text.insert_str(0, BOM);
-        }
-        text
+/// The serialized text of a draft, including its structural mark.
+pub(super) fn with_mark(mut text: String, marked: bool) -> String {
+    if marked {
+        text.insert_str(0, BOM);
     }
+    text
 }
 
 pub(super) enum SaveError {
@@ -170,6 +170,7 @@ pub(super) enum Basis<'a> {
 }
 
 /// Writes the draft, or returns the current snapshot if the file does not hold what `basis` expects.
+/// `draft` supplies the serialized text only when the file matches.
 pub(super) fn save(
     entry: Result<&Entry<'_>, LookupError>,
     original: &mut Original,
@@ -207,7 +208,7 @@ pub(super) fn save(
         Basis::Confirmed(confirmed) => &current == confirmed,
         Basis::Unconfirmed => false,
     };
-    let replacement = expected.then(|| original.with_mark(draft()));
+    let replacement = expected.then(draft);
     // Only present snapshots from stable reads, and do not write over an edit that happened during one.
     let after = file.metadata().map_err(|_| SaveError::Refused("Not saved: the file cannot be read back."))?;
     let stamp = |m: &std::fs::Metadata| (m.len(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec());

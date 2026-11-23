@@ -1262,6 +1262,48 @@ fn recovering_a_kept_draft_preserves_a_pasted_leading_byte_order_mark() {
 }
 
 #[test]
+fn recovering_a_kept_draft_after_saving_an_editable_mark_keeps_it_editable() {
+    let edits = [
+        (&[Key::Char('X')][..], "\u{feff}Xabc\n"),
+        (&[Key::Home, Key::Char('X')][..], "X\u{feff}abc\n"),
+        (&[Key::Backspace][..], "abc\n"),
+    ];
+    for (keys, expected) in edits {
+        let f = Fixture::folder();
+        let file = f.root.join("notes.txt");
+        f.write("notes.txt", "abc\n");
+        let mut reader = editing(&f, "notes.txt");
+        reader.paste(Some("\u{feff}"));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}abc\n");
+        for &key in keys {
+            reader.key(key);
+        }
+        drop(reader);
+
+        let mut reader = editing(&f, "notes.txt");
+        reader.key(Key::Char('r'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+        assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+
+        reader.key(Key::End);
+        typed(&mut reader, "Y");
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("{}Y\n", expected.trim_end_matches('\n')));
+
+        // Undo past the restore and then redo it: the serialization follows the active change.
+        reader.key(Key::Ctrl(b'z'));
+        reader.key(Key::Ctrl(b'z'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}abc\n");
+        reader.key(Key::Ctrl(b'y'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+    }
+}
+
+#[test]
 fn recovering_a_kept_draft_distinguishes_a_pasted_mark_from_file_encoding() {
     enum Name {
         Tagged,
