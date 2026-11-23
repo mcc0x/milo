@@ -443,8 +443,8 @@ static BOOL ArmPeekTTY(GuardedPeek *peek, int tty) {
             "Click this tile and type show after focus settles.\n";
         WriteAll(tty, reset, sizeof(reset) - 1);
         peek->announcedIdleReset = YES;
+        peek->pendingIdleReset = NO;
     }
-    peek->pendingIdleReset = NO;
     peek->announced = peek->ttyReady = YES;
     peek->discarding = NO;
     return YES;
@@ -456,8 +456,8 @@ static PeekInput ReadPeekInput(GuardedPeek *peek, int tty) {
     if (!ForegroundCanonicalTTY(tty)) return PeekBadTTY;
     char line[64];
     ssize_t count = read(tty, line, sizeof(line));
-    if (count < 0) return errno == EAGAIN || errno == EINTR ? PeekNoInput : PeekBadTTY;
-    if (!count) return PeekNoInput; // Canonical EOF key, not a command.
+    if (count < 0) return errno == EAGAIN ? PeekNoInput : errno == EINTR ? PeekIgnored : PeekBadTTY;
+    if (!count) return PeekIgnored; // A canonical EOF record does not prove the queue is empty.
     // Never accept the tail of a long canonical line as a new command.
     BOOL discarding = peek->discarding;
     peek->discarding = count == (ssize_t)sizeof(line) && line[sizeof(line) - 1] != '\n';
@@ -561,7 +561,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
 - (int)run;
 - (void)tick;
 - (void)readState;
-- (void)readPeek;
+- (BOOL)readPeek;
 @end
 
 @implementation MiloPreviewAnchor
@@ -673,7 +673,11 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
 }
 
 - (BOOL)acceptsPanelInput {
-    return _panel.visible && _panel.placementProven && _panel.onActiveSpace &&
+    // AppKit events and WebKit completions can run before the pipe source.
+    // Never use a cached lease across a revocation already on the pipe.
+    if (_finished || !_panel.visible || !_panel.placementProven) return NO;
+    [self readState];
+    return !_finished && _panel.visible && _panel.placementProven && _panel.onActiveSpace &&
         (!_lease.guarded || _peek.phase == PeekVisible) && [self canReveal] &&
         NSEqualRects(_panel.frame, _candidateFrame) && SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample);
 }
@@ -689,13 +693,14 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
     return SampleFresh(NSProcessInfo.processInfo.systemUptime, started) ? PeekOK : PeekStale;
 }
 
-- (void)readPeek {
-    if (_finished || !_lease.guarded) return;
-    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return; }
+// YES only after draining the current eligible input queue to an empty read.
+- (BOOL)readPeek {
+    if (_finished || !_lease.guarded) return NO;
+    if (getppid() != _parent || _rex.terminated) { [self finish:NULL]; return NO; }
     // Drain observer records before checking consent, even if no geometry
     // sample can run. Only the foreground canonical controlling TTY is read.
     [self readState];
-    if (_finished) return;
+    if (_finished) return NO;
     PeekFailure failure = [self eligibilityFailure];
     if (failure != PeekOK) {
         if (_peek.ttyReady || _peek.phase != PeekIdle) [self invalidateFor:failure resetTTY:YES];
@@ -706,35 +711,42 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
                 if (input == PeekShow) WritePeekFailure(_tty, PeekIdle, failure);
             }
         }
-        return;
+        return NO;
     }
     if (!ForegroundCanonicalTTY(_tty)) {
         BOOL reported = _reportedTTYFailure || _peek.phase != PeekIdle;
         if (_peek.ttyReady || _peek.phase != PeekIdle) [self invalidateFor:PeekTTY resetTTY:YES];
         if (!reported) WritePeekFailure(_tty, PeekIdle, PeekTTY);
         _reportedTTYFailure = YES;
-        return;
+        return NO;
     }
     if (_peek.phase != PeekIdle) {
-        if (!PeekActive(&_peek, LeaseNow())) { [self expirePeek]; return; }
-        if (![self pointerInsideTile]) { [self invalidateFor:PeekPointer resetTTY:NO]; return; }
+        if (!PeekActive(&_peek, LeaseNow())) { [self expirePeek]; return NO; }
+        if (![self pointerInsideTile]) { [self invalidateFor:PeekPointer resetTTY:NO]; return NO; }
     }
     if (!_peek.ttyReady) {
         if (!ArmPeekTTY(&_peek, _tty)) [self finishTTYFailure];
-        return;
+        return NO;
     }
     // Bound work per callback, including attempts with invalid placement.
     for (NSUInteger i = 0; i < 8; ++i) {
         PeekInput input = ReadPeekInput(&_peek, _tty);
-        if (input == PeekNoInput) return;
+        if (input == PeekNoInput) return YES;
         if (input == PeekBadTTY) {
             [self finishTTYFailure];
-            return;
+            return NO;
+        }
+        if (_peek.pendingIdleReset) {
+            // After the first reset, only explain a discarded prefix if the
+            // user actually completes an unrecognized command. Never echo it.
+            if (input == PeekIgnored)
+                WriteDiagnostic(_tty, "input followed a Rex focus change; type the complete show command and press Return");
+            _peek.pendingIdleReset = NO;
         }
         if (input == PeekHide) {
             [self invalidateFor:PeekDismissed resetTTY:_peek.phase == PeekIdle];
             if (!_peek.ttyReady && [self eligibilityFailure] == PeekOK) ArmPeekTTY(&_peek, _tty);
-            return;
+            return NO;
         }
         if (input != PeekShow || _peek.phase != PeekIdle) continue;
         NSTimeInterval received = LeaseNow();
@@ -750,7 +762,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
         }
         if (!WriteDiagnostic(_tty, "confirmation accepted; checking the tile")) {
             [self finish:NULL];
-            return;
+            return NO;
         }
         StartPeek(&_peek, received);
         ++_generation; // An in-flight sample may have started before the command.
@@ -758,6 +770,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
         _stableGeometry = NO;
         [self schedulePeekExpiry];
     }
+    return NO; // More input, including a dismissal, may still be queued.
 }
 
 - (void)handleLine:(size_t)length {
@@ -919,8 +932,7 @@ static void WritePeekFailure(int tty, PeekPhase phase, PeekFailure failure) {
         }
         if (!_panel.placementProven) {
             if (_lease.guarded) {
-                [self readPeek]; // A queued local dismissal wins over reveal.
-                if (_finished || generation != _generation) return;
+                if (![self readPeek] || _finished || generation != _generation) return;
                 failure = [self proofFailureAt:started];
                 if (failure != PeekOK) { [self rejectProof:failure]; return; }
                 if (!_panel.visible || !_panel.onActiveSpace || !NSEqualRects(_panel.frame, frame)) {

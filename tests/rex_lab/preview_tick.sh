@@ -10,11 +10,14 @@ watch_args=$(printf '{"mode":"watch","server":"%s","uid":%s,"pid":%s,"session":"
 "$root/bin/rex" --timeout 3s do -s "$REX_SESSION" -b "$REX_BLOCK" "$script" --args "$watch_args" --fail-fast \
     </dev/null >"$watch_pipe" 2>"$root/native-watch.errors" &
 # Only signal these shell jobs, never PIDs that could have been reused.
-trap 'kill %1 %2 2>/dev/null || :; wait || :' EXIT
+reap_workers() { kill %1 %2 2>/dev/null || :; wait || :; }
+trap reap_workers EXIT
 # tee records the real visibility pipe, but neither changes its records nor
 # handles terminal input. Anchor opens /dev/tty in this same Rex process group.
 /usr/bin/tee "$root/native-watch.log" <"$watch_pipe" >"$anchor_pipe" &
 status=0
 "$root/preview-rex-tick" "$owner_pid" "$url" "$root" <"$anchor_pipe" || status=$?
+reap_workers
+trap - EXIT
 printf '%s\n' "$status" >"$root/native-exit"
 exit "$status"

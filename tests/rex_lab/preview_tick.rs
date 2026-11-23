@@ -230,13 +230,28 @@ fn preview_confirmation_uses_rex_pty() {
     tile.enter();
     tile.samples(2);
     assert_eq!((tile.count(READY), tile.count(ACCEPTED), tile.event("revealed")), (1, 0, 0));
+    let guards = tile.state("guard ");
+    let hides = tile.state("hide");
+    tile.type_text("sh");
+    tile.focus(&main);
+    tile.wait("second scope loss was not observed", || tile.state("hide") > hides);
+    tile.focus(&block);
+    tile.wait("second scope restoration was not observed", || tile.state("guard ") > guards);
+    tile.samples(4);
+    tile.type_text("ow");
+    tile.enter();
+    tile.wait("truncated command after a second reset had no explanation", || tile.count("input followed a Rex focus change") == 1);
 
     // Real input spans multiple ticks and repeated late Quartz replies, without
     // flushing the canonical line or announcing a new readiness epoch.
-    tile.type_text("sh");
     let delay = lab.root.join("delay-samples");
     fs::write(&delay, "").unwrap();
-    tile.wait("missing intentionally late samples", || tile.event("late-sample") >= 3);
+    tile.wait("missing stalled geometry", || tile.event("late-sample") >= 1);
+    tile.show();
+    tile.wait("complete command vanished during a sampling stall", || tile.count("not shown: Rex tile geometry is stale") == 1);
+    tile.type_text("sh");
+    let late = tile.event("late-sample");
+    tile.wait("missing intentionally late samples", || tile.event("late-sample") >= late + 3);
     assert_eq!((tile.count(READY), tile.count(ACCEPTED), tile.geometry().len()), (1, 0, 0));
     fs::remove_file(delay).unwrap();
     tile.samples(5);
@@ -314,7 +329,18 @@ fn preview_confirmation_uses_rex_pty() {
     );
     assert!(!tile.capture().contains(&url), "a bounded reason must not print the page URL");
 
+    fs::remove_file(lab.root.join("deny-placement")).unwrap();
+    tile.samples(4);
+    // A dismissal after more than one callback's input budget still wins
+    // over reveal. Send one burst to the actual terminal line discipline.
+    tile.type_text("show\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nhide\n");
+    tile.wait("queued dismissal was not consumed", || tile.count("not shown: the confirmation was canceled") == 1);
+    assert_eq!(tile.event("revealed"), 4);
+    tile.samples(4);
+    tile.show();
+    tile.wait("fresh confirmation did not recover after clearing the obstruction", || tile.event("revealed") == 5);
     lab.rex(&["block", "close", "-s", &session, &main]);
+    tile.wait("closing the working block left the panel revealed", || tile.event("hidden") == 6);
     tile.wait("anchor did not end on watcher EOF", || lab.read("native-exit") == "0\n");
     drop((input, output));
     lab.stop_server();
