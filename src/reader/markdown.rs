@@ -31,6 +31,8 @@ pub(super) struct Preview {
     layout: Layout,
     top: usize,
     height: usize,
+    // The passage being read can outlive rounding to a wrapped row or clamping at the end.
+    anchor: Option<Position>,
     pending_line: Option<usize>,
     following: bool,
     marks: Marks,
@@ -43,6 +45,7 @@ impl Preview {
             layout: Layout::default(),
             top: 0,
             height: 0,
+            anchor: None,
             pending_line: None,
             following: false,
             marks: Marks::default(),
@@ -66,7 +69,7 @@ impl Preview {
             return;
         }
         let matches = Matches::between(&self.doc, &doc);
-        let position = if self.following {
+        self.anchor = if self.following {
             None
         } else {
             self.position().map(|position| matches.translate(position, &self.doc, &doc))
@@ -75,7 +78,7 @@ impl Preview {
         self.doc = doc;
         if self.layout.width != 0 {
             self.layout.reflow(&self.doc, self.layout.width);
-            self.place(position);
+            self.place();
         }
     }
 
@@ -83,6 +86,7 @@ impl Preview {
     pub(super) fn scroll(&mut self, delta: isize) -> bool {
         let following = self.following;
         self.stop_follow();
+        self.anchor = None;
         let top = self.top.saturating_add_signed(delta).min(self.last_top());
         let moved = top != self.top;
         self.top = top;
@@ -93,6 +97,7 @@ impl Preview {
     pub(super) fn follow_end(&mut self) -> bool {
         let changed = !self.following || self.top != self.last_top();
         self.following = true;
+        self.anchor = None;
         self.pending_line = None;
         self.top = self.last_top();
         changed
@@ -120,7 +125,8 @@ impl Preview {
         if self.layout.width == 0 {
             self.pending_line = Some(line);
         } else {
-            self.restore(self.line_position(line));
+            self.anchor = Some(self.line_position(line));
+            self.place();
         }
     }
 
@@ -134,20 +140,21 @@ impl Preview {
     }
 
     pub(super) fn draw(&mut self, screen: &mut Screen, rows: usize) {
-        self.height = rows.min(screen.h.saturating_sub(1));
-        if screen.w == 0 || self.height == 0 {
+        let height = rows.min(screen.h.saturating_sub(1));
+        if screen.w == 0 || height == 0 {
             return;
         }
         let width = screen.w - usize::from(screen.w > 1);
-        let requested = self.pending_line.take().map(|line| self.line_position(line));
-        let position = if width != self.layout.width {
-            let position = requested.or_else(|| self.position());
-            self.layout.reflow(&self.doc, width);
-            position
-        } else {
-            requested
-        };
-        self.place(position);
+        if self.pending_line.is_some() || width != self.layout.width || height != self.height {
+            if !self.following {
+                self.anchor = self.pending_line.take().map(|line| self.line_position(line)).or_else(|| self.position());
+            }
+            self.height = height;
+            if width != self.layout.width {
+                self.layout.reflow(&self.doc, width);
+            }
+            self.place();
+        }
         let shown = &self.layout.rows[self.top.min(self.layout.rows.len())..];
         let shown = &shown[..shown.len().min(self.height)];
         for (i, row) in shown.iter().enumerate() {
@@ -172,6 +179,9 @@ impl Preview {
     }
 
     fn position(&self) -> Option<Position> {
+        if let Some(anchor) = self.anchor {
+            return Some(anchor);
+        }
         let row = self.top_row()?;
         Some(Position {
             block: row.block,
@@ -190,10 +200,10 @@ impl Preview {
         Position { block, offset: byte - self.doc.blocks[block].start, limit: false }
     }
 
-    fn place(&mut self, position: Option<Position>) {
+    fn place(&mut self) {
         if self.following {
             self.top = self.last_top();
-        } else if let Some(position) = position {
+        } else if let Some(position) = self.anchor {
             self.restore(position);
         } else {
             self.top = self.top.min(self.last_top());
@@ -223,6 +233,7 @@ impl Preview {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Position {
     block: usize,
     offset: usize,
@@ -1289,6 +1300,54 @@ mod tests {
         assert!(preview.follow_end());
         preview.go_to_line(0);
         assert!(!preview.following());
+    }
+
+    #[test]
+    fn keeps_the_logical_anchor_across_width_rounding_and_height_clamping() {
+        let paragraph = (0..98).map(|i| format!("w{i:04}")).collect::<Vec<_>>().join(" ");
+        let mut preview = Preview::new(&lines(&["# Lead", &paragraph]));
+        let mut narrow = Screen::sized(43, 8);
+        let mut wide = Screen::sized(49, 8);
+        let mut tall = Screen::sized(43, 13);
+        preview.draw(&mut narrow, 6);
+        assert!(preview.scroll(6));
+        for _ in 0..3 {
+            narrow.clear();
+            preview.draw(&mut narrow, 6);
+            assert!(narrow.text()[1].starts_with("w0035"));
+            wide.clear();
+            preview.draw(&mut wide, 6);
+            assert!(wide.text()[1].starts_with("w0032") && wide.text()[1].contains("w0035"));
+            tall.clear();
+            preview.draw(&mut tall, 11);
+            assert!(tall.text()[1].starts_with("w0021"));
+        }
+        // Even a scroll that can't move at the temporary boundary chooses the visible position.
+        assert!(!preview.scroll(isize::MAX));
+        narrow.clear();
+        preview.draw(&mut narrow, 6);
+        assert!(narrow.text()[1].starts_with("w0021"));
+    }
+
+    #[test]
+    fn consecutive_replacements_keep_the_retained_byte_in_bounds() {
+        let mut text = ["abcdefghijklmnopqrstuvwxyz0123456789", "# Tail A", "# Tail B", "# Tail C"];
+        let mut preview = Preview::new(&lines(&text));
+        let mut screen = Screen::sized(8, 3);
+        preview.draw(&mut screen, 2);
+        assert!(preview.scroll(2));
+        screen.clear();
+        preview.draw(&mut screen, 2);
+        assert!(screen.text()[1].starts_with("opqrstu"));
+
+        let mut narrow = Screen::sized(3, 3);
+        for (edited, expected) in [("東西南北終", "終"), ("海鳥", "鳥"), ("unrelated text", "re")] {
+            text[0] = edited;
+            preview.replace(&lines(&text));
+            narrow.clear();
+            preview.draw(&mut narrow, 2);
+            assert!(narrow.text()[1].starts_with(expected), "{edited}: {:?}", narrow.text());
+        }
     }
 
     #[test]

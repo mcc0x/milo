@@ -132,7 +132,8 @@ fn translate_offset(old: &str, new: &str, offset: usize) -> usize {
             return at;
         }
     }
-    offset
+    // The fallback is reused as an input byte offset on the next save.
+    new.floor_char_boundary(offset.min(new.len().saturating_sub(1)))
 }
 
 #[derive(Clone, Copy)]
