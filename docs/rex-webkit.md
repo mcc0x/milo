@@ -1,14 +1,16 @@
-# Local WebKit preview (experimental, macOS)
+# WebKit browser pane (experimental, macOS)
 
 **Human-test build: placement is approximate.** Use one visible, local Rex window, outside full screen and wholly on one display. Leave Accessibility, Screen Recording and Rex Remote Control off. Placement and tab switching in the Mac client still need visual acceptance before merge.
 
-Start your dev server first. In its **local Rex tab**, run:
+For local development, start your server and run this in its **local Rex tab**:
 
 ```sh
 milo preview http://localhost:3000
 ```
 
 Rex owns the terminal anchor, divider and layer. A small Milo helper owns a borderless AppKit panel containing a real `WKWebView`. The page is not rendered into a bitmap, embedded in the settings dashboard or opened in the default browser. The command never searches for servers, picks a port, changes Rex settings or navigates an existing browser tab. Linux, SSH and remote sessions are not supported.
+
+You can also start at an HTTP(S) site, for example `milo preview https://example.org`. The public command accepts neither credentials nor a query or fragment in the launch URL. Enter addresses with queries or fragments in the native address bar. Credentials in URLs are not accepted there either. Use HTTPS for anything sensitive.
 
 ### Launching from Rex for Mac
 
@@ -38,7 +40,7 @@ To check from that same working shell, the following read-only commands print on
 
 On Rex `0.1.0-preview.21`, a disposable server with a Mac-identifying Unix app peer attached left the working block from **`rex window new` unowned**. Creating the same shell through `session.new_window` on the attached app connection assigned it to that peer without an explicit claim. From inside those two PTYs, Milo’s production identification code refused the first and returned the exact block, window and app peer for the second. This checks the server contract, not a GUI keystroke. If a fresh Mac-created terminal still refuses, report the Rex version, owner classification and Milo error; do not force ownership or change privacy settings to bypass the check.
 
-The preview anchor is separate from its working shell. In a disposable server, the CLI-created split remained unowned after publication until the app peer claimed it. Milo never claims it for the app. At a one-time check after 28 seconds, the observer reports an unclaimed tile and stops **if it can still verify that tile in its original tab**. A detached or unverifiable tile need not produce that diagnostic. A waiting notice or refusal is not a placement pass.
+The preview anchor is a direct terminal command, not a login shell. Milo sets both `shell="none"` and `login=false` on the Rex split; disabling the shell alone does not suppress macOS’s login banner. The new terminal stays blank while Milo verifies the block and starts the helper. Startup errors go to the shell that ran `milo preview`, not the tile. Opening a tile does not authorize showing the page. The app must still claim the published block; if it is unclaimed and verifiably in its original tab at the observer’s 28-second check, Milo closes the tile silently.
 
 ## Placement
 
@@ -52,6 +54,12 @@ The four placements are tiled splits in the same tab. A saved `preview_placement
 
 Click **Return to terminal** or press **Command-Shift-Return** while editing the page to return to the working terminal. **Command-W** in the focused preview closes it. The helper hides when Rex is not the frontmost application.
 
+**Browsing:** Click the address or press **Command-L**, type the destination, then press **Return**. Links, Back, Forward and Reload stay in this pane. The address shows the current page, not just the launch origin. The address bar belongs to Milo, not to the page; page content cannot edit the field. There is no search provider, default-browser handoff or persistent browsing profile.
+
+New-window links, pop-ups, downloads and external application schemes do not open another app. To visit a new-window link, enter its destination in the address bar. Milo does not replay a form submission across a browser partition as a GET or copy its body to another site. Navigation keeps WebKit’s normal certificate checks.
+
+For a redirect that leaves the dev origin, Milo uses WebKit’s navigation identity when available (macOS 27); an older WebKit cannot attribute every redirect to your action. If Milo refuses that transition, enter the intended HTTP(S) destination in the address bar. General browsing uses a separate store and never replays a cross-site form whose body WebKit does not provide.
+
 ## Window ownership and permissions
 
 Milo does not patch Rex or install a plugin. On macOS the Cargo build compiles a separate system-framework helper, embeds it in `milo` and installs that exact helper in the private macOS user cache on demand. The terminal CLI does not link AppKit or WebKit. No separate package, JavaScript runtime or browser extension is required.
@@ -60,7 +68,7 @@ Before splitting, Milo matches the terminal owner to the local Rex app PID and p
 
 Pinning identifies a window; it does not authorize showing a page. A foreign surface over Rex’s titlebar or sibling terminal does not prevent the split. After Rex publishes the intended tile, Milo checks the projected tile against the window stack. If the tile starts covered, its anchor waits before showing WebKit. If a loaded page becomes covered, Milo hides it without discarding its URL or form. In either case it rechecks the frame and stacking before showing the page automatically. A second visible normal Rex window is still ambiguous; Milo never chooses between them by stacking order.
 
-The Rex observer follows the published tile in the original session and tab. It sends normalized bounds when the divider moves. The helper maps those fractions into the pinned window using Rex’s [appearance preferences](https://www.superlogical.com/rex/docs/reference/mac-settings): sidebar side and width, tab bar location, toolbar behavior, pane headers, density and terminal padding. It leaves room for the sidebar whether collapsed or expanded. Header, gap and toolbar dimensions are estimates. The toolbar says **Approximate**. Unconfirmed ownership, an inactive tab, zoom, a higher visible Rex layer or an unsupported window configuration suppresses the overlay.
+The Rex observer follows the published tile in the original session and tab. The helper maps normalized bounds into the pinned window using Rex’s [appearance preferences](https://www.superlogical.com/rex/docs/reference/mac-settings): sidebar side and width, tab bar location, toolbar behavior, pane headers and density. The browser fills the guarded pane body, including space inside the terminal’s text padding; the divider, surrounding chrome and uncertain sidebar area are reserved for Rex. Header, gap and toolbar dimensions are estimates, not measurements of the Mac window. Unconfirmed ownership, an inactive tab, zoom, a higher visible Rex layer or an unsupported window configuration suppresses the overlay.
 
 Milo checks Rex ownership once a second while observing. A silent observer cannot keep a visible panel authorized indefinitely: its last authorization expires after three seconds. A confirmed loss of the pinned Quartz window ends the helper; temporary occlusion, an offscreen window, or unavailable window metadata does not transfer the pin.
 
@@ -78,9 +86,11 @@ Use **Select** in the preview and click the element. Review the structural path 
 
 Resizing cancels an outstanding pick or copy confirmation. If the tile cannot fit distinct review and copy controls, enlarge it to enable selection.
 
-Milo’s picker is first-party code under this repository’s MIT license. Nothing is downloaded at runtime. It uses WebKit’s isolated content world in the explicitly opened loopback origin's main frame. The preview uses a nonpersistent WebKit data store, restricts navigation to the initial origin and does not open external windows. This is for your own dev server, **not a network sandbox for hostile applications**.
+Milo’s picker is first-party MIT code. There is no downloaded picker script. Selection requires an explicit **Select** on the main HTML document of the exact loopback origin you launched. Sandboxed documents, frames and external pages do not receive picker code or a native message bridge. Navigating away cancels a pick; going Back never restores a pending Copy.
 
-Serve the page, assets and hot-reload WebSocket from the same origin (scheme, host and port). If a framework serves its assets from a second port, proxy them through the dev server; Milo will not discover or allowlist that port automatically.
+Local development and general browsing have separate in-memory WebKit data stores. A link from a general page back to the dev address stays in general browsing: it does not acquire local cookies or enable Select. Use the native address bar or Back to reopen the explicitly trusted dev page. Starting on an external site never enables the picker, even if you later visit localhost.
+
+Serve local assets and hot-reload WebSockets from the dev origin (scheme, host and port); Milo does not discover or allowlist a second port. General browsing can make network requests to the sites you visit. Neither the picker boundary nor the local resource rules are a network sandbox for hostile applications.
 
 ## What has been verified
 
@@ -93,6 +103,26 @@ The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b
 * In one four-session run, a separate nonactivating AppKit window covered three parts of a borderless host fixture: the sibling, the modeled titlebar region and the intended right tile. Preflight returned the same host window ID in all three positions. The split started with the tile covered: no panel was ordered and the input gate refused interaction. Moving the cover to the sibling revealed the page; overlap in the modeled titlebar region left it visible. Covering the loaded tile again and moving the cover away restored the same view, URL, history and draft before the divider and idle checks. Occlusion is sampled, not a synchronous notification of every window movement.
 * This test used real nonactivating AppKit windows, Quartz order and a loopback `WKWebView`. It modeled the Mac viewer identity, foreground, chrome and parked pointer and filtered the stack to its own windows. It did **not** move a physical pointer, drive the Rex.app divider, or capture a user's desktop.
 * Fixture timings are not physical divider or keyboard latency. Native focus return, palettes, Spaces and mixed-scale display movement still need manual verification.
+* A fresh general view opened `https://example.org/` with WebKit’s default TLS checks and zero installed user scripts. A separate fixture refused a self-signed certificate without replacing the displayed page. Both checks used ephemeral data stores, not an installed browser profile.
+
+### Browser chrome and opaque pane: cost versus the accepted resize build
+
+Matched four-session fixtures on the same Mac, `334f136` → `15337e5`, same release driver and sampling. Each column is one run per revision. Production browser and placement code; isolated Rex viewer and AppKit windows, not physical scanout.
+
+| Measurement | Light page, accepted → browser | 420 cards, accepted → browser |
+|---|---:|---:|
+| Split → native visible and first DOM layout | 359 → 428 ms | 352 → 423 ms |
+| Request → verified visible frame, p50 / p95 (24) | 56 / 61 → 59 / 67 ms | 56 / 67 → 57 / 71 ms |
+| Native interarrival jitter p95 (23) | 13 → 12 ms | 15 → 14 ms |
+| 24-request burst: hidden time / final request to visible | 574 / 191 → 570 / 189 ms | 567 / 191 → 569 / 190 ms |
+| Sibling CLI → PTY, p50 / p95 (8 burst lines) | 24 / 24 → 25 / 26 ms | 23 / 25 → 23 / 38 ms |
+| Helper CPU / interrupt wakes over six idle seconds | 11 ms / 132 → 9 ms / 131 | 14 ms / 139 → 19 ms / 130 |
+
+Startup to first DOM layout was about 70 ms later in this pair. Native resize p95 was 4–6 ms later. Both builds exposed only the last burst width; neither is continuous 60 fps. The accepted build delivered one matching CSS notification during each passive burst observation; the browser build delivered none in that interval, but an independent DOM read confirmed its final width. CSS delivery p95 across individual changes was 945–966 ms; it does not measure physical paint.
+
+The general-browsing view is created on first use, not on every launch or resize. In a separate static-page AppKit process, moving from one live view/store to two raised resident memory from 103.73 to 105.19 MiB. This does **not** include WebKit’s separate content and network processes and is not a total browser-memory estimate.
+
+Native fixture images: [before](img/preview-browser-before.webp), [browser](img/preview-browser-after.webp), [narrow](img/preview-browser-narrow.webp). These show only the fixture’s own panel and transparent test page, not Rex.app. In the four-session overlay scenario the form, URL and view survived cover/uncover and drag; the panel stayed visible during 14.36 s of sibling idle (32 ms helper CPU, 104.3 MiB at both endpoints). A physical check for terminal/chrome edges, keyboard return and tab switches on this browser build is still required.
 
 ### Divider performance: accepted baseline vs candidate
 
@@ -185,7 +215,9 @@ python3 -m http.server 0 --bind 127.0.0.1 --directory "$site"
 
 Use the printed loopback URL in a fresh **Mac-created Rex terminal**: `/absolute/path/to/milo preview http://127.0.0.1:PORT/ --placement right`. Use `Ctrl-C` in the server shell when finished.
 
-1. Keep the other sessions attached. Navigate to **Second page**, enter a phrase and increment the counter. Click the sibling shell, park the pointer there, type a command and wait at least 15 seconds. The page should stay visible without stealing the keyboard.
+1. Keep the other sessions attached. Click **Navigate** to open the second page, enter a phrase and increment the counter. Click the sibling shell, park the pointer there, type a command and wait at least 15 seconds. The page should stay visible without stealing the keyboard.
 2. Starting on the Rex divider **outside the old page**, drag in both directions. Try a long drag and release on the divider. The page should follow without a click or command, retain the phrase and counter, and report its new viewport width. Compare its green edges with the Rex header, sidebar and divider.
+   During startup, drag and suspension the anchor should be blank, without a login prompt or status text. The transparent fixture should have a solid backing when shown, up to the guarded pane-body edges.
 3. Switch to a different **tab within the original session** and back. The page should hide on that tab and return with its state intact. Try covering the tile, zooming another block and moving the pinned window. Check for stale pixels and an overlay intercepting input outside the tile. Never use a sensitive page or an existing project to test these boundaries.
+   Press **Command-L**, edit and open an address. Follow the fixture’s link to its other loopback origin; the displayed address should change and Select should be unavailable. Check Back, Forward and Reload. A link back from the other origin should not re-enable Select. Use the address bar to reopen the dev address and start a fresh pick.
 4. Use **Return to terminal** after typing in the page, type in the shell, and try the picker’s Cancel and Copy separately. Close the anchor and confirm the helper and observer exit. Repeat with the other placements and chrome variants; test different displays and Spaces separately. Physical right-divider resizing and tab switching in Rex.app remain merge gates.

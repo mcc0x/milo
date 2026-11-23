@@ -557,6 +557,9 @@ fn run_fixture(benchmark: Option<perf::Config>) {
         let revision = resize_pane(&mut viewer, right).revision;
         assert!(revision > last_revision, "Rex did not apply a fresh divider revision");
         last_revision = revision;
+        if updates == 1 {
+            assert!(tile.capture(&block).trim().is_empty(), "divider movement exposed text in the backing PTY");
+        }
         if updates == 3 && !checked_while_held {
             // The responder pauses after the rapid first three updates,
             // with its local drag still held. Require the browser to catch

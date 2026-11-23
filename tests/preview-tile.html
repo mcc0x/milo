@@ -20,8 +20,19 @@
   <input id="typing" autocomplete="off" placeholder="Type a few words">
   <output id="dimensions" aria-label="Page dimensions"></output>
   <p><button type="button" id="count">Clicks: 0</button> · <a href="?page=2">Navigate</a></p>
+  <p><a id="other" hidden>Open the same fixture on another origin</a></p>
 </main>
 <script>
+  // Two loopback names reach this disposable server but are different WebKit origins.
+  if (['127.0.0.1', 'localhost'].includes(location.hostname)) {
+    const other = new URL(location.href);
+    other.hostname = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+    other.pathname = '/';
+    other.search = '';
+    const link = document.getElementById('other');
+    link.href = other.href;
+    link.hidden = false;
+  }
   if (new URL(location.href).searchParams.has('page')) document.querySelector('h1').textContent = 'Second page';
   let clicks = 0;
   document.querySelector('#count').onclick = event => { event.currentTarget.textContent = `Clicks: ${++clicks}`; };
