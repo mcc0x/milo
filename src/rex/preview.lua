@@ -94,8 +94,12 @@ local function local_owner(owner)
     end
   end
   if not pid then return end
-  local valid = true
+  local valid, shared = true, false
   for _, client in ipairs(clients) do
+    if client.client_id ~= owner and client.connection_state ~= "lost" then
+      local here = attachments(client.session_ids)
+      if here ~= false then shared = true end -- unknown scope cannot authorize passive resume
+    end
     if client.client_id ~= owner and exact(client.client_id, "client:") and mac_pid(client) == pid
       and client.session_ids ~= nil then
       local here, other = attachments(client.session_ids)
@@ -103,7 +107,7 @@ local function local_owner(owner)
       elseif other then elsewhere = true end
     end
   end
-  return pid, elsewhere, valid
+  return pid, elsewhere, valid, shared
 end
 
 local function published_anchor(block)
@@ -429,7 +433,16 @@ end
 local function leaf_rect(node)
   if type(node) ~= "table" then return end
   local split = node.split
-  if type(split) == "table" then return leaf_rect(split.before) or leaf_rect(split.after) end
+  if type(split) == "table" then
+    if is_leaf(split.before, a.block) and is_leaf(split.after, a.main) then
+      return split.before.rect, split.direction == "horizontal" and "right" or "bottom"
+    elseif is_leaf(split.before, a.main) and is_leaf(split.after, a.block) then
+      return split.after.rect, split.direction == "horizontal" and "left" or "top"
+    end
+    local rect, divider = leaf_rect(split.before)
+    if rect then return rect, divider end
+    return leaf_rect(split.after)
+  end
   if split == nil and node.block_id == a.block then return node.rect end
 end
 
@@ -457,6 +470,7 @@ local host, cli_pid = local_host()
 local last, verified, published, claimed, last_revision, owner_allowed
 local last_poll
 local confirm = a.confirm == true
+local last_pair
 local announced_confirm = confirm
 local function write(record)
   io.stdout:write(record, "\n")
@@ -505,10 +519,15 @@ local function track_anchor(block)
   return true
 end
 
+local shared_input = false
 local function owner_permitted()
-  local pid, multiple_sessions, valid = local_owner(a.owner)
+  local pid, multiple_sessions, valid, shared = local_owner(a.owner)
   if pid ~= a.owner_pid then return false end
   if multiple_sessions then confirm = true end
+  if confirm and shared and not shared_input then
+    shared_input = true
+    write("shared-input")
+  end
   return valid
 end
 
@@ -549,7 +568,15 @@ local function refresh(owner_checked)
   if not published_anchor(block) or not owner_allowed then return emit() end
   if not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner then return emit() end
   if confirm and window.focused_block_id ~= a.block then return emit() end
-  emit(tile_state(confirm and "guard" or "show", a.owner_pid, leaf_rect(layer.layout)))
+  local rect, pair = leaf_rect(layer.layout)
+  local state = tile_state(confirm and "guard" or "show", a.owner_pid, rect)
+  if confirm and state then
+    -- Only a ratio change of the same working-terminal/anchor pair can
+    -- retain a paused drag. Reparenting or swapping panes revokes it.
+    if last and last:match("^guard ") and (pair ~= last_pair or (not pair and state ~= last)) then emit() end
+    last_pair = pair
+  end
+  emit(state)
 end
 
 local function poll_owner()

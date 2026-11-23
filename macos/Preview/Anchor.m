@@ -1,6 +1,7 @@
 #import "Anchor.h"
 #import "Browser.h"
 #import "Chrome.h"
+#import "Divider.h"
 
 #import <AppKit/AppKit.h>
 #import <dispatch/dispatch.h>
@@ -459,6 +460,7 @@ static void WritePeekHint(int tty) {
         "This preview needs confirmation in this tile. Click the tile and wait for ready to confirm.\n"
         "Keep the pointer inside, then type show and press Return for up to 12 seconds of preview.\n"
         "Before switching sessions, move the pointer out and wait until the page disappears.\n"
+        "To resize, drag the Rex divider and release. Return inside this tile; after 12 seconds click or press Return.\n"
         "Input queued before readiness or across a confirmation reset is discarded for safety.\n";
     WriteAll(tty, hint, sizeof(hint) - 1);
 }
@@ -514,6 +516,8 @@ static PeekInput ReadPeekInput(GuardedPeek *peek, int tty) {
     if (!memcmp(line, "hide\n", 5)) return PeekHide;
     return !memcmp(line, "show\n", 5) ? PeekShow : PeekIgnored;
 }
+
+#import "ResizeInput.h"
 
 static int PrepareFocusInput(int stateFD) {
     const char *encoded = getenv("MILO_PREVIEW_FOCUS_FD");
@@ -592,6 +596,16 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     NSTimeInterval _lastSample;
     NSTimeInterval _nextPinCheck;
     NSTimeInterval _focusDeadline;
+    DividerEdge _resizeEdge;
+    ResizeInput _resizeInput;
+    CGRect _resizeWindow;
+    NSRect _resizePointerBounds;
+    NSPoint _routePointer;
+    NSTimeInterval _localMotionAt;
+    CGDirectDisplayID _resizeDisplay;
+    BOOL _sharedInput;
+    NSTimeInterval _resizeStarted, _resizeConsentEnd;
+    BOOL _resizePressed, _resizeChanged, _resizeReleased, _routeArmed;
     NSUInteger _generation;
     PeekFailure _geometryFailure;
     const char *_stackPhase, *_stackReason;
@@ -607,6 +621,8 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
 - (void)tick;
 - (void)readState;
 - (BOOL)readPeek;
+- (BOOL)pauseForDivider:(DividerEdge)edge;
+- (void)serviceDivider;
 @end
 
 @implementation MiloPreviewAnchor
@@ -665,8 +681,23 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     return LeaseAllowsSampling(&_lease, LeaseNow(), _focusDeadline) ? PeekOK : PeekLease;
 }
 
+- (BOOL)endDivider {
+    _resizeEdge = DividerNone;
+    _resizePressed = _resizeChanged = _resizeReleased = NO;
+    if (!_routeArmed) return YES;
+    _routeArmed = NO;
+    return EndResizeInput(&_resizeInput, _tty);
+}
+
 - (void)invalidateFor:(PeekFailure)failure resetTTY:(BOOL)resetTTY {
     PeekPhase previous = _peek.phase;
+    BOOL paused = _resizeEdge != DividerNone;
+    if (paused && ![self endDivider]) {
+        [self finish:"could not restore the preview terminal after resize"];
+        return;
+    }
+    if (paused && !_finished)
+        WriteDiagnostic(_tty, "divider pause ended; click this tile and type show for a new preview");
     if (previous == PeekIdle && resetTTY && _peek.ttyReady && failure != PeekOK && failure != PeekDismissed)
         _peek.pendingIdleReset = YES;
     EndPeek(&_peek, resetTTY);
@@ -731,6 +762,116 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     return NSPointInRect(NSEvent.mouseLocation, _candidateFrame);
 }
 
+- (BOOL)pauseForDivider:(DividerEdge)edge {
+    NSTimeInterval now = LeaseNow();
+    if (!edge || !_lease.guarded || _peek.phase != PeekVisible || !_panel.placementProven ||
+        !_panel.onActiveSpace || !_candidate.windowID || !PeekActive(&_peek, now) ||
+        [self eligibilityFailure] != PeekOK || !ForegroundCanonicalTTY(_tty) ||
+        !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return NO;
+    _resizeEdge = edge;
+    _resizeWindow = _candidate.window;
+    _resizePointerBounds = NSMakeRect(_resizeWindow.origin.x,
+        CGDisplayBounds(CGMainDisplayID()).size.height - CGRectGetMaxY(_resizeWindow),
+        _resizeWindow.size.width, _resizeWindow.size.height);
+    if (!NSPointInRect(NSEvent.mouseLocation, _resizePointerBounds)) {
+        _resizeEdge = DividerNone;
+        return NO;
+    }
+    _resizeDisplay = _candidateDisplay;
+    _resizeStarted = now;
+    _resizeConsentEnd = _peek.consentEnd;
+    _resizePressed = (NSEvent.pressedMouseButtons & 1) != 0;
+    EndPeek(&_peek, YES); // Order out before anything can receive a divider drag.
+    [_peekTimer invalidate];
+    _peekTimer = nil;
+    ++_generation;
+    [self hidePanel]; // Keep the existing WKWebView, page history and form state.
+    WriteDiagnostic(_tty, "preview paused for the Rex divider; drag, release, then return inside this tile");
+    return YES;
+}
+
+- (BOOL)pauseAtPointer {
+    return [self pauseForDivider:DividerApproach(NSEvent.mouseLocation, _candidateFrame, _lease.tile)];
+}
+
+- (void)serviceDivider {
+    NSTimeInterval now = LeaseNow();
+    BOOL down = (NSEvent.pressedMouseButtons & 1) != 0;
+    if ([self eligibilityFailure] != PeekOK || tcgetpgrp(_tty) != getpgrp() ||
+        !NSPointInRect(NSEvent.mouseLocation, _resizePointerBounds) ||
+        now - _resizeStarted > 45 || ((!_resizePressed || (_resizeReleased && !_resizeChanged)) && now - _resizeStarted > 3)) {
+        [self invalidateFor:PeekFocus resetTTY:YES];
+        return;
+    }
+    if (!_resizeReleased) {
+        if (down) _resizePressed = YES;
+        else if (_resizePressed) _resizeReleased = YES;
+    }
+    if (!_routeArmed) {
+        // Canonical commands remain owned by this tile until we explicitly
+        // scope mouse reporting after a real, released, same-edge resize.
+        PeekInput input = ReadPeekInput(&_peek, _tty);
+        if (input == PeekBadTTY || input == PeekHide || input == PeekShow) {
+            [self invalidateFor:PeekDismissed resetTTY:YES];
+            return;
+        }
+        if (!_resizeChanged || !_resizeReleased || down || !_stableGeometry ||
+            !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return;
+        _routeArmed = YES; // Restore even if terminal mode negotiation fails partway.
+        if (!BeginResizeInput(&_resizeInput, _tty)) {
+            [self invalidateFor:PeekTTY resetTTY:YES];
+            return;
+        }
+        return;
+    }
+    // A server resize, Quartz position or heartbeat cannot tell us which
+    // session is painted. Require fresh input *routed to the anchor PTY*.
+    BOOL ready = ResizeInputReady(&_resizeInput);
+    ResizeInputResult receipt = ReadResizeInput(&_resizeInput, _tty);
+    if (!ready && ResizeInputReady(&_resizeInput)) {
+        _routePointer = NSEvent.mouseLocation;
+        _localMotionAt = 0;
+        const char *hint = _sharedInput ?
+            "divider released; another viewer is attached. Hold the Mac mouse button inside this tile and press Return to resume" :
+            _resizeInput.mode == ResizeCanonical ?
+            "divider released; move inside the tile and press Return to resume" :
+            "divider released; move inside this tile, or click or press Return if the 12-second peek expired";
+        WriteDiagnostic(_tty, hint);
+    }
+    if (receipt == ResizeInputFailed || receipt == ResizeInputDismiss) {
+        [self invalidateFor:PeekDismissed resetTTY:YES];
+        return;
+    }
+    NSPoint point = NSEvent.mouseLocation;
+    if (ready && !NSEqualPoints(_routePointer, point)) {
+        _routePointer = point;
+        _localMotionAt = now;
+    }
+    if (receipt == ResizeInputWaiting || ![self pointerInsideTile] || !_stableGeometry ||
+        !SampleFresh(NSProcessInfo.processInfo.systemUptime, _lastSample)) return;
+    BOOL explicit = receipt == ResizeInputExplicit;
+    if (_sharedInput && (!explicit || !down)) return;
+    if (!explicit && (_sharedInput || down || now >= _resizeConsentEnd || !SampleFresh(now, _localMotionAt))) return;
+    // Recheck for queued revocation *after* consuming the routed receipt.
+    NSUInteger generation = _generation;
+    [self readState];
+    if (_finished || _resizeEdge == DividerNone || generation != _generation || [self eligibilityFailure] != PeekOK) return;
+    if (![self endDivider] || !ForegroundCanonicalTTY(_tty)) {
+        [self finish:"could not restore the preview terminal after resize"];
+        return;
+    }
+    _peek.ttyReady = YES;
+    StartPeek(&_peek, now);
+    if (!explicit) {
+        _peek.consentEnd = _resizeConsentEnd;
+        _peek.deadline = MIN(_peek.deadline, _peek.consentEnd);
+    }
+    ++_generation;
+    _stableGeometry = NO;
+    _lastSample = 0;
+    [self schedulePeekExpiry];
+}
+
 - (BOOL)canReveal {
     return [self canSample] && (!_lease.guarded || ForegroundCanonicalTTY(_tty)) &&
         ConsentAllowsReveal(&_lease, &_peek, LeaseNow(), _lease.guarded && [self pointerInsideTile]);
@@ -769,6 +910,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     // sample can run. Only the foreground canonical controlling TTY is read.
     [self readState];
     if (_finished) return NO;
+    if (_resizeEdge != DividerNone) { [self serviceDivider]; return NO; }
     PeekFailure failure = [self eligibilityFailure];
     if (failure != PeekOK) {
         if (_peek.ttyReady || _peek.phase != PeekIdle) [self invalidateFor:failure resetTTY:YES];
@@ -790,7 +932,10 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     }
     if (_peek.phase != PeekIdle) {
         if (!PeekActive(&_peek, LeaseNow())) { [self expirePeek]; return NO; }
-        if (![self pointerInsideTile]) { [self invalidateFor:PeekPointer resetTTY:NO]; return NO; }
+        if (![self pointerInsideTile]) {
+            if (![self pauseAtPointer]) [self invalidateFor:PeekPointer resetTTY:NO];
+            return NO;
+        }
     }
     if (!_peek.ttyReady) {
         if (!ArmPeekTTY(&_peek, _tty)) [self finishTTYFailure];
@@ -842,6 +987,14 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
 }
 
 - (void)handleLine:(size_t)length {
+    if (length == 12 && !memcmp(_line, "shared-input", 12)) {
+        if (!_sharedInput) {
+            _sharedInput = YES;
+            if (_peek.phase != PeekIdle) [self invalidateFor:PeekFocus resetTTY:YES];
+            else ++_generation; // Discard any passive receipt being authorized.
+        }
+        return;
+    }
     VisibilityLease previous = _lease;
     NSTimeInterval now = LeaseNow();
     VisibilityUpdate update = UpdateVisibility(&_lease, now, _rex.processIdentifier, _line, length);
@@ -852,8 +1005,19 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
                 [self invalidateFor:PeekFocus resetTTY:YES];
             else if (previous.checked && !LeaseFresh(&previous, now))
                 [self invalidateFor:PeekLease resetTTY:YES];
-            else
-                [self invalidateFor:PeekStale resetTTY:NO];
+            else {
+                DividerEdge edge = ResizedDivider(previous.tile, _lease.tile);
+                BOOL down = (NSEvent.pressedMouseButtons & 1) != 0;
+                if (!_resizeEdge && down && edge && edge == DividerApproach(NSEvent.mouseLocation, _candidateFrame, previous.tile))
+                    [self pauseForDivider:edge];
+                if (edge && edge == _resizeEdge && !_routeArmed && (down || _resizePressed)) {
+                    _resizePressed = _resizeChanged = YES;
+                    ++_generation;
+                    [self clearGeometry:PeekStale];
+                } else {
+                    [self invalidateFor:PeekStale resetTTY:NO];
+                }
+            }
             break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
         case VisibilityWrongOwner: [self finish:"the Rex client changed; reopen the preview in the current Rex client"]; break;
@@ -908,6 +1072,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
 }
 
 - (void)rejectProof:(PeekFailure)failure {
+    if (failure == PeekPointer && [self pauseAtPointer]) return;
     if (failure == PeekExpired) {
         [self expirePeek];
         return;
@@ -958,9 +1123,14 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
         [self rejectProof:failure];
         return;
     }
+    if (_resizeEdge && (_resizeDisplay != display || !CGRectEqualToRect(_resizeWindow, geometry.window))) {
+        [self rejectProof:PeekPlacement];
+        return;
+    }
     if (!SameGeometry(_candidate, geometry) || display != _candidateDisplay ||
         !NSEqualRects(frame, _candidateFrame)) {
-        [self invalidateFor:PeekStale resetTTY:NO];
+        if (_resizeEdge && !_candidate.windowID) [self clearGeometry:PeekStale];
+        else [self invalidateFor:PeekStale resetTTY:NO];
         _candidate = geometry;
         _candidateFrame = frame;
         _candidateDisplay = display;
@@ -1096,7 +1266,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
         [self rejectProof:eligibility];
     else if (_peek.phase != PeekIdle && !PeekActive(&_peek, LeaseNow()))
         [self expirePeek];
-    else if (_peek.phase != PeekIdle && ![self pointerInsideTile])
+    else if (_peek.phase != PeekIdle && ![self pointerInsideTile] && ![self pauseAtPointer])
         [self rejectProof:PeekPointer];
     else if (_panel.visible && !_panel.onActiveSpace)
         [self invalidateFor:[self stackFailureAt:"post-order" reason:"helper panel is not on the active Space"] resetTTY:YES];
@@ -1146,7 +1316,8 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
 
 - (void)windowDidResignKey:(NSNotification *)notification {
     (void)notification;
-    if (_lease.guarded && _peek.phase == PeekVisible) [self invalidateFor:PeekFocus resetTTY:YES];
+    if (_lease.guarded && _peek.phase == PeekVisible && ![self pauseAtPointer])
+        [self invalidateFor:PeekFocus resetTTY:YES];
 }
 
 - (void)observe:(NSNotificationName)name center:(NSNotificationCenter *)center {
@@ -1223,6 +1394,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
         MiloPreviewAnchor *anchor = weakSelf;
         if (!anchor || !anchor->_panel || event.window != anchor->_panel) return event;
         if (![anchor acceptsPanelInput]) {
+            if (anchor->_resizeEdge) return nil; // Concealed; Rex owns divider input.
             PeekFailure failure = [anchor proofFailureAt:anchor->_lastSample];
             [anchor rejectProof:failure == PeekOK ?
                 [anchor stackFailureAt:"input" reason:"panel is no longer eligible for input"] : failure];
@@ -1245,6 +1417,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     [self tick];
     if (!_finished) [NSApp run];
     [self finish:NULL];
+    if (!EndResizeInput(&_resizeInput, _tty)) _status = 1;
 
     [_timer invalidate];
     if (_keyMonitor) [NSEvent removeMonitor:_keyMonitor];

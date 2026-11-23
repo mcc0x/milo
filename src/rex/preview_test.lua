@@ -545,9 +545,15 @@ malformed_peer.window.focused_block_id = preview
 local watch_malformed = call(malformed_peer)
 assert(watch_malformed() == "hide\n")
 malformed_peer.gui.session_ids = four_sessions
-assert(watch_malformed("attachment_poll") == "hide\nguard-hide\n")
+assert(watch_malformed("attachment_poll") == "hide\nshared-input\nguard-hide\n")
 malformed_peer.gui.session_ids, malformed_peer.second_viewer = { session }, nil
-assert(watch_malformed("attachment_poll") == "hide\nguard-hide\n" .. guard .. "\n")
+assert(watch_malformed("attachment_poll") == "hide\nshared-input\nguard-hide\n" .. guard .. "\n")
+
+local shared = fixture("watch", preview)
+shared.gui.session_ids, shared.window.focused_block_id = four_sessions, preview
+shared.second_viewer = second_viewer(gui + 1, { session })
+local watch_shared = call(shared)
+assert(watch_shared() == "hide\nshared-input\n" .. guard .. "\n")
 
 local ready = fixture("watch", preview)
 ready.gui.session_ids, ready.window.focused_block_id = four_sessions, preview
@@ -562,6 +568,12 @@ for _, block in ipairs{ preview, main } do
   ownership = ownership .. guarded
   assert(watch_ready("block_owner_changed", { block_id = block }) == ownership)
 end
+-- Losing the original sibling is a hard boundary even if the anchor's
+-- normalized rectangle and focused block haven't changed.
+ready.branch.before = { block_id = other, rect = ready.main_leaf.rect }
+ownership = ownership .. guarded
+assert(watch_ready("session_view_changed") == ownership)
+assert(watch_ready("attachment_poll") == ownership .. "renew\n")
 
 -- All three startup paths retain the latch if the viewer is down to one
 -- attachment before the initial placement becomes eligible.
