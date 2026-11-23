@@ -1,10 +1,12 @@
 # Using the panes
 
-Run the panes in a Unix terminal with 256 colours. Outline and history start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, outline shows just the files and history says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
+Use an interactive Unix terminal for the panes: both input and output must be terminals. If output is redirected or `TERM=dumb`, use `milo doctor`, `milo COMMAND --help` or another text command instead. You do not need Rex or a particular shell.
+
+Outline and History start in the current directory unless you give them a path. Inside a Git repository they use its root, even when you start in a subfolder. In a plain folder, Outline shows just the files and History says it is not a Git project. To outline a directory named like a command, give its path explicitly: `milo ./history`.
 
 If you initialize Git in that folder, open panes pick up the repository and its saved worktree choices without restarting. Switching branches does not erase remembered folder folds or mark the newly visible timeline as newly arrived.
 
-In Follow mode, Outline and History use the local shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin.
+In a managed Rex pane, Follow mode lets Outline and History use the adjacent shell's working directory, even with a coding agent in the foreground and no directory report from the prompt. If the directory is missing, the pane says **Waiting for shell**; if it cannot open the reported folder, it says **Shell folder unavailable**. It keeps showing the last project and names it when space permits. Neither message changes your project preference to Pin. A standalone pane stays in the project where you opened it.
 If Git temporarily cannot identify the shell's project, the pane keeps the last project and retries without another `cd`.
 If shell tracking itself stops, the notice changes to **Shell tracking unavailable**. Reopen the pane to reconnect.
 
@@ -295,10 +297,12 @@ Open a working file from Outline with `Enter` or a double-click. The preview is 
 
 | Working file | macOS | Linux |
 | --- | --- | --- |
-| PNG | Kitty bitmap where available; colored terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
+| PNG | Kitty bitmap where available; terminal cells otherwise | Kitty bitmap only; PNG must fit the 1,600-pixel side limit without resizing |
 | JPEG, static WebP | Same as PNG, using the system image decoder | No conversion |
 | MP4 | FFmpeg and FFprobe 8.0+ with `fd:` and `scale=…:reset_sar=1`, installed together in `/opt/homebrew/bin` or `/usr/local/bin` | Same tool capabilities, installed together in `/usr/bin` |
 | `.md`, `.markdown` | Rendered terminal text; `m` for source or diff, `e` to edit | Same |
+
+Milo asks recognized graphics terminals whether they support Kitty images. It sends a bitmap only after a positive reply. For an unrecognized terminal that supports the protocol, try `MILO_GRAPHICS=kitty milo view FILE`; `MILO_GRAPHICS=off` disables the query. Neither setting enables passthrough in a detected tmux or screen session. With a decoded image but fewer than 256 colours, Milo uses monochrome cells instead. A shell name or a `TERM` value alone is not proof that an emulator displayed an image.
 
 **Pictures.** The image keeps its proportions and fits between the filename and the key hints. Input is limited to 64 MiB. The macOS decoder checks the format and dimensions, caps source images at 40 million pixels and 16,384 pixels per side, and has a five-second deadline. The Kitty bitmap is at most 1,600 pixels per side and 16 MiB; the cell raster is at most 512 pixels per side. Text named like a picture can still be read as text. Active documents such as SVG and PDF aren't rasterized.
 

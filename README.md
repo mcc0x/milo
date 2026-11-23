@@ -28,7 +28,7 @@ curl -fsSLo milo-install.sh https://github.com/mcc0x/milo/releases/download/v0.1
 
 The script verifies the release binary against its SHA-256 checksum and installs it to `~/.local/bin` by default. It does not need Rust or Git. If you already installed with Homebrew, run `brew upgrade mcc0x/milo/milo`. See [setup and removal](docs/setup.md) for source installation and uninstall instructions.
 
-Run `milo` inside Rex to choose your panes and save your workspace preferences.
+From a shell in your project, try `milo outline`. Press `Enter` on a file to read it, `e` to edit, `Ctrl-S` to save, and `q` while reading to go back. No Rex installation, browser, account or setup is needed. In Rex, use `milo setup` if you want the panes arranged beside your shell.
 
 ## Workspace settings
 
@@ -84,29 +84,30 @@ Read a file with added and removed lines marked, or open it as it was at a commi
 
 Press `e` to edit a working text file where you are reading it. The edit is a draft until you save with `Ctrl-S`, and a save never replaces a file that changed on disk without asking. `Ctrl-F` formats the draft with a [formatter you have installed](docs/panes.md#formatting); `Ctrl-Z` takes it back. See [editing files](docs/panes.md#editing-files).
 
-To review an agent’s edits without mixing in your own uncommitted work, have it pass its recorded patch to `milo review PATCH --float`. Milo opens a [read-only review](docs/panes.md#reviewing-an-agents-edits) in Rex. It checks that the patch still fits, not who wrote it.
+To review an agent’s edits without mixing in your own uncommitted work, have it hand you its recorded patch and run `milo review PATCH`. In Rex, `--float` opens that [read-only review](docs/panes.md#reviewing-an-agents-edits) over the current tab. Milo checks that the patch still fits, not who wrote it.
 
-## Commands
+## What works in each terminal
 
-| Command | Opens |
-| --- | --- |
-| `milo` | Milo Home: Browser settings, Terminal settings, Doctor and Uninstall |
-| `milo outline [PATH]` | File tree |
-| `milo history [PATH]` | Recent commits |
-| `milo usage` | Usage limits |
-| `milo view FILE [--commit ID \| --edit]` | File reader, or its editor with `--edit` |
-| `milo review PATCH [--from NAME] [--float]` | [Only the edits a coding agent hands over](docs/panes.md#reviewing-an-agents-edits) as a patch, in a read-only reader |
-| `milo setup` | Setup screen |
-| `milo web [--port PORT] [--no-open]` | [Local browser settings editor](docs/setup.md#browser-editor) |
-| `milo web --host HOST` | [Another Rex host’s settings](docs/setup.md#open-another-hosts-settings) through a loopback Rex forward |
-| `milo settings export GROUPS` / `import FILE` / `undo` | [Copy chosen pane settings](docs/setup.md#copy-settings-to-another-host), preview the import, and take it back |
-| `milo menubar install` / `uninstall` | Install or remove the optional menu app (menu-enabled builds only) |
-| `milo menubar indicator quota\|cpu\|memory` | Choose the menu bar reading for this profile without installing or opening the app |
-| `milo doctor` | Read-only preference and integration report |
-| `milo alerts` | [Mirror Rex alerts](docs/setup.md#mirror-rex-alerts) to a Telegram chat or Discord channel; off until you turn it on |
-| `milo presence [status]` / `enable` / `details` / `application` / `disable` | Show or change the optional [Discord presence](docs/presence.md) |
+The direct pane commands below already work in v0.1.6. **In this checkout**, bare `milo` also offers the local panes outside Rex; that picker is not in the pinned release above.
 
-`milo PATH` opens Outline at that path. On a fresh install, `milo` and `milo setup` share a short welcome guide. For unattended installs, `milo setup --skip-onboarding` dismisses it and exits without opening a TUI or applying settings. Direct pane commands never start the guide.
+| Command or feature | Ordinary terminal, no Rex | What Rex adds |
+| --- | --- | --- |
+| `milo` (Home) | Choose Outline, History, Usage or settings. No first-run guide on this path. Quit a pane to return to Home. | The existing settings and maintenance Home, with a first-run guide. |
+| `milo outline [DIR]` or `milo DIR` | Browse and search a plain folder or Git worktree; open a file in place. | Managed sidebar, floating reader tabs, optional shell-following and temporary outline peek. |
+| `milo history [DIR]` | Browse Git commits, expand a commit and read its file at that revision in place. | Managed sidebar and floating reader tabs. |
+| `milo view FILE` / `--edit` / `--commit ID` | Read in the current terminal. Edit a working text file; save explicitly. A commit is read-only. | Same direct command. |
+| `milo review PATCH [--from NAME]` | Read a handed-over patch in place. | `--float` can open the review from a non-interactive caller in a Rex pane. |
+| `milo usage` / `usage --menu-stream` | Show available local figures in a pane, or emit a stream for the menu app. No provider sign-in required. | Optional compact Usage rail. |
+| `milo setup` | Terminal settings, including icon, Git mark and usage choices. The explicit command offers a skippable first-run guide. | Try, save, repair or remove managed layouts. |
+| `milo web [--no-open]` | Local settings dashboard. `--no-open` prints a private loopback link instead of opening the browser. | `--host HOST` uses Rex to forward **another** host’s editor. |
+| `milo settings export GROUPS` / `import FILE [--apply]` / `undo` | Transfer selected settings as a file. Import previews unless you ask to apply. | Saved rail geometry can be used by a Rex layout. |
+| `milo doctor`, `--help`, `--version` | Plain output; no TTY needed. Doctor distinguishes local preferences from optional integrations. | Reports Rex host and integration health. |
+| `milo alerts`, `milo presence` | Inspect the settings without a running session. | Actual event mirroring and activity presence require Rex and explicit opt-in. |
+| `milo listen`, arrange/remember rails, title tabs | Not standalone features. Run a direct pane command instead. | Managed by the Rex integration. |
+| `milo menubar install` / `uninstall` / `indicator` | Optional on macOS with a menu-enabled build; choosing an indicator does not install the app. | Not Rex-dependent. |
+| `milo claude-status` | Status-line helper for an explicitly configured Claude Code profile, not an interactive pane. | Not Rex-dependent. |
+
+`milo setup --skip-onboarding` records a skip without opening a TUI or applying settings. Direct pane commands never run the guide. For input, display fallbacks and split sizes see [Using the panes](docs/panes.md).
 
 ## Documentation
 

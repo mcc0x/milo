@@ -4,6 +4,8 @@ Press `?` for help when the pane has room. `Esc`, `q` or `?` closes help; `Ctrl-
 
 A help page longer than the pane continues in a second column, and a third, once the pane is 57 columns wide or more, so a full-width pane usually shows it whole. In the shell, `milo COMMAND --help` or `milo --help COMMAND` explains one command in a few lines, and `milo --help` lists every command and key.
 
+In standalone Home, use `↑`/`↓` and `Enter` to choose a pane; the mouse is optional. `q` in a reader opened from Outline or History returns to the list, then `q` returns to Home. A pane started directly returns to the shell instead.
+
 ## Moving around
 
 These keys work in the outline tree, history and reader. The reader and help page scroll instead of moving a selection.
@@ -105,6 +107,8 @@ Questions take the place of the last row and wait for one of the keys they list.
 In Usage, `r` checks local data without bypassing the [oh-my-pi read interval](usage.md#where-the-figures-come-from), and `q` quits. In setup, use `1`–`4` or `Tab` for Layout, Appearance, Workflow and Health. Up / Down or `k` / `j` selects a row; `Enter` or `Space` activates it. In Layout, `a` tries the current draft and `u` undoes the trial. `s` asks **where** to save; choose the scope and confirm. `Esc` backs out of a confirmation without saving.
 
 ## Colours and marks
+
+Milo uses the palette advertised by the terminal. Set `NO_COLOR=1` to suppress text colours without losing the selection indicator. Standalone panes default to plain file symbols; saved icon choices and `MILO_ICONS=plain`, `nerd` or `off` override the default. Rex keeps its Nerd Font default.
 
 In a Git outline, **bold** means changes to commit and regular coloured names mean changes to push. Plain names have no changes marked.
 
