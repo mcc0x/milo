@@ -11,7 +11,7 @@ One Apple M5 Pro, macOS arm64, Rust 1.100.0, Apple Git 2.54.0, SQLite CLI 3.54.0
 | Show all 200,000 files after the eight-file preview, ms | 24 | 0.413 / 0.455 | 0.097 / 0.131 |
 | Milo RSS increase on expansion, KiB | 24 | 4,720 / 4,736 | 16 / 16 |
 | RSS still above pre-expansion after collapse, KiB | 24 | 4,720 / 4,736 | 16 / 16 |
-| Open the initial Git listing, ms | 24 | 284.92 / 290.64 | 284.18 / 297.76 |
+| First file-list load for the selected commit, after History settled, ms | 24 | 284.92 / 290.64 | 284.18 / 297.76 |
 | Page Up/Down in the expanded commit, ms | 720 | 0.023 / 0.036 | 0.024 / 0.039 |
 | Read the selected patch, ms | 24 | 3.86 / 5.45 | 4.95 / 5.39 |
 | Show all in the 6,000-file control, ms | 24 | 0.097 / 0.119 | 0.098 / 0.151 |
@@ -49,11 +49,13 @@ Encode complete triples into four output bytes at once; only the tail needs padd
 | Refresh, milliseconds | Base p50 / p95 | Final p50 / p95 |
 |---|---:|---:|
 | 32 active files, known append | 3.311 / 3.718 | 1.556 / 1.980 |
-| Same, filesystem notification | 3.663 / 3.908 | 1.889 / 2.128 |
+| Same, simulated filesystem notification before timing | 3.663 / 3.908 | 1.889 / 2.128 |
 | Same, idle | 0.550 / 0.924 | 0.555 / 1.861 |
 | Four active files, known append | 0.251 / 0.394 | 0.230 / 0.358 |
 
-Eight matched runs/build, alternating order; each value is the **median of eight batch quantiles**, not a pooled percentile. Each batch contains 32 looks, with 128 older rollouts; the busy case starts with 63,752 distinct IDs including duplicates across files. An append grows the table only a little. Reserve for the prior distinct count, bounded by IDs in the remaining files, rather than repeatedly growing the temporary table. New sessions and cold starts can still grow it. The idle path skips the changed code; its worse p95 is reported, not claimed as a win. In each append phase both builds wrote 13,216 fixture bytes and read 13,248 transcript bytes; idle read zero. Token totals, complete/partial state and Codex percentage/time were checked after every look. This is sampler work, not end-to-end menu repaint time.
+Eight matched runs/build, alternating order; each value is the **median of eight batch quantiles**, not a pooled percentile. Each batch contains 32 looks (lower middle observation for its p50), with 128 older rollouts; the busy case starts with 63,752 IDs after deduplication across files. Reserve for the prior distinct count, bounded by IDs in the remaining files, rather than repeatedly growing the temporary table. Cold starts can still grow it. The idle path skips the changed code; its worse p95 is reported, not claimed as a win. In each append phase both builds wrote 13,216 fixture bytes and read 13,248 transcript bytes; idle read zero. Token totals and complete/partial state were checked after every look; Codex percentage and time after every append. The fixture calls `filesystem_changed()` directly: this is neither OS notification latency nor menu repaint time.
+
+After session churn, the prior distinct count can exceed the current distinct count: surviving files can share IDs. The sum of their stored IDs caps the hint, but a temporary table can still be oversized. The append workload does not measure peak memory in that case.
 
 ## OMP: check the historical tail, then compare the new plan
 
@@ -77,14 +79,14 @@ The final SQL fixes the loop order of the timestamp tie-break join, not the winn
 
 ## Reproduction
 
-From this branch, export the three revisions to disposable directories. Install the Rust toolchain and cache the locked dependency before running offline. Commands below use Bash, Git, Cargo, Python 3, `jq` and the system SQLite CLI; image counters and `sips` require macOS.
+From this branch, export the three revisions to disposable directories. Install the Rust toolchain and cache the locked dependency before running offline. Commands below use Bash, Git, Cargo, Python 3, `jq` and the system SQLite CLI; image counters and `sips` require macOS. The historical SQL comparison used the system Python's SQLite 3.54.0 writer; the base-to-final comparison used Homebrew Python's 3.54.1 writer. Both read with `/usr/bin/sqlite3` 3.54.0. Each pair uses one writer.
 
 ```bash
 set -euo pipefail
 lab=$(mktemp -d)
 mkdir -p "$lab/home" "$lab/tmp"
 for name in pre base final; do
-  case $name in pre) rev=536342f;; base) rev=9576854;; final) rev=HEAD;; esac
+  case $name in pre) rev=536342f;; base) rev=9576854;; final) rev=1d9f42c;; esac
   d="$lab/$name"; mkdir "$d"; git archive "$rev" | tar -x -C "$d"
   # Identical test-only fixtures; never copy production SQL or a production reader.
   cp src/usage/tests.rs "$d/src/usage/tests.rs"
@@ -104,8 +106,8 @@ b="$lab/base/target/release/milo"; f="$lab/final/target/release/milo"
 isolated python3 -B tests/history_paging.py "$b" "$f" --runs 24
 isolated python3 -B tests/outline_search.py "$b" "$f" --files 50000 --runs 24
 isolated python3 -B tests/picture_upload.py "$b" "$f" --runs 24
-isolated python3 -B tests/usage_omp_tail.py 536342f 9576854 --pairs 120 --raw
-isolated python3 -B tests/usage_omp_tail.py 9576854 HEAD --pairs 120 --indexed-pairs 24 --raw
+isolated /usr/bin/python3 -B tests/usage_omp_tail.py 536342f 9576854 --pairs 120 --raw
+isolated /opt/homebrew/bin/python3 -B tests/usage_omp_tail.py 9576854 18547ab --pairs 120 --indexed-pairs 24 --raw
 for ((i=0; i<8; ++i)); do
   order='base final'; if ((i%2)); then order='final base'; fi
   for name in $order; do
@@ -125,4 +127,4 @@ for repeat in 1 2; do
 done
 ```
 
-For each `sample` TSV row the last field is completion time in µs. Group by revision and workload, take the median and the 137th ordered value of 144. For transcripts take the median of the eight reported batch p50s and of the eight batch p95s for each workload. CLI diagnostic launches that print query plans and counters are separate from the timed queries. History's page measurements move near the beginning of the expanded list; the end-of-list check is not timed as a page. PTY parity covers sampled updates, not every asynchronous frame or every possible cursor position. No cross-platform speedup is inferred from this machine.
+For `sample` rows in the **Rust sampler** logs the last field is completion time in µs. Group by revision and workload, take the median and the 137th ordered value of 144. The SQL-only driver's `--raw` rows instead end with A and B elapsed times in ms. For transcripts take the median of the eight reported batch p50s and of the eight batch p95s for each workload. CLI diagnostic launches are separate from timed queries. History's timed pages move near the beginning of the expanded list; the end-of-list check is not timed as a page. PTY parity covers sampled updates, not every asynchronous frame or every possible cursor position. No cross-platform speedup is inferred from this machine.
