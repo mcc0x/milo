@@ -600,13 +600,17 @@ static NSString *const PerfViewportScript =
     @"(() => {"
      "const form = document.getElementById('divider-form');"
      "if (!form) return;"
-     "const observer = new ResizeObserver(([entry]) => {"
-     "  const {width, height} = entry.contentRect;"
-     "  window.webkit.messageHandlers.miloRexViewport.postMessage(["
-     "    innerWidth, innerHeight, width, height, performance.now(), performance.timeOrigin, form.isConnected"
-     "  ]);"
+     "const subject = document.querySelector('main article') || form;"
+     "const observer = new ResizeObserver(entries => {"
+     "  for (const entry of entries) {"
+     "    const {width, height} = entry.contentRect;"
+     "    window.webkit.messageHandlers.miloRexViewport.postMessage(["
+     "      innerWidth, innerHeight, width, height, performance.now(), performance.timeOrigin,"
+     "      form.isConnected, entry.target === subject"
+     "    ]);"
+     "  }"
      "});"
-     "observer.observe(document.documentElement);"
+     "observer.observe(document.documentElement); observer.observe(subject);"
      "})();";
 static NSString *const PerfViewportMessage = @"miloRexViewport";
 static __weak WKWebView *perfWeb;
@@ -619,12 +623,15 @@ static void PerfVerifyFinalViewport(void) {
     assert(web && panel.placementProven && panel.visible && !panel.ignoresMouseEvents);
     NSSize expected = web.bounds.size;
     assert(fabs(NSWidth(panel.frame) - expected.width) <= 1);
-    [web evaluateJavaScript:@"[innerWidth, innerHeight, document.documentElement.getBoundingClientRect().width,"
-        " !!document.querySelector('#divider-form')]" completionHandler:^(id result, NSError *error) {
-        assert(!error && [result count] == 4 && [result[3] isEqual:@YES]);
+    [web evaluateJavaScript:@"(() => { const form = document.querySelector('#divider-form');"
+        " const subject = document.querySelector('main article') || form; return [innerWidth, innerHeight,"
+        " document.documentElement.getBoundingClientRect().width, !!form, subject.getBoundingClientRect().width]; })()"
+        completionHandler:^(id result, NSError *error) {
+        assert(!error && [result count] == 5 && [result[3] isEqual:@YES] && [result[4] doubleValue] > 0);
         assert(fabs([result[0] doubleValue] - expected.width) <= 1 &&
             fabs([result[1] doubleValue] - expected.height) <= 1 && [result[2] doubleValue] > 0);
-        PerfRecord("final_viewport", PerfNow(), ",\"right\":%u", perfRight);
+        PerfRecord("final_viewport", PerfNow(), ",\"right\":%u,\"element_border_width_css\":%.3f",
+            perfRight, [result[4] doubleValue]);
     }];
 }
 
@@ -639,7 +646,7 @@ static void PerfVerifyFinalViewport(void) {
     uint64_t when = PerfNow();
     assert(message.frameInfo.mainFrame && message.webView == perfWeb);
     assert([message.frameInfo.request.URL.path isEqualToString:@"/rex-lab-page"]);
-    assert([message.body isKindOfClass:NSArray.class] && [message.body count] == 7);
+    assert([message.body isKindOfClass:NSArray.class] && [message.body count] == 8);
     NSArray *values = message.body;
     assert([values[6] isEqual:@YES]);
     int width = [values[0] intValue], height = [values[1] intValue];
@@ -649,10 +656,11 @@ static void PerfVerifyFinalViewport(void) {
     if (width <= 0 || height <= 0 || layoutWidth <= 0) return;
     if (!_ready) _documentOrigin = documentOrigin;
     else assert(documentOrigin == _documentOrigin);
-    PerfRecord(_ready ? "reflow" : "page_ready", when,
+    BOOL element = [values[7] boolValue];
+    PerfRecord(element ? "element_layout" : (_ready ? "reflow" : "page_ready"), when,
         ",\"width_css\":%d,\"height_css\":%d,\"layout_width_css\":%.6f,\"layout_height_css\":%.6f,\"web_time_ms\":%.6f",
         width, height, layoutWidth, layoutHeight, webTime);
-    _ready = YES;
+    if (!element) _ready = YES;
 }
 @end
 

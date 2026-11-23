@@ -185,6 +185,7 @@ impl Config {
         });
         let last = format!("rex-bench-ack-{}", burst.pty.last().unwrap().serial);
         tile.wait("benchmark PTY did not print an acknowledgment", || tile.capture(tile.shell).contains(&last));
+        tile.shell_is_focused();
         settled.report(&settled_events, &acks);
         burst.report(&samples, &acks);
         if let Some(path) = &self.artifacts {
@@ -369,6 +370,7 @@ struct Endpoints {
     visible: Option<u64>,
     continued: bool,
     css: Option<u64>,
+    element: Option<u64>,
     points: Option<f64>,
     css_width: Option<u64>,
     css_layout_width: Option<f64>,
@@ -391,10 +393,10 @@ impl Resize {
         let continued = frame.as_deref().and_then(|line| field::<bool>(line, "visible_continuously")) == Some(true);
         let visible = if continued { frame.as_deref() } else { proof.as_deref() };
         let points = frame.as_deref().or(visible).and_then(|line| field::<f64>(line, "width_pt"));
-        let css = web_frame.as_deref().and_then(|web| {
+        let layout = |kind: &str| web_frame.as_deref().and_then(|web| {
             let expected = field::<f64>(web, "width_pt")?;
             let expected_height = field::<f64>(web, "height_pt")?;
-            records(events).filter(|line| has_event(line, "reflow") && time(line) >= time(web)).find_map(|line| {
+            records(events).filter(|line| has_event(line, kind) && time(line) >= time(web)).find_map(|line| {
                 let width = field::<u64>(line, "width_css")?;
                 let height = field::<u64>(line, "height_css")?;
                 let layout_width = field::<f64>(line, "layout_width_css")?;
@@ -404,11 +406,13 @@ impl Resize {
                     .then(|| (time(line), width, layout_width))
             })
         });
+        let css = layout("reflow");
         Endpoints {
             received,
             frame: frame.as_deref().map(time),
             web_frame: web_frame.as_deref().map(time),
             visible: visible.map(time),
+            element: layout("element_layout").map(|record| record.0),
             continued,
             css: css.map(|(stamp, _, _)| stamp),
             points,
@@ -416,6 +420,54 @@ impl Resize {
             css_layout_width: css.map(|(_, _, width)| width),
         }
     }
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct BlankTime {
+    intervals: usize,
+    total: u64,
+    longest: u64,
+}
+
+impl BlankTime {
+    fn include(&mut self, from: u64, to: u64) {
+        if to > from {
+            let length = to - from;
+            self.intervals += 1;
+            self.total += length;
+            self.longest = self.longest.max(length);
+        }
+    }
+}
+
+// Native content visibility, not scanout. Clip gaps crossing a boundary;
+// multiple outstanding widths can share one uninterrupted blank interval.
+fn blank_time(log: &str, start: u64, end: u64) -> BlankTime {
+    assert!(end >= start);
+    let mut hidden = Some(start); // A panel is not exposed before the first positive proof.
+    let mut blank = BlankTime::default();
+    for line in records(log) {
+        let visible = has_event(line, "visible");
+        if !visible && !has_event(line, "concealed") { continue; }
+        let t = time(line);
+        if t > end { break; }
+        if visible {
+            if let Some(begin) = hidden.take() { blank.include(begin, t); }
+        } else {
+            hidden.get_or_insert(start.max(t));
+        }
+    }
+    if let Some(begin) = hidden { blank.include(begin, end); }
+    blank
+}
+
+#[test]
+fn blank_time_clips_both_edges_and_counts_a_sustained_gap_once() {
+    let trace = "{\"event\":\"visible\",\"t_ns\":1}\n{\"event\":\"concealed\",\"t_ns\":4}\n\
+                 {\"event\":\"concealed\",\"t_ns\":7}\n{\"event\":\"visible\",\"t_ns\":10}\n\
+                 {\"event\":\"concealed\",\"t_ns\":12}\n{\"event\":\"visible\",\"t_ns\":20}\n";
+    assert_eq!(blank_time(trace, 5, 16), BlankTime { intervals: 2, total: 9, longest: 5 });
+    assert_eq!(blank_time(trace, 10, 12), BlankTime::default());
 }
 
 struct Phase {
@@ -519,6 +571,13 @@ impl Phase {
             );
             ends.push((row, ep));
         }
+        let first = self.rows[0].layout.sent_ns.unwrap();
+        if let Some(last_visible) = ends.last().and_then(|(_, ep)| ep.visible) {
+            let blank = blank_time(samples, first, last_visible);
+            eprintln!("CONTINUITY phase={name} duration_ms={:.3} blank_ms={:.3} longest_blank_ms={:.3} gaps={}",
+                elapsed(first, last_visible), blank.total as f64 / MS as f64,
+                blank.longest as f64 / MS as f64, blank.intervals);
+        }
         let count = |seen: fn(&Endpoints) -> bool| ends.iter().filter(|(_, endpoint)| seen(endpoint)).count();
         let n = self.rows.len();
         eprintln!(
@@ -535,6 +594,7 @@ impl Phase {
             ("wk-view-frame", |ep| ep.web_frame),
             ("native-visible", |ep| ep.visible),
             ("css-delivered", |ep| ep.css),
+            ("responsive-element", |ep| ep.element),
             ("both", Endpoints::both),
         ] {
             percentiles(
