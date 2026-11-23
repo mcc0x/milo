@@ -230,11 +230,12 @@ impl Outline {
         let relative = Path::new(path.strip_suffix('/').unwrap_or(&path));
         let (root, identity) = (&self.repo.root, self.root_identity);
         let result = match choice {
-            Choice::Read => {
+            Choice::Read if identity.is_some() && native::identity(root) == identity => {
                 self.search = None;
                 self.open_file(ClickTarget::Tree(path));
                 return;
             }
+            Choice::Read => Err("The project folder changed"),
             Choice::Open => NativeAction::Open.run(root, identity, relative),
             Choice::Reveal => NativeAction::Reveal.run(root, identity, relative),
             Choice::Preview => preview::open(root, identity, relative),

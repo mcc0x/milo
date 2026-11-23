@@ -780,6 +780,23 @@ mod tests {
     }
 
     #[test]
+    fn read_from_actions_refuses_a_replaced_project_with_the_same_path() {
+        let f = Fixture::folder();
+        f.write("page.txt", "original project");
+        let mut o = open(&f);
+        draw(&mut o, 80, 12);
+        o.key(Key::Ctrl(b'a'));
+        let menu = draw(&mut o, 80, 12).text();
+        assert!(menu[0].contains("page.txt") && menu[1].contains("Read in Milo"));
+
+        fs::rename(&f.root, f.root.with_file_name("moved")).unwrap();
+        f.write("page.txt", "replacement project");
+        o.key(Key::Enter);
+        assert!(o.reading.is_none());
+        assert!(draw(&mut o, 80, 12).text()[11].contains("The project folder changed"));
+    }
+
+    #[test]
     fn tree_actions_filter_folders_and_recheck_native_open_on_selection() {
         use std::os::unix::fs::PermissionsExt as _;
 
