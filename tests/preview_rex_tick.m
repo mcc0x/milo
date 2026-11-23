@@ -594,18 +594,19 @@ static IMP Hook(Class cls, SEL selector, IMP replacement) {
     return original;
 }
 
-// One passive notification after WebKit computed the root layout box.
+// Observe both the root viewport and an element responding to its layout.
 // Do not poll, force layout, or assume this is when the display presented it.
 static NSString *const PerfViewportScript =
     @"(() => {"
      "const form = document.getElementById('divider-form');"
      "if (!form) return;"
      "const subject = document.querySelector('main article') || form;"
+     "const documentID = crypto.randomUUID();"
      "const observer = new ResizeObserver(entries => {"
      "  for (const entry of entries) {"
      "    const {width, height} = entry.contentRect;"
      "    window.webkit.messageHandlers.miloRexViewport.postMessage(["
-     "      innerWidth, innerHeight, width, height, performance.now(), performance.timeOrigin,"
+     "      innerWidth, innerHeight, width, height, performance.now(), documentID,"
      "      form.isConnected, entry.target === subject"
      "    ]);"
      "  }"
@@ -639,7 +640,7 @@ static void PerfVerifyFinalViewport(void) {
 @end
 @implementation PerfViewport {
     BOOL _ready;
-    double _documentOrigin;
+    NSString *_documentID;
 }
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
     (void)controller;
@@ -651,11 +652,14 @@ static void PerfVerifyFinalViewport(void) {
     assert([values[6] isEqual:@YES]);
     int width = [values[0] intValue], height = [values[1] intValue];
     double layoutWidth = [values[2] doubleValue], layoutHeight = [values[3] doubleValue];
-    double webTime = [values[4] doubleValue], documentOrigin = [values[5] doubleValue];
-    assert(isfinite(layoutWidth) && isfinite(layoutHeight) && isfinite(webTime) && isfinite(documentOrigin));
+    double webTime = [values[4] doubleValue];
+    assert(isfinite(layoutWidth) && isfinite(layoutHeight) && isfinite(webTime));
     if (width <= 0 || height <= 0 || layoutWidth <= 0) return;
-    if (!_ready) _documentOrigin = documentOrigin;
-    else assert(documentOrigin == _documentOrigin);
+    // Compare one token per injected document, not a privacy-rounded clock reading.
+    NSString *documentID = values[5];
+    assert([documentID isKindOfClass:NSString.class] && documentID.length);
+    if (!_documentID) _documentID = [documentID copy];
+    else assert([documentID isEqualToString:_documentID]);
     BOOL element = [values[7] boolValue];
     PerfRecord(element ? "element_layout" : (_ready ? "reflow" : "page_ready"), when,
         ",\"width_css\":%d,\"height_css\":%d,\"layout_width_css\":%.6f,\"layout_height_css\":%.6f,\"web_time_ms\":%.6f",
