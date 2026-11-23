@@ -12,7 +12,7 @@ use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use super::content::LIMIT;
 use super::working_path::{Entry, LookupError};
 
-const BOM: &str = "\u{feff}";
+pub(super) const BOM: &str = "\u{feff}";
 
 /// Why a file is shown but cannot be edited, in words that fit a narrow pane after "Read-only:".
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,6 +73,11 @@ impl Original {
     pub(super) fn text(&self) -> &str {
         let text = self.snapshot.text();
         if self.marked { &text[BOM.len()..] } else { text }
+    }
+
+    /// Whether the mark is part of the file's encoding, rather than editable text.
+    pub(super) fn marked(&self) -> bool {
+        self.marked
     }
 
     /// The text of the file when it holds the draft.

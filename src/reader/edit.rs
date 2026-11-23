@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use super::buffer::{Buffer, Pos};
 use super::content::LIMIT;
-use super::disk::{self, Original, SaveError, Snapshot};
+use super::disk::{self, BOM, Original, SaveError, Snapshot};
 use super::draw::LinePainter;
 use super::rescue::{self, Draft, Drafts};
 use super::working_path::{Entry, LookupError};
@@ -191,6 +191,8 @@ struct Restored {
     /// The file held other text than the draft was written over, or it cannot be told: a save
     /// would replace text that whoever wrote the draft never saw.
     over_other_text: bool,
+    /// Whether the kept draft had a structural mark, independent of the file on disk.
+    marked: bool,
 }
 
 /// The display column at which the character at `byte` starts.
@@ -556,11 +558,13 @@ impl Editor {
             self.say("The kept draft cannot be read.", now);
             return Step::Stay;
         };
-        let kept = kept.strip_prefix('\u{feff}').unwrap_or(&kept);
-        let step = self.replace(Pos::default(), self.buffer.end(), kept);
+        let original = self.original.read();
+        let over_other_text = !draft.written_over(original);
+        let unmarked = kept.strip_prefix(BOM).filter(|_| draft.marked(original, !over_other_text));
+        let step = self.replace(Pos::default(), self.buffer.end(), unmarked.unwrap_or(&kept));
         // The kept copy stays until this text is saved: undoing the restore must not be the end of it.
-        let over_other_text = !draft.written_over(self.original.read());
-        self.restored = Some(Restored { change: self.buffer.last_change(), draft, over_other_text });
+        let marked = unmarked.is_some();
+        self.restored = Some(Restored { change: self.buffer.last_change(), draft, over_other_text, marked });
         self.cursor = Pos { row: self.top.min(self.buffer.len() - 1), col: 0 };
         let over = if over_other_text { " over a changed file" } else { "" };
         self.say(format!("Draft restored{over} · ^Z undoes"), now);
@@ -958,9 +962,10 @@ impl Drop for Editor {
             Some(restored) if restored.over_other_text => restored.draft.base().map(str::to_owned),
             _ => Some(rescue::base(self.original.read())),
         };
-        let text = self.original.with_mark(self.buffer.text());
+        let text = self.buffer.text();
+        let marked = restored.map_or_else(|| self.original.marked(), |restored| restored.marked);
         let note = match self.place.drafts() {
-            Some(drafts) => drafts.keep(text.as_bytes(), base.as_deref(), restored.map(|restored| &restored.draft)),
+            Some(drafts) => drafts.keep(&text, marked, base.as_deref(), restored.map(|restored| &restored.draft)),
             None => format!("unsaved edits to {} were lost: milo has no state folder.", self.place.name()),
         };
         rescue::tell(note);
