@@ -57,6 +57,14 @@ A shallow clone has only part of the project's history. If you expand a commit w
 Open a file from the outline or history with `Enter` or a double-click. Inside Rex it opens in a floating reader, and the next file you open from that pane becomes a [tab](#tabs-in-the-floating-reader) of the same reader. Any shell you split beside the reader stays open. Outside Rex the reader takes over the pane; `q` brings you back.
 History catches up with repository changes when you return from a file, keeping that file selected if it is still in the timeline.
 
+### Opening a file outside Milo on a Mac
+
+In the Outline tree, highlight a file with the keyboard or a click. In Find, type a query and choose a result with the arrows. Press **Ctrl-O** to open that file in its default app, or **Ctrl-R** to select it in Finder. The same keys act on the **shown working-file tab** in Reader. `Enter` and double-click still read in Milo. The short strip has no cursor: use `/` to choose a file.
+
+These actions use the file on disk, not the text on screen. They do not export a commit, patch or draft. Finish editing before using them. Reveal a directory or executable instead of opening it. A missing file, a symlink, or a path through a linked project folder is refused; Milo never substitutes another file or its parent.
+
+Outside Rex, Milo recognizes a direct Terminal.app, Ghostty or iTerm2 session in its standard location, with no intervening multiplexer or unrecognized shell or wrapper. Inside Rex, exactly one app must be attached to this session over a local connection as the same user. SSH, remote or mixed viewers, and an uncertain result leave the file unopened. Milo checks only when you press the shortcut; it never copies the file to a client.
+
 ### Tabs in the floating reader
 
 A reader with one file looks as it always has. With a second file, a row of names appears above it: the shown tab is bold and has a `×`, and a yellow `*` before a name marks unsaved edits. Opening a file that already has a tab shows that tab; the file as of a commit is a tab of its own, named with the commit. Two files of the same name are shown with their folders.
