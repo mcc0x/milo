@@ -20,7 +20,7 @@ function FeatureIcon({ name }: { name: string }) {
 }
 
 const title = 'milo — The little things that make Rex feel like home';
-const description = 'A file tree, commit history, diffs, and agent usage, right where you want them. Milo remembers how you like your panes.';
+const description = 'Review changes, edit files, and keep an eye on agent usage. In Rex, Milo remembers your layout and can ping you in Discord or Telegram when an agent needs you.';
 const preview = {
   url: 'https://usemilo.net/milo-preview.jpg',
   alt: 'Milo — Your Git workspace, inside Rex. A file tree, commit history and agent session sit above the Milo and Rex mascots.',
@@ -75,7 +75,7 @@ export default function Home() {
           <div className="intro">
             <div className="intro-copy">
               <p className="description">The little things that make <a className="rex" href="https://www.superlogical.com/rex"><img src={rex.src} width="72" height="72" alt="" />Rex</a> feel like home.</p>
-              <p className="subtext">A file tree, commit history, diffs, and agent usage, right where you want them. Milo remembers how you like your panes.</p>
+              <p className="subtext">{description}</p>
             </div>
             <div className="install">
               <span className="install-prompt" aria-hidden="true">$</span>
