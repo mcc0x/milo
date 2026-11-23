@@ -57,7 +57,12 @@ export async function requestJson(request: Request, max: number) {
   }
 }
 
-const testMessage = "Milo test: Rex alert mirroring can reach this destination. This is not a Rex alert, and nothing else was sent.";
+const statusMessages: Record<string, true> = {
+  "Milo test: Rex alert mirroring can reach this destination. This is not a Rex alert, and nothing else was sent.": true,
+  "Milo: Rex alert forwarding was enabled.": true,
+  "Milo: Rex alert forwarding was paused.": true,
+  "Milo: Rex alert forwarding recovered after an interruption.": true,
+};
 const code = "<code>(?:[^<>&\\n]|&(?:amp|lt|gt);)+</code>";
 const alert = new RegExp(`^Rex: (?:a program|a terminal|${code}) (?:is waiting for (?:permission|an answer|you(?: to sign in)?)|reported an error|finished|sent a notification|rang its bell)(?:\\n${code})?(?:\\n\\([0-9]{1,10} earlier (?:alert was|alerts were) not sent\\.\\))?$`);
 const markup = /<code>|<\/code>|&(?:amp|lt|gt);|[<>&]/g;
@@ -66,7 +71,7 @@ const markup = /<code>|<\/code>|&(?:amp|lt|gt);|[<>&]/g;
 // make links, mentions, or commands. The production bot sends only Milo alerts.
 export function validTelegramText(text: string, production: boolean): boolean {
   if (!text.trim() || text.length > 16_384 || /[\x00-\x09\x0b-\x1f\x7f-\x9f\p{Surrogate}\p{Bidi_Control}]/u.test(text)) return false;
-  if (production && text !== testMessage && !alert.test(text)) return false;
+  if (production && !Object.hasOwn(statusMessages, text) && !alert.test(text)) return false;
   let inCode = false;
   let length = text.length;
   for (const { 0: token } of text.matchAll(markup)) {
