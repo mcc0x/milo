@@ -200,8 +200,24 @@ pub(crate) fn anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
 fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
     use std::time::{Duration, Instant};
 
-    let mut watcher = crate::rex::preview_watch(anchor)?;
-    let result = run(url, anchor, &mut watcher);
+    let (input, state) = io::pipe().map_err(|_| "could not open the preview observer pipe")?;
+    let mut watch = crate::rex::preview_observer_command(anchor, state)?;
+    let (reader, reply) = focus_pipe().map_err(|_| "could not open the preview focus acknowledgment pipe")?;
+    let mut helper = spawn(&[url, &anchor.native_window_id.to_string()], input.into(), Some(reader))
+        .map_err(|_| "could not launch the local WebKit helper")?;
+    // No observation may precede the helper's clock baseline, including
+    // when installation or launch stalls across a system clock change.
+    let mut watcher = match after_clock_ready(&mut helper, move || {
+        watch.spawn().map_err(|_| "couldn't start the local Rex preview observer".into())
+    }) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            let _ = helper.kill();
+            let _ = helper.wait();
+            return Err(error);
+        }
+    };
+    let result = serve_actions(helper, reply, || crate::rex::return_preview_focus(anchor).is_ok());
     // EOF can reach the helper before Rex's exit status is waitable. Give it
     // a short grace period, but report nothing from the Rex process itself.
     let deadline = Instant::now() + Duration::from_millis(80);
@@ -222,12 +238,14 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
     result
 }
 
-fn run(url: &str, anchor: Anchor<'_>, watcher: &mut Child) -> Result<(), String> {
-    let state = watcher.stdout.take().ok_or("missing preview observer pipe")?;
-    let (reader, reply) = focus_pipe().map_err(|_| "could not open the preview focus acknowledgment pipe")?;
-    let helper = spawn(&[url, &anchor.native_window_id.to_string()], state.into(), Some(reader))
-        .map_err(|_| "could not launch the local WebKit helper")?;
-    serve_actions(helper, reply, || crate::rex::return_preview_focus(anchor).is_ok())
+fn after_clock_ready<T>(helper: &mut Child, start: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let output = helper.stdout.as_mut().expect("helper stdout is piped");
+    let mut fds = [libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+    let mut receipt = [0];
+    if crate::term::wait_ready(&mut fds, 8_000) <= 0 || output.read_exact(&mut receipt).is_err() || receipt != *b"R" {
+        return Err("the WebKit helper did not initialize the preview observer; no page was shown".into());
+    }
+    start()
 }
 
 fn serve_actions(
@@ -268,6 +286,16 @@ fn serve_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_helper_that_exits_during_startup_cannot_start_the_observer() {
+        let mut helper = Command::new("/usr/bin/true").stdout(Stdio::piped()).spawn().unwrap();
+        let result = after_clock_ready(&mut helper, || -> Result<(), String> {
+            panic!("observed the Rex layout before the helper established its clock baseline")
+        });
+        assert!(result.is_err());
+        helper.wait().unwrap();
+    }
 
     #[test]
     fn pin_success_requires_a_single_canonical_window_id() {
@@ -323,11 +351,12 @@ mod tests {
         let monitor = reader.try_clone().unwrap();
         let mut command = Command::new("/bin/sh");
         command
-            .args(["-c", r#"printf 'focus\n'; test "$(/usr/bin/head -c 1 "/dev/fd/$MILO_PREVIEW_FOCUS_FD")" = 1"#])
+            .args(["-c", r#"printf 'Rfocus\n'; test "$(/usr/bin/head -c 1 "/dev/fd/$MILO_PREVIEW_FOCUS_FD")" = 1"#])
             .stdout(Stdio::piped());
         inherit_focus_reader(&mut command, reader);
-        let helper = command.spawn().unwrap();
+        let mut helper = command.spawn().unwrap();
         drop(command);
+        after_clock_ready(&mut helper, || Ok(())).unwrap();
         let mut attempts = 0;
         serve_actions(helper, reply, || {
             attempts += 1;

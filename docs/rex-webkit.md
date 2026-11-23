@@ -95,7 +95,7 @@ The installed Apple Silicon Rex `0.1.0-preview.21` (Mac build 2061, commit `202b
 
 ### Persistent right-split fixture measurement
 
-One Apple Silicon run with sustained divider movement: 1.16 s from creating the Rex split to visible WebKit; 1.62 s to the navigated form with a draft. Across 13.32 s idle, the native fixture used 0.049 CPU seconds (0.37% of one core); RSS was 102.9 → 102.8 MiB. These include test instrumentation and exclude Rex.app, the server, observer and separate WebKit workers. They are not whole-application measurements.
+One Apple Silicon run with sustained divider movement: 1.43 s from creating the Rex split to visible WebKit; 1.88 s to the navigated form with a draft. Across 13.35 s idle, the native fixture used 0.052 CPU seconds (0.39% of one core); RSS was 103.0 MiB at both endpoints. These include test instrumentation and exclude Rex.app, the server, observer and separate WebKit workers. They are not whole-application measurements.
 
 ### Earlier component measurements, not an end-to-end benchmark
 

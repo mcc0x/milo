@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::json::Value;
 use crate::preferences::{Preferences, PreviewPlacement};
@@ -209,16 +209,15 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
     Ok(())
 }
 
-pub(crate) fn preview_watch(anchor: Anchor<'_>) -> Result<Child, String> {
+pub(crate) fn preview_observer_command(anchor: Anchor<'_>, state: std::io::PipeWriter) -> Result<Command, String> {
     let connection = Connection::local()?;
-    connection
-        .command()
+    let mut command = connection.command();
+    command
         .args(["--args", &connection.args("watch", &anchor_args(anchor))])
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "couldn't start the local Rex preview observer".into())
+        .stdout(state)
+        .stderr(Stdio::null());
+    Ok(command)
 }
 
 pub(crate) fn return_preview_focus(anchor: Anchor<'_>) -> Result<(), String> {

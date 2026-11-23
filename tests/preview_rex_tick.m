@@ -533,9 +533,12 @@ int main(int argc, const char **argv) {
 
         assert(strtoul(argv[4], NULL, 10) == targetID);
         SetAccessory();
-        // Never warp the user's pointer. The helper sees this parked point
-        // far from any fixture tile if it ever queries the global pointer.
-        parkedPointer = NSMakePoint(NSMinX(screen.visibleFrame) + 1, NSMinY(screen.visibleFrame) + 1);
+        // Park the modeled pointer inside the working shell throughout the
+        // test. Its left third stays in the shell at every tested split ratio.
+        Geometry host = SampleGeometry(VisibleWindows(), ownerPID, targetID, getpid(), NULL, NULL);
+        CGRect shell;
+        assert(host.windowID == targetID && FixturePane(host.window, CGRectMake(0, 0, 1.0/3, 1), &shell));
+        parkedPointer = NSMakePoint(CGRectGetMidX(shell), quartzHeight - CGRectGetMidY(shell));
         trace = open(Path(@"native.log").fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         assert(trace >= 0);
         ActualOrder = (void (*)(MiloPreviewPanel *, SEL, NSWindowOrderingMode, NSInteger))
@@ -553,6 +556,7 @@ int main(int argc, const char **argv) {
         assert(url);
         MiloPreviewAnchor *anchor = [[PersistentFixtureAnchor alloc] initWithURL:url rex:(id)owner
             pinned:targetID stateFD:STDIN_FILENO focusFD:focus[0] parent:getppid()];
+        assert(anchor);
         int result = [anchor run];
         assert(tcgetattr(tty, &after) == 0 && after.c_iflag == before.c_iflag && after.c_oflag == before.c_oflag &&
             after.c_cflag == before.c_cflag && ((after.c_lflag ^ before.c_lflag) & ~PENDIN) == 0 &&

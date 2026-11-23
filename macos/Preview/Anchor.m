@@ -586,6 +586,7 @@ static int PrepareFocusInput(int stateFD) {
         _notificationTokens = [NSMutableArray array];
         _signalSources = [NSMutableArray array];
         UpdateObserverClock(&_clock, ObserveClock());
+        if (_clock.uncertain) return nil;
     }
     return self;
 }
@@ -964,6 +965,9 @@ static int PrepareFocusInput(int stateFD) {
 }
 
 - (int)run {
+    // The parent starts the observer only after this process has sampled
+    // both clocks. An old observation cannot queue before that baseline.
+    if (!WriteAll(STDOUT_FILENO, "R", 1)) return StartupFailure("could not start the Rex preview observer");
     _diagnosticFD = OpenDiagnosticOutput();
     __weak MiloPreviewAnchor *weakSelf = self;
     _stateSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)_stateFD, 0, dispatch_get_main_queue());
@@ -1075,6 +1079,10 @@ int milo_preview_run(const char *url, CGWindowID pinned_window, int state_fd) {
         }
         MiloPreviewAnchor *anchor = [[MiloPreviewAnchor alloc] initWithURL:location rex:rex pinned:pinned_window
             stateFD:state_fd focusFD:focusFD parent:parent];
+        if (!anchor) {
+            close(focusFD);
+            return StartupFailure("could not establish the preview observation clock");
+        }
         int status = [anchor run];
         close(focusFD);
         return status;
