@@ -607,6 +607,45 @@ fn deferring_or_undoing_a_kept_draft_does_not_lose_either_edit_on_external_close
 }
 
 #[test]
+fn competing_readers_keep_both_edits_to_the_same_restored_draft() {
+    let f = Fixture::folder();
+    let file = f.root.join("notes.txt");
+    f.write("notes.txt", "one\n");
+    let mut reader = editing(&f, "notes.txt");
+    typed(&mut reader, "kept ");
+    drop(reader);
+
+    let mut first = editing(&f, "notes.txt");
+    let mut second = editing(&f, "notes.txt");
+    for (reader, prefix) in [(&mut first, "first "), (&mut second, "second ")] {
+        reader.key(Key::Char('r'));
+        assert_eq!(draft(reader), "kept one\n");
+        typed(reader, prefix);
+    }
+    // The second reader re-keeps from a predecessor already removed by the first.
+    drop(first);
+    drop(second);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
+
+    let mut recovered = Vec::new();
+    for i in 0..2 {
+        let mut reader = editing(&f, "notes.txt");
+        reader.key(Key::Char('r'));
+        let text = draft(&reader);
+        reader.key(Key::Ctrl(b's'));
+        if i == 1 {
+            assert_eq!(fs::read_to_string(&file).unwrap(), recovered[0]);
+            reader.key(Key::Char('o'));
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), text);
+        recovered.push(text);
+    }
+    recovered.sort();
+    assert_eq!(recovered, ["first kept one\n", "second kept one\n"]);
+    assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+}
+
+#[test]
 fn a_kept_draft_can_be_deleted_instead() {
     let f = Fixture::folder();
     f.write("notes.txt", "one\n");
@@ -1195,6 +1234,165 @@ fn a_byte_order_mark_typed_into_a_file_without_one_is_not_doubled() {
     // A paste that holds nothing to insert is not a change.
     assert_eq!(reader.paste(Some("\x1b\x07")), After::Ignored);
     assert!(!reader.editor.as_ref().unwrap().dirty());
+}
+
+#[test]
+fn recovering_a_kept_draft_preserves_a_pasted_leading_byte_order_mark() {
+    for mark in ["", "\u{feff}"] {
+        let f = Fixture::folder();
+        let original = format!("{mark}abc\n");
+        let file = f.root.join("notes.txt");
+        f.write("notes.txt", &original);
+        let mut reader = editing(&f, "notes.txt");
+        reader.paste(Some("\u{feff}"));
+        drop(reader);
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+
+        let mut reader = editing(&f, "notes.txt");
+        assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
+        reader.key(Key::Char('r'));
+        assert_eq!(draft(&reader), "\u{feff}abc\n");
+        reader.key(Key::Ctrl(b'z'));
+        assert_eq!(draft(&reader), "abc\n");
+        reader.key(Key::Ctrl(b'y'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("{mark}\u{feff}abc\n"));
+        assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn recovering_a_kept_draft_after_saving_an_editable_mark_keeps_it_editable() {
+    let edits = [
+        (&[Key::Char('X')][..], "\u{feff}Xabc\n"),
+        (&[Key::Home, Key::Char('X')][..], "X\u{feff}abc\n"),
+        (&[Key::Backspace][..], "abc\n"),
+    ];
+    for (keys, expected) in edits {
+        let f = Fixture::folder();
+        let file = f.root.join("notes.txt");
+        f.write("notes.txt", "abc\n");
+        let mut reader = editing(&f, "notes.txt");
+        reader.paste(Some("\u{feff}"));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}abc\n");
+        for &key in keys {
+            reader.key(key);
+        }
+        drop(reader);
+
+        let mut reader = editing(&f, "notes.txt");
+        reader.key(Key::Char('r'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+        assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+
+        reader.key(Key::End);
+        typed(&mut reader, "Y");
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("{}Y\n", expected.trim_end_matches('\n')));
+
+        // Undo past the restore and then redo it: the serialization follows the active change.
+        reader.key(Key::Ctrl(b'z'));
+        reader.key(Key::Ctrl(b'z'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "\u{feff}abc\n");
+        reader.key(Key::Ctrl(b'y'));
+        reader.key(Key::Ctrl(b's'));
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+    }
+}
+
+#[test]
+fn recovering_a_kept_draft_distinguishes_a_pasted_mark_from_file_encoding() {
+    enum Name {
+        Tagged,
+        Based,
+        Slot,
+        Single,
+    }
+
+    let mark = "\u{feff}";
+    for (source_mark, disk_mark, pasted) in [(mark, "", ""), ("", mark, mark)] {
+        for name in [Name::Tagged, Name::Based, Name::Slot, Name::Single] {
+            let f = Fixture::folder();
+            let file = f.root.join("notes.txt");
+            f.write("notes.txt", &format!("{source_mark}abc\n"));
+            let mut reader = editing(&f, "notes.txt");
+            if !pasted.is_empty() {
+                reader.paste(Some(pasted));
+            }
+            typed(&mut reader, "kept ");
+            drop(reader);
+
+            let dir = state(&f).join("drafts");
+            let kept = fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
+            let filename = kept.file_name();
+            let stem = filename.to_str().unwrap().strip_suffix(".draft").unwrap();
+            let (untagged, _) = stem.rsplit_once('-').unwrap();
+            let (hash, tail) = untagged.split_once('-').unwrap();
+            let (slot, _) = tail.split_once('-').unwrap();
+            let old_name = match name {
+                Name::Tagged => None,
+                Name::Based => Some(format!("{untagged}.draft")),
+                Name::Slot => Some(format!("{hash}-{slot}.draft")),
+                Name::Single => Some(format!("{hash}.draft")),
+            };
+            if let Some(old_name) = old_name {
+                fs::rename(kept.path(), dir.join(old_name)).unwrap();
+            }
+
+            // A base alone can identify an unmarked source when only a BOM changed.
+            // With a tag, the draft's interpretation is independent of other disk edits.
+            let disk_body = if matches!(name, Name::Tagged) { "changed" } else { "abc" };
+            let current = format!("{disk_mark}{disk_body}\n");
+            f.write("notes.txt", &current);
+
+            let mut reader = editing(&f, "notes.txt");
+            reader.key(Key::Char('r'));
+            let pasted = if matches!(name, Name::Slot | Name::Single) { "" } else { pasted };
+            let restored = format!("{pasted}kept abc\n");
+            assert_eq!(draft(&reader), restored);
+            reader.key(Key::Ctrl(b's'));
+            assert_eq!(fs::read_to_string(&file).unwrap(), current);
+            assert_eq!(drawn(&mut reader, 60, 5)[4], " Changed on disk: c compare · o overwrite · Esc back");
+            reader.key(Key::Char('o'));
+            assert_eq!(fs::read_to_string(&file).unwrap(), format!("{disk_mark}{restored}"));
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
+fn rekeeping_an_unconfirmed_draft_preserves_its_source_encoding() {
+    for (source_mark, disk_mark) in [("\u{feff}", ""), ("", "\u{feff}")] {
+        for additional in ["later ", ""] {
+            let f = Fixture::folder();
+            let file = f.root.join("notes.txt");
+            let original = format!("{source_mark}abc\n");
+            let changed = format!("{disk_mark}abc\n");
+            f.write("notes.txt", &original);
+            let mut reader = editing(&f, "notes.txt");
+            typed(&mut reader, "kept ");
+            drop(reader);
+
+            f.write("notes.txt", &changed);
+            let mut reader = editing(&f, "notes.txt");
+            reader.key(Key::Char('r'));
+            assert_eq!(drawn(&mut reader, 60, 5)[4], " Draft restored over a changed file · ^Z undoes");
+            typed(&mut reader, additional);
+            drop(reader);
+            assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+
+            f.write("notes.txt", &original);
+            let mut reader = editing(&f, "notes.txt");
+            reader.key(Key::Char('r'));
+            assert_eq!(drawn(&mut reader, 60, 5)[4], " Draft restored · ^Z undoes");
+            reader.key(Key::Ctrl(b's'));
+            assert_eq!(fs::read_to_string(&file).unwrap(), format!("{source_mark}{additional}kept abc\n"));
+            assert_eq!(fs::read_dir(state(&f).join("drafts")).unwrap().count(), 0);
+        }
+    }
 }
 
 #[test]

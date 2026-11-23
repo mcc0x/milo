@@ -776,11 +776,13 @@ impl AlertsEdit<'_> {
             settings.remove_target(destination);
             self.write_settings(&settings)?;
         }
-        if was_active {
-            self.alerts.stop()?;
-        }
         let disarmed = !settings.active(destination);
-        let restarted = if was_active && disarmed { self.alerts.start_if_active(&settings) } else { Ok(()) };
+        let restarted = if was_active && disarmed {
+            self.alerts.stop()?;
+            self.alerts.start_if_active(&settings)
+        } else {
+            Ok(())
+        };
         let kept = (|| {
             if destination == Destination::Telegram {
                 self.revoke_telegram(previous.as_deref(), Some(secret))?;
@@ -800,10 +802,11 @@ impl AlertsEdit<'_> {
             }
             Ok(())
         })();
+        kept.and(restarted)?;
         if was_active && !disarmed {
-            kept.and(self.alerts.start_if_active(&settings))?;
-        } else {
-            kept.and(restarted)?;
+            // An identical re-save retries mirroring only after the save succeeds.
+            self.alerts.stop()?;
+            self.alerts.start_if_active(&settings)?;
         }
         let saved =
             format!("Saved the {} destination; its secret is in {}.", destination.title(), self.alerts.place());

@@ -499,6 +499,30 @@ fn the_other_hosts_settings_open_here_through_a_forward_that_ends_with_them() {
     assert_eq!(lab.a.files(), before_a);
 }
 
+#[test]
+#[ignore = "needs an installed Rex; run with --ignored"]
+fn losing_the_forward_or_host_does_not_report_a_successful_editor_session() {
+    let mut lab = Lab::start();
+    let before = lab.a.files();
+    for stop_host in [false, true] {
+        let mut editor = Forwarded::open(&lab);
+        assert!(editor.state().contains("\"forwarded\":true"));
+        if stop_host {
+            assert!(lab.b.stop());
+        } else {
+            lab.b.rex(&["forward", "close", "-s", "milo-settings", "--all"]);
+        }
+
+        assert!(soon(|| editor.process.try_wait().unwrap().is_some()), "forward stayed open");
+        assert!(TcpStream::connect(("127.0.0.1", editor.port)).is_err());
+        assert_eq!(lab.a.files(), before);
+        assert!(!editor.process.wait().unwrap().success(), "{}", editor.said());
+        if !stop_host {
+            assert_cleaned_up(&lab, editor.port, &editor.said());
+        }
+    }
+}
+
 fn libc_pid(child: &Child) -> String {
     child.id().to_string()
 }
