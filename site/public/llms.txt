@@ -7,16 +7,16 @@ milo writes to the project it displays only when you save a file you edited in i
 ## Using milo
 
 - [Full documentation](https://usemilo.net/llms-full.txt): The main-branch guides and agent instructions in one text file.
-- [README](https://github.com/mcc0x/milo/blob/main/README.md): Installation, a picture of each pane and the main commands.
+- [README](https://github.com/mcc0x/milo/blob/main/README.md): Start with the pinned release or check which workflows are available on `main`. The terminal compatibility table distinguishes standalone panes from Rex integrations.
 - [v0.1.6 release notes](https://github.com/mcc0x/milo/blob/main/docs/releases/v0.1.6.md): Floating Reader tabs, agent patch review, several Rex hosts, fixes and performance measurements.
 - [Release installer](https://github.com/mcc0x/milo/releases/download/v0.1.6/install.sh): Downloads the v0.1.6 binary from GitHub, verifies its SHA-256 checksum and installs it without a toolchain.
 - [Source installer](https://github.com/mcc0x/milo/blob/main/install.sh): Builds milo with Cargo and installs or removes the binary. It does not change Rex or Claude Code settings.
 - [Agent skill](https://github.com/mcc0x/milo/blob/main/skills/milo/SKILL.md): How to check milo, open a reader in the user's terminal, including at a Git commit, and show the user only the edits the agent itself made.
 - [Setup and removal](https://github.com/mcc0x/milo/blob/main/docs/setup.md): Effective worktree and global preferences, remembering a Rex rail, outline peeks, new shell tabs, opt-in tab titles and naming a session for its project, several Rex hosts (which host and Rex version this is, `milo web --host`, `milo settings export`, `import` and `undo`), opt-in mirroring of Rex alerts to Telegram or Discord, `milo doctor`, repair and ownership-aware removal.
 - [Keys and marks](https://github.com/mcc0x/milo/blob/main/docs/keys.md): Keyboard shortcuts and what the panes show.
-- [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md): Where the figures come from and what they mean.
+- [Usage limits](https://github.com/mcc0x/milo/blob/main/docs/usage.md): Provider quotas and activity, plus optional local CPU or memory indicators in the Mac menu bar.
 - [Discord presence](https://github.com/mcc0x/milo/blob/main/docs/presence.md): The optional, off-by-default Discord Rich Presence for Rex: what becomes public, the opt-in session and project names, Milo's Discord application or your own, `milo presence`, and its limits.
-- [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md): Pane sizes, Outline search, History, floating Reader tabs, changes-only view, reviewing only the edits an agent hands over (`milo review`), and editing and formatting working files.
+- [Using the panes](https://github.com/mcc0x/milo/blob/main/docs/panes.md): Outline search, History, floating Reader tabs, opening a document in its Mac app or revealing it in Finder, media and Markdown viewing, patch review, and editing working files.
 
 ## Developing milo
 
