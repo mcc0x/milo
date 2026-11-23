@@ -544,7 +544,7 @@ static int PrepareFocusInput(int stateFD) {
     NSUInteger _generation;
     const char *_lastPhase, *_lastReason;
     BOOL _firstOrderedSample, _samplePending, _finished, _sessionInactive, _screensAsleep;
-    BOOL _drainingState;
+    BOOL _drainingState, _sampleRequested;
     char _line[96];
     size_t _lineLength;
     int _status;
@@ -638,13 +638,34 @@ static int PrepareFocusInput(int stateFD) {
     return observation;
 }
 
+// A layout receipt or a successful proof step can make progress now.
+// Coalesce them on the main queue; never spin on rejection. The periodic
+// check remains independent for occlusion, lease expiry and pin loss.
+- (void)queueRequestedSample {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_sampleRequested && !self->_samplePending && !self->_finished) {
+            self->_sampleRequested = NO;
+            [self tick];
+        }
+    });
+}
+
+- (void)requestSample {
+    if (_sampleRequested || _finished) return;
+    _sampleRequested = YES;
+    if (!_samplePending) [self queueRequestedSample];
+}
+
 - (void)handleLine:(size_t)length {
     ClockObservation observation = [self observeClock];
     NSTimeInterval rejectThrough = _clock.uncertain ? INFINITY : _clock.rejectThrough;
     switch (UpdateVisibility(&_lease, observation.before, observation.wall, rejectThrough,
         _rex.processIdentifier, _line, length)) {
         case VisibilityUnchanged: break;
-        case VisibilityChanged: [self invalidatePlacement]; break;
+        case VisibilityChanged:
+            [self invalidatePlacement];
+            if (_lease.checked) [self requestSample];
+            break;
         case VisibilityInvalid: [self finish:"invalid Rex visibility message"]; break;
         case VisibilityWrongOwner: [self finish:"the Rex client changed; reopen the preview in the current Rex client"]; break;
         case VisibilityUnclaimed:
@@ -763,6 +784,7 @@ static int PrepareFocusInput(int stateFD) {
     _panel.delegate = self;
     _panel.contentView = browser;
     [_panel prepareStaging];
+    [self requestSample];
 }
 
 - (void)stagePanelAt:(NSRect)frame geometry:(Geometry)geometry generation:(NSUInteger)generation started:(NSTimeInterval)started {
@@ -794,6 +816,7 @@ static int PrepareFocusInput(int stateFD) {
         return;
     }
     _firstOrderedSample = YES;
+    [self requestSample];
     // Leave the clear, click-through panel ordered for post-order proof.
 }
 
@@ -831,11 +854,15 @@ static int PrepareFocusInput(int stateFD) {
     }
     if (!SameGeometry(_candidate, geometry) || display != _candidateDisplay || !NSEqualRects(frame, _candidateFrame)) {
         // A changed window/frame cannot reuse the prior order proof.
+        BOOL firstOrProven = !_candidate.windowID || _panel.placementProven;
         [self invalidatePlacement];
         _candidate = geometry;
         _candidateFrame = frame;
         _candidateDisplay = display;
         _lastSample = started;
+        // A still-moving native window with no new Rex receipt must not
+        // drive a chain of unbounded retries for intermediate frames.
+        if (firstOrProven) [self requestSample];
         return;
     }
     _lastSample = started;
@@ -880,6 +907,7 @@ static int PrepareFocusInput(int stateFD) {
     BOOL checkPin = !_sessionInactive && !_screensAsleep && now >= _nextPinCheck;
     if (!canSample && !checkPin) return;
     if (checkPin) _nextPinCheck = now + 1.0;
+    _sampleRequested = NO;
     _samplePending = YES;
     NSUInteger generation = _generation;
     const CGRect normalized = _lease.tile;
@@ -909,6 +937,7 @@ static int PrepareFocusInput(int stateFD) {
                 // Keep only one sample in flight, including across nested
                 // run loops during WebKit creation or AppKit ordering.
                 anchor->_samplePending = NO;
+                if (anchor->_sampleRequested) [anchor queueRequestedSample];
             });
         }
     });
