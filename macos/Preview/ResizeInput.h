@@ -174,7 +174,8 @@ static inline ResizeInputResult ResizeFinishCSI(ResizeInput *input, int tty) {
         input->length = 0;
         return ResizeInputWaiting;
     }
-    if (input->mode == ResizeProbe && p != end && *p++ == '?') {
+    if (input->mode == ResizeProbe && p != end && *p == '?') {
+        ++p;
         unsigned mode, status;
         if (ResizeNumber(&p, end, &mode) && end - p == 4 && *p++ == ';' &&
             ResizeNumber(&p, end, &status) && end - p == 2 && !memcmp(p, "$y", 2) && status <= 4) {
@@ -187,7 +188,7 @@ static inline ResizeInputResult ResizeFinishCSI(ResizeInput *input, int tty) {
         input->line = ResizeLineRejected;
         return ResizeInputWaiting;
     }
-    if (input->mode == ResizeMouse && p != end && *p++ == '<') {
+    if ((input->mode == ResizeMouse || input->mode == ResizeProbe) && p != end && *p++ == '<') {
         unsigned button, x, y;
         if (!ResizeNumber(&p, end, &button) || p == end || *p++ != ';' ||
             !ResizeNumber(&p, end, &x) || p == end || *p++ != ';' ||
@@ -195,7 +196,8 @@ static inline ResizeInputResult ResizeFinishCSI(ResizeInput *input, int tty) {
             input->line = ResizeLineRejected;
             return ResizeInputWaiting;
         }
-        if (input->line != ResizeLineEmpty || *p != 'M' || button != 35) return ResizeInputWaiting;
+        if (input->mode != ResizeMouse || input->line != ResizeLineEmpty || *p != 'M' || button != 35)
+            return ResizeInputWaiting;
         struct winsize size;
         if (ioctl(tty, TIOCGWINSZ, &size) < 0 || x > size.ws_col || y > size.ws_row) return ResizeInputWaiting;
         input->motionX = (x - 0.5) / size.ws_col;
@@ -254,9 +256,10 @@ static inline ResizeInputResult ResizeReadByte(ResizeInput *input, int tty, unsi
         break;
     case ResizeGround:
         if (byte == '\033') {
-            // Well-formed mouse frames may precede a line, but cannot be
-            // interleaved with its digits (or with a dismissal).
-            if (input->line != ResizeLineEmpty) input->line = ResizeLineRejected;
+            // Never assemble a positive receipt across a control sequence.
+            // A recognized mouse packet or probe reply may interrupt a
+            // dismissal; other control sequences reject it when parsed.
+            if (input->line == ResizeLineDigits) input->line = ResizeLineRejected;
             input->escape = ResizeEscape;
         } else return ResizeReadLineByte(input, byte);
     }

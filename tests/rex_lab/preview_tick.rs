@@ -609,20 +609,6 @@ fn preview_confirmation_uses_rex_pty() {
     tile.restored(short, new);
     assert_eq!(tile.active_route_modes(), initial_modes, "resume leaked terminal reporting modes");
 
-    let gap = tile.start_drag();
-    tile.model_revision_gap();
-    let new = tile.resize(&mut viewer, &main, 0.44);
-    tile.pointer(new.divider(), true);
-    let route = tile.count(ROUTE_READY);
-    tile.pointer(new.divider(), false);
-    tile.route_ready(route);
-    tile.pointer(new.center(), false);
-    tile.motion(&mut viewer);
-    tile.samples(2);
-    assert_eq!(tile.presentation(), gap, "a revision gap retained passive consent");
-    tile.confirm_local_receipt();
-    tile.restored(gap, new);
-
     // Let the actual 12-second consent expire while continuously held down.
     // After return, no-button motion is not fresh explicit consent.
     let long = tile.start_drag();
@@ -652,8 +638,24 @@ fn preview_confirmation_uses_rex_pty() {
     tile.enter();
     tile.samples(2);
     assert_eq!(tile.presentation(), long, "a bare Return from a Rex client renewed expired consent");
+    let grant_requested = Instant::now();
     tile.confirm_local_receipt();
     tile.restored(long, new);
+
+    let gap = tile.start_drag();
+    tile.model_revision_gap();
+    let new = tile.resize(&mut viewer, &main, 0.44);
+    tile.pointer(new.divider(), true);
+    let route = tile.count(ROUTE_READY);
+    tile.pointer(new.divider(), false);
+    tile.route_ready(route);
+    tile.pointer(new.center(), false);
+    tile.motion(&mut viewer);
+    tile.samples(2);
+    assert_eq!(tile.presentation(), gap, "a revision gap retained passive consent");
+    assert!(grant_requested.elapsed() < Duration::from_secs(12), "expiry masked the gap revocation");
+    tile.confirm_local_receipt();
+    tile.restored(gap, new);
 
     // No sampled button-down or hover interval. Handle a quick release on
     // either side of the *old* boundary, but don't infer consent from a ratio.
