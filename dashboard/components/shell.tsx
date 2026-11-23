@@ -154,7 +154,12 @@ function Dialogs() {
         <form method="dialog" className="dialog-actions button-row"><button className="button secondary">Cancel</button></form>
       </dialog>
       <dialog ref={confirmDialog} id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-note"
-        onClose={event => finishConfirmation(event.currentTarget.returnValue === 'continue')}>
+        onClose={event => {
+          // Native close events are queued. Cancel and immediately reopen must
+          // not clear the new prompt or its confirmation callback.
+          const dialog = event.currentTarget;
+          if (!dialog.open) finishConfirmation(dialog.returnValue === 'continue');
+        }}>
         <h2 id="confirm-title">{confirmation?.title}</h2>
         <p id="confirm-note">{confirmation?.note}</p>
         <div className="button-row dialog-actions">

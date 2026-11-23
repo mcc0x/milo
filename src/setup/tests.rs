@@ -236,9 +236,9 @@ fn exit_save_scopes_preferences_then_saves_claude() {
 
 #[test]
 fn global_preference_save_rejects_stale_edits_and_does_not_copy_worktree_settings() {
-    let Some(root) =
-        isolated_settings("setup::tests::global_preference_save_rejects_stale_edits_and_does_not_copy_worktree_settings")
-    else {
+    let Some(root) = isolated_settings(
+        "setup::tests::global_preference_save_rejects_stale_edits_and_does_not_copy_worktree_settings",
+    ) else {
         return;
     };
     let worktree = root.join("worktree");
@@ -820,7 +820,8 @@ fn stale_terminal_layout_inheritance_keeps_the_newer_worktree_profile() {
 
 #[test]
 fn preference_prompts_return_to_the_clicked_control_in_each_section() {
-    let Some(root) = isolated_settings("setup::tests::preference_prompts_return_to_the_clicked_control_in_each_section")
+    let Some(root) =
+        isolated_settings("setup::tests::preference_prompts_return_to_the_clicked_control_in_each_section")
     else {
         return;
     };
@@ -940,10 +941,9 @@ fn workflow_opens_alerts_and_presence_independently() {
     let f = Fixture::folder();
     let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("drawing does not call Rex"));
     pane.menu_installed = Some(true);
-    for (label, panel, row) in [
-        ("Mirror Rex alerts…", Panel::Alerts, Row::Alerts),
-        ("Discord presence…", Panel::Presence, Row::PresenceOpen),
-    ] {
+    for (label, panel, row) in
+        [("Mirror Rex alerts…", Panel::Alerts, Row::Alerts), ("Discord presence…", Panel::Presence, Row::PresenceOpen)]
+    {
         let rows = frame(&mut pane, 80, 20);
         assert_eq!(pane.key(click_label(&rows, label)), After::Stay);
         assert_eq!(pane.panel, panel);
@@ -1388,8 +1388,10 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
 
     assert_eq!(choose(&mut pane, Row::Alerts), After::Stay);
     assert_eq!(pane.panel, Panel::Alerts);
-    let rows = frame(&mut pane, 80, 24).join("\n");
-    assert!(rows.contains("Mirror Rex alerts  Off") && rows.contains("None saved"), "{rows}");
+    let rows = frame(&mut pane, 80, 24);
+    assert!(rows.iter().any(|row| row.contains("Alerts") && row.trim_end().ends_with("Off")), "{rows:?}");
+    assert!(rows.iter().any(|row| row.contains("None saved")), "{rows:?}");
+    assert!(!saved(&pane).enabled);
 
     // Turning on is asked about first, and without a destination does nothing.
     choose(&mut pane, Row::AlertsOn);
@@ -1407,6 +1409,8 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
 
     // A destination is saved elsewhere; the pane never takes a secret.
     pane.alerts.as_ref().unwrap().set_telegram(TOKEN, "-1001234567890").unwrap();
+    assert_eq!(pane.key(Key::Char('r')), After::Stay);
+    assert!(pane.alert_summary.as_ref().unwrap().saved(alerts::Destination::Telegram));
     assert_eq!(pane.key(Key::Esc), After::Stay);
     assert!(pane.panel == Panel::Workflow && pane.selected_row() == Some(Row::Alerts));
     choose(&mut pane, Row::Alerts);
@@ -1431,6 +1435,7 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Review them again"));
 
     choose(&mut pane, Row::AlertsOn);
+    frame(&mut pane, 80, 24);
     choose(&mut pane, Row::Continue);
     assert!(saved(&pane).enabled);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Rex alert mirroring is on."));
@@ -1440,6 +1445,42 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
     // None of this is a draft to save or discard on the way out.
     assert!(!pane.dirty());
+}
+
+#[test]
+fn alert_confirmation_cannot_enable_from_a_truncated_or_unpainted_review() {
+    let f = Fixture::folder();
+    let alerts = Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state"));
+    alerts.set_telegram("123456:SYNTHETICsyntheticSYNTHETIC00", "-1001234567890").unwrap();
+    alerts.set_content(alerts::Content::Text).unwrap();
+    alerts.locked(|edit| edit.set_notices(alerts::Destination::Telegram, true)).unwrap();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("alerts do not call Rex"));
+    pane.alerts = Some(alerts);
+    choose(&mut pane, Row::Alerts);
+    choose(&mut pane, Row::AlertsOn);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "no review was painted");
+
+    let rows = frame(&mut pane, 80, 24).join("\n");
+    assert!(rows.contains("Telegram chat -1001234567890"), "{rows}");
+    assert!(rows.contains("300 characters"), "{rows}");
+    assert!(rows.contains("Events: blocked, error, done"), "{rows}");
+    assert!(rows.contains("Lifecycle notices (forwarding status only): Telegram."), "{rows}");
+    assert!(!pane.disabled(Row::Continue));
+
+    // Resizing an already visible review never leaves a hidden approval active.
+    let rows = frame(&mut pane, 18, 8);
+    let blocked = rows.iter().position(|row| row.starts_with('›') && row.contains("milo web")).unwrap();
+    assert_eq!(pane.key(click_at(&rows, blocked, "milo web")), After::Ignored);
+    assert_eq!(pane.key(Key::Enter), After::Ignored);
+    frame(&mut pane, 80, 5);
+    assert_eq!(pane.key(Key::Char(' ')), After::Ignored);
+    assert_eq!(pane.panel, Panel::Confirm(Confirm::MirrorAlerts));
+    assert!(!pane.alerts.as_ref().unwrap().settings().unwrap().enabled);
+
+    frame(&mut pane, 80, 24);
+    assert!(!pane.disabled(Row::Continue), "approval returns when the review fits");
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert!(!pane.alerts.as_ref().unwrap().settings().unwrap().enabled);
 }
 
 #[test]
@@ -1584,7 +1625,10 @@ fn discord_presence_takes_an_application_of_your_own_and_goes_back_to_milos() {
     assert_eq!(choose(&mut pane, Row::PresenceApp), After::Stay);
     assert_eq!(pane.panel, Panel::Confirm(Confirm::PresenceApp));
     let asked = page(&mut pane);
-    assert!(asked.contains("No bot or token is needed.") && asked.contains("Type your Discord application ID."), "{asked}");
+    assert!(
+        asked.contains("No bot or token is needed.") && asked.contains("Type your Discord application ID."),
+        "{asked}"
+    );
     assert!(pane.selected_row() == Some(Row::PresenceId));
     assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "an application ID is needed first");
     for digit in ID[..16].chars() {
