@@ -176,6 +176,27 @@ fn wait_forward(output: &mut (impl Read + AsRawFd), wake: &PipeReader, port: u16
     if STOP.load(Ordering::Relaxed) { Ok(false) } else { Err(io::ErrorKind::InvalidData.into()) }
 }
 
+/// Only the editor's successful exit confirms a clean end. A forward can
+/// also exit zero when someone closes its tunnel while the editor is open.
+fn editor_ended(forward: &mut Child, watch: &mut Child, host: &str) -> Result<bool, String> {
+    let finished = |child: &mut Child, name: &str| match child.try_wait() {
+        Ok(None) => Ok(false),
+        Ok(Some(status)) if status.success() => Ok(true),
+        Ok(Some(status)) => Err(format!("the Rex {name} for {host} failed ({status})")),
+        Err(error) => Err(format!("could not check the Rex {name} for {host}: {error}")),
+    };
+    let ended = finished(watch, "editor watch")?;
+    if finished(forward, "forward")? && !ended {
+        // Both can finish during one poll. Check the watch once more before
+        // diagnosing a tunnel that closed while its editor was still running.
+        if !finished(watch, "editor watch")? {
+            return Err(format!("the Rex forward to {host} closed before the editor confirmed it ended"));
+        }
+        return Ok(true);
+    }
+    Ok(ended)
+}
+
 pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String> {
     let host = request.host.to_string_lossy().into_owned();
     let there = rex::server(Some(request.host)).ok_or_else(|| {
@@ -209,10 +230,9 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
     };
 
     let failed = |error: io::Error| format!("could not start the Rex forward: {error}");
-    carried.forward = Some(carried.editor.forward(port, host_port).map_err(failed)?);
-    carried.watch = Some(carried.editor.watch().map_err(failed)?);
-    let output =
-        carried.forward.as_mut().and_then(|forward| forward.stdout.as_mut()).expect("Rex forward stdout was piped");
+    let forward = carried.forward.insert(carried.editor.forward(port, host_port).map_err(failed)?);
+    let watch = carried.watch.insert(carried.editor.watch().map_err(failed)?);
+    let output = forward.stdout.as_mut().expect("Rex forward stdout was piped");
     let ready = wait_forward(output, wake, port)
         .map_err(|error| format!("the Rex forward to {host} did not start listening on 127.0.0.1:{port}: {error}"))?;
     if !ready {
@@ -242,14 +262,8 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
         if launcher.as_mut().is_some_and(|launch| launch.poll(Instant::now()).is_none()) {
             launcher = None;
         }
-        let ended =
-            |child: &mut Option<Child>| child.as_mut().is_some_and(|child| !matches!(child.try_wait(), Ok(None)));
-        if ended(&mut carried.watch) {
+        if editor_ended(forward, watch, &host)? {
             eprintln!("milo web: the editor on {host} ended");
-            break;
-        }
-        if ended(&mut carried.forward) {
-            eprintln!("milo web: the Rex forward to {host} ended");
             break;
         }
     }
@@ -258,9 +272,18 @@ pub(super) fn run(request: &Request<'_>, wake: &PipeReader) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{FORWARD_TARGET, TcpListener, handoff, interrupt, io, wait_forward};
+    use super::{FORWARD_TARGET, TcpListener, editor_ended, handoff, interrupt, io, wait_forward};
     use std::io::Write as _;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn a_completed_editor_does_not_mask_a_failed_forward() {
+        let mut forward = Command::new("/bin/sh").args(["-c", "exit 1"]).spawn().unwrap();
+        let mut watch = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        assert!(!forward.wait().unwrap().success());
+        assert!(watch.wait().unwrap().success());
+        assert!(editor_ended(&mut forward, &mut watch, "test-host").is_err());
+    }
 
     #[test]
     fn interrupt_does_not_signal_a_reaped_forward() {
