@@ -1,13 +1,15 @@
 use std::ffi::{CStr, OsStr};
 use std::fs::{self, DirBuilder};
-use std::io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _};
+use std::io::{self, BufRead as _, Read, Write};
 use std::num::NonZeroU32;
-use std::os::fd::AsRawFd as _;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::Anchor;
 use crate::fs_ops;
@@ -33,9 +35,13 @@ fn focus_pipe() -> io::Result<(io::PipeReader, io::PipeWriter)> {
 
 fn inherit_focus_reader(command: &mut Command, reader: io::PipeReader) {
     command.env(FOCUS_FD_ENV, reader.as_raw_fd().to_string());
+    inherit_pipe(command, reader);
+}
+
+fn inherit_pipe(command: &mut Command, pipe: impl AsRawFd + Send + Sync + 'static) {
     let inherit = move || {
-        // SAFETY: the closure owns this open reader.
-        if unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
+        // SAFETY: the closure owns this open pipe endpoint.
+        if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -174,49 +180,244 @@ fn parse_pin_reply(code: Option<i32>, reply: &[u8]) -> Result<NonZeroU32, String
     }
 }
 
-/// The helper and observer run only for this terminal. In particular, failure
-/// to start WebKit must not leave the observer waiting for more session events.
-pub(crate) fn anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
-    let result = run_anchor(url, anchor);
-    if let Err(error) = &result {
-        let input = io::stdin();
-        if input.is_terminal() && io::stderr().is_terminal() {
-            // Keep the diagnostic visible without keeping WebKit or Rex running.
-            // Do not let a saturated or flow-stopped PTY keep the parent alive.
-            // Use a separate file description so the shell's flags are unchanged.
-            if let Ok(mut tty) = crate::term::terminal_output(io::stderr().as_raw_fd())
-                && writeln!(tty, "milo preview: {error}\n\nPress Enter to dismiss (closes automatically in 15 seconds).").is_ok()
-            {
-                let mut fds = [libc::pollfd { fd: input.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-                let _ = crate::term::wait_ready(&mut fds, 15_000);
-            }
-            // Never retry on blocking stderr in the CLI's top-level error path.
-            std::process::exit(1);
-        }
-    }
-    result
+const STARTUP_WAIT: Duration = Duration::from_secs(15);
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum StartupStatus {
+    Ready,
+    ObserverScope,
+    ObserverPipe,
+    FocusPipe,
+    HelperLaunch,
+    HelperInit,
+    ObserverLaunch,
+    ObserverInit,
 }
 
-fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
-    use std::time::{Duration, Instant};
+impl StartupStatus {
+    fn from_reply(reply: u8) -> Result<(), String> {
+        let problem = match reply {
+            n if n == Self::Ready as u8 => return Ok(()),
+            n if n == Self::ObserverScope as u8 => "couldn't confirm the preview's local Rex session; reopen from the local working terminal",
+            n if n == Self::ObserverPipe as u8 => "couldn't open the Rex preview observer pipe",
+            n if n == Self::FocusPipe as u8 => "couldn't open the preview focus acknowledgment pipe",
+            n if n == Self::HelperLaunch as u8 => "couldn't launch the local WebKit helper",
+            n if n == Self::HelperInit as u8 => "the WebKit helper couldn't initialize; check the Rex window is still visible and reopen the preview",
+            n if n == Self::ObserverLaunch as u8 => "couldn't start the local Rex preview observer",
+            n if n == Self::ObserverInit as u8 => "Rex couldn't verify the preview terminal and its viewer; reopen from the local working terminal",
+            _ => "the local preview returned an invalid startup response",
+        };
+        Err(problem.into())
+    }
+}
 
-    let (input, state) = io::pipe().map_err(|_| "could not open the preview observer pipe")?;
-    let mut watch = crate::rex::preview_observer_command(anchor, state)?;
-    let (reader, reply) = focus_pipe().map_err(|_| "could not open the preview focus acknowledgment pipe")?;
-    let mut helper = spawn(&[url, &anchor.native_window_id.to_string()], input.into(), Some(reader))
-        .map_err(|_| "could not launch the local WebKit helper")?;
-    // No observation may precede the helper's clock baseline, including
-    // when installation or launch stalls across a system clock change.
-    let mut watcher = match after_clock_ready(&mut helper, move || {
-        watch.spawn().map_err(|_| "couldn't start the local Rex preview observer".into())
-    }) {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            let _ = helper.kill();
-            let _ = helper.wait();
-            return Err(error);
+/// The directory and socket have no URL content. The endpoint exists only
+/// until this opener accepts its one peer or leaves the startup path.
+pub(crate) struct StartupSocket {
+    dir: PathBuf,
+    path: PathBuf,
+    listener: Option<UnixListener>,
+}
+
+impl StartupSocket {
+    pub(crate) fn new() -> io::Result<Self> {
+        let mut name = *b"/private/tmp/milo-preview.XXXXXX\0";
+        // SAFETY: This mutable NUL-terminated template is valid for mkdtemp;
+        // it creates the directory with mode 0700 and retains no reference.
+        if unsafe { libc::mkdtemp(name.as_mut_ptr().cast()) }.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let dir = PathBuf::from(OsStr::from_bytes(&name[..name.len() - 1]));
+        let path = dir.join("start");
+        let mut socket = Self { dir, path, listener: None };
+        let listener = UnixListener::bind(&socket.path)?;
+        listener.set_nonblocking(true)?;
+        socket.listener = Some(listener);
+        Ok(socket)
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        self.path.to_str().expect("startup socket path is ASCII")
+    }
+
+    pub(crate) fn start(
+        mut self, url: &str, authorize: impl FnOnce(u32) -> Result<(), String>,
+    ) -> Result<u32, String> {
+        let listener = self.listener.take().expect("startup listener was initialized");
+        let mut fds = [libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let mut peer = if crate::term::wait_ready(&mut fds, 3_000) > 0 {
+            listener.accept().ok().map(|(peer, _)| peer)
+        } else {
+            None
+        }
+        .ok_or("the quiet preview terminal didn't start; check that Rex supports direct command launch")?;
+        drop(self);
+        drop(listener);
+        configure_peer(&peer).map_err(|_| "couldn't verify the quiet preview startup connection")?;
+        let pid = peer_pid(&peer).map_err(|_| "couldn't identify the quiet preview terminal process")?;
+        authorize(pid)?;
+        let mut reply = [0];
+        write_address(&mut peer, url)
+            .and_then(|()| peer.read_exact(&mut reply))
+            .map_err(|_| "the quiet preview didn't initialize; check the Rex window and run preview again")?;
+        StartupStatus::from_reply(reply[0])?;
+        Ok(pid)
+    }
+}
+
+impl Drop for StartupSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_dir(&self.dir);
+    }
+}
+
+fn configure_peer(peer: &UnixStream) -> io::Result<()> {
+    let fd = peer.as_raw_fd();
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: fd is a connected Unix stream and both output pointers are valid.
+    if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: geteuid has no preconditions.
+    if uid != unsafe { libc::geteuid() } {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    // SAFETY: fd is still owned by this connected socket.
+    if unsafe { libc::fcntl(fd, libc::F_SETNOSIGPIPE, 1) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Darwin's accepted socket can inherit O_NONBLOCK from the listener.
+    // Use blocking I/O with explicit timeouts for the framed exchange.
+    peer.set_nonblocking(false)?;
+    peer.set_read_timeout(Some(STARTUP_WAIT))?;
+    peer.set_write_timeout(Some(STARTUP_WAIT))
+}
+
+fn peer_pid(peer: &UnixStream) -> io::Result<u32> {
+    let mut pid: libc::pid_t = 0;
+    let expected = libc::socklen_t::try_from(std::mem::size_of_val(&pid)).expect("pid_t fits in socklen_t");
+    let mut size = expected;
+    // SAFETY: pid is valid for the indicated output size and peer owns fd.
+    if unsafe {
+        libc::getsockopt(peer.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut size)
+    } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if size != expected || pid < 2 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    u32::try_from(pid).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+fn write_address(mut channel: impl Write, url: &str) -> io::Result<()> {
+    let size = u32::try_from(url.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    channel.write_all(&size.to_be_bytes())?;
+    channel.write_all(url.as_bytes())
+}
+
+fn read_address(channel: &mut UnixStream, buf: &mut [u8; super::URL_MAX]) -> io::Result<usize> {
+    let mut size = [0; 4];
+    channel.read_exact(&mut size)?;
+    let size = usize::try_from(u32::from_be_bytes(size)).map_err(|_| io::ErrorKind::InvalidData)?;
+    if size == 0 || size > buf.len() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    channel.read_exact(&mut buf[..size])?;
+    Ok(size)
+}
+
+/// The direct child never writes to the PTY, including when Rex restores
+/// this command later and its one-time startup socket no longer exists.
+pub(crate) fn anchor(startup: &Path, anchor: Anchor<'_>) -> Result<(), String> {
+    let _quiet = QuietInput::disable_echo();
+    let mut peer = UnixStream::connect(startup).map_err(|_| "the preview startup request expired")?;
+    configure_peer(&peer).map_err(|_| "couldn't verify the preview startup connection")?;
+    let mut address = [0; super::URL_MAX];
+    let count = read_address(&mut peer, &mut address).map_err(|_| "couldn't read the preview address")?;
+    let address = std::str::from_utf8(&address[..count]).map_err(|_| "invalid preview address encoding")?;
+    let address = super::url(address)?;
+    let processes = match start_anchor(address, anchor) {
+        Ok(processes) => processes,
+        Err(status) => {
+            let _ = peer.write_all(&[status as u8]);
+            return StartupStatus::from_reply(status as u8);
         }
     };
+    let (mut helper, mut watcher, reply) = processes;
+    if peer.write_all(&[StartupStatus::Ready as u8]).is_err() {
+        let _ = helper.kill();
+        let _ = watcher.kill();
+        let _ = helper.wait();
+        let _ = watcher.wait();
+        return Err("the preview launcher closed during startup".into());
+    }
+    drop(peer);
+    run_anchor(helper, watcher, reply, anchor)
+}
+
+struct QuietInput(libc::termios);
+
+impl QuietInput {
+    fn disable_echo() -> Option<Self> {
+        let fd = libc::STDIN_FILENO;
+        let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: tcgetattr initializes the struct on success and retains no pointer.
+        if unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: tcgetattr succeeded above.
+        let original = unsafe { mode.assume_init() };
+        let mut mode = original;
+        mode.c_lflag &= !(libc::ECHO | libc::ECHONL);
+        // SAFETY: mode came from this same terminal; the only change is to echo.
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &mode) } == 0 { Some(Self(original)) } else { None }
+    }
+}
+
+impl Drop for QuietInput {
+    fn drop(&mut self) {
+        // SAFETY: restore the exact settings for the same inherited descriptor.
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+    }
+}
+
+fn start_anchor(url: &str, anchor: Anchor<'_>) -> Result<(Child, Child, io::PipeWriter), StartupStatus> {
+    let (input, mut state) = io::pipe().map_err(|_| StartupStatus::ObserverPipe)?;
+    let (mut watch_ready, send_ready) = io::pipe().map_err(|_| StartupStatus::ObserverPipe)?;
+    let mut watch =
+        crate::rex::preview_observer_command(anchor, send_ready.as_raw_fd()).map_err(|_| StartupStatus::ObserverScope)?;
+    inherit_pipe(&mut watch, send_ready);
+    let (reader, reply) = focus_pipe().map_err(|_| StartupStatus::FocusPipe)?;
+    let mut helper = spawn(&["--address-stdin", &anchor.native_window_id.to_string()], input.into(), Some(reader))
+        .map_err(|_| StartupStatus::HelperLaunch)?;
+    let watcher = write_address(&mut state, url)
+        .map_err(|_| StartupStatus::HelperInit)
+        .and_then(|()| {
+            // No observation may precede the helper's clock baseline.
+            after_clock_ready(&mut helper).map_err(|_| StartupStatus::HelperInit)?;
+            let mut watcher = watch.stdout(state).spawn().map_err(|_| StartupStatus::ObserverLaunch)?;
+            drop(watch); // Rust must not keep the write end alive across a refused startup.
+            if !read_ready(&mut watch_ready, 3_000) {
+                let _ = watcher.kill();
+                let _ = watcher.wait();
+                return Err(StartupStatus::ObserverInit);
+            }
+            Ok(watcher)
+        });
+    match watcher {
+        Ok(watcher) => Ok((helper, watcher, reply)),
+        Err(status) => {
+            let _ = helper.kill();
+            let _ = helper.wait();
+            Err(status)
+        }
+    }
+}
+
+fn run_anchor(helper: Child, mut watcher: Child, reply: io::PipeWriter, anchor: Anchor<'_>) -> Result<(), String> {
     let result = serve_actions(helper, reply, || crate::rex::return_preview_focus(anchor).is_ok());
     // EOF can reach the helper before Rex's exit status is waitable. Give it
     // a short grace period, but report nothing from the Rex process itself.
@@ -238,14 +439,19 @@ fn run_anchor(url: &str, anchor: Anchor<'_>) -> Result<(), String> {
     result
 }
 
-fn after_clock_ready<T>(helper: &mut Child, start: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn after_clock_ready(helper: &mut Child) -> Result<(), &'static str> {
     let output = helper.stdout.as_mut().expect("helper stdout is piped");
-    let mut fds = [libc::pollfd { fd: output.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-    let mut receipt = [0];
-    if crate::term::wait_ready(&mut fds, 8_000) <= 0 || output.read_exact(&mut receipt).is_err() || receipt != *b"R" {
-        return Err("the WebKit helper did not initialize the preview observer; no page was shown".into());
+    if read_ready(output, 8_000) {
+        Ok(())
+    } else {
+        Err("the WebKit helper did not initialize the preview observer; no page was shown")
     }
-    start()
+}
+
+fn read_ready(pipe: &mut (impl Read + AsRawFd), timeout_ms: i32) -> bool {
+    let mut fds = [libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+    let mut receipt = [0];
+    crate::term::wait_ready(&mut fds, timeout_ms) > 0 && pipe.read_exact(&mut receipt).is_ok() && receipt == *b"R"
 }
 
 fn serve_actions(
@@ -276,10 +482,10 @@ fn serve_actions(
         }
     }
     drop(reply);
-    if helper.wait().map_err(|_| "could not wait for the WebKit helper")?.success() {
-        Ok(())
-    } else {
-        Err("WebKit preview stopped".into())
+    match helper.wait().map_err(|_| "could not wait for the WebKit helper")?.code() {
+        Some(0) => Ok(()),
+        Some(3) => Err("the Mac viewer didn't claim the preview tile; reopen from a Mac-created working terminal".into()),
+        _ => Err("WebKit preview stopped".into()),
     }
 }
 
@@ -288,12 +494,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_sends_the_literal_address_only_after_peer_authorization() {
+        let socket = StartupSocket::new().unwrap();
+        let path = PathBuf::from(socket.path());
+        assert_eq!(path.parent().unwrap().metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        let url = "https://example.com/private/a%2Fb&$HOME";
+        std::thread::scope(|scope| {
+            let path = &path;
+            let child = scope.spawn(move || {
+                let mut peer = UnixStream::connect(path).unwrap();
+                configure_peer(&peer).unwrap();
+                let mut buf = [0; super::super::URL_MAX];
+                let size = read_address(&mut peer, &mut buf).unwrap();
+                assert_eq!(&buf[..size], url.as_bytes());
+                peer.write_all(&[StartupStatus::ObserverScope as u8]).unwrap();
+            });
+            let error = socket.start(url, |pid| {
+                assert_eq!(pid, std::process::id());
+                assert!(!path.exists(), "an accepted socket must not remain discoverable");
+                Ok(())
+            }).unwrap_err();
+            assert!(error.contains("local working terminal") && !error.contains(url));
+            child.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn refused_socket_peer_receives_no_address() {
+        let socket = StartupSocket::new().unwrap();
+        let path = PathBuf::from(socket.path());
+        std::thread::scope(|scope| {
+            let path = &path;
+            let peer = scope.spawn(move || {
+                let mut peer = UnixStream::connect(path).unwrap();
+                peer.set_read_timeout(Some(STARTUP_WAIT)).unwrap();
+                assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+            });
+            assert_eq!(socket.start("http://localhost/a", |_| Err("wrong terminal".into())).unwrap_err(), "wrong terminal");
+            peer.join().unwrap();
+        });
+    }
+
+    #[test]
     fn a_helper_that_exits_during_startup_cannot_start_the_observer() {
         let mut helper = Command::new("/usr/bin/true").stdout(Stdio::piped()).spawn().unwrap();
-        let result = after_clock_ready(&mut helper, || -> Result<(), String> {
-            panic!("observed the Rex layout before the helper established its clock baseline")
-        });
-        assert!(result.is_err());
+        assert!(after_clock_ready(&mut helper).is_err());
         helper.wait().unwrap();
     }
 
@@ -356,7 +601,7 @@ mod tests {
         inherit_focus_reader(&mut command, reader);
         let mut helper = command.spawn().unwrap();
         drop(command);
-        after_clock_ready(&mut helper, || Ok(())).unwrap();
+        after_clock_ready(&mut helper).unwrap();
         let mut attempts = 0;
         serve_actions(helper, reply, || {
             attempts += 1;

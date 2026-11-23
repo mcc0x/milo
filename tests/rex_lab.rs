@@ -923,6 +923,7 @@ fn discord_presence_shows_nothing_without_a_rex_app_and_its_helper_ends_with_the
 #[ignore = "needs Rex and Python 3; starts a disposable server and simulated viewer"]
 fn preview_layout_and_observer() {
     use std::io::{BufRead as _, BufReader};
+    use std::os::unix::net::UnixListener;
 
     fn unix_seconds() -> u64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
@@ -994,6 +995,8 @@ fn preview_layout_and_observer() {
     let viewer = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_lab/preview_viewer.py");
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/src/rex/preview.lua");
     let url = "http://localhost:4321/lab/a%2Fb&$HOME";
+    let unused_startup = lab.root.join("unused-preview-start.sock");
+    let unused_startup = unused_startup.to_str().unwrap();
     let native_window_id = u32::MAX; // A sentinel; the simulated app has no native window.
     let pid_file = lab.root.join("preview-arguments");
     let nested = lab.root.join("nested-worktree");
@@ -1172,7 +1175,7 @@ fn preview_layout_and_observer() {
     };
     let open = |origin: &str, target: &str, placement: &str, expected: &str, cwd: &str| {
         let extra = format!(
-            r#","exe":"/bin/bash","url":"{url}","placement":"{placement}","main":"{expected}","cwd":"{cwd}"{owner}"#,
+            r#","exe":"/bin/bash","startup":"{unused_startup}","placement":"{placement}","main":"{expected}","cwd":"{cwd}"{owner}"#,
         );
         request("open", origin, target, &extra)
     };
@@ -1249,7 +1252,7 @@ fn preview_layout_and_observer() {
     lab.rex(&["focus", "-s", &session, &tab]);
     lab.rex(&["focus", "-s", &session, &main]);
     let raced = format!(
-        r#","exe":"/bin/bash","url":"{url}","placement":"right","main":"{main}","cwd":"{planned_cwd}","switch_to":"{second_tab}"{owner}"#,
+        r#","exe":"/bin/bash","startup":"{unused_startup}","placement":"right","main":"{main}","cwd":"{planned_cwd}","switch_to":"{second_tab}"{owner}"#,
     );
     assert_eq!(request("open", &main, &main, &raced).trim(), "changed");
     assert!(lab.view().tabs.values().all(|tab| !tab.labels().iter().any(|label| label.starts_with("milo:preview"))));
@@ -1259,14 +1262,27 @@ fn preview_layout_and_observer() {
     assert!(!lab.view().tab(&tab).labels().iter().any(|label| label.starts_with("milo:preview")));
 
     let anchor_scope = format!(r#","main":"{main}"{owner}"#);
+    let stage = |mode: &str, caller: &str, block: &str, placement: &str, pid: u32| {
+        let extra = format!(r#"{anchor_scope},"tile":"{block}","placement":"{placement}","anchor_pid":{pid}"#);
+        request(mode, caller, caller, &extra)
+    };
+    let blank = |block: &str| {
+        let capture = lab.rex(&["capture", "-s", &session, "-b", block, "--trim", "--unwrap"]);
+        assert!(capture.trim().is_empty(), "preview PTY emitted output: {capture:?}");
+    };
     let focus_main = |block: &str| request("focus", block, block, &anchor_scope);
     let start_watch = |block: &str, child: u32| {
-        let payload = args("watch", block, &child.to_string(), &anchor_scope);
+        let payload = args("watch", block, &child.to_string(), &format!(r#"{anchor_scope},"startup_fd":3"#));
         let file = request_file(&lab, block);
         let cmd = file.with_extension("watch.json");
         let staged = file.with_extension("watch.tmp");
         fs::write(&staged, payload).unwrap();
         fs::rename(staged, cmd).unwrap();
+        assert!(
+            soon(|| fs::read(file.with_extension("watch.ready")).is_ok_and(|record| record == b"R")),
+            "Rex observer didn't acknowledge scoped startup: {}",
+            fs::read_to_string(file.with_extension("watch.errors")).unwrap_or_default()
+        );
         file
     };
     let alive = |pid: u32| lab.command("/bin/ps").args(["-p", &pid.to_string(), "-o", "pid="]).output().unwrap().status.success();
@@ -1285,12 +1301,19 @@ fn preview_layout_and_observer() {
     ] {
         // A launch from the focused sidebar must not steal keyboard focus either.
         lab.rex(&["focus", "-s", &session, caller]);
-        assert_eq!(launch(caller, placement).trim(), "ok", "{placement}");
+        let staged = launch(caller, placement);
+        let block = staged.trim();
+        assert!(block.starts_with("block:"), "{placement}: {staged}");
+        blank(block);
         check_focus(caller);
-        let literal = format!("\n{url}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\n");
+        let literal = format!("\n{unused_startup}\n{main}\n{tab}\n{client}\n{viewer_pid}\n{native_window_id}\n");
         assert!(soon(|| lab.read("preview-arguments").ends_with(&literal)));
         let child = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
         fs::remove_file(&pid_file).unwrap();
+        assert_eq!(stage("authorize", caller, block, placement, child).trim(), "ok");
+        assert_eq!(stage("publish", caller, block, placement, child).trim(), "ok");
+        blank(block);
+        check_focus(caller);
         let found = scope(&format!(
             "local view=assert(rex.session.view{{}}); for _,w in ipairs(view.windows) do if w.window_id=='{tab}' then \
              for _,l in ipairs(w.layers) do for _,b in ipairs(l.blocks) do if b.label=='milo:preview' then \
@@ -1302,7 +1325,7 @@ fn preview_layout_and_observer() {
              end end; error('no preview')"
         ));
         let mut found = found.split_whitespace();
-        let block = found.next().unwrap();
+        assert_eq!(found.next(), Some(block));
         let owner_before_claim = found.next().unwrap();
         if placement == "above" {
             // Publishing a split created by a CLI does not itself assign an app owner.
@@ -1392,6 +1415,7 @@ fn preview_layout_and_observer() {
         let resized = show_for(block);
         assert_ne!(show, resized, "{placement}: Rex's leaf did not move on resize");
         expect(&resized);
+        blank(block);
         let show = resized;
         lab.rex(&["zoom", "-s", &session, &main, "--on"]);
         expect("hide");
@@ -1514,66 +1538,71 @@ fn preview_layout_and_observer() {
         assert!(soon(|| !alive(watcher)), "{placement}: watcher didn't end");
     }
 
-    // The real Rust anchor reaches its startup error without asking for or
-    // exercising GUI access. Use the production Lua launch and exit policy.
+    // Exercise the actual Rust child with a scoped startup failure. It must
+    // stay silent while waiting for the URL, including on input, and return
+    // a fixed status over the socket rather than a PTY diagnostic.
+    lab.rex(&["focus", "-s", &session, &main]);
     let launcher = lab.root.join("preview-startup");
     let child = lab.milo.display();
     fs::write(&launcher, format!("#!/bin/sh\nSSH_CONNECTION=lab exec '{child}' \"$@\"\n")).unwrap();
     fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
     let plan = identify(&main, &main);
     let cwd = id(&plan, "cwd");
-    let launch_startup = |placement: &str| {
-        let exe = launcher.display();
+    let launch_startup = |placement: &str, startup: &Path| {
+        let (exe, startup) = (launcher.display(), startup.display());
         request(
             "open",
             &main,
             &main,
             &format!(
-                r#","exe":"{exe}","url":"{url}","placement":"{placement}","main":"{main}","cwd":"{cwd}"{owner}"#,
+                r#","exe":"{exe}","startup":"{startup}","placement":"{placement}","main":"{main}","cwd":"{cwd}"{owner}"#,
             ),
         )
     };
-    assert_eq!(launch_startup("right").trim(), "ok");
-    let failure_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
-    let capture = || lab.rex(&["capture", "-s", &session, "-b", &failure_block, "--trim"]);
-    assert!(soon(|| capture().contains("Press Enter to dismiss")), "{}", capture());
-    std::thread::sleep(Duration::from_millis(350));
-    let error = capture();
-    assert!(error.contains("SSH session") && !error.contains(url), "{error}");
-    lab.rex(&["send-key", "-s", &session, "-b", &failure_block, "enter"]);
-    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
+    let endpoint = lab.root.join("preview-start.sock");
+    let socket = UnixListener::bind(&endpoint).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let result = launch_startup("right", &endpoint);
+    let failure_block = result.trim();
+    assert!(failure_block.starts_with("block:"), "{result}");
+    let mut peer = None;
+    assert!(soon(|| {
+        peer = socket.accept().ok().map(|(peer, _)| peer);
+        peer.is_some()
+    }));
+    let mut peer = peer.unwrap();
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(WAIT)).unwrap();
+    fs::remove_file(&endpoint).unwrap();
+    drop(socket);
+    blank(failure_block);
+    lab.rex(&["send", "-s", &session, "-b", failure_block, "do not echo this"]);
+    blank(failure_block);
+    check_focus(&main);
+    peer.write_all(&u32::try_from(url.len()).unwrap().to_be_bytes()).unwrap();
+    peer.write_all(url.as_bytes()).unwrap();
+    let mut response = [0; 1];
+    peer.read_exact(&mut response).unwrap();
+    assert_eq!(response, [1], "expected the fixed local Rex scope refusal");
+    assert_eq!(peer.read(&mut response).unwrap(), 0, "a startup reply is exactly one byte");
+    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview:starting")));
+    check_focus(&main);
 
-    // The simulated viewer owns no native Rex window. Startup must leave a
-    // readable diagnostic without leaking the URL or retaining any children.
-    fs::write(
-        &launcher,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{root}/preview-postspawn-pid'\nexec '{child}' \"$@\"\n"
-        ),
-    )
-    .unwrap();
-    assert_eq!(launch_startup("right").trim(), "ok");
-    viewer_session("session.own_block", &session);
-    let postspawn = lab.view().tab(&tab).pane("milo:preview").block.clone();
-    let error_started = Instant::now();
-    let capture = || lab.rex(&["capture", "-s", &session, "-b", &postspawn, "--trim"]);
-    assert!(soon(|| capture().contains("Press Enter to dismiss")), "{}", capture());
-    let error = capture();
-    assert!(!error.contains(url), "{error}");
-    let pid = lab.read("preview-postspawn-pid").trim().parse::<u32>().unwrap();
-    assert!(alive(pid), "the diagnostic pane ended before the user could read it");
-    let children = lab.command("/usr/bin/pgrep").args(["-P", &pid.to_string()]).output().unwrap();
-    assert!(children.stdout.is_empty() && children.status.code() == Some(1), "{children:?}");
-    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
-    assert!(error_started.elapsed() <= Duration::from_secs(17));
+    // A restored command has only an expired socket name, never the URL.
+    // It cannot reconnect or leave an inert preview terminal behind.
+    let result = launch_startup("right", &endpoint);
+    assert!(result.trim() == "changed" || result.trim().starts_with("block:"), "{result}");
+    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview:starting")));
+    check_focus(&main);
 
     // A successful anchor can also exit in less than Rex's quick-exit time
     // (for example when closed during startup) without leaving a dead pane.
     fs::write(&launcher, format!("#!/bin/sh\n/bin/sleep 0.1\nprintf done > '{root}/preview-quick-exit'\nexit 0\n"))
         .unwrap();
-    assert_eq!(launch_startup("right").trim(), "ok");
+    let result = launch_startup("right", &endpoint);
+    assert!(result.trim() == "changed" || result.trim().starts_with("block:"), "{result}");
     assert!(soon(|| lab.read("preview-quick-exit") == "done"));
-    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview")));
+    assert!(soon(|| !lab.view().tab(&tab).labels().contains(&"milo:preview:starting")));
 
     // One Mac app can retain four session attachments. Keep the working
     // shell focused and the published preview visible through a resize.
@@ -1587,14 +1616,19 @@ fn preview_layout_and_observer() {
          error('missing lab viewer')"
     ));
     lab.rex(&["focus", "-s", &session, &main]);
-    assert_eq!(launch(&main, "right").trim(), "ok");
+    let staged = launch(&main, "right");
+    let anchor_block = staged.trim();
+    assert!(anchor_block.starts_with("block:"), "{staged}");
+    blank(anchor_block);
     check_focus(&main);
     assert!(soon(|| lab.read("preview-arguments").ends_with(&format!("\n{native_window_id}\n"))));
     let anchor_pid = lab.read("preview-arguments").lines().next().unwrap().parse::<u32>().unwrap();
-    let anchor_block = lab.view().tab(&tab).pane("milo:preview").block.clone();
+    assert_eq!(stage("authorize", &main, anchor_block, "right", anchor_pid).trim(), "ok");
+    assert_eq!(stage("publish", &main, anchor_block, "right", anchor_pid).trim(), "ok");
+    assert_eq!(lab.view().tab(&tab).pane("milo:preview").block, anchor_block);
     viewer_session("session.own_block", &session);
     let started_at = unix_seconds();
-    let owned_watch = start_watch(&anchor_block, anchor_pid);
+    let owned_watch = start_watch(anchor_block, anchor_pid);
     let records = || fs::read_to_string(owned_watch.with_extension("watch.log")).unwrap_or_default();
     let expect_states = |expected: &[&str]| {
         assert!(
@@ -1603,16 +1637,17 @@ fn preview_layout_and_observer() {
             records()
         );
     };
-    let first = show_for(&anchor_block);
+    let first = show_for(anchor_block);
     expect_states(&["hide", &first]);
     scope(&format!(
         "assert(rex.session.resize_pane{{direction='horizontal', before_block_id='{main}', \
          after_block_id='{anchor_block}', ratio=0.65}})"
     ));
-    let resized = show_for(&anchor_block);
+    let resized = show_for(anchor_block);
     assert_ne!(resized, first);
     let visible = ["hide", first.as_str(), resized.as_str()];
     expect_states(&visible);
+    blank(anchor_block);
     let started = Instant::now();
     let (mut renewals, mut full_snapshots) = (0, 0);
     while started.elapsed() < Duration::from_secs(13) {
@@ -1627,19 +1662,19 @@ fn preview_layout_and_observer() {
     }
     assert!(renewals >= 8 && full_snapshots >= 2, "missing sustained heartbeats: {}", records());
     check_focus(&main);
-    let (mut other, input, output, other_id) = transfer(&anchor_block);
+    let (mut other, input, output, other_id) = transfer(anchor_block);
     scope(&format!(
         "local b=assert(rex.session.describe_block{{block_id='{anchor_block}'}}).block; assert(b.owner=='{other_id}')"
     ));
     expect_states(&["hide", &first, &resized, "hide"]);
-    lab.rex(&["focus", "-s", &session, &anchor_block]);
-    assert_eq!(focus_main(&anchor_block).trim(), "focus");
-    check_focus(&anchor_block);
+    lab.rex(&["focus", "-s", &session, anchor_block]);
+    assert_eq!(focus_main(anchor_block).trim(), "focus");
+    check_focus(anchor_block);
     viewer_session("session.own_block", &session);
     drop((input, output));
     assert!(other.wait().unwrap().success());
     expect_states(&["hide", &first, &resized, "hide", &resized]);
-    assert_eq!(focus_main(&anchor_block).trim(), "ok");
+    assert_eq!(focus_main(anchor_block).trim(), "ok");
     check_focus(&main);
     // The departure must conceal the pane even if the observer's first
     // snapshot after these calls already sees the original tab again.
@@ -1652,7 +1687,7 @@ fn preview_layout_and_observer() {
     close(&main);
     expect_states(&["hide", &first, &resized, "hide", &resized, "hide", &resized, "hide"]);
     assert!(soon(|| fs::read_to_string(owned_watch.with_extension("watch.exit")).is_ok_and(|code| code.trim() == "0")));
-    close(&anchor_block);
+    close(anchor_block);
 }
 
 /// The floating reader the outline opens in Rex, edited through Rex's own keys.

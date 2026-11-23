@@ -950,11 +950,11 @@ fn wall_reader(project: &Project, cols: u16, rows: u16) -> Terminal {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn preview_error_exits_when_its_terminal_cannot_display_the_notice() {
+fn a_stale_preview_anchor_exits_even_with_a_stopped_terminal() {
     let project = Project::new();
     let mut command = project.command("/bin/sh");
     command.args(["-c", "while [ ! -f go ]; do sleep .05; done; exec \"$@\"", "anchor", env!("CARGO_BIN_EXE_milo"),
-        "preview-anchor", "http://localhost:3000", "block:11111111-1111-4111-8111-111111111111",
+        "preview-anchor", "/missing-milo-test/startup.sock", "block:11111111-1111-4111-8111-111111111111",
         "window:22222222-2222-4222-8222-222222222222", "client:33333333-3333-4333-8333-333333333333", "100", "42"]);
     let mut terminal = Terminal::run(&mut command);
     let fd = terminal.slave.as_raw_fd();

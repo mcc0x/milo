@@ -1,4 +1,4 @@
-//! An explicit local URL, the user's placement choice, and a Rex-owned terminal anchor.
+//! An explicit browser address, the user's placement choice, and a Rex-owned terminal anchor.
 
 use crate::preferences::PreviewPlacement;
 
@@ -14,18 +14,20 @@ pub(crate) struct Anchor<'a> {
     pub native_window_id: std::num::NonZeroU32,
 }
 
+pub(crate) const URL_MAX: usize = 4096;
 pub(crate) const EXPECTED: &str = "expected milo preview URL [--placement right|left|above|below]";
 pub(crate) const HELP: &str = "\
 Usage: milo preview URL [--placement right|left|above|below]
 
-Open a persistent local browser pane beside the working terminal in this Rex tab.
+Open a browser pane beside the working terminal in this local Rex tab.
+For your dev server, try milo preview http://localhost:3000. HTTP(S) sites also work.
+Launch without credentials, query or fragment; use the pane's address bar for full URLs.
 Right is the default. Change Preview placement in Settings or override it once.
-Use HTTP or HTTPS on localhost, 127.0.0.1 or [::1], without credentials, query or fragment.
 
 Keep working in the sibling terminal or drag the Rex divider. The page stays
-loaded. Command-Shift-Return returns keyboard focus; Command-W in the preview
-closes it. Select an element, review its structural path, then choose Copy.
-Nothing is sent to an agent.
+loaded. Command-L edits the address; Return opens it. Command-Shift-Return
+returns keyboard focus; Command-W in the preview closes it. Only the original
+local dev origin offers Select → review → Copy. Nothing is sent to an agent.
 
 Experimental macOS overlay: placement is approximate. Start in a Mac-created
 terminal with one visible local Rex window. No Accessibility, Screen Recording,
@@ -36,12 +38,54 @@ Rex can report a tab change but not every session or host switch inside the same
 Mac window. The preview can remain over that other session indefinitely. Close
 the preview before switching sessions or hosts in the pinned window.";
 
-/// Restrict the authority before passing the literal URL through Rex. WebKit checks
-/// the parsed origin again on navigation. Never echo a rejected URL in an error.
+// Use unambiguous ASCII hosts in command arguments. In particular, don't let
+// WebKit canonicalize legacy numeric spellings into a picker-eligible loopback host.
+fn valid_authority(authority: &str) -> bool {
+    let port = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((host, rest)) = bracketed.split_once(']') else { return false };
+        let Ok(ip) = host.parse::<std::net::Ipv6Addr>() else { return false };
+        if ip.is_loopback() && host != "::1" {
+            return false;
+        }
+        rest
+    } else {
+        let (host, rest) = authority.split_at(authority.find(':').unwrap_or(authority.len()));
+        let domain = host.strip_suffix('.').unwrap_or(host);
+        if domain.is_empty()
+            || domain.len() > 253
+            || !domain.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+        {
+            return false;
+        }
+        let last = domain.rsplit('.').next().unwrap_or_default();
+        let numeric = last.bytes().all(|b| b.is_ascii_digit())
+            || last
+                .strip_prefix("0x")
+                .or_else(|| last.strip_prefix("0X"))
+                .is_some_and(|s| s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if numeric && host.parse::<std::net::Ipv4Addr>().is_err() {
+            return false;
+        }
+        rest
+    };
+    port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<u16>().is_ok_and(|p| p != 0))
+}
+
+/// The launch command may appear in shell history. Keep query strings and
+/// fragments in the native address field; never echo a rejected argument.
 pub(crate) fn url(text: &str) -> Result<&str, &'static str> {
     const INVALID: &str =
-        "use an HTTP(S) URL on localhost, 127.0.0.1 or [::1], without credentials, a query or a fragment";
-    if text.len() > 4096 {
+        "use an HTTP(S) URL with a host and no credentials, query or fragment; enter full URLs in the pane";
+    if text.len() > URL_MAX {
         return Err(INVALID);
     }
     let (scheme, rest) = text.split_once("://").ok_or(INVALID)?;
@@ -63,20 +107,7 @@ pub(crate) fn url(text: &str) -> Result<&str, &'static str> {
             return Err(INVALID);
         }
     }
-    let port = ["localhost", "127.0.0.1", "[::1]"]
-        .into_iter()
-        .find_map(|host| {
-            authority
-                .get(..host.len())
-                .filter(|prefix| prefix.eq_ignore_ascii_case(host))
-                .map(|_| &authority[host.len()..])
-        })
-        .ok_or(INVALID)?;
-    if !port.is_empty()
-        && !port
-            .strip_prefix(':')
-            .is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<u16>().is_ok_and(|p| p != 0))
-    {
+    if !valid_authority(authority) {
         return Err(INVALID);
     }
     Ok(text)
@@ -88,7 +119,7 @@ pub(crate) fn open(url: &str, placement: Option<PreviewPlacement>) -> Result<(),
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use mac::{anchor, pin_window};
+pub(crate) use mac::{StartupSocket, anchor, pin_window};
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn open(_: &str, _: Option<PreviewPlacement>) -> Result<(), String> {
@@ -96,8 +127,8 @@ pub(crate) fn open(_: &str, _: Option<PreviewPlacement>) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn anchor(url: &str, _: Anchor<'_>) -> Result<(), String> {
-    open(url, None)
+pub(crate) fn anchor(_: &std::path::Path, _: Anchor<'_>) -> Result<(), String> {
+    Err("WebKit preview requires a local Rex session on macOS".into())
 }
 
 #[cfg(test)]
@@ -105,12 +136,31 @@ mod tests {
     use super::url;
 
     #[test]
-    fn explicit_loopback_authorities_only() {
-        for good in ["http://localhost:3000", "HTTPS://LOCALHOST/dev", "http://127.0.0.1", "http://[::1]:8080/a%2Fb"] {
+    fn launch_accepts_http_sites_without_confusing_them_with_loopback() {
+        for good in [
+            "http://localhost:3000",
+            "HTTPS://LOCALHOST/dev",
+            "http://127.0.0.1",
+            "http://[::1]:8080/a%2Fb",
+            "https://localhost.example",
+            "https://www.example.org/index.html",
+            "http://192.0.2.1:8080",
+            "http://[2001:db8::1]/",
+            "https://xn--bcher-kva.example/",
+            "https://example.org./",
+        ] {
             assert_eq!(url(good), Ok(good));
         }
         for bad in [
-            "http://localhost.example",
+            "https://",
+            "https:///etc",
+            "https://-bad.example",
+            "http://a..b",
+            "http://example:443:80",
+            "http://0x7f000001/",
+            "http://2130706433/",
+            "http://0177.0.0.1/",
+            "http://[0:0:0:0:0:0:0:1]/",
             "http://localhost:80@evil.net",
             "http://127.1",
             "http://localhost:0",

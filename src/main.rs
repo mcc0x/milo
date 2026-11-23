@@ -91,8 +91,8 @@ milo web opens local Settings in your browser. Use --no-open to print the link
   without opening it.
 milo web --host HOST opens the Settings of another Rex host here, through a Rex
   forward that ends with it.
-milo preview opens a local dev site in a tiled split beside the main terminal in
-  this Rex tab on macOS. --placement applies to this launch only.
+milo preview opens an HTTP(S) browser pane beside the working terminal in this
+  local macOS Rex tab. --placement applies to this launch only.
 milo doctor explains local preferences, integration health and usage sources.
 milo alerts mirrors Rex alerts to a Telegram chat or Discord channel you choose.
   It is off until you turn it on.
@@ -334,7 +334,7 @@ enum Command<'a> {
     Setup,
     Web(web::Start<'a>),
     Preview { url: &'a str, placement: Option<preferences::PreviewPlacement> },
-    PreviewAnchor { url: &'a str, anchor: preview::Anchor<'a> },
+    PreviewAnchor { startup: &'a Path, anchor: preview::Anchor<'a> },
     SkipOnboarding,
     Doctor,
     Repair,
@@ -461,7 +461,7 @@ fn command<'a>(
             let [main, window, owner, owner_pid, native] = rest else {
                 return Err("missing preview terminal, viewer or native window".into());
             };
-            let url = preview::url(option.ok_or(preview::EXPECTED)?)?;
+            let startup = second.map(Path::new).filter(|p| p.is_absolute()).ok_or("invalid preview startup socket")?;
             let main = rex::exact_id(main, "block:").ok_or("invalid preview terminal")?;
             let window = rex::exact_id(window, "window:").ok_or("invalid preview tab")?;
             let owner = rex::exact_id(owner, "client:").ok_or("invalid preview viewer")?;
@@ -471,7 +471,10 @@ fn command<'a>(
                 .filter(|pid| (2..=2_147_483_647).contains(pid))
                 .ok_or("invalid preview viewer PID")?;
             let native_window_id = native.to_str().and_then(|id| id.parse().ok()).ok_or("invalid native window ID")?;
-            Command::PreviewAnchor { url, anchor: preview::Anchor { main, window, owner, owner_pid, native_window_id } }
+            Command::PreviewAnchor {
+                startup,
+                anchor: preview::Anchor { main, window, owner, owner_pid, native_window_id },
+            }
         }
         (Some("web"), first_flag) => {
             const EXPECTED: &str = "expected milo web [--host HOST [--project DIR]] [--port PORT] [--no-open]";
@@ -633,7 +636,7 @@ fn dispatch(command: Command<'_>, run: impl FnOnce(Start<'_>, &Open<'_>) -> Resu
         Command::UsageMenuStream => usage::menu_stream().map_err(|e| format!("could not stream usage: {e}")),
         Command::Web(start) => web::run(start),
         Command::Preview { url, placement } => preview::open(url, placement),
-        Command::PreviewAnchor { url, anchor } => preview::anchor(url, anchor),
+        Command::PreviewAnchor { startup, anchor } => preview::anchor(startup, anchor),
         Command::Doctor => print_report(setup::doctor::report()),
         Command::Repair => print_report(setup::doctor::repair()),
         Command::Remove => print_report(setup::doctor::remove()),
@@ -747,8 +750,11 @@ fn main() {
     }
     let second = args.next();
     let rest: Vec<_> = args.collect();
-    let command = command(first.as_deref(), second.as_deref(), &rest).unwrap_or_else(|why| fail(&why));
-    let result = dispatch(command, pane::run);
+    let result = command(first.as_deref(), second.as_deref(), &rest).and_then(|command| dispatch(command, pane::run));
+    // This terminal is the browser's blank backing. The launcher owns startup diagnostics.
+    if first.as_deref() == Some(OsStr::new("preview-anchor")) && result.is_err() {
+        exit(1);
+    }
     if term::TERMINATED.load(std::sync::atomic::Ordering::Relaxed) {
         exit(1);
     }

@@ -10,7 +10,7 @@ local another_session = id("session", 2)
 local four_sessions = { session, another_session, id("session", 3), id("session", 4) }
 local host = "00000000-0000-0000-0000-000000000001"
 local term = "com.superlogical.terminal"
-local exe, url = "/with spaces/milo", "http://localhost:3400/hello?who=$HOME&next=%2Fhere#section"
+local exe, startup = "/with spaces/milo", "/private/tmp/milo-preview.fixture/start"
 local uid, helper, cli, gui = 501, 20, 30, 40
 local native_window = 4294967295
 local epoch = 1790000000
@@ -36,7 +36,16 @@ local function call(f)
   local env = setmetatable({
     rex = f.rex,
     print = function(s) writes[#writes + 1] = s .. "\n" end,
-    io = { stdout = { write = function(_, s, n) writes[#writes + 1] = s .. n end, flush = function() end } },
+    io = {
+      stdout = { write = function(_, s, n) writes[#writes + 1] = s .. n end, flush = function() end },
+      open = function(path, mode)
+        assert(path == "/dev/fd/7" and mode == "w" and not f.ready)
+        return {
+          write = function(_, byte) assert(byte == "R"); f.ready = true; return true end,
+          close = function() return true end,
+        }
+      end,
+    },
     os = { time = function() return f.now or epoch end },
   }, { __index = _G })
   f.rex.on = function(event, run)
@@ -111,7 +120,8 @@ local function fixture(mode, block)
     session_id = session,
     block_id = block,
     args = { mode = mode, server = server, uid = uid, pid = helper, session = session, block = block,
-      exe = exe, url = url, placement = "right", main = main, window = window, cwd = "/work/project",
+      exe = exe, startup = startup, tile = preview, anchor_pid = helper, placement = "right",
+      main = main, window = window, cwd = "/work/project",
       owner = app, owner_pid = gui, native_window_id = native_window },
     json = { encode = function(plan) f.plan = plan; return "plan" end },
     call = function(method, a)
@@ -190,18 +200,38 @@ for _, p in ipairs{ { "right", "horizontal", "after" }, { "left", "horizontal", 
   { "above", "vertical", "before" }, { "below", "vertical", "after" } } do
   local f = fixture("open", sidebar)
   f.rex.args.placement = p[1]
-  assert(call(f)() == "ok\n")
+  assert(call(f)() == preview .. "\n")
   local a = f.placed
   assert(a.focus == false and a.layout.block.label == "milo:preview:starting")
-  assert(f.published and f.anchor.label == "milo:preview")
+  assert(not f.published and f.anchor.label == "milo:preview:starting")
   local launch = a.layout.block.options
-  assert(launch.shell == "none" and launch.cwd == "/work/project")
+  assert(launch.shell == "none" and launch.login == false and launch.cwd == "/work/project")
   assert(launch.exit.on_completion == true and launch.exit.quick_exit_threshold_ms == 0)
   assert(#launch.command == 8 and launch.command[1] == exe and launch.command[2] == "preview-anchor"
-    and launch.command[3] == url and launch.command[4] == main and launch.command[5] == window
+    and launch.command[3] == startup and launch.command[4] == main and launch.command[5] == window
     and launch.command[6] == app and launch.command[7] == tostring(gui) and launch.command[8] == "4294967295")
   assert(a.anchor_id == main and a.direction == p[2] and a.side == p[3])
 end
+
+local function staged(mode, change)
+  local f = fixture("open", main)
+  assert(call(f)() == preview .. "\n")
+  f.rex.args.mode = mode
+  if change then change(f) end
+  return f, call(f)()
+end
+local approved, authorized = staged("authorize")
+assert(authorized == "ok\n" and not approved.published)
+local published, sent = staged("publish")
+assert(sent == "ok\n" and published.published and published.anchor.label == "milo:preview")
+local forged_peer, refused_peer = staged("authorize", function(f) f.rex.args.anchor_pid = helper + 1 end)
+assert(refused_peer == "changed\n" and not forged_peer.published)
+local moved_peer, refused_move = staged("publish", function(f) f.view.active_window_id = inactive end)
+assert(refused_move == "changed\n" and not moved_peer.published)
+local canceled, canceled_reply = staged("cancel")
+assert(canceled_reply == "ok\n" and canceled.canceled and not canceled.published)
+local relabeled, relabeled_reply = staged("cancel", function(f) f.anchor.label = "renamed by user" end)
+assert(relabeled_reply == "ok\n" and not relabeled.canceled)
 
 local function denied(mode, block, change, status)
   local f = fixture(mode, block)
@@ -227,7 +257,7 @@ for _, companion in ipairs{
 } do
   local f = fixture("open", main)
   f.second_viewer = companion
-  assert(call(f)() == "ok\n")
+  assert(call(f)() == preview .. "\n")
 end
 for _, invalid in ipairs{ false, {}, { another_session }, { session, false }, { current = session } } do
   denied("open", main, function(f) f.gui.session_ids = invalid end, "client")
@@ -235,11 +265,11 @@ end
 denied("open", main, function(f) f.gui.session_ids = nil end, "client")
 local duplicates = fixture("open", main)
 duplicates.gui.session_ids = { session, session }
-assert(call(duplicates)() == "ok\n")
+assert(call(duplicates)() == preview .. "\n")
 local attached_during_open = fixture("open", main)
 attached_during_open.after_create = function() attached_during_open.gui.session_ids = { session, another_session } end
-assert(call(attached_during_open)() == "ok\n" and attached_during_open.published and not attached_during_open.canceled
-  and attached_during_open.anchor.label == "milo:preview"
+assert(call(attached_during_open)() == preview .. "\n" and not attached_during_open.canceled
+  and attached_during_open.anchor.label == "milo:preview:starting"
   and #attached_during_open.placed.layout.block.options.command == 8)
 local lost_during_open = fixture("open", main)
 lost_during_open.after_create = function() lost_during_open.gui.session_ids = { another_session } end
@@ -290,7 +320,7 @@ denied("open", main, function(f)
 end, "shell")
 local interactive = fixture("open", main)
 interactive.proc[main].child.argv0, interactive.shell_command = "zsh", "zsh -i"
-assert(call(interactive)() == "ok\n" and interactive.placed.anchor_id == main)
+assert(call(interactive)() == preview .. "\n" and interactive.placed.anchor_id == main)
 denied("open", sidebar, function(f) f.gui.principal.transport = "tailscale" end, "client")
 denied("open", sidebar, function(f) f.gui.info.platform = "ios" end, "client")
 denied("open", sidebar, function(f) f.cli = peer(cli + 1) end, "transport")
@@ -308,7 +338,7 @@ wrapped.parents[helper][1] = 14
 wrapped.parents[14] = { 12, uid, "bash" }
 wrapped.proc[main].ancestors = { wrapped.proc[main].child }
 wrapped.proc[main].child = { pid = 12, user_id = 0, path = "/usr/bin/login", name = "login" }
-assert(call(wrapped)() == "ok\n")
+assert(call(wrapped)() == preview .. "\n")
 local nested = fixture("open", main)
 local outer = nested.proc[main].child
 local inner = { name = "zsh", path = "/bin/zsh", argv0 = "-zsh", user_id = uid, pid = 13, cwd = "/nested/path" }
@@ -320,7 +350,7 @@ nested.rex.exec = function(argv)
   if argv[6] == "13" then return { ok = true, stdout = "-zsh" } end
   return exec(argv)
 end
-assert(call(nested)() == "ok\n" and nested.placed.layout.block.options.cwd == inner.cwd)
+assert(call(nested)() == preview .. "\n" and nested.placed.layout.block.options.cwd == inner.cwd)
 denied("open", sidebar, function(f) f.rex.args.main = other end, "changed")
 denied("open", sidebar, function(f)
   f.rail.label = "milo:usage"
@@ -629,13 +659,18 @@ end
 local staged = fixture("watch", preview)
 staged.anchor.label = "milo:preview:starting"
 staged.anchor.owner = nil
+staged.rex.args.startup_fd = 7
 local gate = call(staged)
-assert(gate() == "hide\n")
+assert(gate() == "hide\n" and staged.ready)
 staged.anchor.label = "milo:preview"
 assert(gate("session_view_changed") == "hide\n")
 staged.anchor.owner = app
 assert(gate("block_owner_changed") == shown)
 assert(gate("deadline") == shown and not staged.stopped)
+local refused_startup = fixture("watch", preview)
+refused_startup.rex.args.startup_fd = 7
+refused_startup.proc[preview].child.pid = helper + 1
+assert(call(refused_startup)() == "hide\n" and refused_startup.stopped == 1 and not refused_startup.ready)
 local unpublished = fixture("watch", preview)
 unpublished.anchor.label = "milo:preview:starting"
 assert(call(unpublished)("deadline") == "hide\n" and unpublished.stopped == 0)

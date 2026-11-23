@@ -144,18 +144,10 @@ local function own_caller(caller, cli_pid)
   return false
 end
 
-local function own_anchor(block)
+local function own_anchor(block, pid)
   local info = process(block)
   local root = info and not info.last_exit and info.child
-  if not root then return false end
-  if root.pid == a.pid and root.user_id == a.uid then return true end
-  -- A macOS login terminal can report only its root-owned login wrapper.
-  -- Accept the anchor if it is that wrapper's actual direct child.
-  if root.path == "/usr/bin/login" and root.user_id == 0 then
-    local parent, owner = process_parent(a.pid)
-    return parent == root.pid and owner == a.uid
-  end
-  return false
+  return root and root.pid == pid and root.user_id == a.uid
 end
 
 local shell_names = { sh = true, bash = true, zsh = true, fish = true, dash = true,
@@ -297,27 +289,40 @@ local function cancel_staged(host, id)
   end
 end
 
-local function publish(host, id, direction, side)
-  local before = side == "after" and a.main or id
-  local after = side == "after" and id or a.main
+local function checked_stage(host, direction, id, pid, cli_pid)
+  local before = direction[2] == "after" and a.main or id
+  local after = direction[2] == "after" and id or a.main
   local view = current_view()
-  if view and view.active_window_id == a.window then
-    local main, window, tiled = locate(view, a.main)
-    local caller, origin, caller_layer = locate(view, a.block)
-    local block, place, layer = locate(view, id)
-    if working_pair(host, main, window, tiled) and origin == window and caller_layer.kind == "tiled"
-      and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
-      and place == window and layer == tiled and local_terminal(block, host) and block.label == staging_label
-      and has_split(tiled.layout, direction, before, after) then
-      if local_owner(a.owner) == a.owner_pid and unchanged(view) then
-        if rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label } then
-          return "ok"
-        end
-      end
-    end
+  if not view or view.active_window_id ~= a.window then return end
+  local main, window, tiled = locate(view, a.main)
+  local caller, origin, caller_layer = locate(view, a.block)
+  local block, place, layer = locate(view, id)
+  if not (working_pair(host, main, window, tiled) and origin == window and caller_layer.kind == "tiled"
+    and local_terminal(caller, host) and caller.owner == a.owner and not window.zoomed_block_id
+    and place == window and layer == tiled and local_terminal(block, host) and block.label == staging_label
+    and has_split(tiled.layout, direction[1], before, after)) then return end
+  -- The kernel socket peer must be the same child attached to this exact
+  -- terminal. A PID inferred from focus or claimed by the child is not proof.
+  if pid and (not own_anchor(block, pid) or not own_caller(caller, cli_pid)) then return end
+  return local_owner(a.owner) == a.owner_pid and unchanged(view)
+end
+
+local function startup(host, cli_pid)
+  if not host then return "transport" end
+  local id = a.tile
+  if not exact(id, "block:") or id == a.block or id == a.main
+    or not request_from_milo(cli_pid) then return "changed" end
+  if a.mode == "cancel" then
+    cancel_staged(host, id)
+    return "ok"
   end
-  cancel_staged(host, id)
-  return "changed"
+  local direction = directions[a.placement]
+  if not direction or not valid_pid(a.anchor_pid) or not checked_stage(host, direction, id, a.anchor_pid, cli_pid) then
+    return "changed"
+  end
+  if a.mode == "authorize" then return "ok" end
+  return rex.session.set_block_label{ session_id = a.session, block_id = id, label = preview_label }
+    and "ok" or "changed"
 end
 
 local function open(host, view, caller, window, layer, owner_pid)
@@ -340,12 +345,13 @@ local function open(host, view, caller, window, layer, owner_pid)
   end
   local direction = directions[a.placement]
   if not direction then return "placement" end
+  if type(a.startup) ~= "string" or a.startup:sub(1, 1) ~= "/" then return "placement" end
   local layout = { block = { flavor = terminal .. ".shell", label = staging_label, options = {
-    command = { a.exe, "preview-anchor", a.url, a.main, a.window, a.owner, tostring(a.owner_pid),
+    command = { a.exe, "preview-anchor", a.startup, a.main, a.window, a.owner, tostring(a.owner_pid),
       string.format("%.0f", native_window_id) },
-    shell = "none", cwd = cwd,
-    -- Rex also keeps quick successful exits. Milo displays failures itself
-    -- for a bounded time; Rex should close the anchor whenever Milo exits.
+    -- Start the program directly, without either a command shell or
+    -- macOS's separate login wrapper (which can print Last login).
+    shell = "none", login = false, cwd = cwd,
     exit = { on_completion = true, quick_exit_threshold_ms = 0 },
   } } }
   -- Rex has no if-active-window or revision precondition for these mutations.
@@ -355,7 +361,10 @@ local function open(host, view, caller, window, layer, owner_pid)
   local made = rex.session.new_split{ session_id = a.session, anchor_id = main.block_id,
     direction = direction[1], side = direction[2], focus = false, layout = layout }
   local id = made and made.block_ids and #made.block_ids == 1 and made.block_ids[1]
-  return exact(id, "block:") and publish(host, id, direction[1], direction[2]) or "placement"
+  if not exact(id, "block:") then return "placement" end
+  if checked_stage(host, direction, id) then return id end
+  cancel_staged(host, id)
+  return "changed"
 end
 
 local function one_shot(host, cli_pid)
@@ -422,7 +431,7 @@ local function return_focus(host, cli_pid)
   if not working_pair(host, main, place, tiled) or not local_terminal(anchor, host)
     or window ~= place or layer ~= tiled or anchor.label ~= preview_label or anchor.owner ~= a.owner
     or not visible(view, window, layer, index) or not tile_rect(leaf_rect(layer.layout)) then return "focus" end
-  if not own_anchor(anchor) or local_owner(a.owner) ~= a.owner_pid or not unchanged(view) then return "focus" end
+  if not own_anchor(anchor, a.pid) or local_owner(a.owner) ~= a.owner_pid or not unchanged(view) then return "focus" end
   -- The native panel can have keyboard focus while Rex already targets the shell.
   if window.focused_block_id == a.main then return "ok" end
   -- Rex offers no conditional focus RPC. Do not repair or retry with another
@@ -436,6 +445,9 @@ if a.mode == "focus" then
 elseif a.mode == "identify" or a.mode == "open" then
   print(one_shot(local_host()))
   return
+elseif a.mode == "authorize" or a.mode == "publish" or a.mode == "cancel" then
+  print(startup(local_host()))
+  return
 elseif a.mode ~= "watch" then
   return
 end
@@ -443,6 +455,7 @@ end
 local host, cli_pid = local_host()
 local last, verified, published, claimed, last_revision, tab_departed
 local heartbeats_since_show = 0
+local startup_fd = a.startup_fd
 local full_refresh_interval = 5
 local function write(record, observed_at)
   if observed_at then record = string.format("%s @%.0f", record, observed_at) end
@@ -464,16 +477,26 @@ local function stop(code)
   rex.stop(code or 0)
 end
 
-if not valid_anchor_request(host, cli_pid) then
+if not valid_anchor_request(host, cli_pid)
+  or (startup_fd ~= nil and (not valid_pid(startup_fd) or startup_fd < 3)) then
   stop(1)
   return
+end
+
+local function acknowledge_startup()
+  local pipe = io.open(string.format("/dev/fd/%d", startup_fd), "w")
+  startup_fd = nil
+  if not pipe then return false end
+  local wrote = pipe:write("R")
+  local closed = pipe:close()
+  return wrote and closed
 end
 
 local function track_anchor(block)
   if not local_terminal(block, host) or block.block_id ~= a.block
     or (block.label ~= preview_label and block.label ~= staging_label) then return false end
   if not verified then
-    if not own_anchor(block) then return false end
+    if not own_anchor(block, a.pid) then return false end
     verified = true
   end
   if block.owner == a.owner then claimed = true end
@@ -519,6 +542,10 @@ local function refresh(heartbeat)
     return emit()
   end
   if tiled ~= layer or not track_anchor(block) then return stop(1) end
+  -- Readiness proves scope and a live view, not ownership of the new
+  -- block or that the page is visible. Startup still publishes separately.
+  if startup_fd and owner_allowed and working_pair(host, main, place, tiled)
+    and not acknowledge_startup() then return stop(1) end
   if block.label ~= preview_label or not owner_allowed or tab_departed
     or not visible(view, window, layer, index) or block.owner ~= a.owner or main.owner ~= a.owner then
     return emit()

@@ -1,13 +1,14 @@
 //! Native previews are attached only to the local Rex server of their terminal.
 
 use std::ffi::OsStr;
+use std::os::fd::RawFd;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::json::Value;
 use crate::preferences::{Preferences, PreviewPlacement};
-use crate::preview::Anchor;
+use crate::preview::{Anchor, StartupSocket};
 
 use super::{CALL_WAIT, Target, exact_block, exact_id, json, program, scripted};
 
@@ -194,28 +195,41 @@ pub(crate) fn open_preview(url: &str, override_placement: Option<PreviewPlacemen
     let native_window_id = crate::preview::pin_window(owner_pid)?;
     let placement = resolve_placement(Path::new(cwd.as_ref()), override_placement, crate::paths::config_dir);
     let anchor = anchor_args(Anchor { main: &main, window: &window, owner: &owner, owner_pid, native_window_id });
+    let startup = StartupSocket::new().map_err(|_| "couldn't create the private preview startup socket")?;
     let extra = format!(
-        r#","exe":{},"url":{},"placement":{},"cwd":{}{anchor}"#,
+        r#","exe":{},"startup":{},"placement":{},"cwd":{}{anchor}"#,
         json(exe),
-        json(url),
+        json(startup.path()),
         json(placement.value()),
         json(&cwd),
     );
-    // Arguments go through stdin. The URL is never in Rex CLI argv or an error.
-    connection.call("open", &extra)?;
+    // Rex sees only the one-shot socket name, never the address. Confirm
+    // that the connected peer is the placed terminal child before sending
+    // bytes, then publish only after the helper has initialized.
+    let launched = connection.request("open", &extra)?;
+    let tile = exact_block(OsStr::new(&launched)).ok_or_else(|| problem(&launched).to_owned())?;
+    let staged = format!(r#","tile":{},"placement":{}{anchor}"#, json(tile), json(placement.value()));
+    let approve = |pid| format!(r#"{staged},"anchor_pid":{pid}"#);
+    let result = startup
+        .start(url, |pid| connection.call("authorize", &approve(pid)))
+        .and_then(|pid| connection.call("publish", &approve(pid)));
+    if let Err(error) = result {
+        let _ = connection.call("cancel", &staged);
+        return Err(error);
+    }
     eprintln!(
         "Preview tile opened. Close it before switching sessions or hosts: the page can stay over another session in this Mac window."
     );
     Ok(())
 }
 
-pub(crate) fn preview_observer_command(anchor: Anchor<'_>, state: std::io::PipeWriter) -> Result<Command, String> {
+pub(crate) fn preview_observer_command(anchor: Anchor<'_>, startup_fd: RawFd) -> Result<Command, String> {
     let connection = Connection::local()?;
     let mut command = connection.command();
+    let scope = format!(r#"{},"startup_fd":{startup_fd}"#, anchor_args(anchor));
     command
-        .args(["--args", &connection.args("watch", &anchor_args(anchor))])
+        .args(["--args", &connection.args("watch", &scope)])
         .stdin(Stdio::null())
-        .stdout(state)
         .stderr(Stdio::null());
     Ok(command)
 }
