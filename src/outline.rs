@@ -39,6 +39,26 @@ enum Note {
     StripFind,
 }
 
+enum NativeSelection {
+    Hidden,
+    Changed,
+    Ready,
+}
+
+impl NativeSelection {
+    fn changed(&mut self) {
+        if matches!(self, Self::Ready) {
+            *self = Self::Changed;
+        }
+    }
+
+    fn chosen(&mut self) {
+        if !matches!(self, Self::Hidden) {
+            *self = Self::Ready;
+        }
+    }
+}
+
 pub struct Outline {
     repo: Repo,
     root_identity: Option<(u64, u64)>,
@@ -70,6 +90,8 @@ pub struct Outline {
     attention: Attention,
     pending_only: bool,
     sel: usize,
+    /// Do not hand an unseen replacement row to the native opener.
+    native_selection: NativeSelection,
     top: usize,
     /// The cursor was put where it is by a click, so the view stays put.
     by_click: bool,
@@ -143,6 +165,7 @@ impl Outline {
             attention: Attention::new(Instant::now()),
             pending_only,
             sel: 0,
+            native_selection: NativeSelection::Hidden,
             top: 0,
             by_click: false,
             strip_col: 0,
@@ -220,6 +243,8 @@ impl Outline {
         }
         if repo.root != self.repo.root {
             self.root_identity = native::identity(&repo.root);
+            self.native_selection = NativeSelection::Hidden;
+            self.painted.clear_tree_targets();
             self.tree = Tree::default();
             self.search = None;
             self.search_walk = None;
@@ -337,13 +362,27 @@ impl Outline {
         self.tree.row(self.sel).map(|n| n.path.clone())
     }
 
-    /// Recomputes rows, keeping the cursor on the selected path or its visible folder.
-    fn relayout(&mut self, selected: Option<Rc<str>>) {
+    fn choose_row(&mut self, row: usize) {
+        if row != self.sel {
+            self.sel = row;
+            self.native_selection.chosen();
+        }
+    }
+
+    /// Recomputes rows, returning whether the requested path is still selected exactly.
+    fn relayout(&mut self, selected: Option<Rc<str>>) -> bool {
         self.tree.layout(|p| self.folds.is_open(p), self.pending_only);
         self.painted.tree_rows = 0..0;
         self.change_columns = None;
-        let at = selected.as_deref().and_then(|path| self.visible_row(path)).unwrap_or(self.sel);
+        let exact = selected.as_deref().and_then(|path| self.tree.row_of(path));
+        let at = exact
+            .or_else(|| selected.as_deref().and_then(|path| folders_above(path).find_map(|p| self.tree.row_of(p))))
+            .unwrap_or(self.sel);
         self.sel = at.min(self.tree.rows.len().saturating_sub(1));
+        if exact.is_none() {
+            self.native_selection.changed();
+        }
+        exact.is_some()
     }
 
     fn visible_row(&self, path: &str) -> Option<usize> {
@@ -365,9 +404,9 @@ impl Outline {
     /// Opens whatever folders hide `path` and puts the cursor on it.
     fn reveal(&mut self, path: Rc<str>) {
         if let Some(row) = self.tree.row_of(&path) {
-            self.sel = row;
-        } else if self.folds.open_above(&path) {
-            self.relayout(Some(path));
+            self.choose_row(row);
+        } else if self.folds.open_above(&path) && self.relayout(Some(path)) {
+            self.native_selection.chosen();
         }
     }
 
@@ -377,7 +416,10 @@ impl Outline {
         let Some(row) = self.visible_row(path) else {
             return;
         };
-        self.sel = row;
+        if row != self.sel {
+            self.sel = row;
+            self.native_selection.changed();
+        }
         self.by_click = false;
         let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
         self.say(format!("following {name}"));
@@ -700,6 +742,46 @@ mod tests {
     }
 
     #[test]
+    fn native_tree_actions_wait_for_a_replacement_row_to_be_shown_or_chosen() {
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::folder();
+        for path in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            f.write(path, path);
+        }
+        let mut o = open(&f);
+        o.key(Key::Down);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        o.key(Key::Home);
+        draw(&mut o, 80, 12);
+        assert_eq!(o.selected_path().as_deref(), Some("a.txt"));
+
+        fs::remove_file(f.root.join("a.txt")).unwrap();
+        o.key(Key::Char('r'));
+        assert_eq!(o.selected_path().as_deref(), Some("b.txt"));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        assert!(draw(&mut o, 80, 12).text()[11].contains("Choose a visible item first"));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert_eq!(calls, [(Action::Open, f.root.join("b.txt"))]);
+
+        fs::remove_file(f.root.join("b.txt")).unwrap();
+        o.key(Key::Char('r'));
+        assert_eq!(o.selected_path().as_deref(), Some("c.txt"));
+        o.key(Key::Down);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert_eq!(calls, [(Action::Reveal, f.root.join("d.txt"))]);
+
+        o.follow("c.txt");
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert!(calls.is_empty());
+        draw(&mut o, 80, 12);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert_eq!(calls, [(Action::Reveal, f.root.join("c.txt"))]);
+    }
+
+    #[test]
     fn native_find_actions_filter_first_and_leave_the_query_and_result_alone() {
         use crate::native::{Action, tests::with_fake};
 
@@ -749,6 +831,65 @@ mod tests {
         assert!(rows[0].contains("same nameorjkGg/? q"));
         assert!(rows[1].contains("No matches"));
         assert!(o.reading.is_none());
+    }
+
+    #[test]
+    fn a_find_viewport_must_have_room_for_the_match_before_native_actions_run() {
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::new();
+        f.write("selected.txt", "text");
+        f.commit("first");
+        let mut o = open(&f);
+        o.key(Key::Char('/'));
+        let rows = draw(&mut o, 16, 1).text();
+        assert!(!rows[0].contains("selected.txt"));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("selected.txt"));
+        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
+            let (_, calls) = with_fake(Ok(()), || o.key(key));
+            assert!(calls.is_empty());
+        }
+        assert!(draw(&mut o, 16, 1).text()[0].contains("Widen Find"));
+
+        let rows = draw(&mut o, 64, 1).text();
+        assert!(rows[0].contains("selected.txt"));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert_eq!(calls, [(Action::Reveal, f.root.join("selected.txt"))]);
+    }
+
+    #[test]
+    fn changing_between_tree_find_and_inline_reader_needs_a_new_visible_target() {
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::new();
+        f.write("a.txt", "first");
+        f.write("b.txt", "second");
+        f.commit("first");
+        let mut o = open(&f);
+        draw(&mut o, 80, 12);
+
+        o.key(Key::Char('/'));
+        o.paste(Some("b.txt"));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        assert!(draw(&mut o, 80, 12).text()[11].contains("Show a Find result first"));
+
+        o.key(Key::Esc);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        draw(&mut o, 80, 12);
+
+        o.key(Key::Char('/'));
+        o.paste(Some("b.txt"));
+        o.key(Key::Enter);
+        assert!(o.reading.is_some());
+        o.key(Key::Char('q'));
+        assert!(o.reading.is_none());
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        draw(&mut o, 80, 12);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert_eq!(calls, [(Action::Open, f.root.join("a.txt"))]);
     }
 
     #[test]

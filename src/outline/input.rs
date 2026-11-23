@@ -12,7 +12,7 @@ use crate::preferences::Preferences;
 use crate::reader::ReadFile;
 
 use super::draw::{Layout, margin};
-use super::{Note, Outline};
+use super::{NativeSelection, Note, Outline};
 
 pub(super) struct Click {
     target: ClickTarget,
@@ -92,6 +92,9 @@ impl Outline {
                 return After::Stay;
             }
             let result = self.tree.row(self.sel).ok_or("No file selected").and_then(|node| {
+                if !matches!(self.native_selection, NativeSelection::Ready) {
+                    return Err("Choose a visible item first");
+                }
                 let path = node.path.as_ref();
                 // The tree marks folder rows with a trailing slash; the opener wants the entry itself.
                 let path = if node.dir { path.strip_suffix('/').unwrap_or(path) } else { path };
@@ -180,11 +183,11 @@ impl Outline {
                     self.say("No changed files");
                 }
             }
-            Key::Char('}') => self.sel = self.tree.folder_row(sel, Next).unwrap_or(sel),
-            Key::Char('{') => self.sel = self.tree.folder_row(sel, Previous).unwrap_or(sel),
-            Key::Char('J') => self.sel = self.tree.sibling_row(sel, Next).unwrap_or(sel),
-            Key::Char('K') => self.sel = self.tree.sibling_row(sel, Previous).unwrap_or(sel),
-            Key::Char('p') => self.sel = self.tree.parent_row(sel).unwrap_or(sel),
+            Key::Char('}') => self.choose_row(self.tree.folder_row(sel, Next).unwrap_or(sel)),
+            Key::Char('{') => self.choose_row(self.tree.folder_row(sel, Previous).unwrap_or(sel)),
+            Key::Char('J') => self.choose_row(self.tree.sibling_row(sel, Next).unwrap_or(sel)),
+            Key::Char('K') => self.choose_row(self.tree.sibling_row(sel, Previous).unwrap_or(sel)),
+            Key::Char('p') => self.choose_row(self.tree.parent_row(sel).unwrap_or(sel)),
             Key::Click(x, y) => {
                 let Some(row) = self.painted.row_at(x, y) else {
                     self.clicked = None;
@@ -222,7 +225,7 @@ impl Outline {
             (Key::Enter, Some(Pointed::File(path))) => {
                 self.open_file(ClickTarget::Tree(path));
             }
-            (Key::Char('h') | Key::Left, _) => self.sel = self.tree.parent_row(self.sel).unwrap_or(self.sel),
+            (Key::Char('h') | Key::Left, _) => self.choose_row(self.tree.parent_row(self.sel).unwrap_or(self.sel)),
             _ => {}
         }
     }
@@ -249,7 +252,7 @@ impl Outline {
             self.scroll_under_pointer(rows, shown.max(1));
         } else {
             let last = self.tree.rows.len().saturating_sub(1);
-            self.sel = self.sel.saturating_add_signed(rows).min(last);
+            self.choose_row(self.sel.saturating_add_signed(rows).min(last));
         }
         (self.sel, self.top) != before
     }
@@ -261,7 +264,11 @@ impl Outline {
         let margin = margin(rows);
         let low = if self.top == 0 { 0 } else { self.top + margin };
         let high = if self.top == last_top { len.saturating_sub(1) } else { self.top + rows - 1 - margin };
-        self.sel = self.sel.clamp(low, high.max(low));
+        let row = self.sel.clamp(low, high.max(low));
+        if row != self.sel {
+            self.sel = row;
+            self.native_selection.changed();
+        }
     }
 
     /// Clicks toggle folders, select files, and open files when repeated.
@@ -270,6 +277,7 @@ impl Outline {
         let target = ClickTarget::Tree(Rc::clone(&node.path));
         let folder = node.dir.then(|| Rc::clone(&node.path));
         (self.sel, self.by_click) = (row, true);
+        self.native_selection = NativeSelection::Ready;
         match (folder, self.repeat_click(target, cell, now)) {
             (Some(path), None) => {
                 let open = self.folds.is_open(&path);
@@ -297,6 +305,8 @@ impl Outline {
         {
             self.clicked = None;
         }
+        self.native_selection =
+            if layout.tree_rows.contains(&self.sel) { NativeSelection::Ready } else { NativeSelection::Hidden };
         self.painted = layout;
     }
 
@@ -318,6 +328,7 @@ impl Outline {
             Ok(reader) => {
                 self.reading = reader;
                 if self.reading.is_some() {
+                    self.native_selection = NativeSelection::Hidden;
                     self.painted.clear_tree_targets();
                     self.painted.clear_strip_targets();
                 }

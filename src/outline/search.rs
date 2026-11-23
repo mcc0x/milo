@@ -15,11 +15,12 @@ use crate::ui::{self, FAINT};
 use crate::walk;
 use crate::width::{byte_at_col, str_width};
 
-use super::{NATIVE_HINT, Outline};
+use super::{NATIVE_HINT, NativeSelection, Outline};
 
 pub(super) const WALK_FRAME: Duration = Duration::from_millis(40);
 const QUERY_LIMIT: usize = 4096;
 const OPEN: &str = "Enter open";
+const WIDEN: &str = "Widen Find";
 
 pub(super) enum Action {
     Ignored,
@@ -77,6 +78,8 @@ pub(super) struct Search {
     top: usize,
     pan: usize,
     path_width: usize,
+    /// Whether the current viewport has room to show a match.
+    match_fits: bool,
     /// Hit targets from the latest paint, cleared when the list changes.
     painted: Range<usize>,
     width: usize,
@@ -114,6 +117,7 @@ impl Outline {
             }
         }
         self.clicked = None;
+        self.native_selection = NativeSelection::Hidden;
         self.painted.clear_tree_targets();
         self.painted.clear_strip_targets();
         self.search = Some(search);
@@ -183,7 +187,12 @@ impl Search {
     pub(super) fn native(&mut self, run: impl FnOnce(&Path) -> Result<(), &'static str>) {
         self.clear_click();
         self.filter();
-        self.notice = self.selected_path().and_then(|path| run(Path::new(path)).err());
+        self.notice = match self.selected_path() {
+            Some(path) if self.match_fits => run(Path::new(path)).err(),
+            Some(_) if self.width == 0 => Some("Show a Find result first"),
+            Some(_) => Some(WIDEN),
+            None => None,
+        };
     }
 
     pub(super) fn paste(&mut self, text: Option<&str>) -> After {
@@ -301,6 +310,8 @@ impl Search {
         let (w, h) = (s.w, s.h);
         if h == 0 || w == 0 {
             self.painted = 0..0;
+            self.match_fits = false;
+            (self.width, self.rows) = (0, 0);
             return;
         }
         let inset = usize::from(w >= 8);
@@ -326,14 +337,23 @@ impl Search {
         let prefix = if w > 3 { "/ " } else { "/" };
         let x = inset + s.put(inset, 0, w, prefix, Style::PLAIN.bold());
         let room = badge_at.saturating_sub(x + usize::from(!close.is_empty()));
+        let single_row = h == 1 && room >= 14;
+        self.match_fits = h > 1 || single_row;
+        if self.match_fits && self.notice == Some(WIDEN) {
+            self.notice = None;
+        }
         let len = self.matches.len();
         let inline_notice = self
             .notice
             .filter(|_| h == 1 || h == 2 && len > 0)
             .or_else(|| (h == 1 && len == 0).then(|| self.empty_message()));
-        // Even a one-row strip can show its current match or say why there is none.
-        let single_row = h == 1 && room >= 14;
-        let room = if single_row || inline_notice.is_some() { room / 3 } else { room };
+        let room = if single_row || h == 2 && inline_notice.is_some() {
+            room / 3
+        } else if inline_notice.is_some() {
+            0
+        } else {
+            room
+        };
         if self.query.is_empty() {
             let label = if self.pending_only { "Find changed files" } else { "Find files" };
             s.put_fit(x, 0, room, label, FAINT);
