@@ -24,6 +24,11 @@ impl Root {
         Ok(Self { dir, identity: (metadata.dev(), metadata.ino()) })
     }
 
+    /// The directory as originally opened, even if its pathname is later reused.
+    pub(super) fn identity(&self) -> (u64, u64) {
+        self.identity
+    }
+
     pub(super) fn same_directory(&self, other: &Self) -> bool {
         self.identity == other.identity
     }

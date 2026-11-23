@@ -1,10 +1,12 @@
 //! Handles keys and clicks in the outline, or passes them to its reader.
 
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
 use crate::keys::Direction::{Next, Previous};
 use crate::keys::{DOUBLE_CLICK, Key};
+use crate::native::Action as NativeAction;
 use crate::pane::{After, Pane};
 use crate::preferences::Preferences;
 use crate::reader::ReadFile;
@@ -55,7 +57,12 @@ impl Outline {
                 after => after,
             };
         }
+        let native = NativeAction::key(key);
         if let Some(search) = &mut self.search {
+            if let Some(action) = native {
+                search.native(|path| action.run(&self.repo.root, self.root_identity, path));
+                return After::Stay;
+            }
             use super::search::Action;
 
             match search.key(key, now) {
@@ -77,6 +84,24 @@ impl Outline {
         }
         if key == Key::Char('q') || self.peek && key == Key::Esc {
             return After::Leave;
+        }
+        if let Some(action) = native {
+            self.clicked = None;
+            let result = if self.painted.strip {
+                Err("Use / to choose a file")
+            } else {
+                self.tree.row(self.sel).ok_or("No file selected").and_then(|node| {
+                    let path = node.path.as_ref();
+                    // The tree marks folder rows with a trailing slash; the opener wants the entry itself.
+                    let path = if node.dir { path.strip_suffix('/').unwrap_or(path) } else { path };
+                    action.run(&self.repo.root, self.root_identity, Path::new(path))
+                })
+            };
+            match result {
+                Ok(()) => self.note = None,
+                Err(why) => self.say(why),
+            }
+            return After::Stay;
         }
         let by_click = self.by_click;
         if !matches!(key, Key::Click(..)) {

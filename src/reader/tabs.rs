@@ -496,6 +496,7 @@ mod tests {
     use super::super::{Floated, Offer};
     use super::*;
     use crate::fixture::Fixture;
+    use crate::native::{Action, tests::with_fake};
 
     const BLOCK: &str = "block:11111111-1111-1111-1111-111111111111";
 
@@ -655,6 +656,43 @@ mod tests {
 
         tabs.key(Key::Ctrl(b'n'));
         assert!(drawn(&mut tabs, 40, 8)[2].starts_with("  7   line 7"));
+    }
+
+    #[test]
+    fn native_actions_use_the_shown_tab_even_while_another_has_a_draft() {
+        let f = Fixture::folder();
+        f.write("draft.txt", "original\n");
+        f.write("page.md", "# Preview\n");
+        let mut tabs = opened(&f, &["draft.txt", "page.md"]);
+        tabs.key(Key::Char('e'));
+        typed(&mut tabs, "draft ");
+        let draft = drawn(&mut tabs, 80, 6);
+        assert!(tabs.editing() && tabs.holds_drafts());
+
+        assert_eq!(tabs.key(Key::Ctrl(b'n')), After::Stay);
+        assert!(!tabs.editing() && tabs.holds_drafts());
+        assert!(tabs.reader().markdown().is_some() && !tabs.reader().markdown_source);
+        let target = f.root.join("page.md");
+        let ((), opened) = with_fake(Ok(()), || {
+            assert_eq!(tabs.key(Key::Ctrl(b'o')), After::Stay);
+            assert!(drawn(&mut tabs, 80, 6)[5].contains("Opened in default app."));
+            assert_eq!(tabs.key(Key::Ctrl(b'r')), After::Stay);
+            assert!(drawn(&mut tabs, 80, 6)[5].contains("Revealed in Finder."));
+        });
+        assert!(
+            matches!(opened.as_slice(), [(Action::Open, first), (Action::Reveal, second)] if first == &target && second == &target)
+        );
+        assert!(tabs.reader().markdown().is_some() && !tabs.reader().markdown_source);
+
+        let denied = "Native actions are unavailable here.";
+        let (after, opened) = with_fake(Err(denied), || tabs.key(Key::Ctrl(b'r')));
+        assert_eq!(after, After::Stay);
+        assert!(opened.is_empty());
+        assert!(drawn(&mut tabs, 80, 6)[5].contains(denied));
+
+        assert_eq!(tabs.key(Key::Ctrl(b'p')), After::Stay);
+        assert_eq!(drawn(&mut tabs, 80, 6), draft);
+        assert_eq!(fs::read_to_string(f.root.join("draft.txt")).unwrap(), "original\n");
     }
 
     #[test]

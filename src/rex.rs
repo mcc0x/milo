@@ -2,6 +2,8 @@
 
 mod server;
 
+#[cfg(target_os = "macos")]
+pub(crate) use server::native_app;
 pub(crate) use server::{CommandVersion, RemoteEditor, Server, Viewers, command_version, server, viewers};
 
 use std::ffi::{OsStr, OsString};

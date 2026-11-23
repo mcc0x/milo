@@ -2,10 +2,12 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::path::Path;
 use std::rc::Rc;
 use std::thread::{Builder, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::help;
 use crate::keys::{DOUBLE_CLICK, Key};
 use crate::pane::After;
 use crate::screen::{Screen, Style, Wash};
@@ -13,7 +15,7 @@ use crate::ui::{self, FAINT};
 use crate::walk;
 use crate::width::{byte_at_col, str_width};
 
-use super::Outline;
+use super::{NATIVE_HINT, Outline};
 
 pub(super) const WALK_FRAME: Duration = Duration::from_millis(40);
 const QUERY_LIMIT: usize = 4096;
@@ -178,6 +180,12 @@ impl Search {
         self.clicked = None;
     }
 
+    pub(super) fn native(&mut self, run: impl FnOnce(&Path) -> Result<(), &'static str>) {
+        self.clear_click();
+        self.filter();
+        self.notice = self.selected_path().and_then(|path| run(Path::new(path)).err());
+    }
+
     pub(super) fn paste(&mut self, text: Option<&str>) -> After {
         let Some(line) = text.and_then(|text| text.split(['\r', '\n']).next()) else {
             self.notice = Some("Paste too long");
@@ -242,8 +250,7 @@ impl Search {
                 if self.selected == next {
                     return Action::Ignored;
                 }
-                self.selected = next;
-                self.pan = 0;
+                (self.selected, self.pan, self.notice) = (next, 0, None);
             }
         }
         Action::Redraw
@@ -254,6 +261,9 @@ impl Search {
             self.clear_click();
             return Action::Ignored;
         };
+        if self.selected != self.painted.start + offset {
+            self.notice = None;
+        }
         self.selected = self.painted.start + offset;
         if self.clicked.is_some_and(|(i, a, b, clicked)| {
             (i, a, b) == (self.selected, x, y) && now.saturating_duration_since(clicked) < DOUBLE_CLICK
@@ -316,9 +326,14 @@ impl Search {
         let prefix = if w > 3 { "/ " } else { "/" };
         let x = inset + s.put(inset, 0, w, prefix, Style::PLAIN.bold());
         let room = badge_at.saturating_sub(x + usize::from(!close.is_empty()));
+        let len = self.matches.len();
+        let inline_notice = self
+            .notice
+            .filter(|_| h == 1 || h == 2 && len > 0)
+            .or_else(|| (h == 1 && len == 0).then(|| self.empty_message()));
         // Even a one-row strip can show its current match or say why there is none.
         let single_row = h == 1 && room >= 14;
-        let room = if single_row { room / 3 } else { room };
+        let room = if single_row || inline_notice.is_some() { room / 3 } else { room };
         if self.query.is_empty() {
             let label = if self.pending_only { "Find changed files" } else { "Find files" };
             s.put_fit(x, 0, room, label, FAINT);
@@ -332,25 +347,31 @@ impl Search {
                 s.put(x + 1, 0, room - 1, &self.query[at..], Style::PLAIN);
             }
         }
+        if let Some(note) = inline_notice {
+            let x = x + room + 2 * usize::from(room > 0);
+            s.put_fit(x, 0, badge_at.saturating_sub(x + 1), note, FAINT);
+        }
 
-        let len = self.matches.len();
-        let footer = h >= 4 && (self.notice.is_some() || len > 0 && w >= OPEN.len() + 3);
+        let footer = len > 0 && h >= 3 && (self.notice.is_some() || h >= 4 && w >= OPEN.len() + 3);
         let rows = h - 1 - usize::from(footer);
         if (w, rows) != (self.width, self.rows) {
             self.clear_click();
-            self.pan = 0;
+            if w != self.width {
+                self.pan = 0;
+            }
         }
         (self.width, self.rows) = (w, rows);
         self.path_width = w - 2 * inset;
+        if footer {
+            self.draw_footer(s, inset);
+        }
         if rows == 0 {
             self.painted = 0..0;
-            if single_row {
+            if single_row && inline_notice.is_none() {
                 let x = x + room + 2;
                 self.path_width = badge_at.saturating_sub(x + 1);
-                if let Some(path) = self.selected_path().filter(|_| self.notice.is_none()) {
+                if let Some(path) = self.selected_path() {
                     self.draw_path(s, x, 0, path);
-                } else {
-                    s.put_fit(x, 0, self.path_width, self.notice.unwrap_or_else(|| self.empty_message()), FAINT);
                 }
             }
             return;
@@ -369,14 +390,21 @@ impl Search {
                 s.wash(0, y, w, Wash::Bar);
             }
         }
-        if footer {
-            let hint = if w >= 36 { "Enter open · ↑↓ move · ←→ pan" } else { "Enter open · ↑↓ move" };
-            let text = self.notice.unwrap_or(hint);
-            s.put_fit(inset, h - 1, self.path_width, text, FAINT);
-            if self.notice.is_none() {
-                self.open_y = Some(h - 1);
-            }
+    }
+
+    fn draw_footer(&mut self, s: &mut Screen, inset: usize) {
+        let y = s.h - 1;
+        if let Some(note) = self.notice {
+            s.put_fit(inset, y, self.path_width, note, FAINT);
+            return;
         }
+        if cfg!(target_os = "macos") && self.path_width >= OPEN.len() + str_width(NATIVE_HINT) + 3 {
+            help::draw_hint(s, OPEN, &["←→ pan", "↑↓ move"], NATIVE_HINT);
+        } else {
+            let hint = if s.w >= 36 { "Enter open · ↑↓ move · ←→ pan" } else { "Enter open · ↑↓ move" };
+            s.put_fit(inset, y, self.path_width, hint, FAINT);
+        }
+        self.open_y = Some(y);
     }
 }
 

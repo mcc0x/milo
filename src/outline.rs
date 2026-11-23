@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crate::git::{Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::Key;
+use crate::native;
 use crate::pane::{After, Pane};
 use crate::preferences::{FoldStore, IconMode, Preferences, ProjectMode};
 use crate::reader::{OpenReader, Reader};
@@ -31,9 +32,11 @@ use self::draw::{ChangeColumns, Layout};
 
 /// How long something said in place of the key hint stays.
 const NOTE: Duration = Duration::from_secs(4);
+const NATIVE_HINT: &str = "Ctrl-O open · Ctrl-R reveal";
 
 pub struct Outline {
     repo: Repo,
+    root_identity: Option<(u64, u64)>,
     /// Pending files, with all uncommitted entries before the unpushed entries.
     /// A path can occur once in each group, and once more among the
     /// uncommitted when Git lists it as both tracked and untracked.
@@ -110,8 +113,10 @@ impl Outline {
             fold_store.as_ref().and_then(|store| store.load().ok()).map_or_else(Folds::default, Folds::remembered);
         let pending_only = repo.git && prefs.changes_only;
         let icons = if cfg!(test) { prefs.icons } else { prefs.icons.effective() };
+        let root_identity = native::identity(&repo.root);
         let mut outline = Outline {
             repo,
+            root_identity,
             pending: Vec::new(),
             untracked: untracked::Untracked::default(),
             listing: walk::Listing::default(),
@@ -207,6 +212,12 @@ impl Outline {
             if let Some(choices) = choices.filter(|choices| !choices.is_empty()) {
                 self.folds = Folds::remembered(choices);
             }
+        }
+        if repo.root != self.repo.root {
+            self.root_identity = native::identity(&repo.root);
+            self.tree = Tree::default();
+            self.search = None;
+            self.search_walk = None;
         }
         self.repo = repo;
         self.listing = walk::Listing::default();
@@ -537,7 +548,7 @@ impl Pane for Outline {
             heading("Tree keys"),
             key("↑↓   ", "move (k j)"),
             key("Enter", "toggle folder"),
-            key("Enter", "open file"),
+            key("Enter", "read in Milo"),
             key("/    ", "find file or path"),
             key("Space", "toggle folder"),
             key("←    ", "close or parent"),
@@ -556,15 +567,24 @@ impl Pane for Outline {
             heading("Find files"),
             key("↑↓   ", "select a result"),
             key("←→   ", "pan long paths"),
-            key("Enter", "open file"),
+            key("Enter", "read in Milo"),
             key("Esc  ", "back to tree"),
         ]);
+        if cfg!(target_os = "macos") {
+            rows.extend([
+                HelpRow::new(),
+                heading("macOS: tree and Find"),
+                key("Ctrl-O", "open in macOS"),
+                key("Ctrl-R", "reveal in Finder"),
+            ]);
+        }
         if self.repo.git {
             rows.extend([
                 HelpRow::new(),
                 heading("Strip keys"),
                 key("←→   ", "scroll (h l)"),
                 key("g G  ", "first/last"),
+                key("/    ", "choose a file"),
             ]);
         }
         Page::new(rows)
@@ -632,6 +652,131 @@ mod tests {
         let matches = draw(&mut o, 40, 12).text();
         assert!(matches.iter().any(|row| row.contains("src/clean.rs")));
         assert!(!matches.iter().any(|row| row.contains("ignored.rs")));
+    }
+
+    #[test]
+    fn native_tree_actions_use_the_cursor_and_only_reveal_folders() {
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::new();
+        f.write("first/same name.txt", "first");
+        f.write("second/same name.txt", "second");
+        f.commit("first");
+        let mut o = open(&f);
+        o.key(Key::Char('e'));
+        let rows = draw(&mut o, 100, 12).text();
+        assert_eq!(rows[11].contains(NATIVE_HINT), cfg!(target_os = "macos"));
+        let y = rows.iter().enumerate().filter_map(|(y, row)| row.contains("same name.txt").then_some(y)).nth(1).unwrap();
+        o.key(Key::Click(4, y));
+
+        let (after, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert_eq!(after, After::Stay);
+        assert_eq!(calls, [(Action::Open, f.root.join("second/same name.txt"))]);
+        assert!(o.reading.is_none());
+
+        o.key(Key::Up);
+        assert_eq!(o.selected_path().as_deref(), Some("second/"));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert_eq!(calls, [(Action::Reveal, f.root.join("second"))]);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        assert!(draw(&mut o, 100, 12).text()[11].contains("Use Reveal for folders"));
+        assert!(o.folds.is_open("second/"));
+        assert_eq!(o.selected_path().as_deref(), Some("second/"));
+    }
+
+    #[test]
+    fn native_find_actions_filter_first_and_leave_the_query_and_result_alone() {
+        use crate::native::{Action, tests::with_fake};
+
+        let f = Fixture::new();
+        f.write("00-other.txt", "other");
+        f.write("first/same name.txt", "first");
+        f.write("second/same name.txt", "second");
+        f.commit("first");
+        let mut o = open(&f);
+        o.key(Key::Char('/'));
+        let rows = draw(&mut o, 80, 12).text();
+        assert_eq!(rows[11].contains(NATIVE_HINT), cfg!(target_os = "macos"));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("00-other.txt"));
+
+        o.paste(Some("same name"));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert_eq!(calls, [(Action::Open, f.root.join("first/same name.txt"))]);
+        o.key(Key::Down);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert_eq!(calls, [(Action::Reveal, f.root.join("second/same name.txt"))]);
+
+        let refusal = "This file is on a remote host";
+        let (after, calls) = with_fake(Err(refusal), || o.key(Key::Ctrl(b'r')));
+        assert_eq!(after, After::Stay);
+        assert!(calls.is_empty());
+        let rows = draw(&mut o, 80, 3).text();
+        assert!(rows[0].contains("same name"));
+        assert!(rows[1].contains("second/same name.txt"));
+        assert!(rows[2].contains(refusal));
+        let rows = draw(&mut o, 80, 2).text();
+        assert!(rows[0].contains(refusal));
+        assert!(rows[1].contains("second/same name.txt"));
+        assert!(draw(&mut o, 80, 1).text()[0].contains(refusal));
+        assert_eq!(o.search.as_ref().unwrap().selected_path(), Some("second/same name.txt"));
+
+        fs::remove_file(f.root.join("second/same name.txt")).unwrap();
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'r')));
+        assert!(calls.is_empty());
+        assert!(draw(&mut o, 80, 3).text()[2].contains("The selected path no longer exists"));
+
+        for ch in "orjkGg/? q".chars() {
+            assert_eq!(o.key(Key::Char(ch)), After::Stay);
+        }
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        let rows = draw(&mut o, 80, 3).text();
+        assert!(rows[0].contains("same nameorjkGg/? q"));
+        assert!(rows[1].contains("No matches"));
+        assert!(o.reading.is_none());
+    }
+
+    #[test]
+    fn native_shortcuts_on_the_strip_do_not_use_the_last_click_or_tree_cursor() {
+        use crate::native::tests::with_fake;
+
+        let f = project();
+        let mut o = open(&f);
+        let selected = o.selected_path();
+        let rows = draw(&mut o, 60, 7).text();
+        let y = rows.iter().position(|row| row.contains("notes.txt")).unwrap();
+        o.key(Key::Click(2, y));
+        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
+            let (after, calls) = with_fake(Ok(()), || o.key(key));
+            assert_eq!(after, After::Stay);
+            assert!(calls.is_empty());
+        }
+        assert_eq!(o.selected_path(), selected);
+        assert!(draw(&mut o, 60, 7).text()[6].contains("Use / to choose a file"));
+        assert!(draw(&mut o, 60, 1).text()[0].contains("Use / to choose a file"));
+        o.key(Key::Char('/'));
+        assert!(draw(&mut o, 60, 7).text()[0].contains("Find files"));
+        assert!(o.reading.is_none());
+    }
+
+    #[test]
+    fn a_folder_refresh_does_not_reauthorize_a_replaced_project_root() {
+        use crate::native::tests::with_fake;
+
+        let f = Fixture::folder();
+        f.write("page.txt", "original");
+        let mut o = open(&f);
+        draw(&mut o, 80, 12);
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert_eq!(calls.len(), 1);
+
+        fs::rename(&f.root, f.root.with_file_name("moved")).unwrap();
+        f.write("page.txt", "replacement");
+        o.key(Key::Char('r'));
+        let (_, calls) = with_fake(Ok(()), || o.key(Key::Ctrl(b'o')));
+        assert!(calls.is_empty());
+        assert!(draw(&mut o, 80, 12).text()[11].contains("Can't verify the original project folder"));
     }
 
     fn draw_at(o: &mut Outline, w: usize, h: usize, now: Instant) -> Screen {

@@ -11,7 +11,7 @@ use crate::tree::{Node, Tree};
 use crate::ui::{self, FAINT};
 use crate::width::str_width;
 
-use super::Outline;
+use super::{NATIVE_HINT, Outline};
 use super::attention::{LIVE, PULSE};
 
 /// The shortest pane with room for the project heading.
@@ -82,10 +82,10 @@ impl Layout {
 }
 
 fn arrange(w: usize, h: usize, git: bool, partial: bool) -> Layout {
-    if w < 3 || h == 0 {
-        return Layout::default();
-    }
     let strip = git && h <= STRIP_ROWS;
+    if w < 3 || h == 0 {
+        return Layout { strip, ..Layout::default() };
+    }
     let heading = h >= HEADING_ROWS || partial && h > 1;
     let hint = h >= HINT_ROWS;
     let body_top = usize::from(heading);
@@ -131,25 +131,25 @@ impl Outline {
                 layout.body_rows = 0;
             }
         }
+        let git_unavailable = !layout.strip && self.repo.git_unavailable();
+        if (self.note.is_some() || git_unavailable) && !layout.hint {
+            layout.body_rows = layout.body_rows.saturating_sub(1);
+        }
         if layout.strip {
             self.discover_untracked();
             if layout.body_rows > 0 {
                 self.draw_strip(s, &mut layout);
             }
         } else {
-            let git_unavailable = self.repo.git_unavailable();
-            if (self.note.is_some() || git_unavailable) && !layout.hint {
-                layout.body_rows = layout.body_rows.saturating_sub(1);
-            }
             self.draw_tree(s, &mut layout, now);
             self.discover_untracked();
-            if let Some((note, _)) = &self.note {
-                s.put_fit(1, s.h - 1, s.w - 2, note, Style::fg(screen::YELLOW));
-            } else if git_unavailable {
-                s.put_fit(1, s.h - 1, s.w - 2, GIT_UNAVAILABLE, ui::DEL);
-            } else if layout.hint && self.attention.show_controls() && self.draw_hint(s) {
-                layout.find_y = Some(s.h - 1);
-            }
+        }
+        if let Some((note, _)) = &self.note {
+            s.put_fit(1, s.h - 1, layout.width.saturating_sub(2), note, Style::fg(screen::YELLOW));
+        } else if git_unavailable {
+            s.put_fit(1, s.h - 1, s.w - 2, GIT_UNAVAILABLE, ui::DEL);
+        } else if layout.hint && self.attention.show_controls() && self.draw_hint(s) {
+            layout.find_y = Some(s.h - 1);
         }
         self.record_layout(layout);
     }
@@ -238,12 +238,15 @@ impl Outline {
     /// panes. On screen a pending file is simply one that changed.
     fn draw_hint(&self, s: &mut Screen) -> bool {
         let folders = if self.folds.all() { "e undo open all" } else { "e open all" };
+        let first_hint = usize::from(!cfg!(target_os = "macos"));
         if self.repo.git {
             let filter = if self.pending_only { "c all files" } else { "c changed only" };
             let first = if self.pending.is_empty() { "Enter open" } else { "n next change" };
-            help::draw_hint(s, FIND, &[first, folders, filter, "q quit"], "? help").index_at(1, s.h - 1) == Some(0)
+            let hints = [NATIVE_HINT, first, folders, filter, "q quit"];
+            help::draw_hint(s, FIND, &hints[first_hint..], "? help").index_at(1, s.h - 1) == Some(0)
         } else {
-            help::draw_hint(s, FIND, &["Enter open", folders, "q quit"], "? help").index_at(1, s.h - 1) == Some(0)
+            let hints = [NATIVE_HINT, "Enter open", folders, "q quit"];
+            help::draw_hint(s, FIND, &hints[first_hint..], "? help").index_at(1, s.h - 1) == Some(0)
         }
     }
 

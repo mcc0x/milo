@@ -1,7 +1,7 @@
 //! Terminal media stays inside the Reader's content rectangle, including under a tab strip.
 
 use super::video::Video;
-use crate::help::{self, Page};
+use crate::help::{self, HelpRow};
 use crate::keys::Key;
 use crate::pane::After;
 use crate::picture::Picture;
@@ -121,13 +121,11 @@ pub(super) fn status<'a>(video: &Video, buffer: &'a mut [u8; 64]) -> &'a str {
     std::str::from_utf8(&buffer[..used]).expect("video status is UTF-8")
 }
 
-pub(super) fn help() -> Page {
-    Page::new(vec![
-        help::heading("Video · muted"),
-        help::key("Space", "play/pause"),
-        help::key("← →  ", "seek 5 seconds"),
-        help::key("q Esc", "close"),
-    ])
+pub(super) fn help_rows(video: &Video) -> Vec<HelpRow> {
+    if video.error().is_some() {
+        return vec![help::heading("Video unavailable")];
+    }
+    vec![help::heading("Video · muted"), help::key("Space", "play/pause"), help::key("← →  ", "seek 5 seconds")]
 }
 
 #[cfg(test)]

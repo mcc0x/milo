@@ -22,6 +22,7 @@ use crate::diff::{Line, LineKind, TAB};
 use crate::format::{self, Support, Tool};
 use crate::help::{self, HelpRow, Page};
 use crate::keys::Key;
+use crate::native::Action;
 use crate::screen::{Screen, Style, YELLOW};
 use crate::syntax::{Lang, Span, State};
 use crate::ui::{self, FAINT};
@@ -655,7 +656,7 @@ impl Editor {
     }
 
     pub(super) fn key(&mut self, key: Key, now: Instant) -> Step {
-        if matches!(key, Key::Focus(_)) {
+        if matches!(key, Key::Focus(_)) || Action::key(key).is_some() {
             return Step::Ignored;
         }
         if let Some(comparison) = &mut self.comparison {
