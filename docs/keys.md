@@ -27,6 +27,7 @@ These keys work in the outline tree, history and reader. The reader and help pag
 | Key | Action |
 | --- | --- |
 | `Enter` | Open or close a folder, or read a file |
+| `Ctrl-O` / `Ctrl-R` | Open the selected working file in its default Mac app / reveal it in Finder; also works on the highlighted Find result |
 | `Space` | Open or close a folder |
 | Left or `h` | Close an open folder, or go to the parent |
 | Right or `l` | Open a closed folder |
@@ -67,6 +68,7 @@ Click a commit to toggle its files, click a file to select it, or double-click t
 | `c` | Switch between the full diff and changes with nearby context |
 | `Tab`, then `Enter` | Select and expand a folded stretch of unchanged lines; clicking the fold expands it too |
 | `e` | Edit the file, or say why it is read-only |
+| `Ctrl-O` / `Ctrl-R` | Open the shown working file in its default Mac app / reveal it in Finder (read mode only) |
 | `q` or `Esc` | Close |
 
 The last row shows `e edit` when the file can be edited and the row has room. Help lists the reason when it cannot, and the formatter that would run.

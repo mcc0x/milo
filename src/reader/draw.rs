@@ -321,11 +321,11 @@ impl Reader {
     fn draw_hint(&self, s: &mut Screen) {
         if let Body::Video(video) = &self.body {
             if video.error().is_some() {
-                crate::help::draw_hint(s, "q close", &[], "? help");
+                self.draw_reader_hint(s, "q close", &[]);
                 return;
             }
             let action = if video.is_playing() { "Space pause" } else { "Space play" };
-            crate::help::draw_hint(s, action, &["←→ seek 5s", "q close"], "? help");
+            self.draw_reader_hint(s, action, &["←→ seek 5s", "q close"]);
             return;
         }
         if self.markdown().is_some() {
@@ -337,7 +337,7 @@ impl Reader {
                 (true, false) => &["e edit", "↑↓ scroll", "q close"],
                 (false, false) => &["↑↓ scroll", "q close"],
             };
-            crate::help::draw_hint(s, action, middle, "? help");
+            self.draw_reader_hint(s, action, middle);
             return;
         }
         if let Source::Handed(handed) = &self.source
@@ -352,7 +352,7 @@ impl Reader {
             } else {
                 &["e edit", "↑↓ scroll", "q close", "n N changes"]
             };
-            crate::help::draw_hint(s, action, middle, "? help");
+            self.draw_reader_hint(s, action, middle);
             return;
         }
         let changes = self.has_changes_among_other_lines();
@@ -369,7 +369,19 @@ impl Reader {
             (false, true) => &["↑↓ scroll", "e edit", "q close"],
             (false, false) => &["↑↓ scroll", "q close"],
         };
-        crate::help::draw_hint(s, action, middle, "? help");
+        self.draw_reader_hint(s, action, middle);
+    }
+
+    fn draw_reader_hint(&self, s: &mut Screen, action: &str, middle: &[&str]) {
+        if self.offers_native_actions() {
+            // The new keys give way first, so the existing hints still fit as before.
+            let mut working = [""; 5];
+            working[0] = "^O open · ^R reveal";
+            working[1..1 + middle.len()].copy_from_slice(middle);
+            crate::help::draw_hint(s, action, &working[..1 + middle.len()], "? help");
+        } else {
+            crate::help::draw_hint(s, action, middle, "? help");
+        }
     }
 
     /// Keeps the file name ahead of its directory so the name gets the space

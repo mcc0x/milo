@@ -8,6 +8,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+#[cfg(any(target_os = "macos", test))]
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -45,11 +47,16 @@ pub(crate) enum Viewers {
     Nobody,
 }
 
+fn rex_command(exe: &OsStr, wait: &str) -> Command {
+    let mut command = Command::new(exe);
+    command.args(["--autostart=false", "--timeout", wait]).env_remove("REX_CLIENT");
+    command
+}
+
 /// A `rex` that never starts a server. With a host, the session and pane of
 /// this terminal are left out: they belong to another server.
 fn rex(host: Option<&OsStr>, wait: &str) -> Command {
-    let mut command = Command::new("rex");
-    command.args(["--autostart=false", "--timeout", wait]).env_remove("REX_CLIENT");
+    let mut command = rex_command(OsStr::new("rex"), wait);
     if let Some(host) = host {
         command.arg("-S").arg(host).env_remove("REX_SESSION").env_remove("REX_BLOCK").env_remove("REX_SERVER");
     }
@@ -111,6 +118,152 @@ fn parse_viewers(output: &[u8]) -> Option<Viewers> {
 /// Whether a Rex app on this computer is connected to the server of this terminal.
 pub(crate) fn viewers() -> Option<Viewers> {
     parse_viewers(&probe_output(rex(None, "3s").args(["client", "ls", "--json"]), PROBE_WAIT)?)
+}
+
+#[cfg(any(target_os = "macos", test))]
+const NATIVE_UNKNOWN: &str = "Could not confirm a local Rex app for this pane";
+#[cfg(any(target_os = "macos", test))]
+const NATIVE_REMOTE: &str = "Native opening is unavailable from remote Rex";
+
+#[cfg(any(target_os = "macos", test))]
+enum NativeConnection {
+    Here,
+    Elsewhere,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn native_connection(principal: Value<'_>, uid: u64) -> Option<NativeConnection> {
+    let [kind, transport, uid_field] = principal.fields(["kind", "transport", "uid"]);
+    let (kind, transport) = (kind?, transport?);
+    if kind.is("peer") && transport.is("unix") {
+        (uid_field?.unsigned()? == uid).then_some(NativeConnection::Here)
+    } else if (kind.is("anonymous") || kind.is("tailscale")) && (transport.is("tcp") || transport.is("tailscale"))
+        || kind.is("windows_peer") && transport.is("named_pipe")
+    {
+        Some(NativeConnection::Elsewhere)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn native_identity(output: &[u8], session: &str, block: &str, uid: u64) -> Result<(), &'static str> {
+    let [principal, endpoint, session_id, block_id] =
+        Value::parse(output).ok_or(NATIVE_UNKNOWN)?.fields(["principal", "endpoint", "session_id", "block_id"]);
+    match native_connection(principal.ok_or(NATIVE_UNKNOWN)?, uid).ok_or(NATIVE_UNKNOWN)? {
+        NativeConnection::Elsewhere => return Err(NATIVE_REMOTE),
+        NativeConnection::Here => {}
+    }
+    let endpoint = endpoint.and_then(|value| value.string(4096)).ok_or(NATIVE_UNKNOWN)?;
+    let unix_socket = endpoint
+        .strip_prefix("unix:///")
+        .is_some_and(|path| !path.is_empty() && !path.bytes().any(|b| b.is_ascii_control()));
+    if unix_socket && session_id.is_some_and(|id| id.is(session)) && block_id.is_some_and(|id| id.is(block)) {
+        Ok(())
+    } else {
+        Err(NATIVE_UNKNOWN)
+    }
+}
+
+/// The scope in the reply must agree with the session we sent on the command line.
+#[cfg(any(target_os = "macos", test))]
+fn native_attachment(sessions: Value<'_>, session: &str) -> Option<bool> {
+    let mut attached = false;
+    for id in sessions.elements()? {
+        if id.is(session) {
+            attached = true;
+        } else {
+            let id = id.string(44)?;
+            exact_id(OsStr::new(&*id), "session:")?;
+        }
+    }
+    Some(attached)
+}
+
+/// A complete answer is required even when the first client is local.
+#[cfg(any(target_os = "macos", test))]
+fn native_clients(output: &[u8], session: &str, uid: u64) -> Option<Result<(), &'static str>> {
+    let [clients] = Value::parse(output)?.fields(["clients"]);
+    let (mut here, mut elsewhere) = (0, false);
+    for client in clients?.elements()? {
+        let [info, principal, state, sessions] =
+            client.fields(["info", "principal", "connection_state", "session_ids"]);
+        let state = state?;
+        if state.is("lost") {
+            continue;
+        }
+        if !state.is("connected") {
+            return None;
+        }
+        let [kind] = info?.fields(["kind"]);
+        let kind = kind?;
+        if kind.is("cli") || kind.is("agent") || kind.is("other") {
+            continue;
+        }
+        if !kind.is("app") || !native_attachment(sessions?, session)? {
+            return None;
+        }
+        match native_connection(principal?, uid)? {
+            NativeConnection::Here => here += 1,
+            NativeConnection::Elsewhere => elsewhere = true,
+        }
+    }
+    Some(match (here, elsewhere) {
+        (1, false) => Ok(()),
+        (0, false) => Err("No Rex app is connected to this session"),
+        (0, true) => Err(NATIVE_REMOTE),
+        _ => Err("Native opening needs exactly one local Rex app connected to this session"),
+    })
+}
+
+/// Prefer the executable the kernel reports for a direct Rex parent. Otherwise
+/// use an absolute PATH entry, never a launcher or executable in the project.
+#[cfg(any(target_os = "macos", test))]
+fn native_program(root: &Path, parent: Option<PathBuf>, path: &OsStr) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let project = root.canonicalize().ok()?;
+    let outside = |path: &Path| !path.starts_with(root) && !path.starts_with(&project);
+    let executable = |file: PathBuf| {
+        if !file.is_absolute() || !outside(&file) || !outside(&file.parent()?.canonicalize().ok()?) {
+            return None;
+        }
+        let file = file.canonicalize().ok()?;
+        if !outside(&file) || !file.is_file() {
+            return None;
+        }
+        let name = std::ffi::CString::new(file.as_os_str().as_bytes()).ok()?;
+        // SAFETY: name is a live NUL-terminated path. access only checks permissions.
+        (unsafe { libc::access(name.as_ptr(), libc::X_OK) } == 0).then_some(file)
+    };
+    parent.filter(|file| file.file_name() == Some(OsStr::new("rex"))).and_then(executable).or_else(|| {
+        std::env::split_paths(path).filter(|dir| dir.is_absolute()).map(|dir| dir.join("rex")).find_map(executable)
+    })
+}
+
+/// Check the same session and pane the local CLI sees, then count the apps
+/// attached to that session. The web editor's server-wide viewer hint is not an authorization check.
+#[cfg(target_os = "macos")]
+pub(crate) fn native_app(root: &Path, session: &OsStr, block: &OsStr) -> Result<(), &'static str> {
+    use std::time::Instant;
+
+    let session = exact_id(session, "session:").ok_or(NATIVE_UNKNOWN)?;
+    let block = exact_id(block, "block:").ok_or(NATIVE_UNKNOWN)?;
+    let parent = super::parent_program();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let exe = native_program(root, parent, &path).ok_or(NATIVE_UNKNOWN)?;
+    // Both probes run in the input loop, so they share one short deadline.
+    let deadline = Instant::now() + Duration::from_millis(600);
+    let probe = |args: &[&str]| {
+        let left = deadline.checked_duration_since(Instant::now())?;
+        probe_output(rex_command(exe.as_os_str(), "500ms").args(args), left)
+    };
+    // SAFETY: Getting the current effective user ID touches no memory.
+    let uid = u64::from(unsafe { libc::geteuid() });
+    let who = probe(&["whoami", "--json"]).ok_or(NATIVE_UNKNOWN)?;
+    native_identity(&who, session, block, uid)?;
+    let clients = probe(&["client", "ls", "-s", session, "--json"]).ok_or(NATIVE_UNKNOWN)?;
+    native_clients(&clients, session, uid).ok_or(NATIVE_UNKNOWN)?
 }
 
 /// The session a host runs its settings editor in, and that editor's terminal.
@@ -191,9 +344,60 @@ impl RemoteEditor {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandVersion, Server, Viewers, parse_command_version, parse_created, parse_server, parse_viewers};
+    use super::{
+        CommandVersion, NATIVE_REMOTE, NATIVE_UNKNOWN, Server, Viewers, native_clients, native_identity,
+        native_program, parse_command_version, parse_created, parse_server, parse_viewers,
+    };
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::path::Path;
+
+    use crate::fixture::Fixture;
 
     const HOST: &str = "d4744373-81e8-4cdb-a5be-9a5be80c2c4a";
+    const SESSION: &str = "session:01a1fe07-6593-7bcb-a091-bfac0d945bd5";
+    const BLOCK: &str = "block:01a1fe07-6593-7d94-b45e-a15c13d6737c";
+    const PEER: &str = r#"{"kind":"peer","transport":"unix","uid":501}"#;
+    const REMOTE: &str = r#"{"kind":"tailscale","transport":"tailscale"}"#;
+
+    #[test]
+    fn native_probe_skips_checkout_paths_links_and_non_executables() {
+        let fixture = Fixture::folder();
+        let root = &fixture.root;
+        let installed = Fixture::folder();
+        let binary = |name: &str, mode| {
+            installed.write(name, "");
+            let binary = installed.root.join(name);
+            fs::set_permissions(&binary, fs::Permissions::from_mode(mode)).unwrap();
+            binary
+        };
+        let non_executable = binary("non-executable/rex", 0o644);
+        let executable = binary("installed/rex", 0o755);
+        let parent = binary("parent/rex", 0o755);
+        fixture.write("bin/rex", "");
+        let checkout = root.join("bin/rex");
+        fs::set_permissions(&checkout, fs::Permissions::from_mode(0o755)).unwrap();
+        let inside_link = root.join("link");
+        fs::create_dir(&inside_link).unwrap();
+        symlink(&executable, inside_link.join("rex")).unwrap();
+        let outside_link = installed.root.join("checkout-link");
+        fs::create_dir(&outside_link).unwrap();
+        symlink(&checkout, outside_link.join("rex")).unwrap();
+        let alias = installed.root.join("checkout-dir");
+        symlink(&inside_link, &alias).unwrap();
+        let bad_path = [
+            Path::new("."),
+            checkout.parent().unwrap(),
+            &inside_link,
+            &outside_link,
+            &alias,
+            non_executable.parent().unwrap(),
+        ];
+        assert_eq!(native_program(root, Some(checkout.clone()), &std::env::join_paths(bad_path).unwrap()), None);
+        let path = std::env::join_paths(bad_path.into_iter().chain(executable.parent())).unwrap();
+        assert_eq!(native_program(root, None, &path), Some(executable));
+        assert_eq!(native_program(root, Some(parent.clone()), &path), Some(parent));
+    }
 
     #[test]
     fn a_server_is_known_by_its_whole_host_id_and_a_plain_version() {
@@ -233,6 +437,76 @@ mod tests {
         let both = [client("app", "ssh", "connected"), client("app", "unix", "connected")];
         assert_eq!(viewers(&both), Some(Viewers::Here));
         assert_eq!(parse_viewers(br#"{"clients":{}}"#), None);
+    }
+
+    #[test]
+    fn native_identity_requires_a_local_peer_and_the_exact_pane() {
+        let reply = format!(
+            r#"{{"principal":{PEER},"endpoint":"unix:///tmp/rex.sock","session_id":"{SESSION}","block_id":"{BLOCK}"}}"#
+        );
+        assert_eq!(native_identity(reply.as_bytes(), SESSION, BLOCK, 501), Ok(()));
+        let remote = reply.replace(PEER, REMOTE);
+        assert_eq!(native_identity(remote.as_bytes(), SESSION, BLOCK, 501), Err(NATIVE_REMOTE));
+        for bad in [
+            reply.replace(SESSION, "session:5bd5"),
+            reply.replace(BLOCK, "block:737c"),
+            reply.replace("block_id", "window_id"),
+            reply.replace("unix:///tmp/rex.sock", "tcp://127.0.0.1:2411"),
+            reply.replace("501", "502"),
+            reply.replace("501", "\"501\""),
+            reply.replace("\"peer\"", "null"),
+        ] {
+            assert_eq!(native_identity(bad.as_bytes(), SESSION, BLOCK, 501), Err(NATIVE_UNKNOWN), "{bad}");
+        }
+    }
+
+    fn app(principal: &str, state: &str, session: &str) -> String {
+        format!(
+            r#"{{"info":{{"kind":"app"}},"principal":{principal},"connection_state":"{state}","session_ids":["{session}"]}}"#
+        )
+    }
+
+    fn clients(clients: &[&str]) -> Option<Result<(), &'static str>> {
+        native_clients(format!(r#"{{"clients":[{}]}}"#, clients.join(",")).as_bytes(), SESSION, 501)
+    }
+
+    #[test]
+    fn native_actions_need_one_same_user_app_in_this_session() {
+        let local = app(PEER, "connected", SESSION);
+        let remote = app(REMOTE, "connected", SESSION);
+        let lost = app(REMOTE, "lost", SESSION);
+        let cli = local.replace(r#""app""#, r#""cli""#);
+        let multiple = Some(Err("Native opening needs exactly one local Rex app connected to this session"));
+        let nobody = Some(Err("No Rex app is connected to this session"));
+        assert_eq!(clients(&[]), nobody);
+        assert_eq!(clients(&[&lost, &cli]), nobody);
+        assert_eq!(clients(&[&local, &lost, &cli]), Some(Ok(())));
+        let other_session = "session:01a1fe07-6593-7bcb-a091-bfac0d945bd6";
+        let attached_twice = local.replace(SESSION, &format!(r#"{SESSION}","{other_session}"#));
+        assert_eq!(clients(&[&attached_twice]), Some(Ok(())));
+        assert_eq!(clients(&[&remote]), Some(Err(NATIVE_REMOTE)));
+        assert_eq!(clients(&[&local, &local]), multiple);
+        assert_eq!(clients(&[&local, &remote]), multiple);
+        assert_eq!(clients(&[&remote, &local]), multiple);
+    }
+
+    #[test]
+    fn a_malformed_native_client_reply_cannot_authorize_even_with_a_good_local_app() {
+        let local = app(PEER, "connected", SESSION);
+        let wrong_session = "session:01a1fe07-6593-7bcb-a091-bfac0d945bd6";
+        for bad in [
+            app(PEER, "connected", wrong_session),
+            app(PEER, "unknown", SESSION),
+            app(&PEER.replace("501", "502"), "connected", SESSION),
+            app(r#"{"kind":"peer","transport":"unix"}"#, "connected", SESSION),
+            app(r#"{"kind":"future","transport":"future"}"#, "connected", SESSION),
+            local.replace(r#""connection_state":"connected","#, ""),
+            local.replace("[\"", "[42,\""),
+            "null".into(),
+        ] {
+            assert_eq!(clients(&[&local, &bad]), None, "{bad}");
+        }
+        assert_eq!(native_clients(br#"{"clients":{}}"#, SESSION, 501), None);
     }
 
     #[test]

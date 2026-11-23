@@ -28,6 +28,7 @@ use crate::diff::{Line, LineKind};
 use crate::git::{Commit, CommitVersion, Kind, PendingFile, Repo};
 use crate::help::{self, Page};
 use crate::keys::{Direction, Key};
+use crate::native::Action;
 use crate::pane::{After, Pane};
 use crate::picture::Picture;
 use crate::preferences::{IconMode, Preferences};
@@ -328,6 +329,17 @@ impl Reader {
         self.editor.as_ref().is_some_and(|editor| editor.asking())
     }
 
+    fn offers_native_actions(&self) -> bool {
+        cfg!(target_os = "macos") && matches!(self.source, Source::Working(_))
+    }
+
+    fn native_help(&self) -> impl Iterator<Item = help::HelpRow> {
+        self.offers_native_actions()
+            .then(|| [help::key("^O", "open in default app"), help::key("^R", "reveal in Finder")])
+            .into_iter()
+            .flatten()
+    }
+
     /// Says `text` for a while, where the reader or its draft says such things.
     fn say(&mut self, text: &'static str, now: Instant) {
         match &mut self.editor {
@@ -471,10 +483,10 @@ impl Pane for Reader {
             return editor.help();
         }
         if let Body::Video(video) = &self.body {
-            if video.error().is_some() {
-                return Page::new(vec![heading("Video unavailable"), key("q Esc", "close")]);
-            }
-            return media::help();
+            let mut rows = media::help_rows(video);
+            rows.extend(self.native_help());
+            rows.push(key("q Esc", "close"));
+            return Page::new(rows);
         }
         if self.markdown().is_some() && !self.markdown_source {
             let mut rows = vec![
@@ -485,6 +497,7 @@ impl Pane for Reader {
                 key("b    ", "page up"),
                 key("g G  ", "top/bottom"),
             ];
+            rows.extend(self.native_help());
             if let Some(ReadOnly(why)) = self.read_only {
                 rows.extend([note("Read-only:"), note(why)]);
             } else {
@@ -519,6 +532,7 @@ impl Pane for Reader {
                 note("Or click a fold."),
             ]);
         }
+        rows.extend(self.native_help());
         rows.extend([
             key("g G  ", "top/bottom"),
             key("q Esc", "close"),
@@ -656,6 +670,23 @@ impl Reader {
         if let Some(editor) = &mut self.editor {
             let step = editor.key(key, now);
             return self.apply(step, now);
+        }
+        if let Some(action) = Action::key(key) {
+            match self.source.working() {
+                Ok(work) => {
+                    let success = match action {
+                        Action::Open => "Opened in default app.",
+                        Action::Reveal => "Revealed in Finder.",
+                    };
+                    let result = action.run(&work.repo.root, Some(work.root.identity()), &work.relative);
+                    self.say(result.err().unwrap_or(success), now);
+                }
+                Err(ReadOnly(why)) => {
+                    let notice = JumpNotice::Said { lead: "Unavailable: ", text: why };
+                    self.change_notice = Some((notice, now + CHANGE_NOTICE));
+                }
+            }
+            return After::Stay;
         }
         if let Body::Video(video) = &mut self.body
             && let Some(after) = media::input(video, key)

@@ -16,6 +16,7 @@ mod icons;
 mod json;
 mod keys;
 mod menubar;
+mod native;
 mod outline;
 mod pane;
 mod paths;
@@ -112,6 +113,7 @@ Outline (tree):
   ↑↓ or k j     move
   Enter         toggle a folder or open a file
   /             find a file by its name or path
+  Ctrl-O/R      open in the default Mac app / reveal in Finder (also in Find)
   Space         toggle a folder
   ← or h        close an open folder or go to the parent
   → or l        open a closed folder
@@ -149,6 +151,7 @@ Reader (also opened by milo view):
   m             rendered Markdown / source and changes
   Space, ←→     in an MP4: play/pause, seek back/forward five seconds
   e             edit a working text file
+  Ctrl-O/R      open the working file in its default Mac app / reveal in Finder
   q or Esc      close
 
 Editing in the reader (also opened by milo view FILE --edit):

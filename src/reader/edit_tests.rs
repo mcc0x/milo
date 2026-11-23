@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use super::*;
 use crate::fixture::Fixture;
 use crate::git::CommitId;
+use crate::native::tests::with_fake;
 
 fn drawn(reader: &mut Reader, w: usize, h: usize) -> Vec<String> {
     let mut screen = Screen::sized(w, h);
@@ -38,6 +39,15 @@ fn typed(reader: &mut Reader, text: &str) {
 
 fn draft(reader: &Reader) -> String {
     reader.editor.as_ref().unwrap().text()
+}
+
+fn assert_native_keys_inert(reader: &mut Reader) {
+    let ((), opened) = with_fake(Ok(()), || {
+        for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
+            assert_eq!(reader.key(key), After::Ignored);
+        }
+    });
+    assert!(opened.is_empty());
 }
 
 /// The words `e` answers with when the file stays read-only.
@@ -93,10 +103,14 @@ fn leaving_unsaved_edits_asks_and_discarding_leaves_the_file_alone() {
     let before = fs::metadata(&file).unwrap();
     let mut reader = editing(&f, "notes.txt");
     typed(&mut reader, "draft ");
+    let draft_view = drawn(&mut reader, 60, 4);
+    assert_native_keys_inert(&mut reader);
+    assert_eq!(drawn(&mut reader, 60, 4), draft_view);
 
     // Esc, Ctrl-C and Ctrl-Q all ask, and Esc at the question goes back to the draft.
     for leave in [Key::Esc, Key::Ctrl(b'c'), Key::Ctrl(b'q')] {
         assert_eq!(reader.key(leave), After::Stay);
+        assert_native_keys_inert(&mut reader);
         assert_eq!(drawn(&mut reader, 60, 4)[3], " Unsaved edits: s save · d discard · Esc back");
         assert_eq!(reader.key(Key::Char('x')), After::Ignored);
         assert_eq!(reader.key(Key::Esc), After::Stay);
@@ -144,6 +158,7 @@ fn a_file_changed_on_disk_is_not_overwritten_without_asking() {
     // Another program rewrites the file in place, then replaces it with a new file.
     fs::write(&file, "theirs\n").unwrap();
     reader.key(Key::Ctrl(b's'));
+    assert_native_keys_inert(&mut reader);
     assert_eq!(drawn(&mut reader, 60, 4)[3], " Changed on disk: c compare · o overwrite · Esc back");
     assert_eq!(fs::read_to_string(&file).unwrap(), "theirs\n");
     reader.key(Key::Esc);
@@ -191,6 +206,8 @@ fn comparison_scrolls_in_diff_colours_and_returns_to_the_same_draft() {
     let rows = screen.text();
     assert!(rows[0].contains("- Disk  + Draft"), "{rows:?}");
     assert!(rows[1].contains("- disk head") && rows[2].contains("+ start row-mine"), "{rows:?}");
+    assert_native_keys_inert(&mut reader);
+    assert_eq!(drawn(&mut reader, 60, 4), rows);
     let output = String::from_utf8(screen.emitted()).unwrap();
     assert!(output.contains("\x1b[0;31mdisk head") && output.contains("\x1b[0;32mstart row-mine"), "{output:?}");
 
@@ -543,6 +560,7 @@ fn a_reader_closed_from_outside_keeps_its_draft_for_the_next_edit() {
     let mut reader = open(&f, "notes.txt");
     assert_eq!(drawn(&mut reader, 60, 5)[1], " 1   one");
     reader.key(Key::Char('e'));
+    assert_native_keys_inert(&mut reader);
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Kept draft found: r restore · d delete · Esc later");
     // The narrowest pane milo is laid out for still lists every key, using its margins.
     assert_eq!(drawn(&mut reader, 28, 5)[4], "r restore d delete Esc later");
@@ -555,6 +573,7 @@ fn a_reader_closed_from_outside_keeps_its_draft_for_the_next_edit() {
     reader.key(Key::Char('e'));
     reader.key(Key::Char('r'));
     assert_eq!(draft(&reader), "unsaved one\ntwo\n");
+    assert_native_keys_inert(&mut reader);
     assert_eq!(drawn(&mut reader, 60, 5)[4], " Draft restored · ^Z undoes");
     // The kept copy is not given up before its text is saved.
     assert!(kept[0].exists());
@@ -1105,7 +1124,9 @@ fn a_file_that_cannot_be_written_does_not_offer_editing() {
     f.write("locked.txt", "one\n");
     fs::set_permissions(f.root.join("locked.txt"), Permissions::from_mode(0o444)).unwrap();
     let mut reader = open(&f, "locked.txt");
-    assert_eq!(drawn(&mut reader, 60, 4)[3], " ↑↓ scroll · q close · ? help");
+    let rows = drawn(&mut reader, 60, 4);
+    assert_eq!(rows[3].contains("^O open · ^R reveal"), cfg!(target_os = "macos"));
+    assert!(rows[3].ends_with("↑↓ scroll · q close · ? help"));
     assert!(reader.help().text().contains("Read-only:\n  no write permission\n"));
     assert_eq!(refusal(&mut reader), " Read-only: no write permission · ? help");
 }

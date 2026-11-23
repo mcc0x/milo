@@ -717,6 +717,12 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                     {
                         continue;
                     }
+                    // A shortcut must not act on a handoff that has not been painted, or outrun a queued quit.
+                    if crate::native::Action::key(key).is_some()
+                        && (overlay_changed || keys.iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)))
+                    {
+                        continue;
+                    }
                     if let Key::Focus(value) = key {
                         focused = Some(value);
                     }
@@ -910,6 +916,57 @@ mod tests {
                 });
                 let exit = pane_loop(Start::Loaded, &open, &mut terminal, &mut Screen::new());
                 assert!(if cancel { matches!(exit, Ok(Exit::Done)) } else { matches!(exit, Ok(Exit::OpenWeb)) });
+            });
+        }
+    }
+
+    #[test]
+    fn native_shortcuts_wait_for_the_pane_and_do_not_outrun_quit() {
+        use crate::native::Action;
+
+        struct Probe(Option<Key>);
+        impl Pane for Probe {
+            fn draw(&mut self, screen: &mut Screen) {
+                screen.clear();
+                screen.put(0, 0, screen.w, "Ready", Style::PLAIN);
+            }
+            fn help(&self) -> Page {
+                Page::new(vec![])
+            }
+            fn key(&mut self, key: Key) -> After {
+                if Action::key(key).is_some() {
+                    assert_eq!(Some(key), self.0);
+                    // The loop returns this without starting a browser.
+                    After::OpenWeb
+                } else if key == Key::Char('q') {
+                    After::Leave
+                } else {
+                    After::Ignored
+                }
+            }
+        }
+
+        let welcome = Start::Welcome(|| Ok(Box::new(Probe(None))));
+        for (start, keys, expected) in [
+            (welcome, b"q\x0fq".as_slice(), None),
+            (Start::Loaded, b"?q\x12q".as_slice(), None),
+            (Start::Loaded, b"\x12\x03".as_slice(), None),
+            (Start::Loaded, b"\x1b[200~\x12\x0f\x1b[201~\x0fq".as_slice(), Some(Key::Ctrl(b'o'))),
+        ] {
+            let (mut terminal, mut master, _signals) = Session::test_pty();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let output = read_until(&mut master, "Ready");
+                    master.write_all(keys).unwrap();
+                    assert!(output.contains("Ready"), "{output:?}");
+                });
+                let exit = pane_loop(start, &|| Ok(Box::new(Probe(expected))), &mut terminal, &mut Screen::new());
+                let launched = match exit {
+                    Ok(Exit::OpenWeb) => true,
+                    Ok(Exit::Done) => false,
+                    Err(error) => panic!("{error}"),
+                };
+                assert_eq!(launched, expected.is_some(), "{keys:?}");
             });
         }
     }

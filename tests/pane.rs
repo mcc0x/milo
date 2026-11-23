@@ -893,9 +893,9 @@ fn both_panes_promote_a_plain_folder_while_idle_and_load_worktree_choices() {
     fs::create_dir_all(&config).unwrap();
     fs::write(config.join("preferences.conf"), "changes_only = true\n").unwrap();
     let mut seed = Terminal::run(project.command(milo).arg("outline"));
-    seed.until("c all files");
+    seed.shows("c all files");
     seed.master.write_all(b"c").unwrap();
-    seed.until("changed only");
+    seed.shows("c changed only");
     seed.master.write_all(b"q").unwrap();
     assert!(seed.wait_for_exit().success());
 
@@ -917,7 +917,7 @@ fn both_panes_promote_a_plain_folder_while_idle_and_load_worktree_choices() {
 
     fs::rename(metadata, root.join(".git")).unwrap();
     outline.until("to commit");
-    outline.until("changed only");
+    outline.shows("c changed only");
     outline.until("kept.txt");
     history.until("FirstGitCommit");
     for terminal in [&mut outline, &mut history] {

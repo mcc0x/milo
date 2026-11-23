@@ -6,6 +6,7 @@ use super::content::{CommittedTarget, NOT_TEXT};
 use super::*;
 use crate::fixture::Fixture;
 use crate::git::CommitId;
+use crate::native::tests::with_fake;
 
 fn drawn(reader: &mut Reader, w: usize, h: usize) -> Vec<String> {
     let mut screen = Screen::sized(w, h);
@@ -28,9 +29,63 @@ fn reader_hints_say_close_and_keep_help_last() {
     let f = Fixture::folder();
     f.write("page.txt", "a file\n");
     let mut reader = Reader::open(&f.root.join("page.txt")).unwrap();
+    let rows = drawn(&mut reader, 80, 5);
+    assert_eq!(rows[4].contains("^O open · ^R reveal"), cfg!(target_os = "macos"));
+    assert!(rows[4].ends_with("↑↓ scroll · e edit · q close · ? help"));
+    let help = reader.help();
+    help.assert_rows_fit(26);
+    let help = help.text();
+    assert_eq!(help.contains("^O  open in default app"), cfg!(target_os = "macos"));
+    assert_eq!(help.contains("^R  reveal in Finder"), cfg!(target_os = "macos"));
     assert_eq!(drawn(&mut reader, 40, 5)[4], " ↑↓ scroll · e edit · q close · ? help");
     assert_eq!(drawn(&mut reader, 28, 5)[4], " e edit · q close · ? help");
     assert_eq!(drawn(&mut reader, 20, 5)[4], " q close · ? help");
+}
+
+#[test]
+fn native_actions_refuse_commit_and_handed_over_views_of_a_working_file() {
+    let f = Fixture::new();
+    f.write("page.txt", "before\n");
+    f.commit("before");
+    f.write("page.txt", "after\n");
+    let mut repo = Repo::open(&f.root).unwrap();
+    repo.read();
+    let history = repo.history(1).unwrap();
+    let id = CommitId::parse(&history[0].hash).unwrap();
+    let committed = Reader::at_commit(&f.root.join("page.txt"), id).unwrap();
+    let patch = crate::handoff::Patch::parse(
+        "diff --git a/page.txt b/page.txt\n--- a/page.txt\n+++ b/page.txt\n@@ -1 +1 @@\n-before\n+after\n",
+    )
+    .unwrap();
+    let handed = Reader::handed_over(&repo, &patch, "page.txt", Handed { from: None, number: 1, total: 1 });
+    for (mut reader, why) in [(committed, "this is a commit"), (handed, "this shows a patch")] {
+        assert!(!reader.help().text().contains("^O"));
+        let ((), opened) = with_fake(Ok(()), || {
+            for key in [Key::Ctrl(b'o'), Key::Ctrl(b'r')] {
+                assert_eq!(reader.key(key), After::Stay);
+                assert_eq!(drawn(&mut reader, 60, 4)[3], format!(" Unavailable: {why} · ? help"));
+            }
+        });
+        assert!(opened.is_empty(), "{opened:?}");
+    }
+}
+
+#[test]
+fn a_native_action_keeps_the_original_root_even_when_its_path_is_reused() {
+    let f = Fixture::folder();
+    f.write("page.txt", "original folder\n");
+    let file = f.root.join("page.txt");
+    let mut reader = Reader::open(&file).unwrap();
+    let (after, opened) = with_fake(Ok(()), || reader.key(Key::Ctrl(b'o')));
+    assert_eq!(after, After::Stay);
+    assert!(matches!(opened.as_slice(), [(Action::Open, path)] if path == &file));
+
+    fs::rename(&f.root, f.root.with_file_name("moved")).unwrap();
+    f.write("page.txt", "replacement folder\n");
+    let (after, opened) = with_fake(Ok(()), || reader.key(Key::Ctrl(b'o')));
+    assert_eq!(after, After::Stay);
+    assert!(opened.is_empty(), "{opened:?}");
+    assert!(!drawn(&mut reader, 60, 4)[3].contains("Opened in default app."));
 }
 
 #[test]
@@ -1444,7 +1499,7 @@ fn single_file_commit_reads_distinguish_rename_destinations_deletions_and_unchan
 }
 
 #[test]
-fn a_non_utf8_working_path_never_shows_its_lossy_siblings_diff() {
+fn a_non_utf8_working_path_never_uses_its_lossy_sibling() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -1455,6 +1510,9 @@ fn a_non_utf8_working_path_never_shows_its_lossy_siblings_diff() {
     let raw = f.root.join(OsStr::from_bytes(b"page\xff.txt"));
     f.write("page\u{fffd}.txt", "edited sibling\n");
     let mut reader = Reader::open(&raw).unwrap();
+    let (after, opened) = with_fake(Ok(()), || reader.key(Key::Ctrl(b'o')));
+    assert_eq!(after, After::Stay);
+    assert!(opened.is_empty());
     for (kind, expected) in [(Kind::Modified, "edited sibling"), (Kind::Deleted, "original sibling")] {
         if kind == Kind::Deleted {
             fs::remove_file(&sibling).unwrap();
