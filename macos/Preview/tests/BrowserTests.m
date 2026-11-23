@@ -451,9 +451,9 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
     [_address selectText:nil]; // click/field-editor path, not the Cmd-L action
     NSTextView *draft = (NSTextView *)_address.currentEditor;
     CHECK(draft && self.window.firstResponder == draft);
-    [draft insertText:@"draft.example" replacementRange:draft.selectedRange];
+    [draft insertText:@"draft.example" replacementRange:NSMakeRange(NSNotFound, 0)];
     [web deliverMode:@"arm" result:@YES];
-    CHECK(self.window.firstResponder == draft && _pickState == PickIdle);
+    CHECK(WaitFor(^BOOL{ return _pickState == PickIdle; }) && self.window.firstResponder == draft);
     CHECK([draft.string isEqualToString:@"draft.example"]);
     [self endAddressEdit];
     [self armPick:nil];

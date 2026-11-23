@@ -732,7 +732,7 @@ static NSString *const PreviewWebKeyPaths[] = {@"URL", @"canGoBack", @"canGoForw
     _cancel.hidden = _pickState == PickIdle;
     _picker.hidden = _pickState != PickArmed && _pickState != PickReading;
     _reload.enabled = _rulesReady;
-    _address.enabled = _rulesReady;
+    if (_address.enabled != _rulesReady) _address.enabled = _rulesReady;
     [self updateNavigationControls];
     [self updateSelectAvailability];
     [self.window invalidateCursorRectsForView:_picker];
@@ -774,7 +774,14 @@ static NSString *const PreviewWebKeyPaths[] = {@"URL", @"canGoBack", @"canGoForw
 }
 
 - (void)controlTextDidBeginEditing:(NSNotification *)notification {
-    if (_pickState != PickIdle) [self finishPick:@""];
+    // AppKit can deliver this from inside the field editor's first insertion.
+    // Invalidate the reply now; update controls after that editing transaction.
+    if (_pickState != PickIdle) {
+        NSUInteger generation = ++_pickID;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_pickID == generation) [self finishPick:@""];
+        });
+    }
     NSTextView *editor = notification.userInfo[@"NSFieldEditor"];
     editor.continuousSpellCheckingEnabled = NO;
     editor.grammarCheckingEnabled = NO;
