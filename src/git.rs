@@ -341,7 +341,28 @@ pub(crate) fn root_commit(root: &Path) -> Option<String> {
     if run::output(root, &[], &["rev-parse", "--is-shallow-repository"])?.as_slice() != b"false\n" {
         return None;
     }
+    first_visible_commit(root)
+}
+
+fn first_visible_commit(root: &Path) -> Option<String> {
+    // In a shallow checkout Git stops at the local boundary, not the root on another host.
     run::optional_oid(root, &[], &["rev-list", "--max-parents=0", "--max-count=1", "HEAD"])?
+}
+
+/// Identity for reviewing an explicit mapping on this host, never for matching a repo across hosts.
+/// The Git directory distinguishes two unborn repositories installed in the same worktree directory.
+pub(crate) fn mapped_checkout(root: &Path) -> Option<(u64, u64, Option<String>)> {
+    let raw = discovery_output(root, &["rev-parse", "--absolute-git-dir"]).ok()??;
+    let git = Path::new(OsStr::from_bytes(&raw));
+    if !git.is_absolute() {
+        return None;
+    }
+    let directory = git.metadata().ok()?;
+    let first = first_visible_commit(root);
+    if first.is_none() && run::optional_oid(root, &[], &["rev-parse", "--verify", "--quiet", "HEAD"])?.is_some() {
+        return None; // HEAD exists but its history could not be read.
+    }
+    Some((directory.dev(), directory.ino(), first))
 }
 
 /// What people call a checkout: its repository and, in a linked worktree, that worktree's folder.

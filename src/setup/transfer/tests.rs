@@ -245,11 +245,11 @@ fn an_import_stops_when_the_host_changed_after_its_preview() {
     b.write("preferences.conf", "icons = off\n");
     let bundle = a.with(|place| export(place, &Group::ALL, Scopes::Global)).unwrap();
     let reviewed = b.with(|place| plan(place, &bundle, &[])).unwrap();
-    let basis = reviewed.basis();
+    let basis = reviewed.basis().unwrap();
     // Another editor saves on host B before the import is applied.
     b.write("preferences.conf", "icons = nerd\nstatic_marks = true\n");
     let later = b.with(|place| plan(place, &bundle, &[])).unwrap();
-    assert_ne!(later.basis(), basis, "a new preview is a new plan");
+    assert_ne!(later.basis().unwrap(), basis, "a new preview is a new plan");
     assert_eq!(b.with(|place| apply(place, reviewed)).err().as_deref(), Some(STALE));
     assert_eq!(b.read("preferences.conf").unwrap(), "icons = nerd\nstatic_marks = true\n");
     assert!(b.read("layouts/global").is_none(), "none of the import was kept");

@@ -369,14 +369,14 @@ pub(crate) enum Destination {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WorktreeMatch {
     SameRepository,
-    Chosen { device: u64, inode: u64, first_commit: Option<String> },
+    Chosen,
 }
 
 impl WorktreeMatch {
     const fn reason(&self) -> &'static str {
         match self {
             Self::SameRepository => "same repository",
-            Self::Chosen { .. } => "chosen by you",
+            Self::Chosen => "chosen by you",
         }
     }
 }
@@ -411,9 +411,9 @@ impl Plan {
         self.sections.iter().map(|section| section.rows.len()).sum()
     }
 
-    /// Names the exact files this plan was worked out against, what it would
-    /// write, and which checkout the person explicitly chose.
-    pub(crate) fn basis(&self) -> String {
+    /// The browser rechecks the files and explicit mapping it previewed. A
+    /// one-shot CLI import does not need to walk a manually chosen repo's history.
+    pub(crate) fn basis(&self) -> Result<String, String> {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut feed = |bytes: &[u8]| {
             for &byte in bytes.iter().chain(&[0xff]) {
@@ -428,16 +428,20 @@ impl Plan {
             feed(after.map_or(&[][..], |image| &image.bytes));
         }
         for section in &self.sections {
-            if let Destination::Worktree { root, matched: WorktreeMatch::Chosen { device, inode, first_commit } } =
-                &section.destination
-            {
+            if let Destination::Worktree { root, matched: WorktreeMatch::Chosen } = &section.destination {
+                let folder =
+                    fs::metadata(root).map_err(|_| format!("Could not read the worktree at {}.", root.display()))?;
                 feed(root.as_os_str().as_bytes());
+                feed(&folder.dev().to_le_bytes());
+                feed(&folder.ino().to_le_bytes());
+                let (device, inode, first) = git::mapped_checkout(root)
+                    .ok_or_else(|| format!("Could not verify the repository at {}.", root.display()))?;
                 feed(&device.to_le_bytes());
                 feed(&inode.to_le_bytes());
-                feed(first_commit.as_deref().unwrap_or("").as_bytes());
+                feed(first.as_deref().unwrap_or("").as_bytes());
             }
         }
-        format!("{hash:016x}")
+        Ok(format!("{hash:016x}"))
     }
 
     /// The plan as someone reads it in a terminal.
@@ -477,8 +481,8 @@ impl Plan {
     }
 
     /// The plan as the browser editor shows it.
-    pub(crate) fn json(&self) -> String {
-        let mut out = format!("{{\"basis\":\"{}\",\"changes\":{},\"sections\":[", self.basis(), self.changes());
+    pub(crate) fn json(&self, basis: &str) -> String {
+        let mut out = format!("{{\"basis\":\"{basis}\",\"changes\":{},\"sections\":[", self.changes());
         for (index, section) in self.sections.iter().enumerate() {
             if index != 0 {
                 out.push(',');
@@ -529,13 +533,7 @@ fn destination(place: &Place<'_>, project: &Project, maps: &[(String, PathBuf)])
     if let Some((_, dir)) = maps.iter().find(|(name, _)| *name == project.name) {
         let root =
             git::worktree(dir).ok_or_else(|| format!("{} is not in a Git worktree on this host.", dir.display()))?;
-        // The path alone could now name a different checkout. History also
-        // catches a repository replaced in place; when no root commit is
-        // available (unborn or shallow), a manual choice still works.
-        let folder = fs::metadata(&root).map_err(|_| format!("Could not read the worktree at {}.", root.display()))?;
-        let matched =
-            WorktreeMatch::Chosen { device: folder.dev(), inode: folder.ino(), first_commit: git::root_commit(&root) };
-        return Ok(Destination::Worktree { root, matched });
+        return Ok(Destination::Worktree { root, matched: WorktreeMatch::Chosen });
     }
     let Some(commit) = &project.repository else { return Ok(Destination::Unmapped) };
     let below_home = place.home.zip(project.home.as_deref()).map(|(home, path)| home.join(path));

@@ -66,6 +66,15 @@ def sample(binary, home, check):
     bundle.write_text(f"milo-settings 1\n[project]\nname = moved\nhome = checkout\nrepository = {commit}\nicons = off\n")
     assert f"{repo} (same repository)" in settings("project preview via home", "import", bundle)
 
+    # An explicit one-shot mapping needs a worktree, not the browser's cross-request review token.
+    for action in [(), ("--apply",)]:
+        label = "explicit CLI apply" if action else "explicit CLI preview"
+        assert f"{other} (chosen by you)" in settings(label, "import", bundle, "--map", "moved=.", *action)
+        if check:
+            events = map(json.loads, trace.read_text().splitlines())
+            assert not any("rev-list" in event["argv"] or "--absolute-git-dir" in event["argv"]
+                           for event in events if event["event"] == "start")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
