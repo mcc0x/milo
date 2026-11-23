@@ -11,6 +11,7 @@ args = parser.parse_args()
 repo = site.parent
 base = 'https://github.com/mcc0x/milo/blob/main/'
 files = ['README.md', 'docs/setup.md', 'docs/panes.md', 'docs/keys.md', 'docs/usage.md', 'docs/presence.md',
+         'docs/integrations.md',
          'skills/milo/SKILL.md', 'CONTRIBUTING.md', 'docs/internals.md']
 
 
