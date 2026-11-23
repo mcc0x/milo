@@ -67,6 +67,9 @@ class QuietHandler(BaseHTTPRequestHandler):
 class Outside(QuietHandler):
     def do_GET(self):
         if self.path in ('/outside', '/slow-outside'):
+            if self.path == '/outside':
+                with (root / 'escaped.departures').open('ab') as arrivals:
+                    arrivals.write(b'.')
             if self.path == '/slow-outside':
                 time.sleep(0.6)
             if self.headers.get('Referer'):

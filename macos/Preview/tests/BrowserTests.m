@@ -501,7 +501,8 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSU
     CHECK([TestBoard setString:@"smoke sentinel" forType:NSPasteboardTypeString]);
 
     __block NSUInteger returns = 0;
-    NSView *content = MiloPreviewContent(url, ^BOOL{ return YES; }, ^{ ++returns; });
+    __block BOOL panelInput = YES;
+    NSView *content = MiloPreviewContent(url, ^BOOL{ return panelInput; }, ^{ ++returns; });
     CHECK(content != nil);
     NSPanel *window = [[SmokePanel alloc] initWithContentRect:NSMakeRect(60, 60, 430, 410)
                                                    styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
@@ -518,11 +519,17 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSU
     // Browser.m test hooks, message injection, or synthetic page-side clicks.
     WKWebView *web = nil;
     NSTextView *review = nil;
+    NSTextView *destination = nil;
     NSTextField *address = nil;
     NSButton *select = nil, *copy = nil, *cancel = nil, *back = nil, *forward = nil, *reload = nil, *terminal = nil;
+    NSButton *open = nil, *stay = nil;
     for (NSView *view in content.subviews) {
         if ([view isKindOfClass:WKWebView.class]) web = (WKWebView *)view;
-        if ([view isKindOfClass:NSScrollView.class]) review = ((NSScrollView *)view).documentView;
+        if ([view isKindOfClass:NSScrollView.class]) {
+            NSTextView *text = ((NSScrollView *)view).documentView;
+            if ([[text accessibilityLabel] isEqual:@"External destination"]) destination = text;
+            else review = text;
+        }
         if ([view isKindOfClass:NSTextField.class] && [[view accessibilityLabel] isEqual:@"Web address"])
             address = (NSTextField *)view;
         if (![view isKindOfClass:NSButton.class]) continue;
@@ -535,7 +542,10 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSU
         if ([name isEqual:@"Go forward"]) forward = button;
         if ([name isEqual:@"Reload preview"]) reload = button;
         if ([name isEqual:@"Return to terminal"]) terminal = button;
+        if ([name isEqual:@"Open link"]) open = button;
+        if ([name isEqual:@"Stay"]) stay = button;
     }
+    CHECK(open && stay && destination);
     CHECK(web && address && review && select && copy && cancel && back && forward && reload && terminal);
     CHECK(!web.configuration.websiteDataStore.isPersistent);
     CHECK(WaitFor(^BOOL{ return select.enabled && !web.isLoading; }));
@@ -675,12 +685,41 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSU
     }));
     CHECK(WaitForPage(content, address, hash, @"Milo fixture") == web);
 
-    // A local top-level scripted departure is not an explicit click.
+    // The page can propose, not send, an external request or move focus.
+    NSString *departureRequests = [escapedRequest stringByAppendingString:@".departures"];
+    DraftAddress(content, address, @"unsubmitted-departure.example");
+    NSText *draft = address.currentEditor;
     Evaluate(web, [NSString stringWithFormat:@"location.href = '%@'; true", outside.absoluteString]);
-    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Open a link or enter an address"); }));
-    CHECK([web.URL isEqual:hash]);
+    CHECK(WaitFor(^BOOL{
+        [content layoutSubtreeIfNeeded];
+        return !open.isHidden && open.isEnabled;
+    }));
+    CHECK(window.firstResponder == draft && [draft.string isEqual:@"unsubmitted-departure.example"]);
+    CHECK([web.URL isEqual:hash] && [destination.string isEqual:outside.absoluteString]);
+    Evaluate(web, [NSString stringWithFormat:@"location.href = '%@'; true", alias.absoluteString]);
+    CHECK([destination.string isEqual:outside.absoluteString]);
+    panelInput = NO;
+    CHECK([NSApp sendAction:open.action to:open.target from:open]);
+    panelInput = YES;
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:departureRequests]);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\e", 53, 0));
+    CHECK([address.stringValue isEqual:hash.absoluteString]);
+    CHECK([window makeFirstResponder:stay]);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\x03", 76, 0));
+    CHECK(WaitFor(^BOOL{ [content layoutSubtreeIfNeeded]; return open.isHidden; }));
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:departureRequests]);
+
     ClickElement(web, @"outside");
+    CHECK(WaitFor(^BOOL{ [content layoutSubtreeIfNeeded]; return !open.isHidden && open.isEnabled; }));
+    CHECK([address.stringValue isEqual:hash.absoluteString] && [destination.string isEqual:outside.absoluteString]);
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:departureRequests]);
+    SetViewport(content, 144, 240);
+    CheckControls(content, @[open, stay]);
+    CHECK([window makeFirstResponder:open]);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\r", 36, 0));
     WKWebView *general = WaitForPage(content, address, outside, @"Outside fixture");
+    CHECK([NSData dataWithContentsOfFile:departureRequests].length == 1);
+    SetViewport(content, 430, 470);
     CHECK(general != web && web.isHidden && !select.enabled);
     CHECK(general.configuration.userContentController.userScripts.count == 0);
     CHECK([NSApp sendAction:select.action to:select.target from:select]);
@@ -745,17 +784,14 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSU
     CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
     CHECK(select.enabled && copy.isHidden && TestBoard.changeCount == unchanged);
 
+    NSUInteger departures = [NSData dataWithContentsOfFile:departureRequests].length;
     ClickElement(web, @"redirect");
-    BOOL canAssociateRedirect = NO;
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
-    if (@available(macOS 27.0, *)) canAssociateRedirect = YES;
-#endif
-    if (!canAssociateRedirect) {
-        CHECK(WaitFor(^BOOL{ return back.enabled && HasStatus(content, @"Open a link or enter an address"); }));
-        CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
-        SubmitAddress(content, address, outside.absoluteString);
-    }
+    CHECK(WaitFor(^BOOL{ [content layoutSubtreeIfNeeded]; return !open.isHidden && open.isEnabled; }));
+    CHECK([address.stringValue isEqual:duringReview.absoluteString] && [destination.string isEqual:outside.absoluteString]);
+    CHECK([NSData dataWithContentsOfFile:departureRequests].length == departures);
+    [open performClick:nil];
     CHECK(WaitForPage(content, address, outside, @"Outside fixture") == general);
+    CHECK([NSData dataWithContentsOfFile:departureRequests].length > departures);
     CHECK(!select.enabled && [NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".redirect"]]);
     CHECK(![NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".referrer"]]);
     [back performClick:nil];
