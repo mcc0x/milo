@@ -44,8 +44,10 @@ WITH cache_json AS (
 ), history_heads AS (
     -- Break timestamp ties within the filtered history, not by scanning
     -- every provider's rows between the oldest and newest eligible IDs.
+    -- Keep eligible outer so SQLite can index the per-limit timestamps instead
+    -- of building an automatic index of every eligible observation.
     SELECT t.provider, t.account_key, max(h.id) AS id, t.recorded_at
-    FROM eligible h JOIN latest_times t USING (provider,account_key,recorded_at)
+    FROM eligible h CROSS JOIN latest_times t USING (provider,account_key,recorded_at)
     WHERE h.limit_id IS t.limit_id
     GROUP BY t.provider,t.account_key,t.limit_id
 ), history_accounts AS (

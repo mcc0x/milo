@@ -86,7 +86,7 @@ impl History {
         let below_click = click_offset.map_or(self.shown, |offset| self.shown.saturating_sub(offset + 1));
         let selected = self.selected();
         // Leave room for the last note at the end, or for an expanded commit's preview.
-        let list_rows = if self.truncated && self.rows[self.cursor + 1..].iter().all(|row| !row.selectable()) {
+        let list_rows = if self.truncated && (self.cursor + 1..self.rows.len()).all(|i| !self.rows.selectable(i)) {
             self.rows.len() - self.cursor
         } else if matches!(selected, Some(TimelineRow::Commit(i)) if self.open_index() == Some(i)) {
             2
@@ -267,9 +267,9 @@ impl History {
         let open_files = self.open_files();
         let files = open_files.map_or(&[][..], |diff| diff.files.as_slice());
         let right = s.w - 1;
-        for (i, row) in self.rows.iter().enumerate().skip(top).take(self.shown) {
+        for (i, row) in (top..top + self.shown).map_while(|i| Some((i, self.rows.get(i)?))) {
             let y = body_top + i - top;
-            match *row {
+            match row {
                 TimelineRow::Uncommitted => self.draw_uncommitted(s, y),
                 TimelineRow::Divider => self.draw_divider(s, y),
                 TimelineRow::Commit(index) => {

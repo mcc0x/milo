@@ -8,6 +8,7 @@ mod refresh;
 mod tests;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::os::fd::RawFd;
 use std::path::Path;
 #[cfg(test)]
@@ -60,7 +61,7 @@ struct Entry {
 }
 
 /// Rows the cursor can point at, with the guides between them.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TimelineRow {
     Uncommitted,
     Divider,
@@ -73,6 +74,55 @@ enum TimelineRow {
 impl TimelineRow {
     fn selectable(self) -> bool {
         matches!(self, Self::Commit(_) | Self::File(_) | Self::More)
+    }
+}
+
+/// Only one commit can be open, so its consecutive file rows need just a range.
+#[derive(Default)]
+struct Timeline {
+    markers: Vec<TimelineRow>,
+    files: Range<usize>,
+}
+
+impl Timeline {
+    fn clear(&mut self) {
+        self.markers.clear();
+        self.files = 0..0;
+    }
+
+    fn push(&mut self, row: TimelineRow) {
+        self.markers.push(row);
+    }
+
+    fn push_files(&mut self, count: usize) {
+        let start = self.markers.len();
+        self.files = start..start + count;
+    }
+
+    fn len(&self) -> usize {
+        self.markers.len() + self.files.len()
+    }
+
+    fn get(&self, index: usize) -> Option<TimelineRow> {
+        if index < self.files.start {
+            self.markers.get(index).copied()
+        } else if index < self.files.end {
+            Some(TimelineRow::File(index - self.files.start))
+        } else {
+            self.markers.get(index - self.files.len()).copied()
+        }
+    }
+
+    fn position(&self, row: TimelineRow) -> Option<usize> {
+        if let TimelineRow::File(i) = row {
+            return (i < self.files.len()).then_some(self.files.start + i);
+        }
+        let i = self.markers.iter().position(|&marker| marker == row)?;
+        Some(if i < self.files.start { i } else { i + self.files.len() })
+    }
+
+    fn selectable(&self, index: usize) -> bool {
+        self.get(index).is_some_and(TimelineRow::selectable)
     }
 }
 
@@ -120,7 +170,7 @@ pub struct History {
     patience: Duration,
     #[cfg(test)]
     listing_releases: Option<Arc<AtomicUsize>>,
-    rows: Vec<TimelineRow>,
+    rows: Timeline,
     cursor: usize,
     top: usize,
     shown: usize,
@@ -155,7 +205,7 @@ impl History {
             patience: if cfg!(test) { Duration::from_secs(60) } else { PATIENCE },
             #[cfg(test)]
             listing_releases: None,
-            rows: Vec::new(),
+            rows: Timeline::default(),
             cursor: 0,
             top: 0,
             shown: 0,
@@ -286,7 +336,7 @@ impl History {
     }
 
     fn selected(&self) -> Option<TimelineRow> {
-        self.rows.get(self.cursor).copied()
+        self.rows.get(self.cursor)
     }
 
     fn open_index(&self) -> Option<usize> {
@@ -322,7 +372,7 @@ impl History {
                     Some(diff) => {
                         let n = diff.files.len();
                         let shown = if open.all_files { n } else { n.min(FILE_PREVIEW) };
-                        self.rows.extend((0..shown).map(TimelineRow::File));
+                        self.rows.push_files(shown);
                         if shown < n {
                             self.rows.push(TimelineRow::More);
                         }
@@ -343,7 +393,7 @@ impl History {
         } else if self.truncated {
             self.rows.push(TimelineRow::Note("Older commits not shown."));
         }
-        self.cursor = selected.and_then(|selected| self.rows.iter().position(|&row| row == selected)).unwrap_or(0);
+        self.cursor = selected.and_then(|selected| self.rows.position(selected)).unwrap_or(0);
     }
 
     fn toggle_files(&mut self, i: usize) {

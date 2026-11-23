@@ -191,6 +191,9 @@ fn database_looks(
         assert!(usage.external_fd().is_none());
         verify(&usage, look);
         if look > 0 {
+            if std::env::var_os("MILO_BENCH_OMP_TAIL").is_some() {
+                println!("sample\t{profile}\t{look}\t{}\t{}", foreground.as_micros(), complete.as_micros());
+            }
             jobs += 1;
             inline.push(foreground);
             fetched.push(complete);
@@ -217,7 +220,12 @@ fn usage_profile_active_sqlite() {
         "profile\tdatabase_bytes\tseed_rows\tday_assistant_rows\tcommits\tjobs\tover_1s\tinline_p50_us\tinline_p95_us\tresult_p50_us\tresult_p95_us"
     );
     let now = local_noon();
+    // The tail comparison needs individual observations from the two unindexed cases.
+    let tail = std::env::var_os("MILO_BENCH_OMP_TAIL").is_some();
     for profile in ["omp-uncached", "omp-cached", "omp-indexed-dense", "omp-indexed-sparse"] {
+        if tail && profile.starts_with("omp-indexed-") {
+            return;
+        }
         let f = Fixture::folder();
         let path = omp_limits::sqlite(&f).unwrap();
         history(&path, HISTORY_ROWS, (now - 60) * 1000, "0.25");

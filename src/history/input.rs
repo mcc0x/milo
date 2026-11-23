@@ -86,7 +86,7 @@ impl History {
     fn left(&mut self) {
         match (self.selected(), self.open_index()) {
             (Some(TimelineRow::File(_) | TimelineRow::More), Some(open)) => {
-                self.cursor = self.rows.iter().position(|&row| row == TimelineRow::Commit(open)).unwrap_or(self.cursor);
+                self.cursor = self.rows.position(TimelineRow::Commit(open)).unwrap_or(self.cursor);
             }
             (Some(TimelineRow::Commit(i)), Some(open)) if i == open => self.toggle_files(i),
             _ => {}
@@ -100,7 +100,7 @@ impl History {
             return;
         };
         let at = painted.top + offset;
-        let Some(&row) = self.rows.get(at).filter(|row| x < painted.width && row.selectable()) else {
+        let Some(row) = self.rows.get(at).filter(|row| x < painted.width && row.selectable()) else {
             self.clicked = None;
             return;
         };
@@ -125,12 +125,13 @@ impl History {
     }
 
     fn scroll(&mut self, delta: isize) {
-        if delta == 0 || self.rows.is_empty() {
+        let len = self.rows.len();
+        if delta == 0 || len == 0 {
             return;
         }
-        let at = self.cursor.saturating_add_signed(delta).min(self.rows.len() - 1);
-        let before = || self.rows[..=at].iter().rposition(|row| row.selectable());
-        let after = || self.rows[at..].iter().position(|row| row.selectable()).map(|i| at + i);
+        let at = self.cursor.saturating_add_signed(delta).min(len - 1);
+        let before = || (0..=at).rev().find(|&i| self.rows.selectable(i));
+        let after = || (at..len).find(|&i| self.rows.selectable(i));
         let next = if delta < 0 { before().or_else(after) } else { after().or_else(before) };
         self.cursor = next.unwrap_or(self.cursor);
     }
