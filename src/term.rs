@@ -319,11 +319,7 @@ impl Session {
 
     fn after_wait(&mut self, wait: Wait) -> Wait {
         let expired = self.expire_replies();
-        if matches!(wait, Wait::Timeout) && expired {
-            Wait::Input
-        } else {
-            wait
-        }
+        if matches!(wait, Wait::Timeout) && expired { Wait::Input } else { wait }
     }
 
     fn expire_replies(&mut self) -> bool {
@@ -932,7 +928,8 @@ mod tests {
         let (keyboard, _master) = test_pair();
         let before = modes(&keyboard);
         let read_only = File::open("/dev/null").unwrap();
-        let failed = Session::enter(keyboard.try_clone().unwrap(), read_only, io::pipe().unwrap().0, Capabilities::TEST);
+        let failed =
+            Session::enter(keyboard.try_clone().unwrap(), read_only, io::pipe().unwrap().0, Capabilities::TEST);
         assert!(failed.is_err());
         assert_eq!(modes(&keyboard), before);
     }

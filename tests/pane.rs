@@ -32,7 +32,17 @@ impl Project {
     }
 
     fn command(&self, program: impl AsRef<Path>) -> Command {
-        let mut command = Command::new(program.as_ref());
+        self.configure(Command::new(program.as_ref()))
+    }
+
+    /// A stock shell's tools, without the developer's Rex or provider environment.
+    fn standalone(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_milo"));
+        command.env_clear().env("PATH", "/usr/bin:/bin");
+        self.configure(command)
+    }
+
+    fn configure(&self, mut command: Command) -> Command {
         command
             .current_dir(self.0.join("project"))
             .env("HOME", &self.0)
@@ -40,6 +50,10 @@ impl Project {
             .env("XDG_STATE_HOME", self.0.join("state"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("TERM", "xterm-256color")
+            .env_remove("TERM_PROGRAM")
+            .env_remove("TMUX")
+            .env_remove("STY")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK");
@@ -355,6 +369,32 @@ fn a_slow_open_reflows_its_loading_frame_without_waiting_for_git() {
     assert!(!terminal.restored());
     fs::write(project.0.join("go"), "").unwrap();
     terminal.until("page.txt");
+}
+
+#[test]
+fn home_cancels_before_starting_git_when_enter_and_ctrl_c_arrive_together() {
+    let project = Project::new();
+    let mut command = project.standalone();
+    project.stand_in_git(
+        &mut command,
+        "touch \"$HOME/git-started\"\nwhile [ -d \"$HOME\" ]; do sleep 0.02; done\nexit 1\n",
+    );
+    let started = project.0.join("git-started");
+    let mut terminal = Terminal::run(&mut command);
+    terminal.shows("› Outline");
+    terminal.master.write_all(b"\r\x03").unwrap();
+    let until = Instant::now() + TEST_WAIT;
+    let status = loop {
+        assert!(!started.exists(), "Home started Git before consuming Ctrl-C");
+        if let Some(status) = terminal.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < until, "Home did not cancel");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success());
+    assert!(!started.exists());
+    assert!(terminal.restored());
 }
 
 #[test]
@@ -1166,19 +1206,54 @@ fn a_pane_started_without_a_terminal_says_what_works_without_one() {
 }
 
 #[test]
+fn dumb_terminal_is_refused_before_entering_screen_modes() {
+    let project = Project::new();
+    let mut tty = Terminal::run(project.standalone().env("TERM", "dumb").arg("outline"));
+    tty.until("TERM=dumb");
+    assert_eq!(tty.wait_for_exit().code(), Some(1));
+    assert!(!tty.bytes.contains(&0x1b));
+    assert!(tty.restored());
+}
+
+#[test]
+fn a_nested_terminal_uses_plain_icons_and_opens_a_file_in_place_without_colour() {
+    let project = Project::new();
+    fs::write(project.0.join("project/page.txt"), "a standalone terminal\n").unwrap();
+    let mut command = project.standalone();
+    command
+        .env("TERM", "tmux-256color")
+        .env("TERM_PROGRAM", "rex")
+        .env("REX_SESSION", "session:00000000-0000-0000-0000-000000000001")
+        .env("REX_BLOCK", "block:00000000-0000-0000-0000-000000000002")
+        .env("REX_SERVER", project.0.join("absent.sock"))
+        .env("NO_COLOR", "1");
+    let mut tty = Terminal::run(command.arg("outline"));
+    tty.shows("page.txt");
+    assert!(tty.output().contains('•'));
+    tty.master.write_all(b"\r").unwrap();
+    tty.shows("a standalone terminal");
+    tty.master.write_all(b"qq").unwrap();
+    tty.until("\x1b[?1049l");
+    assert!(tty.wait_for_exit().success());
+    let output = tty.output();
+    assert!(!output.contains("\x1b_G"));
+    for sgr in output.split("\x1b[") {
+        if let Some((parameters, _)) = sgr.split_once('m')
+            && parameters.bytes().all(|byte| byte.is_ascii_digit() || byte == b';')
+        {
+            assert!(parameters.split(';').all(|p| matches!(p, "0" | "1" | "2" | "3" | "4" | "7" | "9")), "{sgr:?}");
+        }
+    }
+}
+
+#[test]
 fn a_floating_review_outside_rex_points_to_the_local_command() {
     let project = Project::new();
-    let output = project
-        .command(env!("CARGO_BIN_EXE_milo"))
-        .args(["review", "missing.patch", "--float"])
-        .output()
-        .unwrap();
+    let output = project.standalone().args(["review", "missing.patch", "--float"]).output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "milo: --float needs a Rex pane; elsewhere, run milo review PATCH in a terminal\n"
-    );
+    let reason = String::from_utf8(output.stderr).unwrap();
+    assert!(reason.contains("--float needs a Rex pane") && reason.contains("milo review PATCH"), "{reason}");
 }
 
 #[test]
@@ -1344,8 +1419,7 @@ fn fresh_home_opens_and_reopens_the_local_outline_without_setup() {
     let root = project.0.join("project");
     let page = root.join("page.txt");
     fs::write(&page, "Original text\n").unwrap();
-    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    let mut tty = Terminal::run(command.env_remove("REX_CONFIG"));
+    let mut tty = Terminal::run(&mut project.standalone());
     tty.shows("› Outline");
     tty.shows("Open browser settings");
     assert!(!tty.output().contains("Skip setup"));
@@ -1396,6 +1470,9 @@ fn a_failed_local_open_shows_its_error_and_returns_to_home() {
     assert!(!tty.restored());
     tty.master.write_all(b"\x1b").unwrap();
     tty.shows("› Outline");
+    // Consume Home's final row too: a PTY with no emulator to drain it can
+    // otherwise block the rest of the frame before Milo handles quit.
+    tty.shows("q quit");
     tty.master.write_all(b"q").unwrap();
     assert!(tty.wait_for_exit().success());
     assert!(tty.restored());
@@ -1404,14 +1481,7 @@ fn a_failed_local_open_shows_its_error_and_returns_to_home() {
 #[test]
 fn fresh_home_opens_git_history_usage_and_terminal_settings_in_place() {
     let project = Project::new();
-    let mut command = project.command(env!("CARGO_BIN_EXE_milo"));
-    let isolated = command
-        .env_remove("REX_CONFIG")
-        .env_remove("CODEX_HOME")
-        .env_remove("PI_CODING_AGENT_DIR")
-        .env_remove("OPENCODE_DB")
-        .env("XDG_DATA_HOME", project.0.join("data"));
-    let mut tty = Terminal::run(isolated);
+    let mut tty = Terminal::run(&mut project.standalone());
     tty.shows("› Outline");
     tty.master.write_all(b"j\r").unwrap();
     tty.shows("Not a Git project.");

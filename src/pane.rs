@@ -514,6 +514,9 @@ fn with_loading<T>(
                         draw_loading(screen, dir, w, h);
                         if let Err(e) = screen.flush(|bytes| terminal.write_while_open(bytes, ready.as_raw_fd())) {
                             if e.kind() == io::ErrorKind::Interrupted && !terminal.stopping() {
+                                // The cancelled write may not have erased the previous pane.
+                                // Discard the diff's baseline and erase on the next frame.
+                                screen.resize(w, h);
                                 return;
                             }
                             break;
@@ -692,7 +695,8 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
             Wait::Input => {
                 let mut overlay_changed = false;
                 keys.extend(terminal.receive());
-                for key in keys.drain(..) {
+                let mut pending = keys.drain(..);
+                while let Some(key) = pending.next() {
                     if let Key::Hover(x, y) = key {
                         if tracking && !overlay_changed && pane_row_available(screen, &help, &pace, y) {
                             pointer = Some((x, y));
@@ -729,6 +733,11 @@ fn pane_loop(start: Start<'_>, open: &Open<'_>, terminal: &mut Session, screen: 
                         After::Ignored => {}
                         After::Stay => redraw = true,
                         After::Open(destination) => {
+                            // The loading thread can read the terminal, but not the
+                            // rest of this decoded burst. Cancel before handing it off.
+                            if pending.as_slice().iter().any(|key| matches!(key, Key::Ctrl(b'c') | Key::Eof)) {
+                                break 'run;
+                            }
                             let start = destination.start();
                             let child_checks = matches!(start, Start::Check);
                             let (opened, focus) = load_pane(start, &|| Ok(destination.open()), terminal, screen);

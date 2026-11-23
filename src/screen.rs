@@ -825,11 +825,9 @@ mod tests {
 
     #[test]
     fn selected_text_remains_visible_without_palette_colours() {
-        for (colors, expected) in [
-            (Colors::None, "\x1b[0;1;7mA"),
-            (Colors::Ansi, "\x1b[0;1;7;31mA"),
-            (Colors::Indexed, "\x1b[0;1;31;100mA"),
-        ] {
+        for (colors, expected) in
+            [(Colors::None, "\x1b[0;1;7mA"), (Colors::Ansi, "\x1b[0;1;7;31mA"), (Colors::Indexed, "\x1b[0;1;31;100mA")]
+        {
             let mut screen = Screen::for_terminal(Capabilities { colors, graphics: false });
             screen.resize(4, 1);
             screen.set_background([55; 3]);

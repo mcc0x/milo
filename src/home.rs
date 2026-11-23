@@ -20,16 +20,15 @@ const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BRAND_WIDTH: usize = "Milo  ".len() + VERSION.len();
 const LOCAL_ROWS: usize = 3;
 const OPEN_BROWSER: &str = "Open browser settings";
-const MENU: [&str; 7] = ["Outline", "Git history", "Usage", OPEN_BROWSER, "Terminal settings", "Doctor", "Uninstall Milo"];
+const MENU: [&str; 7] =
+    ["Outline", "Git history", "Usage", OPEN_BROWSER, "Terminal settings", "Doctor", "Uninstall Milo"];
 const MENU_WIDTH: usize = OPEN_BROWSER.len() + 2;
 const APP_ROW: usize = 6;
 const REMOVE_APP_ROW: usize = APP_ROW + 1;
 const INSTALL_APP: &str = "Install and Open Menu App";
 const OPEN_APP: &str = "Open or Update Menu App";
 const INSTALLED_MENU_WIDTH: usize = OPEN_APP.len() + 2;
-const INSTALL_MENU: &[&str] = &[
-    MENU[0], MENU[1], MENU[2], MENU[3], MENU[4], MENU[5], INSTALL_APP, MENU[APP_ROW],
-];
+const INSTALL_MENU: &[&str] = &[MENU[0], MENU[1], MENU[2], MENU[3], MENU[4], MENU[5], INSTALL_APP, MENU[APP_ROW]];
 const INSTALLED_MENU: &[&str] = &menu_with_installed_app(OPEN_APP);
 const COMPACT_INSTALLED_MENU: &[&str] = &menu_with_installed_app("Open/Update App");
 
@@ -756,11 +755,9 @@ mod tests {
         for &label in &MENU {
             assert!(lines.iter().any(|line| line.contains(label)), "{lines:?}");
         }
-        for (label, destination) in [
-            ("Outline", Destination::Outline),
-            ("Git history", Destination::History),
-            ("Usage", Destination::Usage),
-        ] {
+        for (label, destination) in
+            [("Outline", Destination::Outline), ("Git history", Destination::History), ("Usage", Destination::Usage)]
+        {
             assert_eq!(home.key(click_on(&wide, label)), After::Open(destination));
         }
         assert_eq!(home.key(click_on(&wide, OPEN_BROWSER)), After::OpenWeb);
