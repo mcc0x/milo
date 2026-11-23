@@ -266,10 +266,43 @@ fn opening_a_long_commit_in_a_narrow_pane_keeps_the_subject_and_previews_eight_n
     commit(&f, "a commit arrived");
     assert!(history.check());
     assert!(active_row(&draw(&mut history, 30, 12), "page39.txt"));
+    f.write("pending.txt", "uncommitted work\n");
+    history.key(Key::Char('r'));
+    assert!(active_row(&draw(&mut history, 30, 12), "page39.txt"));
     history.key(Key::Left);
     history.key(Key::Enter);
     history.key(Key::Enter);
     assert!(draw(&mut history, 30, 12).text()[10].contains("… 32 more"));
+}
+
+#[test]
+fn expanded_files_share_one_run_between_timeline_markers() {
+    let mut rows = Timeline::default();
+    let count = 200_000;
+    rows.push(TimelineRow::Commit(0));
+    let marker_capacity = rows.markers.capacity();
+    rows.push_files(count);
+    assert_eq!(rows.markers.capacity(), marker_capacity);
+    rows.push(TimelineRow::Note("Some file names cannot be shown."));
+    rows.push(TimelineRow::Commit(1));
+    assert_eq!(rows.markers.len(), 3);
+    assert_eq!(rows.len(), count + 3);
+    for (i, row) in [
+        (0, TimelineRow::Commit(0)),
+        (1, TimelineRow::File(0)),
+        (count, TimelineRow::File(count - 1)),
+        (count + 1, TimelineRow::Note("Some file names cannot be shown.")),
+        (count + 2, TimelineRow::Commit(1)),
+    ] {
+        assert_eq!(rows.get(i), Some(row));
+        assert_eq!(rows.position(row), Some(i));
+    }
+    assert_eq!(rows.get(rows.len()), None);
+    assert_eq!(rows.position(TimelineRow::File(count)), None);
+    rows.clear();
+    rows.push(TimelineRow::Commit(0));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.get(0), Some(TimelineRow::Commit(0)));
 }
 
 #[test]
