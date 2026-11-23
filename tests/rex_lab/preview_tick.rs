@@ -339,8 +339,10 @@ fn preview_confirmation_uses_rex_pty() {
     tile.samples(4);
     tile.show();
     tile.wait("fresh confirmation did not recover after clearing the obstruction", || tile.event("revealed") == 5);
+    // A canceled attempt may also order out a transparent staging window.
+    let hidden_before_close = tile.event("hidden");
     lab.rex(&["block", "close", "-s", &session, &main]);
-    tile.wait("closing the working block left the panel revealed", || tile.event("hidden") == 6);
+    tile.wait("closing the working block left the panel revealed", || tile.event("hidden") > hidden_before_close);
     tile.wait("anchor did not end on watcher EOF", || lab.read("native-exit") == "0\n");
     drop((input, output));
     lab.stop_server();
