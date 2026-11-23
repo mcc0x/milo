@@ -36,6 +36,7 @@ export interface AlertsState {
   discord: {saved: boolean; active: boolean; consent: string | null};
   events: Record<AlertKind, boolean>;
   content: 'metadata' | 'text';
+  origin: boolean;
   place: string;
   disclosure: string;
   note: string;

@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+#[path = "alerts/origin.rs"]
+mod origin;
+
 const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
 const LINK: &str = "https://discord.com/api/webhooks/1234567890/SYNTHETIC_synthetic-SYNTHETIC0";
 /// A connection in the form the development relay gives. The production
@@ -214,6 +217,7 @@ impl Home {
             .env("PATH", format!("{}:{path}", self.root.join("bin").display()))
             .env("MILO_ALERTS_TEST_ENDPOINT", format!("http://127.0.0.1:{}", self.destination.port))
             .env("MILO_ALERTS_KEYCHAIN", self.keychain())
+            .env("REX_SERVER", self.root.join("rex.sock"))
             .env_remove("XDG_STATE_HOME")
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("MILO_RELAY_ORIGIN")

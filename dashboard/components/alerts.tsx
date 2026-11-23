@@ -19,7 +19,7 @@ const content = [["metadata", "Kind and program name"], ["text", "Also program t
 
 type Destination = (typeof destinations)[number][0];
 type DestinationEditor = "closed" | "list" | Destination;
-type Field = "forwarding" | "content" | "test" | "forget" | "forget_local" | Destination | `events.${(typeof events)[number][0]}`;
+type Field = "forwarding" | "content" | "origin" | "test" | "forget" | "forget_local" | Destination | `events.${(typeof events)[number][0]}`;
 
 function AlertGroup({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -196,9 +196,6 @@ export default function Alerts() {
   const destinationsOpen = editor !== "closed";
   const actionError = localError || operationWarning;
   const selectedEvents = events.filter(([kind]) => alerts.events[kind]);
-  const payload = alerts.content === "text"
-    ? "Each alert includes its kind, the program’s short name, and up to 300 characters of program text. That text can name files or quote a prompt. No session, tab or folder names are added."
-    : "Each alert includes only its kind and the program’s short name. No text from the program is sent. No session, tab, folder or file names are included.";
   const rexNotifications = "Rex’s own notifications are unchanged.";
   const noEvents = "No events selected. Nothing is forwarded until you select an event.";
 
@@ -241,13 +238,14 @@ export default function Alerts() {
   }
 
   function toggleForwarding(destination: Destination) {
-    const consent = alerts?.[destination].consent;
-    if (alerts?.[destination].active) {
+    if (!alerts) return;
+    const {active, consent} = alerts[destination];
+    if (active) {
       send("forwarding", { destination, enabled: false });
     } else if (consent) {
       const selected = selectedEvents.length ? `Events: ${selectedEvents.map(([, label]) => label).join(", ")}.` : noEvents;
       confirm("Turn on alert forwarding?",
-        `Destination: ${targetLabels[destination]}.\n${selected}\n${payload}\n${rexNotifications}`, "Turn on",
+        `Destination: ${targetLabels[destination]}.\n${selected}\n${alerts.disclosure}\n${rexNotifications}`, "Turn on",
         () => send("forwarding", { destination, enabled: true, consent }));
     }
   }
@@ -355,9 +353,12 @@ export default function Alerts() {
         </dialog>
       </AlertGroup>
       <AlertGroup id="group-alert-content" title="What gets sent">
-        <p className="setting-detail alerts-privacy">{payload} {rexNotifications}</p>
+        <p className="setting-detail alerts-privacy">{alerts.disclosure} {rexNotifications}</p>
         <ChoiceSetting field="alerts.content" label="Content"
           value={alerts.content} choices={content} disabled={busy} onChange={key => send("content", key)} />
+        <SwitchSetting field="alerts.origin" label="Include Rex origin label"
+          detail="Share a short Rex session label with every enabled destination when Milo can verify the event’s session. This can reveal a name you use in Rex, even with program text off."
+          checked={alerts.origin} disabled={busy} onChange={checked => send("origin", checked)} />
       </AlertGroup>
       <AlertGroup id="group-alert-kinds" title="Events to forward">
         {!selectedEvents.length ? <p className="setting-detail alerts-privacy">{noEvents}</p> : null}

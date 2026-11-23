@@ -10,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -231,11 +232,84 @@ pub fn exec_listener(script: &Path) -> io::Error {
     }
 }
 
+/// The local endpoint and host of one alert subscription. A socket replaced
+/// after Rex restarts must not resolve labels for events from the old stream.
+pub(crate) struct AlertServer {
+    endpoint: String,
+    socket: (u64, u64),
+    pub(crate) host: String,
+}
+
+impl AlertServer {
+    pub(crate) fn local() -> Option<Self> {
+        let selected = std::env::var_os("REX_SERVER").unwrap_or_default();
+        let selected = match selected.to_str()? {
+            "" | "localhost" => "localhost",
+            endpoint if socket_path(endpoint).is_some() => endpoint,
+            _ => return None,
+        };
+        let socket = socket_identity(selected);
+        let reply = probe_output(
+            alert_command(Some(selected)).args(["--timeout", "400ms", "whoami", "--json"]),
+            Duration::from_millis(500),
+        )?;
+        let [principal, endpoint, host] =
+            crate::json::Value::parse(&reply)?.fields(["principal", "endpoint", "host_id"]);
+        let [kind, transport] = principal?.fields(["kind", "transport"]);
+        if !kind?.is("peer") || !transport?.is("unix") {
+            return None;
+        }
+        let endpoint = endpoint?.string(4096)?;
+        let identity = socket_identity(&endpoint)?;
+        if selected != "localhost" && (socket_path(&endpoint) != socket_path(selected) || socket != Some(identity)) {
+            return None;
+        }
+        let host = host?.string(36)?;
+        uuid(&host).then(|| Self { endpoint: endpoint.into_owned(), socket: identity, host: host.into_owned() })
+    }
+
+    pub(crate) fn session(&self, id: &str) -> Option<Vec<u8>> {
+        exact_id(OsStr::new(id), "session:")?;
+        self.is_current().then_some(())?;
+        let reply = probe_output(
+            alert_command(Some(&self.endpoint)).args(["--timeout", "400ms", "session", "inspect", id, "--json"]),
+            Duration::from_millis(500),
+        )?;
+        self.is_current().then_some(reply)
+    }
+
+    fn is_current(&self) -> bool {
+        socket_identity(&self.endpoint) == Some(self.socket)
+    }
+}
+
+fn socket_path(endpoint: &str) -> Option<&Path> {
+    let path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+    (path.starts_with('/') && !path.bytes().any(|byte| byte.is_ascii_control())).then(|| Path::new(path))
+}
+
+fn socket_identity(endpoint: &str) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(socket_path(endpoint)?).ok()?;
+    meta.file_type().is_socket().then(|| (meta.dev(), meta.ino()))
+}
+
+fn alert_command(endpoint: Option<&str>) -> Command {
+    let mut command = Command::new("rex");
+    command.arg("--autostart=false");
+    if let Some(endpoint) = endpoint {
+        command.args(["-S", endpoint]);
+        for key in ["REX_SERVER", "REX_SESSION", "REX_BLOCK", "REX_CLIENT"] {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
 /// Starts `rex events`, which prints every event of every session of the
 /// server as a line of JSON until it is ended. It never starts a server.
-pub(crate) fn events() -> io::Result<Child> {
-    Command::new("rex")
-        .args(["--autostart=false", "events", "--all", "--json"])
+pub(crate) fn events(server: Option<&AlertServer>) -> io::Result<Child> {
+    alert_command(server.map(|server| server.endpoint.as_str()))
+        .args(["events", "--all", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -537,13 +611,15 @@ fn exact_block(id: &OsStr) -> Option<&str> {
 /// A whole Rex ID of the given kind, such as `window:` followed by its UUID.
 pub(crate) fn exact_id<'a>(id: &'a OsStr, kind: &str) -> Option<&'a str> {
     let id = id.to_str()?;
-    let suffix = id.strip_prefix(kind)?;
-    (suffix.len() == 36
-        && suffix.bytes().enumerate().all(|(i, b)| match i {
+    uuid(id.strip_prefix(kind)?).then_some(id)
+}
+
+fn uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match i {
             8 | 13 | 18 | 23 => b == b'-',
             _ => b.is_ascii_hexdigit(),
-        }))
-    .then_some(id)
+        })
 }
 
 /// What an observer script prints: an update a line, of which the latest counts.

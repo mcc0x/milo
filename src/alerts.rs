@@ -5,13 +5,14 @@
 //! for a desktop notification, or one that rings the bell. Milo hears these on
 //! Rex's event stream, beside Rex, so Rex's own notifications are untouched.
 //! Mirroring is off until the user turns it on, and sends the kind of alert
-//! and the program's short name only, unless the user asks for its text too.
+//! and the program's short name only, unless the user opts into text or an origin label.
 
 mod cli;
 mod consent;
 mod event;
 mod forward;
 mod message;
+mod origin;
 pub(crate) mod relay;
 mod secret;
 mod send;
@@ -27,7 +28,7 @@ use std::process::{Command, Stdio};
 pub(crate) use cli::{HELP, command};
 pub(crate) use consent::{Consent, ConsentFor, ConsentToken};
 pub(crate) use event::Kind;
-pub(crate) use message::disclosure;
+pub(crate) use message::{origin_disclosure, sends};
 
 use crate::setup::lock;
 use crate::{paths, preferences};
@@ -78,7 +79,7 @@ impl Destination {
     }
 }
 
-/// How much of an alert leaves this machine.
+/// Whether to send the program's own alert text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Content {
     /// The kind of alert and the program's short name.
@@ -111,6 +112,8 @@ pub(crate) struct Settings {
     /// One choice for each kind, in `Kind::ALL` order.
     pub(crate) kinds: [bool; 5],
     pub(crate) content: Content,
+    /// Include a short Rex session label when the session can be verified for the event.
+    pub(crate) origin: bool,
     /// A chat's number or a public channel's `@name`. Not a secret.
     pub(crate) telegram_chat: String,
 }
@@ -123,6 +126,7 @@ impl Default for Settings {
             targets: None,
             kinds: [true, true, true, false, false],
             content: Content::Metadata,
+            origin: false,
             telegram_chat: String::new(),
         }
     }
@@ -152,6 +156,7 @@ impl Settings {
                 }
                 "events" => settings.kinds = parse_kinds(value).ok_or_else(|| invalid(key))?,
                 "content" => settings.content = Content::parse(value).ok_or_else(|| invalid(key))?,
+                "origin" => settings.origin = value.parse().map_err(|_| invalid(key))?,
                 "telegram_chat" if valid_chat(value) => value.clone_into(&mut settings.telegram_chat),
                 "telegram_chat" => return Err(invalid(key)),
                 _ => {}
@@ -179,6 +184,7 @@ impl Settings {
         }
         let _ = writeln!(text, "events = {}", self.kind_names().join(","));
         let _ = writeln!(text, "content = {}", self.content.name());
+        let _ = writeln!(text, "origin = {}", self.origin);
         if !self.telegram_chat.is_empty() {
             let _ = writeln!(text, "telegram_chat = {}", self.telegram_chat);
         }
@@ -569,6 +575,15 @@ impl Alerts {
         self.locked(|edit| edit.set_content(content))
     }
 
+    pub(crate) fn set_origin(&self, origin: bool) -> Result<String, String> {
+        self.locked(|edit| {
+            let mut settings = edit.editable()?;
+            settings.origin = origin;
+            edit.save(&settings)?;
+            Ok(message::sends(&settings))
+        })
+    }
+
     pub(crate) fn enable(&self) -> Result<String, String> {
         self.locked(|edit| edit.enable())
     }
@@ -878,7 +893,7 @@ impl AlertsEdit<'_> {
         }
         let mut report = format!("Selected {}.", describe(&settings));
         if settings.has_active() {
-            let _ = write!(report, " Alerts go to {}.", describe_active(&settings));
+            let _ = write!(report, " Alerts go to {}.\n{}", describe_active(&settings), message::disclosure(&settings));
         } else {
             report.push_str(" Mirroring is still off. Check the destination with milo alerts test.");
         }
@@ -897,7 +912,7 @@ impl AlertsEdit<'_> {
         let mut settings = self.editable()?;
         settings.content = content;
         self.save(&settings)?;
-        Ok(message::sends(content).to_owned())
+        Ok(message::sends(&settings))
     }
 
     /// Resumes the chosen targets, or starts with the legacy selection.

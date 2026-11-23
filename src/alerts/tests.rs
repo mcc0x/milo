@@ -6,7 +6,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
-use super::event::{self, Alert, Seen, Waiting};
+use super::event::{self, Alert, Envelope, Seen, Waiting};
 use super::{
     Alerts, Content, Destination, Kind, Settings, forward, message, send, stand_in, valid_chat, valid_token, webhook,
 };
@@ -51,7 +51,8 @@ fn alerts(seen: &mut Seen, lines: &[String], seconds: u64) -> Vec<Alert> {
         .iter()
         .zip(0..)
         .filter_map(|(line, step)| {
-            seen.alert(event::parse(line.as_bytes(), Content::Text)?, start + Duration::from_secs(seconds * step))
+            let envelope = Envelope::read(line.as_bytes())?;
+            seen.alert(event::parse(&envelope, Content::Text)?, start + Duration::from_secs(seconds * step))
         })
         .collect()
 }
@@ -90,7 +91,7 @@ fn only_the_events_rex_raises_as_alerts_become_alerts() {
 #[test]
 fn another_kind_of_block_is_never_taken_for_a_terminal() {
     let other = line("a", "bell", "{}").replace("com.superlogical.terminal", "com.example.plugin");
-    assert_eq!(event::parse(other.as_bytes(), Content::Metadata), None);
+    assert_eq!(event::parse(&Envelope::read(other.as_bytes()).unwrap(), Content::Metadata), None);
 }
 
 #[test]
@@ -133,7 +134,7 @@ fn bells_and_repeated_notifications_are_sent_once_in_a_while() {
 }
 
 fn alert(kind: Kind, text: &str) -> Alert {
-    Alert { kind, waiting: Some(Waiting::Permission), app: Some("claude-code".into()), text: text.into() }
+    Alert { kind, waiting: Some(Waiting::Permission), app: Some("claude-code".into()), text: text.into(), origin: None }
 }
 
 #[test]
@@ -147,7 +148,7 @@ fn nothing_a_program_wrote_is_sent_unless_text_was_chosen() {
         message::text(&secret, Content::Text, 2, Destination::Discord),
         "`claude-code` **is waiting for permission**\n`Delete /Users/me/private.txt?`\n(2 earlier alerts were not sent.)"
     );
-    let unnamed = Alert { kind: Kind::Done, waiting: None, app: None, text: "x".into() };
+    let unnamed = Alert { kind: Kind::Done, waiting: None, app: None, text: "x".into(), origin: None };
     assert_eq!(message::text(&unnamed, Content::Metadata, 0, Destination::Discord), "a program **finished**");
     let bell = message::text(&alert(Kind::Bell, ""), Content::Text, 0, Destination::Telegram);
     assert_eq!(bell, "Rex: a terminal rang its bell");
@@ -161,6 +162,7 @@ fn a_program_s_name_and_text_cannot_become_a_link_or_mark_up() {
         waiting: Some(Waiting::Auth),
         app: Some("login.example.com".into()),
         text: String::new(),
+        origin: None,
     };
     assert_eq!(
         message::text(&lure, Content::Metadata, 0, Destination::Telegram),
@@ -248,9 +250,12 @@ fn each_destination_is_told_how_to_read_the_text_and_to_notify_nobody_by_name() 
 fn mirroring_is_off_and_sends_no_text_until_chosen() {
     let settings = Settings::default();
     assert!(!settings.enabled && settings.destination.is_none() && settings.content == Content::Metadata);
+    assert!(!settings.origin);
     assert_eq!(Destination::ALL.map(|destination| settings.active(destination)), [false; 2]);
     assert_eq!(Kind::ALL.map(|kind| settings.mirrors(kind)), [true, true, true, false, false]);
     assert_eq!(Settings::parse("").unwrap(), settings);
+    let legacy = Settings::parse("enabled = true\ncontent = text\ndestination = telegram\n").unwrap();
+    assert!(legacy.enabled && legacy.content == Content::Text && !legacy.origin);
 }
 
 #[test]
@@ -261,6 +266,7 @@ fn saved_settings_read_back_and_a_broken_file_mirrors_nothing() {
         targets: None,
         kinds: [true, false, false, true, true],
         content: Content::Text,
+        origin: true,
         telegram_chat: "@synthetic_channel".into(),
     };
     assert_eq!(Settings::parse(&chosen.render()).unwrap(), chosen);
@@ -275,6 +281,7 @@ fn saved_settings_read_back_and_a_broken_file_mirrors_nothing() {
         "targets = telegram,email",
         "events = blocked,everything",
         "content = all",
+        "origin = yes",
         "telegram_chat = a b",
         "enabled",
     ] {
@@ -381,7 +388,7 @@ fn a_line_too_long_to_be_an_alert_is_skipped_without_losing_the_next() {
     let stream = format!("{huge}\n{}\n{}", line("a", "bell", "{}"), line("b", "bell", "{}"));
     let mut kinds = Vec::new();
     let settings = Settings { kinds: [true; 5], ..Settings::default() };
-    forward::read(stream.as_bytes(), &settings, |alert| kinds.push(alert.kind));
+    forward::read(stream.as_bytes(), &settings, None, |alert| kinds.push(alert.kind));
     assert_eq!(kinds, [Kind::Bell, Kind::Bell]);
 }
 
@@ -392,7 +399,7 @@ fn what_is_an_alert_is_decided_as_each_event_arrives_and_only_chosen_kinds_wait(
     let lines =
         [blocked("a", "permission", "x"), working("a"), line("a", "bell", "{}"), blocked("a", "permission", "x")];
     let mut kinds = Vec::new();
-    forward::read(lines.join("\n").as_bytes(), &Settings::default(), |alert| kinds.push(alert.kind));
+    forward::read(lines.join("\n").as_bytes(), &Settings::default(), None, |alert| kinds.push(alert.kind));
     assert_eq!(kinds, [Kind::Blocked, Kind::Blocked]);
 }
 
@@ -403,7 +410,7 @@ fn queue_content_tracks_consent_without_collapsing_distinct_notifications() {
     for content in [Content::Metadata, Content::Text] {
         let settings = Settings { content, kinds: [true; 5], ..Settings::default() };
         let mut queued = Vec::new();
-        forward::read(stream.as_bytes(), &settings, |alert| queued.push(alert));
+        forward::read(stream.as_bytes(), &settings, None, |alert| queued.push(alert));
         assert_eq!(kinds(&queued), [Kind::Blocked, Kind::Notification, Kind::Notification]);
         assert_eq!(queued[0].app.as_deref(), Some("synthetic"));
         let text: Vec<_> = queued.iter().map(|alert| alert.text.as_str()).collect();
@@ -785,12 +792,15 @@ fn the_messages_the_relay_is_tested_with_are_the_ones_milo_words() {
     ];
     let mut sent = vec![message::TEST.to_owned()];
     for (index, (kind, waiting)) in states.into_iter().enumerate() {
-        let named = Alert { kind, waiting, app: Some("a.b+c_d-e".into()), text: hostile.into() };
+        let named = Alert { kind, waiting, app: Some("a.b+c_d-e".into()), text: hostile.into(), origin: None };
         sent.push(message::text(&named, Content::Metadata, 0, Destination::Telegram));
         let unnamed = Alert { app: None, ..named };
         sent.push(message::text(&unnamed, Content::Text, [1, 2, u32::MAX][index % 3], Destination::Telegram));
     }
-    let longest = Alert { kind: Kind::Error, waiting: None, app: None, text: "&".repeat(400) };
+    let labeled = Alert { origin: Some("release-review".into()), ..alert(Kind::Done, "checks passed") };
+    sent.push(message::text(&labeled, Content::Metadata, 0, Destination::Telegram));
+    sent.push(message::text(&labeled, Content::Text, 1, Destination::Telegram));
+    let longest = Alert { kind: Kind::Error, waiting: None, app: None, text: "&".repeat(400), origin: None };
     sent.push(message::text(&longest, Content::Text, 0, Destination::Telegram));
 
     let listed = Value::parse(include_str!("../../hosted/milo-alert-texts.json").trim().as_bytes()).unwrap();

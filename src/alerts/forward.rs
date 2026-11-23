@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::event::{self, Alert, Seen};
 use super::send::{self, Outcome};
-use super::{Alerts, Destination, Settings, message, secret};
+use super::{Alerts, Destination, Settings, message, origin, secret};
 use crate::setup::lock;
 use crate::{preferences, rex};
 
@@ -139,6 +139,7 @@ fn changed(alerts: &Alerts, settings: &Settings) -> Option<Ended> {
     let same = Destination::ALL.into_iter().all(|destination| now.active(destination) == settings.active(destination))
         && now.kinds == settings.kinds
         && now.content == settings.content
+        && now.origin == settings.origin
         && (!now.active(Destination::Telegram) || now.telegram_chat == settings.telegram_chat);
     (!same).then_some(Ended::Changed)
 }
@@ -199,10 +200,11 @@ fn follow(
             return ended;
         }
         let began = Instant::now();
-        if let Ok(mut stream) = rex::events() {
+        let server = settings.origin.then(rex::AlertServer::local).flatten();
+        if let Ok(mut stream) = rex::events(server.as_ref()) {
             CHILDREN[0].store(stream.id().try_into().unwrap_or(0), Ordering::Relaxed);
             status.stream("Listening for Rex alerts.");
-            let ended = read_stream(&mut stream, alerts, settings, senders, dropped);
+            let ended = read_stream(&mut stream, alerts, settings, server.as_ref(), senders, dropped);
             CHILDREN[0].store(0, Ordering::Relaxed);
             let _ = stream.wait();
             if ended != Ended::Stream {
@@ -222,6 +224,7 @@ fn read_stream(
     stream: &mut Child,
     alerts: &Alerts,
     settings: &Settings,
+    server: Option<&rex::AlertServer>,
     senders: &[Option<mpsc::SyncSender<Queued>>; 2],
     dropped: &[AtomicU32; 2],
 ) -> Ended {
@@ -229,7 +232,7 @@ fn read_stream(
     let (reading, ended) = mpsc::channel::<()>();
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            read(output, settings, |alert| fan_out(alert, senders, dropped));
+            read(output, settings, server, |alert| fan_out(alert, senders, dropped));
             drop(reading);
         });
         let ended = loop {
@@ -483,9 +486,15 @@ pub(crate) fn forget_note(state: &Path) {
 /// too long to be an alert is skipped whole. What each terminal last said is
 /// kept only for this stream: Rex repeats nothing to a listener that joins
 /// late, so after the stream is opened again nothing remembered can be trusted.
-pub(super) fn read(stream: impl io::Read, settings: &Settings, mut queue: impl FnMut(Alert)) {
+pub(super) fn read(
+    stream: impl io::Read,
+    settings: &Settings,
+    server: Option<&rex::AlertServer>,
+    mut queue: impl FnMut(Alert),
+) {
     let mut stream = BufReader::new(stream);
     let mut seen = Seen::default();
+    let server = server.filter(|_| settings.origin);
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -497,9 +506,13 @@ pub(super) fn read(stream: impl io::Read, settings: &Settings, mut queue: impl F
                 }
             }
             Ok(_) => {
-                let alert = event::parse(line.trim_ascii_end(), settings.content)
-                    .and_then(|event| seen.alert(event, Instant::now()));
-                if let Some(alert) = alert.filter(|alert| settings.mirrors(alert.kind)) {
+                let Some(envelope) = event::Envelope::read(line.trim_ascii_end()) else { continue };
+                let alert =
+                    event::parse(&envelope, settings.content).and_then(|event| seen.alert(event, Instant::now()));
+                if let Some(mut alert) = alert.filter(|alert| settings.mirrors(alert.kind)) {
+                    if let Some(server) = server {
+                        alert.origin = origin::label(&envelope, &server.host, |id| server.session(id));
+                    }
                     queue(alert);
                 }
             }
@@ -517,7 +530,7 @@ fn a_full_queue_drops_only_that_destinations_copy() {
     let senders = [Some(telegram), Some(discord)];
     let dropped = Destination::ALL.map(|_| AtomicU32::new(0));
     for kind in [Kind::Bell, Kind::Blocked] {
-        fan_out(Alert { kind, waiting: None, app: None, text: String::new() }, &senders, &dropped);
+        fan_out(Alert { kind, waiting: None, app: None, text: String::new(), origin: None }, &senders, &dropped);
     }
     let kinds: Vec<_> = discord_waiting
         .try_iter()
@@ -565,7 +578,7 @@ fn a_relay_outage_retries_only_telegram_and_only_up_to_the_limit() {
             hosted_telegram: destination == Destination::Telegram,
             cancelled: &cancelled,
         });
-        let alert = Alert { kind: Kind::Blocked, waiting: None, app: None, text: String::new() };
+        let alert = Alert { kind: Kind::Blocked, waiting: None, app: None, text: String::new(), origin: None };
         let mut telegram_delivery = Delivery::default();
         let began = Instant::now();
         std::thread::scope(|scope| {
@@ -629,7 +642,7 @@ fn a_relay_connection_failure_is_retried_and_counted_but_a_lost_reply_is_not() {
             hosted_telegram: true,
             cancelled: &cancelled,
         };
-        delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new() }, &target);
+        delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new(), origin: None }, &target);
     };
 
     let began = Instant::now();
@@ -689,7 +702,7 @@ fn a_page_from_in_front_of_the_relay_does_not_pause_mirroring() {
         };
         let mut delivery = Delivery::default();
         for kind in [Kind::Blocked, Kind::Done] {
-            delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new() }, &target);
+            delivery.deliver(&Alert { kind, waiting: None, app: None, text: String::new(), origin: None }, &target);
             assert!(!delivery.refused, "{}", note(alerts.state_dir()));
         }
         assert_eq!((delivery.sent, delivery.unsent), (2, 0));

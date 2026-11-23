@@ -48,6 +48,8 @@ const ROWS: usize = if super::WORKFLOW.len() > TUNE.len() { super::WORKFLOW.len(
 pub(super) struct Visible {
     current: bool,
     first: usize,
+    /// Present only when the full forwarding disclosure fits in this frame.
+    pub(super) alert_review: Option<alerts::ConsentToken>,
     y: usize,
     pub(super) len: usize,
     pub(super) scroll_limit: usize,
@@ -170,6 +172,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             self.draw_diagnostics(s, y, end);
             return;
         }
+        if self.panel == Panel::Confirm(Confirm::MirrorAlerts) {
+            self.draw_alert_review(s, y, end);
+            return;
+        }
 
         let width = s.w.saturating_sub(2);
         let selected = rows.get(self.selected).map(|&row| (row, self.cell(row)));
@@ -183,13 +189,13 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
         let summary_rows = if summary_rows < space { summary_rows } else { 0 };
         if let Some(text) = self.intro() {
             let spare = end.saturating_sub(y + rows.len().min(3) + summary_rows);
-            let review = if self.panel == Panel::Confirm(Confirm::MirrorAlerts) {
-                self.alert_summary.as_ref().and_then(|summary| summary.settings.forwarding_review())
-            } else {
-                None
-            };
-            let review = review.iter().flat_map(|text| wrap(text, width));
-            for line in wrap(text, width).chain(review).take(spare) {
+            let origin = self
+                .alert_summary
+                .as_ref()
+                .filter(|_| self.panel == Panel::Alerts)
+                .map(|summary| alerts::origin_disclosure(summary.settings.origin));
+            let origin = origin.into_iter().flat_map(|text| wrap(text, width));
+            for line in origin.chain(wrap(text, width)).take(spare) {
                 s.put(1, y, width, line, FAINT);
                 y += 1;
             }
@@ -269,6 +275,38 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 _ => {}
             }
         }
+    }
+
+    fn draw_alert_review(&mut self, s: &mut Screen, mut y: usize, end: usize) {
+        let width = s.w - 2;
+        let spare = end.saturating_sub(y + self.rows().len());
+        if let Some((summary, token)) = self
+            .alert_summary
+            .as_ref()
+            .and_then(|summary| summary.consent.token(alerts::ConsentFor::All).map(|token| (summary, token)))
+            && let Some(destinations) = summary.settings.forwarding_review()
+        {
+            let origin = alerts::origin_disclosure(summary.settings.origin);
+            let payload = match summary.settings.content {
+                _ if !summary.settings.kinds.contains(&true) => "No events selected. Nothing is forwarded.",
+                alerts::Content::Metadata => {
+                    "Sends the event kind and the program's short name, if available. No text from the program is sent."
+                }
+                alerts::Content::Text => {
+                    "Sends up to 300 characters of program text with the event kind and the program's short name, \
+                     if available. That text can name files or quote a prompt."
+                }
+            };
+            let lines = wrap(&destinations, width).chain(wrap(payload, width)).chain(wrap(origin, width));
+            if lines.clone().take(spare + 1).count() <= spare {
+                self.visible.alert_review = Some(token);
+                for line in lines {
+                    s.put(1, y, width, line, FAINT);
+                    y += 1;
+                }
+            }
+        }
+        self.draw_rows(s, y, end, s.w.min(54));
     }
 
     fn heading(&self, s: &mut Screen, dirty: bool) {
@@ -369,7 +407,10 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Tune | Panel::Presence => return None,
             Panel::Appearance => return None,
             Panel::Workflow => return None,
-            Panel::Alerts => "Rex's own notifications stay as they are. Each choice here is saved as you make it.",
+            Panel::Alerts => {
+                "Rex's own notifications stay as they are. Change origin labels in milo web or with \
+                 milo alerts origin on|off."
+            }
             Panel::Health => "Inspect settings without changing them. Repair or remove only Milo's integration.",
             Panel::Diagnostics => return None,
             Panel::Exit => "Save before leaving?",
@@ -395,16 +436,7 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
             Panel::Confirm(Confirm::RemoveMenuBar) => {
                 "Remove only the menu bar app. The Milo CLI and pane settings stay as they are."
             }
-            Panel::Confirm(Confirm::MirrorAlerts) => {
-                match self.alert_summary.as_ref().map(|summary| summary.settings.content) {
-                    Some(alerts::Content::Text) => {
-                        "Each enabled destination receives the alert kind, the program's short name, and up to 300 characters the program gave Rex, which can name files or quote a prompt. Rex's own notifications are unchanged."
-                    }
-                    _ => {
-                        "Each enabled destination receives the alert kind and the program's short name, such as “Rex: claude-code is waiting for permission”. Nothing the program wrote is sent. Rex's own notifications are unchanged."
-                    }
-                }
-            }
+            Panel::Confirm(Confirm::MirrorAlerts) => return None,
             Panel::Confirm(Confirm::Presence) => self.presence_view.as_ref()?.setting.public(),
             Panel::Confirm(Confirm::PresenceDetails(details)) => {
                 let own = self.presence_view.as_ref().is_some_and(|status| status.setting.application.is_some());
@@ -849,12 +881,11 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                     .as_ref()
                     .is_some_and(|summary| summary.settings.content == alerts::Content::Text);
                 Cell::choice(
-                    "What is sent",
-                    "Sends",
-                    if text { "Kind and text" } else { "Kind only" },
-                    "Kind only sends the kind of alert and the program's short name, and nothing the program wrote. Kind and text adds up to 300 characters the program gave Rex, which can name files or quote a prompt.",
+                    "Program text",
+                    "Text",
+                    if text { "Included" } else { "Not sent" },
+                    "Sets whether to add up to 300 characters the program gave Rex, which can name files or quote a prompt. Origin labels are a separate choice.",
                 )
-                .with_short_value(if text { "Text" } else { "Kind" })
             }
             Row::AlertsTest => Cell::action(
                 "Send a test message",
@@ -992,6 +1023,26 @@ impl<R: Fn(&[&OsStr]) -> bool> Setup<R> {
                 }
                 Panel::Confirm(Confirm::RemoveMenuBar) => {
                     Cell::action("Remove app now", "Remove app now", "Remove Milo from the menu bar.")
+                }
+                Panel::Confirm(Confirm::MirrorAlerts) if self.visible.alert_review.is_none() => {
+                    if self
+                        .alert_summary
+                        .as_ref()
+                        .is_some_and(|summary| summary.consent.token(alerts::ConsentFor::All).is_some())
+                    {
+                        Cell::action(
+                            "Enlarge pane to review",
+                            "Enlarge pane",
+                            "Enlarge the pane to see what would be sent.",
+                        )
+                    } else {
+                        Cell::action("No saved destination to review", "No destination", "Nothing will be turned on.")
+                    }
+                }
+                Panel::Confirm(Confirm::MirrorAlerts)
+                    if self.alert_summary.as_ref().is_some_and(|summary| summary.settings.origin) =>
+                {
+                    Cell::action("Turn mirroring on with labels", "On + labels", "Send Rex session labels when known.")
                 }
                 Panel::Confirm(Confirm::MirrorAlerts) => {
                     Cell::action("Turn mirroring on", "Turn on", "Start sending the chosen alerts now.")

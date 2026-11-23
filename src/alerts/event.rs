@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use super::Content;
 use crate::json::Value;
 
-const TERMINAL: &str = "com.superlogical.terminal";
+pub(super) const TERMINAL: &str = "com.superlogical.terminal";
 /// A bell or a repeated notification from one terminal counts once in this long.
 const QUIET: Duration = Duration::from_secs(30);
 /// More remembered terminals than any server holds. Past it, start again.
@@ -97,17 +97,32 @@ pub(crate) struct Alert {
     pub(crate) waiting: Option<Waiting>,
     pub(crate) app: Option<String>,
     pub(crate) text: String,
+    pub(crate) origin: Option<String>,
 }
 
-/// Reads one line of the stream. None for everything Milo has no use for.
-pub(crate) fn parse(line: &[u8], content: Content) -> Option<Event> {
-    let [kind, payload] = Value::parse(line)?.fields(["type", "payload"]);
-    if !kind?.is("session_event") {
-        return None;
+/// The server wrapper is shared by alert parsing and optional origin binding.
+pub(super) struct Envelope<'a> {
+    pub(super) session: Option<Value<'a>>,
+    pub(super) kind: Value<'a>,
+    pub(super) payload: Value<'a>,
+}
+
+impl<'a> Envelope<'a> {
+    pub(super) fn read(line: &'a [u8]) -> Option<Self> {
+        let [kind, payload] = Value::parse(line)?.fields(["type", "payload"]);
+        let (kind, payload) = (kind?, payload?);
+        if !kind.is("session_event") {
+            return None;
+        }
+        let [session, event] = payload.fields(["session_id", "event"]);
+        let [kind, payload] = event?.fields(["type", "payload"]);
+        Some(Self { session, kind: kind?, payload: payload? })
     }
-    let [event] = payload?.fields(["event"]);
-    let [kind, payload] = event?.fields(["type", "payload"]);
-    let (kind, payload) = (kind?, payload?);
+}
+
+/// Reads a wrapped event. None for everything that cannot affect alert deduplication.
+pub(super) fn parse(event: &Envelope<'_>, content: Content) -> Option<Event> {
+    let Envelope { kind, payload, .. } = *event;
     let [block, creator, name, inner] = payload.fields(["block_id", "creator_name", "name", "payload"]);
     let block = block?.string(64)?.into_owned();
     if kind.is("block_closed") {
@@ -208,7 +223,7 @@ impl Seen {
                     State::Error => (Kind::Error, None),
                     State::Done => (Kind::Done, None),
                 };
-                (before != Some(state)).then_some(Alert { kind, waiting, app, text })
+                (before != Some(state)).then_some(Alert { kind, waiting, app, text, origin: None })
             }
             Event::StatusRemoved { block, records } => {
                 let mut key = (block, String::new());
@@ -225,14 +240,14 @@ impl Seen {
                     return None;
                 }
                 self.notified.insert(block, (hash, now));
-                Some(Alert { kind: Kind::Notification, waiting: None, app: None, text })
+                Some(Alert { kind: Kind::Notification, waiting: None, app: None, text, origin: None })
             }
             Event::Bell { block } => {
                 if self.rang.get(&block).is_some_and(|&at| now.duration_since(at) < QUIET) {
                     return None;
                 }
                 self.rang.insert(block, now);
-                Some(Alert { kind: Kind::Bell, waiting: None, app: None, text: String::new() })
+                Some(Alert { kind: Kind::Bell, waiting: None, app: None, text: String::new(), origin: None })
             }
             Event::BlockClosed { block } => {
                 self.states.retain(|(owner, _), _| *owner != block);

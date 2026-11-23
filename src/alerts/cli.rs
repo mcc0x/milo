@@ -13,6 +13,7 @@ Usage: milo alerts
        milo alerts use telegram | discord
        milo alerts events KIND[,KIND...]
        milo alerts content metadata | text
+       milo alerts origin on | off
        milo alerts test [telegram | discord]
        milo alerts on|off [telegram | discord]
        milo alerts forget telegram | discord
@@ -31,8 +32,11 @@ use selects a saved destination for commands without a provider. It also
 switches mirroring if you have not set independent forwarding choices.
 events chooses the kinds mirrored: blocked, error, done, notification, bell.
 The first three are chosen to begin with.
-content chooses what is sent. metadata, the default, is the kind of alert and
-the program's short name. text adds the line the program gave Rex.
+content chooses whether to send the line the program gave Rex. The default,
+metadata, sends only the kind and the program's short name unless origin is on.
+origin on adds a short Rex session label when Milo can verify the event's
+session, for every enabled destination. It is off by default, independent
+of program text, and may reveal a name you use in Rex.
 test sends one message written by Milo to the named or selected destination.
 on and off with a provider affect only that provider. Without a provider, off
 pauses all forwarding and on resumes it (or starts with the selected destination
@@ -65,6 +69,9 @@ pub(crate) fn command(action: Option<&OsStr>, rest: &[OsString]) -> Result<(), S
         [Some("content"), Some(name)] => {
             alerts.set_content(Content::parse(name).ok_or("Content is metadata or text.")?)?
         }
+        [Some("origin"), Some("on")] => alerts.set_origin(true)?,
+        [Some("origin"), Some("off")] => alerts.set_origin(false)?,
+        [Some("origin"), Some(_)] => return Err("Origin is on or off.".into()),
         [Some("test")] => alerts.test()?,
         [Some("test"), Some(name)] => alerts.test_destination(destination(name)?)?,
         [Some("on")] => alerts.enable()?,

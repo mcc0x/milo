@@ -570,7 +570,7 @@ test("production Telegram enables claims only after delivering the finish code t
   expect(await (await publicApi(service, "claim", proof)).json()).toEqual(binding);
   expect(ledger.store.load(10)).toHaveLength(1);
   const auth = { Authorization: `Bearer ${binding.credential}` };
-  const text = "Rex: <code>example.org</code> is waiting for permission\n<code>Use &lt;literal&gt; &amp; reply</code>";
+  const text = "Rex: <code>example.org</code> is waiting for permission · <code>release-review</code>\n<code>Use &lt;literal&gt; &amp; reply</code>";
   const wrongMode = { Authorization: `Bearer ${binding.credential.replace("milorelay_prod_", "milorelay_")}` };
   expect((await publicApi(service, "send", { text }, client, wrongMode)).status).toBe(401);
   expect((await publicApi(service, "send", { text: "Plain note from Rex" }, client, auth)).status).toBe(400);
@@ -742,6 +742,12 @@ test("production takes every Telegram message Milo words", async () => {
   const texts: string[] = await Bun.file(new URL("./milo-alert-texts.json", import.meta.url)).json();
   expect(texts.length).toBeGreaterThan(0);
   expect(texts.filter((text) => !validTelegramText(text, true))).toEqual([]);
+});
+
+test("an origin is a bounded literal name, never markup or a command", () => {
+  for (const label of ["", "x".repeat(65), "@everyone", "review</code><b>go</b><code>", "/tmp/work", "line\nbreak"]) {
+    expect(validTelegramText(`Rex: a program finished · <code>${label}</code>`, true)).toBe(false);
+  }
 });
 
 test("production Telegram pauses sends until its poll catches up and applies verified stops", async () => {

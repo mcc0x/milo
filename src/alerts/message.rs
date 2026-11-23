@@ -54,6 +54,10 @@ pub(crate) fn text(alert: &Alert, content: Content, unsent: u32, destination: De
         Destination::Telegram => format!("Rex: {subject} {action}"),
         Destination::Discord => format!("{subject} **{action}**"),
     };
+    if let Some(label) = &alert.origin {
+        message.push_str(" · ");
+        message.push_str(&literal(label, destination));
+    }
     if content == Content::Text {
         let said = plain(&alert.text);
         if !said.is_empty() {
@@ -144,26 +148,42 @@ pub(crate) fn body(destination: Destination, chat: &str, text: &str, kind: Optio
     }
 }
 
-/// What is sent for each alert with this choice of content.
-pub(crate) fn sends(content: Content) -> &'static str {
-    match content {
-        Content::Metadata => {
-            "Sends: the kind of alert and the program's short name, such as \"Rex: claude-code is waiting for \
-             permission\". No text from the program, and no session, tab, folder or file names."
-        }
-        Content::Text => {
-            "Sends: the kind of alert, the program's short name, and up to 300 characters of the text the program \
-             gave Rex for it, which can name files or quote a prompt. No session, tab or folder names."
-        }
+/// Independent of program text: Rex labels can reveal names chosen by the user.
+pub(crate) fn origin_disclosure(origin: bool) -> &'static str {
+    if origin {
+        "Origin label: on. Milo adds a short Rex session label when it can verify the event's session. This can \
+         reveal a name you use in Rex."
+    } else {
+        "Origin label: off. Milo adds no Rex session label."
     }
 }
 
-/// What leaves this machine with the current choices, in words and by example.
+/// What a selected alert can send with these settings.
+pub(crate) fn sends(settings: &Settings) -> String {
+    let content = match settings.content {
+        Content::Metadata => "No text from the program is sent.",
+        Content::Text => {
+            "Also sends up to 300 characters of the text the program gave Rex, which can name files or quote a prompt."
+        }
+    };
+    format!(
+        "Sends the alert kind and the program's short name, if available. {content} {}",
+        origin_disclosure(settings.origin)
+    )
+}
+
+/// The chosen events and payload, even if no events are currently selected.
 pub(crate) fn disclosure(settings: &Settings) -> String {
-    let kinds: Vec<_> = Kind::ALL.into_iter().filter(|&kind| settings.mirrors(kind)).collect();
+    let kinds: Vec<_> = Kind::ALL
+        .into_iter()
+        .filter(|&kind| settings.mirrors(kind))
+        .map(|kind| format!("{} ({})", kind.name(), kind.meaning()))
+        .collect();
+    let payload = sends(settings);
     if kinds.is_empty() {
-        return "Mirrors: nothing. Choose kinds with milo alerts events, such as blocked,error,done.".into();
+        return format!(
+            "Mirrors: nothing. Choose kinds with milo alerts events, such as blocked,error,done.\nIf selected: {payload}"
+        );
     }
-    let meanings: Vec<_> = kinds.iter().map(|kind| format!("{} ({})", kind.name(), kind.meaning())).collect();
-    format!("Mirrors: {}.\n{}", meanings.join(", "), sends(settings.content))
+    format!("Mirrors: {}.\n{payload}", kinds.join(", "))
 }

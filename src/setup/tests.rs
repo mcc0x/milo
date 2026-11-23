@@ -1397,11 +1397,11 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert!(pane.selected_row() == Some(Row::Cancel));
     assert!(!saved(&pane).enabled);
     let rows = frame(&mut pane, 80, 24).join("\n");
-    assert!(rows.contains("Nothing the") && rows.contains("Turn mirroring on"), "{rows}");
-    choose(&mut pane, Row::Continue);
-    assert_eq!(pane.panel, Panel::Alerts);
+    assert!(rows.contains("No saved destination to review"), "{rows}");
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored);
     assert!(!saved(&pane).enabled);
-    assert!(frame(&mut pane, 80, 24).join("\n").contains("Nothing was turned on"));
+    assert_eq!(pane.key(Key::Esc), After::Stay);
+    assert_eq!(pane.panel, Panel::Alerts);
     choose(&mut pane, Row::AlertsDestination);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("No other destination is saved"));
 
@@ -1425,12 +1425,15 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     choose(&mut pane, Row::AlertsOn);
     let review = frame(&mut pane, 80, 24).join("\n");
     assert!(review.contains("Telegram chat -1001234567890") && review.contains("Events: blocked, error, bell"));
-    pane.alerts.as_ref().unwrap().set_content(alerts::Content::Metadata).unwrap();
+    assert!(review.contains("Origin label: off."), "{review}");
+    pane.alerts.as_ref().unwrap().set_origin(true).unwrap();
     choose(&mut pane, Row::Continue);
     assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Review them again"));
 
     choose(&mut pane, Row::AlertsOn);
+    let review = frame(&mut pane, 80, 24).join("\n");
+    assert!(review.contains("Origin label: on.") && review.contains("Turn mirroring on with labels"), "{review}");
     choose(&mut pane, Row::Continue);
     assert!(saved(&pane).enabled);
     assert!(frame(&mut pane, 80, 24).join("\n").contains("Rex alert mirroring is on."));
@@ -1440,6 +1443,46 @@ fn alerts_are_mirrored_only_after_the_pane_has_said_what_is_sent() {
     assert!(pane.panel == Panel::Alerts && !saved(&pane).enabled);
     // None of this is a draft to save or discard on the way out.
     assert!(!pane.dirty());
+}
+
+#[test]
+fn alert_forwarding_review_must_fit_before_it_can_be_approved() {
+    const TOKEN: &str = "123456:SYNTHETICsyntheticSYNTHETIC00";
+    let f = Fixture::folder();
+    let alerts = Alerts::at(&f.root.join("alerts"), &f.root.join("alert-state"));
+    alerts.set_telegram(TOKEN, "-1001234567890").unwrap();
+    alerts.set_content(alerts::Content::Text).unwrap();
+    alerts.set_origin(true).unwrap();
+    let mut pane = Setup::new(Some(store(&f)), false, None, None, |_| panic!("alerts do not call Rex"));
+    pane.alerts = Some(alerts);
+    let enabled = |pane: &Setup<_>| pane.alerts.as_ref().unwrap().settings().unwrap().enabled;
+    choose(&mut pane, Row::Alerts);
+    choose(&mut pane, Row::AlertsOn);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Ignored, "opening the modal has not displayed the review");
+
+    let full = frame(&mut pane, 80, 24).join("\n");
+    for detail in [
+        "Destination: Telegram chat -1001234567890",
+        "Events: blocked, error, done",
+        "up to 300 characters",
+        "Origin label: on. Milo adds a short Rex session label",
+        "Turn mirroring on with labels",
+    ] {
+        assert!(full.contains(detail), "{full}");
+    }
+
+    // Shrinking an already reviewed pane invalidates the approval for both input paths.
+    for (width, height) in [(80, 10), (18, 8)] {
+        let rows = frame(&mut pane, width, height);
+        assert!(rows.iter().all(|line| !line.contains("Destination:") && !line.contains("Turn mirroring on")));
+        assert_eq!(pane.key(click_label(&rows, "Enlarge pane")), After::Ignored);
+        assert_eq!(choose(&mut pane, Row::Continue), After::Ignored);
+        assert!(!enabled(&pane));
+    }
+
+    frame(&mut pane, 80, 24);
+    assert_eq!(choose(&mut pane, Row::Continue), After::Stay);
+    assert!(enabled(&pane));
 }
 
 #[test]
