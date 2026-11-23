@@ -7,20 +7,26 @@
 } } while (0)
 
 static void CheckPolicies(void) {
-    CHECK(PreviewOrigin(nil, NO) == nil);
-    CHECK([PreviewOrigin([NSURL URLWithString:@"HTTP://LOCALHOST:80/a"], YES) isEqual:@"http://localhost"]);
-    CHECK([PreviewOrigin([NSURL URLWithString:@"https://[::1]:5443/a"], YES) isEqual:@"https://[::1]:5443"]);
-    CHECK([PreviewOrigin([NSURL URLWithString:@"http://127.0.0.1:3000/a?query#fragment"], NO) isEqual:@"http://127.0.0.1:3000"]);
+    CHECK(!PreviewWebURL(nil));
+    CHECK([PreviewLoopbackOrigin([NSURL URLWithString:@"HTTP://LOCALHOST:80/a"]) isEqual:@"http://localhost"]);
+    CHECK([PreviewLoopbackOrigin([NSURL URLWithString:@"https://[::1]:5443/a"]) isEqual:@"https://[::1]:5443"]);
+    CHECK([PreviewLoopbackOrigin([NSURL URLWithString:@"http://127.0.0.1:3000/a?query#fragment"]) isEqual:@"http://127.0.0.1:3000"]);
     NSData *nonRFC = [@"http://127.0.0.1:3000/a?filter[status]=open|{ready}#x^y" dataUsingEncoding:NSUTF8StringEncoding];
     NSURL *unusual = [NSURL URLWithDataRepresentation:nonRFC relativeToURL:nil];
-    CHECK([PreviewOrigin(unusual, NO) isEqual:@"http://127.0.0.1:3000"]);
-    CHECK(PreviewOrigin(unusual, YES) == nil);
+    CHECK([PreviewLoopbackOrigin(unusual) isEqual:@"http://127.0.0.1:3000"]);
+    CHECK(!MiloPreviewContent(unusual, ^BOOL{ return NO; }, ^{}));
     for (NSString *url in @[@"http://localhost:0/", @"http://localhost:65536/", @"http://user@localhost/", @"http://localhost@elsewhere/",
-                             @"http://localhost/a?q", @"http://localhost/#f", @"http://127.1/", @"http://127.0.0.2/",
-                             @"http://%6cocalhost/", @"http://localhost.example/", @"http://[::2]/", @"http://localhost./",
-                             @"file:///tmp/file", @"ws://localhost/", @"mailto:local@example.com"]) {
-        CHECK(PreviewOrigin([NSURL URLWithString:url], YES) == nil);
-    }
+                             @"http://127.1/", @"http://127.0.0.2/", @"http://%6cocalhost/", @"http://localhost.example/",
+                             @"http://[::2]/", @"http://localhost./", @"file:///tmp/file", @"ws://localhost/", @"mailto:local@example.com"])
+        CHECK(!PreviewLoopbackOrigin([NSURL URLWithString:url]));
+    CHECK([PreviewAddressURL(@" example.com/path?q=test#part ").absoluteString isEqual:@"https://example.com/path?q=test#part"]);
+    CHECK([PreviewAddressURL(@"localhost:3000/a").absoluteString isEqual:@"http://localhost:3000/a"]);
+    CHECK([PreviewAddressURL(@"127.0.0.1:3000/a").absoluteString isEqual:@"http://127.0.0.1:3000/a"]);
+    CHECK([PreviewAddressURL(@"[::1]:3000/a").absoluteString isEqual:@"http://[::1]:3000/a"]);
+    for (NSString *address in @[@"", @"/relative", @"file:///tmp/file", @"javascript:1+1", @"data:text/html,a",
+                                  @"mailto:local@example.com", @"http://u:p@localhost/", @"https://u%40x@example.com/",
+                                  @"https://", @"http://localhost:65536", @"ftp://host.com", @"https://ex\\am.ple/"])
+        CHECK(!PreviewAddressURL(address));
     CHECK((PreviewPath(@[@[@0, @2]]) && [PreviewPath(@[@[@0, @2]]) isEqual:@"*:nth-child(2)"]));
     NSArray *invalid = @[@"html", @[], @[@[@1, @0]], @[@[@900, @1]], @[@[@1, @4097]], @[@[@YES, @1]],
                          @[@[@1, @1.5]], @[@[@1, @"123"]], @[@[@1, @1, @"secret"]], @[@[@"custom-name", @1]]];
@@ -73,11 +79,9 @@ static void Key(NSWindow *window, NSString *key, unsigned short code, NSEventMod
 }
 
 static void DispatchKeyThroughApplication(NSEvent *event) {
-    [NSApp postEvent:event atStart:YES];
-    NSEvent *queued = [NSApp nextEventMatchingMask:NSEventMaskKeyDown untilDate:NSDate.distantPast
-                                            inMode:NSDefaultRunLoopMode dequeue:YES];
-    CHECK(queued == event);
-    [NSApp sendEvent:queued];
+    // AppKit need not return the same NSEvent object from its queue. Dispatch
+    // through NSApplication directly without consuming unrelated input events.
+    [NSApp sendEvent:event];
 }
 
 static void CheckShortcuts(void) {
@@ -90,6 +94,11 @@ static void CheckShortcuts(void) {
     CHECK(PreviewShortcutAction(KeyEvent(nil, @"\r", 36, shortcut | NSEventModifierFlagControl)) == NULL);
     CHECK(PreviewShortcutAction(KeyEvent(nil, @"\x03", 76, shortcut)) == NULL);
     CHECK(PreviewShortcutAction(KeyEvent(nil, @"T", 17, shortcut)) == NULL);
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"l", 37, NSEventModifierFlagCommand)) == @selector(focusAddress:));
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"r", 15, NSEventModifierFlagCommand)) == @selector(reload:));
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"[", 33, NSEventModifierFlagCommand)) == @selector(goBack:));
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"]", 30, NSEventModifierFlagCommand)) == @selector(goForward:));
+    CHECK(PreviewShortcutAction(KeyEvent(nil, @"l", 37, NSEventModifierFlagCommand | NSEventModifierFlagOption)) == NULL);
 }
 
 static NSPasteboard *TestBoard;
@@ -130,6 +139,96 @@ static void SetViewport(NSView *content, CGFloat width, CGFloat height) {
     NSSize size = NSMakeSize(width, height);
     [content.window setContentSize:size];
     CHECK(NSEqualSizes(content.bounds.size, size));
+}
+
+static WKWebView *VisibleWebView(NSView *content) {
+    WKWebView *active = nil;
+    for (NSView *view in content.subviews) {
+        if (!view.isHidden && [view isKindOfClass:WKWebView.class]) {
+            CHECK(!active);
+            active = (WKWebView *)view;
+        }
+    }
+    return active;
+}
+
+static WKWebView *WaitForPageAt(int line, NSView *content, NSTextField *address, NSURL *url, NSString *title) {
+    BOOL arrived = WaitFor(^BOOL{
+        WKWebView *web = VisibleWebView(content);
+        return [web.URL isEqual:url] && !web.isLoading && [web.title isEqualToString:title] &&
+            [address.stringValue isEqualToString:web.URL.absoluteString] && !address.currentEditor;
+    });
+    if (!arrived) {
+        WKWebView *web = VisibleWebView(content);
+        fprintf(stderr, "Navigation at line %d timed out (URL %d, title %d, loading %d, address %d, editing %d)\n",
+            line, [web.URL isEqual:url], [web.title isEqualToString:title], web.isLoading,
+            [address.stringValue isEqualToString:web.URL.absoluteString], address.currentEditor != nil);
+        fprintf(stderr, "URL components matched (scheme %d, host %d, path %d, query %d, fragment %d)\n",
+            [(web.URL.scheme ?: @"") isEqual:(url.scheme ?: @"")], [(web.URL.host ?: @"") isEqual:(url.host ?: @"")],
+            [(web.URL.path ?: @"") isEqual:(url.path ?: @"")], [(web.URL.query ?: @"") isEqual:(url.query ?: @"")],
+            [(web.URL.fragment ?: @"") isEqual:(url.fragment ?: @"")]);
+        exit(1);
+    }
+    return VisibleWebView(content);
+}
+
+#define WaitForPage(...) WaitForPageAt(__LINE__, __VA_ARGS__)
+
+static NSTextView *FocusAddress(NSView *content, NSTextField *address) {
+    DispatchKeyThroughApplication(KeyEvent(content.window, @"l", 37, NSEventModifierFlagCommand));
+    CHECK(WaitFor(^BOOL{ return address.currentEditor && content.window.firstResponder == address.currentEditor; }));
+    NSTextView *editor = (NSTextView *)address.currentEditor;
+    CHECK(NSEqualRanges(editor.selectedRange, NSMakeRange(0, editor.string.length)));
+    return editor;
+}
+
+static void DraftAddress(NSView *content, NSTextField *address, NSString *value) {
+    NSTextView *editor = FocusAddress(content, address);
+    [editor insertText:value replacementRange:editor.selectedRange];
+    CHECK([editor.string isEqualToString:value]);
+}
+
+static void SubmitAddress(NSView *content, NSTextField *address, NSString *value) {
+    DraftAddress(content, address, value);
+    DispatchKeyThroughApplication(KeyEvent(content.window, @"\r", 36, 0));
+}
+
+static void ClickElement(WKWebView *web, NSString *name) {
+    [web.window.contentView layoutSubtreeIfNeeded];
+    NSString *script = [NSString stringWithFormat:
+        @"(() => { const a = document.getElementById('%@'); const r = a.getBoundingClientRect();"
+        "const x = r.x + r.width / 2, y = r.y + r.height / 2;"
+        "return document.elementFromPoint(x, y) === a ? [x, y] : null; })()", name];
+    NSArray *point = Evaluate(web, script);
+    CHECK(point.count == 2);
+    Click(web, [point[0] doubleValue], [point[1] doubleValue]);
+}
+
+static void CheckOpaqueViewport(NSView *content, WKWebView *web) {
+    [content layoutSubtreeIfNeeded];
+    CHECK(content.isOpaque && content.clipsToBounds && web.clipsToBounds);
+    CHECK(web.underPageBackgroundColor.alphaComponent == 1);
+    CHECK(NSMinX(web.frame) == NSMinX(content.bounds) && NSMaxX(web.frame) == NSMaxX(content.bounds) &&
+        NSMaxY(web.frame) == NSMaxY(content.bounds));
+    CHECK([Evaluate(web, @"getComputedStyle(document.body).backgroundColor") isEqual:@"rgba(0, 0, 0, 0)"]);
+    CHECK([Evaluate(web, @"getComputedStyle(document.getElementById('outside-edge')).backgroundColor") isEqual:@"rgb(229, 17, 39)"]);
+    CHECK([Evaluate(web, @"document.getElementById('outside-edge').getBoundingClientRect().right === innerWidth") isEqual:@YES]);
+    __block BOOL finished = NO;
+    __block NSImage *snapshot = nil;
+    WKSnapshotConfiguration *configuration = [WKSnapshotConfiguration new];
+    configuration.afterScreenUpdates = YES;
+    [web takeSnapshotWithConfiguration:configuration completionHandler:^(NSImage *image, NSError *error) {
+        snapshot = image;
+        finished = YES;
+    }];
+    CHECK(WaitFor(^BOOL{ return finished; }));
+    CHECK(snapshot);
+    NSBitmapImageRep *bitmap = [NSBitmapImageRep imageRepWithData:snapshot.TIFFRepresentation];
+    CHECK(bitmap.pixelsWide >= 24 && bitmap.pixelsHigh >= 24);
+    NSColor *center = [bitmap colorAtX:bitmap.pixelsWide / 2 y:bitmap.pixelsHigh / 2];
+    NSColor *edge = [[bitmap colorAtX:bitmap.pixelsWide - 4 y:bitmap.pixelsHigh / 2] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    CHECK(center.alphaComponent > 0.99 && edge.alphaComponent > 0.99);
+    CHECK(edge.redComponent > 0.75 && edge.greenComponent < 0.25 && edge.blueComponent < 0.30);
 }
 
 static void CheckControlFrames(NSView *content, NSArray<NSButton *> *controls) {
@@ -272,6 +371,9 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
 // This fixture exercises native geometry and invalidation, not page loading
 // or consent gestures. The full smoke uses a real committed document for those.
 - (void)compileRules {}
+- (BOOL)hasCommittedLocalPage {
+    return [_web isKindOfClass:PickerReplyWebView.class] ? [super hasCommittedLocalPage] : _pageCommitted;
+}
 
 - (void)prepareReview {
     _pickState = PickReview;
@@ -323,11 +425,12 @@ static void CheckNarrowPicker(NSView *content, WKWebView *web, NSTextView *revie
 - (void)checkRevokedCopy:(void (^)(BOOL))setAuthorized {
     PickerReplyWebView *web = [[PickerReplyWebView alloc] initWithFrame:_web.frame configuration:_web.configuration];
     web.fixtureURL = _initialURL;
-    [_web removeObserver:self forKeyPath:@"URL" context:NULL];
-    [_web removeObserver:self forKeyPath:@"canGoBack" context:NULL];
-    _observingWeb = NO;
+    [self stopObservingWebView:_web];
     [self replaceSubview:_web with:web];
-    _web = web;
+    _localWeb = _web = web;
+    [self observeWebView:web];
+    _committedURL = _initialURL;
+    _pickerDocument = YES; // the held-reply fixture models a validated HTML response
 
     CHECK(self.window.isVisible && self.window.isKeyWindow && _pageCommitted);
     [self armPick:nil];
@@ -360,7 +463,7 @@ static void DoLayoutSmoke(void) {
     window.releasedWhenClosed = NO;
     __block BOOL authorized = NO;
     LayoutSmokeBrowser *content = [[LayoutSmokeBrowser alloc]
-        initWithURL:[NSURL URLWithString:@"http://127.0.0.1/"] origin:@"http://127.0.0.1"
+        initWithURL:[NSURL URLWithString:@"http://127.0.0.1/"] localOrigin:@"http://127.0.0.1"
         acceptsPanelInput:^BOOL{ return authorized; } returnFocus:^{}];
     window.contentView = content;
     [content checkLayout];
@@ -373,7 +476,7 @@ static void DoLayoutSmoke(void) {
     [window close];
 }
 
-static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
+static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest, NSURL *outside, NSURL *alias, NSURL *secure) {
     // Do not read, clear or write the user's pasteboard. Only this test process
     // resolves generalPasteboard to a newly named, disposable pasteboard.
     TestBoard = NSPasteboard.pasteboardWithUniqueName;
@@ -397,10 +500,13 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     // Browser.m test hooks, message injection, or synthetic page-side clicks.
     WKWebView *web = nil;
     NSTextView *review = nil;
-    NSButton *select = nil, *copy = nil, *cancel = nil, *back = nil, *reload = nil, *terminal = nil;
+    NSTextField *address = nil;
+    NSButton *select = nil, *copy = nil, *cancel = nil, *back = nil, *forward = nil, *reload = nil, *terminal = nil;
     for (NSView *view in content.subviews) {
         if ([view isKindOfClass:WKWebView.class]) web = (WKWebView *)view;
         if ([view isKindOfClass:NSScrollView.class]) review = ((NSScrollView *)view).documentView;
+        if ([view isKindOfClass:NSTextField.class] && [[view accessibilityLabel] isEqual:@"Web address"])
+            address = (NSTextField *)view;
         if (![view isKindOfClass:NSButton.class]) continue;
         NSButton *button = (NSButton *)view;
         NSString *name = [button accessibilityLabel] ?: button.title;
@@ -408,12 +514,14 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
         if ([name isEqual:@"Copy path"]) copy = button;
         if ([name isEqual:@"Cancel"]) cancel = button;
         if ([name isEqual:@"Go back"]) back = button;
+        if ([name isEqual:@"Go forward"]) forward = button;
         if ([name isEqual:@"Reload preview"]) reload = button;
         if ([name isEqual:@"Return to terminal"]) terminal = button;
     }
-    CHECK(web && review && select && copy && cancel && back && reload && terminal);
+    CHECK(web && address && review && select && copy && cancel && back && forward && reload && terminal);
     CHECK(!web.configuration.websiteDataStore.isPersistent);
     CHECK(WaitFor(^BOOL{ return select.enabled && !web.isLoading; }));
+    CHECK([address.stringValue isEqualToString:web.URL.absoluteString]);
     CHECK([Evaluate(web, @"document.title") isEqual:@"Milo fixture"]);
     CHECK(WaitFor(^BOOL{ return [Evaluate(web, @"document.querySelector('#hmr').textContent") isEqual:@"ready"]; }));
     CHECK([@"updated" writeToFile:hmrFile atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
@@ -494,15 +602,8 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
         }
     }
 
-    Click(web, 50, 107); // a target=_blank link to the unapproved port
-    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Blocked a navigation"); }));
-    Click(web, 50, 145); // same-origin path that redirects to that port
-    CHECK(WaitFor(^BOOL {
-        return [NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".redirect"]];
-    }));
-    CHECK(WaitFor(^BOOL{ return !web.isLoading && select.enabled && HasStatus(content, @"Blocked a navigation"); }));
-    CHECK([Evaluate(web, @"document.title") isEqual:@"Milo fixture"]);
-    CHECK(![NSFileManager.defaultManager fileExistsAtPath:escapedRequest]);
+    Click(web, 50, 107); // a target=_blank link is never opened
+    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Pop-up windows are disabled."); }));
     [terminal performClick:nil];
     CHECK(returns == 1);
     Click(web, 80, 23);
@@ -517,6 +618,161 @@ static void DoSmoke(NSURL *url, NSString *hmrFile, NSString *escapedRequest) {
     CHECK(WaitFor(^BOOL{ return returns == 2; }));
     CHECK([Evaluate(web, @"document.activeElement.id") isEqual:@"typed"]);
     CHECK([Evaluate(web, @"window.returnKeyDowns") isEqual:@1]);
+
+    SetViewport(content, 144, 240);
+    CheckControls(content, @[back, forward, reload, select, terminal]);
+    CHECK(address.isEditable && !address.isHidden && NSContainsRect(content.bounds, address.frame));
+    DraftAddress(content, address, @"example.com");
+    CHECK([web.URL isEqual:url]); // editing alone makes no navigation
+    DispatchKeyThroughApplication(KeyEvent(window, @"\e", 53, 0));
+    CHECK(!address.currentEditor && [address.stringValue isEqualToString:web.URL.absoluteString]);
+    NSURL *typed = [NSURL URLWithString:@"start?mode=typed#address" relativeToURL:url].absoluteURL;
+    SubmitAddress(content, address, [typed.absoluteString substringFromIndex:[@"http://" length]]);
+    CHECK(WaitForPage(content, address, typed, @"Milo fixture") == web);
+    SetViewport(content, 430, 470);
+
+    NSURL *hash = [NSURL URLWithString:@"#section" relativeToURL:typed].absoluteURL;
+    ClickElement(web, @"hash");
+    CHECK(WaitForPage(content, address, hash, @"Milo fixture") == web);
+    CHECK(select.enabled);
+    DraftAddress(content, address, @"unsubmitted.example");
+    DispatchKeyThroughApplication(KeyEvent(window, @"[", 33, NSEventModifierFlagCommand));
+    CHECK(WaitForPage(content, address, typed, @"Milo fixture") == web);
+    [forward performClick:nil];
+    CHECK(WaitForPage(content, address, hash, @"Milo fixture") == web);
+    SubmitAddress(content, address, @"file:///__milo_browser_fixture_missing");
+    CHECK(HasStatus(content, @"Enter a valid HTTP or HTTPS address."));
+    CHECK([((NSTextView *)address.currentEditor).string isEqual:@"file:///__milo_browser_fixture_missing"]);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\e", 53, 0));
+    CHECK([address.stringValue isEqualToString:hash.absoluteString]);
+    ClickElement(web, @"unsafe");
+    CHECK([web.URL isEqual:hash]);
+    ClickElement(web, @"download");
+    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Downloads are disabled."); }));
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".download"]]);
+    ClickElement(web, @"attachment");
+    CHECK(WaitFor(^BOOL{
+        return [NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".attachment"]] &&
+            back.enabled && HasStatus(content, @"Downloads are disabled.");
+    }));
+    CHECK(WaitForPage(content, address, hash, @"Milo fixture") == web);
+
+    // A local top-level scripted departure is not an explicit click.
+    Evaluate(web, [NSString stringWithFormat:@"location.href = '%@'; true", outside.absoluteString]);
+    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Open a link or enter an address"); }));
+    CHECK([web.URL isEqual:hash]);
+    ClickElement(web, @"outside");
+    WKWebView *general = WaitForPage(content, address, outside, @"Outside fixture");
+    CHECK(general != web && web.isHidden && !select.enabled);
+    CHECK(general.configuration.userContentController.userScripts.count == 0);
+    CHECK([NSApp sendAction:select.action to:select.target from:select]);
+    CHECK(copy.isHidden && cancel.isHidden);
+    CheckOpaqueViewport(content, general);
+    SetViewport(content, 144, 240);
+    CheckControls(content, @[back, forward, reload, select, terminal]);
+    CHECK(VisibleWebView(content) == general && [Evaluate(general, @"innerWidth") isEqual:@144]);
+    SetViewport(content, 430, 470);
+    CHECK(VisibleWebView(content) == general);
+
+    [back performClick:nil];
+    CHECK(WaitForPage(content, address, hash, @"Milo fixture") == web);
+    CHECK(select.enabled && copy.isHidden && cancel.isHidden);
+    [forward performClick:nil];
+    CHECK(WaitForPage(content, address, outside, @"Outside fixture") == general);
+    Evaluate(general, @"window.fixtureReloadSentinel = true");
+    DispatchKeyThroughApplication(KeyEvent(window, @"r", 15, NSEventModifierFlagCommand));
+    CHECK(WaitFor(^BOOL{ return [Evaluate(general, @"typeof window.fixtureReloadSentinel") isEqual:@"undefined"]; }));
+    CHECK(WaitForPage(content, address, outside, @"Outside fixture") == general);
+
+    NSURL *outsideForm = [NSURL URLWithString:@"outside-form" relativeToURL:url].absoluteURL;
+    ClickElement(general, @"outside-form");
+    CHECK(WaitFor(^BOOL{
+        return [general.URL isEqual:outsideForm] || HasStatus(content, @"This cross-site form cannot be sent");
+    }));
+    if ([general.URL isEqual:outsideForm]) {
+        CHECK(WaitForPage(content, address, outsideForm, @"Outside form passed") == general);
+        [back performClick:nil];
+        CHECK(WaitForPage(content, address, outside, @"Outside fixture") == general);
+    } else {
+        puts("WebKit did not expose a complete cross-host POST body; preview refused replay.");
+        CHECK([general.URL isEqual:outside]);
+    }
+
+    NSURL *cookieCheck = [NSURL URLWithString:@"cookie-check" relativeToURL:url].absoluteURL;
+    CHECK([Evaluate(web, @"document.cookie.includes('milo_dev_fixture=private')") isEqual:@YES]);
+    ClickElement(general, @"return");
+    CHECK(WaitForPage(content, address, cookieCheck, @"Unprivileged local fixture") == general);
+    CHECK(!select.enabled && ![NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".cookie"]]);
+
+    // The address draft stays the key recipient when any outstanding navigation,
+    // including a view replacement, finally commits.
+    SubmitAddress(content, address, url.absoluteString);
+    CHECK(WaitForPage(content, address, url, @"Milo fixture") == web);
+    NSURL *slow = [NSURL URLWithString:@"slow-outside" relativeToURL:outside].absoluteURL;
+    SubmitAddress(content, address, slow.absoluteString);
+    CHECK([address.stringValue isEqualToString:web.URL.absoluteString]);
+    DraftAddress(content, address, @"retained-draft.example");
+    CHECK(WaitFor(^BOOL{ return VisibleWebView(content) == general && [general.URL isEqual:slow] && !general.isLoading; }));
+    CHECK(window.firstResponder == address.currentEditor &&
+        [((NSTextView *)address.currentEditor).string isEqual:@"retained-draft.example"]);
+    DispatchKeyThroughApplication(KeyEvent(window, @"\e", 53, 0));
+    CHECK(WaitForPage(content, address, slow, @"Outside fixture") == general);
+    SubmitAddress(content, address, url.absoluteString);
+    CHECK(WaitForPage(content, address, url, @"Milo fixture") == web);
+    CHECK(select.enabled && copy.isHidden && cancel.isHidden);
+    NSInteger unchanged = TestBoard.changeCount;
+    ReviewElement(content, select, copy, review, @"html:nth-child(1) > body:nth-child(2) > *:nth-child(2)");
+    Evaluate(web, @"location.hash = 'during-review'; true");
+    NSURL *duringReview = [NSURL URLWithString:@"#during-review" relativeToURL:url].absoluteURL;
+    CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
+    CHECK(select.enabled && copy.isHidden && TestBoard.changeCount == unchanged);
+
+    ClickElement(web, @"redirect");
+    CHECK(WaitForPage(content, address, outside, @"Outside fixture") == general);
+    CHECK(!select.enabled && [NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".redirect"]]);
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:[escapedRequest stringByAppendingString:@".referrer"]]);
+    [back performClick:nil];
+    CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
+    NSURL *failed = [NSURL URLWithString:@"failed" relativeToURL:url].absoluteURL;
+    SubmitAddress(content, address, failed.absoluteString);
+    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Could not load the page."); }));
+    CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
+    SubmitAddress(content, address, secure.absoluteString);
+    CHECK(WaitFor(^BOOL{ return HasStatus(content, @"Could not load the page."); }));
+    CHECK(WaitForPage(content, address, duringReview, @"Milo fixture") == web);
+    CHECK(![NSFileManager.defaultManager fileExistsAtPath:escapedRequest]);
+
+    NSURL *sandbox = [NSURL URLWithString:@"sandbox" relativeToURL:url].absoluteURL;
+    SubmitAddress(content, address, sandbox.absoluteString);
+    CHECK(WaitForPage(content, address, sandbox, @"Sandbox fixture") == web);
+    CHECK(!select.enabled && ![(MiloPreviewBrowser *)content canPick]);
+    NSInteger beforeSandbox = TestBoard.changeCount;
+    CHECK([NSApp sendAction:select.action to:select.target from:select]);
+    CHECK(copy.isHidden && cancel.isHidden && TestBoard.changeCount == beforeSandbox);
+    SubmitAddress(content, address, url.absoluteString);
+    CHECK(WaitForPage(content, address, url, @"Milo fixture") == web && select.enabled);
+    [back performClick:nil];
+    CHECK(WaitForPage(content, address, sandbox, @"Sandbox fixture") == web);
+    CHECK(!select.enabled && ![(MiloPreviewBrowser *)content canPick]);
+
+    // A resolvable loopback alias is not literal startup authority. It cannot
+    // create the trusted WebView, even after visiting a literal loopback URL.
+    NSView *unprivileged = MiloPreviewContent(alias, ^BOOL{ return YES; }, ^{});
+    CHECK(unprivileged && !PreviewLoopbackOrigin(alias));
+    window.contentView = unprivileged;
+    NSTextField *unprivilegedAddress = nil;
+    NSButton *unprivilegedSelect = nil;
+    for (NSView *view in unprivileged.subviews) {
+        if ([view isKindOfClass:MiloPreviewAddress.class]) unprivilegedAddress = (NSTextField *)view;
+        if ([view isKindOfClass:NSButton.class] && [[view accessibilityLabel] isEqual:@"Select an element"])
+            unprivilegedSelect = (NSButton *)view;
+    }
+    CHECK(unprivilegedAddress && unprivilegedSelect);
+    WKWebView *unprivilegedWeb = WaitForPage(unprivileged, unprivilegedAddress, alias, @"Outside fixture");
+    CHECK(!unprivilegedSelect.enabled);
+    SubmitAddress(unprivileged, unprivilegedAddress, url.absoluteString);
+    CHECK(WaitForPage(unprivileged, unprivilegedAddress, url, @"Milo fixture") == unprivilegedWeb);
+    CHECK(!unprivilegedSelect.enabled && unprivilegedWeb.configuration.userContentController.userScripts.count == 0);
     [window orderOut:nil];
     window.contentView = nil;
     [window close];
@@ -536,11 +792,14 @@ int main(int argc, char **argv) {
             puts("Offscreen picker layout, resize invalidation, and async copy authorization passed without clipboard access.");
             return 0;
         }
-        CHECK(argc == 4);
+        CHECK(argc == 7);
         CheckPolicies();
         [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory];
         [NSApp finishLaunching];
-        WithIsolatedPasteboard(^{ DoSmoke([NSURL URLWithString:@(argv[1])], @(argv[2]), @(argv[3])); });
-        puts("Native WebKit navigation, form, websocket hot reload, element picker and resize, origin policy and terminal shortcut passed.");
+        WithIsolatedPasteboard(^{
+            DoSmoke([NSURL URLWithString:@(argv[1])], @(argv[2]), @(argv[3]), [NSURL URLWithString:@(argv[4])],
+                [NSURL URLWithString:@(argv[5])], [NSURL URLWithString:@(argv[6])]);
+        });
+        puts("Native WebKit address, HTTP navigation, reload/history, isolation, opaque viewport, forms/HMR, picker and shortcuts passed.");
     }
 }

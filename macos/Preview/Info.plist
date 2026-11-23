@@ -6,4 +6,8 @@
     <key>CFBundleExecutable</key><string>Milo Preview</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- User-entered HTTP sites in WKWebView; not a transport exception for native clients. -->
+    <key>NSAppTransportSecurity</key><dict>
+        <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
+    </dict>
 </dict></plist>

@@ -544,6 +544,7 @@ static int PrepareFocusInput(int stateFD) {
     int _stateFD, _focusFD;
     pid_t _parent;
     MiloPreviewPanel *_panel;
+    __weak NSView *_browser;
     NSTimer *_timer, *_dragTimer;
     NSMutableArray *_notificationTokens;
     id _inputMonitor;
@@ -811,6 +812,7 @@ static int PrepareFocusInput(int stateFD) {
     _panel.title = @"Milo Preview (Approximate)";
     _panel.delegate = self;
     [_panel installContentForStaging:browser];
+    _browser = browser;
     [self requestSample];
 }
 
@@ -922,6 +924,7 @@ static int PrepareFocusInput(int stateFD) {
             // A tab change can race the focus request. Keep the same page
             // suspended and wait for a fresh observer receipt and proof.
             _scopeSince = LeaseNow();
+            MiloPreviewFocusRefused(_browser);
         }
     }
     BOOL canSample = [self canSample];

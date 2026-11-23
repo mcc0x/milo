@@ -21,7 +21,7 @@ Usage: milo preview URL [--placement right|left|above|below]
 
 Open a browser pane beside the working terminal in this local Rex tab.
 For your dev server, try milo preview http://localhost:3000. HTTP(S) sites also work.
-Launch without credentials, query or fragment; use the pane's address bar for full URLs.
+Credentials in URLs are not accepted. Enter addresses with a query or fragment in the pane.
 Right is the default. Change Preview placement in Settings or override it once.
 
 Keep working in the sibling terminal or drag the Rex divider. The page stays
@@ -84,7 +84,7 @@ fn valid_authority(authority: &str) -> bool {
 /// fragments in the native address field; never echo a rejected argument.
 pub(crate) fn url(text: &str) -> Result<&str, &'static str> {
     const INVALID: &str =
-        "use an HTTP(S) URL with a host and no credentials, query or fragment; enter full URLs in the pane";
+        "use an HTTP(S) URL with a host and no credentials; enter addresses with a query or fragment in the pane";
     if text.len() > URL_MAX {
         return Err(INVALID);
     }
