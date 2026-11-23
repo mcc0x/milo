@@ -2,6 +2,7 @@
 #import "Browser.h"
 #import "Chrome.h"
 #import "Divider.h"
+#import "MenuStrip.h"
 
 #import <AppKit/AppKit.h>
 #import <dispatch/dispatch.h>
@@ -160,7 +161,7 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         geometry = (Geometry){.window = bounds, .pane = bounds, .windowID = (CGWindowID)number};
         match = i;
     }
-    if (match == NSNotFound) return RejectedGeometry("pinned Rex window not onscreen");
+    if (match == NSNotFound) return RejectedGeometry(pinned ? "pinned Rex window not onscreen" : "no visible normal Rex window");
     if (sawOtherRex) return RejectedGeometry("additional normal Rex window; one visible Rex window is supported");
     if (panel != NSNotFound && panel >= match) return RejectedGeometry("helper panel is behind the pinned Rex window");
     if (normalized && !MiloApproximatePane(geometry.window, *normalized, &geometry.pane))
@@ -174,8 +175,25 @@ static Geometry SampleGeometry(NSArray *windows, pid_t rexPID, CGWindowID pinned
         if (alpha == 0) continue;
         CGRect bounds = WindowBounds(window);
         if (CGRectIsNull(bounds)) return RejectedGeometry("occlusion cannot be checked: missing bounds");
-        if (!CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane))) {
+        if (!CGRectIsEmpty(CGRectIntersection(bounds, pinned ? geometry.pane : geometry.window))) {
             pid_t owner = [window[(__bridge NSString *)kCGWindowOwnerPID] intValue];
+            if (!pinned) {
+                if (owner == rexPID) return RejectedGeometry("a separate Rex surface overlaps the candidate window");
+                if (owner == helperPID || MiloPreviewProcess(owner))
+                    return RejectedGeometry("a Milo Preview helper window overlaps the candidate Rex window");
+                int layer = [window[(__bridge NSString *)kCGWindowLayer] intValue];
+                if (layer == CGWindowLevelForKey(kCGMainMenuWindowLevelKey)) {
+                    if (!CGRectIsEmpty(CGRectIntersection(bounds, geometry.pane)))
+                        return RejectedGeometry("a menu-level surface overlaps the drawable workspace");
+                    CGDirectDisplayID display = 0;
+                    uint32_t count = 0;
+                    if (alpha == 1 && CGGetDisplaysWithRect(geometry.window, 1, &display, &count) == kCGErrorSuccess && count == 1 &&
+                        MiloMenuStripOnDisplay(bounds, geometry.window, geometry.pane, CGDisplayBounds(display)) &&
+                        MiloSystemMenuOwner(owner)) continue;
+                    return RejectedGeometry("overlapping menu-level surface is not a verified display-top system menu strip");
+                }
+                return RejectedGeometry("a non-Rex window overlaps the candidate Rex window");
+            }
             if (owner == rexPID) return RejectedGeometry("a Rex overlay overlaps the tile; dismiss it");
             if (owner == helperPID) return RejectedGeometry("another helper window overlaps the tile");
             return RejectedGeometry("another window overlaps the tile; uncover the tile");
@@ -360,9 +378,9 @@ typedef struct {
 
 // Quartz uses the primary display's top-left as origin; AppKit uses its bottom-left.
 // Do not clip or extrapolate when switching screens or when a window spans displays.
-static BOOL PlaceOnScreen(Geometry geometry, CGRect primary, const PreviewScreen *screens, size_t count,
+static const char *ScreenPlacementFailure(Geometry geometry, CGRect primary, const PreviewScreen *screens, size_t count,
     NSRect *pane, CGDirectDisplayID *display) {
-    if (!ValidRect(primary) || primary.origin.x != 0 || primary.origin.y != 0) return NO;
+    if (!ValidRect(primary) || primary.origin.x != 0 || primary.origin.y != 0) return "primary display coordinates unavailable";
     NSRect window = NSMakeRect(geometry.window.origin.x, primary.size.height - CGRectGetMaxY(geometry.window),
         geometry.window.size.width, geometry.window.size.height);
     NSRect body = NSMakeRect(geometry.pane.origin.x, primary.size.height - CGRectGetMaxY(geometry.pane),
@@ -370,46 +388,65 @@ static BOOL PlaceOnScreen(Geometry geometry, CGRect primary, const PreviewScreen
     const PreviewScreen *target = NULL;
     for (size_t i = 0; i < count; ++i) {
         if (!NSContainsRect(screens[i].frame, window)) continue;
-        if (target) return NO;
+        if (target) return "multiple displays contain the candidate Rex window";
         target = &screens[i];
     }
-    if (!target || !target->id || target->mirrored || !NSContainsRect(window, body) ||
-        !NSContainsRect(target->visibleFrame, body)) return NO;
-    // Native full-screen Spaces are not a supported overlay placement target.
-    if (NSEqualRects(target->frame, window)) return NO;
+    if (!target) return "candidate Rex window is not wholly contained on one display";
+    if (!target->id || target->mirrored) return "candidate display is mirrored or its identity is unavailable";
+    if (NSEqualRects(target->frame, window)) return "candidate Rex window occupies the entire display; that layout is unsupported";
+    if (!NSContainsRect(window, body) || !NSContainsRect(target->visibleFrame, body))
+        return "projected workspace is outside the Rex window or the display work area";
     *display = target->id;
 
     // Round inward at the selected screen's pixel scale; never cover a neighboring control.
     CGFloat scale = target->scale;
-    if (!isfinite(scale) || scale <= 0) return NO;
+    if (!isfinite(scale) || scale <= 0) return "display pixel scale unavailable";
     CGFloat left = ceil(NSMinX(body) * scale) / scale, bottom = ceil(NSMinY(body) * scale) / scale;
     CGFloat right = floor(NSMaxX(body) * scale) / scale, top = floor(NSMaxY(body) * scale) / scale;
     *pane = NSMakeRect(left, bottom, right - left, top - bottom);
-    return ValidRect(*pane);
+    return ValidRect(*pane) ? NULL : "projected workspace is empty after pixel alignment";
 }
 
-static BOOL ScreenFrame(Geometry geometry, NSRect *pane, CGDirectDisplayID *display) {
+static const char *ScreenFrameFailure(Geometry geometry, NSRect *pane, CGDirectDisplayID *display) {
     PreviewScreen screens[32];
     size_t count = 0;
     for (NSScreen *screen in NSScreen.screens) {
-        if (count == sizeof(screens) / sizeof(screens[0])) return NO;
+        if (count == sizeof(screens) / sizeof(screens[0])) return "display inventory exceeds supported limit";
         CGDirectDisplayID id = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
         screens[count++] = (PreviewScreen){screen.frame, screen.visibleFrame, screen.backingScaleFactor,
             id, id && CGDisplayIsInMirrorSet(id)};
     }
-    return PlaceOnScreen(geometry, CGDisplayBounds(CGMainDisplayID()), screens, count, pane, display);
+    return ScreenPlacementFailure(geometry, CGDisplayBounds(CGMainDisplayID()), screens, count, pane, display);
 }
 
-CGWindowID milo_preview_pin_window(pid_t pid) {
-    NSRunningApplication *rex = RexApplication(pid);
-    if (!FrontmostRex(rex)) return kCGNullWindowID;
-    Geometry sampled = SampleGeometry(VisibleWindows(), pid, kCGNullWindowID, getpid(), NULL, NULL);
-    // There is no tile yet. Check just that this window and its current chrome can support placement.
+static CGWindowID PinForegroundWindow(NSRunningApplication *rex, pid_t pid, const char **reason) {
+    if (!rex || rex.terminated || rex.processIdentifier != pid) {
+        *reason = "Rex client PID does not identify a running local Rex application";
+        return kCGNullWindowID;
+    }
+    if (!FrontmostRex(rex)) {
+        *reason = "the identified Rex process was not foreground at the start of the window check";
+        return kCGNullWindowID;
+    }
+    CGRect workspace = CGRectMake(0, 0, 1, 1);
+    Geometry sampled = SampleGeometry(VisibleWindows(), pid, kCGNullWindowID, getpid(), NULL, &workspace);
+    if (!sampled.windowID) {
+        *reason = sampled.rejection;
+        return kCGNullWindowID;
+    }
     NSRect pane;
     CGDirectDisplayID display;
-    if (!sampled.windowID || !MiloApproximatePane(sampled.window, CGRectMake(0, 0, 1, 1), &sampled.pane) ||
-        !ScreenFrame(sampled, &pane, &display) || !FrontmostRex(rex)) return kCGNullWindowID;
+    *reason = ScreenFrameFailure(sampled, &pane, &display);
+    if (*reason) return kCGNullWindowID;
+    if (!FrontmostRex(rex)) {
+        *reason = "the identified Rex process lost foreground during the window check";
+        return kCGNullWindowID;
+    }
     return sampled.windowID;
+}
+
+CGWindowID milo_preview_pin_window(pid_t pid, const char **reason) {
+    return PinForegroundWindow(RexApplication(pid), pid, reason);
 }
 
 @interface MiloPreviewPanel : NSPanel
@@ -1220,7 +1257,7 @@ static const char *PeekStatusPrefix(PeekPhase phase) {
     }
     NSRect frame;
     CGDirectDisplayID display;
-    if (failure == PeekOK && !ScreenFrame(geometry, &frame, &display)) failure = PeekPlacement;
+    if (failure == PeekOK && ScreenFrameFailure(geometry, &frame, &display)) failure = PeekPlacement;
     if (failure == PeekOK && !SampleFresh(NSProcessInfo.processInfo.systemUptime, started)) failure = PeekStale;
     if (failure != PeekOK) {
         [self rejectProof:failure];

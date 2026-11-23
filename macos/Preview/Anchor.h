@@ -6,8 +6,9 @@
 #include <sys/types.h>
 
 // Returns the unique visible normal window of the frontmost local Rex process
-// if its display and chrome support placement, or zero.
-CGWindowID milo_preview_pin_window(pid_t pid);
+// if its display and chrome support placement, or zero. reason receives a
+// fixed non-identifying refusal on failure, NULL on success.
+CGWindowID milo_preview_pin_window(pid_t pid, const char **reason);
 
 // Main thread. state_fd carries the observer's show/guard (PID and tile in
 // integer millionths), renew, hide, guard-hide and unclaimed records. EOF

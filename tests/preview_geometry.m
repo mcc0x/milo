@@ -1,6 +1,6 @@
 // macOS, no GUI interaction or permission needed:
 // xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
-//   -framework AppKit -framework CoreGraphics -framework WebKit -o /tmp/preview-geometry
+//   -framework AppKit -framework CoreGraphics -framework WebKit -framework Security -o /tmp/preview-geometry
 // /tmp/preview-geometry
 // /tmp/preview-geometry --panel-staging additionally checks Quartz in a logged-in GUI session.
 #import <assert.h>
@@ -30,24 +30,24 @@ static void ScreenPlacement(void) {
     NSRect overlay;
     CGDirectDisplayID display;
     Geometry left = {CGRectMake(-1200, 220, 700, 500), CGRectMake(-1199.75, 230.25, 500.5, 400.25), 1, NULL};
-    assert(PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
+    assert(!ScreenPlacementFailure(left, primary, screens, 3, &overlay, &display));
     assert(display == 2 && NSEqualRects(overlay, NSMakeRect(-1199.5, 269.5, 500, 400)));
 
     Geometry above = {CGRectMake(1500, -920, 800, 600), CGRectMake(1510, -880, 790, 560), 1, NULL};
-    assert(PlaceOnScreen(above, primary, screens, 3, &overlay, &display));
+    assert(!ScreenPlacementFailure(above, primary, screens, 3, &overlay, &display));
     assert(display == 3 && NSEqualRects(overlay, NSMakeRect(1510, 1220, 790, 560)));
 
     Geometry crosses = {CGRectMake(-200, 220, 700, 500), CGRectMake(0, 220, 400, 500), 1, NULL};
-    assert(!PlaceOnScreen(crosses, primary, screens, 3, &overlay, &display));
+    assert(ScreenPlacementFailure(crosses, primary, screens, 3, &overlay, &display));
     Geometry menuBar = {CGRectMake(100, 0, 700, 500), CGRectMake(100, 12, 400, 400), 1, NULL};
-    assert(!PlaceOnScreen(menuBar, primary, screens, 3, &overlay, &display));
+    assert(ScreenPlacementFailure(menuBar, primary, screens, 3, &overlay, &display));
     Geometry fullScreen = {primary, CGRectMake(100, 50, 400, 400), 1, NULL};
-    assert(!PlaceOnScreen(fullScreen, primary, screens, 3, &overlay, &display));
+    assert(ScreenPlacementFailure(fullScreen, primary, screens, 3, &overlay, &display));
     screens[1].mirrored = YES;
-    assert(!PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
+    assert(ScreenPlacementFailure(left, primary, screens, 3, &overlay, &display));
     screens[1].mirrored = NO;
     screens[2] = screens[1];
-    assert(!PlaceOnScreen(left, primary, screens, 3, &overlay, &display));
+    assert(ScreenPlacementFailure(left, primary, screens, 3, &overlay, &display));
 }
 
 static NSDictionary *Metadata(pid_t pid, CGWindowID id, CGRect rect) {
@@ -220,7 +220,7 @@ static void RemapPinnedWindow(void) {
     };
     NSRect frame;
     CGDirectDisplayID display;
-    assert(PlaceOnScreen(current, screens[0].frame, screens, 2, &frame, &display));
+    assert(!ScreenPlacementFailure(current, screens[0].frame, screens, 2, &frame, &display));
     assert(display == 2 && NSEqualRects(frame, NSMakeRect(-773, 98, 351, 470)));
     assert(!WindowID(@[Metadata(100, 2, moved)], 1, &right));
 

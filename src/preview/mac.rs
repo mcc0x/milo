@@ -1,6 +1,7 @@
 use std::ffi::{CStr, OsStr};
 use std::fs::{self, DirBuilder};
 use std::io::{self, BufRead as _, IsTerminal as _, Read as _, Write as _};
+use std::num::NonZeroU32;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
@@ -13,6 +14,12 @@ use crate::fs_ops;
 
 const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Milo Preview"));
 const FOCUS_FD_ENV: &str = "MILO_PREVIEW_FOCUS_FD";
+const PIN_REFUSED: i32 = 2; // PinRefused in macos/Preview/main.m.
+const PIN_REFUSAL_PREFIX: &[u8] = b"refused: ";
+const PIN_REASON_MAX: usize = 160;
+const PIN_REPLY_MAX: usize = PIN_REFUSAL_PREFIX.len() + PIN_REASON_MAX + 1; // Includes the newline.
+const ABNORMAL_PIN_EXIT: &str = "the preview window check ended unexpectedly; no pane was opened";
+const INVALID_PIN_SUCCESS: &str = "the preview window check returned an invalid window ID; no pane was opened";
 
 fn focus_pipe() -> io::Result<(io::PipeReader, io::PipeWriter)> {
     let (reader, writer) = io::pipe()?;
@@ -115,17 +122,56 @@ fn spawn(args: &[&str], state: Stdio, focus: Option<io::PipeReader>) -> io::Resu
     command.spawn()
 }
 
-pub(crate) fn pin_window(owner_pid: u32) -> Result<std::num::NonZeroU32, String> {
-    let check = spawn(&["--pin-window", &owner_pid.to_string()], Stdio::null(), None)
-        .and_then(Child::wait_with_output)
+pub(crate) fn pin_window(owner_pid: u32) -> Result<NonZeroU32, String> {
+    let mut helper = spawn(&["--pin-window", &owner_pid.to_string()], Stdio::null(), None)
         .map_err(|e| format!("could not run the preview window check: {e}"))?;
-    if !check.status.success() {
-        return Err("Preview could not pin one unobstructed local Rex window. Start in a frontmost, non-full-screen Mac-created tab on one display, with no Rex palette open. No pane was opened; no privacy permission is needed.".into());
+    let mut stdout = helper.stdout.take().expect("helper stdout is piped");
+    let mut reply = [0; PIN_REPLY_MAX + 1];
+    let mut size = 0;
+    // Read one byte beyond the longest valid record to distinguish it from a
+    // truncated one. Close the pipe before waiting even if it had more data.
+    let read = loop {
+        if size == reply.len() {
+            break Ok(());
+        }
+        match stdout.read(&mut reply[size..]) {
+            Ok(0) => break Ok(()),
+            Ok(n) => size += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => break Err(e),
+        }
+    };
+    drop(stdout);
+    let status = helper.wait().map_err(|_| ABNORMAL_PIN_EXIT)?;
+    read.map_err(|_| ABNORMAL_PIN_EXIT)?;
+    parse_pin_reply(status.code(), &reply[..size])
+}
+
+fn parse_pin_reply(code: Option<i32>, reply: &[u8]) -> Result<NonZeroU32, String> {
+    let line = reply.strip_suffix(b"\n");
+    match code {
+        Some(0) => line
+            .filter(|id| id.len() <= 10 && matches!(id.first().copied(), Some(b'1'..=b'9')))
+            .and_then(|id| std::str::from_utf8(id).ok()?.parse().ok())
+            .ok_or_else(|| INVALID_PIN_SUCCESS.into()),
+        Some(PIN_REFUSED) => {
+            let reason = line
+                .and_then(|line| line.strip_prefix(PIN_REFUSAL_PREFIX))
+                .filter(|reason| {
+                    !reason.is_empty()
+                        && reason.len() <= PIN_REASON_MAX
+                        && !reason.starts_with(b" ")
+                        && !reason.ends_with(b" ")
+                        && reason.iter().all(|byte| (b' '..=b'~').contains(byte))
+                })
+                .and_then(|reason| std::str::from_utf8(reason).ok());
+            Err(match reason {
+                Some(reason) => format!("Preview could not pin a Rex window: {reason}\nNo pane was opened."),
+                None => ABNORMAL_PIN_EXIT.into(),
+            })
+        }
+        _ => Err(ABNORMAL_PIN_EXIT.into()),
     }
-    std::str::from_utf8(&check.stdout)
-        .ok()
-        .and_then(|line| line.trim_end().parse().ok())
-        .ok_or_else(|| "the helper did not identify a native Rex window; no pane was opened".into())
 }
 
 /// The helper and observer run only for this terminal. In particular, failure
@@ -229,6 +275,54 @@ fn serve_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_success_requires_a_single_canonical_window_id() {
+        assert_eq!(parse_pin_reply(Some(0), b"4294967295\n").unwrap().get(), u32::MAX);
+        for reply in [
+            b"".as_slice(),
+            b"42",
+            b"0\n",
+            b"042\n",
+            b"+42\n",
+            b"42 \n",
+            b"42\n43\n",
+            b"4294967296\n",
+            b"refused: another window overlaps Rex\n",
+        ] {
+            assert_eq!(parse_pin_reply(Some(0), reply).unwrap_err(), INVALID_PIN_SUCCESS);
+        }
+    }
+
+    #[test]
+    fn pin_refusal_requires_the_refusal_status_and_bounded_printable_ascii() {
+        let refusal = b"refused: another window overlaps Rex\n";
+        assert_eq!(
+            parse_pin_reply(Some(PIN_REFUSED), refusal).unwrap_err(),
+            "Preview could not pin a Rex window: another window overlaps Rex\nNo pane was opened."
+        );
+        for code in [None, Some(1)] {
+            assert_eq!(parse_pin_reply(code, refusal).unwrap_err(), ABNORMAL_PIN_EXIT);
+        }
+        for reply in [
+            b"42\n".as_slice(),
+            b"refused: \n",
+            b"refused:  overlap\n",
+            b"refused: overlap \n",
+            b"refused: overlap",
+            b"refused: overlap\r\n",
+            b"refused: overlap\nextra\n",
+            b"refused: \x1b[2J\n",
+            b"refused: \xff\n",
+        ] {
+            assert_eq!(parse_pin_reply(Some(PIN_REFUSED), reply).unwrap_err(), ABNORMAL_PIN_EXIT);
+        }
+        let max = format!("refused: {}\n", "x".repeat(PIN_REASON_MAX));
+        assert_eq!(max.len(), PIN_REPLY_MAX);
+        assert!(parse_pin_reply(Some(PIN_REFUSED), max.as_bytes()).unwrap_err().contains(&"x".repeat(PIN_REASON_MAX)));
+        let over_max = format!("refused: {}\n", "x".repeat(PIN_REASON_MAX + 1));
+        assert_eq!(parse_pin_reply(Some(PIN_REFUSED), over_max.as_bytes()).unwrap_err(), ABNORMAL_PIN_EXIT);
+    }
 
     #[test]
     fn slow_focus_acknowledges_only_after_the_rpc_approves() {

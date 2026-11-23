@@ -8,6 +8,8 @@
 #include <string.h>
 #include <unistd.h>
 
+enum { PinRefused = 2 }; // The Rust startup handoff recognizes this exit status.
+
 static unsigned long Decimal(const char *argument, unsigned long limit) {
     if (!*argument || argument[strspn(argument, "0123456789")]) return 0;
     errno = 0;
@@ -21,8 +23,13 @@ int main(int argc, const char *argv[]) {
         if (strcmp(argv[1], "--pin-window") == 0) {
             if (argc != 3) return EXIT_FAILURE;
             pid_t pid = (pid_t)Decimal(argv[2], INT_MAX);
-            CGWindowID pinned = milo_preview_pin_window(pid);
-            if (!pinned || printf("%u\n", pinned) < 0 || fflush(stdout) != 0) return EXIT_FAILURE;
+            const char *reason = NULL;
+            CGWindowID pinned = milo_preview_pin_window(pid, &reason);
+            if (!pinned) {
+                return reason && printf("refused: %s\n", reason) >= 0 && fflush(stdout) == 0
+                    ? PinRefused : EXIT_FAILURE;
+            }
+            if (printf("%u\n", pinned) < 0 || fflush(stdout) != 0) return EXIT_FAILURE;
             return EXIT_SUCCESS;
         }
         if (argc != 4) return EXIT_FAILURE;

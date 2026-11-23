@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - run: |
           xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_geometry.m macos/Preview/Browser.m \
-            -framework AppKit -framework CoreGraphics -framework WebKit \
+            -framework AppKit -framework CoreGraphics -framework WebKit -framework Security \
             -o "$RUNNER_TEMP/preview-geometry"
           "$RUNNER_TEMP/preview-geometry"
           xcrun clang -fobjc-arc -mmacosx-version-min=13.0 tests/preview_chrome.m \
