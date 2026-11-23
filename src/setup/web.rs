@@ -1190,6 +1190,54 @@ mod tests {
         json.fields([name])[0].unwrap()
     }
 
+    #[test]
+    fn a_mapped_import_must_review_the_checkout_that_will_receive_it() {
+        let host = Fixture::folder();
+        let original = Fixture::new();
+        let replacement = Fixture::new(); // Unborn worktrees can still be mapped by hand.
+        original.git(&["commit", "-qm", "first", "--allow-empty"]);
+        original.git(&["remote", "add", "origin", "https://example.invalid/first.git"]);
+
+        let store = fixture_store(&host);
+        let global = crate::preferences::layer_file(&store.config, None);
+        let layer = |root: &Path| crate::preferences::layer_file(&store.config, Some(root));
+        fs::create_dir(&store.config).unwrap();
+        fs::write(&global, "icons = plain\n").unwrap();
+        let mut editor = outside(store.clone(), Some(&original.root));
+        let bundle = Quoted("milo-settings 1\n[project]\nname = project\nicons = off\n");
+        let preview = |editor: &mut Editor| {
+            let request = format!(r#"{{"action":"preview","bundle":{bundle},"here":"project"}}"#);
+            let TransferReply::Data(json) = editor.transfer(request.as_bytes()) else {
+                panic!("explicit preview was refused")
+            };
+            field(Value::parse(json.as_bytes()).unwrap(), "basis").string(16).unwrap().into_owned()
+        };
+        let apply = |editor: &mut Editor, basis: &str| {
+            let request = format!(
+                r#"{{"action":"apply","bundle":{bundle},"here":"project","basis":"{basis}","version":{}}}"#,
+                editor.version
+            );
+            editor.transfer(request.as_bytes())
+        };
+
+        let reviewed = preview(&mut editor);
+        original.git(&["remote", "set-url", "origin", "https://example.invalid/renamed.git"]);
+        original.git(&["commit", "-qm", "next", "--allow-empty"]);
+        assert_eq!(preview(&mut editor), reviewed, "new tips and remote URLs do not change the checkout");
+
+        let moved = original.root.with_file_name("moved");
+        fs::rename(&original.root, &moved).unwrap();
+        fs::rename(&replacement.root, &original.root).unwrap();
+        assert!(matches!(apply(&mut editor, &reviewed), TransferReply::Stale(_)));
+        assert!(!layer(&original.root).exists() && !transfer::undo_available(&store.state));
+
+        let reviewed = preview(&mut editor);
+        assert!(matches!(apply(&mut editor, &reviewed), TransferReply::Changed(_)));
+        assert_eq!(fs::read_to_string(layer(&original.root)).unwrap(), "icons = off\n");
+        assert!(!layer(&moved).exists() && !layer(&replacement.root).exists());
+        assert_eq!(fs::read_to_string(global).unwrap(), "icons = plain\n");
+    }
+
     fn change_alert(editor: &mut Editor, name: &str, value: &str) -> Result<String, String> {
         action(editor, &format!("\"action\":\"alerts\",\"field\":{name:?},\"value\":{value}"))
     }

@@ -13,10 +13,10 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
 use super::files::{self, Change, Image};
@@ -360,10 +360,25 @@ pub(crate) enum Destination {
     Global,
     Worktree {
         root: PathBuf,
-        why: &'static str,
+        matched: WorktreeMatch,
     },
     /// A project that no worktree here was matched to.
     Unmapped,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WorktreeMatch {
+    SameRepository,
+    Chosen { device: u64, inode: u64, first_commit: Option<String> },
+}
+
+impl WorktreeMatch {
+    const fn reason(&self) -> &'static str {
+        match self {
+            Self::SameRepository => "same repository",
+            Self::Chosen { .. } => "chosen by you",
+        }
+    }
 }
 
 /// One setting an import would change, in the words shown for it.
@@ -396,8 +411,8 @@ impl Plan {
         self.sections.iter().map(|section| section.rows.len()).sum()
     }
 
-    /// Names the exact files this plan was worked out against and what it
-    /// would write. A later plan with another basis is another plan.
+    /// Names the exact files this plan was worked out against, what it would
+    /// write, and which checkout the person explicitly chose.
     pub(crate) fn basis(&self) -> String {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         let mut feed = |bytes: &[u8]| {
@@ -412,6 +427,16 @@ impl Plan {
             feed(&[u8::from(before.is_some())]);
             feed(after.map_or(&[][..], |image| &image.bytes));
         }
+        for section in &self.sections {
+            if let Destination::Worktree { root, matched: WorktreeMatch::Chosen { device, inode, first_commit } } =
+                &section.destination
+            {
+                feed(root.as_os_str().as_bytes());
+                feed(&device.to_le_bytes());
+                feed(&inode.to_le_bytes());
+                feed(first_commit.as_deref().unwrap_or("").as_bytes());
+            }
+        }
         format!("{hash:016x}")
     }
 
@@ -421,8 +446,8 @@ impl Plan {
         for section in &self.sections {
             match (&section.project, &section.destination) {
                 (None, _) => out.push_str("Global defaults\n"),
-                (Some(name), Destination::Worktree { root, why }) => {
-                    writeln!(out, "Project {name} → {} ({why})", root.display()).unwrap()
+                (Some(name), Destination::Worktree { root, matched }) => {
+                    writeln!(out, "Project {name} → {} ({})", root.display(), matched.reason()).unwrap()
                 }
                 (Some(name), _) => {
                     writeln!(
@@ -460,7 +485,9 @@ impl Plan {
             }
             let (kind, path, why) = match &section.destination {
                 Destination::Global => ("global", None, None),
-                Destination::Worktree { root, why } => ("worktree", Some(root.to_string_lossy()), Some(*why)),
+                Destination::Worktree { root, matched } => {
+                    ("worktree", Some(root.to_string_lossy()), Some(matched.reason()))
+                }
                 Destination::Unmapped => ("unmapped", None, None),
             };
             let optional = |text: Option<&str>| text.map_or_else(|| "null".to_owned(), quoted);
@@ -502,7 +529,13 @@ fn destination(place: &Place<'_>, project: &Project, maps: &[(String, PathBuf)])
     if let Some((_, dir)) = maps.iter().find(|(name, _)| *name == project.name) {
         let root =
             git::worktree(dir).ok_or_else(|| format!("{} is not in a Git worktree on this host.", dir.display()))?;
-        return Ok(Destination::Worktree { root, why: "chosen by you" });
+        // The path alone could now name a different checkout. History also
+        // catches a repository replaced in place; when no root commit is
+        // available (unborn or shallow), a manual choice still works.
+        let folder = fs::metadata(&root).map_err(|_| format!("Could not read the worktree at {}.", root.display()))?;
+        let matched =
+            WorktreeMatch::Chosen { device: folder.dev(), inode: folder.ino(), first_commit: git::root_commit(&root) };
+        return Ok(Destination::Worktree { root, matched });
     }
     let Some(commit) = &project.repository else { return Ok(Destination::Unmapped) };
     let below_home = place.home.zip(project.home.as_deref()).map(|(home, path)| home.join(path));
@@ -511,7 +544,7 @@ fn destination(place: &Place<'_>, project: &Project, maps: &[(String, PathBuf)])
         if let Some(root) = git::worktree(&candidate)
             && git::root_commit(&root).as_ref() == Some(commit)
         {
-            return Ok(Destination::Worktree { root, why: "same repository" });
+            return Ok(Destination::Worktree { root, matched: WorktreeMatch::SameRepository });
         }
     }
     Ok(Destination::Unmapped)
