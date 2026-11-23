@@ -72,7 +72,8 @@ static inline struct termios ResizeTTYMode(struct termios mode, bool canonical) 
 static inline bool ResizeTTYMatches(const ResizeInput *input, int tty) {
     struct termios actual, expected = ResizeTTYMode(input->saved, input->mode == ResizeCanonical);
     return tcgetpgrp(tty) == getpgrp() && tcgetattr(tty, &actual) == 0 &&
-        actual.c_iflag == expected.c_iflag && actual.c_lflag == expected.c_lflag &&
+        // Darwin sets PENDIN when entering canonical mode and clears it on read.
+        actual.c_iflag == expected.c_iflag && ((actual.c_lflag ^ expected.c_lflag) & ~PENDIN) == 0 &&
         !memcmp(actual.c_cc, expected.c_cc, sizeof(actual.c_cc));
 }
 

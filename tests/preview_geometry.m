@@ -481,10 +481,13 @@ static void GuardedTTY(void) {
     close(wire[0]);
 }
 
-static void ResizeExpect(int wire, ResizeInput *input, int tty, ResizeInputResult expected) {
+static void ResizeExpectAt(int wire, ResizeInput *input, int tty, ResizeInputResult expected, int line) {
     TTYStep(wire);
-    assert(ReadResizeInput(input, tty) == expected);
+    ResizeInputResult got = ReadResizeInput(input, tty);
+    if (got != expected) fprintf(stderr, "resize fixture line %d: expected %d, got %d\n", line, expected, got);
+    assert(got == expected);
 }
+#define ResizeExpect(wire, input, tty, expected) ResizeExpectAt(wire, input, tty, expected, __LINE__)
 
 static void ResizeTTYRestored(int tty, const struct termios *before, int flags) {
     struct termios after;
@@ -495,7 +498,7 @@ static void ResizeTTYRestored(int tty, const struct termios *before, int flags) 
     const int openModes = O_ACCMODE | O_NONBLOCK | O_APPEND | O_ASYNC;
     assert(restoredFlags >= 0 && (restoredFlags & openModes) == (flags & openModes));
     assert(before->c_iflag == after.c_iflag && before->c_oflag == after.c_oflag &&
-        before->c_cflag == after.c_cflag && before->c_lflag == after.c_lflag &&
+        before->c_cflag == after.c_cflag && ((before->c_lflag ^ after.c_lflag) & ~PENDIN) == 0 &&
         !memcmp(before->c_cc, after.c_cc, sizeof(after.c_cc)) &&
         cfgetispeed(before) == cfgetispeed(&after) && cfgetospeed(before) == cfgetospeed(&after));
 }
