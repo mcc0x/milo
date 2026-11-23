@@ -202,7 +202,8 @@ mod tests {
             assert_eq!(finish(o), Some(true));
         };
 
-        f.write(path, "keep\nnew-1\nnew-2\nold-3\n");
+        // Vary the file size as well as the contents: Git may cache stat times at second resolution.
+        f.write(path, "keep\nreplacement-1\nreplacement-2\nold-3\n");
         refresh(&mut o);
         assert_eq!(o.selected_path().as_deref(), Some(path));
         assert_eq!(totals(&o), [(Kind::Modified, 2, 2, 1); 3]);
@@ -211,7 +212,7 @@ mod tests {
         let index = f.root.join(".git/index");
         let saved = fs::read(&index).unwrap();
         fs::write(&index, "corrupt index").unwrap();
-        f.write(path, "keep\nnew-1\nnew-2\nnew-3\n");
+        f.write(path, "keep\nreplacement-1\nreplacement-2\nreplacement-3\n");
         refresh(&mut o);
         let failed = rows(&mut o);
         assert!(failed[0].ends_with("git did not answer"), "{failed:?}");
